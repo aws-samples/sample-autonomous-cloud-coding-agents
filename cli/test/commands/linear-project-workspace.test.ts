@@ -23,6 +23,7 @@
 import { GetSecretValueCommand, ListSecretsCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
+  assertMirrorIsSafe,
   findProjectOwnerWorkspace,
   listActiveWorkspaceRows,
   listOnboardedWorkspaceSlugs,
@@ -294,5 +295,36 @@ describe('listWorkspaceProjectIds', () => {
     const failing = jest.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)) as unknown as typeof fetch;
     await expect(listWorkspaceProjectIds({ accessToken: 'tok', fetchImpl: failing }))
       .rejects.toThrow('Linear API returned 500');
+  });
+});
+
+describe('assertMirrorIsSafe', () => {
+  const SELF = 'org-self';
+
+  test('allows the mirror when this is the only active workspace', () => {
+    expect(() => assertMirrorIsSafe([{ linear_workspace_id: SELF }], SELF, 'acme')).not.toThrow();
+  });
+
+  test('allows it on a genuinely empty registry', () => {
+    expect(() => assertMirrorIsSafe([], SELF, 'acme')).not.toThrow();
+  });
+
+  test('refuses when another active workspace would be the source of the secret', () => {
+    expect(() => assertMirrorIsSafe(
+      [{ linear_workspace_id: SELF }, { linear_workspace_id: 'org-other' }],
+      SELF,
+      'acme',
+    )).toThrow(/already has 1 other active Linear workspace/);
+  });
+
+  test('names the remedy, since refusing mid-setup is only useful with a way forward', () => {
+    expect(() => assertMirrorIsSafe([{ linear_workspace_id: 'org-other' }], SELF, 'acme'))
+      .toThrow(/update-webhook-secret acme/);
+  });
+
+  test('ignores rows with no workspace id rather than counting them as tenants', () => {
+    // A half-written registry row is not another tenant, and treating it as one would
+    // block a legitimate first-workspace mirror.
+    expect(() => assertMirrorIsSafe([{ workspace_slug: 'half' }], SELF, 'acme')).not.toThrow();
   });
 });

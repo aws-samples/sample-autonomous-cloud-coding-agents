@@ -23,6 +23,7 @@ import {
   clearWorkspaceRevocation,
   getOauthSecret,
   getOauthSecretStrict,
+  getRegistryRowStrict,
   invalidateLinearOauthCache,
   isRefreshTokenRejection,
   isTokenExpiring,
@@ -1286,4 +1287,45 @@ describe('a vault-managed bundle carries no grant, and must still verify webhook
     );
     expect(fetched).toBeNull();
   });
+});
+
+describe('webhook_secret_owned — provenance, not value equality', () => {
+  beforeEach(() => _resetCachesForTesting());
+
+  function rowWith(extra: Record<string, unknown>) {
+    return {
+      send: jest.fn().mockResolvedValue({
+        Item: {
+          linear_workspace_id: 'ws-1',
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          ...extra,
+        },
+      }),
+    } as unknown as Parameters<typeof getRegistryRowStrict>[0];
+  }
+
+  test('carries a recorded true through to the reader', async () => {
+    const row = await getRegistryRowStrict(rowWith({ webhook_secret_owned: true }), 'registry', 'ws-1');
+    expect(row?.webhook_secret_owned).toBe(true);
+  });
+
+  test('leaves the field absent when the row predates it', async () => {
+    // Absent must not read as `false`: the reader distinguishes "not proven" from
+    // "proven not owned", and every row written before this field is the former.
+    const row = await getRegistryRowStrict(rowWith({}), 'registry', 'ws-1');
+    expect(row?.webhook_secret_owned).toBeUndefined();
+  });
+
+  test.each([['false-ish string', 'true'], ['number', 1], ['explicit false', false]] as const)(
+    'refuses to treat a %s as proof of ownership',
+    async (_label, value) => {
+      // Only a literal boolean `true` counts. A truthy-but-not-true value reaching this
+      // field would otherwise silently grant the workspace the same standing as one the
+      // operator actually supplied a secret for.
+      const row = await getRegistryRowStrict(rowWith({ webhook_secret_owned: value }), 'registry', 'ws-1');
+      expect(row?.webhook_secret_owned).toBeUndefined();
+    },
+  );
 });

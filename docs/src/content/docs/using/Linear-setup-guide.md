@@ -136,6 +136,12 @@ Pass `--label <name>` to use a trigger label other than `bgagent`. Also availabl
 
 Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them, and `bgagent linear backfill-project-workspaces` fills them in (run it with `--dry-run` first).
 
+### Signing secrets in a multi-workspace install
+
+Every workspace must have its own webhook signing secret, read from its own Linear app. `setup` asks for it and refuses to continue without one, and records on the workspace's registry row that the secret is genuinely that workspace's.
+
+A workspace onboarded by an older release may instead be holding a copy of the first workspace's secret. Two workspaces sharing one secret means either can produce a delivery the other's signature check accepts. Fix it per workspace with `bgagent linear update-webhook-secret <slug>`, which now also records that the secret is that workspace's own — pass `--stack-name` if you are not using the default.
+
 ### 6. Test
 
 Apply the trigger label to an issue in that project. Within ~30 seconds the agent posts `🤖 Starting on this issue…`, then a PR link when it's done.

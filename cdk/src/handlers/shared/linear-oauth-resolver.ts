@@ -114,6 +114,22 @@ export interface RegistryRow {
    */
   readonly vault_user_id?: string;
   /**
+   * Whether this workspace's `webhook_signing_secret` is provably its OWN, rather than
+   * a copy of another workspace's.
+   *
+   * Recorded by provenance — which `bgagent linear setup` branch produced the value —
+   * and NOT inferred by comparing the stored secret against the stack-wide one. Value
+   * equality cannot tell the two apart: a healthy single-workspace install also holds a
+   * secret equal to the stack-wide copy, because the first install stamps the same real
+   * secret into both slots. Rejecting on equality would therefore 401 exactly the
+   * deployments that are safe.
+   *
+   * Absent on rows written before this was recorded, which is why the reader treats
+   * absence as "not proven" rather than as `false`, and only acts on it where sharing
+   * can actually cross a tenant boundary — a stack with two or more active workspaces.
+   */
+  readonly webhook_secret_owned?: boolean;
+  /**
    * Why `status` was flipped to `revoked`, as written by {@link markWorkspaceRevoked}.
    *
    * Read, not just written, because the two reasons differ in how much they are
@@ -857,6 +873,10 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     // Distinguishes a latch built on Linear's own refusal from one built on an
     // inference the vault path can re-test. See RegistryRow.revoked_reason.
     ...(typeof item.revoked_reason === 'string' && { revoked_reason: item.revoked_reason }),
+    // Only a literal `true` counts as proof of ownership. A missing field, or any
+    // other value, leaves it absent so the reader sees "not proven" — the safe
+    // reading for the rows this field was added for, which predate it entirely.
+    ...(item.webhook_secret_owned === true && { webhook_secret_owned: true }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;

@@ -643,6 +643,44 @@ export async function listOnboardedWorkspaceSlugs(args: {
   return collected;
 }
 
+/**
+ * Refuse to copy the stack-wide signing secret into a workspace when another active
+ * workspace exists.
+ *
+ * Mirroring is only correct for the first/only workspace, where the stack-wide value IS
+ * that workspace's own secret. For an additional workspace it installs a DIFFERENT
+ * tenant's key, after which both verify under the same secret and either can sign an
+ * event whose routing values the other's are read from.
+ *
+ * Extracted rather than inlined at the one call site because that call site is currently
+ * unreachable: `setup` collects this workspace's own secret up front and throws when
+ * neither a supplied nor a legitimately-stored one exists, so the mirror branch cannot
+ * be entered from there. An unreachable guard is an untested guard, and this keeps the
+ * rule itself exercisable — and enforced if that prompt is ever relaxed.
+ *
+ * @param activeRows - active workspace-registry rows.
+ * @param selfWorkspaceId - the workspace being set up, excluded from the count.
+ * @param slug - workspace slug, for the remedy in the error text.
+ */
+export function assertMirrorIsSafe(
+  activeRows: ReadonlyArray<Record<string, unknown>>,
+  selfWorkspaceId: string,
+  slug: string,
+): void {
+  const others = activeRows
+    .map((r) => r.linear_workspace_id as string | undefined)
+    .filter((id): id is string => Boolean(id) && id !== selfWorkspaceId);
+  if (others.length === 0) return;
+  throw new CliError(
+    `Workspace '${slug}' has no signing secret of its own, and this stack already has `
+    + `${others.length} other active Linear workspace(s).\n`
+    + '  Mirroring the stack-wide secret would give this workspace another tenant\'s key,\n'
+    + '  letting either one sign events the other\'s routing values are read from.\n'
+    + `  Re-run with --webhook-secret <lin_wh_…> read from '${slug}'s own Linear app, or set\n`
+    + `  it afterwards with \`bgagent linear update-webhook-secret ${slug}\`.`,
+  );
+}
+
 /** Outcome of resolving a usable Linear access token for one workspace. */
 export type WorkspaceTokenResult =
   | { readonly kind: 'token'; readonly accessToken: string }
@@ -1583,6 +1621,26 @@ export function makeLinearCommand(): Command {
         // prefix-route Linear issue lookups (e.g. ENG-42 → the workspace
         // owning the ENG team) instead of scanning every active workspace.
         const teamKeys = await queryLinearTeamKeys(`Bearer ${linearAccessToken}`);
+
+        // Provenance of the signing secret, recorded so verification can tell a
+        // workspace's OWN secret from a copy of another workspace's. Derived from where
+        // the value came from, never from comparing it to the stack-wide copy: a healthy
+        // single-workspace install holds a secret equal to that copy, because the first
+        // install stamps the same real secret into both slots.
+        //
+        // Either input proves ownership. `suppliedWebhookSecret` was read off the app
+        // being onboarded moments ago, and `holdsOwnWebhookSecret` means a stored
+        // `lin_wh_…` that differs from the stack-wide value. Anything else either threw
+        // above (nothing supplied, nothing legitimate stored) or is inherited, and
+        // inherited is precisely what must not be recorded as owned.
+        //
+        // Today this cannot evaluate false — the up-front prompt refuses the one case
+        // that would produce it — so it reads as a constant and no test can distinguish
+        // it from `true`. It is written as a derivation rather than a literal because it
+        // becomes load-bearing the moment that prompt is relaxed, and the failure would
+        // otherwise be silent: a workspace recorded as owning a secret it inherited.
+        const webhookSecretOwned = Boolean(suppliedWebhookSecret) || holdsOwnWebhookSecret;
+
         await ddb.send(new PutCommand({
           TableName: workspaceRegistryTable!,
           Item: {
@@ -1593,6 +1651,10 @@ export function makeLinearCommand(): Command {
             installed_at: now,
             updated_at: now,
             status: 'active',
+            // Written only when true. An explicit `false` would be indistinguishable
+            // from the absent field on rows predating this, and both mean the same
+            // thing to the reader — not proven.
+            ...(webhookSecretOwned ? { webhook_secret_owned: true } : {}),
             ...(teamKeys.length > 0 ? { team_keys: teamKeys } : {}),
             // Vault substrate: the provider to mint from, and the subject the grant
             // is bound to. vault_user_id is stored rather than derived because it is
@@ -1679,10 +1741,21 @@ export function makeLinearCommand(): Command {
           console.log('  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
           webhookSigningSecret = secretAction.secret;
         } else if (secretAction.kind === 'mirror-stackwide') {
-          // No per-workspace secret yet, but the stack-wide one is set. Safe to
-          // mirror ONLY when this is the first/only workspace — for a genuinely
-          // new ADDITIONAL workspace the stack-wide secret is the wrong one, so
-          // warn that the operator should verify (or run `update-webhook-secret`).
+          // Mirroring is only ever correct for the first/only workspace: the stack-wide
+          // value IS that workspace's own secret. For an additional workspace it copies
+          // a DIFFERENT tenant's secret into this one's bundle, after which both verify
+          // under the same key and either can sign an event the other's routing values
+          // would be trusted from. Refuse instead of warning.
+          //
+          // Currently a safety net rather than a live path: `setup` collects this
+          // workspace's own secret up front and throws when neither a supplied nor a
+          // legitimately-stored one exists, so this branch is unreachable from there.
+          // Kept, and made to refuse, so the invariant survives that prompt changing.
+          assertMirrorIsSafe(
+            await listActiveWorkspaceRows(ddb, workspaceRegistryTable!),
+            identity.organization.id,
+            slug,
+          );
           console.log('  ✓ No per-workspace secret yet; mirroring the stack-wide signing secret');
           console.log('    (if this is an ADDITIONAL workspace, its Linear webhook secret differs —');
           console.log(`     run \`bgagent linear update-webhook-secret ${slug}\` with this workspace's secret.)`);
@@ -2101,6 +2174,7 @@ export function makeLinearCommand(): Command {
       .description('Update the per-workspace webhook signing secret without re-running OAuth')
       .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
       .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .action(async (slug: string, opts) => {
         // Use case: rotation, recovery from misconfig, or first-time
         // configuration after Linear regenerated the signing secret.
@@ -2180,6 +2254,43 @@ export function makeLinearCommand(): Command {
           updated_at: new Date().toISOString(),
         };
         await upsertOauthSecret(sm, secretName, merged, slug);
+
+        // Record that this workspace now holds a secret of its own. The operator just
+        // read it off this workspace's Linear app, which is the only evidence of
+        // ownership that exists — and without recording it, verification cannot tell
+        // this repaired workspace from one still carrying an inherited copy, so the
+        // repair would appear to do nothing.
+        //
+        // A hard failure rather than a warning: the secret write above already
+        // succeeded, so a silent miss here leaves the operator believing the fix landed
+        // when the state that verification reads is unchanged.
+        const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
+        if (registryTableName) {
+          try {
+            await makeDocClient({ region }).send(new UpdateCommand({
+              TableName: registryTableName,
+              Key: { linear_workspace_id: stored.workspace_id },
+              UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+              ConditionExpression: 'attribute_exists(linear_workspace_id)',
+              ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
+            }));
+            console.log('  ✓ Recorded that this workspace owns its signing secret');
+          } catch (err) {
+            if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+              throw new CliError(
+                `Updated the signing secret, but workspace '${slug}' has no registry row `
+                + `(${stored.workspace_id}).\n  Run \`bgagent linear setup ${slug}\` so the workspace `
+                + 'is registered; the secret you just entered will be preserved.',
+              );
+            }
+            throw new CliError(
+              'Updated the signing secret, but could not record its provenance: '
+              + `${err instanceof Error ? err.message : String(err)}\n`
+              + '  Re-run this command once the registry table is writable, otherwise this\n'
+              + '  workspace is still treated as carrying an inherited secret.',
+            );
+          }
+        }
 
         console.log();
         console.log(`✅ Updated webhook signing secret for '${slug}'.`);
