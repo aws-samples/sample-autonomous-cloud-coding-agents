@@ -108,7 +108,7 @@ const GEO_PREFIX_RE = new RegExp(`^(?:${GEO_ALTERNATION})\\.`);
  * `CrossRegionInferenceProfile.fromConfig`, the ECS task role in
  * `constructs/ecs-agent-cluster.ts` via the `<geo>.<modelId>` ARN resource
  * name), and the agent's auxiliary-model env var (`ANTHROPIC_DEFAULT_HAIKU_MODEL`)
- * takes the same prefix via {@link haikuInferenceProfileId} — so the main and
+ * takes the same prefix via {@link inferenceProfileId} — so the main and
  * auxiliary models can never route through different geographies.
  *
  * Throws at synth on an unrecognized value: an invented geography would produce

@@ -227,20 +227,13 @@ describe('makeLinearCommand', () => {
     }
   });
 
-  test('app-template rejects a --bot-name without the [bot] suffix', async () => {
-    const errSpy = jest.spyOn(console, 'error').mockImplementation();
-    const exitSpy = jest.spyOn(process, 'exit').mockImplementation(((code?: number) => {
-      throw new Error(`process.exit:${code}`);
-    }) as never);
-    try {
-      const program = makeLinearCommand();
-      await expect(
-        program.parseAsync(['node', 'bgagent', 'app-template', '--bot-name', 'notabot']),
-      ).rejects.toThrow('process.exit:1');
-      expect(errSpy.mock.calls.some((c) => String(c[0]).includes('[bot]'))).toBe(true);
-    } finally {
-      errSpy.mockRestore();
-      exitSpy.mockRestore();
-    }
+  test('app-template offers no --bot-name — Linear\'s app form has no such field', () => {
+    // Verified against the live form: there is no GitHub username field, so a flag
+    // that fills one in only invites operators to look for something absent.
+    const program = makeLinearCommand();
+    const appTemplate = program.commands.find((c) => c.name() === 'app-template');
+    const flags = (appTemplate?.options ?? []).map((o) => o.long);
+    expect(flags).not.toContain('--bot-name');
+    expect(flags).toContain('--app-name');
   });
 });
