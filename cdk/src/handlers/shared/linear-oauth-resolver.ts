@@ -23,7 +23,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { announceRevocation, revocationAlertTopicArn } from './linear-revocation-alert';
 import {
   LINEAR_VAULT_SCOPES,
@@ -1348,6 +1348,51 @@ async function tryRefreshOnce(
   // Cache the freshest value.
   tokenCache.set(secretArn, { value: next, expiresAt: Date.now() + SECRET_CACHE_TTL_MS });
   return { kind: 'success', token: next };
+}
+
+/**
+ * The one active Linear workspace on this stack, or undefined when that is not a
+ * well-defined question.
+ *
+ * For binding a delivery that was verified by the stack-wide secret. That secret is
+ * bound to no workspace, so the body's `organizationId` is claimed rather than attested
+ * and must not select a tenant. When exactly one workspace is active there is only one
+ * tenant it could mean; with zero or several there is no answer, and returning undefined
+ * makes the caller drop the delivery rather than pick one.
+ *
+ * Mirrors `resolveSoleActiveJiraTenant`. Not cached: the callers reach it only on the
+ * back-compat path of a single-workspace install, which is rare enough that a Scan per
+ * delivery is cheaper than another cache to invalidate.
+ */
+export async function resolveSoleActiveLinearWorkspace(
+  ddbClient: DynamoDBDocumentClient,
+  registryTableName: string | undefined,
+): Promise<string | undefined> {
+  if (!registryTableName) return undefined;
+  const active: string[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddbClient.send(new ScanCommand({
+      TableName: registryTableName,
+      ProjectionExpression: 'linear_workspace_id, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
+    }));
+    for (const item of page.Items ?? []) {
+      if (item.status === 'active' && typeof item.linear_workspace_id === 'string') {
+        active.push(item.linear_workspace_id);
+      }
+    }
+    lastKey = page.LastEvaluatedKey;
+    if (active.length > 1) break;
+  } while (lastKey);
+
+  if (active.length === 1) return active[0];
+  logger.warn('Cannot bind a stack-wide-verified Linear delivery: registry does not have exactly one active workspace', {
+    active_workspace_count: active.length,
+  });
+  return undefined;
 }
 
 /** Test-only: clear all caches. */

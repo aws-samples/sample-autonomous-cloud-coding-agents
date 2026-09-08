@@ -46,7 +46,7 @@ import {
   renderTaskLookupFailedNudge,
   renderWrongMentionNudge,
 } from './shared/linear-notes';
-import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
@@ -621,6 +621,16 @@ interface LinearCommentEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /**
+   * Whether the stack-wide secret — bound to no workspace — is what verified this
+   * delivery, as reported by the receiver.
+   *
+   * On that path the body's `organizationId` is claimed rather than attested, so it must
+   * not be used to select a tenant. Absent is read as `false`, which is correct for the
+   * per-workspace path and is also what an in-flight invocation from a previous version
+   * looks like during a deploy.
+   */
+  readonly verified_via_stack_wide?: boolean;
 }
 
 /**
@@ -685,6 +695,33 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
     return;
+  }
+
+  // A delivery verified by the stack-wide secret carries no proof of WHICH workspace
+  // sent it — that secret is bound to none of them — so the body's `organizationId`
+  // is a claim. Replace it with the only workspace it could mean, and drop the delivery
+  // when there is no single answer.
+  //
+  // Rewritten on the payload rather than threaded as a parameter because the workspace
+  // id is read from ~6 places downstream (task attribution, feedback, the comment path).
+  // Passing it alongside would leave every one of those a site where the claimed value
+  // could still be picked up by mistake; overwriting the untrusted field means the
+  // attested value is the only one reachable.
+  if (event.verified_via_stack_wide) {
+    const bound = await resolveSoleActiveLinearWorkspace(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (!bound) {
+      logger.warn('Dropping stack-wide-verified Linear delivery: cannot determine the sending workspace', {
+        claimed_workspace_id: payload.organizationId,
+      });
+      return;
+    }
+    if (payload.organizationId && payload.organizationId !== bound) {
+      logger.warn('Ignoring body organizationId on a stack-wide-verified delivery; binding to the sole active workspace', {
+        claimed_workspace_id: payload.organizationId,
+        bound_workspace_id: bound,
+      });
+    }
+    (payload as { organizationId?: string }).organizationId = bound;
   }
 
   // A Comment with an @bgagent mention on an orchestrated sub-issue
