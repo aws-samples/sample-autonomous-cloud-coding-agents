@@ -21,10 +21,30 @@ import server
 
 @pytest.fixture(autouse=True)
 def reset_server_state():
+    """Reset the pipeline registry, joining any thread still running on the way out.
+
+    `/run` and `/invocations` answer while the pipeline thread is only just starting,
+    so that thread usually looks up `server.run_task` AFTER the test body has
+    returned. Clearing the registry without joining orphans it: the stubs are then
+    undone, and the thread goes on to run a REAL pipeline — task-state writes, a
+    heartbeat, a clone — inside whichever test happens to be running next. That is a
+    cross-test AWS call arriving from a thread nothing is waiting on, and it stays
+    invisible until some later test asserts that no AWS seam was touched. Joining
+    here is what keeps a pipeline thread from outliving the test that spawned it.
+
+    The live threads are read from `threading.enumerate()` rather than from
+    `_active_threads`, because a test may substitute that registry with one that
+    refuses to be read; it stays clearable, which is all this fixture asks of it.
+    Joining the pipeline thread also retires its heartbeat, which the pipeline stops
+    on its way out.
+    """
     server._background_pipeline_failed = False
     with server._threads_lock:
         server._active_threads.clear()
     yield
+    for thread in threading.enumerate():
+        if thread.name.startswith("pipeline-") and thread.is_alive():
+            thread.join(timeout=10)
     server._background_pipeline_failed = False
     with server._threads_lock:
         server._active_threads.clear()
