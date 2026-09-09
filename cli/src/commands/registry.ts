@@ -146,8 +146,9 @@ export function makeRegistryCommand(): Command {
         console.log(`${result.kind}/${result.namespace}/${result.name}`);
         console.log(`${'VERSION'.padEnd(VERSION_WIDTH)} ${'STATUS'.padEnd(NS_WIDTH)} CREATED`);
         for (const v of result.versions) {
+          const created = v.malformed ? 'MALFORMED (descriptor unparseable)' : v.created_at ?? '-';
           console.log(
-            `${v.version.padEnd(VERSION_WIDTH)} ${v.status.padEnd(NS_WIDTH)} ${v.created_at ?? '-'}`,
+            `${v.version.padEnd(VERSION_WIDTH)} ${v.status.padEnd(NS_WIDTH)} ${created}`,
           );
         }
       }),

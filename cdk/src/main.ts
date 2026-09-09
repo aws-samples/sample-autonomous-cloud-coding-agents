@@ -92,6 +92,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       env,
       agentCoreAvailabilityZones: azResolution.zones,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
+      // Emit compact JSON for a CloudFormation 1 MB template-body ceiling.
+      suppressTemplateIndentation: true,
     },
   );
 

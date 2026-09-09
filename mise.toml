@@ -176,6 +176,24 @@ run = [
   "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
 ]
 
+[tasks."security:sast:masking:range"]
+description = "Masking scan ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_MASKING_BASELINE, e.g. origin/main."
+# Ratchet, not a full scan: --baseline-commit reports only findings a branch
+# ADDS relative to the baseline, so the pre-existing findings on main (tracked
+# in #756) don't block PRs that don't touch them — while any NEW masking
+# regression fails here at PR time. Mirrors security:secrets:range. The full
+# blocking scan (security:sast:masking) still runs in security.yml and the
+# pre-push hook.
+# `semgrep test .semgrep/` runs first (as in the full task) so a PR that WEAKENS
+# the rule or breaks a fixture fails at PR time too — otherwise a rule-weakening
+# change would only be caught weekly / at pre-push (which is currently bypassable
+# with --no-verify). Defaults the baseline to origin/main so the task is safe to
+# run anywhere; the per-PR CI job sets SEMGREP_MASKING_BASELINE to the PR base SHA.
+run = [
+  "semgrep test .semgrep/",
+  "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --baseline-commit \"${SEMGREP_MASKING_BASELINE:-origin/main}\" --error --quiet .",
+]
+
 [tasks."security:deps"]
 description = "Audit dependencies for known vulnerabilities (osv-scanner)"
 # Yarn workspaces use the repo-root lockfile only; do not scan stale cli/docs yarn.lock copies.

@@ -7,6 +7,12 @@
 
 > **2026-07-21 revision.** The outbound design was restructured to separate **execution semantics** (deterministic REST/GraphQL from Lambda) from **credential transport** (AgentCore Identity vault), and to make **MCP a first-class control plane** (registration + Gateway execution, fail-closed, no direct fallback) rather than a per-vendor transport toggle. Introduces three credential types (`ChannelCredential`, `McpCredential`, `McpRegistration`). This **rejects** the earlier two-flag (`lifecycleViaGateway`/`gatewayOAuthOk`) "derived transport" framing and the Linear Hybrid/two-app framing. **Further (later 2026-07-21, after live validation):** Linear MCP via Gateway was proven non-functional on one OAuth app (`actor=user` reads error; `actor=app` can't consent on an installed app), so **Linear MCP is removed entirely** — Linear becomes 100% deterministic on the one `@bgagent` `ChannelCredential`, and the Gateway is kept as the general MCP control plane for *other* registered servers only. See *Linear is fully deterministic* below.
 
+> **2026-08-28 implementation note — Phase 1 (Linear `ChannelCredential`) is built and live-verified
+> on a dev stack** ([#809](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/809)).
+> Additive and context-gated (`enableLinearIdentityVault`, default off), with Secrets Manager retained
+> as the fallback, so a deployment that does not opt in is byte-for-byte unchanged. The decision below
+> stands; two implementation details deviate from the P1 text and are recorded in *Phasing* → P1.
+
 ## Context
 
 ABCA propagates *who* as data but not as an enforceable credential. Issue [#245](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/245) threads the user identity through traces and logs (`cognito+<sub>`), so attribution is correct. The same identity does not yet gate a token. Two costs follow from that gap:
@@ -146,7 +152,7 @@ Per-user `McpCredential` selection requires the Gateway to know *which task-user
 | Phase | Action | Gate |
 |---|---|---|
 | P0 ✅ | Re-validate `USER_FEDERATION` / OBO post-GA against the live service. | **Done 2026-06-14 (`us-east-1`): GO-LIKELY** — parked PAR bug does not reproduce (see [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249)). Full GO pending one human consent click. |
-| P1 | **`ChannelCredential` for Linear (deterministic path first).** Move the Lambda tier + agent `linear_reactions.py` off Secrets Manager onto the vault: one `abca-linear-channel` workload identity, credential keyed `linear-workspace:<id>`, the 6 Lambda roles + runtime role granted `GetResourceOauth2Token` on that domain. Deterministic ops stay direct GraphQL — only the token source changes. | Flag-gated; SM fallback retained until green; per-workspace isolation preserved. |
+| P1 ✅ built (#809) | **`ChannelCredential` for Linear (deterministic path first).** Lambda tier + agent `linear_reactions.py` resolve the Linear token from the vault instead of Secrets Manager; deterministic ops stay direct GraphQL — only the token source changed. Onboarding is `bgagent linear setup <slug>` — the single command for both substrates, which creates the provider, drives ONE consent, and records `provider_name` plus `vault_user_id` on the workspace registry row. The subject is derived from the workspace slug rather than its organization UUID, because the UUID is only knowable after a token exists; deriving it would force a second consent purely to learn the organization. | Flag-gated (`enableLinearIdentityVault`, default off); SM fallback retained on every path; per-workspace isolation preserved. Live-verified: a Linear-triggered task resolved its token through the vault and ran **while that workspace's Secrets Manager grant was revoked**. |
 | P2 | **Retire SM refresh/write-back** once P1 is green: drop `PutSecretValue` from the 5 Lambda roles and delete `tryRefreshOnce` write-back in `linear-oauth-resolver.ts`; the vault owns refresh. | No SM writes remain on the Linear path. |
 | P3 | **MCP control plane (registration + Gateway execution).** Build `McpRegistration`/`McpCredential`: users/workspaces register MCP servers + bind tools to agents/workflows; every registered MCP runs through the Gateway; unsupported auth fails closed; no direct-MCP fallback. | Registration API + Gateway execution; fail-closed verified. |
 | P4 | **Remove Linear MCP; make Linear fully deterministic — mirror the Jira attachment pattern (PR #619).** #619 already solved the identical problem for Jira: because the vendor MCP can't run headlessly, attachments + recent comments are fetched **authenticated at task-admission time in the webhook processor** (`jira-attachments.ts` → `api.atlassian.com/.../attachment/content/{id}` with the 3LO token, refresh-retry on 401/403, magic-bytes + Bedrock-Guardrail screen, S3 upload) and injected via `create-task-core.ts`'s `preScreenedAttachments` seam — **bypassing `confirm-uploads`/Cognito entirely.** Build the Linear analog `linear-attachments.ts`: fetch `uploads.linear.app` + paperclip attachments with the `@bgagent` `ChannelCredential`, screen, inject as `preScreenedAttachments`; pre-hydrate issue text/recent comments (mirroring #619's `fetchRecentHumanComments`). Then delete the `"linear"` MCP builder in `channel_mcp.py` (`_build_linear_entry`/`_linear_server_entry`), rewrite `prompt_builder.py` to drop all `mcp__linear-server__*` guidance (agent works from pre-hydrated context; Lambda owns writes), and retire the per-thread `LINEAR_API_TOKEN` MCP env. **NOTE the `confirm-uploads` Cognito-only limitation (task-api.ts:834, verified) is IRRELEVANT to this path** — #619 proves webhook-sourced attachments don't touch the presigned/`confirm-uploads` flow at all. **Orchestration is NOT at risk (verified):** the sub-issue DAG, the live status panel (`upsertStatusComment`), the maturing threaded reply (`upsertThreadedReply`), reactions, and state transitions are ALL Lambda-tier deterministic GraphQL (`orchestration-reconciler.ts` + `linear-feedback.ts`) on the `ChannelCredential` — zero MCP dependency, so removing Linear MCP cannot affect them (their only change is token source SM→vault, behavior-preserving with fallback). **One thing removing MCP DOES drop:** in the *default first-run* task mode the agent posts its own "🤖 Starting"/PR-URL courtesy comments via `mcp__linear-server__save_comment`. Those are redundant best-effort choreography (orchestrated/iteration tasks already suppress them because the platform panel owns all narration). To preserve them for first-run tasks, move them to the Lambda tier — `linear-feedback.ts` already has `postIssueComment`; trivial. Not a risk to orchestration; just don't silently drop the first-run comments. | No `linear-server` MCP entry; agent runs from hydrated context; attachments fetched authenticated + screened (Jira #619 pattern); first-run courtesy comments moved to Lambda (or explicitly dropped); orchestration/panel unchanged; tests updated. Requires main merged in (for #619/#176 seams). |
@@ -154,7 +160,74 @@ Per-user `McpCredential` selection requires the Gateway to know *which task-user
 | P6 | **Trusted task-user identity propagation** (prerequisite for per-user MCP on the general plane, P5): specify + validate a user-scoped inbound identity the Gateway authorizer trusts, replacing the M2M JWT for per-user credential selection. | **Blocks per-user `McpCredential`.** Until done, MCP credentials are workspace-scoped at best. |
 | P7 | Jira + Slack `ChannelCredential` (same shape as P1); GitHub `GithubOauth2` behind a flag, retire the shared PAT; OBO `act`-claim delegation feeding #237. | Flag-gated; per-surface. |
 
-**Substrate independence (verified 2026-07-21, both proven live):** the vault path works on any compute. AgentCore Runtime injects the Workload Access Token as the `WorkloadAccessToken` header; ECS/Fargate/Lambda bootstrap it via `GetWorkloadAccessTokenForJWT(workloadName, userToken=<Cognito M2M JWT>)` against a **standalone** (non-service-linked) workload identity, then call `GetResourceOauth2Token`. Runtime-managed (service-linked) workload identities cannot self-vend, so the ECS path needs a manually-created workload identity. The runtime execution role today has `GetWorkloadAccessToken*` but **not** `GetResourceOauth2Token` — P1 adds it (+ `GetSecretValue` on `bedrock-agentcore-identity!*`), mirroring the gateway service role.
+**Substrate exception — `lambda-microvm` (2026-09-02):** P1's vault cannot be enabled on the MicroVM substrate. The two together synthesize 505 resources against CloudFormation's hard 500-resource limit (MicroVM alone 496, the vault alone 488), so `AgentStack` refuses the combination at synth, naming both context flags. The MicroVM wiring itself is complete — `platform_config` carries the workload name and the guest execution role holds the mint grant — so this is a capacity limit, not a design gap, and it lifts as soon as a subsystem moves into a nested stack.
+
+**Substrate independence (verified 2026-07-21, both proven live):** the vault path works on any compute. AgentCore Runtime injects the Workload Access Token as the `WorkloadAccessToken` header; ECS/Fargate/Lambda bootstrap it via `GetWorkloadAccessTokenForJWT(workloadName, userToken=<Cognito M2M JWT>)` against a **standalone** (non-service-linked) workload identity, then call `GetResourceOauth2Token`. Runtime-managed (service-linked) workload identities cannot self-vend, so the ECS path needs a manually-created workload identity. The runtime execution role today has `GetWorkloadAccessToken*` but **not** `GetResourceOauth2Token` — P1 adds it, plus `GetSecretValue` scoped to that surface's providers (`bedrock-agentcore-identity!default/oauth2/<prefix>*`; see the implementation notes below for why this is narrower than the wildcard first anticipated here).
+
+## Phase-1 implementation notes (learned live, 2026-08-28)
+
+Recorded here because they are properties of AgentCore Identity, not of Linear — the same facts apply
+to the Jira/Slack/GitHub `ChannelCredential`s in P7, and none of them are discoverable from a unit test.
+
+**Two deliberate deviations from the P1 text above.**
+
+1. **Per-workspace credential provider, not one provider with per-workspace subjects.** P1 described a
+   single provider under one workload identity. As built there is one shared workload identity
+   (`abca_linear_oauth`, as designed) but a provider per workspace (`bgagent-linear-oauth-<slug>`),
+   selected by the registry row's `provider_name`. Each workspace authorizes the OAuth app separately
+   and the provider rotates that workspace's own refresh token, so a provider per workspace keeps one
+   workspace's grant (and its revocation) from touching another's — the same isolation the
+   per-workspace Secrets Manager secret gave. The subject is still `linear-workspace:<id>`.
+2. **The agent self-mints on both substrates.** Rather than consuming the AgentCore-injected
+   `WorkloadAccessToken` header, the agent calls `get_workload_access_token_for_user_id` +
+   `get_resource_oauth2_token` through boto3 against its ambient role. AgentCore Runtime and ECS then
+   behave identically, which is what makes the substrate-independence claim testable rather than
+   aspirational.
+
+**IAM: the resources the data plane authorizes against are not the ones you would guess.** Both were
+found only by a live `AccessDenied`, because a unit test can only assert the ARN you chose:
+
+- `GetWorkloadAccessTokenForUserId` authorizes against the workload-identity **directory**
+  (`workload-identity-directory/default`), *not* the named identity beneath it.
+- `GetResourceOauth2Token` authorizes against **four** resources, all required: the token vault
+  (`token-vault/default`), the specific `oauth2credentialprovider/<name>`, the named workload
+  identity, and the workload-identity directory. IAM names only the first resource it cannot
+  authorize, so the set is invisible until each one is granted in turn — it took three
+  successive denials to enumerate. Of the four, only the credential-provider ARN is narrowable.
+- `secretsmanager:GetSecretValue` is required — the vault reads the provider's client secret
+  through the caller's credentials — but **not** on the `bedrock-agentcore-identity!*` wildcard
+  this ADR originally anticipated. **Superseded (2026-09-01):** the secret name embeds the
+  provider, so the grant is scoped to `!default/oauth2/<surface-prefix>*` instead. The wildcard
+  is wider than it reads: these are raw OAuth *client* secrets, `grantMintToken` is applied to
+  roles that execute untrusted repository code, and the account's vault already holds a GitHub
+  provider and an unrelated API key beside the Linear ones — with Jira and Slack to come under
+  P7. A leaked client secret mints and refreshes offline, surviving the revocation P1/#812 exist
+  to make actionable. Verified live: the scoped grant still mints, and is denied the GitHub
+  provider's secret. Per-surface scoping is therefore the rule for P7, not the wildcard.
+
+**A cached grant is keyed by the whole token request, `customParameters` included.** Resolving without
+the same `customParameters` used at consent time returns an `authorizationUrl` ("consent required")
+even when a perfectly good grant is cached, so every resolve silently degrades to the fallback. Linear
+needs `actor=app` + `prompt=consent` to consent at all, so both resolvers must send that identical set
+forever. The parameters look redundant on a read; they are load-bearing.
+
+**Consent must be finalized explicitly.** After the user authorizes, the provider's callback exchanges
+the code and AgentCore redirects the browser to the caller-supplied `resourceOauth2ReturnUrl` with
+`?session_id=…`. Until `CompleteResourceTokenAuth` is called with that session, the vault keeps
+reporting "consent required" — polling alone never yields a token. The return URL is therefore
+load-bearing, not cosmetic. ABCA finalizes from the CLI using the operator's own credentials; the
+hosted consent page only *displays* the session id, deliberately avoiding a public unauthenticated
+endpoint that completes OAuth sessions.
+
+**Revocation changes shape on the vault path.** Secrets Manager surfaced a dead grant as an
+`invalid_grant` error; the vault surfaces it as an authorization URL. Detection keyed only on the
+former will miss it — tracked in
+[#812](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/812).
+
+**What Phase 1 does not deliver.** The `ChannelCredential` is a workspace-scoped bot identity, so the
+token cannot attribute work to the human who triggered it; per-user attribution stays with #245's logs
+until the unresolved task-user propagation (P6) lands. And the vault does not prevent a provider from
+revoking a grant — it changes who stores and refreshes the token, not whether the vendor kills it.
 
 ## Out of scope (this ADR)
 
