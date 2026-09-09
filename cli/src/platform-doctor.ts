@@ -31,7 +31,12 @@ import {
   LambdaMicrovmProbeClientFactory,
   probeLambdaMicrovmAvailability,
 } from './lambda-microvm-availability';
-import { checkLinearWorkspaceAuth, type LinearProbe, type LinearRefreshVerifier } from './linear-auth-health';
+import {
+  checkLinearWorkspaceAuth,
+  makeLinearVaultTokenMinter,
+  type LinearProbe,
+  type LinearRefreshVerifier,
+} from './linear-auth-health';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { getStackOutput } from './stack-outputs';
@@ -85,6 +90,7 @@ export async function runPlatformDoctor(
     repoTableName,
     linearRegistryTableName,
     jiraRegistryTableName,
+    linearVaultWorkloadName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -93,6 +99,9 @@ export async function runPlatformDoctor(
     getStackOutput(region, stackName, 'RepoTableName'),
     getStackOutput(region, stackName, 'LinearWorkspaceRegistryTableName'),
     getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+    // Absent unless the stack was deployed with the Linear identity vault enabled.
+    // Its absence is the signal that no workspace here is vault-managed.
+    getStackOutput(region, stackName, 'LinearVaultWorkloadName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -111,6 +120,7 @@ export async function runPlatformDoctor(
   }
   checks.push(await checkLinearAuth(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
+    linearVaultWorkloadName,
   ));
   checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
@@ -406,6 +416,7 @@ async function checkLinearAuth(
   registryTableName: string | null,
   probe?: LinearProbe,
   verifyRefresh?: LinearRefreshVerifier,
+  vaultWorkloadName?: string | null,
 ): Promise<DoctorCheckResult> {
   const id = 'linear_workspace_auth';
   const label = 'Linear workspace authorizations live';
@@ -420,6 +431,12 @@ async function checkLinearAuth(
       registryTableName,
       ...(probe && { probe }),
       ...(verifyRefresh && { verifyRefresh }),
+      // Without this a vault-managed workspace can only be reported `unknown`:
+      // its Secrets Manager bundle holds no token by design, so there is nothing
+      // to probe. Read-only — minting a token grants nothing and rotates nothing.
+      ...(vaultWorkloadName && {
+        mintVaultToken: makeLinearVaultTokenMinter(region, vaultWorkloadName),
+      }),
     });
     if (health.length === 0) {
       return { id, label, status: 'pass', detail: 'No Linear workspaces onboarded yet.' };

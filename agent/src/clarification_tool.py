@@ -39,7 +39,7 @@ def build_clarification_server() -> Any:
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:  # pragma: no cover - SDK always present in the container
-        return None
+        return None  # nosemgrep: py-silent-success-masking -- optional-dependency feature detect; None is the documented "server not registered" signal and the runner's marker-based fallback covers it (#756 Category 3)  # noqa: E501
 
     @tool(
         "request_clarification",

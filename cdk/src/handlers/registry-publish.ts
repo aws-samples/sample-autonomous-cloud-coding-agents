@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { ConflictException } from '@aws-sdk/client-bedrock-agentcore-control';
+import { ConflictException } from '@aws-sdk/client-agent-registry-control';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { extractUserId, userInGroup } from './shared/gateway';

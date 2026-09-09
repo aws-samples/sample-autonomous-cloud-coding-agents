@@ -78,14 +78,14 @@
 #   contracts/      <- cross-language constants the agent reads at runtime
 #
 # ---------------------------------------------------------------------------
-# !! A P1 IMAGE IS RUNNABLE, BUT NOT SMOKE-VERIFIED !!
+# !! A P2 IMAGE IS FULLY WIRED, BUT NOT SMOKE-VERIFIED !!
 # ---------------------------------------------------------------------------
 # This script packages and uploads a real artifact, and the image the service
 # builds from it will reach ACTIVE, accept a `runHookPayload`, and launch. What
 # it does NOT have is any smoke-parity guarantee.
 #
 # ADR-021 sub-decision 3's hook-phasing table (corrected after the live P1
-# verification run) is now:
+# verification run, then completed in P2) is now:
 #
 #   /ready, /run                    declared by the CDK construct AND served by
 #                                   the agent in P1 (agent/src/server.py).
@@ -94,15 +94,29 @@
 #                                   image with no hooks at all cannot receive a
 #                                   runHookPayload — so "declare /run in P1,
 #                                   serve it in P2" was never a reachable state.
-#   /validate                       P2 (a /validate that 404s fails every build)
-#   /terminate                      P2;  /suspend, /resume  P3
+#   /validate, /terminate           declared AND served in P2. /validate is a
+#                                   build-time self-check that makes ZERO AWS
+#                                   calls (it runs under the build role, which
+#                                   holds no Bedrock/Secrets/DynamoDB grants);
+#                                   /terminate is a best-effort in-guest
+#                                   breadcrumb that must not write terminal task
+#                                   status — the orchestrator finalizes the task
+#                                   and THEN calls TerminateMicrovm.
+#   /suspend, /resume               P3. A hook the service calls but nothing
+#                                   answers fails its lifecycle transition, so
+#                                   each is enabled only once it is served.
 #
-# Still unverified and owned by P2: AgentCore Memory grants + MEMORY_ID delivery,
-# the agent's non-secret env parity inside the snapshot, egress specifics from a
-# running MicroVM, and heartbeat/progress behaviour end to end. So clone → change
-# → PR on this backend is untested. Keep production repos on
-# compute_type=agentcore or ecs until P2 (smoke parity) lands. The Dockerfile is
-# copied unmodified deliberately — adapting it to a MicroVM base image is P2 work.
+# A P2 smoke run HAS now completed clone → change → PR on this substrate
+# (2026-08-07: two tasks COMPLETED with pull requests, live progress events, and
+# the 45 s agent heartbeat observed). What is still missing is a run with NO manual
+# intervention: that smoke needed a live IAM workaround, and the two defects behind
+# it (ADR-021 P2r2-F9 / P2r2-F10 — the `iam:PassedToService` condition on both
+# `iam:PassRole` paths) are fixed in source but not yet re-exercised live. Keep
+# production repos on compute_type=agentcore or ecs until a clean run is on record,
+# and note that the CDK-managed image path additionally needs bootstrap policy
+# bundle >= 1.6.0 (see the banner after upload). The Dockerfile is the P2 tuned base
+# and is copied unmodified — further customization (e.g., Alpine adoption) would be
+# P2.5 work.
 #
 # Requires: awscli v2, zip, rsync, python3 (none of which are installed by this script).
 
@@ -251,15 +265,18 @@ echo "    log group       : ${LOG_GROUP}"
 print_p1_reminder() {
   cat <<'EOF'
 
-!! REMINDER (ADR-021 P1): a P1 image is runnable but NOT smoke-verified.
-   The image IS creatable and launchable and the agent DOES serve /ready + /run,
-   so a lambda-microvm task can start and receive its payload. NOT verified:
-   AgentCore Memory grants + MEMORY_ID delivery, the agent's non-secret env
-   parity inside the snapshot, egress specifics from a running MicroVM, and
-   heartbeat/progress behaviour. clone -> change -> PR on this backend is
-   untested. Keep production repos on compute_type=agentcore or ecs until P2
-   (smoke parity) lands. CDK synth emits the same warning
-   (abca:microvm-image-p1-smoke-unverified) on every deploy that configures an image.
+!! REMINDER (ADR-021 P2): smoke-verified ONCE, and only WITH a manual workaround.
+   The image is creatable and launchable, the agent serves all four declared hooks
+   (/ready + /validate on the build path, /run + /terminate at runtime), the
+   execution role holds its full runtime permission set, and a 2026-08-07 run took
+   two tasks clone -> change -> PR to COMPLETED with a live 45 s heartbeat.
+   NOT verified: an UNATTENDED run. That smoke needed a live IAM workaround, and the
+   two defects behind it (ADR-021 P2r2-F9 / P2r2-F10) are fixed in source but not
+   re-exercised. The CDK-managed image path also needs bootstrap bundle >= 1.6.0.
+   Keep production repos on compute_type=agentcore or ecs until a clean run is on
+   record. /suspend and /resume stay disabled until P3. CDK synth emits the same
+   warning (abca:microvm-image-p1-smoke-unverified) on every deploy that configures
+   an image.
 EOF
 }
 
@@ -309,7 +326,28 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
 ==> Artifact uploaded. Next: create (or update) the image.
 
-  CDK-managed (recommended) — redeploy with the base image pinned:
+  CDK-managed (recommended) — redeploy with the base image pinned.
+
+  !! RE-BOOTSTRAP REQUIRED (bootstrap policy bundle >= 1.6.0) !!
+  This path took two live-verified fixes to work. The first (ADR-021 P2-F2: the L1
+  sent hook paths and \`arm64\` where CloudFormation wants ENABLED / ARM_64) is
+  DISCHARGED — change-set early validation now passes. The second (ADR-021
+  P2r2-F9) is a BOOTSTRAP change: CloudFormation could not pass the MicroVM build
+  role, because the deploy role's \`iam:PassRole\` carried an
+  \`iam:PassedToService\` condition the Lambda MicroVMs service does not satisfy.
+  The fix is the \`MicrovmPassRoles\` statement in the conditional
+  IaCRole-ABCA-Compute-LambdaMicrovms policy, which only reaches your account when
+  you re-bootstrap:
+
+    aws cloudformation describe-stacks --stack-name CDKToolkit \\
+      --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
+    # if that is below 1.6.0:
+    MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
+
+  Without it the image resource fails with
+  "is not authorized to perform: iam:PassRole on resource:
+   ...LambdaMicrovmComputeBuildRole... (Service: LambdaMicrovms, Status Code: 403)".
+  Then:
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
@@ -344,13 +382,48 @@ echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
 # Flags use the Lambda MicroVMs service API shape (which differs from the
 # CloudFormation shape used by CfnMicrovmImage), all confirmed against the live
 # CLI/SDK model on 2026-07-31:
-#   * `ARM_64` is the only documented architecture value.
+#   * `ARM_64` is the only accepted architecture value — on BOTH surfaces (see
+#     below); `arm64` is rejected.
 #   * hooks are ENABLED/DISABLED with timeouts, NOT paths.
+#   * CORRECTION (live 2026-08-06, ADR-021 P2-F2): this comment used to claim the
+#     hook/architecture fields were "the ONE place the two shapes genuinely
+#     disagree" — that `CfnMicrovmImage` routes on a path string while this API
+#     takes a flag, and that both were correct for their own surface. That was
+#     WRONG, and it made the CDK-managed image path non-functional. CloudFormation
+#     enforces the SAME enums at change-set early validation, and rejected all
+#     five values the construct was sending:
+#       "/aws/lambda-microvms/runtime/v1/run is not a valid enum value. Supported
+#        values: [DISABLED, ENABLED]" (x4, one per hook)
+#       "arm64 is not a valid enum value. Supported values: [ARM_64]"
+#     The L1 types them as plain strings and documents no allowed values, which is
+#     how the wrong shape survived synth, unit tests and cdk-nag. The construct now
+#     sends ENABLED / ARM_64, i.e. exactly what this script always sent. Neither
+#     surface takes a hook path at all: the service calls fixed well-known routes,
+#     which the agent serves and `MICROVM_AGENT_HOOK_ROUTES` in
+#     `cdk/src/constructs/lambda-microvm-compute.ts` records for that purpose only.
 #   * `/ready` is MANDATORY whenever any lifecycle hook is enabled:
 #       "The ready (/ready) MicroVM image hook must be enabled when any MicroVM
 #        lifecycle hook (run, resume, suspend, or terminate) is enabled."
-#     `/validate` stays disabled — the agent serves no validation endpoint, and a
-#     404 there fails every build.
+#   * all four hooks the agent serves are enabled: `/ready` + `/validate` (build)
+#     and `/run` + `/terminate` (runtime). `/suspend` and `/resume` stay DISABLED
+#     until P3 implements them — a hook the service calls but nothing answers
+#     fails the corresponding build or lifecycle transition.
+#   * the timeouts mirror the construct's constants
+#     (`RUN_/READY_/VALIDATE_/TERMINATE_HOOK_TIMEOUT_SECONDS` in
+#     `cdk/src/constructs/lambda-microvm-compute.ts`), which carry the rationale
+#     for each value. A bash helper cannot import them, and "keep the two in step"
+#     as prose already FAILED once — `readyTimeoutInSeconds` stayed at 60 here when
+#     the construct went to 300 — so the invariant is now enforced by a unit test
+#     that parses this exact `--hooks` string and compares it against the
+#     synthesized template (`cdk/test/constructs/lambda-microvm-compute.test.ts`,
+#     "the out-of-band script's API request matches the CDK-managed image"). If that
+#     test fails, one of the two moved: fix the one that is wrong, do not relax the
+#     test. An out-of-band image built here must behave like a CDK-built one.
+#   * `readyTimeoutInSeconds` is 300, NOT 60: as of ADR-021 P2-F5 the `/ready` hook
+#     warms the 225 MiB `claude` binary before the snapshot is captured, so it does
+#     real work whose duration is a cold `exec`. Build hooks are allowed up to
+#     3600 s. `validateTimeoutInSeconds` deliberately stays at 60 — /validate gained
+#     no warm-up, so sharing a number would size it for work it does not do.
 #   * the BUILD connector (443 + 80) is used here, not the runtime one.
 CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --name "${IMAGE_NAME}" \
@@ -363,7 +436,7 @@ CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --resources "[{\"minimumMemoryInMiB\":${MEMORY_MIB}}]" \
   --egress-network-connectors "${BUILD_EGRESS_CONNECTORS}" \
   --logging "{\"cloudWatch\":{\"logGroup\":\"${LOG_GROUP}\"}}" \
-  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":60}}' \
+  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
   --tags "abca:compute-backend=lambda-microvm" \
   --output json)"
 

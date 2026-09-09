@@ -70,6 +70,33 @@ paths = [
 stopwords = ["gitleaks:allow account-id"]
 
 [[rules.allowlists]]
+# Retired fixture value from PR #733 (#645), kept suppressed SHA-INDEPENDENTLY.
+#
+# `agent/tests/test_server.py` briefly used `999988887777` as the "foreign
+# account" in the ARN-pinning tests. HEAD uses the AWS-published placeholder
+# `111122223333` instead, but the original value survives in the already-pushed
+# `baa365fc` blob, and the per-PR gate scans a COMMIT RANGE
+# (`security-pr.yml` -> `security:secrets:range`, `PR_BASE_SHA..PR_HEAD_SHA`), so
+# that blob is in scope until the branch merges.
+#
+# A regex here rather than only a `.gitleaksignore` fingerprint, for the reason
+# `.gitleaksignore` itself records against #537: a fingerprint is keyed on the
+# commit SHA, so a rebase or squash of this branch silently invalidates it and
+# reddens a required security gate. This block cannot rot that way.
+#
+# SCOPED TO THE ONE FILE on purpose. `999988887777` is NOT an AWS-published
+# placeholder (unlike the four in the block above), so allowlisting it repo-wide
+# would mean a future real account that happens to match goes unflagged forever.
+# Confined to this path, the exemption cannot outlive its cause.
+description = "Retired foreign-account test fixture from #645; superseded by 111122223333 at HEAD."
+regexes = [
+    '''999988887777''',
+]
+paths = [
+    '''(.*/)?agent/tests/test_server\.py$''',
+]
+
+[[rules.allowlists]]
 # False positives where a 12-digit run is NOT an AWS account ID:
 #  - GitHub Action commit-SHA pins contain digit runs (e.g. jdx/mise-action
 #    `…981980618f…` matches `629881980618`).

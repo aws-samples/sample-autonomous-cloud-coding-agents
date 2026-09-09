@@ -73,6 +73,18 @@ bgagent login \
 
 Tokens are saved to `~/.bgagent/credentials.json` (mode 0600). The CLI automatically refreshes expired tokens using the cached refresh token.
 
+**First login (invited users):** `admin invite-user` issues a *temporary* password, so your first login is a rotation. Cognito returns a `NEW_PASSWORD_REQUIRED` challenge and the CLI prompts you to set (and confirm) a permanent password, which replaces the admin-shared temp one. Run it interactively — **omit `--password`** so the CLI can prompt; passing `--password` (or piping on a non-TTY) skips the rotation prompt and fails with a clear "log in interactively" error rather than hanging. Temporary passwords also expire after a few days; if yours has lapsed the login reports that and asks the admin to re-run `invite-user`.
+
+### `bgagent change-password`
+
+Rotate the signed-in user's Cognito password (requires an active `bgagent login` session).
+
+```
+bgagent change-password
+```
+
+Prompts for your current password, then the new password twice (masked). Cognito enforces the pool's password policy on the new value — by default minimum 12 characters with an upper, lower, digit, and symbol. No flags: the current-password prompt doubles as verification, and the username is read from your cached session so you never retype your email.
+
 ### `bgagent submit`
 
 Submit a new coding task.
@@ -116,6 +128,8 @@ bgagent budget status --me [--output text|json]
 ```
 
 This path uses Cognito authentication and requires no operator AWS credentials. It is read-only, does not expose team budgets, and reports personal spend even when no personal limit is configured.
+
+The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
 
 ### `bgagent status <task-id>`
 
@@ -367,7 +381,7 @@ Manage Cognito users with operator AWS credentials (`cognito-idp:Admin*` on the 
 ```
 bgagent admin invite-user <email> \
   --stack-name backgroundagent-dev \
-  --password <pwd>              # optional; auto-generated if omitted
+  --password <pwd>              # optional temporary password; auto-generated if omitted
 
 bgagent admin list-users \
   --output <text|json>
@@ -378,13 +392,13 @@ bgagent admin reset-password <email> \
   --password <pwd>              # optional; auto-generated if omitted
 ```
 
-`invite-user` creates the user, sets a permanent password, and writes credentials plus an optional configure bundle to `~/.bgagent/invites/<email>.txt` (mode 0600). Replaces Quick Start Step 5 raw `aws cognito-idp` commands.
+`invite-user` creates the user with a *temporary* password (rotated on the teammate's first login via `bgagent login`) and writes credentials plus an optional configure bundle to `~/.bgagent/invites/<email>.txt` (mode 0600). The temp password stops being valid once they set their own, so the admin-shared string never becomes a standing credential. `reset-password` instead sets a *permanent* password for an existing user (no first-login rotation). Replaces Quick Start Step 5 raw `aws cognito-idp` commands.
 
 ## Output formats
 
 **Text mode** (default) prints human-readable output:
 - `status` and `submit` show a key-value detail view
-- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, DESCRIPTION)
+- `list` shows an aligned table (TASK ID, STATUS, REPO, CREATED, HEARTBEAT, DESCRIPTION)
 - `events` shows a timeline (TIMESTAMP, EVENT TYPE, METADATA)
 - `webhook create` shows webhook details and the one-time HMAC secret
 - `webhook list` shows an aligned table (WEBHOOK ID, NAME, STATUS, CREATED)

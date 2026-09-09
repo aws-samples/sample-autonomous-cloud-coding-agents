@@ -27,7 +27,7 @@ function synth(): { template: Template; registryApi: RegistryApi } {
   const parent = new Stack(app, 'ParentStack');
   const userPool = new cognito.UserPool(parent, 'UserPool');
   const registryApi = new RegistryApi(parent, 'RegistryApi', {
-    agentRegistryId: 'reg-abc123',
+    agentRegistryId: 'AbCdEfGh1234',
     userPool,
   });
   // A NestedStack renders as AWS::CloudFormation::Stack in the parent; assert on
@@ -68,9 +68,9 @@ describe('RegistryApi nested stack', () => {
         Statement: Match.arrayWith([
           Match.objectLike({
             Action: Match.arrayWith([
-              'bedrock-agentcore:CreateRegistryRecord',
-              'bedrock-agentcore:SubmitRegistryRecordForApproval',
-              'bedrock-agentcore:UpdateRegistryRecordStatus',
+              'agent-registry:CreateRegistryRecord',
+              'agent-registry:SubmitRegistryRecordForApproval',
+              'agent-registry:UpdateRegistryRecordStatus',
             ]),
           }),
         ]),
@@ -83,7 +83,7 @@ describe('RegistryApi nested stack', () => {
     const policies = template.findResources('AWS::IAM::Policy');
     const serialized = JSON.stringify(policies);
     // The wired registry id must appear in the resource ARNs...
-    expect(serialized).toContain('reg-abc123');
+    expect(serialized).toContain('AbCdEfGh1234');
     // ...and no registry statement may grant a bare "*" resource (the finding-10
     // regression: a resource:['*'] would let a read handler reach other registries).
     for (const policy of Object.values(policies)) {
@@ -91,7 +91,7 @@ describe('RegistryApi nested stack', () => {
         .Properties.PolicyDocument.Statement;
       for (const stmt of statements) {
         const actions = JSON.stringify(stmt.Action);
-        if (actions.includes('bedrock-agentcore:')) {
+        if (actions.includes('agent-registry:')) {
           expect(stmt.Resource).not.toBe('*');
           expect(JSON.stringify(stmt.Resource)).not.toBe('"*"');
         }

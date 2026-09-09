@@ -21,6 +21,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import {
+  BEDROCK_GEO_REGION_CONTEXT_KEY,
+  DEFAULT_BEDROCK_GEO_REGION,
+  DEFAULT_BEDROCK_MODEL_IDS,
+} from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
@@ -83,6 +88,63 @@ describe('AgentStack', () => {
     });
   });
 
+  test('the orchestrator carries the platform_config transport env on EVERY compute type', () => {
+    // Wired unconditionally rather than under the lambda-microvm gate: the strategy
+    // fails a session start when a required identifier is missing, and that guard
+    // must only ever fire for a hand-edited Lambda environment — never because a
+    // deploy-time gate and a per-repo `compute_type` disagreed. These are the
+    // MicroVM's substitute for the AgentCore runtime env block / ECS container env,
+    // since a snapshot must not bake configuration in (ADR-021 sub-decision 3).
+    const [, orchestrator] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    for (const key of [
+      'TASK_APPROVALS_TABLE_NAME',
+      'NUDGES_TABLE_NAME',
+      'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME',
+      'TRACE_ARTIFACTS_BUCKET_NAME',
+      'AGENT_SESSION_ROLE_ARN',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    ]) {
+      expect(env[key]).toBeDefined();
+    }
+    // Plus the three the orchestrator already carried for its own work — together
+    // these cover all four identifiers the MicroVM strategy treats as required.
+    expect(env.TASK_TABLE_NAME).toBeDefined();
+    expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
+    expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
+  });
+
+  test('the forwarded identifiers are the SAME stack values the AgentCore runtime gets', () => {
+    // One stack value, one env-var name, three backends — so an agent behaves
+    // identically on every substrate and a value can only be changed in one place.
+    // A drift here would mean a MicroVM agent writing approvals to a different
+    // table than an AgentCore agent on the same deployment.
+    const [, orchestrator] = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const orchestratorEnv = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
+
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const runtimeEnv = Object.values(runtimes)[0]!.Properties.EnvironmentVariables as Record<string, unknown>;
+
+    for (const key of [
+      'TASK_APPROVALS_TABLE_NAME',
+      'NUDGES_TABLE_NAME',
+      'LOG_GROUP_NAME',
+      'ARTIFACTS_BUCKET_NAME',
+      'TRACE_ARTIFACTS_BUCKET_NAME',
+      'AGENT_SESSION_ROLE_ARN',
+      'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'TASK_TABLE_NAME',
+      'TASK_EVENTS_TABLE_NAME',
+      'GITHUB_TOKEN_SECRET_ARN',
+    ]) {
+      expect(JSON.stringify(orchestratorEnv[key])).toEqual(JSON.stringify(runtimeEnv[key]));
+    }
+  });
+
   test('outputs ComputeSubstrate=agentcore on the default (no-gate) deploy', () => {
     // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
     // stack that never provisioned the ECS substrate.
@@ -91,6 +153,12 @@ describe('AgentStack', () => {
 
   test('outputs CedarWasmLayerArn', () => {
     template.hasOutput('CedarWasmLayerArn', {});
+  });
+
+  test('enables Agent Registry by default', () => {
+    template.hasOutput('AgentRegistryId', {});
+    template.hasOutput('AgentRegistryArn', {});
+    template.hasOutput('RegistryApiUrl', {});
   });
 
   test('creates the Cedar-wasm Lambda layer', () => {
@@ -153,16 +221,22 @@ describe('AgentStack', () => {
     }
   });
 
-  test('default Haiku model env var is the cross-region inference profile (us.), not the bare model id', () => {
+  test('default Haiku model env var is the cross-region inference profile, not the bare model id', () => {
     // Claude 4.x on Bedrock cannot be invoked on-demand by bare foundation-model
     // id (400 "on-demand throughput isn't supported"); WebFetch's Haiku sub-calls
-    // hit this. The env var must be the granted us.* inference profile.
+    // hit this. The env var must be the granted inference profile.
+    //
+    // The expectation is DERIVED from the default geography rather than hardcoded
+    // `us.` (#746): the prefix is now a function of `bedrockGeoRegion`, so a
+    // hardcoded literal here would assert the default's value twice and go stale
+    // the moment the default moves — while the thing worth guarding (main and
+    // auxiliary models routing through the SAME geography) went unchecked.
     const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
     for (const rt of Object.values(runtimes)) {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
       expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-4-5-20251001-v1:0`);
     }
   });
 
@@ -267,6 +341,11 @@ describe('AgentStack', () => {
     // Default (no bedrockModels context): the runtime execution role must hold
     // bedrock:InvokeModel on every default foundation model + its US
     // inference profile, scoped (never Resource: '*').
+    //
+    // The `us.` literals below are deliberate, not stale (#746): this test pins
+    // the DEFAULT deploy, and the default geography is still `us`. The
+    // geo-parameterized behaviour is covered separately; template identity under
+    // default context is covered by the exact-set test further down.
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
@@ -339,6 +418,136 @@ describe('AgentStack', () => {
     expect(serialized).not.toContain('claude-haiku-4-5');
     // ...and the grant is never a bare wildcard.
     expect(serialized).not.toContain('"*"');
+  });
+
+  /**
+   * TEMPLATE IDENTITY (#746). Making the inference-profile geography
+   * configurable must not MOVE it: the default is still `us`, so a stack
+   * deployed before this change and re-synthesized after it must produce the
+   * same Bedrock IAM resources. That is the whole safety argument for shipping
+   * the refactor on its own, ahead of the geo flip (#747) — so it is asserted,
+   * not asserted-in-a-PR-description.
+   *
+   * The expected set below is the literal, exhaustive list captured from a
+   * pre-change `origin/main` synth of this same stack (`fb1e007b`, before the
+   * `bedrockGeoRegion` key existed) — every `foundation-model/…` and
+   * `inference-profile/…` resource name appearing in any `bedrock:` IAM
+   * statement of the default-context template. Asserted as EXACT set equality,
+   * so the refactor can neither add, drop, nor re-prefix a grant unnoticed. A
+   * `toContain`-style check would pass on a template that also granted
+   * something new.
+   *
+   * (The full 25k-line template was also diffed pre/post out-of-band and is
+   * identical modulo CDK's own local synth non-determinism — asset hashes,
+   * custom-resource timestamps, the InputGuardrail version logical id — which
+   * differ between two synths of the SAME tree and so cannot be asserted here.
+   * The Bedrock resources are the change's entire blast radius.)
+   */
+  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
+    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+      'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-opus-4-8',
+      'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-sonnet-4-6',
+      'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-opus-4-8',
+      'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-sonnet-4-6',
+    ];
+
+    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    const found = [...new Set(
+      serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
+    )].sort();
+    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+
+    // Sanity: the set is derived from the shared model list, so a model added to
+    // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here
+    // rather than silently widening the "identical" claim.
+    expect(found).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+
+    // And the auxiliary-model env var is still the `us.` profile it always was.
+    const runtimes = template.findResources('AWS::BedrockAgentCore::Runtime');
+    const envVars = (Object.values(runtimes)[0] as {
+      Properties?: { EnvironmentVariables?: Record<string, unknown> };
+    }).Properties?.EnvironmentVariables ?? {};
+    expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+      .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    expect(DEFAULT_BEDROCK_GEO_REGION).toBe('us');
+  });
+
+  /**
+   * The point of the key: a non-`us` deploy must be reachable from context
+   * alone, with no construct edit. Parameterized over the geographies with a
+   * distinct ARN shape from the default, `global` included — `global.` was the
+   * specific case verified live (its profile ARN is regional + account-qualified,
+   * identical in shape to `us.`), and is what #747 will flip the default to.
+   */
+  describe.each(['global', 'eu', 'apac'])('bedrockGeoRegion=%s', (geo) => {
+    let geoTemplate: Template;
+
+    beforeAll(() => {
+      const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: geo } });
+      const stack = new AgentStack(app, `GeoAgentStack${geo.replace('-', '')}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      geoTemplate = Template.fromStack(stack);
+    });
+
+    test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
+      const serialized = JSON.stringify(geoTemplate.findResources('AWS::IAM::Policy'));
+      for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+        expect(serialized).toContain(`inference-profile/${geo}.${modelId}`);
+        // The default geography must be GONE, not merely joined — a grant left
+        // on `us.` while the agent calls `global.` is an AccessDenied at turn 0.
+        expect(serialized).not.toContain(`inference-profile/us.${modelId}`);
+        // The foundation-model half is already geo-agnostic (region: '*'), so it
+        // is unchanged — and must NOT pick up a geo prefix.
+        expect(serialized).toContain(`foundation-model/${modelId}`);
+        expect(serialized).not.toContain(`foundation-model/${geo}.${modelId}`);
+      }
+      // Still per-model scoped; the geo knob must never become a wildcard.
+      // Scoped to the bedrock:InvokeModel* statements — the stack legitimately
+      // holds Resource:'*' elsewhere (ec2/route53resolver describes have no
+      // resource-level scoping), so a blanket scan would assert nothing here.
+      const bedrockStatements: unknown[] = [];
+      for (const p of Object.values(geoTemplate.findResources('AWS::IAM::Policy'))) {
+        for (const s of (p.Properties?.PolicyDocument?.Statement ?? []) as Array<{ Action?: unknown; Resource?: unknown }>) {
+          const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+          if (actions.some((a) => typeof a === 'string' && a.startsWith('bedrock:InvokeModel'))) {
+            bedrockStatements.push(s.Resource);
+          }
+        }
+      }
+      expect(bedrockStatements.length).toBeGreaterThan(0);
+      expect(bedrockStatements).not.toContain('*');
+      expect(JSON.stringify(bedrockStatements)).not.toContain('"*"');
+    });
+
+    test('derives the auxiliary Haiku model prefix from the same key', () => {
+      // Without this the main model routes through `geo` while WebFetch's Haiku
+      // sub-calls still ask for `us.` — a grant/env split that only shows up as a
+      // mid-task failure on the auxiliary path.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      for (const rt of Object.values(runtimes)) {
+        const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
+          .Properties?.EnvironmentVariables ?? {};
+        expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+      }
+    });
+  });
+
+  test('an unknown bedrockGeoRegion fails at synth, not at turn 0', () => {
+    // Synth-time because the value feeds grantInvoke's ARN construction: a
+    // CloudFormation parameter would resolve after synth and force the grant back
+    // to Resource: '*'. A typo must therefore fail here, loudly.
+    const app = new App({ context: { [BEDROCK_GEO_REGION_CONTEXT_KEY]: 'usa' } });
+    expect(() => new AgentStack(app, 'BadGeoAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow(/must be one of/);
   });
 
   test('outputs ApiUrl', () => {
@@ -1018,6 +1227,51 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(rendered).not.toContain('microvm-image:*');
   });
 
+  test('wires the P2 runtime-parity grants onto the MicroVM execution role', () => {
+    // Construct-level scoping is asserted in test/constructs/lambda-microvm-compute
+    // test; what only the STACK can get wrong is passing the props at all — a
+    // missing `githubTokenSecret` or `agentMemory` here synthesizes cleanly and
+    // fails at run time (no clone / silently-dropped memory writes).
+    const policies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+    // The platform GitHub PAT secret, by reference to the real stack secret.
+    expect(policies).toContain('secretsmanager:GetSecretValue');
+    expect(policies).toContain('GitHubTokenSecret');
+    // AgentCore Memory, so cross-task learning persists on this substrate.
+    expect(policies).toContain('bedrock-agentcore:CreateEvent');
+    // Bedrock, scoped to the shared model list rather than a wildcard.
+    expect(policies).toContain('bedrock:InvokeModel');
+    expect(policies).toContain('inference-profile/us.anthropic.claude-opus-4-8');
+    // Tenant data stays on the SessionRole: no direct DynamoDB, ever.
+    expect(policies).not.toContain('dynamodb:');
+    expect(policies).toContain('sts:TagSession');
+  });
+
+  test('grants the MicroVM execution role writes on the SAME log group platform_config names', () => {
+    // ADR-021 P2-F4, and a stack-level property by construction: the construct can
+    // only grant against the log group the stack hands it, and the orchestrator can
+    // only deliver the name the stack puts in `agentPlatformConfig`. If those two
+    // ever came from different objects the deploy would still succeed and every
+    // per-task log line would AccessDenied — which is exactly what the live P2 run
+    // hit. So this asserts they are the SAME logical resource.
+    const policies = JSON.stringify(
+      Object.entries(template.findResources('AWS::IAM::Policy'))
+        .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
+    );
+    expect(policies).toContain('logs:CreateLogStream');
+    expect(policies).toContain('RuntimeApplicationLogGroup');
+
+    // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
+    const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+    const logGroupEnv = JSON.stringify(
+      orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
+    );
+    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+  });
+
   test('MicroVM resources carry the backend cost-allocation tag', () => {
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
@@ -1336,5 +1590,346 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
         ]),
       });
     });
+  });
+});
+
+describe('AgentStack Linear identity vault gate (#809)', () => {
+  test('default synth omits the vault: no workload identity, no token grant, no agent env', () => {
+    const app = new App();
+    const stack = new AgentStack(app, 'LinearVaultOffStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const rendered = JSON.stringify(Template.fromStack(stack).toJSON());
+    expect(rendered).not.toContain('Custom::LinearWorkloadIdentity');
+    expect(rendered).not.toContain('GetResourceOauth2Token');
+    expect(rendered).not.toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    // The hosted consent page is part of the same gate.
+    expect(rendered).not.toContain('LinearVaultConsentPage');
+    expect(rendered).not.toContain('LinearVaultConsentUrl');
+  });
+
+  test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultOnStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    // The workload identity is provisioned.
+    template.resourceCountIs('Custom::LinearWorkloadIdentity', 1);
+    // Some role is granted the two token data-plane actions. Asserted on the
+    // rendered policies rather than a fixed Action shape: the two actions live in
+    // separate statements (they authorize against different resources), and CDK
+    // renders a single-action statement as a string, not a one-element array.
+    const policyJson = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policyJson).toContain('bedrock-agentcore:GetWorkloadAccessTokenForUserId');
+    expect(policyJson).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    // NOT asserted here: that the mint grant covers the workload-identity DIRECTORY,
+    // the resource whose omission caused a live AccessDenied. At this level the claim
+    // is unfalsifiable — the AgentCore Runtime L2 grants its own role
+    // `GetWorkloadAccessToken*` on `workload-identity-directory/default` for reasons
+    // unrelated to Linear, so the assertion passes with `grantMintToken`'s directory
+    // resource deleted. Verified by deleting it. The falsifiable, per-resource guard
+    // lives in linear-identity-vault.test.ts, scoped to one grantee's own policy.
+    // The agent runtime carries the vault env so config.py takes the vault path.
+    const rendered = JSON.stringify(template.toJSON());
+    expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    expect(rendered).toContain('abca_linear_oauth');
+
+    // Hosted consent page ships with the gate, and its URL is published so
+    // `bgagent linear setup` can read it from the stack. Without the output the CLI
+    // has no return URL to register and falls back to the localhost loopback, which
+    // is exactly what the hosted page exists to avoid.
+    const outputs = template.toJSON().Outputs as Record<string, unknown>;
+    expect(Object.keys(outputs)).toContain('LinearVaultConsentUrl');
+    // The page ships in a NESTED stack so its ~13 resources do not eat the root's
+    // headroom against the 500-per-stack ceiling; the root therefore pays only a
+    // single AWS::CloudFormation::Stack for it.
+    expect(rendered).not.toContain('Custom::CDKBucketDeployment');
+    expect(rendered).toContain('LinearVaultConsentPageStack');
+  });
+
+  test('the workload identity name is STACK-scoped, so two stacks cannot share one', () => {
+    // AgentCore workload identity names are unique per account+region; stacks are not.
+    // Sharing one is not a benign no-op: the second stack's CreateWorkloadIdentity
+    // conflicts, falls back to an update, and that update REPLACES
+    // allowedResourceOauth2ReturnUrls — dropping the first stack's consent page from
+    // the allowlist, so its consent begins failing. A Delete from either then removes
+    // the identity both were using.
+    const nameFor = (id: string): string => {
+      const app = new App({ context: { enableLinearIdentityVault: true } });
+      const rendered = JSON.stringify(Template.fromStack(
+        new AgentStack(app, id, { env: { account: '123456789012', region: 'us-east-1' } }),
+      ).toJSON());
+      const match = /"(abca_linear_oauth[A-Za-z0-9_]*)"/.exec(rendered);
+      return match![1];
+    };
+    const first = nameFor('AlphaAgentStack');
+    const second = nameFor('BetaAgentStack');
+    expect(first).not.toBe(second);
+    expect(first).toContain('AlphaAgentStack');
+    // 64 characters is the AgentCore limit; a long stack name must be truncated to
+    // fit rather than rejected at deploy time.
+    const long = nameFor('AgentStackWithAVeryLongDeliberatelyExcessiveNameForTruncation');
+    expect(long.length).toBeLessThanOrEqual(64);
+    expect(long.startsWith('abca_linear_oauth_')).toBe(true);
+  });
+
+  test('the workload identity name can be pinned by context, for an existing deployment', () => {
+    // A grant is bound to (workload identity, user id), so renaming the identity
+    // orphans every consent already given. An operator already running the vault
+    // pins the old name instead of re-consenting every workspace.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, linearVaultWorkloadName: 'abca_linear_oauth' },
+    });
+    const template = Template.fromStack(
+      new AgentStack(app, 'PinnedNameStack', { env: { account: '123456789012', region: 'us-east-1' } }),
+    );
+    const outputs = template.toJSON().Outputs as Record<string, { Value: unknown }>;
+    // Published so `bgagent linear setup` consents against the identity this stack
+    // actually created, instead of carrying its own copy of the name.
+    expect(outputs.LinearVaultWorkloadName.Value).toBe('abca_linear_oauth');
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withEnv = Object.values(fns).filter((f) => (f as {
+      Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+    }).Properties?.Environment?.Variables?.LINEAR_WORKLOAD_IDENTITY_NAME === 'abca_linear_oauth');
+    expect(withEnv.length).toBeGreaterThan(0);
+  });
+
+  test('EVERY Lambda that can mint a Linear token has the vault env + grant', () => {
+    // Pinned as a SET, and cross-checked against the source graph below. The earlier
+    // version asserted a hardcoded count of 4, derived by grepping handlers that
+    // import a Linear module DIRECTLY — which silently omitted the two that reach a
+    // minting resolver two hops away, through orchestration-channel-factory. A guard
+    // built from an incomplete inventory just encodes the incompleteness.
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const template = Template.fromStack(
+      new AgentStack(app, 'LinearVaultWritersStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const fns = template.findResources('AWS::Lambda::Function');
+    const withVaultEnv = Object.entries(fns)
+      .filter(([, f]) => {
+        const vars = (f as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+          .Properties?.Environment?.Variables ?? {};
+        return vars.LINEAR_VAULT_ENABLED === 'true';
+      })
+      .map(([id]) => id);
+
+    for (const fragment of [
+      'LinearIntegrationWebhookProcessor',
+      'FanOut',
+      'Orchestrator',
+      'OrchestrationReconciler',
+      'IterationHeartbeat',
+      'GitHubScreenshot',
+    ]) {
+      expect(withVaultEnv.join(' ')).toContain(fragment);
+    }
+    // Every one also carries the workload name, or the env is inert — and they all
+    // carry the SAME one. Two Lambdas naming different identities is a partial
+    // outage that no single-Lambda assertion would catch: one mints, one 404s.
+    const workloadNames = new Set(withVaultEnv.map((id) => (fns[id] as {
+      Properties: { Environment: { Variables: Record<string, unknown> } };
+    }).Properties.Environment.Variables.LINEAR_WORKLOAD_IDENTITY_NAME));
+    expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
+  });
+
+  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
+    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
+    // — platform_config carries the workload name and the guest's execution role gets the
+    // mint grant — but the two cannot be enabled together today: 505 resources against a
+    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
+    // without saying so would be false.
+    //
+    // The stack refuses the combination itself rather than letting the counter throw,
+    // because the counter's message is a per-type census that never mentions either flag —
+    // the operator cannot tell from it what to change.
+    //
+    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
+    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
+    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
+    //
+    // When the room is found, this test should be replaced by a real parity assertion.
+    const app = new App({
+      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
+    });
+    expect(() => Template.fromStack(
+      new AgentStack(app, 'LinearVaultMicrovmStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  });
+
+  test('the source graph names no Linear-minting handler that is unwired', () => {
+    // The completeness half. Recomputes, from the handler sources, which Lambdas can
+    // reach `resolveLinearOauthToken` at runtime — following VALUE imports only,
+    // since `import type` is erased — and fails if that set grows beyond the handlers
+    // known to be wired. Adding an import is then a test failure rather than a
+    // production 401 on a vault-managed workspace.
+    const handlersDir = path.join(__dirname, '..', '..', 'src', 'handlers');
+    const sharedDir = path.join(handlersDir, 'shared');
+    const valueImports = (file: string): Set<string> => {
+      const src = fs.readFileSync(file, 'utf8');
+      const found = new Set<string>();
+      const re = /import\s+(type\s+)?(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s+'(?:\.\/)?(?:shared\/)?([a-z0-9-]+)'/gs;
+      for (let m = re.exec(src); m !== null; m = re.exec(src)) {
+        if (!m[1]) found.add(m[2]!);
+      }
+      return found;
+    };
+    const sharedFiles = fs.readdirSync(sharedDir).filter((f) => f.endsWith('.ts'));
+    // Seed: shared modules that CALL the resolver (not merely import its file — the
+    // signature-verification helpers import a different export and never mint).
+    const minters = new Set<string>(
+      sharedFiles
+        .filter((f) => /\bresolveLinearOauthToken\s*\(/.test(fs.readFileSync(path.join(sharedDir, f), 'utf8')))
+        .map((f) => f.replace(/\.ts$/, '')),
+    );
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const f of sharedFiles) {
+        const name = f.replace(/\.ts$/, '');
+        if (minters.has(name)) continue;
+        for (const dep of valueImports(path.join(sharedDir, f))) {
+          if (minters.has(dep)) { minters.add(name); grew = true; break; }
+        }
+      }
+    }
+    const reaching = fs.readdirSync(handlersDir)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => [...valueImports(path.join(handlersDir, f))].some((d) => minters.has(d)))
+      .sort();
+
+    // linear-webhook is the RECEIVER: it imports the resolver file for
+    // getOauthSecretStrict (signature verification) and never mints, so it needs no
+    // grant. Everything else here must be wired above.
+    expect(reaching).toEqual([
+      'fanout-task-events.ts',
+      'github-webhook-processor.ts',
+      'iteration-heartbeat-sweep.ts',
+      'linear-webhook-processor.ts',
+      'linear-webhook.ts',
+      'orchestrate-task.ts',
+      'orchestration-reconciler.ts',
+    ]);
+  });
+});
+
+describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
+  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
+  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.
+  // Every deploy-gate cell is covered, not only the widest, so a regression confined
+  // to one substrate cannot hide behind the others. The gap this closes: no test had
+  // ever constructed `compute_type` and `enableToolGateway` *together*, so the widest
+  // cell could exceed the quota — unable to synthesize at all — with CI still green.
+  // Budget is deliberately below the quota so this fails as a readable assertion with a
+  // named remedy before synth starts throwing.
+  const MAX_RESOURCE_BUDGET = 500;
+  const CUSHION = 10;
+  const RESOURCE_BUDGET = MAX_RESOURCE_BUDGET - CUSHION;
+
+  // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
+  // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
+  const SYNTH_ONLY_RESOURCES = 1;
+
+  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
+  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
+    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
+  );
+
+  describe.each(CELLS)(
+    'compute_type=$computeType enableToolGateway=$enableToolGateway',
+    ({ computeType, enableToolGateway }) => {
+      let template: Template;
+
+      beforeAll(() => {
+        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
+        const stack = new AgentStack(app, 'BudgetStack', {
+          env: { account: '123456789012', region: 'us-east-1' },
+        });
+        // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
+        // reaching the assertions below is itself part of the guard.
+        template = Template.fromStack(stack);
+      });
+
+      test('stays inside the resource budget', () => {
+        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
+        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
+      });
+
+      test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {
+        // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
+        // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
+        // scoped to `method.testMethodArn` — removing the API Gateway console's "TEST"
+        // button, which nothing in this solution invokes, and its extra
+        // `lambda:InvokeFunction` grant.
+        // Naming the offending logical IDs makes a regressed call site point straight
+        // at its own construct.
+        const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
+          .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
+          .map(([logicalId]) => logicalId);
+
+        expect(offenders).toEqual([]);
+      });
+    },
+  );
+});
+
+describe('AgentStack Agent Registry gate', () => {
+  test.each([undefined, true, 'true'])(
+    'enableAgentRegistry=%p includes the registry by default or explicit enablement',
+    (enableAgentRegistry) => {
+      const context = enableAgentRegistry === undefined ? {} : { enableAgentRegistry };
+      const app = new App({ context });
+      const stack = new AgentStack(app, `AgentRegistryStack${String(enableAgentRegistry)}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const nestedStackIds = Object.keys(
+        Template.fromStack(stack).findResources('AWS::CloudFormation::Stack'),
+      );
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(true);
+    },
+  );
+
+  test.each([false, 'false'])(
+    'enableAgentRegistry=%p omits registry resources, wiring, and outputs',
+    (enableAgentRegistry) => {
+      const app = new App({ context: { enableAgentRegistry } });
+      const stack = new AgentStack(app, `NoAgentRegistryStack${typeof enableAgentRegistry}`, {
+        env: { account: '123456789012', region: 'us-east-1' },
+      });
+      const template = Template.fromStack(stack);
+      const rendered = template.toJSON();
+      const nestedStackIds = Object.keys(template.findResources('AWS::CloudFormation::Stack'));
+      const outputs = rendered.Outputs ?? {};
+
+      expect(nestedStackIds.some(id => id.includes('AgentRegistryStack'))).toBe(false);
+      expect(nestedStackIds.some(id => id.includes('RegistryApi'))).toBe(false);
+      expect(outputs).not.toHaveProperty('AgentRegistryId');
+      expect(outputs).not.toHaveProperty('AgentRegistryArn');
+      expect(outputs).not.toHaveProperty('RegistryApiUrl');
+
+      for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+        expect(fn.Properties?.Environment?.Variables ?? {}).not.toHaveProperty('AGENT_REGISTRY_ID');
+      }
+
+      for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+        const statements = policy.Properties?.PolicyDocument?.Statement ?? [];
+        for (const statement of statements) {
+          expect(JSON.stringify(statement.Action)).not.toContain('agent-registry:');
+        }
+      }
+    },
+  );
+
+  test('rejects malformed enableAgentRegistry context values', () => {
+    const app = new App({ context: { enableAgentRegistry: 'fasle' } });
+
+    expect(() => new AgentStack(app, 'InvalidAgentRegistryContext', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
   });
 });

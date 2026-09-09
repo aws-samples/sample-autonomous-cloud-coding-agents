@@ -46,18 +46,28 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const client = makeRegistryClient();
-    const records = (await client.listRecords({ kind, namespace })).filter((r) => r.name === name);
-    if (records.length === 0) {
+    // Browse over entries (not listRecords) so a malformed record still counts:
+    // otherwise an asset whose only versions are corrupt would 404 as if absent,
+    // hiding the corruption (#791). Malformed versions surface flagged; publisher
+    // is nulled because it lives in the erased payload, and created_at is nulled
+    // by convention (the marker carries only the envelope's name/version/status,
+    // not the envelope timestamp) so a flagged row reads uniformly.
+    const entries = (await client.listBrowseEntries({ kind, namespace })).filter(
+      (e) => (e.malformed ? e.name : e.record.name) === name,
+    );
+    if (entries.length === 0) {
       return errorResponse(404, ErrorCode.REGISTRY_RECORD_NOT_FOUND, `No asset ${kind}/${namespace}/${name}.`, requestId);
     }
 
-    const versions: RegistryVersionSummary[] = records
-      .map((r) => ({
-        version: r.version,
-        status: r.status,
-        created_at: r.createdAt ?? null,
-        publisher: r.publisher ?? null,
-      }))
+    const versions: RegistryVersionSummary[] = entries
+      .map((e) => (e.malformed
+        ? { version: e.version, status: e.status, created_at: null, publisher: null, malformed: true }
+        : {
+          version: e.record.version,
+          status: e.record.status,
+          created_at: e.record.createdAt ?? null,
+          publisher: e.record.publisher ?? null,
+        }))
       .sort((a, b) => {
         const av = parseVersion(a.version);
         const bv = parseVersion(b.version);

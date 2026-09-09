@@ -54,7 +54,7 @@ export function infrastructurePolicy(): iam.PolicyDocument {
         ],
         resources: [
           'arn:aws:cloudformation:*:*:stack/backgroundagent-dev/*',
-          // Nested stacks (e.g. the AgentCore registry, #246) synth as child
+          // Nested stacks (e.g. Agent Registry, #246) synth as child
           // stacks named ``backgroundagent-dev-<Child><hash>``.
           'arn:aws:cloudformation:*:*:stack/backgroundagent-dev-*',
           'arn:aws:cloudformation:*:*:stack/CDKToolkit/*',

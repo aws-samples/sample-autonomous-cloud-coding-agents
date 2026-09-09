@@ -25,6 +25,15 @@
       "Effect": "Allow",
       "Resource": "*",
       "Sid": "LambdaMicrovms"
+    },
+    {
+      "Action": "iam:PassRole",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
+      ],
+      "Sid": "MicrovmPassRoles"
     }
   ],
   "Version": "2012-10-17"

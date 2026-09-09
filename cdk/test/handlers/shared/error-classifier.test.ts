@@ -586,6 +586,64 @@ describe('classifyError', () => {
       expect(result.title).not.toMatch(/Unexpected error/i);
     });
 
+    // --- lifecycle-hook 4xx: non-retryable, and it must OUTRANK the generic entry ---
+    //
+    // The service reports a guest 4xx in `stateReason`, which
+    // `reconcileMicrovmSubstrateState` appends to the persisted message — so BOTH
+    // the generic `MicroVM substrate terminated` string and the hook-status string
+    // are present in one `error_message` and ORDER decides the answer. These tests
+    // exist because the wrong order is invisible to a message-only assertion.
+
+    /** The `stateReason` the service really sends, verbatim from the runbook §6.1. */
+    const hookReason = (status: number) =>
+      `Run lifecycle hook returned HTTP status ${status}. `
+      + 'Please check your hook endpoint and application logs for more details.';
+    /** ...as `reconcileMicrovmSubstrateState` persists it. */
+    const reconciled = (reason: string) =>
+      'MicroVM substrate terminated before the agent wrote a terminal status: '
+      + `substrate state completed (${reason})`;
+
+    test.each([400, 403, 404, 422, 499])(
+      'classifies a lifecycle-hook %i as a NON-retryable config fault',
+      (status) => {
+        // Every 4xx the guest can answer is a wiring fault no retry fixes:
+        // MICROVM_RUN_PAYLOAD_INVALID, ..._PLATFORM_CONFIG_INVALID and
+        // ..._PLATFORM_CONFIG_INCOMPLETE. Before this entry they all landed on the
+        // generic COMPUTE/TRANSIENT entry whose remedy is "reply here to try
+        // again" — an invitation to loop forever on a version-skewed deployment.
+        const result = classifyError(reconciled(hookReason(status)))!;
+        expect(result.category).toBe(ErrorCategory.CONFIG);
+        expect(result.retryable).toBe(false);
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.title).toMatch(/rejected its own run payload/i);
+        // The remedy must send the operator to the one place the MICROVM_RUN_* code
+        // actually exists: the guest log group. The service does NOT propagate the
+        // response body into `stateReason` (runbook §6.1), so the code cannot be
+        // read from the message itself.
+        expect(result.remedy).toMatch(/log group/i);
+      },
+    );
+
+    test('a lifecycle-hook 5xx stays RETRYABLE — MICROVM_RUN_PAYLOAD_UNREADABLE is a 500', () => {
+      // The scoping that makes the entry above safe. The agent answers 500 for a
+      // truncated/racing S3 payload, which a retry genuinely can fix, so the 4xx
+      // pattern must not swallow the 5xx family.
+      const result = classifyError(reconciled(hookReason(500)))!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('a terminal MicroVM with NO hook status keeps the generic retryable entry', () => {
+      // Session duration cap, host fault, external terminate — and the clean
+      // `Success.` case, which `pollSession` normalizes away entirely.
+      const result = classifyError(
+        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+      )!;
+      expect(result.title).toMatch(/stopped before the agent reported a result/i);
+      expect(result.retryable).toBe(true);
+    });
+
     test('every new MicroVM classification carries a full, non-empty guidance shape', () => {
       const messages = [
         'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'',
@@ -593,6 +651,7 @@ describe('classifyError', () => {
         'MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded',
         'MicroVM RunMicrovm failed: ResourceNotFoundException: image not found',
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        reconciled(hookReason(400)),
       ];
       for (const msg of messages) {
         const result = classifyError(msg) as ErrorClassification;

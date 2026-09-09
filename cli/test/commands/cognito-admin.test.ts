@@ -278,35 +278,44 @@ describe('adminCreateUser', () => {
   });
 });
 
-describe('adminInviteUser', () => {
+describe('adminInviteUser (#238 — temporary password, first-login rotation)', () => {
   beforeEach(() => {
     cognitoSend.mockReset();
   });
 
-  test('creates user then sets permanent password', async () => {
-    cognitoSend
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ Users: [{ Username: 'a@b.com' }] })
-      .mockResolvedValueOnce({});
+  test('creates the user with a TEMPORARY password and never sets a permanent one', async () => {
+    cognitoSend.mockResolvedValueOnce({});
+
     await adminInviteUser(
       { region: 'us-east-1', userPoolId: 'pool', configureBundle: null },
       'a@b.com',
       'SecretPass123!',
     );
-    expect(cognitoSend).toHaveBeenCalledTimes(3);
+
+    // Exactly one call: AdminCreateUser. No AdminSetUserPassword (which would
+    // promote to a permanent password and skip the first-login challenge).
+    expect(cognitoSend).toHaveBeenCalledTimes(1);
+    const input = cognitoSend.mock.calls[0][0].input;
+    expect(input).toEqual(expect.objectContaining({
+      Username: 'a@b.com',
+      TemporaryPassword: 'SecretPass123!',
+      MessageAction: 'SUPPRESS',
+    }));
+    // Guard against a regression that re-introduces a permanent password.
+    expect(input).not.toHaveProperty('Permanent');
   });
 
-  test('surfaces half-created user when password set fails', async () => {
-    cognitoSend
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ Users: [{ Username: 'a@b.com' }] })
-      .mockRejectedValueOnce(Object.assign(new Error('policy'), { name: 'InvalidPasswordException' }));
+  test('propagates UsernameExistsException as a CliError', async () => {
+    cognitoSend.mockRejectedValueOnce(
+      Object.assign(new Error('exists'), { name: 'UsernameExistsException' }),
+    );
 
     await expect(adminInviteUser(
       { region: 'us-east-1', userPoolId: 'pool', configureBundle: null },
       'a@b.com',
-      'weak',
-    )).rejects.toThrow(/FORCE_CHANGE_PASSWORD/);
+      'SecretPass123!',
+    )).rejects.toThrow(/already exists/);
+    expect(cognitoSend).toHaveBeenCalledTimes(1);
   });
 });
 

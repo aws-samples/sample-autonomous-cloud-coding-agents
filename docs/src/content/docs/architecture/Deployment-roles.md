@@ -814,6 +814,10 @@ When the ECS Fargate compute backend is enabled (set the `ComputeTypes` CFN para
 
 When the Lambda MicroVM compute backend is enabled (include `lambda-microvm` in the `ComputeTypes` CFN parameter on the `CDKToolkit` stack), the generated template conditionally attaches this policy to the CloudFormation execution role. It permits CloudFormation to manage MicroVM images and network connectors; runtime session lifecycle permissions remain on the orchestrator role.
 
+The second statement, `MicrovmPassRoles`, is the one exception to the rule that every `iam:PassRole` in this bundle carries an `iam:PassedToService` condition (`IaCRole-ABCA-Infrastructure` → `IAMPassRole`). It has to be: the Lambda MicroVMs service does not present a usable value for that key, so the conditioned statement is **denied** when CloudFormation passes the build role to `CreateMicrovmImage` — live-verified in `us-east-1` (ADR-021 P2r2-F9), with the out-of-band `create-microvm-image` call passing the *same* role successfully as the control. It is deliberately scoped to the two role-name prefixes CloudFormation actually passes (the image build role and the network-connector operator role) and excludes the MicroVM **execution** role, which only the orchestrator passes, at `RunMicrovm`. The shared allowlisted `IAMPassRole` statement (`role/backgroundagent-dev-*`) is left intact to avoid widening the grant for ~30 other roles in the stack, so while it technically matches the execution role, only the orchestrator actively reaches for it.
+
+> **Operators must re-bootstrap for this.** The statement ships in bootstrap policy bundle **1.6.0**; a CDKToolkit stack bootstrapped at 1.5.0 or earlier will fail the CDK-managed MicroVM image deploy with a caller-side `iam:PassRole` AccessDenied on the build role. Check `CDKToolkit`'s `BootstrapPolicyVersion` output, and re-run `mise //cdk:bootstrap` (with `ComputeTypes` including `lambda-microvm`) if it is behind.
+
 ```json
 {
   "Statement": [
@@ -842,6 +846,15 @@ When the Lambda MicroVM compute backend is enabled (include `lambda-microvm` in 
       "Effect": "Allow",
       "Resource": "*",
       "Sid": "LambdaMicrovms"
+    },
+    {
+      "Action": "iam:PassRole",
+      "Effect": "Allow",
+      "Resource": [
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
+      ],
+      "Sid": "MicrovmPassRoles"
     }
   ],
   "Version": "2012-10-17"

@@ -82,6 +82,95 @@ const AGENT_HEARTBEAT_GRACE_SEC = 120;
 const AGENT_HEARTBEAT_STALE_SEC = 240;
 
 /**
+ * Whether a backend's liveness is (partly) inferred from `agent_heartbeat_at`.
+ *
+ * The *periodic* writer is `_heartbeat_worker` (`agent/src/server.py`, 45 s
+ * cadence), which runs ONLY on substrates that go through the FastAPI server:
+ * `/invocations` (AgentCore) and the `/run` hook (MicroVMs) both reach it via
+ * `_run_task_background`. `agent/src/pipeline.py` also writes the timestamp ONCE
+ * at RUNNING on every substrate, but that single write goes stale by design — so
+ * this predicate decides which backends may treat staleness as SIGNAL rather than
+ * as an artefact of never being refreshed.
+ *
+ * - `agentcore` — yes, and it is the ONLY liveness signal there:
+ *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
+ *   reports `running`, so a crashed container is invisible without the heartbeat.
+ * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
+ *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
+ *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
+ *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
+ *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
+ *   indefinitely with no `stateReason`). Without the heartbeat check such a task
+ *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
+ *   reservation, before the safety net fired. So liveness here is substrate state
+ *   AND agent heartbeat.
+ * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
+ *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
+ *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
+ *   so `_heartbeat_worker` NEVER STARTS and `agent_heartbeat_at` is written
+ *   exactly once. Enabling this for `ecs` would fail EVERY ECS task after
+ *   ~4 minutes, regardless of container health: that single write makes the
+ *   timestamp PRESENT, so the staleness arm below applies (`runningAge > 120 &&
+ *   hbAge > 240`), not the never-beat arm (`runningAge > 120 + 240`). The two
+ *   thresholds are not additive on this path — `pipeline.py` calls
+ *   `write_running` and `write_heartbeat` back to back, so `hbAge ≈ runningAge`
+ *   and the 120 s gate is already cleared by the time the 240 s one binds.
+ *   `AGENT_HEARTBEAT_STALE_SEC` alone sets the deadline. Separately — and only as
+ *   a secondary point — ECS does not need it: `DescribeTasks` reports a real
+ *   container exit (including OOM-kill, exit 137) with an exit code, and the ECS
+ *   poll block in `orchestrate-task.ts` already interprets it with its own
+ *   patience counters.
+ *
+ * A `switch` rather than a set membership test so a fourth backend cannot be
+ * added without making an explicit, compile-checked decision here — the culture
+ * ADR-021 sub-decision 1 asks for. The checkable fact that decides a new
+ * backend's answer is "does the agent serve HTTP on it?", not taste: if the
+ * substrate boots through `server.py` the worker runs, and if it boots the
+ * pipeline directly it does not.
+ */
+function heartbeatLivenessApplies(computeType: ComputeType): boolean {
+  switch (computeType) {
+    case 'agentcore':
+    case 'lambda-microvm':
+      return true;
+    case 'ecs':
+      return false;
+    default: {
+      const _exhaustive: never = computeType;
+      throw new Error(`Unknown compute type for heartbeat liveness: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * What to CALL the thing that died, in operator-facing failure copy.
+ *
+ * The heartbeat-stale message used to hard-code "container", which was true for
+ * the only two backends that existed when it was written and became false the
+ * moment `lambda-microvm` joined the heartbeat path: a MicroVM has no container,
+ * so the message told the operator to go looking for one. Same defect class as
+ * the reconcile detail that said "substrate state completed" — copy that names
+ * something which did not happen.
+ *
+ * Deliberately NOT exhaustive-switched: `compute_type` is optional on
+ * `TaskRecord` (absent on tasks written before the field existed), and the
+ * fallback has to be a true generic rather than a guess. A new backend that
+ * forgets to add itself here degrades to "runtime", which is accurate — so this
+ * is one of the few places where a `default` is better than a `never` guard.
+ */
+function substrateNoun(computeType: ComputeType | undefined): string {
+  switch (computeType) {
+    case 'lambda-microvm':
+      return 'the MicroVM';
+    case 'ecs':
+    case 'agentcore':
+      return 'the container';
+    default:
+      return 'the runtime';
+  }
+}
+
+/**
  * Load a task record from DynamoDB.
  * @param taskId - the task to load.
  * @returns the task record.
@@ -407,7 +496,19 @@ export async function reconcileMicrovmSubstrateState(args: {
   // Terminal substrate report (`completed` or `failed`). `pollSession` reports
   // TERMINATING/TERMINATED/NotFound as `completed` because it cannot see an exit
   // code; `failed` only reaches here if a future mapping adds one.
-  const detail = substrate.status === 'failed' ? substrate.error : `substrate state ${substrate.status}`;
+  //
+  // `substrate.reason` is `GetMicrovm`'s `stateReason`, carried through verbatim.
+  // Appending it is what makes this string true on the dominant failure: without
+  // it a `/run` hook 4xx (which self-terminates the VM in ~12 s) rendered as the
+  // bare "substrate state completed", and the classifier's remedy then named a
+  // session duration cap, a host fault, or an external terminate — none of which
+  // happened. With it the operator gets "substrate state completed (Run lifecycle
+  // hook returned HTTP status 400…)", which points at the guest logs where the
+  // agent's own structured 4xx body already is.
+  const substrateReason = substrate.reason ? ` (${substrate.reason})` : '';
+  const detail = substrate.status === 'failed'
+    ? `${substrate.error}${substrateReason}`
+    : `substrate state ${substrate.status}${substrateReason}`;
 
   const reread = await loadTask(taskId);
   if (TERMINAL_STATUSES.includes(reread.status)) {
@@ -517,7 +618,7 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
  * turns into a FAILED task rather than running with a missing/substituted asset.
  *
  * Resolution runs here (not at create-task) so only this one Lambda carries the
- * AgentCore SDK + IAM, mirroring how ``cedar_policies`` already flows from
+ * Agent Registry SDK + IAM, mirroring how ``cedar_policies`` already flows from
  * RepoConfig into the payload.
  */
 export async function resolveRegistryAssets(
@@ -966,6 +1067,15 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 /**
  * Poll the task record in DynamoDB to check if the agent wrote a terminal status.
  * Returns the updated PollState; the waitStrategy decides whether to continue.
+ *
+ * Heartbeat staleness is evaluated for the backends
+ * {@link heartbeatLivenessApplies} names — `agentcore` (its only liveness signal)
+ * and `lambda-microvm` (the in-guest half of "substrate state AND agent
+ * heartbeat"). Thresholds are shared across both on purpose: the timestamp is
+ * written by the same pipeline code at the same cadence regardless of substrate,
+ * so a backend-specific grace window would encode a difference that does not
+ * exist.
+ *
  * @param taskId - the task to poll.
  * @param state - current poll state.
  * @param computeType - the compute backend for this task (controls heartbeat checks).
@@ -988,7 +1098,7 @@ export async function pollTaskStatus(
 
   let sessionUnhealthy = false;
   if (
-    computeType === 'agentcore'
+    heartbeatLivenessApplies(computeType)
     && currentStatus === TaskStatus.RUNNING
     && item?.session_id
     && typeof item.started_at === 'string'
@@ -1007,6 +1117,7 @@ export async function pollTaskStatus(
             sessionUnhealthy = true;
             logger.warn('Agent heartbeat stale while task RUNNING', {
               task_id: taskId,
+              compute_type: computeType,
               agent_heartbeat_at: item.agent_heartbeat_at,
               heartbeat_age_sec: Math.round(hbAgeSec),
             });
@@ -1018,6 +1129,7 @@ export async function pollTaskStatus(
         sessionUnhealthy = true;
         logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
           task_id: taskId,
+          compute_type: computeType,
           running_age_sec: Math.round(runningAgeSec),
         });
       }
@@ -1048,7 +1160,19 @@ export async function finalizeTask(
   // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
-  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast
+  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast.
+  //
+  // FINALIZING is in the guard DEFENSIVELY, and is currently unreachable: the
+  // only writer of `sessionUnhealthy` is `pollTaskStatus`, which computes it
+  // under `currentStatus === TaskStatus.RUNNING`, so a FINALIZING task can never
+  // arrive here with the flag set. It is kept rather than removed because the
+  // reachability depends on a predicate in ANOTHER function: the day
+  // `pollTaskStatus` widens its own status gate (P3's suspend policy already has
+  // to revisit that block), a heartbeat-stale FINALIZING task must fail rather
+  // than fall through to the normal terminal path and be reported as a success.
+  // Dropping the arm would make that a silent behaviour change instead of a
+  // no-op. Do NOT "simplify" it away without also pinning `pollTaskStatus`'s
+  // RUNNING-only gate with a test.
   if (
     pollState.sessionUnhealthy
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
@@ -1058,7 +1182,8 @@ export async function finalizeTask(
       await transitionTask(taskId, currentStatus, TaskStatus.FAILED, {
         completed_at: new Date().toISOString(),
         error_message:
-          'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
+          'Agent session lost: no recent heartbeat from the agent '
+          + `(${substrateNoun(task.compute_type)} may have crashed, been OOM-killed, or stopped)`,
       });
       transitioned = true;
     } catch (err) {

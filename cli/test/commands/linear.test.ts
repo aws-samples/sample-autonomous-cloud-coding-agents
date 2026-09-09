@@ -21,8 +21,10 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
   findReusableOauthAppCredentials,
+  findWorkspaceRowBySlug,
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
+  parsePastedAuthorization,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
@@ -154,59 +156,216 @@ describe('autoLinkTokenOwner', () => {
   });
 });
 
+/**
+ * Just the Redirect URIs block. The invariant is about what goes in that FIELD, not
+ * about the word "localhost" appearing anywhere — the traps below legitimately
+ * mention the loopback when explaining which command needs it.
+ */
+function redirectUriBlock(out: string): string {
+  const lines = out.split('\n');
+  const start = lines.findIndex((l) => l.includes('Redirect URIs'));
+  const end = lines.findIndex((l, i) => i > start && l.includes('Public:'));
+  return lines.slice(start, end).join('\n');
+}
+
 describe('renderLinearAppTemplate', () => {
+  // Every expectation below was checked against Linear's ACTUAL app-creation form.
+  // The template previously asserted a GitHub-username field and a placeholder
+  // webhook URL that do not and should not exist there, which cost two onboarding
+  // attempts — so these tests pin the form's real field names and values.
+
   test('uses sane defaults when no options are passed', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toContain('bgagent[bot]');
-    expect(out).toContain('Webhooks:            ON');
-    expect(out).toContain('REQUIRED for actor=app');
+    expect(out).toContain('Application name:    bgagent');
+    expect(out).toContain('Developer name:      ABCA');
+    expect(out).toContain('actor=app');
   });
 
-  test('warns against enabling Linear agent / app-notification events (breaks comment-thread UX)', () => {
-    // ABCA is a comment-based integration; an OAuth app in Linear "agent" mode
-    // makes @mentions render as interactive agent activity instead of comment
-    // threads. The template must steer operators away from that toggle.
+  test('names the field "Redirect URIs", as Linear\'s form does', () => {
+    // It is not called "Callback URLs" anywhere in the form; an operator scanning
+    // for the label we printed would not find it.
     const out = renderLinearAppTemplate();
-    expect(out.toLowerCase()).toContain('agent');
-    expect(out).toMatch(/do not enable .*agent/i);
+    expect(out).toContain('Redirect URIs');
+    expect(out).not.toContain('Callback URLs');
   });
 
-  test('defaults the callback URL to the localhost endpoint that setup listens on', () => {
-    // Phase 2.0b-O2 (shipped) uses an ephemeral localhost server during
-    // `bgagent linear setup`. Printing the right URL by default
-    // eliminates the "and now substitute the placeholder" step the
-    // setup guide used to embed.
+  test('does NOT ask for a GitHub username — the form has no such field', () => {
+    // Verified against the live form: icon, Application name, Developer name,
+    // Developer URL, Description, Redirect URIs. No GitHub username. Printing one
+    // sent operators to fix a field that does not exist while the real cause of
+    // "Invalid redirect_uri" (an unregistered URI) stayed broken.
+    const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
+    expect(out).not.toMatch(/GitHub username/i);
+    expect(out).not.toMatch(/\[bot\]/);
+  });
+
+  test('warns that redirect URIs match EXACTLY, including the trailing slash', () => {
+    // The live cause of a real dead-end: the consent page URL ends in "/" and an
+    // operator registered it without. Exact-string matching then rejects it.
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/trailing slash/);
+    expect(out).toMatch(/match EXACTLY/);
+    // Wraps across lines in the rendered output, so match the leading phrase.
+    expect(out).toMatch(/Invalid redirect_uri/);
+  });
+
+  test('keeps the line-wrap and wildcard traps, which are real', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/line-wrapped/);
+    expect(out).toMatch(/wildcard/);
+  });
+
+  test('prints the REAL webhook URL when it can resolve one', () => {
+    // It used to print https://example.com/placeholder and say no events were
+    // needed, which left operators with an app that could never deliver an event.
+    const url = 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/linear/webhook';
+    const out = renderLinearAppTemplate({ webhookUrl: url });
+    expect(out).toContain(url);
+    expect(out).not.toContain('example.com/placeholder');
+  });
+
+  test('without a resolved webhook URL it names the command that prints one', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('webhook-info');
+    expect(out).not.toContain('example.com/placeholder');
+  });
+
+  test('requires Comments as well as Issues, or the comment trigger never fires', () => {
+    // Issues alone yields label-triggered tasks only. This is silent when wrong:
+    // labels keep working, so nothing looks broken until an @mention is ignored.
+    const out = renderLinearAppTemplate();
+    expect(out).toContain('Issues + Comments');
+    expect(out).toMatch(/Tick Comments as well as Issues/);
+  });
+
+  test('tells the operator to keep the signing secret', () => {
+    expect(renderLinearAppTemplate()).toMatch(/signing secret/i);
+  });
+
+  test('says to leave App events OFF, and why', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/App events \(agent session/);
+    expect(out).toMatch(/OFF/);
+    expect(out).toMatch(/comment thread/);
+  });
+
+  test('configures the webhook ON THE APP, so there is only one thing to set up', () => {
+    // The receiver routes on the payload's organizationId and verifies the HMAC
+    // against whichever secret it was given, so it does not care which surface the
+    // webhook was created on — one webhook on the app is the least to configure.
+    const out = renderLinearAppTemplate({ webhookUrl: 'https://x.example.com/v1/linear/webhook' });
+    expect(out).toMatch(/Webhooks:\s+ON/);
+    expect(out).toContain('https://x.example.com/v1/linear/webhook');
+    expect(out).toMatch(/Data change events:\s+Issues \+ Comments/);
+  });
+
+  test('warns that a second webhook on the app duplicates every event', () => {
+    // Two subscriptions to one endpoint means two signing secrets, and ABCA stores
+    // one per workspace — so the duplicate both doubles the work and fails to
+    // verify. Worth stating because pasting the URL in both places looks harmless.
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/ONE webhook/);
+    expect(out).toMatch(/workspace webhook pointing here/);
+    expect(out).toMatch(/twice/);
+  });
+
+  test('names the agent whatever the operator chose', () => {
+    expect(renderLinearAppTemplate({ appName: 'Alan Turing' }))
+      .toContain('Application name:    Alan Turing');
+  });
+
+  test('states that renaming does NOT change the trigger phrase', () => {
+    // The trigger is a hardcoded @bgagent token in the platform, not the app name.
+    // Without this, renaming yields an agent that looks right and answers nothing.
+    const out = renderLinearAppTemplate({ appName: 'Alan Turing' });
+    expect(out).toContain('@bgagent <request>');
+    expect(out).toMatch(/not the trigger/);
+  });
+
+  test('a blank or whitespace name falls back to the default', () => {
+    expect(renderLinearAppTemplate({ appName: '   ' })).toContain('Application name:    bgagent');
+  });
+
+  test('lists exactly the URIs the single setup command uses — no menu', () => {
+    // One command means one set of URIs. Listing per-command alternatives was the
+    // menu that got the wrong subset registered and produced an opaque
+    // "Invalid redirect_uri".
+    const out = renderLinearAppTemplate({
+      hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/',
+      vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
+    });
+    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
+    expect(out).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
+    // The loopback is NOT one of the listed URIs when a hosted page exists — setup
+    // will not redirect to it. (A trap further down may still explain that the older
+    // add-workspace command does; that is guidance, not a field value.)
+    expect(redirectUriBlock(out)).not.toContain('http://localhost:8080/oauth/callback');
+    // And no vault-setup: that command no longer exists.
+    expect(out).not.toContain('vault-setup');
+  });
+
+  test('falls back to the loopback URI only when there is no hosted page', () => {
     const out = renderLinearAppTemplate();
     expect(out).toContain('http://localhost:8080/oauth/callback');
+    expect(out).toMatch(/only works when your browser runs on the/);
+    expect(out).toContain('enableLinearIdentityVault=true');
   });
 
-  test('substitutes a different callback URL when supplied (parked AgentCore Identity flow)', () => {
-    const url = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/abc-123';
-    const out = renderLinearAppTemplate({ awsCallbackUrl: url });
-    expect(out).toContain(url);
-    expect(out).not.toContain('http://localhost:8080/oauth/callback');
+  test('the hosted URI REPLACES the loopback rather than joining it', () => {
+    // Two URIs for two flows was the confusion; setup picks one substrate, so the
+    // template lists one.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
+    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
+    expect(redirectUriBlock(out)).not.toContain('localhost:8080');
   });
 
-  test('overrides bot name, developer fields, description', () => {
+  test('lists the hosted URI EXACTLY once, as the CLI sends it', () => {
+    // An earlier version printed a second slashless variant as insurance against a
+    // typo. Linear validates the whole Redirect URIs field on save, so an extra bad
+    // line loses the good ones with it — and the failure then reads as though it
+    // were about the line just added. One entry, matching what the CLI sends.
+    const hosted = 'https://d111111abcdef8.cloudfront.net/';
+    const slashless = hosted.replace(/\/$/, '');
+    const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
+    // Exact equality, not a prefix test: a prefix test on a URL reads as (incomplete)
+    // sanitization to static analysis, and equality is the stronger assertion anyway —
+    // it would also catch a THIRD variant being printed.
+    const lines = out.split('\n').map((l) => l.trim());
+    expect(lines.filter((l) => l === hosted || l === slashless)).toEqual([hosted]);
+  });
+
+  test('with a hosted page but no vault callback, it says setup will print one', () => {
+    // The vault callback id does not exist until the provider is created, which
+    // `setup` does on its first run — so the template promises it rather than
+    // pretending it is unavailable.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
+    expect(out).toMatch(/prints one more URI the first time it runs/);
+  });
+
+  test('without a hosted URL it explains the loopback limitation and the fix', () => {
+    const out = renderLinearAppTemplate();
+    expect(out).toMatch(/same machine as the CLI/);
+    expect(out).toContain('enableLinearIdentityVault=true');
+  });
+
+  test('records that actor=app and the admin scope are mutually exclusive', () => {
+    expect(renderLinearAppTemplate()).toMatch(/cannot also request the `admin` scope/);
+  });
+
+  test('overrides developer fields and description', () => {
     const out = renderLinearAppTemplate({
-      botName: 'acme-bot[bot]',
       developerName: 'Acme Corp',
       developerUrl: 'https://acme.com',
       description: 'Internal coding agent',
     });
-    expect(out).toContain('acme-bot[bot]');
     expect(out).toContain('Acme Corp');
     expect(out).toContain('https://acme.com');
     expect(out).toContain('Internal coding agent');
   });
 
-  test('explains why each gating field matters (actor=app context)', () => {
-    const out = renderLinearAppTemplate();
-    // The "why" explainer is the core differentiator of this command vs. raw
-    // docs — without it operators paste blindly and hit the cryptic Linear
-    // "Invalid redirect_uri" error documented in the 2.0b spike.
-    expect(out).toContain('Invalid redirect_uri');
-    expect(out).toContain('Wildcard callback URLs are not accepted');
+  test('stays short enough to act on — it is a form to fill, not a manual', () => {
+    // It grew to the point the operator stopped reading and missed real fields.
+    expect(renderLinearAppTemplate().split('\n').length).toBeLessThanOrEqual(50);
   });
 });
 
@@ -248,6 +407,47 @@ describe('isWebhookSecretConfigured', () => {
   test('returns false when SecretString is missing', async () => {
     mockSend.mockResolvedValueOnce({});
     expect(await isWebhookSecretConfigured(mockClient, 'arn:secret')).toBe(false);
+  });
+});
+
+describe('findWorkspaceRowBySlug', () => {
+  // Regression: `bgagent linear vault-setup maguireb` reported an already-
+  // onboarded workspace as "not onboarded". Cause: the filtered Scan passed
+  // `Limit: 1`, and DynamoDB applies `Limit` to the items READ *before* the
+  // FilterExpression runs — so it read one arbitrary row (demo-abca), filtered
+  // it out, and returned nothing. Live-caught on a two-workspace registry.
+  beforeEach(() => {
+    ddbSend.mockReset();
+  });
+
+  const ddbClient = () => ({ send: ddbSend }) as unknown as Parameters<typeof findWorkspaceRowBySlug>[0];
+
+  test('finds a workspace that is NOT the first row scanned', async () => {
+    // Mirrors the live table: demo-abca first, maguireb second.
+    ddbSend.mockResolvedValueOnce({
+      Items: [
+        { workspace_slug: 'demo-abca', linear_workspace_id: 'ws-demo', oauth_secret_arn: 'arn:demo' },
+        { workspace_slug: 'maguireb', linear_workspace_id: 'ws-mag', oauth_secret_arn: 'arn:mag' },
+      ],
+    });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb');
+    expect(row?.linear_workspace_id).toBe('ws-mag');
+  });
+
+  test('passes NO Limit on the filtered scan (the bug that broke the lookup)', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [] });
+    await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb');
+    const scanCmd = ddbSend.mock.calls[0][0] as ScanCommand;
+    expect(scanCmd.input.FilterExpression).toBe('workspace_slug = :s');
+    // A Limit here silently breaks the lookup — see the describe comment.
+    expect(scanCmd.input.Limit).toBeUndefined();
+  });
+
+  test('returns undefined when the workspace is genuinely absent', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [{ workspace_slug: 'demo-abca', linear_workspace_id: 'ws-demo' }],
+    });
+    expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb')).toBeUndefined();
   });
 });
 
@@ -466,5 +666,36 @@ describe('queryLinearTeamKeys', () => {
     }) as unknown as typeof fetch;
 
     expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+  });
+});
+
+describe('parsePastedAuthorization', () => {
+  // Restores the OAuth correlation check on the hosted path. When the round trip goes
+  // through a human copying a value, `state` is the only thing tying the pasted code
+  // to the authorization this machine started — without it, a code acquired elsewhere
+  // could be pasted in and exchanged, installing a grant nobody here initiated.
+  test('splits the code and state the consent page returns', () => {
+    expect(parsePastedAuthorization('code=abc123&state=st-9')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('tolerates a leading question mark, as a copied URL fragment would have', () => {
+    expect(parsePastedAuthorization('?code=abc123&state=st-9')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('a bare code parses, with NO state — the caller must not imply the check ran', () => {
+    expect(parsePastedAuthorization('abc123')).toEqual({ code: 'abc123' });
+  });
+
+  test('surrounding whitespace from a copy is stripped', () => {
+    expect(parsePastedAuthorization('  code=abc123&state=st-9  ')).toEqual({ code: 'abc123', state: 'st-9' });
+  });
+
+  test('a pair with an empty code yields an empty code, so callers can refuse it', () => {
+    expect(parsePastedAuthorization('code=&state=st-9').code).toBe('');
+  });
+
+  test('an empty state is reported as absent rather than as a value to compare', () => {
+    // Comparing against '' would make a stateless authorization look correlated.
+    expect(parsePastedAuthorization('code=abc123&state=')).toEqual({ code: 'abc123' });
   });
 });

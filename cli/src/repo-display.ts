@@ -45,7 +45,7 @@ export const PLATFORM_REPO_DEFAULTS = {
    * if it names a different model than the runtime invokes, doctor can report a
    * healthy stack while every task fails at turn 0 with AccessDenied.
    */
-  model_id: 'us.anthropic.claude-opus-4-8',
+  model_id: 'us.anthropic.claude-opus-5',
   max_turns: 200,
   poll_interval_ms: 30_000,
   approval_gate_cap: 50,

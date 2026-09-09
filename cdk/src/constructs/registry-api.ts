@@ -46,7 +46,7 @@ import { Construct } from 'constructs';
 const REGISTRY_HANDLER_TIMEOUT_SECONDS = 15;
 
 export interface RegistryApiProps extends NestedStackProps {
-  /** AgentCore registry id the handlers target (via `AGENT_REGISTRY_ID`). */
+  /** Agent Registry id the handlers target (via `AGENT_REGISTRY_ID`). */
   readonly agentRegistryId: string;
   /** The SHARED Cognito user pool — the registry API authorizes against the same
    *  pool as the main API, so a caller's existing JWT works unchanged. The two
@@ -84,8 +84,8 @@ export class RegistryApi extends NestedStack {
     // --- Handler Lambdas ---
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const environment = { AGENT_REGISTRY_ID: props.agentRegistryId, ABCA_COMPONENT: 'registry-api' };
-    // The AgentCore control-plane SDK is preview and NOT in the Lambda runtime,
-    // so bundle it (do not externalize) — mirrors the provisioning handler.
+    // The Agent Registry control-plane SDK is not in the Lambda runtime, so
+    // bundle it (do not externalize) — mirrors the provisioning handler.
     const bundling: lambda.BundlingOptions = { externalModules: [] };
 
     const registryFn = (fnId: string, entry: string): lambda.NodejsFunction =>
@@ -109,25 +109,25 @@ export class RegistryApi extends NestedStack {
     // known at synth time). Record ids are server-assigned, so the record ARN
     // keeps a `/record/*` wildcard under this registry.
     const registryArn = Stack.of(this).formatArn({
-      service: 'bedrock-agentcore',
+      service: 'agent-registry',
       resource: 'registry',
       resourceName: props.agentRegistryId,
       arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
     });
     const recordArn = Stack.of(this).formatArn({
-      service: 'bedrock-agentcore',
+      service: 'agent-registry',
       resource: 'registry',
       resourceName: `${props.agentRegistryId}/record/*`,
       arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
     });
     const readActions = [
-      'bedrock-agentcore:GetRegistryRecord',
-      'bedrock-agentcore:ListRegistryRecords',
+      'agent-registry:GetRegistryRecord',
+      'agent-registry:ListRegistryRecords',
     ];
     const writeActions = [
-      'bedrock-agentcore:CreateRegistryRecord',
-      'bedrock-agentcore:SubmitRegistryRecordForApproval',
-      'bedrock-agentcore:UpdateRegistryRecordStatus',
+      'agent-registry:CreateRegistryRecord',
+      'agent-registry:SubmitRegistryRecordForApproval',
+      'agent-registry:UpdateRegistryRecordStatus',
     ];
     publishFn.addToRolePolicy(
       new iam.PolicyStatement({ actions: [...readActions, ...writeActions], resources: [registryArn, recordArn] }),
@@ -163,17 +163,17 @@ export class RegistryApi extends NestedStack {
     // --- Routes: /registry ---
     const registry = this.api.root.addResource('registry');
     const records = registry.addResource('records');
-    records.addMethod('POST', new apigw.LambdaIntegration(publishFn), authOptions);
-    records.addMethod('GET', new apigw.LambdaIntegration(listFn), authOptions);
+    records.addMethod('POST', new apigw.LambdaIntegration(publishFn, { allowTestInvoke: false }), authOptions);
+    records.addMethod('GET', new apigw.LambdaIntegration(listFn, { allowTestInvoke: false }), authOptions);
 
     const resolve = registry.addResource('resolve');
-    resolve.addMethod('GET', new apigw.LambdaIntegration(resolveFn), authOptions);
+    resolve.addMethod('GET', new apigw.LambdaIntegration(resolveFn, { allowTestInvoke: false }), authOptions);
 
     // show: /registry/records/{kind}/{namespace}/{name}
     const byKind = records.addResource('{kind}');
     const byNamespace = byKind.addResource('{namespace}');
     const byName = byNamespace.addResource('{name}');
-    byName.addMethod('GET', new apigw.LambdaIntegration(showFn), authOptions);
+    byName.addMethod('GET', new apigw.LambdaIntegration(showFn, { allowTestInvoke: false }), authOptions);
 
     this.apiUrl = this.api.url;
 
@@ -186,7 +186,7 @@ export class RegistryApi extends NestedStack {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'bedrock-agentcore registry/<id>/record/* wildcard scoped to this registry because record ids are server-assigned and unknown at synth (#246)',
+          reason: 'agent-registry registry/<id>/record/* wildcard scoped to this registry because record ids are server-assigned and unknown at synth (#246)',
         },
       ], true);
     }

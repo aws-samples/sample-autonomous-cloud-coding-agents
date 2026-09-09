@@ -119,6 +119,32 @@ describe('get-task handler', () => {
     expect(body.data.channel_source).toBe('api');
   });
 
+  test('surfaces agent_heartbeat_at so the in-guest liveness signal is observable', async () => {
+    // ADR-021 P2r2-F11. The agent writes this every 45 s on every backend and the
+    // orchestrator reads it for hang detection, but `toTaskDetail` dropped it — so
+    // `bgagent status` showed `None` while DynamoDB held a 6-second-old value, and
+    // a live verification run concluded "heartbeats not observed" and blamed an
+    // unrelated defect. Exactly the class of bug the channel_source assertion above
+    // exists for.
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({
+      Item: { ...TASK_RECORD, agent_heartbeat_at: '2025-03-15T10:30:45Z' },
+    });
+
+    const result = await handler(makeEvent());
+
+    expect(result.statusCode).toBe(200);
+    expect(JSON.parse(result.body).data.agent_heartbeat_at).toBe('2025-03-15T10:30:45Z');
+  });
+
+  test('reports agent_heartbeat_at as null when the agent has not beaten yet', async () => {
+    // Present-but-null, not absent: scripts and the CLI branch on the field, so it
+    // must exist on every response (the TaskDetail contract is non-optional).
+    const body = JSON.parse((await handler(makeEvent())).body);
+    expect(body.data).toHaveProperty('agent_heartbeat_at');
+    expect(body.data.agent_heartbeat_at).toBeNull();
+  });
+
   test('surfaces channel_source=webhook for tasks created via the webhook path', async () => {
     mockSend.mockReset();
     mockSend.mockResolvedValueOnce({

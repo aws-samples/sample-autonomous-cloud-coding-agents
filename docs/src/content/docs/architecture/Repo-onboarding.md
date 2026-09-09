@@ -124,7 +124,7 @@ From lowest to highest priority:
 |---|---|---|
 | `compute_type` | `agentcore` | Platform constant |
 | `runtime_arn` | Stack-level env var | CDK stack props |
-| `model_id` | `us.anthropic.claude-opus-4-8` | Python literal in `agent/src/config.py` (no CDK prop or env knob today) — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
+| `model_id` | `us.anthropic.claude-opus-5` | Python literal in `agent/src/config.py` (no CDK prop or env knob today) — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
 | `memory_token_budget` | 2000 | Platform constant |

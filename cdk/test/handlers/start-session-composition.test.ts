@@ -93,6 +93,15 @@ process.env.MICROVM_EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMic
 process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
 process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 
+// platform_config (ADR-021 P2): the four REQUIRED identifiers the MicroVM
+// strategy refuses to start a session without — they are the agent's only
+// channel for them, since a snapshot must not bake configuration in. Read at
+// call time by `buildMicrovmPlatformConfig`, but set here alongside the rest
+// for clarity.
+process.env.GITHUB_TOKEN_SECRET_ARN =
+  'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
+process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
+
 import { TaskStatus } from '../../src/constructs/task-status';
 import { resolveComputeStrategy } from '../../src/handlers/shared/compute-strategy';
 import { transitionTask, emitTaskEvent, failTask, buildComputeMetadata } from '../../src/handlers/shared/orchestrator';

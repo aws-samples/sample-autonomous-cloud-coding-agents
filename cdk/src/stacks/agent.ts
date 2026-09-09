@@ -36,7 +36,11 @@ import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
-import { resolveBedrockModelIds } from '../constructs/bedrock-models';
+import {
+  haikuInferenceProfileId,
+  resolveBedrockGeoRegion,
+  resolveBedrockModelIds,
+} from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
 import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
@@ -54,7 +58,9 @@ import {
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
+import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -87,9 +93,82 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
 
+/**
+ * Prefix for the AgentCore workload identity backing the Linear OAuth token vault
+ * (RFC #249 Phase 1).
+ */
+const LINEAR_VAULT_WORKLOAD_PREFIX = 'abca_linear_oauth';
+
+/**
+ * AgentCore workload identity names are limited to 64 characters, so the
+ * stack-derived suffix is truncated to fit under the prefix and separator.
+ */
+const WORKLOAD_NAME_MAX_LENGTH = 64;
+
+/**
+ * Name of the workload identity for THIS stack.
+ *
+ * Stack-scoped, not a fixed constant, because AgentCore workload identity names
+ * are unique per account+region while CloudFormation stacks are not. Two
+ * vault-enabled stacks in one account sharing a name is not a no-op: the second
+ * `CreateWorkloadIdentity` conflicts, falls back to an update, and that update
+ * REPLACES `allowedResourceOauth2ReturnUrls` — silently dropping the first stack's
+ * consent page from the allowlist, so its consent starts failing. A `Delete` from
+ * either stack then removes the identity both were using. The repo already treats
+ * account-level AgentCore name uniqueness as load-bearing for `runtimeName`.
+ *
+ * `linearVaultWorkloadName` context overrides it, which is what an existing
+ * deployment sets to keep its already-consented grants: the grant is bound to
+ * (workload identity, user id), so renaming the identity orphans every consent.
+ */
+function linearVaultWorkloadName(stack: Stack): string {
+  const override = stack.node.tryGetContext('linearVaultWorkloadName');
+  if (typeof override === 'string' && override.trim()) return override.trim();
+  // Only [a-zA-Z0-9_] survives; stack names routinely carry hyphens.
+  const suffix = stack.stackName.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const room = WORKLOAD_NAME_MAX_LENGTH - LINEAR_VAULT_WORKLOAD_PREFIX.length - 1;
+  return suffix
+    ? `${LINEAR_VAULT_WORKLOAD_PREFIX}_${suffix.slice(0, room)}`
+    : LINEAR_VAULT_WORKLOAD_PREFIX;
+}
+
+/** Properties for {@link AgentStack}. */
+export interface AgentStackProps extends StackProps {
+  /**
+   * Availability-zone *names* to pin the AgentCore VPC (and therefore the
+   * Runtime ENIs) into, so they land only in AgentCore-supported zones.
+   *
+   * Resolved in `main.ts` via `resolveAgentCoreAzs` — the validated
+   * `agentcore:availabilityZones` context override, else auto-selected from the
+   * account's supported zones when synth has a concrete account/region. Leave
+   * `undefined` (env-agnostic synth, unlisted region) to keep CDK's default
+   * `maxAzs` selection.
+   *
+   * Deliberately NOT named `availabilityZones`: `Stack` already exposes an
+   * `availabilityZones` getter returning the *unpinned* set, and two different
+   * values under one name in one class is a trap for `Stack.of(x)` callers.
+   */
+  readonly agentCoreAvailabilityZones?: string[];
+}
+
 export class AgentStack extends Stack {
-  constructor(scope: Construct, id: string, props: StackProps = {}) {
+  constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
+
+    const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
+    if (
+      enableAgentRegistry !== undefined
+      && enableAgentRegistry !== true
+      && enableAgentRegistry !== false
+      && enableAgentRegistry !== 'true'
+      && enableAgentRegistry !== 'false'
+    ) {
+      throw new Error(
+        `enableAgentRegistry must be true or false, got '${String(enableAgentRegistry)}'`,
+      );
+    }
+    // Default-on for compatibility (contrast enableToolGateway, which is opt-in).
+    const agentRegistryEnabled = enableAgentRegistry !== false && enableAgentRegistry !== 'false';
 
     // Build context is repo root (not agent/) so the Dockerfile can COPY
     // sibling trees the agent reads at runtime — currently
@@ -130,19 +209,23 @@ export class AgentStack extends Stack {
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
 
-    // AgentCore-backed asset registry (#246). Provisioned via a custom resource
-    // because CreateRegistry is async and has no CDK L2 during preview.
-    // GA-throwaway — swap for the native construct at GA. Registry names allow
-    // only alphanumerics + underscores, so sanitize the stack name.
+    // Standalone Agent Registry asset registry (#246). Provisioned via a custom
+    // resource because CreateRegistry is async and has no CDK L2. Enabled by
+    // default for compatibility; set ``enableAgentRegistry=false`` to omit the
+    // registry, its API, permissions, environment variables, and outputs.
+    // Registry names allow only alphanumerics + underscores, so sanitize the
+    // stack name.
     //
     // Isolated in a NestedStack: the registry + its Provider framework add ~20
     // resources; nesting keeps the root stack under CloudFormation's hard
     // 500-resource limit. registryId/registryArn cross the boundary via CDK's
     // automatic cross-stack export/import.
-    const agentRegistry = new AgentRegistryStack(this, 'AgentRegistryStack', {
-      registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
-      description: 'ABCA agent asset registry (#246)',
-    });
+    const agentRegistry = agentRegistryEnabled
+      ? new AgentRegistryStack(this, 'AgentRegistryStack', {
+        registryName: `abca_${this.stackName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+        description: 'ABCA agent asset registry (#246)',
+      })
+      : undefined;
 
     // Cedar-wasm Lambda layer (§15.2 task 10). Instantiated here so the
     // asset is in the synthed template; Chunk 5 handlers (Approve,
@@ -275,6 +358,31 @@ export class AgentStack extends Stack {
     const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
       || this.node.tryGetContext('enableToolGateway') === 'true';
 
+    // RFC #249 Phase 1 (Linear OAuth token vault). Additive + default-off:
+    // resolved here (early) so the agent runtime env map + the LinearIdentityVault
+    // construct + the token grants all key off one predicate and cannot drift.
+    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
+      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // Resolved once, next to the gate, for the same anti-drift reason: the construct,
+    // the agent runtime env, the platform config and the CLI-facing output must all
+    // name the SAME workload identity, and a second copy of the derivation is a
+    // second chance to disagree.
+    const linearVaultWorkload = linearVaultWorkloadName(this);
+
+    // Fail here, naming both flags, rather than 500 resources later. The two features
+    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
+    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
+    // the resource counter, the operator gets a per-type census and no hint that two
+    // context flags are the cause.
+    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
+      throw new Error(
+        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
+        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
+        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
+        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
+      );
+    }
+
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -311,8 +419,20 @@ export class AgentStack extends Stack {
       },
     });
 
-    // Network isolation — VPC with restricted egress
-    const agentVpc = new AgentVpc(this, 'AgentVpc');
+    // Network isolation — VPC with restricted egress.
+    // AgentCore only supports a subset of physical availability zones per
+    // region, and AZ *names* are aliased per-account, so the default maxAzs
+    // selection can land the Runtime ENIs in an unsupported zone and fail the
+    // deploy. `props.agentCoreAvailabilityZones` carries the AZ names resolved in
+    // main.ts (`resolveAgentCoreAzs`): the validated `agentcore:availabilityZones`
+    // override, else auto-selected from the account's AgentCore-supported zones
+    // when synth has a concrete account/region. Left undefined otherwise, so the
+    // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
+    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+      ...(props.agentCoreAvailabilityZones?.length
+        ? { availabilityZones: props.agentCoreAvailabilityZones }
+        : {}),
+    });
 
     // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
     const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
@@ -423,10 +543,12 @@ export class AgentStack extends Stack {
     // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
     // on both APIs; the CLI targets its distinct URL (RegistryApiUrl output) for
     // `registry` commands.
-    const registryApi = new RegistryApi(this, 'RegistryApi', {
-      agentRegistryId: agentRegistry.registryId,
-      userPool: taskApi.userPool,
-    });
+    const registryApi = agentRegistry
+      ? new RegistryApi(this, 'RegistryApi', {
+        agentRegistryId: agentRegistry.registryId,
+        userPool: taskApi.userPool,
+      })
+      : undefined;
 
     // --- Tool-federation Gateway (ADR-019 P1, CONTEXT-GATED) ---
     // Provisioned only under ``--context enableToolGateway=true`` (gate read
@@ -451,16 +573,27 @@ export class AgentStack extends Stack {
       this.node.tryGetContext('sdkUaAppId') as string | undefined,
     );
 
+    // Cross-Region inference-profile geography (`bedrockGeoRegion`, default
+    // `us`). Resolved once and used for BOTH the auxiliary-model env var below
+    // and the Bedrock grants further down, so a deployment can never grant one
+    // geography's profiles while telling the agent to call another's.
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
+
     const runtimeEnvironmentVariables = {
       GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
       AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
       CLAUDE_CODE_USE_BEDROCK: '1',
       ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (``us.`` prefix), NOT the bare
-      // foundation-model id: Claude 4.x can't be invoked on-demand by bare id
-      // (400 "on-demand throughput isn't supported"). Must match a granted
-      // profile (see bedrock-models.ts). runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
+      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
+      // bare id (400 "on-demand throughput isn't supported"). Derived through
+      // bedrock-models.ts's `haikuInferenceProfileId` so (a) the prefix comes from
+      // `bedrockGeoRegion` rather than a second hardcode that would silently split
+      // this auxiliary model from the granted profiles on any non-`us` deploy, and
+      // (b) the model id itself comes from the same constant the grant list
+      // interpolates. The lambda-microvm `platform_config` block below calls the
+      // same helper with the same geography. runner.py re-sets this at spawn time.
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
       TASK_TABLE_NAME: taskTable.table.tableName,
       TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
       NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
@@ -512,6 +645,15 @@ export class AgentStack extends Stack {
       // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
       // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
       ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
+      // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
+      // agent's Linear token resolver to mint via the AgentCore Token Vault when
+      // a task carries a provider name. Absent → the agent stays on the
+      // Secrets-Manager path. The workload name is the stack-derived value computed
+      // above and passed INTO the construct — the construct has no default of its own,
+      // and a rename orphans every consent already given.
+      ...(linearIdentityVaultEnabled
+        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
+        : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -612,9 +754,10 @@ export class AgentStack extends Stack {
     // EcsAgentCluster prop below (substrate parity).
     toolGateway?.grantInvoke(runtime);
 
-    // Grant the runtime invoke on each configured foundation model + its US
-    // cross-Region inference profile. The model set is a single source of truth
-    // (constructs/bedrock-models.ts), shared with the ECS task role and
+    // Grant the runtime invoke on each configured foundation model + its
+    // cross-Region inference profile in the configured geography
+    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost
     // attribution) — the two grants derive from one list and can't drift.
@@ -627,7 +770,7 @@ export class AgentStack extends Stack {
         supportsCrossRegion: true,
       });
       const crossRegionProfile = bedrock.CrossRegionInferenceProfile.fromConfig({
-        geoRegion: bedrock.CrossRegionInferenceProfileRegion.US,
+        geoRegion: bedrockGeoRegion,
         model: foundationModel,
       });
       foundationModel.grantInvoke(runtime);
@@ -685,20 +828,35 @@ export class AgentStack extends Stack {
     // runtime ExecutionRole so any present or future overflow is
     // suppressed automatically without hardcoding
     // ``OverflowPolicy<N>`` indices.
+    // Roles known to overflow, with the evidence for each. Keyed by a path
+    // fragment rather than an `OverflowPolicy<N>` index so future splits are
+    // covered automatically.
+    const OVERFLOW_SUPPRESSIONS: readonly { readonly pathFragment: string; readonly reason: string }[] = [
+      {
+        pathFragment: '/Runtime/ExecutionRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
+      },
+      {
+        // #812: granting the Linear webhook processor SNS publish on the
+        // CMK-encrypted alerts topic pushed its role over the same limit. The
+        // wildcard is `kms:GenerateDataKey*`, emitted by SNS Topic.grantPublish for
+        // an encrypted topic (the * covers the …WithoutPlaintext variant) and
+        // scoped to that one topic key — not a wildcard resource.
+        pathFragment: '/LinearIntegration/WebhookProcessorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
+      },
+    ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
         const nodePath = node.node.path;
-        if (
-          nodePath.includes('/Runtime/ExecutionRole/OverflowPolicy')
-          && nodePath.endsWith('/Resource')
-        ) {
-          NagSuppressions.addResourceSuppressions(node, [
-            {
-              id: 'AwsSolutions-IAM5',
-              reason:
-                'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
-            },
-          ]);
+        if (!nodePath.endsWith('/Resource')) return;
+        for (const { pathFragment, reason } of OVERFLOW_SUPPRESSIONS) {
+          if (nodePath.includes(pathFragment)) {
+            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason }]);
+            return;
+          }
         }
       },
     };
@@ -768,15 +926,17 @@ export class AgentStack extends Stack {
       description: 'ARN of the Secrets Manager secret for the GitHub token',
     });
 
-    new CfnOutput(this, 'AgentRegistryId', {
-      value: agentRegistry.registryId,
-      description: 'ID of the AgentCore-backed agent asset registry (#246)',
-    });
+    if (agentRegistry) {
+      new CfnOutput(this, 'AgentRegistryId', {
+        value: agentRegistry.registryId,
+        description: 'ID of the standalone Agent Registry asset registry (#246)',
+      });
 
-    new CfnOutput(this, 'AgentRegistryArn', {
-      value: agentRegistry.registryArn,
-      description: 'ARN of the AgentCore-backed agent asset registry (#246)',
-    });
+      new CfnOutput(this, 'AgentRegistryArn', {
+        value: agentRegistry.registryArn,
+        description: 'ARN of the standalone Agent Registry asset registry (#246)',
+      });
+    }
 
     new CfnOutput(this, 'TraceArtifactsBucketName', {
       value: traceArtifactsBucket.bucket.bucketName,
@@ -820,9 +980,69 @@ export class AgentStack extends Stack {
     //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
     //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
     const ecsTaskSizing = resolveEcsTaskSizing(this.node);
+
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off (flag resolved above): synthesizes only under
+    // `--context enableLinearIdentityVault=true`, so the default synth stays
+    // byte-for-byte unchanged (same context-gate shape as the tool gateway /
+    // ECS / MicroVM backends). When off, Linear token resolution stays on the
+    // per-workspace Secrets-Manager path.
+    //
+    // Created HERE, before the ECS cluster, because EcsAgentCluster takes it as
+    // a prop (the ECS container needs its own env + task-role grant — the
+    // AgentCore runtime env does not reach it). Grants are added at each
+    // consumer: runtime role below, ECS task role inside EcsAgentCluster,
+    // webhook processor inside LinearIntegration.
+    let linearIdentityVault: LinearIdentityVault | undefined;
+    let linearVaultConsentPage: LinearVaultConsentPageStack | undefined;
+    if (linearIdentityVaultEnabled) {
+      // Hosted consent landing page, so onboarding works where the browser cannot
+      // reach the CLI's localhost (cloud desktop, SSH box, container). Static by
+      // design — it only displays the session id; the CLI finalizes with the
+      // operator's own credentials rather than exposing a public endpoint that
+      // completes OAuth sessions. An explicit context override is still honoured
+      // for operators fronting the callback with their own URL.
+      const hostedReturnUrlOverride = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      if (!hostedReturnUrlOverride) {
+        // Nested so its ~10 resources do not eat the root stack's remaining
+        // headroom against CloudFormation's hard 500-per-stack limit.
+        linearVaultConsentPage = new LinearVaultConsentPageStack(this, 'LinearVaultConsentPageStack');
+      }
+      const hostedReturnUrl = hostedReturnUrlOverride ?? linearVaultConsentPage?.consentUrl;
+
+      // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
+      // enforced; F11: localhost + hosted coexist so either onboarding mode works
+      // off one identity). Both are registered: the CLI picks per call.
+      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+        workloadName: linearVaultWorkload,
+        allowedReturnUrls: [
+          'http://localhost:8080/oauth/callback',
+          ...(hostedReturnUrl ? [hostedReturnUrl] : []),
+        ],
+      });
+
+      // Published so `bgagent linear setup` mints the grant under the identity THIS
+      // stack actually created. The CLI used to carry its own copy of the name,
+      // which was correct only while the name was a global constant — the moment it
+      // became stack-scoped, a hardcoded CLI would consent against a different
+      // (or nonexistent) identity than the resolvers read from.
+      new CfnOutput(this, 'LinearVaultWorkloadName', {
+        value: linearVaultWorkload,
+        description: 'AgentCore workload identity backing the Linear token vault — read by `bgagent linear setup`',
+      });
+
+      if (hostedReturnUrl) {
+        new CfnOutput(this, 'LinearVaultConsentUrl', {
+          value: hostedReturnUrl,
+          description: 'Hosted Linear vault consent landing page — used by `bgagent linear setup`',
+        });
+      }
+    }
+
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
+        ...(linearIdentityVault && { linearIdentityVault }),
         vpc: agentVpc.vpc,
         agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
           directory: repoRoot,
@@ -878,6 +1098,22 @@ export class AgentStack extends Stack {
         // to the same per-task SessionRole the AgentCore runtime and the Fargate
         // task role use, so tenant-data access is tag-scoped on every substrate.
         agentSessionRole,
+        // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
+        // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
+        // before the SessionRole is assumed, and MEMORY_ID (already delivered in
+        // agent_payload) makes the agent ATTEMPT a memory write that fails closed
+        // without the grant. The remaining parity grants (channel OAuth, Bedrock,
+        // AZ describe) need no stack input and are wired inside the construct.
+        githubTokenSecret,
+        agentMemory,
+        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+        // delivered the name without the grant, so the agent's structured per-task
+        // lines and its METRICS_REPORT were AccessDenied on
+        // logs:CreateLogStream and the platform's canonical observability streams
+        // were empty on this backend. Passing the construct (not the name) keeps the
+        // grant and the delivered value derived from one object.
+        applicationLogGroup,
         // Resolved above TaskApi — see `microvmImageInputs`.
         ...microvmImageInputs,
       })
@@ -960,7 +1196,57 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       attachmentsBucket: attachmentsBucket.bucket,
-      agentRegistryId: agentRegistry.registryId,
+      ...(agentRegistry && { agentRegistryId: agentRegistry.registryId }),
+      // ADR-021 P2: non-secret platform identifiers the orchestrator forwards to
+      // the in-guest agent as `platform_config` on the MicroVM /run payload — the
+      // MicroVM equivalent of the AgentCore runtime env block above and the ECS
+      // container env, because a snapshot must not bake configuration in.
+      //
+      // Sourced from the SAME stack-level values that block uses, deliberately, so
+      // an agent behaves identically on all three substrates and a value can only
+      // be changed in one place. Wired unconditionally (not under the
+      // lambda-microvm gate) so the strategy's required-identifier guard can only
+      // ever fire for an environment edited outside CDK.
+      //
+      // No grant rides along: the orchestrator forwards these names and calls none
+      // of the resources they identify.
+      agentPlatformConfig: {
+        taskApprovalsTableName: taskApprovalsTable.table.tableName,
+        nudgesTableName: taskNudgesTable.table.tableName,
+        logGroupName: applicationLogGroup.logGroupName,
+        // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
+        // (`traceArtifactsBucket`), exactly as `ARTIFACTS_BUCKET_NAME` and
+        // `TRACE_ARTIFACTS_BUCKET_NAME` do in the AgentCore runtime env block above
+        // — a live P2 run flagged the coincidence (ADR-021 P2-F8) so it is recorded
+        // here rather than re-derived. They stay two keys because the agent reads
+        // them from two independent code paths with two different prefixes
+        // (`deliver_artifact` → `artifacts/<task_id>/`, `telemetry.py --trace` →
+        // `traces/<user_id>/<task_id>.jsonl.gz`), and the per-task SessionRole
+        // scopes each prefix separately. Collapsing them to one key would make
+        // splitting the buckets later a cross-package contract change; sending one
+        // bucket through two keys costs nothing today.
+        artifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        traceArtifactsBucketName: traceArtifactsBucket.bucket.bucketName,
+        // The SessionRole is created above (before the orchestrator), so this needs
+        // no Lazy — it is the same CFN token the runtime env receives.
+        agentSessionRoleArn: agentSessionRole.role.roleArn,
+        // Same helper, same resolved geography as the AgentCore runtime env
+        // above (#764) — the two substrates cannot be told to call different
+        // inference profiles.
+        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        // Substrate parity for the Identity vault: the AgentCore runtime gets these
+        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
+        // receive them too or its agent skips vault minting and falls back to a
+        // Secrets-Manager token a vault-managed workspace does not have — losing
+        // reactions and state transitions on work that otherwise succeeds. Forwarded
+        // as platform_config because a snapshot must not bake configuration in.
+        ...(linearIdentityVault
+          ? {
+            linearVaultEnabled: 'true',
+            linearWorkloadIdentityName: linearVaultWorkload,
+          }
+          : {}),
+      },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
@@ -1140,8 +1426,32 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack channel → default-repo mapping table',
     });
 
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off (flag resolved above): the workload identity +
+    // token grants synthesize only under `--context enableLinearIdentityVault=
+    // true`, so the default synth stays byte-for-byte unchanged (same context-
+    // gate shape as the tool gateway / ECS / MicroVM backends). When off, the
+    // Linear resolver stays on the per-workspace Secrets-Manager token path.
+    // The construct itself is created earlier (it has to exist before the ECS
+    // cluster, which takes it as a prop). Here we only add the grant that needs
+    // `runtime` to exist: the agent self-mints Linear tokens via boto3
+    // (config.py) on the AgentCore substrate using the runtime execution role's
+    // ambient credentials. The ECS task-role grant is wired inside
+    // EcsAgentCluster, and the webhook-processor grant inside LinearIntegration.
+    if (linearIdentityVault) {
+      linearIdentityVault.grantMintToken(runtime.role);
+      // MicroVM parity: the guest self-mints with its AMBIENT identity, which is the
+      // compute's execution role — not the tenant-scoped session role. Without this
+      // the platform_config above would tell the agent to use the vault and the call
+      // would be denied, which is worse than not offering it at all.
+      if (lambdaMicrovm) {
+        linearIdentityVault.grantMintToken(lambdaMicrovm.executionRole);
+      }
+    }
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+      identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
@@ -1612,6 +1922,37 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
     });
 
+    // --- Vault parity for every Lambda that talks to Linear -----------------
+    // The webhook processor was granted vault access when the vault landed and
+    // nothing else was, on the assumption that widening could wait. It could not:
+    // these three post the PR-opened comment, the terminal comment, the epic
+    // rollup, and the GitHub-side issue updates. Without the grant each falls back
+    // to a Secrets-Manager token that a vault-onboarded workspace does not
+    // maintain, so the task succeeds and the Linear issue shows nothing after the
+    // opening comment — no reaction, no state change, no PR link. Live-caught as
+    // 401s in the fan-out log while the task itself completed and opened its PR.
+    if (linearIdentityVault) {
+      // The full set, derived from the transitive import graph rather than from the
+      // handlers that import a Linear module DIRECTLY — which is how the reconciler
+      // and the heartbeat were missed: both reach a minting resolver through
+      // orchestration-channel-factory, two hops away. A source-level test now
+      // recomputes this set and fails if a handler joins it without being wired.
+      //
+      // Deliberately NOT here: the webhook RECEIVER (verifies signatures, never
+      // mints) and the stranded reconciler (reaches no channel that mints).
+      for (const linearWriter of [
+        fanOutConsumer.fn,
+        orchestrator.fn,
+        githubScreenshot.webhookProcessorFn,
+        orchestrationReconciler.fn,
+        iterationHeartbeat.fn,
+      ]) {
+        linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
+        linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', linearVaultWorkload);
+        linearIdentityVault.grantMintToken(linearWriter);
+      }
+    }
+
     // Re-stacking dependents is NOT a GitHub-webhook path. It runs inside the
     // orchestration reconciler (off the TaskTable stream): when a Linear
     // @bgagent comment re-iterates a sub-issue's PR (coding/pr-iteration-v1)
@@ -1640,6 +1981,24 @@ export class AgentStack extends Stack {
       githubScreenshot.processorDlqDepthAlarm,
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
+    );
+
+    // #812: the Linear webhook processor announces a revoked authorization here.
+    // SNS is deliberately the channel — the dead credential is Linear's own, so a
+    // Linear comment cannot report it. The topic has an independent credential and
+    // therefore still works when Linear does not.
+    // grantPublish covers the topic AND the minimal CMK actions. Without the key
+    // grant the publish fails KMSAccessDenied, and because announcing is
+    // best-effort (it must never break token resolution) that failure would be
+    // swallowed — a silently mute alarm in place of the dormant feature #812 exists
+    // to fix.
+    // The IAM5 finding on the wildcard this emits is suppressed by the
+    // overflow-policy Aspect above — the grant lands in an OverflowPolicy that does
+    // not exist yet at this point in the constructor.
+    operationalAlerts.grantPublish(linearIntegration.webhookProcessorFn);
+    linearIntegration.webhookProcessorFn.addEnvironment(
+      'OPERATIONAL_ALERT_TOPIC_ARN',
+      operationalAlerts.topic.topicArn,
     );
 
     new CfnOutput(this, 'OperationalAlertsTopicArn', {
@@ -1774,10 +2133,12 @@ export class AgentStack extends Stack {
       description: 'URL of the Task API',
     });
 
-    new CfnOutput(this, 'RegistryApiUrl', {
-      value: registryApi.apiUrl,
-      description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
-    });
+    if (registryApi) {
+      new CfnOutput(this, 'RegistryApiUrl', {
+        value: registryApi.apiUrl,
+        description: 'URL of the agent asset registry API (#246) — the CLI targets this for `bgagent registry` commands',
+      });
+    }
 
     new CfnOutput(this, 'UserPoolId', {
       value: taskApi.userPool.userPoolId,

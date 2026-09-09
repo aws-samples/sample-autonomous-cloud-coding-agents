@@ -42,6 +42,7 @@ import {
 import { runPreflightChecks } from './shared/preflight';
 import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
+import { deleteMicrovmPayload } from './shared/strategies/lambda-microvm-strategy';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
@@ -449,13 +450,23 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
     await finalizeTask(taskId, finalPollState, task.user_id);
-    // The task is terminal — the container has long since read its payload, so
-    // delete the ephemeral S3 payload object now. Best-effort (deleteEcsPayload
-    // swallows errors) and a no-op for AgentCore tasks / deployments without a
+    // The task is terminal — the substrate has long since read its payload, so
+    // delete the ephemeral S3 payload object now. Best-effort (both deleters
+    // swallow errors) and a no-op for AgentCore tasks / deployments without a
     // payload bucket; the bucket's 1-day lifecycle rule is the backstop if this
     // delete or the whole step never runs.
+    //
+    // Both payload-carrying backends get this, and the MicroVM one is NOT
+    // optional polish: its execution role holds `grantRead` on the WHOLE payload
+    // bucket (the guest must read its object before any tenant identity exists),
+    // keys are `<taskId>/payload.json`, and the guest runs untrusted repo code —
+    // so a TTL-only reaper left every finished task's hydrated prompt readable by
+    // any concurrently running MicroVM for up to ~24 h. See
+    // `deleteMicrovmPayload`.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
+    } else if (blueprintConfig.compute_type === 'lambda-microvm') {
+      await deleteMicrovmPayload(taskId);
     }
     // ADR-021: "When the orchestrator finalizes a `lambda-microvm` task, the
     // orchestrator shall call terminate-microvm (termination shall not rely on

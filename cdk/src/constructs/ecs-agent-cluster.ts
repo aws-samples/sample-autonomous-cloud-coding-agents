@@ -30,7 +30,8 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import { resolveBedrockModelIds } from './bedrock-models';
+import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
+import { LinearIdentityVault } from './linear-identity-vault';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -114,6 +115,17 @@ export interface EcsAgentClusterProps {
    * no grant, no env.
    */
   readonly toolGateway?: ToolGateway;
+
+  /**
+   * Linear OAuth token vault (RFC #249 Phase 1), so the agent's Linear token
+   * resolution works on the ECS substrate too. The agent self-mints through
+   * boto3 (`config.py::_resolve_linear_token_via_vault`) against the task role's
+   * ambient credentials, so ECS needs BOTH the env vars and the token grant —
+   * the AgentCore runtime env does not reach this container. Omitted when the
+   * vault is not provisioned (the default) or in isolated construct tests → no
+   * grant, no env, and the agent stays on the Secrets-Manager path.
+   */
+  readonly linearIdentityVault?: LinearIdentityVault;
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -395,6 +407,13 @@ export class EcsAgentCluster extends Construct {
       // ADR-019 P1: federated-tool Gateway URL, parity with the AgentCore
       // runtime env. Present only when the gateway is provisioned.
       ...(props.toolGateway && { ABCA_TOOL_GATEWAY_URL: props.toolGateway.gatewayUrl }),
+      // RFC #249 Phase 1: Linear token vault, parity with the AgentCore runtime
+      // env. Without these the ECS agent silently stays on the Secrets-Manager
+      // path even when the vault is enabled.
+      ...(props.linearIdentityVault && {
+        LINEAR_VAULT_ENABLED: 'true',
+        LINEAR_WORKLOAD_IDENTITY_NAME: props.linearIdentityVault.workloadName,
+      }),
     };
     const image = ecs.ContainerImage.fromDockerImageAsset(props.agentImageAsset);
     const makeTaskDef = (
@@ -547,6 +566,15 @@ export class EcsAgentCluster extends Construct {
       props.agentMemory.grantReadWrite(taskRole);
     }
 
+    // Same ECS-parity shape as the memory grant above (RFC #249 Phase 1): the
+    // AgentCore runtime role gets this via linearIdentityVault.grantMintToken()
+    // in agent.ts. Without the identical grant here, the ECS agent's vault
+    // token call hits AccessDenied, silently falls back to Secrets Manager
+    // (logged, non-fatal), and the vault path is never exercised on ECS.
+    if (props.linearIdentityVault) {
+      props.linearIdentityVault.grantMintToken(taskRole);
+    }
+
     // ADR-019 P1: parity with the AgentCore runtime's InvokeGateway grant in
     // agent.ts — the ECS task role SigV4-invokes the same tool Gateway. Without
     // this, a gateway-federated MCP tool AccessDenies on the ECS substrate.
@@ -585,10 +613,12 @@ export class EcsAgentCluster extends Construct {
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime
-    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set is the
-    // shared, context-overridable list (constructs/bedrock-models.ts) so the
-    // ECS and AgentCore backends can't drift.
+    // grants in agent.ts), NOT a Resource: '*' wildcard. The model set and the
+    // inference-profile geography are both the shared, context-overridable
+    // values (constructs/bedrock-models.ts: `bedrockModels`, `bedrockGeoRegion`)
+    // so the ECS and AgentCore backends can't drift.
     const stack = Stack.of(this);
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
@@ -603,7 +633,10 @@ export class EcsAgentCluster extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
-          resourceName: `us.${modelId}`,
+          // Same `<geo>.<modelId>` shape CrossRegionInferenceProfile.fromConfig
+          // builds for the AgentCore grant — regional + account-qualified for
+          // every geography, `global.` included.
+          resourceName: `${bedrockGeoRegion}.${modelId}`,
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),
       );

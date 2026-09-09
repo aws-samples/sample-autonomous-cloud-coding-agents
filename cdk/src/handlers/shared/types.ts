@@ -88,6 +88,12 @@ export type RegistryVersionSummary = {
   readonly status: string;
   readonly created_at: string | null;
   readonly publisher: string | null;
+  /** True when the record's descriptor payload failed to parse. `publisher` lives
+   *  in the erased payload so it is unrecoverable (reads `null`); `created_at` is
+   *  envelope data and is nulled only by the `show` marker's convention, not
+   *  because it is lost. Surfaced rather than hidden so a corrupt version is
+   *  visible to operators (#791). */
+  readonly malformed?: boolean;
 };
 
 /** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's
@@ -460,6 +466,22 @@ export interface TaskDetail {
   readonly updated_at: string;
   readonly started_at: string | null;
   readonly completed_at: string | null;
+  /**
+   * ISO timestamp of the agent's last heartbeat, written by the in-guest pipeline
+   * every 45 s on every compute backend (``agent/src/server.py``
+   * ``_heartbeat_worker``). ``null`` before the first beat, on tasks that never
+   * ran, and on records predating the field.
+   *
+   * Surfaced (ADR-021 P2r2-F11) because it was the platform's only in-guest
+   * liveness signal and the API hid it: the orchestrator reads it for
+   * hang detection (``orchestrator.ts`` ``heartbeatLivenessApplies``) but
+   * ``toTaskDetail`` never mapped it, so ``bgagent status`` reported ``None``
+   * while DynamoDB held a 6-second-old value. That gap produced a WRONG
+   * live-verification conclusion ("heartbeats not observed", attributed to a
+   * different defect entirely), which is the cost of an internal signal no
+   * operator can see. Keep in sync with ``cli/src/types.ts::TaskDetail``.
+   */
+  readonly agent_heartbeat_at: string | null;
   readonly duration_s: number | null;
   readonly cost_usd: number | null;
   readonly build_passed: boolean | null;
@@ -537,6 +559,21 @@ export interface TaskSummary {
   readonly pr_url: string | null;
   readonly created_at: string;
   readonly updated_at: string;
+  /**
+   * Last in-guest liveness beat (ISO-8601), or ``null`` when the agent has not
+   * beaten yet, on a substrate whose agent never beats, or on records predating
+   * the field.
+   *
+   * On the SUMMARY as well as the detail (ADR-021 P2r2-F11 follow-up) because
+   * liveness is a list-level question: "is anything still alive?" is asked across
+   * tasks, and answering it one `bgagent status` at a time is how a hung task
+   * goes unnoticed. The field's history is the argument — while `toTaskDetail`
+   * omitted it, `bgagent status` reported `None` against a 6-second-old DynamoDB
+   * value, and that produced a WRONG live-verification conclusion attributed to a
+   * different defect entirely. Keep in sync with the sibling declaration in the
+   * other package's `types.ts`.
+   */
+  readonly agent_heartbeat_at: string | null;
 }
 
 /** Authenticated caller's personal monthly budget status. */
@@ -946,6 +983,9 @@ export function toTaskDetail(
     updated_at: record.updated_at,
     started_at: record.started_at ?? null,
     completed_at: record.completed_at ?? null,
+    // ADR-021 P2r2-F11: written by every backend, consumed by the orchestrator for
+    // hang detection, and — until this line — invisible to every API consumer.
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
     duration_s: coerceNumericOrNull(record.duration_s, { ...ctx, field: 'duration_s' }, logger),
     cost_usd: coerceNumericOrNull(record.cost_usd, { ...ctx, field: 'cost_usd' }, logger),
     build_passed: record.build_passed ?? null,
@@ -1213,6 +1253,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     pr_url: record.pr_url ?? null,
     created_at: record.created_at,
     updated_at: record.updated_at,
+    agent_heartbeat_at: record.agent_heartbeat_at ?? null,
   };
 }
 
