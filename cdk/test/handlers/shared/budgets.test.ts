@@ -19,11 +19,15 @@
 
 const ddbSend = jest.fn();
 const cognitoSend = jest.fn();
+const loggerWarn = jest.fn();
+const loggerError = jest.fn();
 
 async function loadBudgets(options: { enabled?: boolean } = {}) {
   jest.resetModules();
   ddbSend.mockReset();
   cognitoSend.mockReset();
+  loggerWarn.mockReset();
+  loggerError.mockReset();
   if (options.enabled === false) {
     delete process.env.BUDGET_TABLE_NAME;
     delete process.env.USER_POOL_ID;
@@ -35,11 +39,20 @@ async function loadBudgets(options: { enabled?: boolean } = {}) {
     makeDocClient: () => ({ send: ddbSend }),
     makeClient: () => ({ send: cognitoSend }),
   }));
+  jest.doMock('../../../src/handlers/shared/logger', () => ({
+    logger: {
+      info: jest.fn(),
+      warn: loggerWarn,
+      error: loggerError,
+      child: jest.fn(),
+    },
+  }));
   return import('../../../src/handlers/shared/budgets');
 }
 
 afterEach(() => {
   jest.dontMock('../../../src/handlers/shared/ua');
+  jest.dontMock('../../../src/handlers/shared/logger');
   delete process.env.BUDGET_TABLE_NAME;
   delete process.env.USER_POOL_ID;
 });
@@ -92,6 +105,32 @@ describe('budget admission', () => {
     }));
   });
 
+  test('paginates Cognito groups before loading applicable team budgets', async () => {
+    const budgets = await loadBudgets();
+    cognitoSend
+      .mockResolvedValueOnce({
+        Groups: [{ GroupName: 'Platform' }],
+        NextToken: 'page-2',
+      })
+      .mockResolvedValueOnce({
+        Groups: [{ GroupName: 'Developers' }, { GroupName: 'Platform' }],
+      });
+    ddbSend
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } })
+      .mockResolvedValueOnce({ Items: [{ scope_key: 'TEAM#Platform' }] })
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } });
+
+    const result = await budgets.checkBudgetAdmission(
+      'user-1',
+      undefined,
+      new Date('2026-08-18T12:00:00Z'),
+    );
+
+    expect(result.teamIds).toEqual(['Developers', 'Platform']);
+    expect(cognitoSend).toHaveBeenCalledTimes(2);
+    expect(cognitoSend.mock.calls[1][0].input.NextToken).toBe('page-2');
+  });
+
   test('does not call Cognito when no team budget is configured', async () => {
     const budgets = await loadBudgets();
     ddbSend
@@ -113,7 +152,30 @@ describe('budget admission', () => {
     expect(ddbSend).toHaveBeenCalledTimes(2);
   });
 
-  test('fails closed on Cognito errors when a team budget is configured', async () => {
+  test('continues without team scopes when Cognito no longer has the mapped user', async () => {
+    const budgets = await loadBudgets();
+    ddbSend
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } })
+      .mockResolvedValueOnce({ Items: [{ scope_key: 'TEAM#Platform' }] });
+    cognitoSend.mockRejectedValueOnce(Object.assign(new Error('User does not exist'), {
+      name: 'UserNotFoundException',
+    }));
+
+    await expect(budgets.checkBudgetAdmission('deleted-user')).resolves.toEqual({
+      teamIds: [],
+      period: expect.stringMatching(/^\d{4}-\d{2}$/),
+      blocked: null,
+    });
+    expect(loggerWarn).toHaveBeenCalledWith(
+      'Budget team membership user was not found; continuing without teams',
+      expect.objectContaining({
+        user_id: 'deleted-user',
+        metric_type: 'budget_team_membership_user_missing',
+      }),
+    );
+  });
+
+  test('fails closed with a distinct metric on transient Cognito errors', async () => {
     const budgets = await loadBudgets();
     ddbSend
       .mockResolvedValueOnce({ Responses: { Budgets: [] } })
@@ -122,6 +184,13 @@ describe('budget admission', () => {
 
     await expect(budgets.checkBudgetAdmission('user-1'))
       .rejects.toThrow('Cognito throttled');
+    expect(loggerError).toHaveBeenCalledWith(
+      'Failed to resolve budget team membership',
+      expect.objectContaining({
+        user_id: 'user-1',
+        metric_type: 'budget_team_membership_resolution_failure',
+      }),
+    );
   });
 
   test('blocks an exhausted user without querying team configs or Cognito', async () => {
@@ -188,6 +257,37 @@ describe('budget admission', () => {
     expect(result.blocked).toBeNull();
   });
 
+  test('admits against a materialized monthly row whose spend counter is absent', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 10,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            updated_at: '2026-08-18T12:00:00Z',
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.checkBudgetAdmission(
+      'user-1',
+      [],
+      new Date('2026-08-18T12:00:00Z'),
+    )).resolves.toEqual({
+      teamIds: [],
+      period: '2026-08',
+      blocked: null,
+    });
+  });
+
   test('preserves caller-supplied groups when the feature is not wired', async () => {
     const budgets = await loadBudgets({ enabled: false });
     const result = await budgets.checkBudgetAdmission('user-1', ['TeamB', 'TeamA', 'TeamA']);
@@ -250,6 +350,38 @@ describe('budget admission', () => {
     });
   });
 
+  test('treats a materialized monthly row without spend as zero', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 100,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            updated_at: '2026-08-21T12:00:00Z',
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.loadPersonalBudgetStatus(
+      'user-1',
+      new Date('2026-08-21T12:00:00Z'),
+    )).resolves.toEqual(expect.objectContaining({
+      configured: true,
+      spend_usd: 0,
+      remaining_usd: 100,
+      utilization_percent: 0,
+      hard_stop_active: false,
+    }));
+  });
+
   test('shows spend without inventing a personal limit when none is configured', async () => {
     const budgets = await loadBudgets();
     ddbSend.mockResolvedValue({
@@ -280,28 +412,31 @@ describe('budget admission', () => {
     });
   });
 
-  test('fails closed when persisted spend is corrupt', async () => {
-    const budgets = await loadBudgets();
-    ddbSend.mockResolvedValue({
-      Responses: {
-        Budgets: [
-          {
-            scope_key: 'USER#user-1',
-            period: 'CONFIG',
-            monthly_limit_usd: 100,
-          },
-          {
-            scope_key: 'USER#user-1',
-            period: '2026-08',
-            spend_usd: 'not-a-number',
-          },
-        ],
-      },
-    });
+  test.each(['not-a-number', '', '   ', -1])(
+    'fails closed when persisted spend is corrupt (%p)',
+    async corruptSpend => {
+      const budgets = await loadBudgets();
+      ddbSend.mockResolvedValue({
+        Responses: {
+          Budgets: [
+            {
+              scope_key: 'USER#user-1',
+              period: 'CONFIG',
+              monthly_limit_usd: 100,
+            },
+            {
+              scope_key: 'USER#user-1',
+              period: '2026-08',
+              spend_usd: corruptSpend,
+            },
+          ],
+        },
+      });
 
-    await expect(budgets.loadPersonalBudgetStatus(
-      'user-1',
-      new Date('2026-08-21T12:00:00Z'),
-    )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
-  });
+      await expect(budgets.loadPersonalBudgetStatus(
+        'user-1',
+        new Date('2026-08-21T12:00:00Z'),
+      )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
+    },
+  );
 });

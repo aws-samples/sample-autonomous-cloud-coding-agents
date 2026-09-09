@@ -79,6 +79,7 @@ process.env.GUARDRAIL_VERSION = '1';
 process.env.REPO_TABLE_NAME = 'RepoConfig';
 
 import { createTaskCore, type TaskCreationContext } from '../../../src/handlers/shared/create-task-core';
+import { logger } from '../../../src/handlers/shared/logger';
 
 function makeContext(overrides: Partial<TaskCreationContext> = {}): TaskCreationContext {
   return {
@@ -151,6 +152,7 @@ describe('createTaskCore', () => {
   });
 
   test('returns 429 without creating a task when a hard-stop budget is exhausted', async () => {
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
     mockCheckBudgetAdmission.mockResolvedValue({
       teamIds: ['Platform'],
       period: '2026-08',
@@ -173,8 +175,18 @@ describe('createTaskCore', () => {
       code: 'BUDGET_EXCEEDED',
       message: expect.stringContaining("team 'Platform'"),
     });
+    expect(warnSpy).toHaveBeenCalledWith(
+      'Monthly hard-stop budget blocked task admission',
+      expect.objectContaining({
+        request_id: 'req-budget-blocked',
+        scope_type: 'team',
+        scope_id: 'Platform',
+        metric_type: 'budget_admission_blocked',
+      }),
+    );
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockLambdaSend).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   test('fails closed when monthly budget admission is unavailable', async () => {

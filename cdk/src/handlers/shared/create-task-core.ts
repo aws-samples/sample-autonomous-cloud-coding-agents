@@ -729,6 +729,16 @@ export async function createTaskCore(
   if (budgetAdmission.blocked) {
     if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
     const blocked = budgetAdmission.blocked;
+    logger.warn('Monthly hard-stop budget blocked task admission', {
+      user_id: context.userId,
+      request_id: requestId,
+      scope_type: blocked.scopeType,
+      scope_id: blocked.scopeId,
+      period: budgetAdmission.period,
+      spend_usd: blocked.spendUsd,
+      monthly_limit_usd: blocked.monthlyLimitUsd,
+      metric_type: 'budget_admission_blocked',
+    });
     const owner = blocked.scopeType === 'user'
       ? 'Your monthly budget'
       : `The monthly budget for team '${blocked.scopeId}'`;

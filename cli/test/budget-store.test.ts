@@ -77,6 +77,10 @@ describe('budget store', () => {
     expect(command.input.TransactItems?.[1]?.Update?.UpdateExpression)
       .toContain('#ttl = :ttl');
     expect(command.input.TransactItems?.[1]?.Update?.UpdateExpression)
+      .toContain('spend_usd = if_not_exists(spend_usd, :zero)');
+    expect(command.input.TransactItems?.[1]?.Update?.ExpressionAttributeValues?.[':zero'])
+      .toBe(0);
+    expect(command.input.TransactItems?.[1]?.Update?.UpdateExpression)
       .toContain('REMOVE alerted_80_at');
   });
 
@@ -167,6 +171,40 @@ describe('budget store', () => {
     });
   });
 
+  test('reads a materialized monthly row without spend as zero', async () => {
+    sendMock
+      .mockResolvedValueOnce({
+        Item: {
+          scope_key: 'TEAM#Platform',
+          scope_type: 'team',
+          scope_id: 'Platform',
+          monthly_limit_usd: 10,
+          hard_stop: true,
+        },
+      })
+      .mockResolvedValueOnce({
+        Responses: {
+          Budgets: [{
+            scope_key: 'TEAM#Platform',
+            period: '2026-08',
+            updated_at: '2026-08-18T12:00:00Z',
+          }],
+        },
+      });
+
+    await expect(listBudgetStatus(
+      'us-east-1',
+      'Budgets',
+      { type: 'team', id: 'Platform' },
+      new Date('2026-08-18T12:00:00Z'),
+    )).resolves.toEqual([expect.objectContaining({
+      spend_usd: 0,
+      remaining_usd: 10,
+      utilization_percent: 0,
+      hard_stop_active: false,
+    })]);
+  });
+
   test('rejects a corrupt non-positive configured limit', async () => {
     sendMock
       .mockResolvedValueOnce({
@@ -188,31 +226,34 @@ describe('budget store', () => {
     )).rejects.toThrow('Budget config USER#user-1 has invalid monthly_limit_usd');
   });
 
-  test('rejects corrupt persisted spend instead of treating it as zero', async () => {
-    sendMock
-      .mockResolvedValueOnce({
-        Item: {
-          scope_key: 'USER#user-1',
-          scope_type: 'user',
-          scope_id: 'user-1',
-          monthly_limit_usd: 100,
-        },
-      })
-      .mockResolvedValueOnce({
-        Responses: {
-          Budgets: [{
+  test.each(['not-a-number', '', '   ', -1])(
+    'rejects corrupt persisted spend instead of treating %p as zero',
+    async corruptSpend => {
+      sendMock
+        .mockResolvedValueOnce({
+          Item: {
             scope_key: 'USER#user-1',
-            period: '2026-08',
-            spend_usd: 'not-a-number',
-          }],
-        },
-      });
+            scope_type: 'user',
+            scope_id: 'user-1',
+            monthly_limit_usd: 100,
+          },
+        })
+        .mockResolvedValueOnce({
+          Responses: {
+            Budgets: [{
+              scope_key: 'USER#user-1',
+              period: '2026-08',
+              spend_usd: corruptSpend,
+            }],
+          },
+        });
 
-    await expect(listBudgetStatus(
-      'us-east-1',
-      'Budgets',
-      { type: 'user', id: 'user-1' },
-      new Date('2026-08-18T12:00:00Z'),
-    )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
-  });
+      await expect(listBudgetStatus(
+        'us-east-1',
+        'Budgets',
+        { type: 'user', id: 'user-1' },
+        new Date('2026-08-18T12:00:00Z'),
+      )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
+    },
+  );
 });

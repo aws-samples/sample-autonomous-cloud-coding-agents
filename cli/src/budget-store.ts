@@ -84,11 +84,22 @@ function budgetNumber(
   if (typeof value !== 'number' && typeof value !== 'string') {
     throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
   }
+  if (typeof value === 'string' && value.trim().length === 0) {
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
   const numeric = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numeric)) {
     throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
   }
   return numeric;
+}
+
+function budgetSpend(value: unknown, scopeKey: string): number {
+  const spendUsd = budgetNumber(value, 'spend_usd', scopeKey, 0);
+  if (spendUsd < 0) {
+    throw new Error(`Budget row ${scopeKey} has invalid spend_usd.`);
+  }
+  return spendUsd;
 }
 
 function ttlEpoch(now: Date): number {
@@ -106,10 +117,7 @@ function toStatus(
   if (monthlyLimitUsd <= 0) {
     throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
   }
-  const spendUsd = Math.max(
-    0,
-    budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
-  );
+  const spendUsd = budgetSpend(spend?.spend_usd, scopeKey);
   const utilizationPercent = (spendUsd / monthlyLimitUsd) * 100;
   const hardStop = config.hard_stop === true;
   return {
@@ -160,7 +168,8 @@ export async function setMonthlyBudget(
           TableName: tableName,
           Key: { scope_key: scopeKey, period },
           UpdateExpression:
-            'SET scope_type = :scopeType, scope_id = :scopeId, updated_at = :updatedAt, #ttl = :ttl '
+            'SET scope_type = :scopeType, scope_id = :scopeId, updated_at = :updatedAt, '
+            + 'spend_usd = if_not_exists(spend_usd, :zero), #ttl = :ttl '
             + `REMOVE ${BUDGET_WARNING_ALERT_MARKER}, alerted_80_spend_usd, alerted_80_limit_usd, `
             + `${BUDGET_EXCEEDED_ALERT_MARKER}, alerted_100_spend_usd, alerted_100_limit_usd`,
           ExpressionAttributeNames: {
@@ -170,6 +179,7 @@ export async function setMonthlyBudget(
             ':scopeType': scope.type,
             ':scopeId': scope.id,
             ':updatedAt': updatedAt,
+            ':zero': 0,
             ':ttl': ttlEpoch(now),
           },
         },

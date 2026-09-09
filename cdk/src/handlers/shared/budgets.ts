@@ -151,6 +151,9 @@ function budgetNumber(
     });
     throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
   }
+  if (typeof value === 'string' && value.trim().length === 0) {
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
   const numeric = coerceNumericOrNull(value, { field }, logger);
   if (numeric === null) {
     throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
@@ -158,26 +161,71 @@ function budgetNumber(
   return numeric;
 }
 
+function budgetSpend(value: unknown, scopeKey: string): number {
+  const spendUsd = budgetNumber(value, 'spend_usd', scopeKey, 0);
+  if (spendUsd < 0) {
+    throw new Error(`Budget row ${scopeKey} has invalid spend_usd.`);
+  }
+  return spendUsd;
+}
+
+function errorName(err: unknown): string {
+  if (typeof err !== 'object' || err === null || !('name' in err)) return '';
+  const name = (err as { name?: unknown }).name;
+  return typeof name === 'string' ? name : '';
+}
+
 async function resolveTeamIds(userId: string): Promise<string[]> {
   if (!userPoolId || !cognito) {
-    throw new Error('Budget admission requires USER_POOL_ID when team IDs are not supplied by the caller.');
+    const error = new Error(
+      'Budget admission requires USER_POOL_ID when team IDs are not supplied by the caller.',
+    );
+    logger.error('Failed to resolve budget team membership', {
+      user_id: userId,
+      error: error.message,
+      metric_type: 'budget_team_membership_resolution_failure',
+    });
+    throw error;
   }
 
-  const names: string[] = [];
-  let nextToken: string | undefined;
-  do {
-    const result = await cognito.send(new AdminListGroupsForUserCommand({
-      UserPoolId: userPoolId,
-      Username: userId,
-      NextToken: nextToken,
-    }));
-    for (const group of result.Groups ?? []) {
-      if (group.GroupName) names.push(group.GroupName);
-    }
-    nextToken = result.NextToken;
-  } while (nextToken);
+  try {
+    const names: string[] = [];
+    let nextToken: string | undefined;
+    do {
+      const result = await cognito.send(new AdminListGroupsForUserCommand({
+        UserPoolId: userPoolId,
+        Username: userId,
+        NextToken: nextToken,
+      }));
+      for (const group of result.Groups ?? []) {
+        if (group.GroupName) names.push(group.GroupName);
+      }
+      nextToken = result.NextToken;
+    } while (nextToken);
 
-  return [...new Set(names)].sort();
+    return [...new Set(names)].sort();
+  } catch (err) {
+    const name = errorName(err);
+    if (name === 'UserNotFoundException') {
+      // A deleted or externally federated Cognito identity can remain in a
+      // headless integration mapping. User-scope admission still applies, but
+      // there is no resolvable user-pool membership to attribute to teams.
+      logger.warn('Budget team membership user was not found; continuing without teams', {
+        user_id: userId,
+        error: err instanceof Error ? err.message : String(err),
+        error_name: name,
+        metric_type: 'budget_team_membership_user_missing',
+      });
+      return [];
+    }
+    logger.error('Failed to resolve budget team membership', {
+      user_id: userId,
+      error: err instanceof Error ? err.message : String(err),
+      error_name: name || undefined,
+      metric_type: 'budget_team_membership_resolution_failure',
+    });
+    throw err;
+  }
 }
 
 async function hasConfiguredTeamBudgets(): Promise<boolean> {
@@ -254,10 +302,7 @@ export async function loadBudgetStates(
       throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
     }
     const spend = byKey.get(`${scopeKey}\0${period}`);
-    const spendUsd = Math.max(
-      0,
-      budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
-    );
+    const spendUsd = budgetSpend(spend?.spend_usd, scopeKey);
     states.push({
       scopeKey,
       ...parsedScope,
@@ -287,10 +332,7 @@ export async function loadPersonalBudgetStatus(
   ]);
   const config = items.find(item => item.period === BUDGET_CONFIG_PERIOD);
   const spend = items.find(item => item.period === period);
-  const spendUsd = Math.max(
-    0,
-    budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
-  );
+  const spendUsd = budgetSpend(spend?.spend_usd, scopeKey);
 
   if (!config) {
     return {
@@ -348,15 +390,6 @@ export async function checkBudgetAdmission(
     const userBlocked = userStates.find(state =>
       state.hardStop && state.utilizationPercent >= BUDGET_EXCEEDED_PERCENT);
     if (userBlocked) {
-      logger.warn('Monthly budget is at or above the warning threshold', {
-        scope_type: userBlocked.scopeType,
-        scope_id: userBlocked.scopeId,
-        period,
-        spend_usd: userBlocked.spendUsd,
-        monthly_limit_usd: userBlocked.monthlyLimitUsd,
-        utilization_percent: userBlocked.utilizationPercent,
-        hard_stop: userBlocked.hardStop,
-      });
       return {
         teamIds: [],
         period,
