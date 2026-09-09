@@ -635,6 +635,42 @@ interface ProcessorEvent {
  *   the task back to the originating issue (the platform — not the agent —
  *   handles all Linear I/O deterministically; there is no Linear MCP).
  */
+/**
+ * The vault fields a task needs so the AGENT can mint its own Linear token.
+ *
+ * Every channel_metadata builder must spread this. A builder that omits it hands the
+ * agent no provider, so it falls back to a Secrets-Manager token a vault-managed
+ * workspace does not have: no reactions and no state transitions, on work that
+ * otherwise succeeded.
+ *
+ * Two checks guard it, because they fail for different reasons. The source-level one
+ * (in the test file) catches a builder nobody exercised, but keys off the object-literal
+ * form and cannot see a builder that assigns onto an existing object; the behavioural
+ * one asserts the fields actually reach `channel_metadata`.
+ */
+function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
+  return {
+    ...(resolved.providerName && { linear_provider_name: resolved.providerName }),
+    ...(resolved.vaultUserId && { linear_vault_user_id: resolved.vaultUserId }),
+  };
+}
+
+/**
+ * The resolver fields the `channel_metadata` builders thread through.
+ *
+ * Declared once rather than re-stated per builder, because it has to stay WIDER than
+ * the fields any single builder reads. Narrowing it per site to the three that get
+ * read is what silently dropped the vault fields: the callers always passed the full
+ * resolver result, so nothing failed until the agent had no provider to mint with.
+ */
+type BuilderResolvedToken = {
+  accessToken: string;
+  oauthSecretArn: string;
+  workspaceSlug: string;
+  providerName?: string;
+  vaultUserId?: string;
+};
+
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');
@@ -873,6 +909,22 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     }
     channelMetadata.linear_oauth_secret_arn = resolved.oauthSecretArn;
     channelMetadata.linear_workspace_slug = resolved.workspaceSlug;
+    // RFC #249 Phase 1: when the workspace is vault-onboarded, pass the
+    // credential-provider name + workspace id so the agent-side resolver
+    // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
+    // agent stays on the Secrets-Manager path.
+    if (resolved.providerName) {
+      // Through the shared helper, not hand-rolled. This builder assigns onto an
+      // existing object rather than constructing a literal, which is what hid it from
+      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
+      // that guard keys off the literal
+      // form, so the ONE path it was written for was the one path it never covered.
+      // The subject inside the helper is recorded rather than derived from the
+      // workspace id, so a single consent can onboard a workspace whose org UUID is
+      // not yet known; absent ⇒ the agent derives the legacy form.
+      channelMetadata.linear_workspace_id = workspaceId;
+      Object.assign(channelMetadata, vaultMetadata(resolved));
+    }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
     // uploads.linear.app paperclips are fetched/screened/stored below (like
@@ -963,6 +1015,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }),
       ...(channelMetadata.linear_workspace_slug && {
         linear_workspace_slug: channelMetadata.linear_workspace_slug,
+      }),
+      // RFC #249 Phase 1: persist the vault provider name so released sub-issue
+      // children can mint via the vault too (workspace id is re-stamped on
+      // release from credentials_ref).
+      ...(channelMetadata.linear_provider_name && {
+        linear_provider_name: channelMetadata.linear_provider_name,
+      }),
+      ...(channelMetadata.linear_vault_user_id && {
+        linear_vault_user_id: channelMetadata.linear_vault_user_id,
       }),
       linear_project_id: projectId,
       // The label this project actually triggers on, persisted at seed time
@@ -1941,7 +2002,7 @@ async function handleParentEpicCommentTrigger(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  resolved: BuilderResolvedToken;
   registryTableName: string;
 }): Promise<void> {
   const { orchestrationId, snapshot, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2100,7 +2161,7 @@ async function iterateOrchestrationChild(args: {
   trigger: CommentTrigger;
   /** Raw @bgagent comment body — carries any newly-attached uploads.linear.app links. */
   commentBody: string | undefined;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  resolved: BuilderResolvedToken;
   registryTableName: string;
   skipAck?: boolean;
   prNumber?: number;
@@ -2159,6 +2220,7 @@ async function iterateOrchestrationChild(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // The agent addresses a REAL Linear issue for its reactions/comments. The
     // synthetic integration node has no Linear issue — its id is a derived string
     // (`<orchestrationId>__integration`), and handing that to the agent makes it
@@ -2304,7 +2366,7 @@ async function handleStandaloneCommentTrigger(args: {
   /** Thread ROOT to reply to (= parentId when the trigger is a reply, else commentId). */
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  resolved: BuilderResolvedToken;
   registryTableName: string;
 }): Promise<void> {
   const { subIssueId: issueId, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2383,6 +2445,7 @@ async function handleStandaloneCommentTrigger(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // Iteration-UX: the maturing reply to EDIT on later events.
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
@@ -2469,7 +2532,7 @@ async function maybeStartStandaloneNewWork(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  resolved: BuilderResolvedToken;
   registryTableName: string;
 }): Promise<boolean> {
   const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2551,6 +2614,7 @@ async function maybeStartStandaloneNewWork(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),
   };
 
@@ -2633,7 +2697,7 @@ async function maybeResumeClarifyHold(args: {
   commentBody: string | undefined;
   replyTargetId: string;
   trigger: CommentTrigger;
-  resolved: { accessToken: string; oauthSecretArn: string; workspaceSlug: string };
+  resolved: BuilderResolvedToken;
   registryTableName: string;
 }): Promise<boolean> {
   const { issueId, task, workspaceId, commentId, commentBody, replyTargetId, trigger, resolved, registryTableName } = args;
@@ -2680,6 +2744,7 @@ async function maybeResumeClarifyHold(args: {
     linear_workspace_id: workspaceId,
     linear_oauth_secret_arn: resolved.oauthSecretArn,
     linear_workspace_slug: resolved.workspaceSlug,
+    ...vaultMetadata(resolved),
     // Reply to the thread root, and mature THIS ack on terminal (fanout path).
     trigger_comment_id: replyTargetId,
     ...(iterationReplyId && { iteration_reply_comment_id: iterationReplyId }),

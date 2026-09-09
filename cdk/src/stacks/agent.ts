@@ -56,7 +56,9 @@ import {
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
+import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
+import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -88,6 +90,45 @@ const RUNTIME_SESSION_TIMEOUT_HOURS = 8;
 
 /** Index of the stage segment in a split API Gateway URL. */
 const API_URL_STAGE_SEGMENT_INDEX = 3;
+
+/**
+ * Prefix for the AgentCore workload identity backing the Linear OAuth token vault
+ * (RFC #249 Phase 1).
+ */
+const LINEAR_VAULT_WORKLOAD_PREFIX = 'abca_linear_oauth';
+
+/**
+ * AgentCore workload identity names are limited to 64 characters, so the
+ * stack-derived suffix is truncated to fit under the prefix and separator.
+ */
+const WORKLOAD_NAME_MAX_LENGTH = 64;
+
+/**
+ * Name of the workload identity for THIS stack.
+ *
+ * Stack-scoped, not a fixed constant, because AgentCore workload identity names
+ * are unique per account+region while CloudFormation stacks are not. Two
+ * vault-enabled stacks in one account sharing a name is not a no-op: the second
+ * `CreateWorkloadIdentity` conflicts, falls back to an update, and that update
+ * REPLACES `allowedResourceOauth2ReturnUrls` — silently dropping the first stack's
+ * consent page from the allowlist, so its consent starts failing. A `Delete` from
+ * either stack then removes the identity both were using. The repo already treats
+ * account-level AgentCore name uniqueness as load-bearing for `runtimeName`.
+ *
+ * `linearVaultWorkloadName` context overrides it, which is what an existing
+ * deployment sets to keep its already-consented grants: the grant is bound to
+ * (workload identity, user id), so renaming the identity orphans every consent.
+ */
+function linearVaultWorkloadName(stack: Stack): string {
+  const override = stack.node.tryGetContext('linearVaultWorkloadName');
+  if (typeof override === 'string' && override.trim()) return override.trim();
+  // Only [a-zA-Z0-9_] survives; stack names routinely carry hyphens.
+  const suffix = stack.stackName.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const room = WORKLOAD_NAME_MAX_LENGTH - LINEAR_VAULT_WORKLOAD_PREFIX.length - 1;
+  return suffix
+    ? `${LINEAR_VAULT_WORKLOAD_PREFIX}_${suffix.slice(0, room)}`
+    : LINEAR_VAULT_WORKLOAD_PREFIX;
+}
 
 /** Properties for {@link AgentStack}. */
 export interface AgentStackProps extends StackProps {
@@ -312,6 +353,31 @@ export class AgentStack extends Stack {
     // Same context-gate shape as the ECS / MicroVM compute backends above.
     const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
       || this.node.tryGetContext('enableToolGateway') === 'true';
+
+    // RFC #249 Phase 1 (Linear OAuth token vault). Additive + default-off:
+    // resolved here (early) so the agent runtime env map + the LinearIdentityVault
+    // construct + the token grants all key off one predicate and cannot drift.
+    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
+      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // Resolved once, next to the gate, for the same anti-drift reason: the construct,
+    // the agent runtime env, the platform config and the CLI-facing output must all
+    // name the SAME workload identity, and a second copy of the derivation is a
+    // second chance to disagree.
+    const linearVaultWorkload = linearVaultWorkloadName(this);
+
+    // Fail here, naming both flags, rather than 500 resources later. The two features
+    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
+    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
+    // the resource counter, the operator gets a per-type census and no hint that two
+    // context flags are the cause.
+    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
+      throw new Error(
+        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
+        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
+        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
+        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
+      );
+    }
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -574,6 +640,15 @@ export class AgentStack extends Stack {
       // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
       // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
       ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
+      // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
+      // agent's Linear token resolver to mint via the AgentCore Token Vault when
+      // a task carries a provider name. Absent → the agent stays on the
+      // Secrets-Manager path. The workload name is the stack-derived value computed
+      // above and passed INTO the construct — the construct has no default of its own,
+      // and a rename orphans every consent already given.
+      ...(linearIdentityVaultEnabled
+        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
+        : {}),
     };
 
     const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
@@ -748,20 +823,35 @@ export class AgentStack extends Stack {
     // runtime ExecutionRole so any present or future overflow is
     // suppressed automatically without hardcoding
     // ``OverflowPolicy<N>`` indices.
+    // Roles known to overflow, with the evidence for each. Keyed by a path
+    // fragment rather than an `OverflowPolicy<N>` index so future splits are
+    // covered automatically.
+    const OVERFLOW_SUPPRESSIONS: readonly { readonly pathFragment: string; readonly reason: string }[] = [
+      {
+        pathFragment: '/Runtime/ExecutionRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
+      },
+      {
+        // #812: granting the Linear webhook processor SNS publish on the
+        // CMK-encrypted alerts topic pushed its role over the same limit. The
+        // wildcard is `kms:GenerateDataKey*`, emitted by SNS Topic.grantPublish for
+        // an encrypted topic (the * covers the …WithoutPlaintext variant) and
+        // scoped to that one topic key — not a wildcard resource.
+        pathFragment: '/LinearIntegration/WebhookProcessorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
+      },
+    ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
         const nodePath = node.node.path;
-        if (
-          nodePath.includes('/Runtime/ExecutionRole/OverflowPolicy')
-          && nodePath.endsWith('/Resource')
-        ) {
-          NagSuppressions.addResourceSuppressions(node, [
-            {
-              id: 'AwsSolutions-IAM5',
-              reason:
-                'CDK-generated overflow policy on the runtime ExecutionRole inherits the same wildcard Bedrock / CloudWatch actions suppressed on the base policy. Auto-split triggers when the role exceeds the inline-policy size limit; suppression applies to all overflow policies via an Aspect so future splits are covered.',
-            },
-          ]);
+        if (!nodePath.endsWith('/Resource')) return;
+        for (const { pathFragment, reason } of OVERFLOW_SUPPRESSIONS) {
+          if (nodePath.includes(pathFragment)) {
+            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason }]);
+            return;
+          }
         }
       },
     };
@@ -880,9 +970,69 @@ export class AgentStack extends Stack {
     //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
     //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
     const ecsTaskSizing = resolveEcsTaskSizing(this.node);
+
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off (flag resolved above): synthesizes only under
+    // `--context enableLinearIdentityVault=true`, so the default synth stays
+    // byte-for-byte unchanged (same context-gate shape as the tool gateway /
+    // ECS / MicroVM backends). When off, Linear token resolution stays on the
+    // per-workspace Secrets-Manager path.
+    //
+    // Created HERE, before the ECS cluster, because EcsAgentCluster takes it as
+    // a prop (the ECS container needs its own env + task-role grant — the
+    // AgentCore runtime env does not reach it). Grants are added at each
+    // consumer: runtime role below, ECS task role inside EcsAgentCluster,
+    // webhook processor inside LinearIntegration.
+    let linearIdentityVault: LinearIdentityVault | undefined;
+    let linearVaultConsentPage: LinearVaultConsentPageStack | undefined;
+    if (linearIdentityVaultEnabled) {
+      // Hosted consent landing page, so onboarding works where the browser cannot
+      // reach the CLI's localhost (cloud desktop, SSH box, container). Static by
+      // design — it only displays the session id; the CLI finalizes with the
+      // operator's own credentials rather than exposing a public endpoint that
+      // completes OAuth sessions. An explicit context override is still honoured
+      // for operators fronting the callback with their own URL.
+      const hostedReturnUrlOverride = this.node.tryGetContext('linearVaultHostedReturnUrl') as string | undefined;
+      if (!hostedReturnUrlOverride) {
+        // Nested so its ~10 resources do not eat the root stack's remaining
+        // headroom against CloudFormation's hard 500-per-stack limit.
+        linearVaultConsentPage = new LinearVaultConsentPageStack(this, 'LinearVaultConsentPageStack');
+      }
+      const hostedReturnUrl = hostedReturnUrlOverride ?? linearVaultConsentPage?.consentUrl;
+
+      // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
+      // enforced; F11: localhost + hosted coexist so either onboarding mode works
+      // off one identity). Both are registered: the CLI picks per call.
+      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+        workloadName: linearVaultWorkload,
+        allowedReturnUrls: [
+          'http://localhost:8080/oauth/callback',
+          ...(hostedReturnUrl ? [hostedReturnUrl] : []),
+        ],
+      });
+
+      // Published so `bgagent linear setup` mints the grant under the identity THIS
+      // stack actually created. The CLI used to carry its own copy of the name,
+      // which was correct only while the name was a global constant — the moment it
+      // became stack-scoped, a hardcoded CLI would consent against a different
+      // (or nonexistent) identity than the resolvers read from.
+      new CfnOutput(this, 'LinearVaultWorkloadName', {
+        value: linearVaultWorkload,
+        description: 'AgentCore workload identity backing the Linear token vault — read by `bgagent linear setup`',
+      });
+
+      if (hostedReturnUrl) {
+        new CfnOutput(this, 'LinearVaultConsentUrl', {
+          value: hostedReturnUrl,
+          description: 'Hosted Linear vault consent landing page — used by `bgagent linear setup`',
+        });
+      }
+    }
+
     const ecsCluster = computeType === 'ecs'
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
+        ...(linearIdentityVault && { linearIdentityVault }),
         vpc: agentVpc.vpc,
         agentImageAsset: new ecr_assets.DockerImageAsset(this, 'AgentImage', {
           directory: repoRoot,
@@ -1074,6 +1224,18 @@ export class AgentStack extends Stack {
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
         anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
+        // Substrate parity for the Identity vault: the AgentCore runtime gets these
+        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
+        // receive them too or its agent skips vault minting and falls back to a
+        // Secrets-Manager token a vault-managed workspace does not have — losing
+        // reactions and state transitions on work that otherwise succeeds. Forwarded
+        // as platform_config because a snapshot must not bake configuration in.
+        ...(linearIdentityVault
+          ? {
+            linearVaultEnabled: 'true',
+            linearWorkloadIdentityName: linearVaultWorkload,
+          }
+          : {}),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
@@ -1253,8 +1415,32 @@ export class AgentStack extends Stack {
       description: 'Name of the DynamoDB Slack channel → default-repo mapping table',
     });
 
+    // --- Linear OAuth token vault (RFC #249 Phase 1) ---
+    // Additive + default-off (flag resolved above): the workload identity +
+    // token grants synthesize only under `--context enableLinearIdentityVault=
+    // true`, so the default synth stays byte-for-byte unchanged (same context-
+    // gate shape as the tool gateway / ECS / MicroVM backends). When off, the
+    // Linear resolver stays on the per-workspace Secrets-Manager token path.
+    // The construct itself is created earlier (it has to exist before the ECS
+    // cluster, which takes it as a prop). Here we only add the grant that needs
+    // `runtime` to exist: the agent self-mints Linear tokens via boto3
+    // (config.py) on the AgentCore substrate using the runtime execution role's
+    // ambient credentials. The ECS task-role grant is wired inside
+    // EcsAgentCluster, and the webhook-processor grant inside LinearIntegration.
+    if (linearIdentityVault) {
+      linearIdentityVault.grantMintToken(runtime.role);
+      // MicroVM parity: the guest self-mints with its AMBIENT identity, which is the
+      // compute's execution role — not the tenant-scoped session role. Without this
+      // the platform_config above would tell the agent to use the vault and the call
+      // would be denied, which is worse than not offering it at all.
+      if (lambdaMicrovm) {
+        linearIdentityVault.grantMintToken(lambdaMicrovm.executionRole);
+      }
+    }
+
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
     const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+      identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
@@ -1710,6 +1896,37 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
     });
 
+    // --- Vault parity for every Lambda that talks to Linear -----------------
+    // The webhook processor was granted vault access when the vault landed and
+    // nothing else was, on the assumption that widening could wait. It could not:
+    // these three post the PR-opened comment, the terminal comment, the epic
+    // rollup, and the GitHub-side issue updates. Without the grant each falls back
+    // to a Secrets-Manager token that a vault-onboarded workspace does not
+    // maintain, so the task succeeds and the Linear issue shows nothing after the
+    // opening comment — no reaction, no state change, no PR link. Live-caught as
+    // 401s in the fan-out log while the task itself completed and opened its PR.
+    if (linearIdentityVault) {
+      // The full set, derived from the transitive import graph rather than from the
+      // handlers that import a Linear module DIRECTLY — which is how the reconciler
+      // and the heartbeat were missed: both reach a minting resolver through
+      // orchestration-channel-factory, two hops away. A source-level test now
+      // recomputes this set and fails if a handler joins it without being wired.
+      //
+      // Deliberately NOT here: the webhook RECEIVER (verifies signatures, never
+      // mints) and the stranded reconciler (reaches no channel that mints).
+      for (const linearWriter of [
+        fanOutConsumer.fn,
+        orchestrator.fn,
+        githubScreenshot.webhookProcessorFn,
+        orchestrationReconciler.fn,
+        iterationHeartbeat.fn,
+      ]) {
+        linearWriter.addEnvironment('LINEAR_VAULT_ENABLED', 'true');
+        linearWriter.addEnvironment('LINEAR_WORKLOAD_IDENTITY_NAME', linearVaultWorkload);
+        linearIdentityVault.grantMintToken(linearWriter);
+      }
+    }
+
     // Re-stacking dependents is NOT a GitHub-webhook path. It runs inside the
     // orchestration reconciler (off the TaskTable stream): when a Linear
     // @bgagent comment re-iterates a sub-issue's PR (coding/pr-iteration-v1)
@@ -1736,6 +1953,24 @@ export class AgentStack extends Stack {
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
       githubScreenshot.processorDlqDepthAlarm,
+    );
+
+    // #812: the Linear webhook processor announces a revoked authorization here.
+    // SNS is deliberately the channel — the dead credential is Linear's own, so a
+    // Linear comment cannot report it. The topic has an independent credential and
+    // therefore still works when Linear does not.
+    // grantPublish covers the topic AND the minimal CMK actions. Without the key
+    // grant the publish fails KMSAccessDenied, and because announcing is
+    // best-effort (it must never break token resolution) that failure would be
+    // swallowed — a silently mute alarm in place of the dormant feature #812 exists
+    // to fix.
+    // The IAM5 finding on the wildcard this emits is suppressed by the
+    // overflow-policy Aspect above — the grant lands in an OverflowPolicy that does
+    // not exist yet at this point in the constructor.
+    operationalAlerts.grantPublish(linearIntegration.webhookProcessorFn);
+    linearIntegration.webhookProcessorFn.addEnvironment(
+      'OPERATIONAL_ALERT_TOPIC_ARN',
+      operationalAlerts.topic.topicArn,
     );
 
     new CfnOutput(this, 'OperationalAlertsTopicArn', {

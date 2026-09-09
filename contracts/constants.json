@@ -51,5 +51,18 @@
     "ready_hook_timeout_seconds": 300,
     "warmup_total_budget_seconds": 240,
     "warmup_required_timeout_seconds": 120
+  },
+  "linear_vault": {
+    "_why": "The vault caches a grant keyed by the WHOLE token request, customParameters included. A one-token divergence between any two of these copies makes every resolve a cache miss, which post-#812 is reported as consent-required and can latch a healthy workspace revoked.",
+    "scopes": [
+      "read",
+      "write",
+      "app:assignable",
+      "app:mentionable"
+    ],
+    "custom_parameters": {
+      "actor": "app",
+      "prompt": "consent"
+    }
   }
 }

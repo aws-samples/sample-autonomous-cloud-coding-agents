@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { App, NestedStack, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
 import {
@@ -113,6 +113,60 @@ describe('Bootstrap policy synth coverage', () => {
       expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
       expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
     }
+  });
+
+  it('maps the context-gated Linear identity vault custom resource (#249 P1, not in default synth)', () => {
+    // The default synth never instantiates LinearIdentityVault, so its custom
+    // resource type would slip past the coverage loop. Synthesize the gated path
+    // explicitly and assert the type is present, mapped, AND fully covered by the
+    // bootstrap policy bundle — same guarantee the loop gives default types.
+    const app = new App({ context: { enableLinearIdentityVault: true } });
+    const gatedTemplate = Template.fromStack(
+      new AgentStack(app, 'LinearVaultCoverageStack', {
+        env: { account: '123456789012', region: 'us-east-1' },
+      }),
+    );
+    const gatedTypes = new Set(
+      Object.values(
+        gatedTemplate.toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+
+    // The vault's own custom resource lives in the ROOT template.
+    for (const cfnType of ['Custom::LinearWorkloadIdentity']) {
+      expect(gatedTypes.has(cfnType)).toBe(true);
+      expect(cfnType in RESOURCE_ACTION_MAP).toBe(true);
+      expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
+    }
+
+    // The hosted consent page sits in a NESTED stack (to stay clear of the root's
+    // 500-resource ceiling), so its types are not in the root template — but CFN
+    // still creates them with the same execution role, so they need the same
+    // bootstrap coverage. Walk the nested stack explicitly; a nested resource that
+    // slips past the map fails deploy exactly like a root one.
+    const gatedStack = new AgentStack(new App({ context: { enableLinearIdentityVault: true } }), 'LinearVaultNestedStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const consentPageStack = gatedStack.node.tryFindChild('LinearVaultConsentPageStack') as NestedStack | undefined;
+    expect(consentPageStack).toBeDefined();
+    const nestedTypes = new Set(
+      Object.values(
+        Template.fromStack(consentPageStack!).toJSON().Resources as Record<string, { Type: string }>,
+      ).map((r) => r.Type),
+    );
+    for (const cfnType of [
+      'Custom::CDKBucketDeployment',
+      'AWS::CloudFront::Distribution',
+      'AWS::S3::Bucket',
+    ]) {
+      expect(nestedTypes.has(cfnType)).toBe(true);
+    }
+
+    // Nothing the gated path adds — root OR nested — may slip past unmapped.
+    const unmapped = [...gatedTypes, ...nestedTypes].filter(
+      (t) => !CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(t) && !(t in RESOURCE_ACTION_MAP),
+    );
+    expect(unmapped).toEqual([]);
   });
 
   it('covers integration resources that previously failed deploy (regression)', () => {

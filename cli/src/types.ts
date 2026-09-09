@@ -66,6 +66,12 @@ export type RegistryVersionSummary = {
   readonly status: string;
   readonly created_at: string | null;
   readonly publisher: string | null;
+  /** True when the record's descriptor payload failed to parse. `publisher` lives
+   *  in the erased payload so it is unrecoverable (reads `null`); `created_at` is
+   *  envelope data and is nulled only by the `show` marker's convention, not
+   *  because it is lost. Surfaced rather than hidden so a corrupt version is
+   *  visible to operators (#791). */
+  readonly malformed?: boolean;
 };
 
 /** `GET /registry/records/{kind}/{namespace}/{name}` response — one asset's

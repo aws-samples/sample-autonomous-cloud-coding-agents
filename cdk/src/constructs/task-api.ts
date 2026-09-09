@@ -844,27 +844,35 @@ export class TaskApi extends Construct {
     const allFunctions: lambda.NodejsFunction[] = [createTaskFn, getTaskFn, listTasksFn, cancelTaskFn, getTaskEventsFn, getTaskReplayFn];
     if (confirmUploadsFn) allFunctions.push(confirmUploadsFn);
 
+    // Every `LambdaIntegration` below passes `allowTestInvoke: false`, dropping the
+    // second `AWS::Lambda::Permission` per method that CDK emits by default for the
+    // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
+    // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
+    // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
+    // `test/stacks/agent.test.ts` asserts no `test-invoke-stage` permission is ever
+    // emitted.
+
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
-    tasks.addMethod('POST', new apigw.LambdaIntegration(createTaskFn), cognitoAuthOptions);
-    tasks.addMethod('GET', new apigw.LambdaIntegration(listTasksFn), cognitoAuthOptions);
+    tasks.addMethod('POST', new apigw.LambdaIntegration(createTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
+    tasks.addMethod('GET', new apigw.LambdaIntegration(listTasksFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
     const taskById = tasks.addResource('{task_id}');
-    taskById.addMethod('GET', new apigw.LambdaIntegration(getTaskFn), cognitoAuthOptions);
-    taskById.addMethod('DELETE', new apigw.LambdaIntegration(cancelTaskFn), cognitoAuthOptions);
+    taskById.addMethod('GET', new apigw.LambdaIntegration(getTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
+    taskById.addMethod('DELETE', new apigw.LambdaIntegration(cancelTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
     const events = taskById.addResource('events');
-    events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn), cognitoAuthOptions);
+    events.addMethod('GET', new apigw.LambdaIntegration(getTaskEventsFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
     // Operator replay bundle: GET /tasks/{task_id}/replay. Same Cognito
     // owner-scoped auth as GET /tasks/{task_id} (cognitoAuthOptions).
     const replay = taskById.addResource('replay');
-    replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn), cognitoAuthOptions);
+    replay.addMethod('GET', new apigw.LambdaIntegration(getTaskReplayFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
     // --- Confirm-uploads endpoint: POST /tasks/{task_id}/confirm-uploads ---
     if (confirmUploadsFn) {
       const confirmUploads = taskById.addResource('confirm-uploads');
-      confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn), cognitoAuthOptions);
+      confirmUploads.addMethod('POST', new apigw.LambdaIntegration(confirmUploadsFn, { allowTestInvoke: false }), cognitoAuthOptions);
     }
 
     // --- Trace URL endpoint (design §10.1): GET /tasks/{task_id}/trace ---
@@ -913,7 +921,7 @@ export class TaskApi extends Construct {
       }));
 
       const trace = taskById.addResource('trace');
-      trace.addMethod('GET', new apigw.LambdaIntegration(getTraceUrlFn), cognitoAuthOptions);
+      trace.addMethod('GET', new apigw.LambdaIntegration(getTraceUrlFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
       allFunctions.push(getTraceUrlFn);
     }
@@ -957,7 +965,7 @@ export class TaskApi extends Construct {
       }
 
       const nudge = taskById.addResource('nudge');
-      nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn), cognitoAuthOptions);
+      nudge.addMethod('POST', new apigw.LambdaIntegration(nudgeTaskFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
       allFunctions.push(nudgeTaskFn);
     }
@@ -1040,19 +1048,19 @@ export class TaskApi extends Construct {
       const approveTask = taskById.addResource('approve');
       approveTask.addMethod(
         'POST',
-        new apigw.LambdaIntegration(approveTaskFn),
+        new apigw.LambdaIntegration(approveTaskFn, { allowTestInvoke: false }),
         cognitoAuthOptions,
       );
       const denyTask = taskById.addResource('deny');
       denyTask.addMethod(
         'POST',
-        new apigw.LambdaIntegration(denyTaskFn),
+        new apigw.LambdaIntegration(denyTaskFn, { allowTestInvoke: false }),
         cognitoAuthOptions,
       );
       const pending = this.api.root.addResource('pending');
       pending.addMethod(
         'GET',
-        new apigw.LambdaIntegration(getPendingFn),
+        new apigw.LambdaIntegration(getPendingFn, { allowTestInvoke: false }),
         cognitoAuthOptions,
       );
 
@@ -1098,7 +1106,7 @@ export class TaskApi extends Construct {
         const policies = repoById.addResource('policies');
         policies.addMethod(
           'GET',
-          new apigw.LambdaIntegration(getPoliciesFn),
+          new apigw.LambdaIntegration(getPoliciesFn, { allowTestInvoke: false }),
           cognitoAuthOptions,
         );
         allFunctions.push(getPoliciesFn);
@@ -1191,11 +1199,11 @@ export class TaskApi extends Construct {
       props.apiKeyTable.grantReadWriteData(deleteApiKeyFn);
 
       const apiKeys = this.api.root.addResource('api-keys');
-      apiKeys.addMethod('POST', new apigw.LambdaIntegration(createApiKeyFn), cognitoAuthOptions);
-      apiKeys.addMethod('GET', new apigw.LambdaIntegration(listApiKeysFn), cognitoAuthOptions);
+      apiKeys.addMethod('POST', new apigw.LambdaIntegration(createApiKeyFn, { allowTestInvoke: false }), cognitoAuthOptions);
+      apiKeys.addMethod('GET', new apigw.LambdaIntegration(listApiKeysFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
       const apiKeyById = apiKeys.addResource('{key_id}');
-      apiKeyById.addMethod('DELETE', new apigw.LambdaIntegration(deleteApiKeyFn), cognitoAuthOptions);
+      apiKeyById.addMethod('DELETE', new apigw.LambdaIntegration(deleteApiKeyFn, { allowTestInvoke: false }), cognitoAuthOptions);
 
       allFunctions.push(apiKeyAuthorizerFn, createApiKeyFn, listApiKeysFn, deleteApiKeyFn);
     }
@@ -1348,11 +1356,11 @@ export class TaskApi extends Construct {
       // Management routes use the unified authorizer when an API key table is
       // wired (JWT or `webhooks:manage` key), else fall back to Cognito-only.
       const webhooks = this.api.root.addResource('webhooks');
-      const createWebhookMethod = webhooks.addMethod('POST', new apigw.LambdaIntegration(createWebhookFn), webhookMgmtAuthOptions);
-      const listWebhooksMethod = webhooks.addMethod('GET', new apigw.LambdaIntegration(listWebhooksFn), webhookMgmtAuthOptions);
+      const createWebhookMethod = webhooks.addMethod('POST', new apigw.LambdaIntegration(createWebhookFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
+      const listWebhooksMethod = webhooks.addMethod('GET', new apigw.LambdaIntegration(listWebhooksFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
 
       const webhookById = webhooks.addResource('{webhook_id}');
-      const deleteWebhookMethod = webhookById.addMethod('DELETE', new apigw.LambdaIntegration(deleteWebhookFn), webhookMgmtAuthOptions);
+      const deleteWebhookMethod = webhookById.addMethod('DELETE', new apigw.LambdaIntegration(deleteWebhookFn, { allowTestInvoke: false }), webhookMgmtAuthOptions);
 
       // When the unified authorizer is in use these methods are CUSTOM, not
       // Cognito — suppress COG4 (the authorizer still enforces a Cognito JWT
@@ -1367,7 +1375,7 @@ export class TaskApi extends Construct {
       }
 
       const webhookTasks = webhooks.addResource('tasks');
-      const webhookTasksMethod = webhookTasks.addMethod('POST', new apigw.LambdaIntegration(webhookCreateTaskFn), webhookAuthOptions);
+      const webhookTasksMethod = webhookTasks.addMethod('POST', new apigw.LambdaIntegration(webhookCreateTaskFn, { allowTestInvoke: false }), webhookAuthOptions);
 
       NagSuppressions.addResourceSuppressions(webhookTasksMethod, [
         {

@@ -21,9 +21,9 @@
  * Tests for `scripts/check-constants-sync.ts` — the cross-language constants
  * drift gate.
  *
- * WHY THESE EXIST: the script grew ~170 lines in this PR (the `platform_config`
- * allowlist, the hook-budget invariant, the ARN-pinning contract) with no test
- * anywhere, and it is a GATE — a rejection pattern that silently stops matching
+ * WHY THESE EXIST: the script carries several rejection patterns (the
+ * `platform_config` allowlist, the hook-budget invariant, the ARN-pinning contract)
+ * and it is a GATE — a rejection pattern that silently stops matching
  * turns the whole check into a no-op that still prints "OK". A gate whose failure
  * mode is a false pass has to be tested by making it fail.
  *
@@ -61,6 +61,7 @@ const FIXTURE_FILES = [
   'agent/src/policy.py',
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
+  'agent/src/config.py',
   'cdk/src/constructs/lambda-microvm-compute.ts',
 ];
 
@@ -224,6 +225,24 @@ describe('check-constants-sync', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('FORGE_WEBTRIGGER_SUFFIX');
+    });
+
+    test('catches a re-declared linear_vault cache key', () => {
+      // The vault caches a grant keyed by the whole token request, so consent time and
+      // every resolve must send an identical set. Four copies exist across three
+      // languages; a one-token divergence makes every resolve a cache miss, which since
+      // #812 is reported as consent-required and can latch a healthy workspace revoked.
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'agent/src/config.py',
+          `${read(root, 'agent/src/config.py')}\n`
+          + '_LINEAR_VAULT_CUSTOM_PARAMS = {"actor": "app", "prompt": "consent"}\n',
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('_LINEAR_VAULT_CUSTOM_PARAMS');
     });
 
     test('catches a collection literal for the allowlist mapping', () => {
