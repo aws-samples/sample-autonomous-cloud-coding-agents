@@ -20,18 +20,19 @@
 import { Duration } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import { Construct } from 'constructs';
-import {
-  BUDGET_EXCEEDED_PERCENT,
-  BUDGET_WARNING_PERCENT,
-} from '../handlers/shared/budgets';
+import sharedConstants from '../../../contracts/constants.json';
 
 const ALARM_PERIOD_MINUTES = 1;
 const METRIC_NAMESPACE = 'ABCA/Budgets';
+const budgetContract = sharedConstants.monthly_budgets;
+const BUDGET_WARNING_PERCENT = budgetContract.warning_percent;
+const BUDGET_EXCEEDED_PERCENT = budgetContract.exceeded_percent;
 
 /** CloudWatch alarms for one-shot monthly budget threshold metrics. */
 export class BudgetAlerts extends Construct {
   public readonly warningAlarm: cloudwatch.Alarm;
   public readonly exceededAlarm: cloudwatch.Alarm;
+  public readonly teamMembershipUnresolvedAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string) {
     super(scope, id);
@@ -63,5 +64,24 @@ export class BudgetAlerts extends Construct {
         'A user or Cognito-team monthly ABCA budget crossed 100%. '
         + 'Hard-stop scopes reject new tasks until the next UTC month (#471).',
     });
+    this.teamMembershipUnresolvedAlarm = new cloudwatch.Alarm(
+      this,
+      'TeamMembershipUnresolvedAlarm',
+      {
+        metric: new cloudwatch.Metric({
+          namespace: METRIC_NAMESPACE,
+          metricName: 'BudgetTeamMembershipUnresolved',
+          statistic: 'Sum',
+          period: Duration.minutes(ALARM_PERIOD_MINUTES),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription:
+          'A headless task owner could not be resolved in Cognito, so configured team-budget '
+          + 'enforcement was skipped. Repair the stale or federated identity mapping (#471).',
+      },
+    );
   }
 }

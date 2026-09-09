@@ -22,13 +22,13 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { BudgetAlerts } from '../../src/constructs/budget-alerts';
 
 describe('BudgetAlerts', () => {
-  test('creates 80 and 100 percent threshold alarms', () => {
+  test('creates threshold and unresolved-membership alarms', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new BudgetAlerts(stack, 'BudgetAlerts');
     const template = Template.fromStack(stack);
 
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 3);
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       Namespace: 'ABCA/Budgets',
       MetricName: 'BudgetThresholdCrossed',
@@ -40,6 +40,12 @@ describe('BudgetAlerts', () => {
       MetricName: 'BudgetThresholdCrossed',
       Dimensions: [{ Name: 'Threshold', Value: '100' }],
       Threshold: 1,
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'ABCA/Budgets',
+      MetricName: 'BudgetTeamMembershipUnresolved',
+      Threshold: 1,
+      TreatMissingData: 'notBreaching',
     });
   });
 });

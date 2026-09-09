@@ -45,6 +45,7 @@ export const BUDGET_EXCEEDED_ALERT_MARKER = budgetContract.exceeded_alert_marker
 export const MAX_BUDGET_SCOPES_PER_TASK = 99;
 
 const BATCH_GET_LIMIT = 100;
+const BUDGET_METRIC_NAMESPACE = 'ABCA/Budgets';
 const budgetTableName = process.env.BUDGET_TABLE_NAME;
 const userPoolId = process.env.USER_POOL_ID;
 const ddb = makeDocClient();
@@ -175,6 +176,21 @@ function errorName(err: unknown): string {
   return typeof name === 'string' ? name : '';
 }
 
+function emitMissingTeamMembershipMetric(userId: string): void {
+  process.stdout.write(JSON.stringify({
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [{
+        Namespace: BUDGET_METRIC_NAMESPACE,
+        Dimensions: [],
+        Metrics: [{ Name: 'BudgetTeamMembershipUnresolved', Unit: 'Count' }],
+      }],
+    },
+    BudgetTeamMembershipUnresolved: 1,
+    user_id: userId,
+  }) + '\n');
+}
+
 async function resolveTeamIds(userId: string): Promise<string[]> {
   if (!userPoolId || !cognito) {
     const error = new Error(
@@ -210,13 +226,14 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
       // A deleted or externally federated Cognito identity can remain in a
       // headless integration mapping. User-scope admission still applies, but
       // there is no resolvable user-pool membership to attribute to teams.
+      emitMissingTeamMembershipMetric(userId);
       logger.warn('Budget team membership user was not found; continuing without teams', {
         user_id: userId,
         error: err instanceof Error ? err.message : String(err),
         error_name: name,
         metric_type: 'budget_team_membership_user_missing',
       });
-      return [];
+      return []; // nosemgrep: ts-silent-success-masking -- user budgets remain enforced; an alarm pages on skipped team enforcement
     }
     logger.error('Failed to resolve budget team membership', {
       user_id: userId,

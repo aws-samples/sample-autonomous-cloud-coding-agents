@@ -1981,6 +1981,7 @@ export class AgentStack extends Stack {
       githubScreenshot.processorDlqDepthAlarm,
       budgetAlerts.warningAlarm,
       budgetAlerts.exceededAlarm,
+      budgetAlerts.teamMembershipUnresolvedAlarm,
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.

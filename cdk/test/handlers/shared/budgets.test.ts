@@ -53,6 +53,7 @@ async function loadBudgets(options: { enabled?: boolean } = {}) {
 afterEach(() => {
   jest.dontMock('../../../src/handlers/shared/ua');
   jest.dontMock('../../../src/handlers/shared/logger');
+  jest.restoreAllMocks();
   delete process.env.BUDGET_TABLE_NAME;
   delete process.env.USER_POOL_ID;
 });
@@ -154,6 +155,7 @@ describe('budget admission', () => {
 
   test('continues without team scopes when Cognito no longer has the mapped user', async () => {
     const budgets = await loadBudgets();
+    const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     ddbSend
       .mockResolvedValueOnce({ Responses: { Budgets: [] } })
       .mockResolvedValueOnce({ Items: [{ scope_key: 'TEAM#Platform' }] });
@@ -173,6 +175,9 @@ describe('budget admission', () => {
         metric_type: 'budget_team_membership_user_missing',
       }),
     );
+    expect(stdout).toHaveBeenCalledWith(expect.stringContaining(
+      '"BudgetTeamMembershipUnresolved":1',
+    ));
   });
 
   test('fails closed with a distinct metric on transient Cognito errors', async () => {
@@ -255,6 +260,42 @@ describe('budget admission', () => {
 
     expect(cognitoSend).not.toHaveBeenCalled();
     expect(result.blocked).toBeNull();
+  });
+
+  test('blocks a hard-stop budget at exactly 100 percent', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 10,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 10,
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.checkBudgetAdmission(
+      'user-1',
+      [],
+      new Date('2026-08-18T12:00:00Z'),
+    )).resolves.toEqual({
+      teamIds: [],
+      period: '2026-08',
+      blocked: {
+        scopeType: 'user',
+        scopeId: 'user-1',
+        spendUsd: 10,
+        monthlyLimitUsd: 10,
+      },
+    });
   });
 
   test('admits against a materialized monthly row whose spend counter is absent', async () => {

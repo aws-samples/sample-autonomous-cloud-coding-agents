@@ -124,11 +124,38 @@ describe('budget rollup handler', () => {
     expect(result).toBe(true);
     const transaction = sendMock.mock.calls[0][0];
     expect(transaction.input.TransactItems).toHaveLength(3);
-    expect(transaction.input.TransactItems[0].Put.Item.scope_key).toBe('TASK#task-1');
-    for (const item of transaction.input.TransactItems.slice(1)) {
-      expect(item.Update.UpdateExpression).toContain('#ttl = :ttl');
-      expect(item.Update.ExpressionAttributeNames).toEqual({ '#ttl': 'ttl' });
-    }
+    expect(transaction.input.TransactItems[0].Put).toMatchObject({
+      Item: {
+        scope_key: 'TASK#task-1',
+        period: 'ROLLUP',
+        task_id: 'task-1',
+        rolled_up_period: '2026-08',
+        cost_usd: 8.5,
+      },
+      ConditionExpression: 'attribute_not_exists(scope_key)',
+    });
+    expect(transaction.input.TransactItems.slice(1)).toEqual([
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          Key: { scope_key: 'USER#user-1', period: '2026-08' },
+          UpdateExpression: expect.stringContaining('ADD spend_usd :cost, task_count :one'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':cost': 8.5,
+            ':one': 1,
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          Key: { scope_key: 'TEAM#Platform', period: '2026-08' },
+          UpdateExpression: expect.stringContaining('ADD spend_usd :cost, task_count :one'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':cost': 8.5,
+            ':one': 1,
+          }),
+        }),
+      }),
+    ]);
     expect(stdout.mock.calls.map(call => String(call[0])).join('')).toContain('"Threshold":"80"');
   });
 
@@ -208,6 +235,19 @@ describe('budget rollup handler', () => {
 
     expect(result).toBe(false);
     expect(sendMock).toHaveBeenCalledTimes(3);
+  });
+
+  test('rethrows a cancelled transaction when no task marker exists', async () => {
+    const rollup = await loadRollup();
+    const canceled = Object.assign(new Error('transaction conflict'), {
+      name: 'TransactionCanceledException',
+    });
+    sendMock
+      .mockRejectedValueOnce(canceled)
+      .mockResolvedValueOnce({});
+
+    await expect(rollup.rollupTaskCost(record())).rejects.toBe(canceled);
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
   test('retries threshold claims after the spend transaction already committed', async () => {

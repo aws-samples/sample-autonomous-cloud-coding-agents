@@ -186,6 +186,7 @@ describe('createTaskCore', () => {
     );
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockLambdaSend).not.toHaveBeenCalled();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 
@@ -205,6 +206,7 @@ describe('createTaskCore', () => {
     });
     expect(mockSend).not.toHaveBeenCalled();
     expect(mockLambdaSend).not.toHaveBeenCalled();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 
   test('returns 400 when team membership exceeds the rollup transaction limit', async () => {
@@ -466,6 +468,7 @@ describe('createTaskCore', () => {
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockLambdaSend).not.toHaveBeenCalled();
     expect(mockCheckBudgetAdmission).not.toHaveBeenCalled();
+    expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 
   test('returns 200 for a repo-less idempotency replay despite empty branch_name', async () => {
