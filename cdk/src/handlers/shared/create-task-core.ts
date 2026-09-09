@@ -697,6 +697,22 @@ export async function createTaskCore(
     budgetAdmission = await checkBudgetAdmission(context.userId, context.teamIds);
   } catch (budgetErr) {
     if (s3Client) await cleanupOrphanedAttachments(s3Client, uploadedS3Keys);
+    if (
+      budgetErr instanceof Error
+      && budgetErr.name === 'BudgetScopeLimitError'
+    ) {
+      logger.warn('Budget admission rejected unsupported team count', {
+        user_id: context.userId,
+        request_id: requestId,
+        error: budgetErr.message,
+      });
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        budgetErr.message,
+        requestId,
+      );
+    }
     logger.error('Budget admission check failed closed', {
       user_id: context.userId,
       request_id: requestId,

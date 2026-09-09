@@ -84,9 +84,13 @@ export interface BudgetAdmissionResult {
   readonly blocked: BudgetBlock | null;
 }
 
+export class BudgetScopeLimitError extends Error {
+  override readonly name = 'BudgetScopeLimitError';
+}
+
 function assertSupportedScopeCount(userId: string, teamIds: readonly string[]): void {
   if (teamIds.length + 1 > MAX_BUDGET_SCOPES_PER_TASK) {
-    throw new Error(
+    throw new BudgetScopeLimitError(
       `User ${userId} belongs to ${teamIds.length} teams; budget rollup supports at most `
       + `${MAX_BUDGET_SCOPES_PER_TASK - 1}.`,
     );

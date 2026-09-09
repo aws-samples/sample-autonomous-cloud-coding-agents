@@ -195,6 +195,28 @@ describe('createTaskCore', () => {
     expect(mockLambdaSend).not.toHaveBeenCalled();
   });
 
+  test('returns 400 when team membership exceeds the rollup transaction limit', async () => {
+    const error = new Error(
+      'User user-1 belongs to 99 teams; budget rollup supports at most 98.',
+    );
+    error.name = 'BudgetScopeLimitError';
+    mockCheckBudgetAdmission.mockRejectedValue(error);
+
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug' },
+      makeContext(),
+      'req-budget-scope-limit',
+    );
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: expect.stringContaining('belongs to 99 teams'),
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockLambdaSend).not.toHaveBeenCalled();
+  });
+
   test('hoists tenant-scoped Jira issue identity for the sparse lookup index', async () => {
     const result = await createTaskCore(
       { repo: 'org/repo', task_description: 'Fix the Jira issue' },
