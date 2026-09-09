@@ -53,9 +53,11 @@ export interface OrchestrationReconcilerProps {
 }
 
 /**
- * TaskTable terminal-record consumer. It rolls up every positive task cost into
- * monthly user/team budgets, then drives parent/sub-issue orchestration for
- * records that belong to a graph.
+ * TaskTable terminal-record consumer. It first drives parent/sub-issue
+ * orchestration for records that belong to a graph, then rolls up every positive
+ * task cost into monthly user/team budgets. This ordering prevents a budget-table
+ * outage from stranding a graph, at the cost of allowing one dependency wave to
+ * be admitted before the completed parent's spend is visible.
  *
  * Stream-source rationale: TaskEventsTable's stream is at its 2-consumer
  * limit (FanOutConsumer + ApprovalMetricsPublisher); TaskTable had no

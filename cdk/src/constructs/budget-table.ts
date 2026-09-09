@@ -20,8 +20,9 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
+import sharedConstants from '../../../contracts/constants.json';
 
-export const BUDGET_CONFIG_INDEX_NAME = 'record_type-scope_key-index';
+const BUDGET_CONFIG_INDEX_NAME = sharedConstants.monthly_budgets.config_index_name;
 
 export interface BudgetTableProps {
   /** Optional physical table name. */

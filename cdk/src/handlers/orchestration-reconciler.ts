@@ -20,18 +20,22 @@
 /**
  * Terminal TaskTable reconciler for budget rollups and dependency graphs.
  *
- * Consumes the **TaskTable DynamoDB stream**. For each terminal task it first
- * applies an idempotent user/team monthly cost rollup. For graph tasks it then:
+ * Consumes the **TaskTable DynamoDB stream**. For graph tasks it first:
  *   1. resolves the task's orchestration via the ChildTaskIndex GSI
  *      (skips non-orchestration tasks — they have no orchestration_id),
  *   2. loads the orchestration snapshot,
  *   3. computes the gating plan (pure: orchestration-reconcile.ts),
  *   4. persists child-status updates and releases newly-unblocked
  *      children via the shared release helper.
+ * It then applies an idempotent user/team monthly cost rollup.
  *
  * Idempotent: budget rollups use a task marker, status updates are conditional,
  * and releaseChild is idempotency-keyed. Replayed terminal events neither
  * double-count spend, double-release children, nor regress state.
+ *
+ * Orchestration runs first so a budget-table outage cannot strand a dependency
+ * graph. Released children can therefore be admitted against spend that excludes
+ * the just-finished parent, allowing at most one dependency wave of overshoot.
  */
 
 import {

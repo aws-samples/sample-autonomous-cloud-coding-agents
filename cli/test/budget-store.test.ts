@@ -28,20 +28,20 @@ import {
   listBudgetStatus,
   setMonthlyBudget,
 } from '../src/budget-store';
-import { makeDocClient } from '../src/ua';
+import { documentClient } from '../src/dynamo-clients';
 
-jest.mock('../src/ua', () => ({
-  makeDocClient: jest.fn(),
+jest.mock('../src/dynamo-clients', () => ({
+  documentClient: jest.fn(),
 }));
 
-const makeDocClientMock = makeDocClient as jest.Mock;
+const documentClientMock = documentClient as jest.Mock;
 const sendMock = jest.fn();
 
 describe('budget store', () => {
   beforeEach(() => {
     sendMock.mockReset();
-    makeDocClientMock.mockReset();
-    makeDocClientMock.mockReturnValue({ send: sendMock });
+    documentClientMock.mockReset();
+    documentClientMock.mockReturnValue({ send: sendMock });
   });
 
   test('uses UTC calendar months', () => {
@@ -113,6 +113,7 @@ describe('budget store', () => {
     expect((sendMock.mock.calls[0][0] as QueryCommand).input.IndexName)
       .toBe('record_type-scope_key-index');
     expect(sendMock.mock.calls[1][0]).toBeInstanceOf(BatchGetCommand);
+    expect(documentClientMock).toHaveBeenCalledTimes(1);
     expect((sendMock.mock.calls[1][0] as BatchGetCommand)
       .input.RequestItems?.Budgets?.ConsistentRead).toBe(true);
     expect(rows).toEqual([expect.objectContaining({
@@ -185,5 +186,33 @@ describe('budget store', () => {
       { type: 'user', id: 'user-1' },
       new Date('2026-08-18T12:00:00Z'),
     )).rejects.toThrow('Budget config USER#user-1 has invalid monthly_limit_usd');
+  });
+
+  test('rejects corrupt persisted spend instead of treating it as zero', async () => {
+    sendMock
+      .mockResolvedValueOnce({
+        Item: {
+          scope_key: 'USER#user-1',
+          scope_type: 'user',
+          scope_id: 'user-1',
+          monthly_limit_usd: 100,
+        },
+      })
+      .mockResolvedValueOnce({
+        Responses: {
+          Budgets: [{
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 'not-a-number',
+          }],
+        },
+      });
+
+    await expect(listBudgetStatus(
+      'us-east-1',
+      'Budgets',
+      { type: 'user', id: 'user-1' },
+      new Date('2026-08-18T12:00:00Z'),
+    )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
   });
 });

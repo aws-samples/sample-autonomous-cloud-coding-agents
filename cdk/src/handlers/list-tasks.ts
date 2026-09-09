@@ -52,6 +52,14 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 2. Parse query parameters
     const params = event.queryStringParameters ?? {};
+    if (params.view !== undefined && params.view !== 'budget') {
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid view value. Expected "budget".',
+        requestId,
+      );
+    }
     if (params.view === 'budget') {
       const budget = await loadPersonalBudgetStatus(userId);
       return successResponse(200, budget, requestId);

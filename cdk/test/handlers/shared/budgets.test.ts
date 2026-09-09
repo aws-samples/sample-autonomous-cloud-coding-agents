@@ -50,23 +50,26 @@ describe('budget admission', () => {
     cognitoSend.mockResolvedValue({
       Groups: [{ GroupName: 'Developers' }, { GroupName: 'Platform' }],
     });
-    ddbSend.mockResolvedValue({
-      Responses: {
-        Budgets: [
-          {
-            scope_key: 'TEAM#Platform',
-            period: 'CONFIG',
-            monthly_limit_usd: 100,
-            hard_stop: true,
-          },
-          {
-            scope_key: 'TEAM#Platform',
-            period: '2026-08',
-            spend_usd: 101.25,
-          },
-        ],
-      },
-    });
+    ddbSend
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } })
+      .mockResolvedValueOnce({ Items: [{ scope_key: 'TEAM#Platform' }] })
+      .mockResolvedValueOnce({
+        Responses: {
+          Budgets: [
+            {
+              scope_key: 'TEAM#Platform',
+              period: 'CONFIG',
+              monthly_limit_usd: 100,
+              hard_stop: true,
+            },
+            {
+              scope_key: 'TEAM#Platform',
+              period: '2026-08',
+              spend_usd: 101.25,
+            },
+          ],
+        },
+      });
 
     const result = await budgets.checkBudgetAdmission(
       'user-1',
@@ -82,6 +85,77 @@ describe('budget admission', () => {
       monthlyLimitUsd: 100,
     });
     expect(ddbSend.mock.calls[0][0].input.RequestItems.Budgets.ConsistentRead).toBe(true);
+    expect(ddbSend.mock.calls[1][0].input).toEqual(expect.objectContaining({
+      IndexName: budgets.BUDGET_CONFIG_INDEX_NAME,
+      KeyConditionExpression: 'record_type = :config AND begins_with(scope_key, :team)',
+      Limit: 1,
+    }));
+  });
+
+  test('does not call Cognito when no team budget is configured', async () => {
+    const budgets = await loadBudgets();
+    ddbSend
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } })
+      .mockResolvedValueOnce({ Items: [] });
+
+    const result = await budgets.checkBudgetAdmission(
+      'user-1',
+      undefined,
+      new Date('2026-08-18T12:00:00Z'),
+    );
+
+    expect(result).toEqual({
+      teamIds: [],
+      period: '2026-08',
+      blocked: null,
+    });
+    expect(cognitoSend).not.toHaveBeenCalled();
+    expect(ddbSend).toHaveBeenCalledTimes(2);
+  });
+
+  test('fails closed on Cognito errors when a team budget is configured', async () => {
+    const budgets = await loadBudgets();
+    ddbSend
+      .mockResolvedValueOnce({ Responses: { Budgets: [] } })
+      .mockResolvedValueOnce({ Items: [{ scope_key: 'TEAM#Platform' }] });
+    cognitoSend.mockRejectedValueOnce(new Error('Cognito throttled'));
+
+    await expect(budgets.checkBudgetAdmission('user-1'))
+      .rejects.toThrow('Cognito throttled');
+  });
+
+  test('blocks an exhausted user without querying team configs or Cognito', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValueOnce({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 10,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 12,
+          },
+        ],
+      },
+    });
+
+    const result = await budgets.checkBudgetAdmission(
+      'user-1',
+      undefined,
+      new Date('2026-08-18T12:00:00Z'),
+    );
+
+    expect(result.blocked).toEqual(expect.objectContaining({
+      scopeType: 'user',
+      scopeId: 'user-1',
+    }));
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(cognitoSend).not.toHaveBeenCalled();
   });
 
   test('allows a soft budget above 100 percent', async () => {
@@ -204,5 +278,30 @@ describe('budget admission', () => {
       hard_stop: false,
       hard_stop_active: false,
     });
+  });
+
+  test('fails closed when persisted spend is corrupt', async () => {
+    const budgets = await loadBudgets();
+    ddbSend.mockResolvedValue({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-1',
+            period: 'CONFIG',
+            monthly_limit_usd: 100,
+          },
+          {
+            scope_key: 'USER#user-1',
+            period: '2026-08',
+            spend_usd: 'not-a-number',
+          },
+        ],
+      },
+    });
+
+    await expect(budgets.loadPersonalBudgetStatus(
+      'user-1',
+      new Date('2026-08-21T12:00:00Z'),
+    )).rejects.toThrow('Budget row USER#user-1 has invalid spend_usd');
   });
 });

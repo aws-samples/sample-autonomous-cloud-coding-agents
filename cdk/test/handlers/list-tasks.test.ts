@@ -198,6 +198,19 @@ describe('list-tasks handler', () => {
     expect(body.pagination.next_token).toBeTruthy();
   });
 
+  test('returns 400 for an unknown view instead of returning tasks', async () => {
+    const result = await handler(makeEvent({
+      queryStringParameters: { view: 'budgets' },
+    }));
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid view value. Expected "budget".',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   test('passes next_token as ExclusiveStartKey', async () => {
     const key = { task_id: { S: 'task-1' } };
     const token = Buffer.from(JSON.stringify(key)).toString('base64');

@@ -23,7 +23,7 @@ Once deployed, each agent task makes its Bedrock calls under **session-tagged, r
 
 ## ABCA monthly budget guardrails
 
-ABCA can aggregate terminal task `cost_usd` by Cognito user and Cognito-group team, alert at 80%/100%, and optionally reject new tasks at 100%. Configure it with `bgagent budget set` and inspect the current UTC month with `bgagent budget status`; see [Monthly user and team budgets](./USER_GUIDE.md#monthly-user-and-team-budgets).
+ABCA can aggregate terminal task `cost_usd` by Cognito user and Cognito-group team, alert at 80%/100%, and optionally reject new tasks at 100%. The default posture is alerts only; admission remains open unless the operator passes `--hard-stop` for that scope. Configure it with `bgagent budget set` and inspect the current UTC month with `bgagent budget status`; see [Monthly user and team budgets](./USER_GUIDE.md#monthly-user-and-team-budgets).
 
 This is an operational guardrail, not invoice reconciliation. It inherits every limitation of the SDK estimate, counts a task only when it reaches a terminal state, and can overshoot while tasks run concurrently. Use AWS Budgets over activated cost-allocation tags for authoritative billing alerts.
 
@@ -56,7 +56,7 @@ This is an operational guardrail, not invoice reconciliation. It inherits every 
    bgagent budget set --user alice@example.com --monthly-usd 100
    ```
 
-4. **Connect notifications.** Confirm the deployment's `alertEmail` subscription or subscribe an operations destination to the exported `OperationalAlertsTopicArn`.
+4. **Connect notifications.** Confirm the deployment's `alertEmail` subscription or subscribe an operations destination to the exported `OperationalAlertsTopicArn`. The alarm tells you that a threshold was crossed; inspect the `OrchestrationReconciler` Lambda logs to identify the scope and spend.
 5. **Verify both views.** Operators run `bgagent budget status`; users run `bgagent budget status --me` after `bgagent login`. Users see only their personal scope and cannot change it.
 6. **Test enforcement.** Use a non-production user/group and a small limit. Let a task finish so its estimated cost rolls up, then verify the 80%/100% notification and a `429 BUDGET_EXCEEDED` response for a hard-stop scope.
 

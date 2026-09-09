@@ -25,6 +25,7 @@ import {
 import type { DynamoDBRecord } from 'aws-lambda';
 import {
   BUDGET_EXCEEDED_PERCENT,
+  BUDGET_ROLLUP_RETENTION_DAYS,
   BUDGET_ROLLUP_PERIOD,
   BUDGET_WARNING_PERCENT,
   budgetPeriod,
@@ -40,7 +41,6 @@ import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-statu
 
 const BUDGET_TABLE_NAME = process.env.BUDGET_TABLE_NAME;
 const BUDGET_METRIC_NAMESPACE = 'ABCA/Budgets';
-const ROLLUP_RETENTION_DAYS = 400;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const TERMINAL = new Set<TaskStatusType>(TERMINAL_STATUSES);
 const ddb = makeDocClient();
@@ -93,7 +93,8 @@ export function parseTaskCostEvent(record: DynamoDBRecord): TaskCostEvent | null
 }
 
 function ttlEpoch(now: Date = new Date()): number {
-  return Math.floor(now.getTime() / 1000) + (ROLLUP_RETENTION_DAYS * SECONDS_PER_DAY);
+  return Math.floor(now.getTime() / 1000)
+    + (BUDGET_ROLLUP_RETENTION_DAYS * SECONDS_PER_DAY);
 }
 
 function isTransactionCanceled(err: unknown): boolean {

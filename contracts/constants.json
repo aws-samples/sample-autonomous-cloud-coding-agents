@@ -13,6 +13,20 @@
     "min": 0.01,
     "max": 100
   },
+  "monthly_budgets": {
+    "config_period": "CONFIG",
+    "config_record_type": "CONFIG",
+    "config_index_name": "record_type-scope_key-index",
+    "user_prefix": "USER#",
+    "team_prefix": "TEAM#",
+    "task_prefix": "TASK#",
+    "rollup_period": "ROLLUP",
+    "rollup_retention_days": 400,
+    "warning_percent": 80,
+    "exceeded_percent": 100,
+    "warning_alert_marker": "alerted_80_at",
+    "exceeded_alert_marker": "alerted_100_at"
+  },
   "jira_app_actor": {
     "min_secret_length": 32,
     "forge_webtrigger_suffix": ".webtrigger.atlassian.app"

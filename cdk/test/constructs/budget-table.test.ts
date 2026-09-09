@@ -22,13 +22,27 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { BudgetTable } from '../../src/constructs/budget-table';
 
 describe('BudgetTable', () => {
-  test('uses the scope/month composite key with TTL, PITR, and a config index', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new BudgetTable(stack, 'BudgetTable');
-    const template = Template.fromStack(stack);
+  let defaultTemplate: Template;
+  let customTemplate: Template;
 
-    template.hasResourceProperties('AWS::DynamoDB::Table', {
+  beforeAll(() => {
+    const defaultApp = new App();
+    const defaultStack = new Stack(defaultApp, 'DefaultStack');
+    new BudgetTable(defaultStack, 'BudgetTable');
+    defaultTemplate = Template.fromStack(defaultStack);
+
+    const customApp = new App();
+    const customStack = new Stack(customApp, 'CustomStack');
+    new BudgetTable(customStack, 'BudgetTable', {
+      tableName: 'budgets',
+      removalPolicy: RemovalPolicy.RETAIN,
+      pointInTimeRecovery: false,
+    });
+    customTemplate = Template.fromStack(customStack);
+  });
+
+  test('uses the scope/month composite key with TTL, PITR, and a config index', () => {
+    defaultTemplate.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [
         { AttributeName: 'scope_key', KeyType: 'HASH' },
         { AttributeName: 'period', KeyType: 'RANGE' },
@@ -58,22 +72,13 @@ describe('BudgetTable', () => {
   });
 
   test('supports custom lifecycle settings', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new BudgetTable(stack, 'BudgetTable', {
-      tableName: 'budgets',
-      removalPolicy: RemovalPolicy.RETAIN,
-      pointInTimeRecovery: false,
-    });
-    const template = Template.fromStack(stack);
-
-    template.hasResourceProperties('AWS::DynamoDB::Table', {
+    customTemplate.hasResourceProperties('AWS::DynamoDB::Table', {
       TableName: 'budgets',
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: false,
       },
     });
-    template.hasResource('AWS::DynamoDB::Table', {
+    customTemplate.hasResource('AWS::DynamoDB::Table', {
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',
     });

@@ -21,18 +21,25 @@ import {
   AdminListGroupsForUserCommand,
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { BatchGetCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 import type { PersonalBudgetStatus } from './types';
 import { makeClient, makeDocClient } from './ua';
+import sharedConstants from '../../../../contracts/constants.json';
 
-export const BUDGET_CONFIG_PERIOD = 'CONFIG';
-export const BUDGET_ROLLUP_PERIOD = 'ROLLUP';
-export const BUDGET_USER_PREFIX = 'USER#';
-export const BUDGET_TEAM_PREFIX = 'TEAM#';
-export const BUDGET_TASK_PREFIX = 'TASK#';
-export const BUDGET_WARNING_PERCENT = 80;
-export const BUDGET_EXCEEDED_PERCENT = 100;
+const budgetContract = sharedConstants.monthly_budgets;
+export const BUDGET_CONFIG_PERIOD = budgetContract.config_period;
+export const BUDGET_ROLLUP_PERIOD = budgetContract.rollup_period;
+export const BUDGET_USER_PREFIX = budgetContract.user_prefix;
+export const BUDGET_TEAM_PREFIX = budgetContract.team_prefix;
+export const BUDGET_TASK_PREFIX = budgetContract.task_prefix;
+export const BUDGET_WARNING_PERCENT = budgetContract.warning_percent;
+export const BUDGET_EXCEEDED_PERCENT = budgetContract.exceeded_percent;
+export const BUDGET_CONFIG_INDEX_NAME = budgetContract.config_index_name;
+export const BUDGET_ROLLUP_RETENTION_DAYS = budgetContract.rollup_retention_days;
+export const BUDGET_WARNING_ALERT_MARKER = budgetContract.warning_alert_marker;
+export const BUDGET_EXCEEDED_ALERT_MARKER = budgetContract.exceeded_alert_marker;
 
 /** DynamoDB transactions allow 100 actions; reserve one for the task marker. */
 export const MAX_BUDGET_SCOPES_PER_TASK = 99;
@@ -77,6 +84,15 @@ export interface BudgetAdmissionResult {
   readonly blocked: BudgetBlock | null;
 }
 
+function assertSupportedScopeCount(userId: string, teamIds: readonly string[]): void {
+  if (teamIds.length + 1 > MAX_BUDGET_SCOPES_PER_TASK) {
+    throw new Error(
+      `User ${userId} belongs to ${teamIds.length} teams; budget rollup supports at most `
+      + `${MAX_BUDGET_SCOPES_PER_TASK - 1}.`,
+    );
+  }
+}
+
 export function budgetPeriod(date: Date = new Date()): string {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
@@ -112,13 +128,30 @@ export function parseBudgetScopeKey(scopeKey: string): {
   return null;
 }
 
-function numeric(value: unknown): number {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
+function budgetNumber(
+  value: unknown,
+  field: string,
+  scopeKey: string,
+  absentValue?: number,
+): number {
+  if (value === undefined || value === null) {
+    if (absentValue !== undefined) return absentValue;
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
   }
-  return 0;
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    logger.warn('[numeric] unsupported budget value', {
+      event: 'numeric.coercion_failed',
+      field,
+      scope_key: scopeKey,
+      raw: String(value),
+    });
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
+  const numeric = coerceNumericOrNull(value, { field }, logger);
+  if (numeric === null) {
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
+  return numeric;
 }
 
 async function resolveTeamIds(userId: string): Promise<string[]> {
@@ -141,6 +174,22 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
   } while (nextToken);
 
   return [...new Set(names)].sort();
+}
+
+async function hasConfiguredTeamBudgets(): Promise<boolean> {
+  if (!budgetTableName) return false;
+  const result = await ddb.send(new QueryCommand({
+    TableName: budgetTableName,
+    IndexName: BUDGET_CONFIG_INDEX_NAME,
+    KeyConditionExpression: 'record_type = :config AND begins_with(scope_key, :team)',
+    ExpressionAttributeValues: {
+      ':config': BUDGET_CONFIG_PERIOD,
+      ':team': BUDGET_TEAM_PREFIX,
+    },
+    ProjectionExpression: 'scope_key',
+    Limit: 1,
+  }));
+  return (result.Items?.length ?? 0) > 0;
 }
 
 async function batchGetItems(keys: readonly Record<string, string>[]): Promise<Record<string, unknown>[]> {
@@ -196,12 +245,15 @@ export async function loadBudgetStates(
     const config = byKey.get(`${scopeKey}\0${BUDGET_CONFIG_PERIOD}`);
     if (!config) continue;
 
-    const monthlyLimitUsd = numeric(config.monthly_limit_usd);
+    const monthlyLimitUsd = budgetNumber(config.monthly_limit_usd, 'monthly_limit_usd', scopeKey);
     if (monthlyLimitUsd <= 0) {
       throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
     }
     const spend = byKey.get(`${scopeKey}\0${period}`);
-    const spendUsd = Math.max(0, numeric(spend?.spend_usd));
+    const spendUsd = Math.max(
+      0,
+      budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
+    );
     states.push({
       scopeKey,
       ...parsedScope,
@@ -211,8 +263,8 @@ export async function loadBudgetStates(
       period,
       spendUsd,
       utilizationPercent: (spendUsd / monthlyLimitUsd) * 100,
-      warningAlerted: spend !== undefined && Object.hasOwn(spend, 'alerted_80_at'),
-      exceededAlerted: spend !== undefined && Object.hasOwn(spend, 'alerted_100_at'),
+      warningAlerted: spend !== undefined && Object.hasOwn(spend, BUDGET_WARNING_ALERT_MARKER),
+      exceededAlerted: spend !== undefined && Object.hasOwn(spend, BUDGET_EXCEEDED_ALERT_MARKER),
     });
   }
   return states;
@@ -231,7 +283,10 @@ export async function loadPersonalBudgetStatus(
   ]);
   const config = items.find(item => item.period === BUDGET_CONFIG_PERIOD);
   const spend = items.find(item => item.period === period);
-  const spendUsd = Math.max(0, numeric(spend?.spend_usd));
+  const spendUsd = Math.max(
+    0,
+    budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
+  );
 
   if (!config) {
     return {
@@ -247,7 +302,7 @@ export async function loadPersonalBudgetStatus(
     };
   }
 
-  const monthlyLimitUsd = numeric(config.monthly_limit_usd);
+  const monthlyLimitUsd = budgetNumber(config.monthly_limit_usd, 'monthly_limit_usd', scopeKey);
   if (monthlyLimitUsd <= 0) {
     throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
   }
@@ -267,32 +322,66 @@ export async function loadPersonalBudgetStatus(
 }
 
 /**
- * Resolve all team memberships and enforce configured hard-stop budgets.
+ * Resolve relevant team memberships and enforce configured hard-stop budgets.
  *
  * When the budget table is not wired (unit tests or an older deployment),
  * admission is unchanged and only caller-supplied team IDs are returned.
+ * Headless callers query for an existing team config before calling Cognito,
+ * keeping the feature inert when operators have configured no team budgets.
  */
 export async function checkBudgetAdmission(
   userId: string,
   suppliedTeamIds?: readonly string[],
   now: Date = new Date(),
 ): Promise<BudgetAdmissionResult> {
-  const teamIds = suppliedTeamIds === undefined
-    ? (budgetTableName ? await resolveTeamIds(userId) : [])
-    : [...new Set(suppliedTeamIds)].sort();
-  const scopeKeys = [
-    userBudgetScopeKey(userId),
-    ...teamIds.map(teamBudgetScopeKey),
-  ];
-  if (scopeKeys.length > MAX_BUDGET_SCOPES_PER_TASK) {
-    throw new Error(
-      `User ${userId} belongs to ${teamIds.length} teams; budget rollup supports at most `
-      + `${MAX_BUDGET_SCOPES_PER_TASK - 1}.`,
-    );
+  const period = budgetPeriod(now);
+  const userScopeKey = userBudgetScopeKey(userId);
+  let teamIds: string[];
+  let states: BudgetState[];
+
+  if (suppliedTeamIds === undefined) {
+    const userStates = await loadBudgetStates([userScopeKey], period);
+    const userBlocked = userStates.find(state =>
+      state.hardStop && state.utilizationPercent >= BUDGET_EXCEEDED_PERCENT);
+    if (userBlocked) {
+      logger.warn('Monthly budget is at or above the warning threshold', {
+        scope_type: userBlocked.scopeType,
+        scope_id: userBlocked.scopeId,
+        period,
+        spend_usd: userBlocked.spendUsd,
+        monthly_limit_usd: userBlocked.monthlyLimitUsd,
+        utilization_percent: userBlocked.utilizationPercent,
+        hard_stop: userBlocked.hardStop,
+      });
+      return {
+        teamIds: [],
+        period,
+        blocked: {
+          scopeType: userBlocked.scopeType,
+          scopeId: userBlocked.scopeId,
+          spendUsd: userBlocked.spendUsd,
+          monthlyLimitUsd: userBlocked.monthlyLimitUsd,
+        },
+      };
+    }
+
+    teamIds = budgetTableName && await hasConfiguredTeamBudgets()
+      ? await resolveTeamIds(userId)
+      : [];
+    assertSupportedScopeCount(userId, teamIds);
+    states = [
+      ...userStates,
+      ...(await loadBudgetStates(teamIds.map(teamBudgetScopeKey), period)),
+    ];
+  } else {
+    teamIds = [...new Set(suppliedTeamIds)].sort();
+    assertSupportedScopeCount(userId, teamIds);
+    states = await loadBudgetStates([
+      userScopeKey,
+      ...teamIds.map(teamBudgetScopeKey),
+    ], period);
   }
 
-  const period = budgetPeriod(now);
-  const states = await loadBudgetStates(scopeKeys, period);
   for (const state of states) {
     if (state.utilizationPercent >= BUDGET_WARNING_PERCENT) {
       logger.warn('Monthly budget is at or above the warning threshold', {

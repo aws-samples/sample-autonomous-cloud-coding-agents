@@ -73,6 +73,7 @@ function rewriteDocsLinkTarget(target) {
     authentication: '/using/authentication',
     'repository-onboarding': '/customizing/repository-onboarding',
     'per-repo-overrides': '/customizing/per-repo-overrides',
+    'monthly-user-and-team-budgets': '/customizing/per-repo-overrides#monthly-user-and-team-budgets',
     workflows: '/using/workflows',
     'using-the-rest-api': '/using/using-the-rest-api',
     'using-the-cli': '/using/using-the-cli',

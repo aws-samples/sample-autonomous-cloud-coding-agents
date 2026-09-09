@@ -19,19 +19,26 @@
 
 import {
   BatchGetCommand,
+  type DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { makeDocClient } from './ua';
+import { documentClient } from './dynamo-clients';
 
-const CONFIG_PERIOD = 'CONFIG';
-const CONFIG_RECORD_TYPE = 'CONFIG';
-const CONFIG_INDEX_NAME = 'record_type-scope_key-index';
-const USER_PREFIX = 'USER#';
-const TEAM_PREFIX = 'TEAM#';
+export const BUDGET_CONFIG_PERIOD = 'CONFIG';
+export const BUDGET_CONFIG_RECORD_TYPE = 'CONFIG';
+export const BUDGET_CONFIG_INDEX_NAME = 'record_type-scope_key-index';
+export const BUDGET_USER_PREFIX = 'USER#';
+export const BUDGET_TEAM_PREFIX = 'TEAM#';
+export const BUDGET_TASK_PREFIX = 'TASK#';
+export const BUDGET_ROLLUP_PERIOD = 'ROLLUP';
+export const BUDGET_WARNING_PERCENT = 80;
+export const BUDGET_EXCEEDED_PERCENT = 100;
+export const BUDGET_WARNING_ALERT_MARKER = 'alerted_80_at';
+export const BUDGET_EXCEEDED_ALERT_MARKER = 'alerted_100_at';
 const BATCH_GET_LIMIT = 100;
-const ROLLUP_RETENTION_DAYS = 400;
+export const BUDGET_ROLLUP_RETENTION_DAYS = 400;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 
 export type BudgetScopeType = 'user' | 'team';
@@ -61,20 +68,32 @@ export function currentBudgetPeriod(date: Date = new Date()): string {
 }
 
 export function budgetScopeKey(scope: BudgetScope): string {
-  return `${scope.type === 'user' ? USER_PREFIX : TEAM_PREFIX}${scope.id}`;
+  return `${scope.type === 'user' ? BUDGET_USER_PREFIX : BUDGET_TEAM_PREFIX}${scope.id}`;
 }
 
-function numeric(value: unknown): number {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
+function budgetNumber(
+  value: unknown,
+  field: string,
+  scopeKey: string,
+  absentValue?: number,
+): number {
+  if (value === undefined || value === null) {
+    if (absentValue !== undefined) return absentValue;
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
   }
-  return 0;
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) {
+    throw new Error(`Budget row ${scopeKey} has invalid ${field}.`);
+  }
+  return numeric;
 }
 
 function ttlEpoch(now: Date): number {
-  return Math.floor(now.getTime() / 1000) + (ROLLUP_RETENTION_DAYS * SECONDS_PER_DAY);
+  return Math.floor(now.getTime() / 1000)
+    + (BUDGET_ROLLUP_RETENTION_DAYS * SECONDS_PER_DAY);
 }
 
 function toStatus(
@@ -82,11 +101,15 @@ function toStatus(
   spend: Record<string, unknown> | undefined,
   period: string,
 ): BudgetStatus {
-  const monthlyLimitUsd = numeric(config.monthly_limit_usd);
+  const scopeKey = String(config.scope_key);
+  const monthlyLimitUsd = budgetNumber(config.monthly_limit_usd, 'monthly_limit_usd', scopeKey);
   if (monthlyLimitUsd <= 0) {
-    throw new Error(`Budget config ${String(config.scope_key)} has invalid monthly_limit_usd.`);
+    throw new Error(`Budget config ${scopeKey} has invalid monthly_limit_usd.`);
   }
-  const spendUsd = Math.max(0, numeric(spend?.spend_usd));
+  const spendUsd = Math.max(
+    0,
+    budgetNumber(spend?.spend_usd, 'spend_usd', scopeKey, spend ? undefined : 0),
+  );
   const utilizationPercent = (spendUsd / monthlyLimitUsd) * 100;
   const hardStop = config.hard_stop === true;
   return {
@@ -98,7 +121,7 @@ function toStatus(
     remaining_usd: Math.max(0, monthlyLimitUsd - spendUsd),
     utilization_percent: utilizationPercent,
     hard_stop: hardStop,
-    hard_stop_active: hardStop && utilizationPercent >= 100,
+    hard_stop_active: hardStop && utilizationPercent >= BUDGET_EXCEEDED_PERCENT,
     updated_at: typeof config.updated_at === 'string' ? config.updated_at : null,
   };
 }
@@ -111,7 +134,7 @@ export async function setMonthlyBudget(
   hardStop: boolean,
   now: Date = new Date(),
 ): Promise<void> {
-  const ddb = makeDocClient({ region });
+  const ddb = documentClient(region);
   const scopeKey = budgetScopeKey(scope);
   const period = currentBudgetPeriod(now);
   const updatedAt = now.toISOString();
@@ -122,8 +145,8 @@ export async function setMonthlyBudget(
           TableName: tableName,
           Item: {
             scope_key: scopeKey,
-            period: CONFIG_PERIOD,
-            record_type: CONFIG_RECORD_TYPE,
+            period: BUDGET_CONFIG_PERIOD,
+            record_type: BUDGET_CONFIG_RECORD_TYPE,
             scope_type: scope.type,
             scope_id: scope.id,
             monthly_limit_usd: monthlyLimitUsd,
@@ -138,8 +161,8 @@ export async function setMonthlyBudget(
           Key: { scope_key: scopeKey, period },
           UpdateExpression:
             'SET scope_type = :scopeType, scope_id = :scopeId, updated_at = :updatedAt, #ttl = :ttl '
-            + 'REMOVE alerted_80_at, alerted_80_spend_usd, alerted_80_limit_usd, '
-            + 'alerted_100_at, alerted_100_spend_usd, alerted_100_limit_usd',
+            + `REMOVE ${BUDGET_WARNING_ALERT_MARKER}, alerted_80_spend_usd, alerted_80_limit_usd, `
+            + `${BUDGET_EXCEEDED_ALERT_MARKER}, alerted_100_spend_usd, alerted_100_limit_usd`,
           ExpressionAttributeNames: {
             '#ttl': 'ttl',
           },
@@ -156,17 +179,16 @@ export async function setMonthlyBudget(
 }
 
 async function loadConfigs(
-  region: string,
+  ddb: DynamoDBDocumentClient,
   tableName: string,
   scope?: BudgetScope,
 ): Promise<Record<string, unknown>[]> {
-  const ddb = makeDocClient({ region });
   if (scope) {
     const result = await ddb.send(new GetCommand({
       TableName: tableName,
       Key: {
         scope_key: budgetScopeKey(scope),
-        period: CONFIG_PERIOD,
+        period: BUDGET_CONFIG_PERIOD,
       },
       ConsistentRead: true,
     }));
@@ -178,9 +200,9 @@ async function loadConfigs(
   do {
     const result = await ddb.send(new QueryCommand({
       TableName: tableName,
-      IndexName: CONFIG_INDEX_NAME,
+      IndexName: BUDGET_CONFIG_INDEX_NAME,
       KeyConditionExpression: 'record_type = :config',
-      ExpressionAttributeValues: { ':config': CONFIG_RECORD_TYPE },
+      ExpressionAttributeValues: { ':config': BUDGET_CONFIG_RECORD_TYPE },
       ExclusiveStartKey: exclusiveStartKey,
     }));
     rows.push(...(result.Items ?? []));
@@ -190,12 +212,11 @@ async function loadConfigs(
 }
 
 async function batchGetSpend(
-  region: string,
+  ddb: DynamoDBDocumentClient,
   tableName: string,
   scopeKeys: readonly string[],
   period: string,
 ): Promise<Map<string, Record<string, unknown>>> {
-  const ddb = makeDocClient({ region });
   const rows = new Map<string, Record<string, unknown>>();
   for (let offset = 0; offset < scopeKeys.length; offset += BATCH_GET_LIMIT) {
     let pendingKeys = scopeKeys
@@ -229,10 +250,11 @@ export async function listBudgetStatus(
   scope?: BudgetScope,
   now: Date = new Date(),
 ): Promise<BudgetStatus[]> {
+  const ddb = documentClient(region);
   const period = currentBudgetPeriod(now);
-  const configs = await loadConfigs(region, tableName, scope);
+  const configs = await loadConfigs(ddb, tableName, scope);
   const spendByScope = await batchGetSpend(
-    region,
+    ddb,
     tableName,
     configs.map(config => String(config.scope_key)),
     period,
