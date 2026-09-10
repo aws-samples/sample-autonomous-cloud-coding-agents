@@ -118,7 +118,7 @@ The 80% and 100% crossings emit claimed, per-scope `ABCA/Budgets` CloudWatch met
 
 Authenticated users can inspect their personal scope with `bgagent budget status --me` (`GET /v1/tasks?view=budget`). The response includes estimated spend even when no personal limit is configured. It does not expose team scopes or permit mutation; administrators remain the only actors who set user/team limits.
 
-The controls add one on-demand DynamoDB table with PITR, two standard CloudWatch alarms, and up to two custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls).
+The controls add one on-demand DynamoDB table with PITR, three standard CloudWatch alarms, and up to three custom metric time series. Admission, terminal rollup, and user-status requests incur usage-based DynamoDB/API Gateway/Lambda/SNS charges; no dedicated continuously running compute is added. See the operator guide's [cost-control setup and cost breakdown](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution#setting-up-cost-controls).
 
 ## Additional guardrails
 

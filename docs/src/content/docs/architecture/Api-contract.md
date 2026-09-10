@@ -303,7 +303,7 @@ Returns the authenticated user's tasks, newest first. Paginated.
 | `repo` | String | all | Filter by repository (`owner/repo`) |
 | `limit` | Number | 20 | Page size (1-100) |
 | `next_token` | String | - | Pagination token from previous response |
-| `view` | String | tasks | `budget` returns the authenticated caller's personal monthly budget instead of a task page |
+| `view` | String | — | Omit for a task page; `budget` returns the authenticated caller's personal monthly budget instead |
 
 Returns a summary subset of fields. Use `GET /v1/tasks/{task_id}` for full details.
 

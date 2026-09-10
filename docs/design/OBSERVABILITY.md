@@ -124,6 +124,7 @@ All events carry `task_id` and `user_id` for filtering.
 | Task duration (p50, p95) | Latency | Performance baseline and regression detection |
 | Token usage per task | Cost | Cost attribution and budget enforcement |
 | `ABCA/Budgets:BudgetThresholdCrossed` | Cost | Claimed 80%/100% monthly user/team budget crossings; retries can rarely duplicate a metric |
+| `ABCA/Budgets:BudgetTeamMembershipUnresolved` | Correctness | Count of admissions where Cognito could not resolve a mapped user, so team-budget enforcement was skipped |
 | Cold start duration | Latency | Image optimization signal |
 | Active tasks (RUNNING count) | Capacity | Admission control and capacity planning |
 | Pending tasks (SUBMITTED count) | Capacity | Backlog depth and throughput monitoring |
@@ -160,6 +161,7 @@ The CloudWatch GenAI Observability console provides additional views: per-sessio
 | Guardrail screening failures | Sustained Bedrock Guardrail API failures | Tasks fail at submission (503) and hydration (FAILED). Recovers when Bedrock recovers. |
 | Monthly budget warning | Estimated spend crosses 80% | Notify the shared `OperationalAlerts` SNS topic; inspect `OrchestrationReconciler` logs for scope details. |
 | Monthly budget exceeded | Estimated spend crosses 100% | Notify the shared topic. Scopes configured with hard stop reject new tasks. |
+| Budget team membership unresolved | Cognito cannot resolve a mapped task owner | Inspect create-task logs for `budget_team_membership_user_missing`, then repair the stale mapping or federated identity configuration. User-budget enforcement remains active, but team-budget enforcement was skipped. |
 
 ## Code attribution
 
