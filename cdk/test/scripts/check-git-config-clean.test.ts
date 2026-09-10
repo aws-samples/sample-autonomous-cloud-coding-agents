@@ -48,9 +48,40 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+// js-yaml 4's `load` uses the core schema — no custom types are constructed — so it is
+// the safe reader here, unlike the v3 API of the same name.
+import * as yaml from 'js-yaml';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts/check-git-config-clean.mjs');
+
+/**
+ * The gate's exit contract, read out of the gate rather than re-typed here.
+ *
+ * Parsed instead of `import`ed on purpose: the script is ESM and this suite is compiled
+ * to CJS, and — more importantly — importing it would EXECUTE it against whatever
+ * repository jest happens to be running in. Parsing keeps one definition without that.
+ *
+ * A missing or renamed export throws here, so the coupling is real: the contract cannot
+ * be changed on one side only. The numeric values are pinned once, immediately below,
+ * so a silently *edited* value is caught too — a test that only mirrored the source
+ * would follow it anywhere.
+ */
+function exitCode(name: string): number {
+  const source = fs.readFileSync(SCRIPT, 'utf-8');
+  const match = new RegExp(String.raw`export const ${name} = (\d+);`).exec(source);
+  if (!match) {
+    throw new Error(
+      `scripts/check-git-config-clean.mjs no longer exports \`${name}\`. `
+        + 'The exit contract is asserted against these symbols — update both sides.',
+    );
+  }
+  return Number(match[1]);
+}
+
+const EXIT_CLEAN = exitCode('EXIT_CLEAN');
+const EXIT_PROBLEMS_FOUND = exitCode('EXIT_PROBLEMS_FOUND');
+const EXIT_COULD_NOT_CHECK = exitCode('EXIT_COULD_NOT_CHECK');
 
 /**
  * The shared config of the checkout this suite is running in.
@@ -187,11 +218,23 @@ describe('check-git-config-clean', () => {
     fs.rmSync(scratch, { recursive: true, force: true });
   });
 
+  test('the exit contract is 0 clean / 1 problems / 2 could-not-check', () => {
+    // Pinned once, here, and referenced by name everywhere else. Without this line the
+    // suite would only assert that it agrees with whatever the script currently says —
+    // `exitCode()` reads the values out of the source, so an edit to `EXIT_CLEAN = 3`
+    // would move both sides together and every other assertion would stay green.
+    //
+    // The numbers themselves are the interface: 1 vs 2 is what lets a caller tell "your
+    // config is corrupt" from "I could not look", and prek treats every non-zero the
+    // same, so nothing downstream would notice them being swapped.
+    expect([EXIT_CLEAN, EXIT_PROBLEMS_FOUND, EXIT_COULD_NOT_CHECK]).toEqual([0, 1, 2]);
+  });
+
   describe('the clean cases', () => {
     test('a fresh repository passes, and says what it checked', () => {
       const result = runGate(freshRepo('clean'));
 
-      expect(result.status).toBe(0);
+      expect(result.status).toBe(EXIT_CLEAN);
       // The rule list is the anti-vacuity assertion: a gate that inspected NOTHING
       // would also exit 0. Naming them means a dropped rule shows up here.
       expect(result.stdout).toContain('core.worktree');
@@ -208,7 +251,7 @@ describe('check-git-config-clean', () => {
       const result = runGate(REPO_ROOT);
 
       expect(result.stderr).toBe('');
-      expect(result.status).toBe(0);
+      expect(result.status).toBe(EXIT_CLEAN);
     });
 
     test('a real per-repo identity is NOT flagged', () => {
@@ -220,14 +263,14 @@ describe('check-git-config-clean', () => {
       git(repo, ['config', '--local', 'user.name', 'Ada Lovelace']);
       git(repo, ['config', '--local', 'user.email', 'ada@example-corp.dev']);
 
-      expect(runGate(repo).status).toBe(0);
+      expect(runGate(repo).status).toBe(EXIT_CLEAN);
     });
 
     test('a GitHub noreply address is NOT flagged', () => {
       const repo = freshRepo('noreply');
       git(repo, ['config', '--local', 'user.email', '1234+ada@users.noreply.github.com']);
 
-      expect(runGate(repo).status).toBe(0);
+      expect(runGate(repo).status).toBe(EXIT_CLEAN);
     });
 
     test('core.bare = false is NOT flagged', () => {
@@ -235,7 +278,7 @@ describe('check-git-config-clean', () => {
       const repo = freshRepo('bare-false');
       git(repo, ['config', '--local', 'core.bare', 'false']);
 
-      expect(runGate(repo).status).toBe(0);
+      expect(runGate(repo).status).toBe(EXIT_CLEAN);
     });
   });
 
@@ -248,7 +291,7 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(repo);
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain('core.worktree');
       // The remedy must be runnable as printed, not a description of one.
       expect(result.stderr).toContain(
@@ -264,12 +307,31 @@ describe('check-git-config-clean', () => {
       // through git could only report "could not check" on the most common real
       // shape of this corruption. Written with fs.appendFileSync because git itself
       // refuses to set the second key once the first has broken the repo.
+      //
+      // TWO missing components (`gone/deleted-tmp-path`), and that is the whole test.
+      // Measured on git 2.50.1, a single missing LEAF under an existing directory is an
+      // rc-0 shape: rev-parse answers fine, so a version of this test using one would
+      // assert the outcome without ever constructing the state, and would pass just as
+      // happily against the git-based resolution this design rejected.
       const repo = freshRepo('worktree-missing');
-      appendConfig(repo, 'core', [`worktree = ${path.join(scratch, 'deleted-tmp-path')}`]);
+      const missing = path.join(scratch, 'gone', 'deleted-tmp-path');
+      appendConfig(repo, 'core', [`worktree = ${missing}`]);
+      expect(fs.existsSync(path.dirname(missing))).toBe(false); // the shape, asserted
+
+      // The premise, measured rather than assumed: the rejected resolution really is
+      // unusable here. If a future git makes this succeed, this line fails and whoever
+      // sees it can re-evaluate the filesystem walk instead of inheriting a comment.
+      for (const form of [['--show-toplevel'], ['--path-format=absolute', '--git-common-dir']]) {
+        const probe = spawnSync('git', ['-C', repo, 'rev-parse', ...form], {
+          encoding: 'utf8',
+          env: isolatedGitEnv(repo),
+        });
+        expect(probe.status).not.toBe(0);
+      }
 
       const result = runGate(repo);
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain('core.worktree');
       expect(result.stderr).toContain('deleted-tmp-path');
     });
@@ -288,7 +350,7 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(linked);
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain(path.join(repo, '.git', 'config'));
       expect(result.stderr).toContain('user.name');
     });
@@ -301,18 +363,67 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(repo);
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain('core.bare');
       expect(result.stderr).toContain('--unset-all core.bare');
+    });
+
+    test('a GENUINE bare repository is not flagged, and the skip is declared', () => {
+      // The other half of the rule, and the reason it is gated: `core.bare = true` is
+      // corruption in a checkout and the correct, documented state of a bare repository.
+      // An ungated rule would report the *normal* config of a bare repo as the #855 leak
+      // and print a remedy — `--unset-all core.bare` — that BREAKS it.
+      //
+      // Reached the way it is reachable in practice: via an inherited `GIT_DIR`. The
+      // filesystem walk cannot arrive at a bare repo on its own (there is no `.git` to
+      // find), so an env-provided gitdir is the whole exposure.
+      //
+      // The second assertion is what stops the fix from being a silent skip. `OK — 4
+      // rule(s)` is the anti-vacuity signal, so a rule that did not run has to say so in
+      // the count rather than quietly leaving it looking like a full pass.
+      const bare = path.join(scratch, 'genuine.git');
+      git(scratch, ['init', '--bare', '-q', bare]);
+      expect(
+        fs.readFileSync(path.join(bare, 'config'), 'utf-8'),
+      ).toMatch(/bare\s*=\s*true/); // the premise: git itself wrote this
+      const unrelated = path.join(scratch, 'bare-cwd');
+      fs.mkdirSync(unrelated, { recursive: true });
+
+      const result = runGate(unrelated, { GIT_DIR: bare });
+
+      expect(result.status).toBe(EXIT_CLEAN);
+      expect(result.stdout).toContain('core.bare (n/a: no working tree found)');
     });
   });
 
   describe('fixture identities — the #720 sighting', () => {
+    // Every branch of `isFixtureIdentity` and every entry of `RESERVED_EMAIL_SUFFIXES`,
+    // rather than a sample. The earlier table hit 2 of the 7 suffixes and one of the 5
+    // fixture names, so five suffixes and four names were assertion-free: deleting any of
+    // them left the suite green while the gate stopped recognising a shape it names in its
+    // own header. Rule 3 is the only rule matching against a LIST, so it is the only one
+    // where per-entry coverage is a distinct question from per-rule coverage.
     test.each([
+      // --- FIXTURE_NAMES (all five) ---
       ['user.name = t', 'user', ['name = t']],
-      ['user.email = t@t (no dot in the domain)', 'user', ['email = t@t']],
+      ['user.name = test', 'user', ['name = test']],
+      // The identity this repo's own fixtures set. Matched case-insensitively — the
+      // script lowercases before the lookup, and `agent/tests/git_env.py` spells it
+      // `ABCA Test`, so a case-sensitive comparison would miss the very value the
+      // fixtures write. `TestCrossCopyParity` holds the two spellings together.
+      ['user.name = ABCA Test (this repo\'s own fixture identity)', 'user', ['name = ABCA Test']],
+      ['user.name = Test User', 'user', ['name = Test User']],
+      ['user.name = Your Name (a copy-pasted placeholder)', 'user', ['name = Your Name']],
+      // --- RESERVED_EMAIL_SUFFIXES (all seven) ---
       ['a reserved .invalid domain', 'user', ['email = abca-test@example.invalid']],
+      ['a reserved .test domain', 'user', ['email = ada@corp.test']],
+      ['a reserved .example domain', 'user', ['email = ada@corp.example']],
+      ['a reserved .localhost domain', 'user', ['email = ada@build.localhost']],
       ['example.com', 'user', ['email = someone@example.com']],
+      ['example.net', 'user', ['email = someone@example.net']],
+      ['example.org', 'user', ['email = someone@example.org']],
+      // --- the two structural branches ---
+      ['user.email = t@t (no dot in the domain)', 'user', ['email = t@t']],
       ['an empty value', 'user', ['name = ']],
     ])('%s is rejected', (_label, section, lines) => {
       const repo = freshRepo(`identity-${_label.replace(/[^a-z0-9]+/gi, '-')}`);
@@ -320,7 +431,7 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(repo);
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain('--remove-section user');
     });
 
@@ -329,6 +440,42 @@ describe('check-git-config-clean', () => {
       appendConfig(repo, 'user', ['email = t@t']);
 
       expect(runGate(repo).stderr).toContain('user.email = t@t');
+    });
+  });
+
+  describe('several problems at once — the real shape of the leak', () => {
+    test('every problem is reported, including a repeated key', () => {
+      // Until this test, every failing case produced exactly ONE problem, which left two
+      // code paths unexecuted by the suite: the inner `for (const value of ...)` loop
+      // (only ever one value, so an implementation that read just the first would have
+      // passed) and the `Found N problem(s)` summary (only ever `1`, so an off-by-one or a
+      // hardcoded count would have passed).
+      //
+      // The repeated `email` line is not contrived. `[user]` sections appended by
+      // successive fixture runs stack up rather than replace — which is exactly how #720
+      // was found, and why the gate reads `--get-all` instead of `--get`. Written with
+      // appendFileSync because `git config --local` would overwrite the first value.
+      const repo = freshRepo('multi-problem');
+      const elsewhere = path.join(scratch, 'multi-elsewhere');
+      fs.mkdirSync(elsewhere, { recursive: true });
+      git(repo, ['config', '--local', 'core.worktree', elsewhere]);
+      appendConfig(repo, 'user', ['name = t', 'email = t@t']);
+      appendConfig(repo, 'user', ['email = someone@example.com']);
+
+      const result = runGate(repo);
+
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
+      // Exact, not `toBeGreaterThan`: the count is the assertion. core.worktree + user.name
+      // + BOTH user.email values.
+      expect(result.stderr).toContain('Found 4 problem(s)');
+      for (const expected of [
+        `core.worktree = ${elsewhere}`,
+        'user.name = t',
+        'user.email = t@t',
+        'user.email = someone@example.com',
+      ]) {
+        expect(result.stderr).toContain(expected);
+      }
     });
   });
 
@@ -345,7 +492,7 @@ describe('check-git-config-clean', () => {
 
       const result = runGate('/');
 
-      expect(result.status).toBe(2);
+      expect(result.status).toBe(EXIT_COULD_NOT_CHECK);
       expect(result.stderr).toContain('no `.git` found');
     });
 
@@ -355,7 +502,7 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(repo);
 
-      expect(result.status).toBe(2);
+      expect(result.status).toBe(EXIT_COULD_NOT_CHECK);
       expect(result.stderr).toContain('does not exist');
     });
 
@@ -386,7 +533,7 @@ describe('check-git-config-clean', () => {
       try {
         const result = runGate(repo);
 
-        expect(result.status).toBe(2);
+        expect(result.status).toBe(EXIT_COULD_NOT_CHECK);
         expect(result.stderr).toContain('cannot read');
         expect(result.stderr).toContain(configPath);
         // The specific regression: no all-clear may be printed about an unread file.
@@ -410,8 +557,56 @@ describe('check-git-config-clean', () => {
 
       const result = runGate(unrelated, { GIT_DIR: path.join(repo, '.git') });
 
-      expect(result.status).toBe(1);
+      expect(result.status).toBe(EXIT_PROBLEMS_FOUND);
       expect(result.stderr).toContain(path.join(repo, '.git', 'config'));
+    });
+  });
+
+  describe('Layer 3 is actually wired up', () => {
+    // The same defect class as an ungated rule: every test above proves the SCRIPT
+    // behaves, and none of them proves anything ever RUNS it. Delete the
+    // `.pre-commit-config.yaml` stanza and Layer 3 is gone with the whole suite still
+    // green — the gate becomes a file nobody invokes. These two tests are the only place
+    // the wiring is asserted, so they are load-bearing rather than tidy.
+
+    test('the hook is registered at BOTH stages and calls the mise task', () => {
+      // Parsed, not grepped: `stages: [pre-commit, pre-push]` appearing anywhere in a
+      // 150-line file with fourteen hooks says nothing about which hook carries it —
+      // every other local hook here declares stages too.
+      const config = yaml.load(
+        fs.readFileSync(path.join(REPO_ROOT, '.pre-commit-config.yaml'), 'utf-8'),
+      ) as {
+        repos: { repo: string; hooks: { id: string; entry?: string; stages?: string[] }[] }[];
+      };
+      const hook = config.repos
+        .flatMap((r) => r.hooks)
+        .find((h) => h.id === 'git-config-clean');
+
+      expect(hook).toBeDefined();
+      expect(hook!.entry).toContain('mise run check:git-config-clean');
+      // Both, and the pre-push half is the one that matters most: while the config is
+      // corrupted `git status` and `git revert` describe a different directory, so a
+      // developer can push a branch they believe they reverted.
+      expect(hook!.stages).toEqual(['pre-commit', 'pre-push']);
+      // `bash -c`, never `-lc`. A login shell sources the profile before the command, and
+      // this is the one hook with no `cd "$(git rev-parse --show-toplevel)"` prologue to
+      // undo a profile `cd` — so a relocated cwd would break both the `mise.toml` lookup
+      // and the script's own `.git` walk. See the comment above the stanza.
+      expect(hook!.entry).not.toContain('-lc');
+    });
+
+    test('the mise task the hook names exists and points at this script', () => {
+      // The indirection the hook relies on: `mise run check:git-config-clean` is a name,
+      // and nothing else checks that the name resolves. Scoped to the stanza rather than
+      // matched against the whole file, so a task of some other name running the same
+      // script would not satisfy it.
+      const miseToml = fs.readFileSync(path.join(REPO_ROOT, 'mise.toml'), 'utf-8');
+      const stanza = /^\[tasks\."check:git-config-clean"\]$([\s\S]*?)(?=^\[|\Z)/m.exec(miseToml);
+
+      expect(stanza).not.toBeNull();
+      const scriptRelative = path.relative(REPO_ROOT, SCRIPT);
+      expect(stanza![1]).toContain(`run = "node ${scriptRelative}"`);
+      expect(fs.existsSync(SCRIPT)).toBe(true);
     });
   });
 

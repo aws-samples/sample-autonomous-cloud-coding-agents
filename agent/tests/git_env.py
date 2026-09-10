@@ -12,12 +12,30 @@ The mechanism, because it is not obvious from any single call site:
 An explicit ``GIT_DIR`` overrides repository **discovery** outright. That beats
 ``git -C <path>``, ``cwd=``, ``HOME=``, ``--local``, and the ``GIT_CONFIG_*`` pins
 *simultaneously* — ``--local`` in particular resolves relative to ``GIT_DIR``, so it
-is no defence. Git exports ``GIT_DIR``/``GIT_COMMON_DIR`` to hooks **only in a linked
-worktree** (they are unset in a normal checkout), which is exactly how this suite runs
-as a pre-push gate from ``.worktrees/``. Under that environment
-``git -C <tmp> config user.email t@t`` writes into the *real* shared ``.git/config``
-and ``git -C <tmp> init`` re-inits the *real* repository instead of creating one in
-``<tmp>``.
+is no defence. Under that environment ``git -C <tmp> config user.email t@t`` writes
+into the *real* shared ``.git/config`` and ``git -C <tmp> init`` re-inits the *real*
+repository instead of creating one in ``<tmp>``.
+
+``GIT_DIR`` specifically is what a linked worktree adds. Measured on git 2.50.1 by
+dumping the hook environment from a ``pre-commit`` hook in both shapes — and this table
+replaces a broader claim that was simply wrong, which matters because it was the stated
+reason for stripping three vars rather than one:
+
+====================  ===========  =================  ==================  ==============
+shape                 ``GIT_DIR``  ``GIT_COMMON_DIR`` ``GIT_INDEX_FILE``  ``GIT_PREFIX``
+====================  ===========  =================  ==================  ==============
+plain/main checkout   absent       absent             present             present
+linked worktree       **present**  absent             present             present
+====================  ===========  =================  ==================  ==============
+
+So ``GIT_DIR`` is the sole differentiator, ``GIT_COMMON_DIR`` is exported in *neither*
+shape, and ``GIT_INDEX_FILE``/``GIT_PREFIX`` are exported in *both* — "unset in a normal
+checkout" was true only of ``GIT_DIR``. Stripping all seven is still correct: any of
+them, however it arrives (a wrapper script, a developer's shell, an outer hook), bypasses
+the pins. The list is justified by what the vars *do*, not by a claim about who sets them.
+
+This is also why the bug reads as unreproducible: run the same tests by hand from the
+main checkout and nothing leaks, because ``GIT_DIR`` is not there to be inherited.
 
 That is why the bug reads as unreproducible: run the same tests by hand from the main
 checkout and nothing leaks.

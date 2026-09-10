@@ -323,8 +323,11 @@ def _isolate_git_location(monkeypatch, tmp_path):
     1. **Strip the repo-LOCATION vars.** While any of them is set, ``git -C <tmp>``,
        ``cwd=``, ``--local`` and the ``GIT_CONFIG_*`` pins are all bypassed, because
        an explicit ``GIT_DIR`` overrides repository discovery outright. Git exports
-       these to hooks in a linked worktree, which is exactly how this suite runs as a
-       pre-push gate from ``.worktrees/``.
+       ``GIT_DIR`` to a hook in a linked worktree — which is exactly how this suite runs
+       as a pre-push gate from ``.worktrees/`` — and that one var is enough. The other
+       six are stripped for what they *do*, not because git sets them; see the measured
+       hook-environment table in ``tests/git_env.py``, which corrects an earlier claim
+       here that git exported the whole set.
 
     2. **Pin config resolution and identity.** So that a fixture which shells out to
        git *without* using ``isolated_git_env`` still cannot reach the developer's

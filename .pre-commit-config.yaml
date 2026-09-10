@@ -42,9 +42,20 @@ repos:
       # self-announcing rather than silent. The shape this gate actually catches is
       # `core.worktree` pointing at a directory that EXISTS (a sibling worktree), where
       # git answers normally and nothing else complains. See #855.
+      #
+      # `bash -c`, NOT `-lc` like the hooks below, and that is not a style choice. A
+      # login shell sources the user's profile BEFORE running the command, so a `cd` in
+      # a profile relocates cwd — and unlike every other hook here, this one has no
+      # `cd "$(git rev-parse --show-toplevel)"` prologue to put it back, so both the
+      # `mise.toml` lookup and the script's `.git` walk would start from the wrong
+      # place. The hooks below are immune because they re-cd; this one is immune only by
+      # not sourcing the profile. Tradeoff accepted knowingly: `-l` is what puts `mise`
+      # on PATH for a git client that does not source the profile itself, so if this
+      # hook ever reports `mise: command not found` from a GUI client, the fix is an
+      # absolute path to mise — not restoring `-l`.
       - id: git-config-clean
         name: shared .git/config uncorrupted (#855)
-        entry: bash -lc 'mise run check:git-config-clean'
+        entry: bash -c 'mise run check:git-config-clean'
         language: system
         pass_filenames: false
         always_run: true

@@ -83,8 +83,10 @@ def shared_repo(tmp_path):
     """A real repo with a real-looking identity, plus a linked worktree.
 
     Stands in for the developer's checkout. The linked worktree matters because that is
-    the only configuration in which git exports ``GIT_DIR``/``GIT_COMMON_DIR`` to a
-    hook — which is why this leak never reproduces from a normal checkout.
+    the only configuration in which git exports ``GIT_DIR`` to a hook — measured, and the
+    reason this leak never reproduces from a normal checkout. ``GIT_COMMON_DIR`` is
+    exported in *neither* shape despite an earlier claim here; the table is in
+    ``tests/git_env.py``.
     """
     repo = tmp_path / "shared"
     repo.mkdir()
@@ -400,6 +402,76 @@ class TestCrossCopyParity:
             f"{mirror} neither strips nor sets GIT_CEILING_DIRECTORIES, so its discovery "
             "walk is unfenced — see git_env._ceiling_directories for the measured escape."
         )
+
+    def test_the_gate_recognises_the_identity_these_fixtures_write(self):
+        """Layer 1's identity must be in Layer 3's vocabulary.
+
+        A THIRD encoding of ``TEST_IDENTITY_NAME`` lives in the gate, lowercased, inside
+        ``FIXTURE_NAMES`` — and a fourth relationship holds for the email, whose domain
+        suffix has to appear in ``RESERVED_EMAIL_SUFFIXES``. Neither is a copy the gate can
+        derive, because the gate deliberately has no import from ``agent/``.
+
+        The failure this prevents is quiet and asymmetric: rename the constant here to
+        something the gate does not list, and the fixtures keep writing an identity that
+        the pre-push gate no longer recognises as a leak. Every test in both suites stays
+        green — Layer 1 still isolates, Layer 3 still runs — while the exact value the
+        layers were built around walks straight through the last one.
+        """
+        gate = Path(__file__).resolve().parents[2] / "scripts" / "check-git-config-clean.mjs"
+        if not gate.is_file():
+            pytest.skip(f"{gate} not present in this tree")
+        text = gate.read_text(encoding="utf-8")
+
+        names_block = re.search(r"FIXTURE_NAMES\s*=\s*new Set\(\[(.*?)\]\)", text, re.DOTALL)
+        assert names_block is not None, f"no FIXTURE_NAMES set found in {gate}"
+        fixture_names = set(re.findall(r"'([^']*)'", names_block.group(1)))
+        # Lowercased on both sides: the gate lowercases the config value before the lookup,
+        # so `ABCA Test` is meant to match the entry `abca test`.
+        assert TEST_IDENTITY_NAME.lower() in fixture_names, (
+            f"{gate} FIXTURE_NAMES does not contain {TEST_IDENTITY_NAME.lower()!r}, so the "
+            f"gate would not flag the name these fixtures set ({TEST_IDENTITY_NAME!r}). "
+            "Add it there or change it here — the two must agree."
+        )
+
+        suffix_block = re.search(r"RESERVED_EMAIL_SUFFIXES\s*=\s*\[(.*?)\]", text, re.DOTALL)
+        assert suffix_block is not None, f"no RESERVED_EMAIL_SUFFIXES array found in {gate}"
+        suffixes = re.findall(r"'([^']*)'", suffix_block.group(1))
+        assert any(TEST_IDENTITY_EMAIL.lower().endswith(s) for s in suffixes), (
+            f"{gate} RESERVED_EMAIL_SUFFIXES matches nothing in {TEST_IDENTITY_EMAIL!r}, so "
+            "the gate would not flag the address these fixtures set. Note the gate has a "
+            "structural fallback (a domain with no dot), but relying on it here would make "
+            "the guarantee accidental — `abca-test@example.invalid` has a dot."
+        )
+
+    def test_the_ts_suite_sets_up_git_with_the_same_identity(self):
+        """The gate's own suite hardcodes the identity, because it cannot import Python.
+
+        Not pedantry about duplication: that suite runs ``git init``/``commit`` while jest
+        may itself be running under the pre-push hook. If its hardcoded identity drifts from
+        this one, a stray commit made during a failed setup carries a value the gate does
+        not recognise — the one shape #720 was filed for.
+        """
+        suite = (
+            Path(__file__).resolve().parents[2]
+            / "cdk"
+            / "test"
+            / "scripts"
+            / "check-git-config-clean.test.ts"
+        )
+        if not suite.is_file():
+            pytest.skip(f"{suite} not present in this tree")
+        text = suite.read_text(encoding="utf-8")
+
+        for var, expected in (
+            ("GIT_AUTHOR_NAME", TEST_IDENTITY_NAME),
+            ("GIT_COMMITTER_NAME", TEST_IDENTITY_NAME),
+            ("GIT_AUTHOR_EMAIL", TEST_IDENTITY_EMAIL),
+            ("GIT_COMMITTER_EMAIL", TEST_IDENTITY_EMAIL),
+        ):
+            assert f"{var}: '{expected}'" in text, (
+                f"{suite} does not set {var} to {expected!r} (the value in "
+                "agent/tests/git_env.py). The two copies must match."
+            )
 
 
 class TestSharedConfigResolution:
