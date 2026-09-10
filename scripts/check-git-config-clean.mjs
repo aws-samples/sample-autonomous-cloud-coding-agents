@@ -56,13 +56,33 @@
  * actually leaves behind), rev-parse aborts with `fatal: Invalid path`, so a check
  * built on it can only report "could not check" and never name the cause. Walking
  * the filesystem for `.git` is deterministic and reads no config, so it answers
- * correctly on a repository too broken for git to describe. The
- * `.pre-commit-config.yaml` entry for this hook is likewise the only one in the file
- * that does NOT `cd "$(git rev-parse --show-toplevel)"`.
+ * correctly on a repository too broken for git to describe.
+ *
+ * WHAT THE HOOK RUNNER DOES, MEASURED (prek 0.4.8, git 2.50.1) — because the reach of
+ * this gate depends on it and the first version of this comment guessed wrong:
+ *
+ *   - prek chdirs a hook to the repository root ITSELF, derived from its own
+ *     `git rev-parse --show-toplevel`. So omitting the `cd "$(git rev-parse
+ *     --show-toplevel)"` prologue that every other hook in `.pre-commit-config.yaml`
+ *     carries buys this hook nothing — it is already standing where that prologue
+ *     would have put it. The prologue is omitted anyway (one less dependency on a git
+ *     command that can lie), but it is NOT what protects the check. What protects the
+ *     check is resolution-by-filesystem plus reading through `--file` from cwd `/`.
+ *   - When `core.worktree` names a path with two or more missing components, prek
+ *     ABORTS at startup on that same rc-128 rev-parse, before invoking any hook. The
+ *     gate therefore cannot be what catches that shape — but nothing slips through
+ *     either, because plain `git commit` fails identically. That shape is
+ *     self-announcing; every git command in the tree refuses.
+ *   - When `core.worktree` names a path that EXISTS — the shape actually seen in
+ *     #622/#720/#855, pointing at a sibling worktree — git answers normally, prek runs,
+ *     and this gate fires with the right config and the right diagnosis. That is the
+ *     silent-and-dangerous case, and it is the one covered.
  *
  * Reads are delegated to `git config --file <path>` so the parse is git's own, and
  * because `--file` involves no repository discovery — the one git operation this
- * corruption cannot reach.
+ * corruption cannot reach. Readability is proved with a direct `readFileSync` first,
+ * because `--get-all` reports an unreadable file and an absent key with the same
+ * exit status (see `configValues`).
  *
  * Exit codes: 0 clean · 1 corruption found (with remedy) · 2 could not check.
  * Case 2 is a failure, not a pass: an unreadable config or a git that cannot answer
@@ -209,14 +229,32 @@ function sharedConfigPath() {
         + 'this repository is in an unexpected state — check it by hand.',
     );
   }
+
+  // Prove the file is READABLE before any rule is allowed to report on it. Without
+  // this the gate has a false pass: `git config --file <unreadable> --get-all <key>`
+  // exits **1** with only a stderr *warning*, which is byte-identical to git's
+  // "key not present", so every rule would come back empty and the summary would print
+  // `OK — 4 rule(s) clean` about a file it never opened. Reproduced with `chmod 000`.
+  // Exit 2 is the documented verdict for that state (see the header), not exit 0.
+  try {
+    readFileSync(config);
+  } catch (err) {
+    bail(`cannot read ${config} (${err.message}). Refusing to report on a config that `
+      + 'could not be opened — an unreadable config is exactly the state in which a '
+      + 'leak would go unnoticed.');
+  }
   return config;
 }
 
 /** All values of `key` in `configPath` (empty array when unset). */
 function configValues(configPath, key) {
   const result = gitConfigRead(['config', '--file', configPath, '--get-all', key]);
-  // rc 1 is git's "key not present" — the normal, clean case.
-  if (result.status === 1) return [];
+  // rc 1 is git's "key not present" — the normal, clean case — but ONLY when git had
+  // nothing to complain about. git also exits 1 when it could not access the file at
+  // all, emitting `warning: unable to access ...` and no fatal. `sharedConfigPath`
+  // already proved readability, so this is the belt to that braces: a non-empty stderr
+  // on an rc 1 means the read did not happen and "no values" is not a finding.
+  if (result.status === 1 && result.stderr.trim() === '') return [];
   if (result.status !== 0) {
     bail(
       `cannot read ${key} from ${configPath} `

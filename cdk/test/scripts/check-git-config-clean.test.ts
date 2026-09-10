@@ -70,7 +70,16 @@ function realSharedConfigPath(): string {
   return path.join(commonDir, 'config');
 }
 
-/** Repo-location vars — mirrors `GIT_LOCATION_VARS` in `agent/tests/git_env.py`. */
+/**
+ * Repo-location vars — mirrors `GIT_LOCATION_VARS` in `agent/tests/git_env.py`, and
+ * `agent/tests/test_git_fixture_isolation.py` asserts the two lists (plus the copy in
+ * the script itself) stay identical.
+ *
+ * Every entry REDIRECTS git to a repository of the environment's choosing, so removal
+ * is the right treatment for all of them. `GIT_CEILING_DIRECTORIES` is deliberately NOT
+ * here: it does the opposite, LIMITING the discovery walk, so deleting it widens what
+ * git can reach. It is pinned below instead.
+ */
 const GIT_LOCATION_VARS = [
   'GIT_DIR',
   'GIT_COMMON_DIR',
@@ -79,7 +88,6 @@ const GIT_LOCATION_VARS = [
   'GIT_OBJECT_DIRECTORY',
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_PREFIX',
-  'GIT_CEILING_DIRECTORIES',
 ];
 
 /** An environment in which git cannot reach outside `repo`. */
@@ -91,6 +99,10 @@ function isolatedGitEnv(repo: string): NodeJS.ProcessEnv {
     ...env,
     HOME: repo,
     XDG_CONFIG_HOME: repo,
+    // The route stripping does NOT close: a git command aimed at a directory that turns
+    // out not to be a repository walks UP, and TMPDIR sits inside a checkout on some dev
+    // machines. The PARENT, not `repo` itself, so `repo` stays discoverable.
+    GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(repo)),
     GIT_CONFIG_GLOBAL: path.join(repo, '.gitconfig-test'),
     GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
@@ -346,6 +358,44 @@ describe('check-git-config-clean', () => {
       expect(result.status).toBe(2);
       expect(result.stderr).toContain('does not exist');
     });
+
+    // Root bypasses file permissions, so `chmod 000` is still readable there and the
+    // scenario cannot be constructed. Skipped rather than faked: a test that asserted
+    // this via a mock would pass whether or not the real gate handles it.
+    const testUnlessRoot = process.getuid?.() === 0 ? test.skip : test;
+
+    testUnlessRoot('an UNREADABLE .git/config exits 2 rather than reporting clean', () => {
+      // The false pass this file exists to prevent, and one the gate really had:
+      // `git config --file <unreadable> --get-all <key>` exits **1** with only a stderr
+      // *warning* — byte-identical to git's "key not present" — so every rule came back
+      // empty, no rule fired, and the gate printed `OK — 4 rule(s) ... clean` and exited
+      // 0 about a file it had never opened. Worse than a missed detection: it is an
+      // affirmative all-clear on an unexamined config.
+      //
+      // Asserts the CONTRACT (exit 2, no all-clear), not which internal check fired, and
+      // that wording is deliberate: mutation-tested, the gate turns out to have two
+      // independent stops for this input — the up-front `readFileSync` proof and
+      // `configValues` refusing to read rc 1 as "absent" while stderr is non-empty.
+      // Deleting either one alone still leaves this test green; deleting both returns
+      // exit 0 with `OK — 4 rule(s)`, which is what it was measured against.
+      const repo = freshRepo('unreadable-config');
+      const configPath = path.join(repo, '.git', 'config');
+      appendConfig(repo, 'user', ['email = t@t']); // corruption that MUST NOT be missed
+      fs.chmodSync(configPath, 0o000);
+
+      try {
+        const result = runGate(repo);
+
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain('cannot read');
+        expect(result.stderr).toContain(configPath);
+        // The specific regression: no all-clear may be printed about an unread file.
+        expect(result.stdout).not.toContain('OK —');
+      } finally {
+        // Restored so the scratch teardown is not fighting permissions.
+        fs.chmodSync(configPath, 0o600);
+      }
+    });
   });
 
   describe('an inherited GIT_DIR — the hook environment', () => {
@@ -370,14 +420,37 @@ describe('check-git-config-clean', () => {
       // Asserted because the isolation is what stops these tests from re-creating
       // the bug while setting up: with a GIT_DIR inherited from the pre-push hook,
       // `git init <tmp>` re-inits the real repository.
-      const env = isolatedGitEnv('/somewhere');
+      const env = isolatedGitEnv('/somewhere/repo');
 
       for (const key of GIT_LOCATION_VARS) {
         expect(env[key]).toBeUndefined();
       }
-      expect(env.HOME).toBe('/somewhere');
-      expect(env.GIT_CONFIG_GLOBAL).toBe('/somewhere/.gitconfig-test');
+      expect(env.HOME).toBe('/somewhere/repo');
+      expect(env.GIT_CONFIG_GLOBAL).toBe('/somewhere/repo/.gitconfig-test');
       expect(env.GIT_CONFIG_NOSYSTEM).toBe('1');
+      // SET, not stripped — and one level OUT, so `repo` itself stays discoverable while
+      // the walk can never climb above it.
+      expect(env.GIT_CEILING_DIRECTORIES).toBe('/somewhere');
+    });
+
+    test('the discovery ceiling stops a write from escaping into a repo above', () => {
+      // The route stripping does not close, and the one this suite is itself exposed to:
+      // `scratch` is under TMPDIR, which is inside a checkout on some machines. Measured
+      // on git 2.50.1 without the pin, this write lands in the parent repo's config, rc 0.
+      const outer = freshRepo('ceiling-outer');
+      const sub = path.join(outer, 'not-a-repo');
+      fs.mkdirSync(sub, { recursive: true });
+      const outerConfig = path.join(outer, '.git', 'config');
+      const before = fs.readFileSync(outerConfig);
+
+      const result = spawnSync('git', ['-C', sub, 'config', 'user.email', 't@t'], {
+        encoding: 'utf-8',
+        env: isolatedGitEnv(sub),
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('not in a git directory');
+      expect(fs.readFileSync(outerConfig)).toEqual(before);
     });
 
     test('the real repository config is byte-identical after this suite has run', () => {

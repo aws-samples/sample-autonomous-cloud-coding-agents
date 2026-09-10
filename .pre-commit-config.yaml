@@ -26,12 +26,22 @@ repos:
       # `git status` and `git revert` lie, so every later hook is reasoning about a
       # tree that is not the one on disk.
       #
-      # Deliberately the ONLY hook here without `cd "$(git rev-parse
-      # --show-toplevel)"`: `core.worktree`, one of the values this gate detects,
-      # REDIRECTS --show-toplevel, so that prologue would cd the check out of the
-      # repository whenever it had something to find. `mise run` locates mise.toml by
-      # walking the filesystem, and the script locates the shared config the same
-      # way, so neither needs git to answer correctly. See #855.
+      # The ONLY hook here without a `cd "$(git rev-parse --show-toplevel)"` prologue,
+      # but do NOT read that as the protection — measured on prek 0.4.8, prek chdirs a
+      # hook to the repo root itself, derived from its own `git rev-parse
+      # --show-toplevel`, so this hook starts exactly where the prologue would have put
+      # it either way. It is omitted because it would be dead code, not because it is
+      # dangerous. The protection is inside the script: it locates the shared config by
+      # walking the filesystem for `.git` and reads it via `git config --file` from cwd
+      # `/`, so it never asks git a question `core.worktree` can redirect. `mise run`
+      # likewise finds mise.toml by walking the filesystem.
+      #
+      # Known reach, so nobody over-trusts this line: when `core.worktree` names a path
+      # with 2+ missing components, prek itself aborts on that rc-128 rev-parse before
+      # any hook runs — but plain `git commit` fails the same way, so that shape is
+      # self-announcing rather than silent. The shape this gate actually catches is
+      # `core.worktree` pointing at a directory that EXISTS (a sibling worktree), where
+      # git answers normally and nothing else complains. See #855.
       - id: git-config-clean
         name: shared .git/config uncorrupted (#855)
         entry: bash -lc 'mise run check:git-config-clean'
