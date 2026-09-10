@@ -106,9 +106,9 @@ Wire format. Any conformant signing implementation produces receipts with these 
   "policy_engine_id":    "<AgentCore policy engine id>",
   "policy_digest":       "sha256:<hash of the Cedar policy file evaluated>",
   "reason":              "<short human-readable explanation, optional>",
-  "parent_receipt_hash": "sha256:<hash of previous receipt's JCS canonical form, null for sequence=1>",
-  "public_key":          "<hex-encoded Ed25519 public key>",
-  "signature":           "<hex-encoded Ed25519 signature over JCS canonical payload>"
+  "previousReceiptHash": "sha256:<SHA-256 of the previous receipt's JCS canonical form, signature included; omitted entirely for sequence=1>",
+  "public_key":          "<hex-encoded Ed25519 public key; informational only, see 5.2 (4)>",
+  "signature":           "<hex-encoded Ed25519 signature over the JCS-canonical receipt with `signature` removed (section 6.6)>"
 }
 ```
 
@@ -116,11 +116,12 @@ Wire format. Any conformant signing implementation produces receipts with these 
 
 1. **JCS canonicalization (RFC 8785)** before signing. Sorted keys, minimal whitespace, NFC-normalized strings. Any two conformant implementations produce byte-identical signing payloads for semantically equal receipts.
 2. **Ed25519 signatures (RFC 8032)** over the canonical bytes. Deterministic, 64 bytes, widely implemented. A receipt signed by one implementation verifies against any other conformant verifier without coordination.
-3. **Hash chain linkage.** `parent_receipt_hash` is the SHA-256 of the preceding receipt's JCS canonical form (excluding `signature` and `public_key` which are metadata). Insertions, deletions, and reorderings break all subsequent receipts in the chain.
+3. **Hash chain linkage.** `previousReceiptHash` is the SHA-256 of the preceding receipt's JCS-canonical form with the `signature` member included, encoded as `"sha256:" + lowercase hex` (draft-farley-acta-signed-receipts-03, section 6.7). Including the signature binds the chain to the specific signed bytes, so a re-signed receipt is a visible chain event rather than an indistinguishable substitute. The first receipt of a session omits the member entirely; carrying `null` or `""` changes the canonical bytes and therefore the signature (section 2.2). Insertions, deletions, reorderings, and re-signing all break verification.
+4. **The verification key comes from outside the receipt.** A verifier MUST obtain the signer's public key from the out-of-band location in Section 7 (or a JWKS named by key id), never from the `public_key` field of the receipt it is checking. A receipt that carries its own key verifies against any key an attacker chooses to embed after re-signing; the field is informational only.
 
 ### 5.3 Optional outcome receipts
 
-For deployments that want to attest to tool outputs too, each `allow` decision receipt MAY be followed by an **outcome receipt** signed after the tool returns. The outcome receipt's `parent_receipt_hash` points at its decision receipt; its body carries `tool_output_digest` over the (optionally redacted) response. Auditors get the full call boundary: what was authorized, what actually returned.
+For deployments that want to attest to tool outputs too, each `allow` decision receipt MAY be followed by an **outcome receipt** signed after the tool returns. The outcome receipt's `previousReceiptHash` points at its decision receipt; its body carries `tool_output_digest` over the (optionally redacted) response. Auditors get the full call boundary: what was authorized, what actually returned.
 
 This RFC treats outcome receipts as optional. The minimum conformance bar is one decision receipt per policy-engine evaluation.
 
@@ -326,8 +327,8 @@ curl -sL "$CHAIN_URL" -o receipts.jsonl
 curl -sL https://<abca-public-keys>/signing-key.hex -o signing-key.hex
 
 # 4. Offline verification
-npx @veritasacta/verify@0.3.0 receipts.jsonl --key "$(cat signing-key.hex)"
-# exit 0 = valid; exit 1 = tampered / invalid
+npx @veritasacta/verify@0.9.6 --replay-chain receipts.jsonl --key "$(cat signing-key.hex)"
+# exit 0 = valid; exit 1 = tampered / invalid; exit 2 = malformed or unverifiable (e.g. no key)
 
 # Optional: CloudTrail cross-check (requires account read-access)
 aws cloudtrail lookup-events \
@@ -390,7 +391,7 @@ Steps 1-4 require no AWS credentials. The CloudTrail cross-check is the second-l
 
 ## 11. References
 
-- IETF draft: [`draft-farley-acta-signed-receipts`](https://datatracker.ietf.org/doc/draft-farley-acta-signed-receipts/) — receipt wire format
+- IETF draft: [`draft-farley-acta-signed-receipts-03`](https://datatracker.ietf.org/doc/draft-farley-acta-signed-receipts/) — receipt wire format
 - [AgentCore Gateway policy getting started](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-getting-started.html) — native Cedar policy engine, this RFC composes with
 - [cedar-policy/cedar-for-agents](https://github.com/cedar-policy/cedar-for-agents) — Cedar WASM bindings and MCP schema generator
 - [SLSA for agents discussion](https://github.com/slsa-framework/slsa/issues/1594) — composition with build provenance
