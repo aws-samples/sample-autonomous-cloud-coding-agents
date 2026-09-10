@@ -3128,6 +3128,19 @@ class TestMicrovmRunHookPreInstallAwsSilence:
             **extra,
         }
 
+    @pytest.fixture(autouse=True)
+    def _disable_background_pipeline(self, monkeypatch):
+        """Keep handler-only assertions isolated from asynchronous pipeline work.
+
+        Mocking ``run_task`` is insufficient because ``_spawn_background`` returns
+        before its thread necessarily dereferences that global. Pytest can restore
+        the mock between parametrized cases while the prior thread is still
+        starting, letting it run the real pipeline under the next case's AWS seam
+        guard. Stub the spawn boundary instead: these tests specify only the
+        pre-install handler phase and none need a pipeline thread.
+        """
+        monkeypatch.setattr(server, "_spawn_background", MagicMock())
+
     @pytest.fixture
     def seam_guard(self, monkeypatch):
         """Arm every AWS/credential seam to raise until the pre-install phase is OVER.

@@ -9,7 +9,7 @@
 #   - cdk:     @cedar-policy/cedar-wasm@4.8.2  (cdk/package.json)
 min_version = "2026.2.6"
 
-experimental_monorepo_root = true
+monorepo_root = true
 
 [settings]
 experimental = true

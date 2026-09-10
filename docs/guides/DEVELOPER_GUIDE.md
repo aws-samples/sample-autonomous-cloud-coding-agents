@@ -193,7 +193,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 | Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Works — persisted to `RepoTable.max_budget_usd`; same `0.01`–`100` range as the CLI, validated at CDK synth so an out-of-range value cannot deploy. See [Per-repo overrides](./USER_GUIDE.md#per-repo-overrides). |
 | Platform default | — | None by design: **unset means unlimited** |
 
-**Unlimited-by-default is deliberate — pair it with the escape hatch.** Because no platform budget ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying on a cap:
+**Per-task runtime budgets are unlimited by default.** Because no platform-wide per-task runtime ceiling applies, the documented mitigation for cost is choosing a lighter-token model rather than relying only on a cap:
 
 - **Per repo:** Blueprint `agent.modelId` (e.g. `us.anthropic.claude-sonnet-4-6`) — no code change, no agent redeploy
 - **Per task:** `model_id` in the task payload
@@ -202,6 +202,8 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 The model must be in the IAM grant list (layer 1) or the task fails at turn 0 with `AccessDenied` — the grant is the gate, so a lighter model is only reachable if it is granted.
 
 **Trust boundary on the number.** `cost_usd` is the Claude Agent SDK's **client-side estimate** from that bundled price table — not authoritative billing. It drifts when Bedrock pricing changes, when the SDK version does not recognize a model, or when discounts and commitments apply. See [Cost attribution](./COST_ATTRIBUTION.md) (the warning at line 6); authoritative cost comes from AWS Cost Explorer / CUR 2.0.
+
+**Fleet monthly budgets are a separate admission control.** `bgagent budget set --user|--team --monthly-usd <amount> [--hard-stop]` stores a recurring user or Cognito-group limit. Terminal task costs roll up by UTC month from the TaskTable stream. The 80% and 100% crossings publish CloudWatch alarms; hard-stop scopes reject new task creation at 100% without terminating in-flight work. See [Monthly user and team budgets](./USER_GUIDE.md#monthly-user-and-team-budgets).
 
 ## Installation
 
@@ -378,11 +380,13 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `TaskNudgesTableName` | DynamoDB table for task nudges |
 | `TaskApprovalsTableName` | DynamoDB table for Cedar HITL approval gates |
 | `UserConcurrencyTableName` | DynamoDB table for per-user concurrency |
+| `BudgetTableName` | DynamoDB table for recurring user/team limits and monthly estimated spend |
 | `WebhookTableName` | DynamoDB table for webhook integrations |
 | `RepoTableName` | DynamoDB table for per-repo Blueprint config |
 | `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
+| `OperationalAlertsTopicArn` | SNS topic for DLQ and monthly-budget alarms |
 
 When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 
