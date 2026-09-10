@@ -1,5 +1,30 @@
 version: 2
 
+# Grouping policy (#871): each ecosystem gets ONE grouped PR carrying its
+# routine updates, and major-version updates are excluded entirely.
+#
+# Majors are excluded via ``ignore`` rather than routed into a second group,
+# because a group restricted to ``update-types: ["minor", "patch"]`` leaves
+# majors ungrouped — and an ungrouped update gets its own PR, so restricting
+# the group without ignoring majors would produce one PR *per* major
+# dependency. Ignoring them is what keeps the queue at one PR per ecosystem.
+#
+# The cost is deliberate: a major that fixes an advisory will not arrive as a
+# PR. Detection is unaffected — ``//:security:deps`` (osv-scanner over
+# yarn.lock, agent/uv.lock and the jira-forge-app lockfile) fails the build on
+# any advisory regardless of Dependabot — but the upgrade has to be driven by
+# hand. That is the trade for not having a breaking major freeze the ecosystem
+# it lands in: majors are tracked as issues and migrated deliberately.
+#
+# ``open-pull-requests-limit`` is 2 against a single group, so the steady state
+# is one PR per ecosystem with one slot of headroom.
+#
+# The per-dependency ``ignore`` blocks below restate ``semver-major`` even
+# though the blanket rule already covers it. That overlap is deliberate: the
+# blanket rule is a *policy* and may be revisited, whereas each per-dependency
+# block is an *invariant* (a lockstep partner that must not move alone). Stating
+# them fully means relaxing the policy cannot silently degrade an invariant.
+
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -10,10 +35,15 @@ updates:
       default-days: 7
     commit-message:
       prefix: "chore(deps): actions"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     groups:
       all-actions:
         patterns: ["*"]
+    ignore:
+      # Majors are migrated deliberately, not grouped. See the note above.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
 
   - package-ecosystem: "docker"
     directories:
@@ -25,10 +55,25 @@ updates:
       default-days: 7
     commit-message:
       prefix: "chore(deps): docker"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     groups:
       all-docker:
         patterns: ["*"]
+    ignore:
+      # Majors are migrated deliberately, not grouped. See the note above.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+      # The agent's runtime interpreter, tracked as #105. A *minor* bump also
+      # needs excluding (the blanket rule above only covers majors): 3.13 ->
+      # 3.14 has to land with agent/mise.toml, agent/.python_version, the ruff
+      # ``target-version`` and ty ``python-version`` targets in
+      # agent/pyproject.toml, the lockfile, and three prose sites that name the
+      # base tag. Digest and patch refreshes still flow.
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "uv"
     directories:
@@ -40,14 +85,29 @@ updates:
       default-days: 7
     commit-message:
       prefix: "chore(deps): uv"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     groups:
       all-python:
         patterns: ["*"]
     ignore:
+      # Majors are migrated deliberately, not grouped. See the note above.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
       # Cedar engine parity — bump in lockstep with @cedar-policy/cedar-wasm via a
       # dedicated coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
       - dependency-name: "cedarpy"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+      # Bundles the ``claude`` CLI, which is pinned separately by an
+      # ``npm install -g @anthropic-ai/claude-code@<version>`` line in
+      # agent/Dockerfile. That line is in no package.json, so no ecosystem
+      # tracks it and only a human can move it — an automated bump here would
+      # diverge the bundled CLI from the installed one and stale the version
+      # named in pyproject's own comment. Bump both in one PR. See #215.
+      - dependency-name: "claude-agent-sdk"
         update-types:
           - "version-update:semver-major"
           - "version-update:semver-minor"
@@ -63,11 +123,15 @@ updates:
       default-days: 7
     commit-message:
       prefix: "chore(deps): npm"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     groups:
       all-npm:
         patterns: ["*"]
     ignore:
+      # Majors are migrated deliberately, not grouped. See the note above.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
       # Cedar engine parity — bump in lockstep with cedarpy via a dedicated
       # coordinated PR. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23).
       - dependency-name: "@cedar-policy/cedar-wasm"
