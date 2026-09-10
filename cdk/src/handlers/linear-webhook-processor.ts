@@ -856,7 +856,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const channelMetadata: Record<string, string> = {
+  // `let` because the vault branch below re-derives it by spread rather than mutating
+  // it in place; see the comment there for why spread and not `Object.assign` (#879).
+  let channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
     linear_project_id: projectId,
@@ -914,16 +916,31 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
     // agent stays on the Secrets-Manager path.
     if (resolved.providerName) {
-      // Through the shared helper, not hand-rolled. This builder assigns onto an
-      // existing object rather than constructing a literal, which is what hid it from
-      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
-      // that guard keys off the literal
-      // form, so the ONE path it was written for was the one path it never covered.
+      // Through the shared helper, not hand-rolled: `vaultMetadata` is the one place
+      // that says which vault fields a task carries, so a builder restating them drops
+      // whatever field is added there next.
+      //
+      // SPREAD, not `Object.assign`, and that is a security property rather than a
+      // style choice. `Object.assign` copies via [[Set]], which invokes the `__proto__`
+      // setter — a source object carrying that key mutates the target's prototype.
+      // Spread defines own properties, so the same key would land as an ordinary own
+      // property and go nowhere. Not reachable today (the helper returns a literal with
+      // two hard-coded keys), but semgrep flags the capability
+      // (javascript.lang.security.insecure-object-assign) as Blocking, and because
+      // `security:sast` runs in the pre-push hook that one line rejected every push
+      // from every branch while it sat on main (#879).
+      //
+      // This builder assigns onto an existing object rather than constructing a
+      // literal, so the source-level guard in
+      // cdk/test/handlers/linear-webhook-processor.test.ts used to miss it entirely —
+      // the ONE path `vaultMetadata` was written for was the one path its own guard
+      // never covered. That guard now triggers on the assignment form too.
+      //
       // The subject inside the helper is recorded rather than derived from the
       // workspace id, so a single consent can onboard a workspace whose org UUID is
       // not yet known; absent ⇒ the agent derives the legacy form.
       channelMetadata.linear_workspace_id = workspaceId;
-      Object.assign(channelMetadata, vaultMetadata(resolved));
+      channelMetadata = { ...channelMetadata, ...vaultMetadata(resolved) };
     }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The

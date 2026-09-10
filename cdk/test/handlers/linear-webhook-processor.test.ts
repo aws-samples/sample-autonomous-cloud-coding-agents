@@ -1106,6 +1106,50 @@ describe('every channel_metadata builder carries the vault fields', () => {
     expect(offenders).toEqual([]);
   });
 
+  test('assignment-form builders also carry the vault fields', () => {
+    // The check above cannot see the label-trigger builder at all: that one assigns onto
+    // an existing object, so there is no `linear_workspace_slug: resolved.workspaceSlug,`
+    // literal entry to key off, and the ONE path `vaultMetadata` was written for was the
+    // one path its own guard never covered (#879). Same question, other syntax — a
+    // builder that sets the slug by assignment must also pull the vault fields in before
+    // its enclosing block ends.
+    //
+    // End-of-scope is detected by DEDENT rather than a closing brace: an assignment form
+    // has no literal to terminate, so the first non-blank line indented less than the
+    // trigger is the end of the scope the trigger lives in.
+    const lines = src.split('\n');
+    const offenders: number[] = [];
+    lines.forEach((line, i) => {
+      if (!/^\w+\.linear_workspace_slug = resolved\.workspaceSlug;$/.test(line.trim())) return;
+      const indent = line.length - line.trimStart().length;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cur = lines[j]!;
+        if (cur.includes('...vaultMetadata(resolved)')) return;
+        if (cur.trim() !== '' && cur.length - cur.trimStart().length < indent) break;
+      }
+      offenders.push(i + 1);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  test('no metadata builder merges via Object.assign', () => {
+    // `Object.assign` copies with [[Set]], which INVOKES the `__proto__` setter, so the
+    // pattern is one refactor away from a prototype-pollution sink; object spread defines
+    // own properties, where the same key lands inert. semgrep rates it Blocking.
+    //
+    // Asserted here rather than left to `security:sast` because of where that runs:
+    // whole-repo in the pre-push hook and in security.yml, but NOT in security-pr.yml,
+    // which runs only the ranged gates. A reintroduction therefore passes PR CI and then
+    // rejects every contributor's `git push` once it is on main — which is exactly how
+    // #879 happened. This test reds the PR that causes it instead.
+    const offenders = src
+      .split('\n')
+      .map((line, i) => ({ text: line, n: i + 1 }))
+      .filter(({ text }) => /Object\.assign\s*\(\s*\w*[Mm]etadata\b/.test(text))
+      .map(({ n }) => n);
+    expect(offenders).toEqual([]);
+  });
+
   test('the LABEL-trigger path actually emits the vault fields (behavioural)', async () => {
     // The structural check above cannot see this builder: it assigns onto an existing
     // object instead of constructing a literal, so the one path `vaultMetadata` was
