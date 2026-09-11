@@ -115,6 +115,11 @@ export interface ReleaseChildParams {
    *  (reactions/state via linear_reactions.py — there is no Linear MCP). */
   readonly linearOauthSecretArn?: string;
   readonly linearWorkspaceSlug?: string;
+  /** Vault credential-provider name for vault-onboarded workspaces (RFC #249
+   *  Phase 1); workspace id rides the existing credentials_ref stamp. Absent ⇒
+   *  Secrets-Manager path. */
+  readonly linearProviderName?: string;
+  readonly linearVaultUserId?: string;
   readonly linearProjectId?: string;
   /** The base branch this child stacks on. Absent → root (off main). */
   readonly baseBranch?: string;
@@ -194,8 +199,8 @@ export type ReleaseChildReadyResult = ReleaseChildResult & { readonly subIssueId
 // The status codes createTaskCore ACTUALLY returns on a non-success (verified
 // against create-task-core.ts, not assumed from HTTP-code lore): 400
 // VALIDATION_ERROR (incl. the guardrail block), 409 DUPLICATE_TASK (idempotent
-// replay), 422 REPO_NOT_ONBOARDED, 500/503 server/service errors. There is no
-// 403/404/408/429 path here.
+// replay), 422 REPO_NOT_ONBOARDED, 429 BUDGET_EXCEEDED, 500/503 server/service
+// errors. There is no 403/404/408 path here.
 const HTTP_CONFLICT = 409; // idempotent replay — a task already exists for this key
 const HTTP_CLIENT_ERROR_MIN = 400;
 const HTTP_SERVER_ERROR_MIN = 500;
@@ -213,6 +218,9 @@ const HTTP_SERVER_ERROR_MIN = 500;
  *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
  *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
  *    loop the sweep forever.
+ *  - 429 (monthly budget exhausted) → DETERMINISTIC for this release attempt.
+ *    An operator must adjust/disable the budget or wait for the next UTC month,
+ *    then re-run via ``@bgagent retry``.
  *  - 409 (duplicate/idempotent replay) → NOT a real failure: a task already
  *    exists for this key, so treat like a transient (roll back; a re-release
  *    idempotent-replays to 200 and finalizes). Never terminal.
@@ -224,6 +232,7 @@ function isDeterministicCreateFailure(statusCode: number): boolean {
 }
 
 const HTTP_UNPROCESSABLE = 422; // REPO_NOT_ONBOARDED
+const HTTP_TOO_MANY_REQUESTS = 429; // BUDGET_EXCEEDED
 
 /**
  * A short, user-facing reason for a deterministic create failure, shown as
@@ -239,6 +248,9 @@ function deterministicFailureReason(statusCode: number, body: string): string {
   const retry = 'then reply `@bgagent retry` on the epic to re-run.';
   if (statusCode === HTTP_UNPROCESSABLE) {
     return `Couldn't start — this repo isn't onboarded to ABCA. Onboard it, ${retry}`;
+  }
+  if (statusCode === HTTP_TOO_MANY_REQUESTS) {
+    return `Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC month, ${retry}`;
   }
   // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
   if (/content policy|guardrail/i.test(body || '')) {
@@ -372,6 +384,11 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     if (params.linearProjectId) channelMetadata.linear_project_id = params.linearProjectId;
     if (params.linearOauthSecretArn) channelMetadata.linear_oauth_secret_arn = params.linearOauthSecretArn;
     if (params.linearWorkspaceSlug) channelMetadata.linear_workspace_slug = params.linearWorkspaceSlug;
+    // RFC #249 Phase 1: pass the vault provider name to sub-issue children so
+    // the agent-side resolver can mint via the vault (linear_workspace_id is
+    // already stamped above from row.credentials_ref). Absent ⇒ SM path.
+    if (params.linearProviderName) channelMetadata.linear_provider_name = params.linearProviderName;
+    if (params.linearVaultUserId) channelMetadata.linear_vault_user_id = params.linearVaultUserId;
   }
   // Stacked base branch + (diamond) predecessor merge-list. The
   // orchestrator reads these to set the agent payload's base_branch +
@@ -561,13 +578,13 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
     // terminal state, no ❌, epic stuck 👀). Mark it terminally 'failed' so the
     // reconcile settles the epic finished-with-failures and the child gets a ❌
     // + a reason (posted by the caller's terminal path). Only TRANSIENT failures
-    // (5xx / throttle) roll back to 'ready' for a later retry.
+    // (5xx) roll back to 'ready' for a later retry.
     if (isDeterministicCreateFailure(result.statusCode)) {
       const failureReason = deterministicFailureReason(result.statusCode, result.body);
       await failClaimTerminal(ddb, tableName, row, now, failureReason);
       return { kind: 'create_failed_terminal', statusCode: result.statusCode, body: result.body, failureReason };
     }
-    // Claim won but the create failed transiently (5xx, throttle) — roll the
+    // Claim won but the create failed transiently (5xx) — roll the
     // claim back to 'ready' so the next reconcile/sweep retries it, rather than
     // stranding the child in 'releasing'. Note 422 (repo not onboarded) is NOT
     // here: it is deterministic and handled above, since a repo doesn't onboard
@@ -713,6 +730,12 @@ export async function releaseReadyChildren(
       }),
       ...(releaseContext.linear_workspace_slug !== undefined && {
         linearWorkspaceSlug: releaseContext.linear_workspace_slug,
+      }),
+      ...(releaseContext.linear_provider_name !== undefined && {
+        linearProviderName: releaseContext.linear_provider_name,
+      }),
+      ...(releaseContext.linear_vault_user_id !== undefined && {
+        linearVaultUserId: releaseContext.linear_vault_user_id,
       }),
       ...(releaseContext.linear_project_id !== undefined && {
         linearProjectId: releaseContext.linear_project_id,

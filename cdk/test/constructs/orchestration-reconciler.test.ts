@@ -20,6 +20,7 @@
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import { BudgetTable } from '../../src/constructs/budget-table';
 import { OrchestrationReconciler } from '../../src/constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../../src/constructs/orchestration-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
@@ -31,10 +32,12 @@ function synth(): Template {
   const taskTable = new TaskTable(stack, 'TaskTable');
   const orchestrationTable = new OrchestrationTable(stack, 'OrchestrationTable');
   const taskEventsTable = new TaskEventsTable(stack, 'TaskEventsTable');
+  const budgetTable = new BudgetTable(stack, 'BudgetTable');
   new OrchestrationReconciler(stack, 'OrchestrationReconciler', {
     taskTable: taskTable.table,
     orchestrationTable: orchestrationTable.table,
     taskEventsTable: taskEventsTable.table,
+    budgetTable: budgetTable.table,
     orchestratorFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:orch',
   });
   return Template.fromStack(stack);
@@ -52,6 +55,7 @@ describe('OrchestrationReconciler', () => {
         Variables: Match.objectLike({
           ORCHESTRATION_TABLE_NAME: Match.anyValue(),
           TASK_TABLE_NAME: Match.anyValue(),
+          BUDGET_TABLE_NAME: Match.anyValue(),
         }),
       },
     });
