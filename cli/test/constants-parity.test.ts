@@ -20,6 +20,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  BUDGET_CONFIG_INDEX_NAME,
+  BUDGET_CONFIG_PERIOD,
+  BUDGET_CONFIG_RECORD_TYPE,
+  BUDGET_EXCEEDED_ALERT_MARKER,
+  BUDGET_EXCEEDED_PERCENT,
+  BUDGET_ROLLUP_PERIOD,
+  BUDGET_ROLLUP_RETENTION_DAYS,
+  BUDGET_TASK_PREFIX,
+  BUDGET_TEAM_PREFIX,
+  BUDGET_USER_PREFIX,
+  BUDGET_WARNING_ALERT_MARKER,
+  BUDGET_WARNING_PERCENT,
+} from '../src/budget-store';
+import {
   FORGE_WEBTRIGGER_SUFFIX,
   JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
 } from '../src/jira-app-actor';
@@ -54,6 +68,20 @@ describe('CLI constants parity with contracts/constants.json', () => {
   ) as {
     approval_timeout_s: { min: number; max: number; default: number };
     max_budget_usd: { min: number; max: number };
+    monthly_budgets: {
+      config_period: string;
+      config_record_type: string;
+      config_index_name: string;
+      user_prefix: string;
+      team_prefix: string;
+      task_prefix: string;
+      rollup_period: string;
+      rollup_retention_days: number;
+      warning_percent: number;
+      exceeded_percent: number;
+      warning_alert_marker: string;
+      exceeded_alert_marker: string;
+    };
     jira_app_actor: { min_secret_length: number; forge_webtrigger_suffix: string };
   };
 
@@ -66,6 +94,23 @@ describe('CLI constants parity with contracts/constants.json', () => {
   test('max_budget_usd bounds match the contract', () => {
     expect(MAX_BUDGET_USD_MIN).toBe(contracts.max_budget_usd.min);
     expect(MAX_BUDGET_USD_MAX).toBe(contracts.max_budget_usd.max);
+  });
+
+  test('monthly budget storage and alert constants match the contract', () => {
+    expect({
+      config_period: BUDGET_CONFIG_PERIOD,
+      config_record_type: BUDGET_CONFIG_RECORD_TYPE,
+      config_index_name: BUDGET_CONFIG_INDEX_NAME,
+      user_prefix: BUDGET_USER_PREFIX,
+      team_prefix: BUDGET_TEAM_PREFIX,
+      task_prefix: BUDGET_TASK_PREFIX,
+      rollup_period: BUDGET_ROLLUP_PERIOD,
+      rollup_retention_days: BUDGET_ROLLUP_RETENTION_DAYS,
+      warning_percent: BUDGET_WARNING_PERCENT,
+      exceeded_percent: BUDGET_EXCEEDED_PERCENT,
+      warning_alert_marker: BUDGET_WARNING_ALERT_MARKER,
+      exceeded_alert_marker: BUDGET_EXCEEDED_ALERT_MARKER,
+    }).toEqual(contracts.monthly_budgets);
   });
 
   test('Jira app-actor constraints match the contract', () => {

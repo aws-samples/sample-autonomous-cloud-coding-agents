@@ -44,6 +44,8 @@ import {
   resolveBedrockModelIds,
 } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
+import { BudgetAlerts } from '../constructs/budget-alerts';
+import { BudgetTable } from '../constructs/budget-table';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
@@ -203,6 +205,8 @@ export class AgentStack extends Stack {
     // dual-index pattern is preferred (see §10.1 of the design doc).
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
+    const budgetTable = new BudgetTable(this, 'BudgetTable');
+    const budgetAlerts = new BudgetAlerts(this, 'BudgetAlerts');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
     const repoTable = new RepoTable(this, 'RepoTable');
@@ -528,6 +532,7 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      budgetTable: budgetTable.table,
       // ADR-021: gives the cancel Lambda `lambda:TerminateMicrovm`, scoped to the
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
       // immediately. Omitted when no image is configured — there can be no
@@ -915,6 +920,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskEventsTableName', {
       value: taskEventsTable.table.tableName,
       description: 'Name of the DynamoDB task events audit table',
+    });
+
+    new CfnOutput(this, 'BudgetTableName', {
+      value: budgetTable.table.tableName,
+      description: 'Name of the monthly user/team budget configuration and spend table',
     });
 
     new CfnOutput(this, 'TaskNudgesTableName', {
@@ -1418,6 +1428,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
@@ -1510,6 +1521,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
       // (seed DAG + release roots). Sets ORCHESTRATION_TABLE_NAME.
@@ -1537,6 +1549,7 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       orchestrationTable: orchestrationTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
     });
     // createTaskCore (run inside the reconciler) screens descriptions with
@@ -1568,6 +1581,11 @@ export class AgentStack extends Stack {
       'MAX_CONCURRENT_TASKS_PER_USER',
       String(maxConcurrentTasksPerUser),
     );
+    orchestrationReconciler.fn.addEnvironment('USER_POOL_ID', taskApi.userPool.userPoolId);
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [taskApi.userPool.userPoolArn],
+    }));
     orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [orchestrator.alias.functionArn],
@@ -1658,6 +1676,13 @@ export class AgentStack extends Stack {
       'MAX_CONCURRENT_TASKS_PER_USER',
       String(maxConcurrentTasksPerUser),
     );
+    budgetTable.table.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment('BUDGET_TABLE_NAME', budgetTable.table.tableName);
+    strandedOrchestrationReconciler.fn.addEnvironment('USER_POOL_ID', taskApi.userPool.userPoolId);
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [taskApi.userPool.userPoolArn],
+    }));
 
     // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
     // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
@@ -1764,6 +1789,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       orchestrationTable: orchestrationTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
       maxConcurrentTasksPerUser: maxConcurrentTasksPerUser,
@@ -2018,6 +2044,9 @@ export class AgentStack extends Stack {
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
       githubScreenshot.processorDlqDepthAlarm,
+      budgetAlerts.warningAlarm,
+      budgetAlerts.exceededAlarm,
+      budgetAlerts.teamMembershipUnresolvedAlarm,
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.
