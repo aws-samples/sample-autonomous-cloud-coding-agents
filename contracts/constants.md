@@ -51,6 +51,20 @@ JSON at TypeScript compile time via `resolveJsonModule`.
     "min": 0.01,
     "max": 100
   },
+  "monthly_budgets": {
+    "config_period": "CONFIG",
+    "config_record_type": "CONFIG",
+    "config_index_name": "record_type-scope_key-index",
+    "user_prefix": "USER#",
+    "team_prefix": "TEAM#",
+    "task_prefix": "TASK#",
+    "rollup_period": "ROLLUP",
+    "rollup_retention_days": 400,
+    "warning_percent": 80,
+    "exceeded_percent": 100,
+    "warning_alert_marker": "alerted_80_at",
+    "exceeded_alert_marker": "alerted_100_at"
+  },
   "jira_app_actor": {
     "min_secret_length": 32,
     "forge_webtrigger_suffix": ".webtrigger.atlassian.app"
@@ -93,6 +107,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   `bgagent submit --max-budget` (#258).
 - **`max_budget_usd.max`** — ceiling for `max_budget_usd` ($100). Same
   two consumers as `min`.
+- **`monthly_budgets`** — the DynamoDB key prefixes, config index, rollup
+  retention, alert thresholds, and claim-marker names shared by the CDK
+  admission/rollup path and the operator CLI. CDK reads this object directly.
+  The published CLI mirrors it as literals and its constants-parity test makes
+  drift a CI failure.
 - **`jira_app_actor.min_secret_length`** — minimum HMAC shared-secret length
   accepted by the agent, CDK, and CLI Jira app-actor clients.
 - **`jira_app_actor.forge_webtrigger_suffix`** — hostname suffix required by
