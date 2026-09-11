@@ -50,6 +50,15 @@ aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Pa
 
 Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
 
+> **CloudFormation inline-template limit — 51,200 characters**: This is a second, independent size ceiling, distinct from the per-policy IAM 6,144-character limit above. `cdk bootstrap --template` sends the template inline as `TemplateBody`; above 51,200 characters the CLI has to stage it in S3 instead, which it **cannot** do while bootstrapping a fresh account, because that bucket is one of the resources bootstrap creates. The result is a hard `BootstrapStackRequired` failure with no way through `cdk bootstrap`, `--force` included ([#864](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/864)).
+>
+> Two consequences for anyone editing the policies:
+>
+> - **The gated size is not the file's size on disk.** The CLI parses the file, discards its formatting, and re-serialises the parsed object before measuring. Reformatting `bootstrap-template.yaml` therefore changes nothing; only the *content* moves the number. Check it with `npx cdk bootstrap --show-template --template bootstrap/bootstrap-template.yaml | wc -c`.
+> - **Each `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line — which is what keeps the body under the ceiling (45,743 characters, versus 53,369 as mappings).
+>
+> `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
+
 ## Trust policy
 
 ```json
