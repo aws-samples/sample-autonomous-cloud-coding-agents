@@ -321,10 +321,12 @@ bgagent linear remove-workspace <slug>
 
 This runs server-side (through an authenticated `DELETE /v1/linear/workspaces/{slug}` call, so the DynamoDB and Secrets Manager permissions stay on the API role, not on your local IAM identity) and by default:
 
-- Marks the registry row `status=revoked` (preserves the audit trail). The OAuth resolver fail-closes on any non-`active` status, so the workspace stops resolving tokens and routing webhooks the instant the command returns.
-- Deletes the per-workspace `bgagent-linear-oauth-<slug>` secret from Secrets Manager.
+- Marks the registry row `status=revoked` with `revoked_reason=admin_removed` (preserves the audit trail), so the workspace stops resolving tokens and routing webhooks the instant the command returns. The OAuth resolver refuses every non-`active` row except one it re-probes — a `revoked` row whose reason is `vault_consent_required` — and `admin_removed` is deliberately not that reason, so an admin removal is terminal rather than a latch a later vault probe can clear.
+- Deletes the per-workspace `bgagent-linear-oauth-<slug>` secret from Secrets Manager, and reports which of three things happened: `deleted` (a live secret was destroyed), `absent` (already gone — a re-run, or a prior partial teardown), or `not_applicable` (this workspace is vault-managed and has no Secrets Manager secret of its own).
 
 Only the workspace **admin** — the platform user who ran `setup` / `add-workspace` for the slug — may remove it. You are prompted to re-type the slug before anything is torn down.
+
+> **Vault-managed workspaces are not fully torn down by this command.** If the registry row has a `provider_name`, the workspace's credential lives in an AgentCore OAuth2 credential provider created outside CloudFormation, and this command does not delete it — it names it. The CLI prints the exact `delete-oauth2-credential-provider` follow-up; see [Vault-managed workspaces: the credential provider outlives the stack](#vault-managed-workspaces-the-credential-provider-outlives-the-stack) below.
 
 Flags:
 
@@ -352,18 +354,23 @@ aws dynamodb update-item \
 
 If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
 
-If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow):
+If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow). **Run the registry revoke first, then delete the secret** — the same order the handler uses. Deleting the secret first leaves an `active` registry row with no credential behind it: token resolution then fails per-event without latching the row (the resolver deliberately declines to infer a revocation from a missing secret), so the workspace keeps advertising itself as active, and webhook signature verification — which lets Secrets Manager errors bubble so a transient failure can't silently downgrade to the stack-wide secret — makes the receiver return 500 and Linear retry the delivery. Revoking first shuts the workspace off deterministically at the registry, and the secret delete is then pure cleanup.
 
 ```bash
-aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
-
 aws dynamodb update-item \
   --table-name <LinearWorkspaceRegistryTableName> \
   --key '{"linear_workspace_id":{"S":"<linear-org-uuid>"}}' \
-  --update-expression 'SET #s = :revoked' \
+  --update-expression 'SET #s = :revoked, revoked_reason = :reason' \
+  --condition-expression '#s = :active' \
   --expression-attribute-names '{"#s":"status"}' \
-  --expression-attribute-values '{":revoked":{"S":"revoked"}}'
+  --expression-attribute-values '{":revoked":{"S":"revoked"},":active":{"S":"active"},":reason":{"S":"admin_removed"}}'
+
+aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
 ```
+
+The `--condition-expression` mirrors the handler's, so a second run against an already-revoked row fails with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way: because it only matches `status='active'` rows, **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "revoked" from "never existed".
+
+Vault-managed workspaces need one more step after these two — see [the credential-provider section](#vault-managed-workspaces-the-credential-provider-outlives-the-stack).
 
 ### Vault-managed workspaces: the credential provider outlives the stack
 

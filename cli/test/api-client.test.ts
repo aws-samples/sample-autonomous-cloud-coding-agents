@@ -198,7 +198,7 @@ describe('ApiClient', () => {
           workspace_slug: 'acme',
           linear_workspace_id: 'ws-1',
           status: 'revoked',
-          secret_deleted: true,
+          secret: 'deleted',
         },
       }),
     };

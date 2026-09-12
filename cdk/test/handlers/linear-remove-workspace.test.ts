@@ -121,6 +121,29 @@ function routeDdb(opts: {
   });
 }
 
+/**
+ * Find the revoke Update by the value bound to `:revoked`, not by a
+ * `JSON.stringify(...).includes('revoked')` substring — the literal "revoked"
+ * appears in three *attribute names* the same command writes (`revoked_at`,
+ * `revoked_reason`, `revoked_by_platform_user_id`), so a stringify match would
+ * still pass if the status were never set at all.
+ */
+function findRevoke() {
+  return ddbSend.mock.calls.find(
+    ([c]) => c._type === 'Update'
+      && c.input.TableName === 'LinearRegistry'
+      && (c.input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[':revoked'] === 'revoked',
+  );
+}
+
+/** Find the orphaned-secret marker Update by its UpdateExpression target. */
+function findMarker() {
+  return ddbSend.mock.calls.find(
+    ([c]) => c._type === 'Update'
+      && String(c.input.UpdateExpression ?? '').includes('secret_deletion_failed'),
+  );
+}
+
 describe('linear-remove-workspace handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -159,20 +182,41 @@ describe('linear-remove-workspace handler', () => {
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     expect(result.statusCode).toBe(200);
 
-    // Registry row flipped to revoked, NOT deleted, by default.
+    // Registry row flipped to revoked, NOT deleted, by default. Asserted on
+    // the individual attribute values rather than a JSON.stringify substring:
+    // 'revoked' also appears in the attribute *names* (`revoked_at`,
+    // `revoked_reason`, `revoked_by_platform_user_id`), so a stringify match
+    // passes even if `:revoked` were never bound to the status.
     const updateCall = ddbSend.mock.calls.find(([c]) => c._type === 'Update');
     expect(updateCall).toBeTruthy();
     expect(updateCall![0].input.Key).toEqual({ linear_workspace_id: 'ws-uuid-1' });
-    expect(JSON.stringify(updateCall![0].input)).toContain('revoked');
+    expect(updateCall![0].input.ExpressionAttributeValues).toMatchObject({
+      ':revoked': 'revoked',
+      // Terminal, and deliberately NOT `vault_consent_required` — that is the
+      // one revoked reason the OAuth resolver re-probes instead of refusing.
+      ':reason': 'admin_removed',
+      ':uid': ADMIN,
+    });
+    // The revoke is conditional on the row still being active, so two
+    // concurrent DELETEs can't both believe they won (a filtered Scan is a
+    // TOCTOU on its own; only the condition settles it).
+    expect(updateCall![0].input.ConditionExpression).toBe('#status = :active');
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
 
-    // Secret deleted.
+    // Secret deleted — and asserted on *what* was deleted and *how*. A bare
+    // "a DeleteSecret happened" would pass on a wrong SecretId, and without
+    // ForceDeleteWithoutRecovery the secret lingers for a 7-30 day recovery
+    // window while the caller is told teardown is done.
     const secretCall = smSend.mock.calls.find(([c]) => c._type === 'DeleteSecret');
     expect(secretCall).toBeTruthy();
+    expect(secretCall![0].input).toEqual({
+      SecretId: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme-AbCd',
+      ForceDeleteWithoutRecovery: true,
+    });
 
-    const body = JSON.parse(result.body) as { data: { status: string; secret_deleted: boolean } };
+    const body = JSON.parse(result.body) as { data: { status: string; secret: string } };
     expect(body.data.status).toBe('revoked');
-    expect(body.data.secret_deleted).toBe(true);
+    expect(body.data.secret).toBe('deleted');
   });
 
   test('--purge deletes the registry row (after a fail-closed revoke) and reports purged', async () => {
@@ -185,7 +229,7 @@ describe('linear-remove-workspace handler', () => {
     // an Update and a Delete land on the registry row on the purge path.
     const updateCall = ddbSend.mock.calls.find(([c]) => c._type === 'Update');
     expect(updateCall).toBeTruthy();
-    expect(JSON.stringify(updateCall![0].input)).toContain('revoked');
+    expect(updateCall![0].input.ExpressionAttributeValues).toMatchObject({ ':revoked': 'revoked' });
     const deleteCall = ddbSend.mock.calls.find(([c]) => c._type === 'Delete');
     expect(deleteCall).toBeTruthy();
     expect(deleteCall![0].input.Key).toEqual({ linear_workspace_id: 'ws-uuid-1' });
@@ -203,10 +247,12 @@ describe('linear-remove-workspace handler', () => {
 
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     expect(result.statusCode).toBe(200);
-    const body = JSON.parse(result.body) as { data: { secret_deleted: boolean; status: string } };
-    // Row still revoked; secret was already gone → reported as not-deleted-now.
+    const body = JSON.parse(result.body) as { data: { secret: string; status: string; provider_name?: string } };
+    // Row still revoked; the secret this row *recorded* was already gone, so
+    // teardown is genuinely complete → `absent`, not `not_applicable`.
     expect(body.data.status).toBe('revoked');
-    expect(body.data.secret_deleted).toBe(false);
+    expect(body.data.secret).toBe('absent');
+    expect(body.data).not.toHaveProperty('provider_name');
   });
 
   test('never touches a project-mapping table (mapping cleanup dropped)', async () => {
@@ -298,8 +344,8 @@ describe('linear-remove-workspace handler', () => {
   test('already-revoked workspace is treated as not-found (fail-closed, no re-revoke)', async () => {
     // The registry scan filters on status='active', so an already-revoked
     // row simply doesn't match — the router models that by returning no
-    // items for a non-active seed. 404 keeps the endpoint from acting as a
-    // revoke-oracle and avoids a second destructive pass.
+    // items for a non-active seed. The 404 does not distinguish revoked from
+    // missing, and avoids a second destructive pass.
     routeDdb({ registryRow: activeRow({ status: 'revoked' }) });
     smSend.mockReset();
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
@@ -317,6 +363,10 @@ describe('linear-remove-workspace handler', () => {
     );
     expect(scanCall![0].input.FilterExpression).toContain('#status');
     expect(scanCall![0].input.ExpressionAttributeValues).toMatchObject({ ':active': 'active' });
+    // Read-your-writes: a default eventually-consistent Scan can hand back a
+    // row a just-completed setup (or a peer removal) has already changed.
+    // Same reasoning as `shared/jira-tenant-registry.ts:32-46`.
+    expect(scanCall![0].input.ConsistentRead).toBe(true);
   });
 
   test('a real (non-idempotent) secret-delete error 500s SECRET_DELETE_FAILED and marks the row', async () => {
@@ -333,17 +383,17 @@ describe('linear-remove-workspace handler', () => {
     expect(body.error.code).toBe('SECRET_DELETE_FAILED');
 
     // The registry row was still revoked (Update ran before the secret step)...
-    const revokeUpdate = ddbSend.mock.calls.find(
-      ([c]) => c._type === 'Update'
-        && c.input.TableName === 'LinearRegistry'
-        && JSON.stringify(c.input).includes('revoked'),
-    );
+    const revokeUpdate = findRevoke();
     expect(revokeUpdate).toBeTruthy();
-    // ...and a durable secret-deletion-failed marker was persisted.
-    const marker = ddbSend.mock.calls.find(
-      ([c]) => c._type === 'Update' && JSON.stringify(c.input).includes('secret_deletion_failed'),
-    );
+    // ...and a durable secret-deletion-failed marker was persisted, naming the
+    // exact SecretId that was attempted so the orphan is findable.
+    const marker = findMarker();
     expect(marker).toBeTruthy();
+    expect(marker![0].input.ExpressionAttributeValues).toMatchObject({
+      ':t': true,
+      ':e': 'AccessDeniedException',
+      ':arn': 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme-AbCd',
+    });
   });
 
   test('B3 regression: --purge + secret-delete failure keeps the row and marks it (no leaked credential)', async () => {
@@ -363,10 +413,8 @@ describe('linear-remove-workspace handler', () => {
 
     // The row was revoked (Update), the marker was persisted, and — crucially
     // — no Delete ran, so the row (and its marker) survives on the --purge path.
-    const marker = ddbSend.mock.calls.find(
-      ([c]) => c._type === 'Update' && JSON.stringify(c.input).includes('secret_deletion_failed'),
-    );
-    expect(marker).toBeTruthy();
+    expect(findRevoke()).toBeTruthy();
+    expect(findMarker()).toBeTruthy();
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
   });
 
@@ -390,14 +438,213 @@ describe('linear-remove-workspace handler', () => {
     expect(body.data.status).toBe('purged');
   });
 
-  test('a registry row with no oauth_secret_arn skips the secret delete', async () => {
+  // ─── B1: a row with no recorded ARN must still be torn down ─────────────
+  test('a registry row with no oauth_secret_arn deletes the secret by its deterministic name', async () => {
+    // The old handler skipped the secret delete entirely when the row had no
+    // `oauth_secret_arn`, silently leaving a live Linear OAuth secret behind
+    // and reporting success. The name is deterministic
+    // (`bgagent-linear-oauth-<slug>`) and `SecretId` accepts a name, so there
+    // is nothing to guess — and the IAM grant is over that *name* prefix
+    // (`linear-integration.ts:519`), which is what makes this permitted.
     routeDdb({ registryRow: activeRow({ oauth_secret_arn: undefined }) });
     smSend.mockReset();
+    smSend.mockResolvedValue({});
 
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     expect(result.statusCode).toBe(200);
+    expect(smSend).toHaveBeenCalledTimes(1);
+    expect(smSend.mock.calls[0][0].input).toEqual({
+      SecretId: 'bgagent-linear-oauth-acme',
+      ForceDeleteWithoutRecovery: true,
+    });
+    const body = JSON.parse(result.body) as { data: { secret: string } };
+    expect(body.data.secret).toBe('deleted');
+  });
+
+  test("a vault-managed row with no secret reports secret: 'not_applicable' and echoes provider_name", async () => {
+    // The distinction the boolean erased. `absent` says "teardown finished";
+    // `not_applicable` says "this workspace's credential lives in an AgentCore
+    // provider that this endpoint did not delete" — a live, self-refreshing
+    // Linear grant that outlives even `cdk destroy`. Same observable AWS calls,
+    // opposite operational meaning.
+    routeDdb({
+      registryRow: activeRow({
+        oauth_secret_arn: undefined,
+        provider_name: 'bgagent-linear-oauth-acme',
+        vault_user_id: 'vault-user-1',
+      }),
+    });
+    smSend.mockReset();
+    smSend.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { name: 'ResourceNotFoundException' }),
+    );
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body) as { data: { secret: string; provider_name?: string } };
+    expect(body.data.secret).toBe('not_applicable');
+    expect(body.data.provider_name).toBe('bgagent-linear-oauth-acme');
+  });
+
+  test("a vault row that DID record an ARN reports 'absent', not 'not_applicable'", async () => {
+    // `bgagent linear setup` writes `oauth_secret_arn` unconditionally
+    // (cli/src/commands/linear.ts:1321,1340), so vault rows normally carry BOTH
+    // a provider name and an ARN. "vault-managed ⇒ no secret" would therefore be
+    // wrong: only a vault row with no ARN of its own is `not_applicable`. The
+    // provider follow-up is still reported, because that is driven by
+    // `provider_name`, not by the secret outcome.
+    routeDdb({ registryRow: activeRow({ provider_name: 'bgagent-linear-oauth-acme' }) });
+    smSend.mockReset();
+    smSend.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { name: 'ResourceNotFoundException' }),
+    );
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body) as { data: { secret: string; provider_name?: string } };
+    expect(body.data.secret).toBe('absent');
+    expect(body.data.provider_name).toBe('bgagent-linear-oauth-acme');
+  });
+
+  // ─── Concurrency + scan bounds ──────────────────────────────────────────
+  test('a lost race (row no longer active at write time) 404s and never deletes the secret', async () => {
+    // The filtered Scan and the Update are two round trips, so a peer DELETE
+    // (or the resolver latching the row) can land in between. The
+    // ConditionExpression is what catches that; without it both callers would
+    // "succeed" and the second would delete a secret the first already
+    // accounted for.
+    routeDdb();
+    const baseImpl = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Update') {
+        return Promise.reject(
+          Object.assign(new Error('conditional check failed'), { name: 'ConditionalCheckFailedException' }),
+        );
+      }
+      return baseImpl(cmd);
+    });
+    smSend.mockReset();
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(404);
+    const body = JSON.parse(result.body) as { error: { code: string } };
+    expect(body.error.code).toBe('WORKSPACE_NOT_FOUND');
+    // Nothing destructive may follow a lost race.
     expect(smSend).not.toHaveBeenCalled();
-    const body = JSON.parse(result.body) as { data: { secret_deleted: boolean } };
-    expect(body.data.secret_deleted).toBe(false);
+    expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
+  });
+
+  test('a non-conditional Update failure surfaces as a 500 and never reaches the secret delete', async () => {
+    // Only ConditionalCheckFailedException means "someone else won". Any other
+    // Update error (throttle, IAM, table gone) must NOT be swallowed into a
+    // 404, and must not let the secret delete run against a row that is still
+    // active — that would leave a workspace whose token resolves but whose
+    // credential is gone.
+    routeDdb();
+    const baseImpl = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Update') {
+        return Promise.reject(Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }));
+      }
+      return baseImpl(cmd);
+    });
+    smSend.mockReset();
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(500);
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('the registry scan is bounded: a never-matching paginating scan 500s instead of burning the timeout', async () => {
+    // An unbounded `do { ... } while (!row && key)` on a large registry can
+    // spend the whole 10s Lambda budget and die with an opaque timeout. A
+    // clean 500 that names the cap is diagnosable; a timeout is not.
+    let scans = 0;
+    ddbSend.mockReset();
+    ddbSend.mockImplementation((cmd: { _type: string }) => {
+      if (cmd._type === 'Scan') {
+        scans += 1;
+        // Always empty, always another page.
+        return Promise.resolve({ Items: [], LastEvaluatedKey: { _idx: scans } });
+      }
+      return Promise.resolve({});
+    });
+    smSend.mockReset();
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(500);
+    // Bounded, and the bound is the handler's MAX_SCAN_PAGES (20).
+    expect(scans).toBe(20);
+    expect(smSend).not.toHaveBeenCalled();
+  });
+
+  test('a --purge row delete failure after a successful secret delete 500s (does not report purged)', async () => {
+    // The secret is already destroyed at this point, so the workspace cannot
+    // authenticate — but the row is still there as `revoked`. Reporting 200
+    // `purged` would claim a row deletion that never happened.
+    routeDdb();
+    const baseImpl = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Delete') {
+        return Promise.reject(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
+      }
+      return baseImpl(cmd);
+    });
+    smSend.mockReset();
+    smSend.mockResolvedValue({});
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN, query: { purge: 'true' } }));
+    expect(result.statusCode).toBe(500);
+    // The revoke still landed, so the workspace is fail-closed regardless.
+    expect(findRevoke()).toBeTruthy();
+    expect(smSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failing marker write does not mask the SECRET_DELETE_FAILED error', async () => {
+    // The marker is best-effort telemetry; if persisting it also fails, the
+    // caller must still get the loud, specific error rather than an opaque
+    // 500 from the marker's own rejection.
+    routeDdb();
+    const baseImpl = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
+      if (cmd._type === 'Update' && String(cmd.input.UpdateExpression ?? '').includes('secret_deletion_failed')) {
+        return Promise.reject(new Error('marker write failed'));
+      }
+      return baseImpl(cmd);
+    });
+    smSend.mockReset();
+    smSend.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(500);
+    const body = JSON.parse(result.body) as { error: { code: string } };
+    expect(body.error.code).toBe('SECRET_DELETE_FAILED');
+  });
+});
+
+describe('linear-remove-workspace handler without its registry table configured', () => {
+  test('500s on a missing LINEAR_WORKSPACE_REGISTRY_TABLE_NAME instead of an opaque SDK error', async () => {
+    // The env var is read at module scope as `string | undefined` (matching
+    // every other reader of it) and guarded once inside the handler. A `!`
+    // would assert away a deploy misconfiguration and surface it as
+    // `TableName: undefined` from the SDK, several frames from the cause.
+    // Re-imported in isolation because the read happens at module load.
+    const saved = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+    delete process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+    try {
+      jest.resetModules();
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = require('../../src/handlers/linear-remove-workspace') as typeof import('../../src/handlers/linear-remove-workspace');
+      ddbSend.mockReset();
+      smSend.mockReset();
+      const result = await mod.handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+      expect(result.statusCode).toBe(500);
+      // It fails before any AWS call — no scan against an undefined table.
+      expect(ddbSend).not.toHaveBeenCalled();
+      expect(smSend).not.toHaveBeenCalled();
+    } finally {
+      process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = saved;
+      jest.resetModules();
+    }
   });
 });

@@ -55,7 +55,7 @@ describe('linear remove-workspace command', () => {
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
-      secret_deleted: true,
+      secret: 'deleted',
     });
 
     await runRemove(['acme', '--yes']);
@@ -71,7 +71,7 @@ describe('linear remove-workspace command', () => {
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'purged',
-      secret_deleted: true,
+      secret: 'deleted',
     });
 
     await runRemove(['acme', '--yes', '--purge']);
@@ -96,7 +96,7 @@ describe('linear remove-workspace command', () => {
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
-      secret_deleted: true,
+      secret: 'deleted',
     });
 
     await runRemove(['acme', '--yes']);
@@ -105,17 +105,65 @@ describe('linear remove-workspace command', () => {
     expect(out).toContain('mappings left in place');
   });
 
-  test('reports when the OAuth secret was already absent (secret_deleted: false)', async () => {
+  test("reports when the OAuth secret was already absent (secret: 'absent')", async () => {
     mockRemove.mockResolvedValue({
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
-      secret_deleted: false,
+      secret: 'absent',
     });
 
     await runRemove(['acme', '--yes']);
     const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('already absent');
+    // `absent` means teardown IS finished — no vault follow-up must appear.
+    expect(out).not.toContain('delete-oauth2-credential-provider');
+  });
+
+  // ─── Vault-managed teardown is incomplete (the B1 bug) ──────────────────
+  // `secret: 'absent'` and `secret: 'not_applicable'` both mean "no secret was
+  // deleted", but only the first means the workspace is fully torn down. When a
+  // provider name comes back, an AgentCore credential provider outside
+  // CloudFormation still holds the Linear client secret and a live refresh
+  // grant, and the operator has to delete it by hand. Collapsing the two into
+  // one boolean is what hid that.
+  test('prints the AgentCore follow-up command for a vault-managed workspace', async () => {
+    mockRemove.mockResolvedValue({
+      workspace_slug: 'acme',
+      linear_workspace_id: 'ws-uuid-1',
+      status: 'revoked',
+      secret: 'not_applicable',
+      provider_name: 'bgagent-linear-oauth-acme',
+    });
+
+    await runRemove(['acme', '--yes']);
+    const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('vault-managed');
+    expect(out).toContain('Teardown is NOT complete');
+    expect(out).toContain(
+      'aws bedrock-agentcore-control delete-oauth2-credential-provider --name bgagent-linear-oauth-acme',
+    );
+  });
+
+  test('echoes the returned provider name verbatim rather than deriving it from the slug', async () => {
+    // The provider name is minted at onboarding and the response is the only
+    // authority on it — a CLI that rebuilt `<prefix><slug>` would print a
+    // command that silently no-ops if the convention ever changes.
+    mockRemove.mockResolvedValue({
+      workspace_slug: 'acme',
+      linear_workspace_id: 'ws-uuid-1',
+      status: 'revoked',
+      secret: 'deleted',
+      provider_name: 'legacy-linear-provider-acme-7f3a',
+    });
+
+    await runRemove(['acme', '--yes']);
+    const out = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('--name legacy-linear-provider-acme-7f3a');
+    expect(out).not.toContain('--name bgagent-linear-oauth-acme');
+    // A vault row can also have had its own secret deleted; the follow-up is
+    // driven by `provider_name`, not by the secret outcome.
+    expect(out).toContain('✓ OAuth secret deleted');
   });
 
   // ─── Confirmation prompt (the destructive-command safety rail) ──────────
@@ -151,7 +199,7 @@ describe('linear remove-workspace command', () => {
       workspace_slug: 'acme',
       linear_workspace_id: 'ws-uuid-1',
       status: 'revoked',
-      secret_deleted: true,
+      secret: 'deleted',
     });
     const rlSpy = mockPromptLine('acme');
     try {
