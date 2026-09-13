@@ -6,7 +6,9 @@ This review covers the existing MicroVM implementation, related P2 follow-ups, c
 
 **Implementation update (2026-09-13):** subsequent prerequisite work fixes #841 thread isolation, #817 coordinator payload-deletion permission, terminal-failure classification, closed S3-stream handling, and the approval-resume heartbeat race locally. Real bad-byte route tests and ARN contract guards are also added. Trusted deployment identity, task-scoped payload reads and live verification remain open. The findings below preserve the reviewed baseline; see [implementation progress](./645-p3-implementation-plan.md#implementation-progress) for commits, checks and remaining work.
 
-Further local work adds durable MicroVM start receipts, stable request tokens and bounded handle recovery. AWS token-retention/conflict behavior and unknown-ID cleanup remain live verification gates. Reviewing crash replay also exposed a shared finalizer risk: its counter decrement lacks an atomic per-task release marker. That source-level finding is now a prerequisite in the implementation plan; it has not yet been reproduced in AWS or fixed.
+Further local work adds durable MicroVM start receipts, stable request tokens and bounded handle recovery. AWS token-retention/conflict behavior and unknown-ID cleanup remain live verification gates. The shared finalizer's repeated-decrement risk was subsequently reproduced and fixed locally with task-owned reservation transactions, unified counter writers and revision-guarded reconciliation, including approval waits. DynamoDB Local exercises the real transaction conditions; deployed IAM, scan scale and upgrade/drain behavior still need AWS verification.
+
+The reservation review also found a separate trust boundary: the agent role can write/replace/delete its own task row, including coordinator metadata. Internal API fields are not protected from that writer by their naming or TypeScript types. The plan tracks coordinator-only storage or constrained agent writes as a security prerequisite. The replay fix assumes cooperating writers; it is not a hostile-agent isolation claim.
 
 ## Start here: the pieces in plain language
 

@@ -16,7 +16,9 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [ ] Bind configuration to trusted deployment identity and restrict payload reads per task (#817 / #700).
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [ ] Verify AWS token retention/conflicts and unknown-start cleanup on a live deployment.
-- [ ] Make the shared finalizer's concurrency release atomic per task across crash replay.
+- [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
+- [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
+- [ ] Protect coordinator-owned task metadata from agent writes before claiming hostile-task isolation.
 - [ ] Finish logging-failure observability (#810) and registry-overflow coverage (#818).
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [ ] Implement and verify the P3 sleep/wake lifecycle described below.
@@ -51,7 +53,17 @@ Third prerequisite batch completed locally on 2026-09-13:
 
 Final checks for the third batch: CDK ESLint and TypeScript compilation passed. `mise run testf -- test/handlers/ --detectOpenHandles` passed **151 suites / 3,557 tests** and exited successfully. An earlier ordinary broad run reported a delayed-exit warning; the diagnostic run produced no open-handle trace, so its cause remains unidentified. The changed start/recovery integration suites also exited cleanly in isolation. Documentation sync, the **77-page** Astro build and Markdown link checks passed. No Python source changed in this batch.
 
-Deploy the orchestrator update to activate these changes. This batch needs no additional IAM/bootstrap change or agent-image update. The receipt is internal task-table data, not a new public task field. The service emulator proves our retry behavior; AWS token retention/conflicts and unknown-ID cleanup still need live evidence. The shared finalizer's atomic capacity-slot release and the remaining P2/P3 work stay unchecked above.
+Deploy the orchestrator update to activate these changes. This batch needs no additional IAM/bootstrap change or agent-image update. The receipt is internal task-table data, not a new public task field. The service emulator proves our retry behavior; AWS token retention/conflicts and unknown-ID cleanup still need live evidence. At the close of the third batch, atomic capacity-slot release and the remaining P2/P3 work were still open.
+
+Fourth prerequisite batch completed locally on 2026-09-13:
+
+| Commit | Completed work | Proof |
+|---|---|---|
+| `0bb95243` | Task-owned atomic capacity reservations; one admission owner; shared finalizer/stranded release; guarded queue restoration; revision-checked repair including approval waits; scoped IAM and stale counter-doc cleanup | The old replay regression reduced two seats to zero. Fifteen tests against DynamoDB Local now verify real transaction conditions, competing writers, lost committed replies, empty-counter races and stale-revision rejection. Unit and construct tests cover handler wiring and permission scope. |
+
+Final checks for the fourth batch: CDK ESLint and compilation passed. **153 handler suites / 3,600 tests** passed with the local integration suite enabled; **15** of those tests used DynamoDB Local. The focused run passed **323 tests**, including the two relevant IAM construct suites; those counts overlap. Documentation sync, the **77-page** Astro build and Markdown link checks passed. The broad handler run exited successfully after the previously observed delayed-exit warning; the focused run exited normally. The temporary database container was stopped and removed.
+
+No AWS resources changed. Activating this batch requires the coordinated deployment/drain procedure in [capacity verification](./645-capacity-reservations.md), including the reconciler's task-update permission and upload confirmation's narrowed counter access. No agent source/image or bootstrap bundle changed. Coordinator metadata protection is newly tracked in 1G; internal reservation fields currently share an agent-writable row.
 
 ## The result we want
 
@@ -154,7 +166,19 @@ Resolve #810 by exposing a useful structured failure signal for CloudWatch write
 
 ### 1F. Make concurrency release safe across replay
 
-`finalizeTask` currently decrements the user's counter directly after terminal events, without atomically recording a per-task release. A crash after the decrement but before the durable checkpoint can repeat it. Reproduce that exact failure locally, then make the release marker and counter change one conditional transaction. Cover normal completion, start failure, cancellation, timeout, competing finalizers, retries and an already-zero counter. Preserve admission-queue behavior. The new MicroVM start path avoids an additional early release; it does not close this shared finalizer window.
+**Implemented locally:** `task-concurrency.ts` saves a per-task reservation together with the user counter change in one transaction. Repeated acquisition reuses the held reservation; release requires a terminal task and changes `held → released` atomically with the decrement. Missing/released markers never decrement another task's count. This covers cooperating platform writers and crash replay.
+
+The regression reproduced two finalizer executions reducing two occupied seats to zero, instead of leaving the other task's seat occupied. DynamoDB Local tests now exercise real transaction conditions for that replay, concurrent admissions/finalizers, lost committed responses, early failure, cancellation, approval waits, empty counters and a racing new admission. The normal finalizer, early failure path and stranded cleaner share release. Upload confirmation only submits and reads capacity; the orchestrator reserves once. Queue restoration cannot requeue a task that acquired a reservation after an uncertain invoke.
+
+Every counter change carries a fresh revision. Scheduled repair strongly scans the base counter/task tables, compares the saved revision before replacing a count, and completes abandoned terminal releases. It includes approval waits. An increment/decrement with no net count change still invalidates an old scan. Incomplete scans install no partial result. Ambiguous older active tasks prevent guessing a replacement count.
+
+**Deployment gate:** pause admissions and drain old executions, update all counter writers and the reconciler's scoped task-update permission, reconcile after legacy tasks settle, then reopen admissions. Rollback also requires draining. Verify scan duration/read capacity at deployment scale and the mixed-version/drain procedure in AWS. The local simulator does not prove deployed IAM or cloud-scale behavior. See [capacity verification](./645-capacity-reservations.md).
+
+### 1G. Protect coordinator-owned metadata
+
+The agent's task-scoped role restricts **which row** it can change, but currently permits replacement/deletion and unrestricted attribute updates within its own row. `microvm_start` and `concurrency_slot` are internal task-table fields; omitting them from API responses does not protect their storage. A compromised agent must not be able to rewrite the coordinator's start identity or revive a released reservation.
+
+Choose coordinator-only storage or carefully constrained agent write permissions, inventory every task-row writer, and test forged/replaced/deleted rows. Preserve legitimate agent progress/status updates and all backend identity tags. Treat this as a separate security prerequisite; the replay tests in 1D/1F do not establish a hostile-agent guarantee.
 
 ## 2. Nest infrastructure if adopting the split
 
