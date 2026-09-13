@@ -19,15 +19,48 @@ from fastapi.testclient import TestClient
 import server
 
 
+def _join_server_threads(timeout: float = 5.0) -> None:
+    """Reap tracked work before restoring test state; retain leaked handles on failure."""
+    deadline = time.monotonic() + timeout
+    with server._threads_lock:
+        threads = list(server._active_threads)
+    # The pipeline may need _threads_lock to finish; never join while holding it.
+    for thread in threads:
+        if thread.is_alive():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    with server._threads_lock:
+        leaked = [thread.name for thread in server._active_threads if thread.is_alive()]
+        if leaked:
+            pytest.fail(f"Server pipeline threads did not exit within {timeout}s: {leaked}")
+        server._active_threads.clear()
+
+
 @pytest.fixture(autouse=True)
-def reset_server_state():
+def reset_server_state(monkeypatch, env_guard):
+    # Dependencies force this teardown to precede mock/environment restoration.
+    # A still-starting pipeline resolves run_task from the module at call time.
+    _join_server_threads()
     server._background_pipeline_failed = False
+    try:
+        yield
+    finally:
+        _join_server_threads()
+        server._background_pipeline_failed = False
+
+
+def test_server_thread_cleanup_keeps_leaked_handles_and_reports_their_names():
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait, name="deliberately-blocked-pipeline")
+    thread.start()
     with server._threads_lock:
-        server._active_threads.clear()
-    yield
-    server._background_pipeline_failed = False
-    with server._threads_lock:
-        server._active_threads.clear()
+        server._active_threads.append(thread)
+    try:
+        with pytest.raises(pytest.fail.Exception, match="deliberately-blocked-pipeline"):
+            _join_server_threads(timeout=0)
+        assert thread in server._active_threads
+    finally:
+        release.set()
+        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -1748,7 +1781,7 @@ def baked_platform_env(env_guard):
 
 
 @pytest.fixture
-def env_guard():
+def env_guard(monkeypatch):
     """Snapshot/restore ``os.environ`` around a test that installs into it.
 
     ``_install_platform_config`` writes to the REAL process environment (that is
@@ -1756,6 +1789,10 @@ def env_guard():
     without this, one platform_config test would leak table names and a bogus
     ``AGENT_SESSION_ROLE_ARN`` into every test that runs after it (the conftest
     ``_clean_env`` fixture only strips the subset it knows about).
+
+    All server tests use this through reset_server_state. Depending on monkeypatch
+    keeps its original-value restoration last, after joining work and restoring
+    direct environment writes.
     """
     before = dict(os.environ)
     yield
@@ -2359,9 +2396,13 @@ class TestInstallPlatformConfig:
 class TestMicrovmRunHookPlatformConfig:
     """``platform_config`` arrives on the ``/run`` hook as a SIBLING of ``agent_payload``."""
 
+    @pytest.fixture(autouse=True)
+    def _task_identity(self, request):
+        self.task_id = f"t-pc-{request.node.name}"
+
     def _payload(self, **extra) -> dict:
         return {
-            "task_id": "t-pc",
+            "task_id": self.task_id,
             "repo_url": "org/repo",
             "prompt": "do it",
             "github_token": "ghp_x",
@@ -2950,14 +2991,14 @@ class TestMicrovmTerminateHook:
         # COUNT is the only way to reach it, which is why patching `_debug_cw` (the
         # existing test above) cannot — by then `active` is already an int.
         class _UnreadableThreadList(list):
-            """Raises when COUNTED, but still clearable by the reset fixture."""
+            """Simulate an unreadable registry only during the hook call."""
 
             def __iter__(self):
                 raise RuntimeError("thread registry read exploded")
 
-        monkeypatch.setattr(server, "_active_threads", _UnreadableThreadList())
-
-        r = client.post(TERMINATE_HOOK, json={"microvmId": "m-unknown"})
+        with monkeypatch.context() as patch:
+            patch.setattr(server, "_active_threads", _UnreadableThreadList())
+            r = client.post(TERMINATE_HOOK, json={"microvmId": "m-unknown"})
 
         assert r.status_code == 200
         body = r.json()
