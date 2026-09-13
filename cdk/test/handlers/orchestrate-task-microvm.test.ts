@@ -74,6 +74,14 @@ const mockFinalizeTask = jest.fn();
 const mockPollTaskStatus = jest.fn();
 const mockReconcile = jest.fn();
 const mockFailTask = jest.fn();
+const mockLoadTask = jest.fn();
+const mockClaimStart = jest.fn();
+const mockSaveHandle = jest.fn();
+jest.mock('../../src/handlers/shared/microvm-start', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm-start'),
+  claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
+  saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
+}));
 jest.mock('../../src/handlers/shared/orchestrator', () => ({
   admissionControl: jest.fn().mockResolvedValue(true),
   emitTaskEvent: (...a: unknown[]) => mockEmitTaskEvent(...a),
@@ -85,9 +93,7 @@ jest.mock('../../src/handlers/shared/orchestrator', () => ({
   finalizeTask: (...a: unknown[]) => mockFinalizeTask(...a),
   hydrateAndTransition: jest.fn().mockResolvedValue({ repo_url: 'org/repo', task_id: 'TASK001' }),
   loadBlueprintConfig: jest.fn().mockResolvedValue({ compute_type: 'lambda-microvm', runtime_arn: '' }),
-  loadTask: jest.fn().mockResolvedValue({
-    task_id: 'TASK001', user_id: 'user-1', status: 'SUBMITTED', repo: 'org/repo',
-  }),
+  loadTask: (...args: unknown[]) => mockLoadTask(...args),
   pollTaskStatus: (...a: unknown[]) => mockPollTaskStatus(...a),
   reconcileMicrovmSubstrateState: (...a: unknown[]) => mockReconcile(...a),
   transitionTask: (...a: unknown[]) => mockTransitionTask(...a),
@@ -134,11 +140,14 @@ import { LambdaMicrovmComputeStrategy } from '../../src/handlers/shared/strategi
  */
 function fakeContext(opts: { pollOnce?: boolean } = {}) {
   const steps: string[] = [];
+  const stepConfigs: Record<string, any> = {};
   return {
     steps,
+    stepConfigs,
     ctx: {
-      step: async (name: string, fn: () => Promise<unknown>) => {
+      step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
         steps.push(name);
+        stepConfigs[name] = config;
         return fn();
       },
       waitForCondition: async (
@@ -216,8 +225,24 @@ function s3CommandsOfType(type: string) {
   return mockS3Send.mock.calls.map(c => c[0]).filter(c => c._type === type);
 }
 
+function failedTransition() {
+  return mockTransitionTask.mock.calls.find(([, , to]) => to === TaskStatus.FAILED)!;
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  mockTransitionTask.mockReset().mockResolvedValue(undefined);
+  mockEmitTaskEvent.mockReset().mockResolvedValue(undefined);
+  mockFinalizeTask.mockReset().mockResolvedValue(undefined);
+  mockFailTask.mockReset().mockResolvedValue(undefined);
+  mockLoadTask.mockReset().mockImplementation(async (_id: string, consistentRead?: boolean) => ({
+    task_id: 'TASK001',
+    user_id: 'user-1',
+    status: consistentRead ? 'HYDRATING' : 'SUBMITTED',
+    repo: 'org/repo',
+  }));
+  mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
+  mockSaveHandle.mockReset().mockResolvedValue(undefined);
   mockS3Send.mockReset();
   mockS3Send.mockResolvedValue({});
   mockMicrovmSend.mockReset();
@@ -226,6 +251,151 @@ beforeEach(() => {
 });
 
 describe('orchestrate-task for a lambda-microvm task', () => {
+  test('replaying a persisted start failure reaches finalization once without an earlier slot release', async () => {
+    let failed = false;
+    mockMicrovmSend.mockRejectedValue(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
+    mockClaimStart.mockImplementation(async () => ({ clientToken: 'TASK001', closed: failed }));
+    mockTransitionTask.mockImplementation(async (_id, _from, to) => { failed = to === TaskStatus.FAILED; });
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? (failed ? TaskStatus.FAILED : TaskStatus.HYDRATING) : TaskStatus.SUBMITTED,
+    }));
+    const { ctx } = fakeContext();
+    await handler({ task_id: 'TASK001' }, {
+      ...ctx,
+      step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
+        if (name === 'start-session') await fn();
+        return ctx.step(name, fn, config);
+      },
+    } as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(1);
+    expect(mockTransitionTask).toHaveBeenCalledTimes(1);
+    expect(mockFailTask).not.toHaveBeenCalled();
+    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+  });
+
+  test('durable replay after registration recovers one computer without a second transition', async () => {
+    runMicrovmOk();
+    let savedHandle: unknown;
+    let registered = false;
+    mockClaimStart.mockImplementation(async () => ({
+      clientToken: 'TASK001', closed: false, ...(savedHandle ? { handle: savedHandle } : {}),
+    }));
+    mockSaveHandle.mockImplementation(async (_taskId, _token, handle) => { savedHandle = handle; });
+    mockTransitionTask.mockImplementationOnce(async () => { registered = true; });
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? (registered ? TaskStatus.RUNNING : TaskStatus.HYDRATING) : TaskStatus.SUBMITTED,
+      ...(registered && { session_id: MICROVM_ID }),
+    }));
+    const { ctx, stepConfigs } = fakeContext();
+    const replayContext = {
+      ...ctx,
+      step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
+        if (name === 'start-session') await fn(); // response/checkpoint lost
+        return ctx.step(name, fn, config);
+      },
+    };
+    await handler({ task_id: 'TASK001' }, replayContext as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(1);
+    expect(mockTransitionTask).toHaveBeenCalledTimes(1);
+    expect(stepConfigs['start-session'].retryStrategy(new Error('failed'), 1)).toEqual({ shouldRetry: false });
+    expect(mockFailTask).not.toHaveBeenCalled();
+  });
+
+  test('a lost task-transition response is reconciled before stopping a registered computer', async () => {
+    runMicrovmOk();
+    let registered = false;
+    mockTransitionTask.mockImplementationOnce(async () => {
+      registered = true;
+      throw new Error('DynamoDB response lost');
+    });
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? (registered ? TaskStatus.RUNNING : TaskStatus.HYDRATING) : TaskStatus.SUBMITTED,
+      ...(registered && { session_id: MICROVM_ID }),
+    }));
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(mockFailTask).not.toHaveBeenCalled();
+    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(1);
+  });
+
+  test('cancellation after creation terminates and finalizes without restoring RUNNING', async () => {
+    runMicrovmOk();
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
+    }));
+    const { ctx, steps } = fakeContext();
+    await handler({ task_id: 'TASK001' }, ctx as never);
+    expect(mockTransitionTask).not.toHaveBeenCalled();
+    expect(mockFailTask).not.toHaveBeenCalled();
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+    expect(mockFinalizeTask).toHaveBeenCalledWith('TASK001', { attempts: 0 }, 'user-1');
+    expect(steps).toContain('finalize-before-session');
+    expect(mockPollTaskStatus).not.toHaveBeenCalled();
+  });
+
+  test('a session_started audit-event failure does not destroy a registered session', async () => {
+    runMicrovmOk();
+    mockEmitTaskEvent.mockImplementationOnce(async (_id, eventType) => {
+      if (eventType === 'session_started') throw new Error('event write failed');
+    });
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(mockFailTask).not.toHaveBeenCalled();
+    const terminateIndex = mockMicrovmSend.mock.calls.findIndex(([command]) => command._type === 'TerminateMicrovm');
+    expect(mockMicrovmSend.mock.invocationCallOrder[terminateIndex])
+      .toBeGreaterThan(mockFinalizeTask.mock.invocationCallOrder[0]);
+  });
+
+  test('two unanswered starts persist an unknown outcome instead of inviting another task', async () => {
+    const timeout = Object.assign(new Error('response lost'), { name: 'TimeoutError' });
+    mockMicrovmSend.mockRejectedValue(timeout);
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(2);
+    expect(failedTransition()[3].error_message).toContain('MICROVM_START_OUTCOME_UNKNOWN:');
+  });
+
+  test('an unanswered start remains visible if the agent already changed the task to RUNNING', async () => {
+    mockMicrovmSend.mockRejectedValue(Object.assign(new Error('response lost'), { name: 'TimeoutError' }));
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? TaskStatus.RUNNING : TaskStatus.SUBMITTED,
+    }));
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(failedTransition()[1]).toBe(TaskStatus.RUNNING);
+    expect(failedTransition()[3].error_message).toContain('MICROVM_START_OUTCOME_UNKNOWN:');
+  });
+
+  test('cancellation after a lost response records the unknown computer without starting another', async () => {
+    mockClaimStart.mockResolvedValueOnce({ clientToken: 'TASK001', closed: false })
+      .mockResolvedValueOnce({ clientToken: 'TASK001', closed: false })
+      .mockResolvedValue({ clientToken: 'TASK001', closed: true });
+    mockMicrovmSend.mockRejectedValue(Object.assign(new Error('response lost'), { name: 'TimeoutError' }));
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
+    }));
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(1);
+    expect(mockEmitTaskEvent).toHaveBeenCalledWith('TASK001', 'microvm_start_outcome_unknown',
+      { client_token: 'TASK001', task_status: TaskStatus.CANCELLED }, expect.any(Object));
+    expect(mockFailTask).not.toHaveBeenCalled();
+  });
+
   test('persists microvmId and endpoint in compute_metadata on the RUNNING transition', async () => {
     runMicrovmOk();
     const { ctx } = fakeContext();
@@ -472,16 +642,14 @@ describe('orchestrate-task for a lambda-microvm task', () => {
   });
 
   describe('orphan reap when session start fails AFTER RunMicrovm succeeded', () => {
-    test('terminates the MicroVM from the in-memory handle when the persist write fails', async () => {
-      // The MicroVM is already RUNNING and billing, and its id exists ONLY in this
-      // Lambda's memory — no poll or finalize step will ever see it. Nothing
-      // self-terminates on this substrate, so without the reap it bills for the
-      // full 8 h cap while holding admission-gating memory quota.
+    test('terminates the known MicroVM when registration fails before committing', async () => {
+      // The service created the computer, but registration did not commit.
+      // Its start receipt retains the ID; normal task polling has not started.
       runMicrovmOk();
       mockTransitionTask.mockRejectedValueOnce(new Error('ConditionalCheckFailedException'));
 
-      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
-        .rejects.toThrow('ConditionalCheckFailedException');
+      await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+      expect(failedTransition()[3].error_message).toContain('ConditionalCheckFailedException');
 
       const terminates = commandsOfType('TerminateMicrovm');
       expect(terminates).toHaveLength(1);
@@ -492,11 +660,13 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       runMicrovmOk();
       mockTransitionTask.mockRejectedValueOnce(new Error('persist exploded'));
 
-      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
-        .rejects.toThrow('persist exploded');
+      await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+      expect(failedTransition()[3].error_message).toContain('persist exploded');
 
-      expect(mockFailTask).toHaveBeenCalledTimes(1);
-      const [, fromStatus, reason] = mockFailTask.mock.calls[0];
+      expect(mockFailTask).not.toHaveBeenCalled();
+      expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+      const [, fromStatus, , attrs] = failedTransition();
+      const reason = attrs.error_message;
       expect(fromStatus).toBe(TaskStatus.HYDRATING);
       expect(reason).toContain('Session start failed');
       expect(reason).toContain('persist exploded');
@@ -512,8 +682,8 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       // stopSession is internally best-effort (it logs AccessDenied at error level
       // and returns), so the reap is a no-op here — the user must still see why
       // session start actually failed.
-      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
-        .rejects.toThrow('persist exploded');
+      await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+      expect(failedTransition()[3].error_message).toContain('persist exploded');
     });
 
     test('even a stopSession that BREAKS its no-throw contract cannot mask the original error', async () => {
@@ -527,8 +697,8 @@ describe('orchestrate-task for a lambda-microvm task', () => {
         .mockRejectedValueOnce(new Error('stopSession itself threw'));
 
       try {
-        await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never))
-          .rejects.toThrow('persist exploded');
+        await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+        expect(failedTransition()[3].error_message).toContain('persist exploded');
       } finally {
         stopSpy.mockRestore();
       }
@@ -539,7 +709,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       err.name = 'ThrottlingException';
       mockMicrovmSend.mockRejectedValueOnce(err);
 
-      await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never)).rejects.toThrow();
+      await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
       expect(commandsOfType('TerminateMicrovm')).toHaveLength(0);
     });

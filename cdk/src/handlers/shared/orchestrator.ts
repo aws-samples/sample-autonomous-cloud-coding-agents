@@ -175,10 +175,11 @@ function substrateNoun(computeType: ComputeType | undefined): string {
  * @returns the task record.
  * @throws Error if the task is not found.
  */
-export async function loadTask(taskId: string): Promise<TaskRecord> {
+export async function loadTask(taskId: string, consistentRead = false): Promise<TaskRecord> {
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
+    ...(consistentRead && { ConsistentRead: true }),
   }));
   if (!result.Item) {
     throw new Error(`Task ${taskId} not found`);
@@ -1153,7 +1154,9 @@ export async function finalizeTask(
   pollState: PollState,
   userId: string,
 ): Promise<void> {
-  const task = await loadTask(taskId);
+  // Finalization can immediately follow a committed start failure/cancellation.
+  // A stale active state would emit the wrong terminal event.
+  const task = await loadTask(taskId, true);
   const currentStatus = task.status;
   // Correlation envelope on this function's own log lines too, not just the
   // events it emits — admission→terminal logs must join by {user_id, repo}.

@@ -77,6 +77,13 @@ for (const optional of [
 }
 
 const mockSend = jest.fn();
+const mockClaimStart = jest.fn();
+const mockSaveHandle = jest.fn();
+jest.mock('../../../../src/handlers/shared/microvm-start', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/microvm-start'),
+  claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
+  saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
+}));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
@@ -266,6 +273,8 @@ async function withEnvAsync(env: Record<string, string>, body: () => Promise<voi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
+  mockSaveHandle.mockReset().mockResolvedValue(undefined);
 });
 
 describe('LambdaMicrovmComputeStrategy', () => {

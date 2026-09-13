@@ -1223,6 +1223,38 @@ describe('hydrateAndTransition — registry asset resolution (#246)', () => {
 });
 
 describe('finalizeTask', () => {
+  test.each([
+    ['FAILED', 'HYDRATING'],
+    ['CANCELLED', 'RUNNING'],
+  ])('honors committed %s instead of stale %s during immediate finalization', async (committed, stale) => {
+    mockDdbSend.mockImplementation(async (command) => {
+      if (command._type === 'Get') {
+        return {
+          Item: {
+            ...baseTask,
+            status: command.input.ConsistentRead ? committed : stale,
+            memory_written: true,
+          },
+        };
+      }
+      // A stale transition loses to the terminal status already in DynamoDB.
+      if (command.input.ExpressionAttributeValues?.[':fromStatus']) {
+        throw Object.assign(new Error('terminal state already committed'), { name: 'ConditionalCheckFailedException' });
+      }
+      return {};
+    });
+    await finalizeTask('TASK001', { attempts: 0 }, 'user-123');
+    const events = mockDdbSend.mock.calls
+      .filter(([command]) => command._type === 'Put')
+      .map(([command]) => command.input.Item);
+    expect(events).toEqual([expect.objectContaining({
+      event_type: `task_${committed.toLowerCase()}`,
+      metadata: expect.objectContaining({ final_status: committed }),
+    })]);
+    expect(mockDdbSend.mock.calls.some(([command]) =>
+      command.input.ExpressionAttributeValues?.[':fromStatus'])).toBe(false);
+  });
+
   test('handles already-terminal task', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED' } }) // loadTask

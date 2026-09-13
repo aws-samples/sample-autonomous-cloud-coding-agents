@@ -41,6 +41,11 @@ export const ErrorCategory = {
 
 export type ErrorCategoryType = (typeof ErrorCategory)[keyof typeof ErrorCategory];
 
+/** A start was sent, but its response does not establish whether AWS created a VM. */
+export class MicrovmStartUncertainError extends Error {
+  override name = 'MicrovmStartUncertainError';
+}
+
 /**
  * WHO should act, and whether retrying the SAME request can help — the axis a
  * channel reader needs to answer "just retry, or tell my admin?". Distinct from
@@ -152,6 +157,17 @@ export function classifyMicrovmTerminalFailure(errorMessage?: string | null): Er
 }
 
 const PATTERNS: readonly ErrorPattern[] = [
+  {
+    pattern: /MICROVM_START_(?:OUTCOME_UNKNOWN|INPUT_CHANGED|STATE_INVALID|TASK_CLOSED|RECEIPT_SAVE_FAILED):/,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM start requires reconciliation',
+      description: 'The platform cannot safely issue another start for this task.',
+      remedy: 'An admin should inspect the task\'s saved MicroVM start receipt and any recorded computer ID before submitting another task. An unknown start may still have created a MicroVM; do not assume that a missing response means it failed.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
   // --- Auth ---
   {
     pattern: /INSUFFICIENT_GITHUB_REPO_PERMISSIONS/i,
@@ -412,6 +428,17 @@ const PATTERNS: readonly ErrorPattern[] = [
       title: 'The MicroVM host or capacity is temporarily unavailable',
       description: 'AWS could not provide the host or capacity needed for this MicroVM.',
       remedy: 'Retry the task. If the failure persists, an admin should check AWS service health and the available MicroVM capacity.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:TimeoutError|RequestTimeout|ECONNRESET|ETIMEDOUT|InternalServerException|ServiceException)/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM service response was interrupted',
+      description: 'The request timed out, the connection failed, or AWS returned a server error. The request may already have succeeded.',
+      remedy: 'The platform retries the same saved start request within its recovery window. If recovery fails, an admin should inspect the saved start receipt before creating a new task.',
       retryable: true,
       errorClass: ErrorClass.TRANSIENT,
     },

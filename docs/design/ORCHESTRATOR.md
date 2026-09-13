@@ -205,7 +205,13 @@ The orchestrator resolves the repository's `ComputeStrategy` and calls `startSes
 
 AgentCore's session ID is pre-generated and reused on retry. ECS and Lambda MicroVMs use their substrate identifiers as session IDs.
 
-If `RunMicrovm` succeeds but persisting the session handle or emitting the start event fails, the start step terminates the MicroVM best-effort using its in-memory handle before propagating the original error. This orphan reap is required because no later poll or finalization step can recover an unpersisted handle.
+MicroVM starts first save an internal `microvm_start` receipt on the task: its stable client token (the task ID), a fingerprint of the request and full payload, creation time, and a local replay deadline. This happens before payload upload or `RunMicrovm`. Retries must match the saved fingerprint; a changed request cannot overwrite the earlier task's input. A returned handle is saved in the receipt and the normal task metadata before registration finishes. A replay can recover that handle without another start call. Registration uses strongly consistent reads to observe cancellation and already-committed writes.
+
+If a handle-save or registration response is lost, the code checks the committed task before terminating a known computer. If registration failed, cleanup remains best-effort and the receipt retains any saved handle for diagnosis. Failure to emit `session_started` alone does not terminate a registered MicroVM. MicroVM start failures persist the task outcome and reach `finalize-before-session`; they do not also release concurrency in the start step. Finalization begins with a strongly consistent read so a recently saved failure or cancellation is not reported using an older active state.
+
+An unanswered service request may already have created a MicroVM. Recovery reuses the same token and request within a **120-second local window**; after the window, it refuses another `RunMicrovm` call. This window is an application guard, not a verified AWS token-retention promise. An unrecovered request is reported as `MICROVM_START_OUTCOME_UNKNOWN` and requires inspection before submitting another task. Cancellation after an unanswered request records a `microvm_start_outcome_unknown` event. Without an ID, immediate termination cannot be guaranteed; the eight-hour service lifetime bound still applies.
+
+The MicroVM `start-session` step disables automatic durable **error** retries after its own recovery attempt. Crash replay is still possible and uses the saved receipt. Live AWS token-retention, changed-request and concurrent-conflict behavior remain verification gates.
 
 ### Step 5: Await completion
 
@@ -246,9 +252,9 @@ After the session ends, the orchestrator determines the outcome from multiple si
 
 ### Step execution contract
 
-Every step in the pipeline satisfies these properties:
+Configured workflow steps target the following contract. The top-level durable orchestrator still needs explicit guards around external effects, as described under recovery below.
 
-- **Idempotent** - Safe to retry after crashes. Context hydration produces the same prompt for the same inputs; session-start retry semantics are implemented by each backend strategy.
+- **Replay-aware** - A retry must preserve task intent and avoid repeating external effects. Session-start recovery is implemented by each backend strategy; a checkpoint alone is not an idempotency guarantee.
 - **Timeout-bounded** - Each step has a configurable timeout to prevent blocking the pipeline.
 - **Failure-aware** - Returns `success` or `failed`. Infrastructure failures (throttle, transient errors) trigger exponential backoff retries (default: 2 retries, base 1s, max 10s). Explicit failures transition to `FAILED` without retry.
 - **Least-privilege input** - Each step receives only the `blueprintConfig` fields it needs. Custom Lambda steps get credential ARNs stripped.
@@ -325,7 +331,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 ### Recovery mechanisms
 
 1. **Durable execution** - Lambda Durable Functions checkpoints at each state transition and replays after crashes.
-2. **Idempotent operations** - All steps are safe to retry.
+2. **Replay guards** - Operations need their own idempotency controls; checkpointing alone does not make external effects exactly-once. MicroVM starts use saved receipts. The shared finalizer's direct concurrency decrement still needs a per-task atomic release guard and a crash-replay test.
 3. **Stuck-task scanner** - Periodic Lambda detects tasks stuck beyond expected durations and either resumes or fails them.
 4. **Counter reconciliation** - Lambda runs every 15 minutes, compares counters to actual running task counts, corrects drift. Emits `counter_drift_corrected` CloudWatch metric.
 5. **Dead-letter queue** - Tasks that exhaust retries go to DLQ for investigation.

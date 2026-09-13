@@ -30,7 +30,9 @@ import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
 import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
+import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle } from '../microvm-start';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
 
@@ -80,6 +82,7 @@ const MICROVM_EGRESS_CONNECTOR_ARNS = process.env.MICROVM_EGRESS_CONNECTOR_ARNS;
  */
 const MICROVM_INGRESS_CONNECTOR_ARNS = process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 const MICROVM_PAYLOAD_BUCKET = process.env.MICROVM_PAYLOAD_BUCKET;
+const HTTP_REQUEST_TIMEOUT = 408;
 
 /**
  * Session wall-clock ceiling passed on EVERY ``RunMicrovm`` call, pinned to the
@@ -516,9 +519,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
   async startSession(input: {
     taskId: string;
-    /** Accepted to satisfy the ComputeStrategy interface. MicroVMs have no
-     *  workload-token-injecting runtime (they inherit the ECS env-var identity
-     *  posture until #249 / ADR-016 redesign the seam), so this is unused. */
+    /** Checked against the stored task owner before claiming a start receipt. */
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
@@ -577,6 +578,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     let runHookPayload: string;
     let payloadS3Uri: string | undefined;
+    let uploadPayload: (() => Promise<void>) | undefined;
     // EXACT boundary: `<= limit` inlines, `> limit` uploads. The service accepts
     // 4 096 bytes and rejects 4 097 (measured), so 4 096 must still go inline.
     if (inlineBytes <= RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
@@ -609,27 +611,28 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // `platform_config` key today, and if one ever appeared the platform's
       // value is the authoritative one.
       const payloadJson = JSON.stringify({ ...payload, platform_config: platformConfig });
-      try {
-        await getS3Client().send(new PutObjectCommand({
-          Bucket: MICROVM_PAYLOAD_BUCKET,
-          Key: key,
-          Body: payloadJson,
-          ContentType: 'application/json',
-        }));
-      } catch (err) {
-        // Marked so the classifier attributes an upload failure to this backend
-        // rather than letting a bare S3 exception name fall through to UNKNOWN.
-        throw wrapMicrovmError('payload upload', err);
-      }
+      // Defer all writes until the persisted receipt accepts this exact input.
+      uploadPayload = async () => {
+        try {
+          await getS3Client().send(new PutObjectCommand({
+            Bucket: MICROVM_PAYLOAD_BUCKET,
+            Key: key,
+            Body: payloadJson,
+            ContentType: 'application/json',
+          }));
+        } catch (err) {
+          throw wrapMicrovmError('payload upload', err);
+        }
+        logger.info('Wrote MicroVM run-hook payload to S3', {
+          task_id: taskId,
+          bytes: Buffer.byteLength(payloadJson, 'utf8'),
+          inline_bytes: inlineBytes,
+          inline_limit_bytes: RUN_HOOK_PAYLOAD_LIMIT_BYTES,
+          uri,
+        });
+      };
       payloadS3Uri = uri;
       runHookPayload = pointerEnvelope;
-      logger.info('Wrote MicroVM run-hook payload to S3', {
-        task_id: taskId,
-        bytes: Buffer.byteLength(payloadJson, 'utf8'),
-        inline_bytes: inlineBytes,
-        inline_limit_bytes: RUN_HOOK_PAYLOAD_LIMIT_BYTES,
-        uri: payloadS3Uri,
-      });
     }
 
     // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
@@ -647,7 +650,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       ? configuredIngress
       : [noIngressConnectorArn()];
 
-    const command = new RunMicrovmCommand({
+    const request = {
       imageIdentifier: MICROVM_IMAGE_IDENTIFIER,
       ...(MICROVM_IMAGE_VERSION && { imageVersion: MICROVM_IMAGE_VERSION }),
       executionRoleArn: MICROVM_EXECUTION_ROLE_ARN,
@@ -669,12 +672,28 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // is present, so omission is the unambiguous disabled state. Suspension is
       // orchestrator-owned (P3) — do NOT reintroduce this field.
       //
-      // No application-stable `clientToken` is supplied. The SDK may generate a
-      // token for one command, but `startSessionWithRetry` constructs another
-      // command on its next attempt. A failed response does not prove the first
-      // VM was never created. Lost-response reconciliation and attempt-scoped
-      // tokens need coverage before this can claim idempotent session starts.
-    });
+      // The receipt below supplies a task-stable token across new SDK commands.
+    };
+
+    const requestHash = microvmStartRequestHash(request, { ...payload, platform_config: platformConfig });
+    const claim = await claimMicrovmStart(taskId, input.userId, requestHash);
+    if (claim.closed) {
+      if (claim.handle) await this.stopSession(claim.handle);
+      throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
+    }
+    if (claim.handle) return claim.handle;
+    if (uploadPayload) {
+      await uploadPayload();
+    }
+    // Uploads can take time. Observe cancellation/another saved handle again
+    // immediately before the service call, using the same immutable request.
+    const latest = await claimMicrovmStart(taskId, input.userId, requestHash);
+    if (latest.closed) {
+      if (latest.handle) await this.stopSession(latest.handle);
+      throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
+    }
+    if (latest.handle) return latest.handle;
+    const command = new RunMicrovmCommand({ ...request, clientToken: latest.clientToken });
 
     let result;
     try {
@@ -684,7 +703,21 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // / `ResourceNotFoundException` from THIS backend classify as MicroVM
       // faults, while identically-named AgentCore/ECS errors keep their existing
       // classification. See MICROVM_ERROR_MARKER.
-      throw wrapMicrovmError('RunMicrovm', err);
+      const wrapped = wrapMicrovmError('RunMicrovm', err);
+      const serviceError = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+      const httpStatus = serviceError?.$metadata?.httpStatusCode;
+      // A service timeout can carry a 4xx status without proving that creation
+      // never happened. Preserve uncertainty across any subsequent rejection.
+      const timedOut = httpStatus === HTTP_REQUEST_TIMEOUT
+        || ['TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(serviceError?.name ?? '');
+      const knownRejection = !timedOut && (httpStatus !== undefined
+        ? httpStatus >= 400 && httpStatus < 500
+        : ['AccessDeniedException', 'UnauthorizedException', 'ValidationException',
+          'InvalidParameterValueException', 'ResourceNotFoundException', 'ThrottlingException',
+          'TooManyRequestsException', 'ServiceQuotaExceededException', 'ConflictException']
+          .includes(serviceError?.name ?? ''));
+      if (!knownRejection) throw new MicrovmStartUncertainError(wrapped.message, { cause: err });
+      throw wrapped;
     }
 
     const { microvmId, endpoint } = result;
@@ -702,13 +735,33 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // failed` bucket with "Check AgentCore Runtime or ECS cluster health" —
       // advice that names the wrong substrate entirely. `RunMicrovm` is the
       // operation because that is the call whose response is malformed.
-      throw wrapMicrovmError(
+      const incomplete = wrapMicrovmError(
         'RunMicrovm',
         new Error(
           `RunMicrovm returned an incomplete response (microvmId=${microvmId ?? 'missing'}, `
           + `endpoint=${endpoint ? 'present' : 'missing'}, state=${result.state ?? 'unknown'})`,
         ),
       );
+      if (!microvmId) throw new MicrovmStartUncertainError(incomplete.message, { cause: incomplete });
+      throw incomplete;
+    }
+
+    const handle: Extract<SessionHandle, { strategyType: 'lambda-microvm' }> = {
+      sessionId: microvmId, strategyType: 'lambda-microvm', microvmId, endpoint,
+    };
+    try {
+      await saveMicrovmStartHandle(taskId, latest.clientToken, handle);
+    } catch (err) {
+      // The write may have committed before its response was lost. Recover that
+      // receipt before destroying a computer whose handle is already durable.
+      try {
+        const saved = await claimMicrovmStart(taskId, input.userId, requestHash);
+        if (!saved.closed && saved.handle?.microvmId === microvmId) return saved.handle;
+      } catch (readErr) {
+        logger.warn('Could not reconcile the MicroVM start receipt', { task_id: taskId, error: String(readErr) });
+      }
+      await this.terminateBestEffort(microvmId, 'start receipt could not save handle');
+      throw new Error(`MICROVM_START_RECEIPT_SAVE_FAILED: ${String(err)}`, { cause: err });
     }
 
     // Image ARN/version is logged, NOT carried in the handle (ADR-021
@@ -731,20 +784,8 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       platform_config_keys: Object.keys(platformConfig),
     });
 
-    return {
-      // sessionId = microvmId, mirroring the ECS variant's "sessionId = the
-      // substrate identifier" precedent (ECS uses the task ARN) rather than
-      // AgentCore's fresh UUID — AgentCore only needs a UUID because
-      // `runtimeSessionId` is a caller-minted value that must be ≥ 33 chars.
-      // Here the substrate mints the id, every lifecycle API keys on it, and it
-      // is what an operator needs to correlate `TaskRecord.session_id` with the
-      // MicroVM in logs/console. A second synthetic UUID would add a
-      // non-actionable identifier and leave `session_id` un-joinable.
-      sessionId: microvmId,
-      strategyType: 'lambda-microvm',
-      microvmId,
-      endpoint,
-    };
+    // Use AWS's identifier for both lifecycle calls and TaskRecord.session_id.
+    return handle;
   }
 
   /**

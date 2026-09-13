@@ -20,6 +20,7 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
+import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
@@ -184,8 +185,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
   const sessionHandle = await context.step('start-session', async () => {
     let autoRetried = false;
+    let failureStatus: TaskRecord['status'] = TaskStatus.HYDRATING;
     // Hoisted out of the `try` so the catch can reap a MicroVM that STARTED but
-    // whose handle never made it into DynamoDB — see the catch block.
+    // whose registration did not complete — see the catch block.
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
@@ -223,6 +225,15 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // can load the handle they resume from — ADR-021 sub-decision 2).
       const computeMetadata = buildComputeMetadata(handle);
 
+      const current = handle.strategyType === 'lambda-microvm' ? await loadTask(taskId, true) : undefined;
+      if (current && TERMINAL_STATUSES.includes(current.status)) {
+        await strategy.stopSession(handle);
+        return null;
+      }
+      const alreadyRegistered = current?.session_id === handle.sessionId
+        && (current.status === TaskStatus.RUNNING || current.status === TaskStatus.AWAITING_APPROVAL);
+      if (alreadyRegistered) return handle;
+
       await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
         session_id: handle.sessionId,
         started_at: new Date().toISOString(),
@@ -230,10 +241,17 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         compute_metadata: computeMetadata,
         ...(handle.strategyType === 'agentcore' && { agent_runtime_arn: handle.runtimeArn }),
       });
-      await emitTaskEvent(taskId, 'session_started', {
-        session_id: handle.sessionId,
-        strategy_type: handle.strategyType,
-      }, correlation);
+      try {
+        await emitTaskEvent(taskId, 'session_started', {
+          session_id: handle.sessionId,
+          strategy_type: handle.strategyType,
+        }, correlation);
+      } catch (emitErr) {
+        if (handle.strategyType !== 'lambda-microvm') throw emitErr;
+        log.warn('session_started event failed after the MicroVM was registered', {
+          session_id: handle.sessionId, error: String(emitErr),
+        });
+      }
 
       log.info('Session started', {
         session_id: handle.sessionId,
@@ -242,15 +260,39 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
       return handle;
     } catch (err) {
-      // ORPHAN REAP (ADR-021). `RunMicrovm` may have already succeeded and left a
-      // MicroVM RUNNING — the throw could have come from `buildComputeMetadata`,
-      // the `transitionTask` write, or the `session_started` emit. Nothing
-      // self-terminates on this substrate (live-verified: a MicroVM with no
-      // working hook reached RUNNING in 12 s and stayed RUNNING with no
-      // stateReason), and the handle only ever existed in this Lambda's memory —
-      // once we throw, no poll and no finalize step will ever see it. So the VM
-      // would bill until `maximumDurationInSeconds` (8 h) expired while also
-      // holding account memory quota that gates admission for everyone else.
+      if (blueprintConfig.compute_type === 'lambda-microvm') {
+        try {
+          const current = await loadTask(taskId, true);
+          // A lost DynamoDB update response does not undo its committed result.
+          if (startedHandle && current.session_id === startedHandle.sessionId
+            && (current.status === TaskStatus.RUNNING || current.status === TaskStatus.AWAITING_APPROVAL)) {
+            return startedHandle;
+          }
+          if (TERMINAL_STATUSES.includes(current.status)) {
+            if (startedHandle && strategy) await strategy.stopSession(startedHandle);
+            if (!startedHandle && err instanceof MicrovmStartUncertainError) {
+              log.error('Task became terminal while its MicroVM start outcome is unknown', {
+                task_id: taskId, client_token: taskId, task_status: current.status,
+              });
+              try {
+                await emitTaskEvent(taskId, 'microvm_start_outcome_unknown', {
+                  client_token: taskId, task_status: current.status,
+                }, correlation);
+              } catch (eventErr) {
+                log.warn('Could not record the unknown MicroVM start event', { error: String(eventErr) });
+              }
+            }
+            return null;
+          }
+          failureStatus = current.status;
+        } catch (readErr) {
+          log.warn('Could not reconcile MicroVM registration after start failure', { error: String(readErr) });
+        }
+      }
+      // Registration failed and a strong read could not establish a committed
+      // RUNNING/approval-wait task. Reap the known computer. The start receipt
+      // retains its ID for recovery if cleanup itself fails; the service's
+      // eight-hour maximum duration remains the final lifetime bound.
       //
       // Best-effort in the strongest sense: `stopSession` is internally
       // non-throwing for this backend, and the extra try/catch guarantees that
@@ -290,10 +332,39 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // Without this, a double-transient failure was told "reply to retry" instead
       // of "I already retried" — the exact confusion the marker exists to prevent.
       const retriedNote = (autoRetried || isAutoRetried(err)) ? ' [auto-retried]' : '';
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}${retriedNote}`, task.user_id, true, task.repo);
+      const detail = err instanceof MicrovmStartUncertainError
+        ? `MICROVM_START_OUTCOME_UNKNOWN: ${String(err)}`
+        : String(err);
+      const errorMessage = `Session start failed: ${detail}${retriedNote}`;
+      if (blueprintConfig.compute_type === 'lambda-microvm') {
+        // The durable finalization step below owns the terminal event and slot
+        // release. Replaying this step after FAILED must not release it twice.
+        try {
+          await transitionTask(taskId, failureStatus, TaskStatus.FAILED, {
+            completed_at: new Date().toISOString(), error_message: errorMessage,
+          });
+        } catch (transitionErr) {
+          const current = await loadTask(taskId, true);
+          if (!TERMINAL_STATUSES.includes(current.status)) throw transitionErr;
+        }
+        return null;
+      }
+      await failTask(taskId, failureStatus, errorMessage, task.user_id, true, task.repo);
       throw err;
     }
-  });
+  }, blueprintConfig.compute_type === 'lambda-microvm'
+    ? { retryStrategy: () => ({ shouldRetry: false }) }
+    : undefined);
+
+  if (!sessionHandle) {
+    // The task ended before registration, including a persisted start failure.
+    // Reach normal finalization without starting another VM.
+    await context.step('finalize-before-session', async () => {
+      await finalizeTask(taskId, { attempts: 0 }, task.user_id);
+      await deleteMicrovmPayload(taskId);
+    });
+    return;
+  }
 
   // Resolve the compute strategy once and reuse it across poll iterations
   // instead of constructing a new instance on every cycle.

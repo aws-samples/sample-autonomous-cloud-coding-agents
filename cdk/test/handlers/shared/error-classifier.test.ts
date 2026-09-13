@@ -480,6 +480,16 @@ describe('classifyError', () => {
   // --- Lambda MicroVMs (ADR-021) ---
 
   describe('Lambda MicroVMs errors', () => {
+    test('an unknown start requires investigation even when its detail describes a transient failure', () => {
+      const result = classifyError(
+        'Session start failed: MICROVM_START_OUTCOME_UNKNOWN: MicroVM RunMicrovm failed: TimeoutError: response lost [auto-retried]',
+      )!;
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(retryGuidance(result, true)).toMatch(/needs your ABCA admin/);
+      expect(result.remedy).toMatch(/before submitting another task/);
+    });
+
     test('classifies regional unavailability as a non-retryable CONFIG fault with the supported-Region list', () => {
       // ADR-021: "If startSession fails because the MicroVM service is unavailable
       // in the stack region, then the orchestrator shall classify the failure with
