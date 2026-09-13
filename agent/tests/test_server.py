@@ -1867,8 +1867,68 @@ class TestPlatformConfigContract:
         from shared_constants import SHARED_CONSTANTS
 
         contract = SHARED_CONSTANTS["microvm_platform_config"]
+        assert set(contract) == {"env_by_key", "required", "arn_keys", "account_anchor_key"}
         assert contract["env_by_key"] == server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY
         assert frozenset(contract["required"]) == server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
+        assert frozenset(contract["arn_keys"]) == server.MICROVM_PLATFORM_CONFIG_ARN_KEYS
+        assert contract["account_anchor_key"] == server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY
+
+    def test_arn_fields_and_account_anchor_are_explicitly_reviewed(self):
+        assert {
+            "github_token_secret_arn",
+            "linear_oauth_secret_arn",
+            "jira_oauth_secret_arn",
+            "agent_session_role_arn",
+        } == server.MICROVM_PLATFORM_CONFIG_ARN_KEYS
+        assert server.MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY == "agent_session_role_arn"
+
+    @pytest.mark.parametrize(
+        "key,env_name",
+        [("new_resource_arn", "NEW_RESOURCE"), ("new_resource", "NEW_RESOURCE_ARN")],
+    )
+    def test_new_arn_fields_cannot_omit_arn_validation(self, monkeypatch, key, env_name):
+        monkeypatch.setattr(
+            server,
+            "MICROVM_PLATFORM_CONFIG_ENV_BY_KEY",
+            {**server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY, key: env_name},
+        )
+        with pytest.raises(ValueError, match=r"ARN-shaped key.*missing from arn_keys"):
+            server._validate_platform_config_contract()
+
+        monkeypatch.setattr(
+            server,
+            "MICROVM_PLATFORM_CONFIG_ARN_KEYS",
+            server.MICROVM_PLATFORM_CONFIG_ARN_KEYS | {key},
+        )
+        server._validate_platform_config_contract()
+
+    @pytest.mark.parametrize(
+        "constant,value,error",
+        [
+            ("MICROVM_PLATFORM_CONFIG_ARN_KEYS", frozenset(), "arn_keys must not be empty"),
+            (
+                "MICROVM_PLATFORM_CONFIG_ARN_KEYS",
+                frozenset({"unknown_arn"}),
+                "arn_keys names key.*absent from env_by_key",
+            ),
+            (
+                "MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY",
+                "task_table_name",
+                "must be one of arn_keys",
+            ),
+            (
+                "MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY",
+                "linear_oauth_secret_arn",
+                "must also be listed in .required",
+            ),
+        ],
+    )
+    def test_invalid_arn_contract_fails_before_serving_tasks(
+        self, monkeypatch, constant, value, error
+    ):
+        monkeypatch.setattr(server, constant, value)
+        with pytest.raises(ValueError, match=error):
+            server._validate_platform_config_contract()
 
     def test_wire_contract_is_exactly_the_documented_key_set(self):
         # Spelled out on purpose: this is the wire contract Stage B's producer is

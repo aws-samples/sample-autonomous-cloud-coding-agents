@@ -1250,6 +1250,15 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       .toEqual(Object.keys(sharedConstants.microvm_platform_config.env_by_key));
     expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS])
       .toEqual(sharedConstants.microvm_platform_config.required);
+    expect(Object.keys(sharedConstants.microvm_platform_config).sort())
+      .toEqual(['account_anchor_key', 'arn_keys', 'env_by_key', 'required']);
+    expect(sharedConstants.microvm_platform_config.arn_keys).toEqual([
+      'github_token_secret_arn',
+      'linear_oauth_secret_arn',
+      'jira_oauth_secret_arn',
+      'agent_session_role_arn',
+    ]);
+    expect(sharedConstants.microvm_platform_config.account_anchor_key).toBe('agent_session_role_arn');
 
     // Order is part of the contract: it is the serialization order, which the 4 KB
     // inline/S3 branch decision is computed against.

@@ -1054,6 +1054,11 @@ def _validate_platform_config_contract() -> None:
     unknown_arn = sorted(MICROVM_PLATFORM_CONFIG_ARN_KEYS - set(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY))
     if unknown_arn:
         raise ValueError(f"{where}.arn_keys names key(s) absent from env_by_key: {unknown_arn}")
+    for key, env_name in MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
+        if (
+            key.endswith("_arn") or env_name.endswith("_ARN")
+        ) and key not in MICROVM_PLATFORM_CONFIG_ARN_KEYS:
+            raise ValueError(f"{where}: ARN-shaped key {key!r} is missing from arn_keys")
     anchor = MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY
     if anchor not in MICROVM_PLATFORM_CONFIG_ARN_KEYS:
         raise ValueError(f"{where}.account_anchor_key {anchor!r} must be one of arn_keys")

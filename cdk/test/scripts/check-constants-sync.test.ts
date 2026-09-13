@@ -367,6 +367,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('ARN-pinning contract (review B5)', () => {
+    test.each([
+      ['new_resource_arn', 'NEW_RESOURCE'],
+      ['new_resource', 'NEW_RESOURCE_ARN'],
+    ])('rejects an unvalidated ARN field %s → %s', (key, envName) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key[key] = envName;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`ARN-shaped key "${key}" is missing from arn_keys`);
+    });
+
+    test('accepts a new ARN field when its validation is also declared', () => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key.new_resource_arn = 'NEW_RESOURCE_ARN';
+          json.microvm_platform_config.arn_keys.push('new_resource_arn');
+        });
+      });
+      expect(result.status).toBe(0);
+    });
+
     test('rejects an arn_keys entry that is not a wire key', () => {
       const result = runInMutatedRepo((root) => {
         patchContract(root, (json) => {

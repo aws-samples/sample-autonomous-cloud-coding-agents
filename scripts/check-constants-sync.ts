@@ -287,12 +287,11 @@ function main(): number {
     invariantErrors.push('microvm_platform_config.required contains a duplicate');
   }
 
-  // ARN pinning (ADR-021 P2, review B5). `arn_keys` names the values the agent
-  // pins to its own partition/account before installing them into the env that
-  // resolves credentials and fetches secrets; `account_anchor_key` names the ARN
-  // that supplies the expected partition/account. Both are validated here as well
-  // as at agent import time, because a malformed entry would silently WIDEN what
-  // the agent accepts from a network payload.
+  // ARN consistency (ADR-021 P2, review B5). `arn_keys` names the values checked
+  // against the partition/account supplied by `account_anchor_key`. That anchor
+  // comes from the same payload; agreement does not establish deployment identity.
+  // Validate both here and at agent import time so a new ARN field cannot
+  // silently skip the existing consistency check.
   if (!Array.isArray(mpc.arn_keys) || mpc.arn_keys.length === 0) {
     invariantErrors.push('microvm_platform_config.arn_keys must be a non-empty array');
   } else {
@@ -305,6 +304,14 @@ function main(): number {
     }
     if (new Set(mpc.arn_keys).size !== mpc.arn_keys.length) {
       invariantErrors.push('microvm_platform_config.arn_keys contains a duplicate');
+    }
+    for (const [key, envName] of Object.entries(envByKey)) {
+      if ((key.endsWith('_arn') || (typeof envName === 'string' && envName.endsWith('_ARN')))
+        && !mpc.arn_keys.includes(key)) {
+        invariantErrors.push(
+          `microvm_platform_config: ARN-shaped key "${key}" is missing from arn_keys`,
+        );
+      }
     }
     if (!mpc.arn_keys.includes(mpc.account_anchor_key)) {
       invariantErrors.push(
