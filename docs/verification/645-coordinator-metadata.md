@@ -67,3 +67,7 @@ Do not roll back to unrestricted worker writes while relying on protected reserv
 The agent can still report status and results. This patch does not authenticate whether its reported success/failure is truthful or constrain status values/transitions at IAM level. Supporting approval/event/nudge rows retain their prior permissions.
 
 The compute role chooses `{user_id, repo, task_id}` session tags. Current trust policies do not independently prove that the chosen task belongs to that worker. A compromised whole worker with ambient credentials can therefore try to assume a differently tagged session. The attribute restriction applies to that session too, but this is not complete tenant isolation. Trusted task/deployment identity and task-scoped payload reads remain separate prerequisites in the [P3 plan](./645-p3-implementation-plan.md).
+
+## Payload capability storage
+
+The subsequent [v2 payload bootstrap](./645-payload-bootstrap.md) stores signed download URLs only in coordinator-owned S3 launch records. They are not added to `microvm_start` or other TaskTable attributes: own-task reads still include internal metadata, so API omission and attribute write restrictions cannot provide confidentiality for a bearer URL.

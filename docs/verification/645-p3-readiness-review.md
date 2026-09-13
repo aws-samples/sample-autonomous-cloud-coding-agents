@@ -4,7 +4,7 @@ Reviewed 2026-09-13 against `main` commit `5e10038c7e28179b302ac4de78b709795aeba
 
 This review covers the existing MicroVM implementation, related P2 follow-ups, comment accuracy and nested-stack feasibility. It includes local experiments, not an AWS deployment or a new live smoke run. The associated [implementation plan](./645-p3-implementation-plan.md) turns the findings into ordered work.
 
-**Implementation update (2026-09-13):** subsequent prerequisite work fixes #841 thread isolation, #817 coordinator payload-deletion permission, terminal-failure classification, closed S3-stream handling, and the approval-resume heartbeat race locally. Real bad-byte route tests and ARN contract guards are also added. Trusted deployment identity, task-scoped payload reads and live verification remain open. The findings below preserve the reviewed baseline; see [implementation progress](./645-p3-implementation-plan.md#implementation-progress) for commits, checks and remaining work.
+**Implementation update (2026-09-13):** subsequent local batches fix thread isolation, deletion/error/byte/contract bugs, approval heartbeat, stable MicroVM start recovery, atomic capacity reservations and coordinator metadata permissions. The latest batch implements v2 authenticated deployment manifests and single-object payload links for both ECS and MicroVM (#817/#700), with no old unsigned fallback. See the [bootstrap runbook](./645-payload-bootstrap.md) and [implementation progress](./645-p3-implementation-plan.md#implementation-progress). Effective AWS policies, expiry/networking, clean deployment, logging/registry follow-ups and P3 sleep/wake remain open. Findings below preserve the original reviewed baseline, rather than describing all of them as current defects.
 
 Further local work adds durable MicroVM start receipts, stable request tokens and bounded handle recovery. AWS token-retention/conflict behavior and unknown-ID cleanup remain live verification gates. The shared finalizer's repeated-decrement risk was subsequently reproduced and fixed locally with task-owned reservation transactions, unified counter writers and revision-guarded reconciliation, including approval waits. DynamoDB Local exercises the real transaction conditions; deployed IAM, scan scale and upgrade/drain behavior still need AWS verification.
 
@@ -82,7 +82,7 @@ Nesting is useful preparation, especially for the vault combination, but it does
 
 ## Behavior findings that need follow-up
 
-“Confirmed” below means visible in current source or reproduced locally. It does not mean reproduced on AWS during this review.
+“Confirmed” below means visible in the baseline source or reproduced locally during the initial review. It does not mean reproduced on AWS during this review.
 
 | Finding | Evidence and consequence | Treatment |
 |---|---|---|
@@ -111,7 +111,7 @@ The security findings are readiness work, not cosmetic cleanup. This review does
 - **[#702](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/702): teardown leaks.** Account for AgentCore ENIs (network attachments) and Memory deletion state when cleaning the test deployment. Separate platform operations work.
 - **[#736](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/736): future IAM conditions.** Revisit when the service supports suitable context keys. Do not restore the previously broken `iam:PassedToService` condition just to make policies look tighter.
 
-## Cleanup applied in this branch
+## Cleanup in the original review commit
 
 Changes are comments, Python docstrings, documentation, one cdk-nag explanation string and the vault guard’s error wording. The error no longer claims a current 505-resource overflow; the guard still rejects exactly the same combination. The cdk-nag change affects template metadata, not IAM permissions.
 

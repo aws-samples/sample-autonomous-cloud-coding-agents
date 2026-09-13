@@ -244,23 +244,25 @@ Baked secrets are **reported, not enforced**: `warnings` lists the names (never 
 
 `microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
 
-**`POST /aws/lambda-microvms/runtime/v1/run`** — Payload delivery. Validates the body, installs `platform_config` (below), starts the pipeline in a background thread (the same `_extract_invocation_params` → `_spawn_background` path `/invocations` uses), and returns 200 inside the 1–60 s hook budget. Body:
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. Protocol v2 is implemented locally; real AWS permission/network/expiry verification remains pending (repository runbook: `docs/verification/645-payload-bootstrap.md`).
+
+`runHookPayload` is a JSON **string** passed through by `RunMicrovm`, containing:
 
 ```json
 {
-  "microvmId": "microvm-b44b69d9-…",
-  "runHookPayload": "{\"agent_payload_s3_uri\": \"s3://bucket/<task_id>/payload.json\", \"platform_config\": {…}}"
+  "version": 2,
+  "task_id": "TASK001",
+  "bootstrap_s3_uri": "s3://deployment-bucket/bootstrap/<sha256>.json",
+  "payload_url": "<redacted single-object HTTPS URL>",
+  "expires_at": 1789312500000
 }
 ```
 
-`runHookPayload` is an opaque **string** the service passes through from `RunMicrovm`. ABCA's contract for it is one of two shapes, mirroring the ECS container env contract (`AGENT_PAYLOAD` / `AGENT_PAYLOAD_S3_URI`):
+The worker reads the deployment manifest with its ambient AWS role, which explicitly denies object reads outside that bucket's `bootstrap/*` prefix. It downloads the task using the coordinator's short-lived signed URL, verifies the task identity, and requires the task's configuration to equal the manifest. The digest in the manifest filename checks its bytes; IAM authenticates its origin. The entire reference must fit **4,096 bytes**. Manifests and task payloads are capped at **16 KiB** and **8 MiB**. Redirects, environment proxies and hosts/paths other than the task's regional S3 object are rejected.
 
-| Envelope | When |
-|---|---|
-| `{"agent_payload": {…}, "platform_config": {…}}` | the whole orchestrator payload inline — only when it fits |
-| `{"agent_payload_s3_uri": "s3://bucket/key", "platform_config": {…}}` | pointer to the payload in the platform payload bucket |
+ECS uses the same reference in `AGENT_PAYLOAD_REF`, with an empty manifest config because deployment settings already come from its task definition/overrides. `load_ecs_payload()` removes the capability environment variable before importing the pipeline. Neither backend accepts the old unsigned `AGENT_PAYLOAD`, `AGENT_PAYLOAD_S3_URI`, inline hook or S3-pointer formats. Roll out the matching coordinator, worker images and policies with admissions paused and old tasks drained; the runbook records upgrade and rollback steps.
 
-The service caps `runHookPayload` at **4 096 bytes**, so the **pointer form is the normal one** — a hydrated payload is essentially always larger. Fetching it needs no new env var: the MicroVM execution role holds read-only access to that bucket and the URI carries bucket + key.
+A presigned URL is a temporary download permission: **never log it**. Its requested lifetime is at most 900 seconds, shortened by known signer credential expiry; initial creation requires at least 300 seconds. The coordinator privately saves the exact URL for retries and deletes the payload and saved launch reference at finalization. An expired saved reference fails rather than being silently re-signed.
 
 #### `platform_config` — the agent's env, delivered per task (P2)
 
@@ -270,7 +272,7 @@ On AgentCore and ECS the agent's non-secret platform env arrives as runtime env 
 { "platform_config": { "task_table_name": "…", "github_token_secret_arn": "arn:…" } }
 ```
 
-Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** any credential or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and can cache credential state in `boto3.DEFAULT_SESSION` (environment-derived region is re-read for new clients), and until the install has run the only environment available is whatever the snapshot baked. The single AWS call allowed before the install is the S3 payload fetch, because the config is inside the object being fetched. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
+Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** task credential, secret or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and can cache credential state in `boto3.DEFAULT_SESSION` (environment-derived region is re-read for new clients), and until the install has run the only environment available is whatever the snapshot baked. Before installation, bootstrap reads the deployment manifest through the attributed S3 client and downloads the single task object over signed HTTPS. Other pre-install diagnostics remain stdout-only. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
 
 | Key | Env var | Required |
 |---|---|---|
@@ -288,9 +290,9 @@ Each snake_case key installs into its UPPER_SNAKE env var, and a payload value *
 | `aws_sdk_ua_app_id` | `AWS_SDK_UA_APP_ID` | |
 | `anthropic_default_haiku_model` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | |
 
-Values are **non-secret identifiers only** — secrets are still fetched at `/run` time from Secrets Manager using the ARNs delivered here, so task secrets need not be baked into the snapshot. The build-hook warning is not proof that a hand-built image contains no secrets. The allowlist **fails closed**: these values land in `os.environ` of the process that spawns the agent's tool subprocesses, so an unrecognised key is an env-injection attempt (`LD_PRELOAD`, `AWS_ENDPOINT_URL`, …) and the whole run is rejected with nothing installed. Blank/`null` values for optional keys are skipped rather than clobbering an image value; blank required keys are rejected. An envelope with no `platform_config` is accepted with a warning **only if the effective environment already contains all required identifiers**. Otherwise `/run` rejects it as incomplete. Control characters and inconsistent ARN account/partition fields are also rejected; the ARN check does not establish that an identifier belongs to this deployment ([#817](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/817)).
+Values are **non-secret identifiers only** — secrets are still fetched at `/run` time from Secrets Manager using the ARNs delivered here, so task secrets need not be baked into the snapshot. The build-hook warning is not proof that a hand-built image contains no secrets. The allowlist **fails closed**: these values land in `os.environ` of the process that spawns the agent's tool subprocesses, so an unrecognised key is an env-injection attempt (`LD_PRELOAD`, `AWS_ENDPOINT_URL`, …) and the whole run is rejected with nothing installed. Blank/`null` values for optional keys are skipped rather than clobbering an image value; blank required keys are rejected. A verified MicroVM payload must contain `platform_config`; there is no baked-environment fallback. Control characters and inconsistent ARN account/partition fields are also rejected. ARN consistency alone is not deployment authentication: v2 supplies that through the IAM-read manifest and exact configuration comparison, including same-account workspace identifiers ([#817](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/817)).
 
-Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (manifest/payload read or stored bytes failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
 
 `/suspend` and `/resume` are deliberately **not** served — declaring a hook nothing answers fails the corresponding lifecycle transition, so the CDK construct declares exactly the hooks the agent serves. They land in P3 with the ComputeStrategy interface widening.
 

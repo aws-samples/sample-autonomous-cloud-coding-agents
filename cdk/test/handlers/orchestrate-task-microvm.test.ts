@@ -58,8 +58,11 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
 // PUT and the finalize DELETE are both assertions this file needs to make, and a
 // per-instance mock silently discards them.
 const mockS3Send = jest.fn().mockResolvedValue({});
+jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: async () => 'https://payloads.s3.us-east-1.amazonaws.com/task/payload.json?X-Amz-Signature=' + Date.now() }));
+const mockObjects = new Map<string, string>();
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: mockS3Send })),
+  GetObjectCommand: jest.fn((input: unknown) => ({ _type: 'GetObject', input })),
+  S3Client: jest.fn(() => ({ send: mockS3Send, config: { credentials: async () => ({ accessKeyId: 'EXAMPLE', secretAccessKey: 'unused' }) } })),
   PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
@@ -249,8 +252,17 @@ beforeEach(() => {
   }));
   mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
   mockSaveHandle.mockReset().mockResolvedValue(undefined);
-  mockS3Send.mockReset();
-  mockS3Send.mockResolvedValue({});
+  mockObjects.clear();
+  mockS3Send.mockReset().mockImplementation(async ({ _type: type, input: command }) => {
+    if (type === 'GetObject') {
+      if (!mockObjects.has(command.Key)) throw Object.assign(new Error('missing'), { name: 'NoSuchKey' });
+      return { Body: { transformToString: async () => mockObjects.get(command.Key) } };
+    }
+    if (type === 'DeleteObject') { mockObjects.delete(command.Key); return {}; }
+    if (command.IfNoneMatch === '*' && mockObjects.has(command.Key)) throw Object.assign(new Error('exists'), { name: 'PreconditionFailed' });
+    mockObjects.set(command.Key, command.Body);
+    return {};
+  });
   mockMicrovmSend.mockReset();
   mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.COMPLETED });
   mockReconcile.mockResolvedValue({ taskFailed: false });
@@ -488,20 +500,22 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
   // --- finalize-time payload delete (review NB3) ---
 
-  test('deletes its OWN payload object on finalize, closing the cross-task read window', async () => {
-    // The execution role's payload-bucket grant is bucket-wide `grantRead`, so a
-    // TTL-only reaper left every finished task's hydrated prompt readable by any
-    // running MicroVM for ~24 h. ECS already deleted at finalize; this is the parity
-    // that matters.
+  test('deletes its own payload and saved capability on finalize', async () => {
+    // Revoke the signed payload link and remove its private replay record.
+    // The one-day lifecycle remains a cleanup backstop.
     runMicrovmOk();
 
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
     const deletes = s3CommandsOfType('DeleteObject');
-    expect(deletes).toHaveLength(1);
+    expect(deletes).toHaveLength(2);
     expect(deletes[0].input).toEqual({
       Bucket: 'test-microvm-payload-bucket',
       Key: 'TASK001/payload.json',
+    });
+    expect(deletes[1].input).toEqual({
+      Bucket: 'test-microvm-payload-bucket',
+      Key: 'TASK001/launch.json',
     });
     // ...and it did not reach for the ECS deleter.
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();

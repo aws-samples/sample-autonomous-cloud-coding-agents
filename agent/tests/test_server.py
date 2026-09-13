@@ -8,9 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -940,13 +938,45 @@ def _platform_config(**overrides) -> dict:
     return config
 
 
-def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
-    """Wrap an ABCA payload envelope in the service's ``/run`` request body.
+# Route tests isolate the authenticated transport boundary. The real manifest
+# IAM/stream/URL consumer is exercised in test_payload_bootstrap.py.
+_run_documents: dict[str, tuple[dict, Any]] = {}
 
-    The service passes ``runHookPayload`` through as an opaque STRING (it never
-    parses it), so the double encoding here is the real wire shape, not a test
-    artifact.
-    """
+
+@pytest.fixture(autouse=True)
+def _authenticated_test_transport(monkeypatch):
+    import payload_bootstrap
+
+    _run_documents.clear()
+    monkeypatch.setattr(
+        payload_bootstrap,
+        "_manifest",
+        lambda uri, backend: ("payload-bucket", _run_documents[uri][1]),
+    )
+    monkeypatch.setattr(payload_bootstrap, "_download", lambda url: _run_documents[url][0])
+    yield
+    _run_documents.clear()
+
+
+def _run_hook_body(envelope: dict, microvm_id: str = "microvm-abc") -> dict:
+    """Wrap pipeline/config fixtures in the current v2 service envelope."""
+    from tests.test_payload_bootstrap import signed_url
+
+    if "agent_payload" in envelope and isinstance(envelope["agent_payload"], dict):
+        payload = envelope["agent_payload"]
+        task_id = payload.get("task_id", "invalid")
+        config = envelope.get("platform_config", _platform_config())
+        uri = f"s3://payload-bucket/bootstrap/{'a' * 64}.json"
+        url = signed_url(task_id=task_id)
+        document = {
+            "version": 2,
+            "task_id": task_id,
+            "agent_payload": payload,
+            "platform_config": config,
+        }
+        _run_documents[uri] = (document, config)
+        _run_documents[url] = (document, config)
+        envelope = {"version": 2, "task_id": task_id, "bootstrap_s3_uri": uri, "payload_url": url}
     return {"microvmId": microvm_id, "runHookPayload": json.dumps(envelope)}
 
 
@@ -1334,21 +1364,16 @@ class TestMicrovmReadyWarmUpBudget:
         assert "skipping best-effort warm-up of 'opt'" in capfd.readouterr().out
 
 
-class TestMicrovmRunHookInlinePayload:
-    """Inline envelope: ``{"agent_payload": {...}}``.
+class TestMicrovmRunHookVerifiedPayload:
+    """Map an authenticated v2 payload to the asynchronous task pipeline.
 
-    The exception rather than the rule — the service caps ``runHookPayload`` at
-    4 096 bytes and a hydrated payload is larger — but it is the branch that
-    proves the payload→pipeline mapping without any S3 involvement.
+    The module fixture supplies manifest/download bytes; the shared consumer's
+    authentication and transport checks have their own regression suite.
     """
 
     def test_accepts_the_payload_and_starts_the_pipeline_asynchronously(
-        self, client, monkeypatch, baked_platform_env
+        self, client, monkeypatch, cached_github_token
     ):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
         started = threading.Event()
         seen: dict = {}
 
@@ -1371,7 +1396,7 @@ class TestMicrovmRunHookInlinePayload:
                         "aws_region": "us-east-1",
                     }
                 },
-                microvm_id="microvm-inline",
+                microvm_id="microvm-verified",
             ),
         )
 
@@ -1380,7 +1405,7 @@ class TestMicrovmRunHookInlinePayload:
         assert body["status"] == "accepted"
         assert body["task_id"] == "t-microvm-1"
         # Echoed so a MicroVM log line can be joined to the control-plane id.
-        assert body["microvm_id"] == "microvm-inline"
+        assert body["microvm_id"] == "microvm-verified"
 
         assert started.wait(timeout=5.0), "pipeline thread did not start"
         # Same mapping the /invocations path performs: prompt→task_description,
@@ -1389,11 +1414,7 @@ class TestMicrovmRunHookInlinePayload:
         assert seen["repo_url"] == "org/repo"
         assert seen["task_description"] == "Fix the bug"
 
-    def test_returns_before_the_pipeline_finishes(self, client, monkeypatch, baked_platform_env):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
+    def test_returns_before_the_pipeline_finishes(self, client, monkeypatch, cached_github_token):
         release = threading.Event()
         entered = threading.Event()
 
@@ -1421,12 +1442,8 @@ class TestMicrovmRunHookInlinePayload:
             release.set()
 
     def test_uses_the_same_model_id_and_prompt_aliases_as_invocations(
-        self, client, monkeypatch, baked_platform_env
+        self, client, monkeypatch, cached_github_token
     ):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
         seen: dict = {}
         started = threading.Event()
 
@@ -1458,171 +1475,6 @@ class TestMicrovmRunHookInlinePayload:
         assert seen["channel_source"] == "linear"
 
 
-class TestMicrovmRunHookS3Payload:
-    """S3-pointer envelope: ``{"agent_payload_s3_uri": "s3://bucket/key"}``.
-
-    The DOMINANT path on this backend: with a 4 096-byte ``runHookPayload`` cap,
-    any hydrated payload is offloaded to the platform payload bucket and only the
-    pointer travels in the hook body.
-    """
-
-    @pytest.mark.parametrize(
-        "body_bytes,stream_fault",
-        [
-            (b'{"platform_config":{"task_table_name":"must-not-install"},"task_id":', None),
-            (b'{"task_id":"bad-encoding-\xff"}', None),
-            (b'{"task_id":"short-stream"}', "incomplete"),
-            (b'{"task_id":"closed-stream"}', "closed"),
-            (b"[1,2,3]", None),
-        ],
-        ids=["truncated-json", "invalid-encoding", "incomplete-stream", "closed-stream", "array"],
-    )
-    def test_bad_s3_bytes_use_the_real_fetch_path_and_start_nothing(
-        self, client, monkeypatch, body_bytes, stream_fault
-    ):
-        from botocore.response import StreamingBody
-
-        import aws_session
-
-        raw = BytesIO(body_bytes)
-        if stream_fault == "closed":
-            raw.close()
-        body = StreamingBody(raw, len(body_bytes) + (stream_fault == "incomplete"))
-        s3 = MagicMock()
-        s3.get_object.return_value = {"Body": body}
-        factory = MagicMock(return_value=s3)
-        run_task = MagicMock()
-        install_config = MagicMock(wraps=server._install_platform_config)
-        monkeypatch.setattr(aws_session, "platform_client", factory)
-        monkeypatch.setattr(server, "run_task", run_task)
-        monkeypatch.setattr(server, "_install_platform_config", install_config)
-        before_env = dict(os.environ)
-
-        response = client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {
-                    "agent_payload_s3_uri": "s3://payload-bucket/t-bad/payload.json",
-                    "platform_config": {"task_table_name": "outer-must-not-install"},
-                }
-            ),
-        )
-
-        assert response.status_code == 500
-        assert response.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
-        assert response.json()["message"]
-        s3.get_object.assert_called_once_with(Bucket="payload-bucket", Key="t-bad/payload.json")
-        assert factory.call_args.args == ("s3",)
-        install_config.assert_not_called()
-        run_task.assert_not_called()
-        assert dict(os.environ) == before_env
-        with server._threads_lock:
-            assert server._active_threads == []
-
-    def test_fetches_the_payload_from_s3_and_starts_the_pipeline(
-        self, client, monkeypatch, baked_platform_env
-    ):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
-        seen: dict = {}
-        started = threading.Event()
-
-        def fake_run_task(**kwargs):
-            seen.update(kwargs)
-            started.set()
-
-        fetched: dict = {}
-
-        def fake_fetch(uri):
-            fetched["uri"] = uri
-            return {"task_id": "t-s3", "repo_url": "org/repo", "prompt": "from s3"}
-
-        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", fake_fetch)
-        monkeypatch.setattr(server, "run_task", fake_run_task)
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body({"agent_payload_s3_uri": "s3://payload-bucket/t-s3/payload.json"}),
-        )
-
-        assert r.status_code == 200
-        assert r.json()["task_id"] == "t-s3"
-        assert fetched["uri"] == "s3://payload-bucket/t-s3/payload.json"
-        assert started.wait(timeout=5.0)
-        assert seen["task_description"] == "from s3"
-
-    def test_parses_bucket_and_key_out_of_the_uri(self, monkeypatch):
-        captured: dict = {}
-
-        class _Body:
-            @staticmethod
-            def read():
-                return b'{"task_id": "t-1", "repo_url": "o/r"}'
-
-        class _S3:
-            @staticmethod
-            def get_object(**kwargs):
-                captured.update(kwargs)
-                return {"Body": _Body}
-
-        import boto3
-
-        monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _S3)
-
-        payload = server._fetch_microvm_payload_from_s3("s3://my-bucket/prefix/t-1/payload.json")
-
-        # Key keeps every slash after the bucket — a naive split would truncate it.
-        assert captured == {"Bucket": "my-bucket", "Key": "prefix/t-1/payload.json"}
-        assert payload == {"task_id": "t-1", "repo_url": "o/r"}
-
-    def test_rejects_a_uri_with_no_key(self, monkeypatch):
-        with pytest.raises(ValueError, match="not a bucket/key URI"):
-            server._fetch_microvm_payload_from_s3("s3://bucket-only")
-
-    def test_rejects_a_non_object_s3_body(self, monkeypatch):
-        class _Body:
-            @staticmethod
-            def read():
-                return b"[1, 2, 3]"
-
-        class _S3:
-            @staticmethod
-            def get_object(**_kwargs):
-                return {"Body": _Body}
-
-        import boto3
-
-        monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _S3)
-
-        # `_PayloadFetchError`, NOT `ValueError` (review N1): the object is bad, not
-        # the orchestrator's envelope, so the handler must route it to its RETRYABLE
-        # 500 rather than the "retrying cannot help" 400. Asserting the type is the
-        # point — `ValueError` here would silently restore the misclassification.
-        with pytest.raises(server._PayloadFetchError, match="expected an object"):
-            server._fetch_microvm_payload_from_s3("s3://b/k")
-        assert not issubclass(server._PayloadFetchError, ValueError)
-
-    def test_s3_failure_returns_500_and_starts_nothing(self, client, monkeypatch):
-        def boom(_uri):
-            raise RuntimeError("AccessDenied")
-
-        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", boom)
-        monkeypatch.setattr(server, "run_task", MagicMock())
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/key"}))
-
-        # 500, not 400: the body was well-formed, the fetch was not. Retrying an
-        # identical body CAN help here, unlike a malformed envelope.
-        assert r.status_code == 500
-        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
-        assert "AccessDenied" in r.json()["message"]
-        with server._threads_lock:
-            assert server._active_threads == []
-
-
 class TestMicrovmRunHookRejections:
     """Every shape the agent cannot act on must fail LOUDLY, before spawning.
 
@@ -1633,15 +1485,15 @@ class TestMicrovmRunHookRejections:
     @pytest.mark.parametrize(
         "run_hook_payload,expected_fragment",
         [
-            ("", "runHookPayload is empty"),
-            ("   ", "runHookPayload is empty"),
+            ("", "not valid JSON"),
+            ("   ", "not valid JSON"),
             ("not json at all", "not valid JSON"),
-            ('"a string"', "must be a JSON object"),
-            ("[1,2,3]", "must be a JSON object"),
-            ('{"agent_payload": "not-an-object"}', "agent_payload must be an object"),
-            ('{"agent_payload_s3_uri": "https://example.com/x"}', "must be an s3:// URI"),
-            ('{"agent_payload_s3_uri": 42}', "must be an s3:// URI"),
-            ('{"something_else": 1}', "neither agent_payload nor agent_payload_s3_uri"),
+            ('"a string"', "v2 is required"),
+            ("[1,2,3]", "v2 is required"),
+            ('{"agent_payload": "not-an-object"}', "v2 is required"),
+            ('{"agent_payload_s3_uri": "https://example.com/x"}', "v2 is required"),
+            ('{"agent_payload_s3_uri": 42}', "v2 is required"),
+            ('{"something_else": 1}', "v2 is required"),
         ],
     )
     def test_returns_400_with_a_named_code(
@@ -1670,9 +1522,9 @@ class TestMicrovmRunHookRejections:
         assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
 
     def test_incomplete_task_record_reuses_the_invocations_rejection_shape(
-        self, client, monkeypatch, baked_platform_env
+        self, client, monkeypatch, cached_github_token
     ):
-        # `baked_platform_env` so the run gets PAST config delivery and reaches the
+        # Cache the GitHub token so this test reaches the
         # task-record check this test is actually about.
         monkeypatch.setattr(server, "run_task", MagicMock())
 
@@ -1700,12 +1552,8 @@ class TestMicrovmRunHookHeaderPosture:
     """
 
     def test_session_id_and_workload_token_resolve_empty(
-        self, client, monkeypatch, baked_platform_env
+        self, client, monkeypatch, cached_github_token
     ):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
         seen: dict = {}
         started = threading.Event()
 
@@ -1811,26 +1659,9 @@ class TestInvocationParamContract:
 
 
 @pytest.fixture
-def baked_platform_env(env_guard):
-    """Simulate a legacy/hand-built image that BAKES its own required config.
-
-    Needed by every ``/run`` test whose envelope carries no ``platform_config``.
-    Since review N2 the no-config branch re-runs the required-key check against the
-    EFFECTIVE environment and rejects when it is unsatisfied — because
-    ``aws_session`` silently drops tenant scoping when ``AGENT_SESSION_ROLE_ARN``
-    is unset, and running a task unscoped is worse than refusing it. That check is
-    what this fixture satisfies, and satisfying it is exactly what a real legacy
-    image does: the compatibility path is "the snapshot supplies the values", not
-    "nobody supplies them".
-
-    Depends on ``env_guard`` so the writes are reverted with everything else.
-    """
-    for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
-        os.environ[server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]] = _platform_config_value(key)
-    # A baked GITHUB_TOKEN_SECRET_ARN makes `resolve_github_token` reach for real
-    # Secrets Manager; pre-seeding its cache keeps these tests offline. Realistic
-    # for the image this fixture models, and it changes nothing they assert.
-    os.environ["GITHUB_TOKEN"] = "ghp_baked_for_tests"  # noqa: S105 -- test placeholder, not a secret
+def cached_github_token(env_guard):
+    """Keep pipeline mapping tests offline after authenticated config installation."""
+    os.environ["GITHUB_TOKEN"] = "ghp_cached_for_tests"  # noqa: S105 -- test placeholder
     yield
 
 
@@ -2325,20 +2156,10 @@ class TestInstallPlatformConfig:
         assert "GITHUB_TOKEN_SECRET_ARN" not in os.environ
 
     def test_an_in_account_redirect_is_NOT_rejected(self, env_guard):
-        # The KNOWN LIMITATION, pinned as a test so it cannot be quietly mistaken for
-        # coverage. This check compares partition + account only, so a block naming
-        # another workspace's channel-OAuth secret in the SAME account is accepted —
-        # and the `bgagent-*-oauth-*` grants are prefix grants, so IAM would allow
-        # that read too.
-        #
-        # It is left open because it is currently unreachable from the guest:
-        # `platform_config` is produced by the orchestrator Lambda, and the MicroVM
-        # execution role holds `grantRead` ONLY on the payload bucket, so a running
-        # MicroVM can read another task's payload but cannot write one.
-        #
-        # If this test ever needs to flip to `pytest.raises`, the escalation is a
-        # name-shape check tying `github_token_secret_arn` to the task's own
-        # channel/workspace — see `MICROVM_PLATFORM_CONFIG_ARN_KEYS`.
+        # Unit scope: the installer checks internal ARN agreement, not origin.
+        # The v2 resolver authenticates the manifest and compares the downloaded
+        # config BEFORE calling this installer. Its own route/transport tests
+        # reject same-account workspace substitutions.
         installed = server._install_platform_config(
             _platform_config(
                 github_token_secret_arn=(
@@ -2350,10 +2171,8 @@ class TestInstallPlatformConfig:
         assert "GITHUB_TOKEN_SECRET_ARN" in installed
 
     def test_a_wholesale_partition_swap_is_NOT_rejected(self, env_guard):
-        # The other half of the same limitation, and the reason the docstrings say
-        # "internally consistent" rather than "pinned to this deployment": the anchor
-        # travels in the block it validates, so a payload that moves EVERY ARN to
-        # another partition agrees with itself and passes. IAM is what refuses it.
+        # A self-consistent block passes this internal-consistency helper.
+        # Deployment provenance is enforced earlier by the v2 bootstrap resolver.
         installed = server._install_platform_config(
             _platform_config(
                 agent_session_role_arn=f"arn:aws-cn:iam::{_TEST_ACCOUNT}:role/r",
@@ -2523,7 +2342,7 @@ class TestMicrovmRunHookPlatformConfig:
             **extra,
         }
 
-    def test_inline_envelope_installs_the_config_and_accepts_the_task(
+    def test_verified_payload_installs_the_config_and_accepts_the_task(
         self, client, monkeypatch, env_guard
     ):
         monkeypatch.setattr(server, "run_task", MagicMock())
@@ -2633,195 +2452,6 @@ class TestMicrovmRunHookPlatformConfig:
         )
         assert r.status_code == 400
         assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INVALID"
-
-    def test_an_envelope_without_platform_config_is_accepted_when_the_image_bakes_it(
-        self, client, monkeypatch, baked_platform_env, capfd
-    ):
-        # P1 compatibility, PRECISELY scoped (review N2): image snapshot and
-        # orchestrator Lambda deploy on independent cadences, so a new image must not
-        # require a Stage-B orchestrator — PROVIDED the values come from somewhere.
-        # Here the image bakes them, which is what the compatibility path is for.
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
-
-        assert r.status_code == 200
-        # Still pre-install (nothing was installed), so the warning is stdout-only:
-        # `_warn_cw` here would spawn the CloudWatch thread off the snapshot's own
-        # baked env — the very thing it is warning about. See `TestMicrovmRunHook
-        # PreInstallAwsSilence`.
-        assert "[server/run-pre-config] /run hook received no platform_config" in (
-            capfd.readouterr().out
-        )
-
-    def test_no_platform_config_and_no_baked_env_is_refused_not_run_unscoped(
-        self, client, monkeypatch, env_guard, capfd
-    ):
-        # Review N2, the version-skew case: a pre-Stage-B orchestrator launching a P2
-        # image. The image bakes NOTHING by design (`imageEnvironmentVariables`
-        # defaults to `{}`), so nothing supplies `AGENT_SESSION_ROLE_ARN` — and
-        # `aws_session.get_session` silently falls back to the ambient compute role
-        # with tenant scoping OFF when it is unset. Refusing is the only correct
-        # answer; the previous behaviour was a 200 and a stdout breadcrumb.
-        run_task = MagicMock()
-        monkeypatch.setattr(server, "run_task", run_task)
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-        for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
-            os.environ.pop(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], None)
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
-
-        assert r.status_code == 400
-        body = r.json()
-        assert body["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
-        # The response NAMES the unset variables — the whole point is that a skewed
-        # deployment is diagnosable rather than mysterious.
-        assert body["missing_env"] == sorted(
-            server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]
-            for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
-        )
-        assert "AGENT_SESSION_ROLE_ARN" in body["missing_env"]
-        # Nothing was started.
-        run_task.assert_not_called()
-        # And the rejection is attributable in the log, not just in the response.
-        assert "/run hook REJECTED: no platform_config" in capfd.readouterr().out
-
-    def test_a_partially_baked_env_names_only_what_is_actually_missing(
-        self, client, monkeypatch, baked_platform_env
-    ):
-        # The realistic skew: an image that bakes SOME config. The rejection must
-        # name only the genuinely-unset variables, or an operator chases the wrong
-        # one.
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-        os.environ.pop("AGENT_SESSION_ROLE_ARN", None)
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
-
-        assert r.status_code == 400
-        assert r.json()["missing_env"] == ["AGENT_SESSION_ROLE_ARN"]
-
-    def test_s3_pointer_takes_the_config_from_the_outer_envelope(
-        self, client, monkeypatch, env_guard
-    ):
-        # The producer's pointer form: the bare task payload lands in S3 and the
-        # config rides beside the pointer, inside the 4 KB hook body.
-        monkeypatch.setattr(
-            server,
-            "_fetch_microvm_payload_from_s3",
-            lambda _uri: self._payload(task_id="t-outer"),
-        )
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {
-                    "agent_payload_s3_uri": "s3://bucket/t-outer/payload.json",
-                    "platform_config": _platform_config(task_table_name="outer-table"),
-                }
-            ),
-        )
-
-        assert r.status_code == 200
-        assert r.json()["task_id"] == "t-outer"
-        assert os.environ["TASK_TABLE_NAME"] == "outer-table"
-
-    def test_s3_pointer_takes_the_config_merged_into_the_fetched_object(
-        self, client, monkeypatch, env_guard
-    ):
-        # The producer ALSO merges the config into the S3 object, so the agent
-        # gets it whichever end of the fetch it reads. A stray platform_config key
-        # left in the bare payload is inert — the extractor reads named fields.
-        fetched = self._payload(task_id="t-inner")
-        fetched["platform_config"] = _platform_config(task_table_name="inner-table")
-        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", lambda _uri: fetched)
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/t-inner/payload.json"}),
-        )
-
-        assert r.status_code == 200
-        assert r.json()["task_id"] == "t-inner"
-        assert os.environ["TASK_TABLE_NAME"] == "inner-table"
-
-    def test_s3_object_may_itself_be_the_full_envelope(self, client, monkeypatch, env_guard):
-        monkeypatch.setattr(
-            server,
-            "_fetch_microvm_payload_from_s3",
-            lambda _uri: {
-                "agent_payload": self._payload(task_id="t-nested"),
-                "platform_config": _platform_config(task_table_name="nested-table"),
-            },
-        )
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body({"agent_payload_s3_uri": "s3://bucket/t-nested/payload.json"}),
-        )
-
-        assert r.status_code == 200
-        assert r.json()["task_id"] == "t-nested"
-        assert os.environ["TASK_TABLE_NAME"] == "nested-table"
-
-    def test_the_fetched_object_wins_over_the_outer_envelope(self, client, monkeypatch, env_guard):
-        fetched = self._payload(task_id="t-prec")
-        fetched["platform_config"] = _platform_config(task_table_name="inner-wins")
-        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", lambda _uri: fetched)
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {
-                    "agent_payload_s3_uri": "s3://bucket/t-prec/payload.json",
-                    "platform_config": _platform_config(task_table_name="outer-loses"),
-                }
-            ),
-        )
-
-        assert r.status_code == 200
-        assert os.environ["TASK_TABLE_NAME"] == "inner-wins"
-
-    def test_a_nested_agent_payload_of_the_wrong_type_is_a_retryable_500(self, client, monkeypatch):
-        # Review N1: this is a problem with the FETCHED OBJECT, not with the envelope
-        # the orchestrator built, so it belongs on the retryable 500 branch. The old
-        # 400 told the operator "the orchestrator built a bad envelope; retrying
-        # cannot help". A fetched-object failure is kept distinct from that
-        # producer-envelope error; invalid stored bytes still need replacement.
-        monkeypatch.setattr(
-            server,
-            "_fetch_microvm_payload_from_s3",
-            lambda _uri: {"agent_payload": "not-an-object"},
-        )
-        monkeypatch.setattr(server, "run_task", MagicMock())
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://b/k"}))
-
-        assert r.status_code == 500
-        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
-        assert "agent_payload in the S3 payload must be an object" in r.json()["message"]
-
-    def test_resolve_returns_the_config_alongside_the_payload(self):
-        payload, config = server._resolve_microvm_run_payload(
-            json.dumps({"agent_payload": {"task_id": "t"}, "platform_config": {"a": "b"}})
-        )
-        assert payload == {"task_id": "t"}
-        assert config == {"a": "b"}
-
-    def test_resolve_returns_none_for_an_envelope_without_a_config(self):
-        _payload, config = server._resolve_microvm_run_payload(
-            json.dumps({"agent_payload": {"task_id": "t"}})
-        )
-        assert config is None
 
 
 # --------------------------------------------------------------------------
@@ -3041,12 +2671,8 @@ class TestMicrovmTerminateHook:
         write_heartbeat.assert_not_called()
 
     def test_returns_200_without_joining_a_running_pipeline(
-        self, client, monkeypatch, baked_platform_env
+        self, client, monkeypatch, cached_github_token
     ):
-        # `baked_platform_env`: this envelope carries no `platform_config`, which
-        # since review N2 requires the effective env to supply the required values
-        # (a legacy image that bakes its own). This class is about the
-        # payload->pipeline mapping, not about config delivery.
         # A drain can take minutes (that is lifespan's job on graceful shutdown);
         # the hook budget is 1-60 s, so /terminate must observe and return.
         release = threading.Event()
@@ -3122,56 +2748,6 @@ class TestMicrovmTerminateHook:
         assert body["active_pipeline_threads"] is None
         assert body["microvm_id"] == "m-unknown"
         assert "best-effort step failed" in capfd.readouterr().out
-
-
-class TestMicrovmPayloadFetchAttribution:
-    """Every outbound AWS call carries ABCA's solution attribution (#319)."""
-
-    def test_the_s3_payload_fetch_goes_through_the_attributed_factory(self, monkeypatch):
-        captured: dict = {}
-
-        class _Body:
-            @staticmethod
-            def read():
-                return b'{"task_id": "t-1"}'
-
-        def fake_platform_client(service_name, **kwargs):
-            captured["service"] = service_name
-            captured["kwargs"] = kwargs
-            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
-
-        import aws_session
-
-        monkeypatch.setattr(aws_session, "platform_client", fake_platform_client)
-
-        assert server._fetch_microvm_payload_from_s3("s3://b/k") == {"task_id": "t-1"}
-        assert captured["service"] == "s3"
-
-    def test_the_fetch_client_carries_the_md_user_agent_segment(self, monkeypatch):
-        # A naked boto3.client('s3') would silently drop the md/ segment. Assert on
-        # the OUTCOME (the UA on the config) rather than on which helper was used.
-        captured: dict = {}
-
-        class _Body:
-            @staticmethod
-            def read():
-                return b'{"task_id": "t-1"}'
-
-        def fake_boto3_client(service_name, **kwargs):
-            captured["service"] = service_name
-            captured["config"] = kwargs.get("config")
-            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
-
-        import boto3
-
-        monkeypatch.setattr(boto3, "client", fake_boto3_client)
-
-        server._fetch_microvm_payload_from_s3("s3://b/k")
-
-        import ua
-
-        assert captured["service"] == "s3"
-        assert ua.static_user_agent_extra() in captured["config"].user_agent_extra
 
 
 class TestSnapshotCredentialHygiene:
@@ -3257,316 +2833,6 @@ print("FINDINGS:" + repr(findings))
             "scoped_resolved": False,
             "log_writer_threads": [],
         }
-
-
-class TestMicrovmRunHookPreInstallAwsSilence:
-    """Before ``platform_config`` is installed, ``/run`` may touch exactly ONE AWS seam.
-
-    Same defect class the build hooks avoid, one phase later: until the install has
-    run, ``LOG_GROUP_NAME`` is whatever the snapshot happens to carry, so a
-    ``_debug_cw`` on this path would resolve credentials and pin
-    ``boto3.DEFAULT_SESSION`` *before* the orchestrator's own region /
-    ``AWS_SDK_UA_APP_ID`` / session role are in the environment. The sole permitted
-    pre-install call is the S3 payload fetch, because the config is inside the
-    object being fetched.
-
-    Every test here runs with a **baked ``LOG_GROUP_NAME``** — the hostile case the
-    fix exists for. Without it, ``_debug_cw`` degrades to stdout on its own and the
-    assertions would pass vacuously.
-    """
-
-    def _payload(self, **extra) -> dict:
-        return {
-            "task_id": "t-silent",
-            "repo_url": "org/repo",
-            "prompt": "do it",
-            "github_token": "ghp_x",
-            **extra,
-        }
-
-    @pytest.fixture(autouse=True)
-    def _disable_background_pipeline(self, monkeypatch):
-        """Keep handler-only assertions isolated from asynchronous pipeline work.
-
-        Mocking ``run_task`` is insufficient because ``_spawn_background`` returns
-        before its thread necessarily dereferences that global. Pytest can restore
-        the mock between parametrized cases while the prior thread is still
-        starting, letting it run the real pipeline under the next case's AWS seam
-        guard. Stub the spawn boundary instead: these tests specify only the
-        pre-install handler phase and none need a pipeline thread.
-        """
-        monkeypatch.setattr(server, "_spawn_background", MagicMock())
-
-    @pytest.fixture
-    def seam_guard(self, monkeypatch):
-        """Arm every AWS/credential seam to raise until the pre-install phase is OVER.
-
-        Two things end that phase, and only two:
-
-        * ``_install_platform_config`` returning a **non-empty** env list — a real
-          install. Flipping on *any* return would be a hole big enough to drive B2
-          through: the ``raw is None`` early return installs nothing and returns
-          ``[]``, so treating it as "installed" disarms the guard for the entire
-          legacy no-``platform_config`` path — which is exactly where a ``_warn_cw``
-          was spawning the CloudWatch thread off the snapshot's baked env.
-        * ``_extract_invocation_params`` being entered. Past that point the legacy
-          path is *allowed* to talk to AWS: running on the snapshot's own env is the
-          documented P1-compatibility behaviour, so the accepted-line ``_debug_cw``
-          and the pipeline below it are legitimate. Everything the handler does
-          *before* it — including the "no platform_config" warning — is not.
-
-        A rejection path reaches neither, so the seams stay armed for the whole
-        request: a rejected run installed nothing and has no more right to an AWS
-        call than it had before.
-        """
-        state: dict[str, Any] = {
-            "install_phase_done": False,
-            "installed_env": None,
-            "violations": [],
-        }
-        real_install = server._install_platform_config
-        real_extract = server._extract_invocation_params
-
-        def spy_install(raw):
-            result = real_install(raw)
-            state["installed_env"] = result
-            if result:
-                state["install_phase_done"] = True
-            return result
-
-        def spy_extract(*args, **kwargs):
-            state["install_phase_done"] = True
-            return real_extract(*args, **kwargs)
-
-        monkeypatch.setattr(server, "_install_platform_config", spy_install)
-        monkeypatch.setattr(server, "_extract_invocation_params", spy_extract)
-
-        def guard(name):
-            def _seam(*_args, **_kwargs):
-                if not state["install_phase_done"]:
-                    state["violations"].append(name)
-                    raise AssertionError(f"{name} touched before platform_config was installed")
-                return MagicMock()
-
-            return _seam
-
-        import boto3
-
-        import aws_session
-
-        # Kept so a test can re-enable exactly the ONE permitted pre-install seam
-        # (the S3 payload fetch) and assert on it positively.
-        state["real_platform_client"] = aws_session.platform_client
-
-        for module, attr in (
-            (boto3, "client"),
-            (boto3, "Session"),
-            (aws_session, "platform_client"),
-            (aws_session, "tenant_client"),
-            (aws_session, "tenant_resource"),
-            (aws_session, "get_session"),
-            (server, "_debug_cw"),
-            (server, "_warn_cw"),
-            (server, "_debug_cw_exc"),
-        ):
-            monkeypatch.setattr(module, attr, guard(f"{module.__name__}.{attr}"))
-
-        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
-        return state
-
-    @pytest.mark.parametrize("with_config", [True, False], ids=["with-config", "no-config"])
-    def test_no_cloudwatch_or_credential_seam_is_touched_before_the_install(
-        self, client, monkeypatch, baked_platform_env, seam_guard, capfd, with_config
-    ):
-        # The ``no-config`` arm is the legacy P1 envelope, and it is the harder case:
-        # nothing is ever installed, so EVERY line up to param extraction — including
-        # the "running on the snapshot's frozen env" warning itself — is still
-        # pre-install. A ``_warn_cw`` there would spawn the CloudWatch writer thread
-        # and pin ``boto3.DEFAULT_SESSION`` off the baked ``LOG_GROUP_NAME`` this
-        # fixture sets, which is precisely the defect the warning is reporting.
-        #
-        # ``baked_platform_env`` (rather than ``env_guard``) so that arm reaches the
-        # ACCEPT path: since review N2 a no-config run with an unsatisfied effective
-        # env is refused, and a rejected run installs nothing and so proves nothing
-        # about the seams staying silent all the way to param extraction. Baking the
-        # env is also the only shape in which the no-config path is legitimate.
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        envelope: dict[str, Any] = {"agent_payload": self._payload()}
-        if with_config:
-            envelope["platform_config"] = _platform_config()
-
-        r = client.post(RUN_HOOK, json=_run_hook_body(envelope))
-
-        assert r.status_code == 200
-        assert seam_guard["violations"] == []
-        assert seam_guard["install_phase_done"] is True
-        if with_config:
-            assert seam_guard["installed_env"]
-        else:
-            # Vacuously "installed": the early return the flag must NOT trust.
-            assert seam_guard["installed_env"] == []
-            # The warning still reaches an operator — stdout, via the pre-install sink.
-            assert (
-                "[server/run-pre-config] /run hook received no platform_config"
-                in capfd.readouterr().out
-            )
-
-    def test_the_no_config_REJECTION_also_touches_no_seam(
-        self, client, monkeypatch, env_guard, seam_guard, capfd
-    ):
-        # Review N2's rejection is itself a pre-install path, and it emits a NEW log
-        # line — so it needs the same guarantee as every other rejection here: the
-        # refusal must not be the thing that pins `boto3.DEFAULT_SESSION` off the
-        # snapshot's baked `LOG_GROUP_NAME` (which `seam_guard` sets).
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        for key in server.MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS:
-            os.environ.pop(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], None)
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload": self._payload()}))
-
-        assert r.status_code == 400
-        assert r.json()["code"] == "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"
-        assert seam_guard["violations"] == []
-        assert "/run hook REJECTED: no platform_config" in capfd.readouterr().out
-
-    def test_the_received_line_is_stdout_only(
-        self, client, monkeypatch, env_guard, seam_guard, capfd
-    ):
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {"agent_payload": self._payload(), "platform_config": _platform_config()},
-                microvm_id="microvm-quiet",
-            ),
-        )
-
-        out = capfd.readouterr().out
-        assert "[server/run-pre-config] /run hook received:" in out
-        assert "microvm-quiet" in out
-
-    def test_the_s3_payload_fetch_is_the_only_pre_install_aws_call(
-        self, client, monkeypatch, env_guard, seam_guard
-    ):
-        # The permitted exception, asserted positively: exactly one client, for s3,
-        # while the CloudWatch/credential seams stay armed.
-        services: list[str] = []
-
-        class _Body:
-            @staticmethod
-            def read():
-                return json.dumps(self._payload(task_id="t-from-s3")).encode()
-
-        def recording_client(service_name, **_kwargs):
-            services.append(service_name)
-            return SimpleNamespace(get_object=lambda **_kw: {"Body": _Body})
-
-        import boto3
-
-        import aws_session
-
-        # Re-enable the one permitted seam, and only it: the fetch must still go
-        # through the attributed factory (#319), which delegates to boto3.client.
-        monkeypatch.setattr(aws_session, "platform_client", seam_guard["real_platform_client"])
-        monkeypatch.setattr(boto3, "client", recording_client)
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {
-                    "agent_payload_s3_uri": "s3://payload-bucket/t-from-s3/payload.json",
-                    "platform_config": _platform_config(),
-                }
-            ),
-        )
-
-        assert r.status_code == 200
-        assert r.json()["task_id"] == "t-from-s3"
-        assert services == ["s3"]
-        assert seam_guard["violations"] == []
-
-    def test_a_malformed_envelope_is_rejected_without_touching_a_seam(
-        self, client, monkeypatch, seam_guard, capfd
-    ):
-        monkeypatch.setattr(server, "run_task", MagicMock())
-
-        r = client.post(RUN_HOOK, json={"microvmId": "m", "runHookPayload": "not json"})
-
-        assert r.status_code == 400
-        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_INVALID"
-        assert seam_guard["violations"] == []
-        assert seam_guard["install_phase_done"] is False
-        # The reason still reaches an operator: stdout here, and the response body
-        # (which the MicroVM service surfaces) in every case.
-        assert "[server/run-pre-config] /run hook rejected:" in capfd.readouterr().out
-
-    def test_a_failed_payload_fetch_is_reported_without_touching_a_seam(
-        self, client, monkeypatch, seam_guard, capfd
-    ):
-        def boom(_uri):
-            raise RuntimeError("AccessDenied")
-
-        monkeypatch.setattr(server, "_fetch_microvm_payload_from_s3", boom)
-        monkeypatch.setattr(server, "run_task", MagicMock())
-
-        r = client.post(RUN_HOOK, json=_run_hook_body({"agent_payload_s3_uri": "s3://b/k"}))
-
-        assert r.status_code == 500
-        assert r.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
-        assert seam_guard["violations"] == []
-        out = capfd.readouterr().out
-        assert "[server/run-pre-config] /run hook payload fetch FAILED" in out
-        # The traceback is preserved on the stdout line (it is the only diagnostic
-        # the response body does not carry).
-        assert "Traceback" in out
-
-    @pytest.mark.parametrize(
-        "config,expected_code",
-        [
-            ({"ld_preload": "/tmp/evil.so"}, "MICROVM_RUN_PLATFORM_CONFIG_INVALID"),
-            ({"log_group_name": "lg"}, "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE"),
-        ],
-    )
-    def test_a_rejected_platform_config_touches_no_seam(
-        self, client, monkeypatch, env_guard, seam_guard, config, expected_code
-    ):
-        monkeypatch.setattr(server, "run_task", MagicMock())
-
-        r = client.post(
-            RUN_HOOK,
-            json=_run_hook_body({"agent_payload": self._payload(), "platform_config": config}),
-        )
-
-        assert r.status_code == 400
-        assert r.json()["code"] == expected_code
-        # Nothing was installed, so nothing earned the right to an AWS call.
-        assert seam_guard["violations"] == []
-        assert seam_guard["install_phase_done"] is False
-
-    def test_the_accepted_line_correlates_task_and_microvm_ids(
-        self, client, monkeypatch, env_guard, capfd
-    ):
-        # The pre-install "received" line is stdout-only now, so the first line that
-        # reaches the task's log group has to join both ids by itself.
-        monkeypatch.setattr(server, "run_task", MagicMock())
-        monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
-
-        client.post(
-            RUN_HOOK,
-            json=_run_hook_body(
-                {"agent_payload": self._payload(), "platform_config": _platform_config()},
-                microvm_id="microvm-joined",
-            ),
-        )
-
-        out = capfd.readouterr().out
-        assert "/run hook accepted task_id='t-silent' microvm_id='microvm-joined'" in out
 
 
 class TestTerminateHookBodyTolerance:

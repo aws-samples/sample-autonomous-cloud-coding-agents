@@ -32,6 +32,7 @@ import { AgentMemory } from './agent-memory';
 import { AgentSessionRole, grantAgentTaskTableAccess } from './agent-session-role';
 import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import { LinearIdentityVault } from './linear-identity-vault';
+import { grantWorkerBootstrap } from './payload-bootstrap-permissions';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -52,14 +53,12 @@ export interface EcsAgentClusterProps {
   readonly taskSizing?: EcsTaskSizing;
 
   /**
-   * S3 bucket holding per-task ECS payloads. The orchestrator writes the
-   * payload (incl. the large hydrated_context, which can't fit in the 8 KB
-   * RunTask containerOverrides limit) here and passes only an
-   * `AGENT_PAYLOAD_S3_URI` pointer; the container fetches it on boot. The task
-   * role gets **read-only** on this bucket — the container runs untrusted repo
-   * code, so it must not be able to delete payloads (the trusted orchestrator
-   * owns write + delete). When omitted (isolated construct tests / deployments
-   * that still pass the payload inline), no grant or env var is added.
+   * S3 storage for deployment manifests, task payloads and private launch
+   * references. The v2 coordinator sends AGENT_PAYLOAD_REF, containing a
+   * single-object signed download URL. The task role can read only bootstrap/*;
+   * object reads elsewhere and bucket listing are explicitly denied. The
+   * coordinator owns writes and cleanup. Optional for isolated construct tests;
+   * production ECS launches require this bucket and a matching v2 image.
    */
   readonly payloadBucket?: s3.IBucket;
 
@@ -387,9 +386,8 @@ export class EcsAgentCluster extends Construct {
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       ...(props.memoryId && { MEMORY_ID: props.memoryId }),
-      // The payload bucket name so the orchestrator-issued AGENT_PAYLOAD_S3_URI
-      // can be fetched. (The orchestrator sets the URI per-task via container
-      // override; this is set here for parity with the runtime env.)
+      // Deployment metadata; the per-task AGENT_PAYLOAD_REF supplies the
+      // manifest URI and signed payload URL. IAM authenticates the manifest.
       ...(props.payloadBucket && { ECS_PAYLOAD_BUCKET: props.payloadBucket.bucketName }),
       // Artifact workflows (planning/analysis) deliver their document to
       // this bucket. The AgentCore runtime has ARTIFACTS_BUCKET_NAME; the ECS task
@@ -534,13 +532,11 @@ export class EcsAgentCluster extends Construct {
     // agent assumes the SessionRole — stays on the task role).
     props.githubTokenSecret.grantRead(taskRole);
 
-    // Read-only on the ECS payload bucket so the container can fetch its payload
-    // (AGENT_PAYLOAD_S3_URI) at boot. READ only — the container runs untrusted
-    // repo code, so it must not be able to write or delete payloads (the trusted
-    // orchestrator owns write + delete). Stays on the task role (read once at
-    // startup, before the agent assumes any SessionRole).
+    // Only deployment manifests use worker credentials. The boot helper reads
+    // its exact task object through a signed URL and removes that capability
+    // from the environment before starting repository code.
     if (props.payloadBucket) {
-      props.payloadBucket.grantRead(taskRole);
+      grantWorkerBootstrap(props.payloadBucket, taskRole);
     }
 
     // Artifact workflows (planning/analysis) deliver their document to the
@@ -679,7 +675,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(taskRole, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from the legacy TaskEventsTable grant when no SessionRole is wired (TaskTable allows only reporting updates; the worker has no UserConcurrency access); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
+        reason: 'DynamoDB index/* wildcards from the legacy TaskEventsTable grant when no SessionRole is wired (TaskTable allows only reporting updates; the worker has no UserConcurrency access); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; Worker S3 GetObject is restricted to bootstrap/*; other object reads and payload-bucket listing are explicitly denied (#700). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',

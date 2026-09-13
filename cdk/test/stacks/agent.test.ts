@@ -1219,13 +1219,15 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
     expect(actions).toContain('s3:DeleteObject');
-    const deletion = payloadStatements.find(s => s.Action === 's3:DeleteObject');
-    expect(deletion!.Resource).toEqual({
+    expect(actions).toContain('s3:GetObject');
+    expect(actions).toContain('s3:ListBucket');
+    const deletion = payloadStatements.find(s => Array.isArray(s.Action) && s.Action.includes('s3:DeleteObject'));
+    expect(deletion!.Resource).toEqual(['payload.json', 'launch.json'].map(filename => ({
       'Fn::Join': ['', [
         { 'Fn::GetAtt': [expect.stringMatching(/^LambdaMicrovmComputePayloadBucket/), 'Arn'] },
-        '/*/payload.json',
+        `/*/${filename}`,
       ]],
-    });
+    })));
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {

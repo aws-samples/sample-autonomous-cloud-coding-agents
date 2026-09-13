@@ -34,8 +34,12 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ kind: 'terminate', input })),
   MicrovmState: {},
 }));
+jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: async () => 'https://payloads.s3.us-east-1.amazonaws.com/task/payload.json?X-Amz-Signature=' + Date.now() }));
+const mockObjects = new Map<string, string>();
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: mockS3Send })),
+  DeleteObjectCommand: jest.fn((input: unknown) => ({ kind: 'delete', input })),
+  GetObjectCommand: jest.fn((input: unknown) => ({ kind: 'get', input })),
+  S3Client: jest.fn(() => ({ send: mockS3Send, config: { credentials: async () => ({ accessKeyId: 'EXAMPLE', secretAccessKey: 'unused' }) } })),
   PutObjectCommand: jest.fn((input: unknown) => ({ kind: 'put', input })),
 }));
 jest.mock('../../../src/handlers/shared/logger', () => ({
@@ -85,7 +89,17 @@ beforeEach(() => {
   created = new Map();
   now = Date.parse('2026-09-13T15:00:00Z');
   jest.spyOn(Date, 'now').mockImplementation(() => now);
-  mockS3Send.mockReset().mockResolvedValue({});
+  mockObjects.clear();
+  mockS3Send.mockReset().mockImplementation(async ({ kind: type, input: command }) => {
+    if (type === 'get') {
+      if (!mockObjects.has(command.Key)) throw Object.assign(new Error('missing'), { name: 'NoSuchKey' });
+      return { Body: { transformToString: async () => mockObjects.get(command.Key) } };
+    }
+    if (type === 'delete') { mockObjects.delete(command.Key); return {}; }
+    if (command.IfNoneMatch === '*' && mockObjects.has(command.Key)) throw Object.assign(new Error('exists'), { name: 'PreconditionFailed' });
+    mockObjects.set(command.Key, command.Body);
+    return {};
+  });
   mockDdbSend.mockReset().mockImplementation(async ({ kind, input: command }) => {
     if (kind === 'get') return { Item: structuredClone(record) };
     const values = command.ExpressionAttributeValues;
@@ -197,7 +211,7 @@ test('replay after saving a handle makes no further RunMicrovm or payload write'
   now += MICROVM_START_REPLAY_WINDOW_MS * 10;
   expect(await new LambdaMicrovmComputeStrategy().startSession(input)).toEqual(handle);
   expect(runCalls()).toHaveLength(1);
-  expect(mockS3Send).toHaveBeenCalledTimes(1);
+  expect(mockS3Send.mock.calls.filter(([c]) => c.kind === 'put' && c.input.Key.endsWith('/payload.json'))).toHaveLength(1);
 });
 
 test('changed input is refused before overwriting the first task payload', async () => {
@@ -206,7 +220,7 @@ test('changed input is refused before overwriting the first task payload', async
   await expect(new LambdaMicrovmComputeStrategy().startSession({
     ...input, payload: { ...input.payload, prompt: 'changed'.repeat(1_000) },
   })).rejects.toThrow('MICROVM_START_INPUT_CHANGED');
-  expect(mockS3Send).toHaveBeenCalledTimes(1);
+  expect(mockS3Send.mock.calls.filter(([c]) => c.kind === 'put' && c.input.Key.endsWith('/payload.json'))).toHaveLength(1);
   expect(runCalls()).toHaveLength(1);
 });
 
@@ -217,7 +231,7 @@ test('an expired unknown start never receives a new token or another RunMicrovm 
   await expect(new LambdaMicrovmComputeStrategy().startSession(input))
     .rejects.toThrow('MICROVM_START_OUTCOME_UNKNOWN');
   expect(runCalls()).toHaveLength(1);
-  expect(mockS3Send).toHaveBeenCalledTimes(1);
+  expect(mockS3Send.mock.calls.filter(([c]) => c.kind === 'put' && c.input.Key.endsWith('/payload.json'))).toHaveLength(1);
 });
 
 test.each([TaskStatus.CANCELLED, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.TIMED_OUT])(

@@ -840,7 +840,7 @@ describe('EcsAgentCluster payload bucket (#502)', () => {
     });
   });
 
-  test('grants the task role READ on the payload bucket, never write/delete', () => {
+  test('allows only bootstrap reads and explicitly denies other objects and listing', () => {
     const template = createWithPayloadBucket();
     const policies = template.findResources('AWS::IAM::Policy');
     const s3Actions = new Set<string>();
@@ -852,7 +852,13 @@ describe('EcsAgentCluster payload bucket (#502)', () => {
         }
       }
     }
-    // Read actions present...
+    const statements = Object.values(policies).flatMap(p => p.Properties.PolicyDocument.Statement);
+    const allow = statements.find(s => s.Effect === 'Allow' && s.Action === 's3:GetObject');
+    expect(JSON.stringify(allow.Resource)).toContain('/bootstrap/*');
+    expect(statements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ Effect: 'Deny', Action: 's3:GetObject*', NotResource: allow.Resource }),
+      expect.objectContaining({ Effect: 'Deny', Action: 's3:List*' }),
+    ]));
     expect([...s3Actions].some(a => a === 's3:GetObject' || a === 's3:GetObject*')).toBe(true);
     // ...and NO write/delete on the payload bucket from the task role.
     expect(s3Actions.has('s3:PutObject')).toBe(false);

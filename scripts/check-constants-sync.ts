@@ -49,7 +49,9 @@ const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
 const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
 const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY];
+const PAYLOAD_BOOTSTRAP_PY = path.join(REPO_ROOT, 'agent/src/payload_bootstrap.py');
+const PAYLOAD_BOOTSTRAP_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/payload-bootstrap.ts');
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
 
@@ -184,6 +186,15 @@ function main(): number {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
+    };
+    payload_bootstrap?: {
+      version: number;
+      manifest_prefix: string;
+      launch_filename: string;
+      max_manifest_bytes: number;
+      max_payload_bytes: number;
+      url_ttl_seconds: number;
+      minimum_url_lifetime_seconds: number;
     };
   };
   try {
@@ -361,6 +372,27 @@ function main(): number {
       'warmup_total_budget_seconds (the required warm-up must leave the ' +
       'best-effort ones something to share)',
     );
+  }
+
+  const bootstrap = json.payload_bootstrap;
+  const bootstrapNumbers = [
+    'version', 'max_manifest_bytes', 'max_payload_bytes',
+    'url_ttl_seconds', 'minimum_url_lifetime_seconds',
+  ] as const;
+  if (!bootstrap || bootstrapNumbers.some(key => !Number.isInteger(bootstrap[key]) || bootstrap[key] <= 0)
+    || typeof bootstrap.manifest_prefix !== 'string' || !/^[a-z][a-z0-9_-]*\/$/.test(bootstrap.manifest_prefix)
+    || typeof bootstrap.launch_filename !== 'string' || !/^[a-z][a-z0-9_-]*\.json$/.test(bootstrap.launch_filename)
+    || bootstrap.launch_filename === 'payload.json') {
+    invariantErrors.push('payload_bootstrap must define positive integer bounds and distinct safe object paths');
+  } else if (bootstrap.minimum_url_lifetime_seconds > bootstrap.url_ttl_seconds
+    || bootstrap.max_manifest_bytes > bootstrap.max_payload_bytes) {
+    invariantErrors.push('payload_bootstrap minimum lifetime/manifest size exceeds its corresponding maximum');
+  }
+  // Check that both implementations still read the shared block. Literal copies
+  // would allow a security cap or protocol version to drift across languages.
+  if (!/CONTRACT\s*=\s*SHARED_CONSTANTS\["payload_bootstrap"\]/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_PY, 'utf8'))
+    || !/PAYLOAD_BOOTSTRAP\s*=\s*constants\.payload_bootstrap/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_TS, 'utf8'))) {
+    invariantErrors.push('payload_bootstrap consumers must read the shared contract');
   }
 
   if (invariantErrors.length > 0) {

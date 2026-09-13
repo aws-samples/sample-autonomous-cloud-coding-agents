@@ -24,7 +24,6 @@ import {
   RunMicrovmCommand,
   TerminateMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 // Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
@@ -33,6 +32,7 @@ import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-s
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
 import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle } from '../microvm-start';
+import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
 
@@ -42,14 +42,6 @@ function getClient(): LambdaMicrovmsClient {
     sharedClient = makeClient(LambdaMicrovmsClient);
   }
   return sharedClient;
-}
-
-let sharedS3Client: S3Client | undefined;
-function getS3Client(): S3Client {
-  if (!sharedS3Client) {
-    sharedS3Client = makeClient(S3Client);
-  }
-  return sharedS3Client;
 }
 
 /**
@@ -115,18 +107,8 @@ export const MICROVM_MAX_DURATION_SECONDS = 28_800;
  * old 16 384 threshold would have inlined every envelope between 4 097 and
  * 16 384 bytes and had the service reject all of them.
  *
- * This is the EXACT branch point for the inline/S3-pointer decision, with no
- * safety margin — deliberately unlike ``ecs-strategy``, which keeps its inline
- * warn line at 6 144 of ECS's 8 192-byte cap. That margin exists because ECS
- * counts the *whole* ``containerOverrides`` blob (env vars, command, and payload
- * share one budget), so the strategy cannot know how much of the 8 192 the
- * payload actually gets. ``runHookPayload`` is a single standalone string, so
- * the counted size is exactly what we measure and the boundary is computable.
- *
- * Consequence worth stating plainly: at 4 KB the **S3-pointer path is the
- * dominant one**. A hydrated task payload (prompt + issue thread + repo context)
- * essentially always exceeds 4 KB, so the inline branch is the exception (tiny
- * repo-less prompts), not the common case.
+ * V2 always sends a signed payload reference. Enforce this byte limit on the
+ * final serialized reference; payload/config bytes live in S3, not in the hook.
  */
 const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
 
@@ -201,7 +183,7 @@ const MICROVM_BENIGN_STATE_REASON = 'Success.';
  *
  * The contract's declaration order is the emission order (`JSON.stringify`
  * preserves insertion order for string keys), which keeps the serialized
- * envelope — and therefore the 4 KB inline/S3 branch decision — deterministic
+ * manifest serialization deterministic
  * for a given environment.
  */
 const PLATFORM_CONFIG_CONTRACT = sharedConstants.microvm_platform_config;
@@ -354,87 +336,36 @@ export function buildMicrovmPlatformConfig(
 export const MICROVM_ERROR_MARKER = 'MicroVM';
 
 /**
- * Wrap an error escaping a MicroVM control-plane (or payload-upload) call so it
+ * Wrap an error escaping a MicroVM control-plane or payload-bootstrap call so it
  * carries {@link MICROVM_ERROR_MARKER} plus the originating operation.
  *
  * The AWS exception NAME is spliced into the message explicitly because
  * ``err.message`` alone omits it (``String(err)`` would include it, but the
  * classifier is handed the *wrapped* error) and the classifier keys on that
- * name. ``cause`` retains the original for anyone who needs ``err.name``.
+ * name. ``cause`` retains a sanitized name/message copy: SDK errors and their
+ * nested causes can contain signed URLs or request metadata.
  *
  * The wrapper's own ``name`` is intentionally left as ``Error`` so
  * ``String(wrapped)`` reads ``Error: MicroVM <op> failed: <Name>: <msg>`` —
  * marker first, which is the order the classifier patterns document.
  */
 function wrapMicrovmError(operation: string, err: unknown): Error {
-  const name = err instanceof Error ? err.name : undefined;
-  const message = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? redactPayloadUrls(err.name) : undefined;
+  const message = redactPayloadUrls(err instanceof Error ? err.message : String(err));
   const detail = name && name !== 'Error' && !message.includes(name)
     ? `${name}: ${message}`
     : message;
-  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: err });
+  const safeCause = new Error(message);
+  safeCause.name = name ?? 'Error';
+  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: safeCause });
 }
 
-/**
- * S3 object key for a task's MicroVM ``/run`` payload. Same key shape as the
- * ECS payload bucket (``ecsPayloadKey``): one object per task under its own
- * task-id prefix, deleted by the orchestrator at finalize (see
- * {@link deleteMicrovmPayload}), with the payload bucket's lifecycle-expiry rule
- * (ADR-021 sub-decision 3, ``MICROVM_PAYLOAD_TTL_DAYS``) as the backstop.
- */
-export function microvmPayloadKey(taskId: string): string {
-  return `${taskId}/payload.json`;
-}
-
-/**
- * Delete a task's MicroVM ``/run`` payload object. Best-effort: a failed delete
- * must never fail the task; the bucket's 1-day lifecycle rule is the fallback.
- * Called from the orchestrator's ``finalize`` step once the task is terminal.
- * No-ops when the payload bucket isn't configured.
- *
- * The execution role currently reads the whole payload bucket before task-scoped
- * credentials are established. Untrusted task code can therefore read other
- * tasks' payloads where it knows their keys. Deleting completed payloads shortens
- * that exposure; it does not isolate active tasks. #700 tracks task-scoped
- * transport. S3 processes lifecycle expiry asynchronously, so it is not an exact
- * 24-hour bound on retention if this deletion fails.
- *
- * ISSUED UNCONDITIONALLY, including for a task whose payload went INLINE (under
- * the {@link RUN_HOOK_PAYLOAD_LIMIT_BYTES} cap, so no object was ever written).
- * That is on purpose: ``DeleteObject`` on a missing key succeeds, so the call is
- * harmless and idempotent, whereas *deciding* to skip it would mean trusting a
- * per-task record of the delivery mode — and if that record were ever wrong or
- * absent, the skip would leave a real payload behind for the full TTL. Attempting
- * always is the fail-safe direction.
- *
- * The consequence is that a successful call proves a delete was ISSUED, never that
- * an object existed — S3 returns nothing that distinguishes the two on an
- * unversioned bucket. The log line below says exactly that and no more; an earlier
- * "Deleted MicroVM payload object" asserted a deletion that never happened on
- * every inline task.
+/** Remove task instructions and their saved download capability after finalization.
+ * Best-effort; bucket lifecycle reaps leftovers. Deployment manifests are shared.
  */
 export async function deleteMicrovmPayload(taskId: string): Promise<void> {
   if (!MICROVM_PAYLOAD_BUCKET) return;
-  const key = microvmPayloadKey(taskId);
-  try {
-    await getS3Client().send(new DeleteObjectCommand({
-      Bucket: MICROVM_PAYLOAD_BUCKET,
-      Key: key,
-    }));
-    // "issued", not "deleted": see the docstring. An inline-delivered task has no
-    // object here and the call still succeeds.
-    logger.info('MicroVM payload delete issued', {
-      task_id: taskId,
-      bucket: MICROVM_PAYLOAD_BUCKET,
-      key,
-    });
-  } catch (err) {
-    // Non-fatal — the lifecycle rule is the backstop.
-    logger.warn('Failed to delete MicroVM payload object (non-fatal)', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await deletePayloadReference(MICROVM_PAYLOAD_BUCKET, taskId);
 }
 
 /** Split a comma-separated env-var list into trimmed, non-empty entries. */
@@ -547,93 +478,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     // payload upload so a misconfiguration never leaves an orphan S3 object.
     assertImageArn(MICROVM_IMAGE_IDENTIFIER);
 
-    // Payload delivery (ADR-021 sub-decision 3): the `/run` lifecycle hook
-    // receives `runHookPayload` as its request body, capped at 4 KB by the
-    // service. The hydrated_context essentially always blows that, so the
-    // S3-pointer path (mirroring ECS #502) is the DOMINANT one here and the
-    // inline branch is the exception. The MicroVM EXECUTION role holds the read
-    // grant, exactly as the ECS task role does today.
-    //
-    // Three keys, deliberately mirroring the ECS container env contract
-    // (AGENT_PAYLOAD / AGENT_PAYLOAD_S3_URI) so the agent's `/run` hook has one
-    // self-describing shape to branch on:
-    //   { "agent_payload": {...},     "platform_config": {...} }  — inline
-    //   { "agent_payload_s3_uri": "…", "platform_config": {...} }  — pointer
-    //
-    // `platform_config` (see MICROVM_PLATFORM_CONFIG_KEYS) rides in BOTH forms,
-    // and is ALSO merged into the S3 object on the pointer path:
-    //   s3://…/<task>/payload.json = { ...agent_payload, "platform_config": {…} }
-    // The duplication is deliberate and cheap (a few hundred bytes). It is the
-    // agent's env-block substitute — nothing else delivers it, because the
-    // snapshot must not bake it in — so it must be reachable whether the agent
-    // reads it off the hook body before fetching S3 or out of the fetched object.
+    // The manifest authenticates deployment settings through the worker's IAM
+    // grant. Payload access uses a single-object URL, saved outside TaskTable.
     const platformConfig = buildMicrovmPlatformConfig();
-    const inlineEnvelope = JSON.stringify({ agent_payload: payload, platform_config: platformConfig });
-    // Measure the SERIALIZED envelope, not the bare payload: the envelope is
-    // what the service counts against the 4 KB cap, and `platform_config` is part
-    // of it — which is precisely why nearly everything lands on the S3 path.
-    // Byte length (not String.length) because a multi-byte prompt/diff makes
-    // chars an undercount.
-    const inlineBytes = Buffer.byteLength(inlineEnvelope, 'utf8');
-
-    let runHookPayload: string;
-    let payloadS3Uri: string | undefined;
-    let uploadPayload: (() => Promise<void>) | undefined;
-    // EXACT boundary: `<= limit` inlines, `> limit` uploads. The service accepts
-    // 4 096 bytes and rejects 4 097 (measured), so 4 096 must still go inline.
-    if (inlineBytes <= RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-      runHookPayload = inlineEnvelope;
-    } else {
-      const key = microvmPayloadKey(taskId);
-      const uri = `s3://${MICROVM_PAYLOAD_BUCKET}/${key}`;
-      const pointerEnvelope = JSON.stringify({
-        agent_payload_s3_uri: uri,
-        platform_config: platformConfig,
-      });
-      // The pointer envelope is the LAST RESORT — there is no smaller shape to
-      // fall back to — so check it BEFORE the upload (an upload followed by a
-      // throw would leave an orphan object for the lifecycle rule to reap) and
-      // name the one thing an operator can actually act on. Unreachable in
-      // practice: the pointer plus all thirteen identifiers is well under 4 KB.
-      const pointerBytes = Buffer.byteLength(pointerEnvelope, 'utf8');
-      if (pointerBytes > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-        throw new Error(
-          `The MicroVM /run pointer envelope is ${pointerBytes} bytes, over the service's `
-          + `${RUN_HOOK_PAYLOAD_LIMIT_BYTES}-byte runHookPayload cap, with the payload already moved `
-          + 'to S3. The remaining size is the S3 URI plus the platform_config identifiers, so a '
-          + 'pathologically long table/bucket/ARN name is the only possible cause — shorten the '
-          + 'stack name (physical resource names derive from it) and redeploy.',
-        );
-      }
-      // The S3 object carries the payload with `platform_config` merged in at the
-      // top level, so an agent that fetches the object gets the config with it.
-      // Platform config wins on a key collision — the payload has no
-      // `platform_config` key today, and if one ever appeared the platform's
-      // value is the authoritative one.
-      const payloadJson = JSON.stringify({ ...payload, platform_config: platformConfig });
-      // Defer all writes until the persisted receipt accepts this exact input.
-      uploadPayload = async () => {
-        try {
-          await getS3Client().send(new PutObjectCommand({
-            Bucket: MICROVM_PAYLOAD_BUCKET,
-            Key: key,
-            Body: payloadJson,
-            ContentType: 'application/json',
-          }));
-        } catch (err) {
-          throw wrapMicrovmError('payload upload', err);
-        }
-        logger.info('Wrote MicroVM run-hook payload to S3', {
-          task_id: taskId,
-          bytes: Buffer.byteLength(payloadJson, 'utf8'),
-          inline_bytes: inlineBytes,
-          inline_limit_bytes: RUN_HOOK_PAYLOAD_LIMIT_BYTES,
-          uri,
-        });
-      };
-      payloadS3Uri = uri;
-      runHookPayload = pointerEnvelope;
-    }
 
     // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
     // default to "no ingress" — omitting the field attaches the AWS-managed
@@ -661,7 +508,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // Never omitted — see the comment above. `NO_INGRESS` is the suppression
       // mechanism, not an empty list.
       ingressNetworkConnectors,
-      runHookPayload,
+      runHookPayload: 'payload-bootstrap-v2',
       maximumDurationInSeconds: MICROVM_MAX_DURATION_SECONDS,
       // `idlePolicy` is OMITTED — never passed, in any phase (ADR-021
       // sub-decision 1, asserted by an invariant unit test). MicroVM idle
@@ -675,15 +522,21 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // The receipt below supplies a task-stable token across new SDK commands.
     };
 
-    const requestHash = microvmStartRequestHash(request, { ...payload, platform_config: platformConfig });
+    const requestHash = microvmStartRequestHash(
+      { ...request, payloadBucket: MICROVM_PAYLOAD_BUCKET }, { ...payload, platform_config: platformConfig },
+    );
     const claim = await claimMicrovmStart(taskId, input.userId, requestHash);
     if (claim.closed) {
       if (claim.handle) await this.stopSession(claim.handle);
       throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
     }
     if (claim.handle) return claim.handle;
-    if (uploadPayload) {
-      await uploadPayload();
+    const reference = await preparePayloadReference({
+      bucket: MICROVM_PAYLOAD_BUCKET, taskId, backend: 'lambda-microvm', payload, platformConfig,
+    }).catch((error: unknown) => { throw wrapMicrovmError('payload bootstrap', error); });
+    const runHookPayload = JSON.stringify(reference);
+    if (Buffer.byteLength(runHookPayload, 'utf8') > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
+      throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: launch reference exceeds the MicroVM hook limit');
     }
     // Uploads can take time. Observe cancellation/another saved handle again
     // immediately before the service call, using the same immutable request.
@@ -693,7 +546,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
     }
     if (latest.handle) return latest.handle;
-    const command = new RunMicrovmCommand({ ...request, clientToken: latest.clientToken });
+    const command = new RunMicrovmCommand({ ...request, runHookPayload, clientToken: latest.clientToken });
 
     let result;
     try {
@@ -716,7 +569,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
           'InvalidParameterValueException', 'ResourceNotFoundException', 'ThrottlingException',
           'TooManyRequestsException', 'ServiceQuotaExceededException', 'ConflictException']
           .includes(serviceError?.name ?? ''));
-      if (!knownRejection) throw new MicrovmStartUncertainError(wrapped.message, { cause: err });
+      if (!knownRejection) throw new MicrovmStartUncertainError(wrapped.message, { cause: wrapped });
       throw wrapped;
     }
 
@@ -775,8 +628,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       image_arn: result.imageArn,
       image_version: result.imageVersion ?? MICROVM_IMAGE_VERSION,
       maximum_duration_seconds: MICROVM_MAX_DURATION_SECONDS,
-      payload_delivery: payloadS3Uri ? 's3_pointer' : 'inline',
-      ...(payloadS3Uri && { payload_s3_uri: payloadS3Uri }),
+      payload_delivery: 'signed_reference',
       // KEY NAMES only, never values: this is the one operator-visible record of
       // which optional platform identifiers a given session actually received, and
       // "the agent said ARTIFACTS_BUCKET_NAME is not configured" is otherwise a
@@ -970,13 +822,13 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
           microvm_id: microvmId,
           reason,
           error_type: errName,
-          error: err instanceof Error ? err.message : String(err),
+          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
         });
       } else {
         logger.warn('Failed to terminate MicroVM (best-effort)', {
           microvm_id: microvmId,
           reason,
-          error: err instanceof Error ? err.message : String(err),
+          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
         });
       }
     }
@@ -986,7 +838,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 /**
  * Re-exported so tests and future callers can assert the documented cap without
  * duplicating the literal. This is BOTH the service's limit and our exact
- * inline/S3-pointer branch point — there is no separate threshold.
+ * maximum serialized v2 launch-reference size.
  */
 export const MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES = RUN_HOOK_PAYLOAD_LIMIT_BYTES;
 

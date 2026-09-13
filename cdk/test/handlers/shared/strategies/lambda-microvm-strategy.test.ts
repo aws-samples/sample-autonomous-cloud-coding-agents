@@ -101,11 +101,12 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   },
 }));
 
-const mockS3Send = jest.fn();
-jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: mockS3Send })),
-  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
-  DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
+const mockPrepare = jest.fn();
+const mockDelete = jest.fn();
+jest.mock('../../../../src/handlers/shared/payload-bootstrap', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/payload-bootstrap'),
+  preparePayloadReference: (...args: unknown[]) => mockPrepare(...args),
+  deletePayloadReference: (...args: unknown[]) => mockDelete(...args),
 }));
 
 // The real logger writes JSON to process.stdout/stderr, so level assertions need
@@ -129,7 +130,6 @@ import {
   buildMicrovmPlatformConfig,
   deleteMicrovmPayload,
   microvmNoIngressConnectorArnForRegion,
-  microvmPayloadKey,
 } from '../../../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn: '' };
@@ -144,31 +144,6 @@ const EXPECTED_PLATFORM_CONFIG = {
   github_token_secret_arn: GITHUB_TOKEN_SECRET_ARN,
   agent_session_role_arn: AGENT_SESSION_ROLE_ARN,
 };
-
-/**
- * Build a payload whose serialized `{"agent_payload": …, "platform_config": …}`
- * envelope is EXACTLY `targetBytes` long, so the 4 KB boundary can be probed on
- * both sides.
- *
- * `platform_config` is part of the counted envelope (ADR-021 P2), so its bytes are
- * subtracted from the payload's budget here. Asserts its own arithmetic — if the
- * envelope shape or the platform block ever changes, this fails loudly rather than
- * silently testing the wrong boundary.
- */
-function payloadWithEnvelopeBytes(targetBytes: number): Record<string, unknown> {
-  const overhead = Buffer.byteLength(
-    JSON.stringify({ agent_payload: { p: '' }, platform_config: EXPECTED_PLATFORM_CONFIG }),
-    'utf8',
-  );
-  const payload = { p: 'x'.repeat(targetBytes - overhead) };
-  expect(
-    Buffer.byteLength(
-      JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }),
-      'utf8',
-    ),
-  ).toBe(targetBytes);
-  return payload;
-}
 
 function runMicrovmOk() {
   mockSend.mockResolvedValueOnce({
@@ -257,22 +232,10 @@ async function withoutEnvAsync(keys: string[], body: () => Promise<void>): Promi
   }
 }
 
-/** {@link withoutEnvAsync}'s inverse: run `body` with extra env vars SET. */
-async function withEnvAsync(env: Record<string, string>, body: () => Promise<void>): Promise<void> {
-  const saved = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
-  try {
-    Object.assign(process.env, env);
-    await body();
-  } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-}
-
 beforeEach(() => {
   jest.clearAllMocks();
+  mockPrepare.mockReset().mockImplementation(async ({ taskId }: { taskId: string }) => ({ version: 2, task_id: taskId, bootstrap_s3_uri: 's3://b/bootstrap/example.json', payload_url: 'https://signed.example/task', expires_at: Date.now()+900000 }));
+  mockDelete.mockResolvedValue(undefined);
   mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
   mockSaveHandle.mockReset().mockResolvedValue(undefined);
 });
@@ -422,140 +385,15 @@ describe('LambdaMicrovmComputeStrategy', () => {
       ]);
     });
 
-    test('inlines a small payload in runHookPayload and never touches S3', async () => {
-      runMicrovmOk();
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: { repo_url: 'org/repo', prompt: 'Fix the bug', max_turns: 50 },
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).not.toHaveBeenCalled();
-      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-      expect(envelope.agent_payload).toEqual({ repo_url: 'org/repo', prompt: 'Fix the bug', max_turns: 50 });
-      expect(envelope.agent_payload_s3_uri).toBeUndefined();
-      // The MicroVM's substitute for the env block the other two backends get at
-      // deploy time — a snapshot must not bake it in (ADR-021 sub-decision 3), so
-      // it rides the envelope alongside the payload.
-      expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
-    });
-
-    test('uploads an oversized payload to S3 and inlines only the pointer', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      const big = { repo_url: 'org/repo', hydrated_context: { blob: 'x'.repeat(20_000) } };
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: big,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      // Same key shape as the ECS payload bucket: <task_id>/payload.json
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const put = mockS3Send.mock.calls[0][0];
-      expect(put._type).toBe('PutObject');
-      expect(put.input.Bucket).toBe(PAYLOAD_BUCKET);
-      expect(put.input.Key).toBe('TASK001/payload.json');
-      expect(put.input.ContentType).toBe('application/json');
-      // The S3 object carries the payload with platform_config merged in at the top
-      // level, so an agent that resolves the pointer gets the config with it.
-      expect(JSON.parse(put.input.Body)).toEqual({ ...big, platform_config: EXPECTED_PLATFORM_CONFIG });
-
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      const envelope = JSON.parse(runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
+    test.each(['small', 'x'.repeat(20000)])('delivers a persisted v2 reference for every payload size', async prompt => {
+      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+      await new LambdaMicrovmComputeStrategy().startSession({ taskId: 'TASK001', userId: 'u1', payload: { prompt }, blueprintConfig: BLUEPRINT });
+      expect(mockPrepare).toHaveBeenCalledWith(expect.objectContaining({ bucket: PAYLOAD_BUCKET, backend: 'lambda-microvm', platformConfig: EXPECTED_PLATFORM_CONFIG, payload: { prompt } }));
+      const envelope=JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
+      expect(envelope.version).toBe(2);
+      expect(envelope.task_id).toBe('TASK001');
+      expect(envelope.platform_config).toBeUndefined();
       expect(envelope.agent_payload).toBeUndefined();
-      // ...and ALSO inline on the pointer envelope, deliberately duplicated: the
-      // agent must be able to read its platform configuration whether it takes it
-      // off the hook body before fetching S3 or out of the fetched object.
-      expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
-      // The whole point: the hook body must sit far under the 4 KB cap.
-      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    });
-
-    test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
-      // Live-measured, NOT read off the SDK docs (which say 16,384): the service
-      // rejects 4097 with "Member must have length less than or equal to 4096".
-      // Unlike ECS (whose 8192-byte cap is shared with env vars + command, so it
-      // needs a margin), runHookPayload is the entire counted string.
-      expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(4_096);
-    });
-
-    test('a payload whose envelope is EXACTLY 4096 bytes stays inline', async () => {
-      runMicrovmOk();
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(4_096),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      // Boundary is `<=`: 4096 passed the service's length validation live.
-      expect(mockS3Send).not.toHaveBeenCalled();
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBe(4_096);
-      expect(JSON.parse(runHookPayload).agent_payload).toBeDefined();
-    });
-
-    test('a payload whose envelope is 4097 bytes — one over — goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(4_097),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
-      expect(envelope.agent_payload).toBeUndefined();
-    });
-
-    test('a mid-sized envelope the SDK-documented 16KB cap would have inlined goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      // Regression guard for the live-verification fix: anything from 4,097 to
-      // 16,384 bytes used to be inlined and would be REJECTED by the service.
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(13_000),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBeDefined();
-      expect(envelope.agent_payload).toBeUndefined();
-    });
-
-    test('measures the serialized envelope in BYTES, so a multi-byte payload still goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      // 3-byte UTF-8 characters: 2000 chars is ~6 KB of bytes but only 2 KB of
-      // chars, so measuring String.length would have wrongly inlined this.
-      const payload = { prompt: '\u4f60'.repeat(2_000) };
-      expect(JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }).length)
-        .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload).agent_payload_s3_uri).toBeDefined();
     });
 
     test('throws when RunMicrovm returns no microvmId', async () => {
@@ -654,34 +492,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(mockSend.mock.calls.filter(c => c[0]._type === 'TerminateMicrovm')).toHaveLength(0);
     });
 
-    test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
-      // The regression this locks: measuring `{agent_payload}` alone and then
-      // sending `{agent_payload, platform_config}` would inline an envelope the
-      // service rejects outright. So the branch decision has to be made on the
-      // FULL envelope. This payload is exactly 4 096 bytes WITHOUT the platform
-      // block — i.e. the old code would have inlined it — and must now upload.
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      const overheadWithoutConfig = Buffer.byteLength(JSON.stringify({ agent_payload: { p: '' } }), 'utf8');
-      const payload = { p: 'x'.repeat(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES - overheadWithoutConfig) };
-      expect(Buffer.byteLength(JSON.stringify({ agent_payload: payload }), 'utf8'))
-        .toBe(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      expect(JSON.parse(runHookPayload).agent_payload_s3_uri).toBeDefined();
-      expect(Buffer.byteLength(runHookPayload, 'utf8'))
-        .toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    });
-
     test.each(MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS.map(key => [key]))(
       'refuses to start — before any AWS call — when required platform config %s is missing',
       async (key) => {
@@ -693,14 +503,14 @@ describe('LambdaMicrovmComputeStrategy', () => {
             userId: 'cognito-test',
             // Oversized on purpose: the guard must fire before the payload upload,
             // or a misconfiguration leaves orphan objects in the payload bucket.
-            payload: payloadWithEnvelopeBytes(20_000),
+            payload: { prompt: 'x'.repeat(20_000) },
             blueprintConfig: BLUEPRINT,
           });
 
           await expect(start).rejects.toThrow(new RegExp(`${key} <- ${envVar}`));
           await expect(start).rejects.toThrow(/redeploy the stack/);
           expect(mockSend).not.toHaveBeenCalled();
-          expect(mockS3Send).not.toHaveBeenCalled();
+          expect(mockPrepare).not.toHaveBeenCalled();
         });
       },
     );
@@ -723,72 +533,48 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(JSON.stringify(started[1])).not.toContain(GITHUB_TOKEN_SECRET_ARN);
     });
 
-    test('fails BEFORE the upload when even the POINTER envelope cannot fit (no orphan object)', async () => {
-      // The one shape with no smaller fallback: the payload has already been moved
-      // to S3, so if `{pointer + platform_config}` still exceeds 4 096 bytes there
-      // is nothing left to shed. Only a pathological identifier length can cause it
-      // — hence the check, and hence its placement BEFORE the PutObject so a
-      // misconfiguration cannot leave objects behind for the lifecycle rule to reap.
-      await withEnvAsync({ LOG_GROUP_NAME: `/aws/${'x'.repeat(5_000)}` }, async () => {
-        const start = new LambdaMicrovmComputeStrategy().startSession({
-          taskId: 'TASK001',
-          userId: 'cognito-test',
-          payload: payloadWithEnvelopeBytes(20_000),
-          blueprintConfig: BLUEPRINT,
-        });
-
-        await expect(start).rejects.toThrow(/pointer envelope is \d+ bytes/);
-        await expect(start).rejects.toThrow(/shorten the stack name/);
-        expect(mockS3Send).not.toHaveBeenCalled();
-        expect(mockSend).not.toHaveBeenCalled();
-      });
+    test('rejects a saved reference exceeding the service cap before RunMicrovm', async () => {
+      mockPrepare.mockResolvedValueOnce({ version: 2, task_id: 'TASK001', payload_url: 'x'.repeat(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES + 1) });
+      await expect(new LambdaMicrovmComputeStrategy().startSession({ taskId: 'TASK001', userId: 'u1', payload: {}, blueprintConfig: BLUEPRINT })).rejects.toThrow('hook limit');
+      expect(mockSend).not.toHaveBeenCalled();
     });
 
-    test('microvmPayloadKey matches the ECS payload key shape', () => {
-      expect(microvmPayloadKey('TASK001')).toBe('TASK001/payload.json');
+    test.each(['bootstrap', 'run'])('redacts signed URLs throughout the %s error chain', async stage => {
+      const { inspect } = await import('node:util');
+      const original = new Error('request failed https://bucket.example/key?X-Amz-Signature=BEARER-SECRET', {
+        cause: new Error('nested BEARER-SECRET'),
+      });
+      if (stage === 'bootstrap') mockPrepare.mockRejectedValueOnce(original);
+      else mockSend.mockRejectedValueOnce(original);
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001', userId: 'u1', payload: {}, blueprintConfig: BLUEPRINT,
+      }).catch(error => {
+        expect(inspect(error, { depth: null })).not.toContain('BEARER-SECRET');
+      });
+      expect.assertions(1);
+    });
+
+    test('keeps the capability out of ordinary logs and start-receipt arguments', async () => {
+      mockPrepare.mockResolvedValueOnce({ version: 2, task_id: 'TASK001', payload_url: 'BEARER-SECRET' });
+      runMicrovmOk();
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001', userId: 'u1', payload: {}, blueprintConfig: BLUEPRINT,
+      });
+      expect(JSON.stringify([
+        mockLogger.info.mock.calls, mockLogger.warn.mock.calls, mockLogger.error.mock.calls,
+        mockClaimStart.mock.calls, mockSaveHandle.mock.calls,
+      ])).not.toContain('BEARER-SECRET');
     });
   });
 
   // --- finalize-time payload delete (review NB3 / ayushtr nit 2) ---
   //
-  // Not cosmetic parity with ECS. The execution role's payload-bucket grant is
-  // `grantRead` on the WHOLE bucket (the guest must read its object before any
-  // tenant identity exists) and keys are `<taskId>/payload.json`, so a TTL-only
-  // reaper left every finished task's HYDRATED PROMPT readable by any concurrently
-  // running MicroVM — which runs untrusted repo code — for up to ~24 h.
-  describe('deleteMicrovmPayload — closes the cross-task payload-read window', () => {
-    test('deletes the task\'s own object from the payload bucket', async () => {
+  // Finalize revokes the single-object link and removes its private replay
+  // record; worker credentials already deny direct task-object reads.
+  describe('deleteMicrovmPayload', () => {
+    test('delegates cleanup of payload and private launch record', async () => {
       await deleteMicrovmPayload('TASK001');
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const call = mockS3Send.mock.calls[0][0];
-      expect(call._type).toBe('DeleteObject');
-      expect(call.input).toEqual({
-        Bucket: PAYLOAD_BUCKET,
-        Key: microvmPayloadKey('TASK001'),
-      });
-    });
-
-    test('is best-effort — a failed delete never throws', async () => {
-      mockS3Send.mockRejectedValueOnce(new Error('AccessDenied'));
-
-      await expect(deleteMicrovmPayload('TASK001')).resolves.toBeUndefined();
-      // Not silent: the lifecycle rule is the backstop, but an operator must be
-      // able to see the delete is failing.
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        'Failed to delete MicroVM payload object (non-fatal)',
-        expect.objectContaining({ task_id: 'TASK001', error: 'AccessDenied' }),
-      );
-    });
-
-    test('deletes ONLY the given task\'s key — never a prefix or the bucket', async () => {
-      // The delete must not become a cleanup that can reach another task's object.
-      await deleteMicrovmPayload('TASK001');
-
-      const { input } = mockS3Send.mock.calls[0][0];
-      expect(input.Key).toBe('TASK001/payload.json');
-      expect(input.Key).not.toContain('*');
-      expect(input).not.toHaveProperty('Prefix');
+      expect(mockDelete).toHaveBeenCalledWith(PAYLOAD_BUCKET, 'TASK001');
     });
   });
 
@@ -1003,7 +789,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       await expect(start).rejects.toThrow('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded');
     });
 
-    test('preserves the original error as `cause` so err.name stays inspectable', async () => {
+    test('preserves the AWS error name in a sanitized cause', async () => {
       const err = new Error('quota');
       err.name = 'ServiceQuotaExceededException';
       mockSend.mockRejectedValueOnce(err);
@@ -1011,7 +797,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       await new LambdaMicrovmComputeStrategy()
         .startSession({ taskId: 'TASK001', userId: 'u', payload: {}, blueprintConfig: BLUEPRINT })
         .catch((thrown: Error) => {
-          expect(thrown.cause).toBe(err);
+          expect(thrown.cause).not.toBe(err);
           expect((thrown.cause as Error).name).toBe('ServiceQuotaExceededException');
         });
       expect.assertions(2);
@@ -1029,16 +815,16 @@ describe('LambdaMicrovmComputeStrategy', () => {
     test('marks a payload-upload failure so an S3 fault is attributed to this backend', async () => {
       const err = new Error('Access Denied');
       err.name = 'AccessDenied';
-      mockS3Send.mockRejectedValueOnce(err);
+      mockPrepare.mockRejectedValueOnce(err);
 
       const start = new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(20_000),
+        payload: { prompt: 'x'.repeat(20_000) },
         blueprintConfig: BLUEPRINT,
       });
 
-      await expect(start).rejects.toThrow('MicroVM payload upload failed: AccessDenied: Access Denied');
+      await expect(start).rejects.toThrow('MicroVM payload bootstrap failed: AccessDenied: Access Denied');
       // Never reaches RunMicrovm — no half-started MicroVM on an upload fault.
       expect(mockSend).not.toHaveBeenCalled();
     });
@@ -1106,7 +892,7 @@ describe('LambdaMicrovmComputeStrategy without the MicroVM substrate deployed', 
     await expect(start).rejects.toThrow(new RegExp(envVar));
     // Fails BEFORE any AWS call — no half-started MicroVM, no orphan S3 object.
     expect(mockSend).not.toHaveBeenCalled();
-    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(mockPrepare).not.toHaveBeenCalled();
   });
 
   test('MICROVM_IMAGE_VERSION is optional — the field is omitted so the service picks the default', async () => {
@@ -1200,7 +986,7 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
       userId: 'cognito-test',
       // Oversized on purpose: the guard must fire before the payload upload, or a
       // misconfiguration leaves orphan objects in the payload bucket.
-      payload: payloadWithEnvelopeBytes(20_000),
+      payload: { prompt: 'x'.repeat(20_000) },
       blueprintConfig: BLUEPRINT,
     });
 
@@ -1210,7 +996,7 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
     // ...and the remedy.
     await expect(start).rejects.toThrow(/--context compute_type=lambda-microvm/);
     expect(mockSend).not.toHaveBeenCalled();
-    expect(mockS3Send).not.toHaveBeenCalled();
+    expect(mockPrepare).not.toHaveBeenCalled();
   });
 
   test('accepts a full image ARN', async () => {
@@ -1269,8 +1055,8 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     ]);
     expect(sharedConstants.microvm_platform_config.account_anchor_key).toBe('agent_session_role_arn');
 
-    // Order is part of the contract: it is the serialization order, which the 4 KB
-    // inline/S3 branch decision is computed against.
+    // Keep the reviewed key inventory explicit. Payload/bootstrap hashing uses
+    // canonical JSON, so insertion order does not alter retry identity.
     expect([...MICROVM_PLATFORM_CONFIG_KEYS]).toEqual([
       'task_table_name',
       'task_events_table_name',
@@ -1462,18 +1248,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     const config = buildMicrovmPlatformConfig();
     expect(config).toEqual(EXPECTED_PLATFORM_CONFIG);
   });
-
-  test('the full thirteen-key block fits the pointer envelope inside the 4 KB cap', () => {
-    // The one shape with no smaller fallback: if the pointer envelope itself
-    // exceeded 4 096 bytes there would be nothing left to move to S3. This asserts
-    // the design has real headroom rather than relying on the guard.
-    const pointerEnvelope = JSON.stringify({
-      agent_payload_s3_uri: `s3://${PAYLOAD_BUCKET}/TASK001/payload.json`,
-      platform_config: buildMicrovmPlatformConfig(FULL_ENV),
-    });
-    expect(Buffer.byteLength(pointerEnvelope, 'utf8'))
-      .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES / 2);
-  });
 });
 
 describe('LambdaMicrovmComputeStrategy with the FULL platform_config environment', () => {
@@ -1497,21 +1271,9 @@ describe('LambdaMicrovmComputeStrategy with the FULL platform_config environment
     for (const key of Object.keys(OPTIONAL_ENV)) delete process.env[key];
   });
 
-  test('delivers every configured identifier on the wire, in both envelope halves', async () => {
-    mockS3Send.mockResolvedValueOnce({});
-    runMicrovmOk();
-
-    await new LambdaMicrovmComputeStrategy().startSession({
-      taskId: 'TASK001',
-      userId: 'cognito-test',
-      payload: { repo_url: 'org/repo', hydrated_context: { blob: 'x'.repeat(10_000) } },
-      blueprintConfig: BLUEPRINT,
-    });
-
-    const expected = { ...EXPECTED_PLATFORM_CONFIG, ...buildMicrovmPlatformConfig() };
-    const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-    expect(envelope.platform_config).toEqual(expected);
-    expect(Object.keys(envelope.platform_config)).toHaveLength(13);
-    expect(JSON.parse(mockS3Send.mock.calls[0][0].input.Body).platform_config).toEqual(expected);
+  test('passes every configured identifier to the authenticated manifest producer', async () => {
+    mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+    await new LambdaMicrovmComputeStrategy().startSession({ taskId: 'TASK001', userId: 'u1', payload: {}, blueprintConfig: BLUEPRINT });
+    expect(mockPrepare.mock.calls[0][0].platformConfig).toEqual(buildMicrovmPlatformConfig());
   });
 });

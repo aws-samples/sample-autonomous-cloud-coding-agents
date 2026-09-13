@@ -13,7 +13,8 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [x] Stabilize terminal failure classification and user retry guidance (#817).
 - [x] Exercise real S3 bad-byte paths and fix closed-stream error classification (#817).
 - [x] Require new ARN fields to participate in validation; pin contract fields and anchor (#817).
-- [ ] Bind configuration to trusted deployment identity and restrict payload reads per task (#817 / #700).
+- [x] Bind configuration to IAM-authenticated deployment manifests and use single-object payload links for ECS/MicroVM (#817 / #700).
+- [ ] Verify v2 bootstrap policies, S3 conditional writes, expiry, networking and coordinated rollout in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [ ] Verify AWS token retention/conflicts and unknown-start cleanup on a live deployment.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
@@ -73,6 +74,13 @@ Fifth prerequisite batch completed locally on 2026-09-13:
 - The old-policy regression failed on `PutItem`. **1,795 Python tests** pass with **84.47%** coverage, including actual writer-request/permission-contract checks; **268 CDK tests** pass across session-role, ECS, MicroVM and full-stack suites. Python quality, CDK lint/compilation and documentation checks pass. These counts overlap earlier batches; four obsolete helper tests were removed and two contract tests added.
 - [Metadata verification](./645-coordinator-metadata.md) records the effective source-policy boundary, writer inventory, rollback constraints and pending real-AWS allowed/denied transaction matrix. No table migration or bootstrap-policy update is required. Application-role deployment and a matching agent image remain necessary; nothing was deployed.
 
+Sixth prerequisite batch completed locally (2026-09-13):
+
+- v2 payload bootstrap for #817/#700 now covers both ECS and MicroVM: IAM-authenticated deployment manifests, one-object signed downloads, immutable private retry references, bounded bytes/expiry and coordinator cleanup of both task objects. Worker reads outside the manifest prefix and payload-bucket listing are explicitly denied.
+- Regressions reproduced and fixed bearer-URL leaks through Python and JavaScript exception chains. Removed the old unsigned transports, stale permission/compatibility comments and unused per-backend key helpers.
+- Python quality passed **1,806 tests / 84.51% coverage**. The broad CDK run passed **159 suites / 3,935 tests** with `--detectOpenHandles` and exited normally; **15 existing DynamoDB Local tests were skipped** because this batch did not start that service or change its transaction protocol. The final five transport/strategy suites passed **187 tests** after the last cleanup (overlapping the broad run); CDK lint/compilation, Python lint/type checks, constants-sync, the **77-page** docs build and link checks also pass.
+- The [bootstrap runbook](./645-payload-bootstrap.md) records the design, AWS documentation evidence, remaining trust boundaries, live allowed/denied matrix and coordinated deployment/rollback procedure. Nothing was deployed; effective IAM, conditional S3 writes, expiry, DNS/HTTPS, ingress negatives and clean launches remain gates.
+
 ## The result we want
 
 When the coding agent asks a human for permission, its computer may go to sleep. The human can approve or deny while it sleeps. The computer wakes, reads the saved answer, and continues or refuses the action. If nobody answers, it wakes before the deadline and applies the existing timeout-as-denial rule. Its files, task identity, permissions, progress and deadline remain correct.
@@ -103,7 +111,8 @@ A few implementation words used below:
 - Keep the eight-hour `maximumDurationInSeconds = 28800`, including suspended time.
 - Keep `idlePolicy` absent. Traffic-based idleness would mistake outbound-only coding work for inactivity.
 - Keep explicit `NO_INGRESS` and no `CreateMicrovmAuthToken` grant. No public agent-control endpoint or JWE token refresh system is needed for P3.
-- Keep the 4,096-byte hook-payload boundary and S3 fallback, including registry-resolved assets.
+- Keep the 4,096-byte serialized hook-reference boundary and v2 S3 transport for every task, including registry-resolved assets.
+- Resume the restored task context; do not repeat bootstrap or reuse its short-lived launch URL after sleep.
 - Only the orchestrator initiates suspension. Approval handlers may request resume after committing a decision; the orchestrator repairs missed resumes.
 - The agent remains the authority that consumes a decision or times out a gate. Approval HTTP handlers must not simply mark the coding task RUNNING.
 - Preserve tenant-scoped credentials, task/user/repository tags and fail-closed behavior. “Fail closed” means refusing an action when safe authorization cannot be established.
@@ -137,18 +146,20 @@ Keep nesting in a separate change from lifecycle logic. Developing P3 locally ne
 
 ### 1A. Finish #817
 
-- [x] **Deletion IAM:** the coordinator has exact `s3:DeleteObject` on `*/payload.json` in the dedicated bucket. Construct and stack tests pin that scope. The worker retains read-only permissions, and deletion failure does not hide the task outcome.
+- [x] **Deletion IAM:** the coordinator has exact `s3:DeleteObject` on `*/payload.json` and `*/launch.json` in the dedicated bucket. Construct and stack tests pin that scope. Worker ambient reads are now restricted to bootstrap manifests; deletion failure does not hide the task outcome.
 - [x] **Classifier:** reconciliation persists `MICROVM_SUBSTRATE_TERMINATED` or `MICROVM_RUN_HOOK_REJECTED` separately from the descriptive AWS reason. The known leading run-hook 4xx response selects the latter; arbitrary appended text cannot override the code. Legacy task records remain readable. Tests cover task API classification, channel/panel retry guidance, host/capacity failures, regional faults, authorization/configuration, concurrency words, hook 400/500 and other backends.
-- [ ] **Trusted configuration:** decide which data is trusted at `/run`. A same-payload account anchor cannot authenticate its siblings. Bind accepted deployment identifiers to trusted deployment configuration or an authenticated payload reference; preserve legitimate cross-region secrets. Reject another workspace's secret even when it has the same account number.
+- [x] **Trusted configuration (local):** v2 reads a deployment manifest with ambient IAM credentials restricted by an explicit deny outside that deployment's bootstrap prefix, then verifies downloaded task/config equality. Another workspace's secret in the same account is rejected; an exact trusted cross-region secret is preserved. Both languages share the version/caps. Live effective-IAM, public-bucket and ingress negatives remain open.
 - [x] **Contract guards:** pin exact contract fields, ARN fields and the account anchor in both languages. Python import-time validation and the constants checker reject newly added `*_arn` / `*_ARN` fields omitted from `arn_keys`. This prevents accidental validation gaps; it does not establish deployment identity.
 - [x] **S3 bad bytes:** real `StreamingBody` tests cover truncated JSON, invalid encoding, short and closed streams, and non-object JSON through fetch/decode/envelope/route. They assert a structured unreadable response, no configuration installation/environment mutation, and no pipeline thread. A closed-stream `ValueError` now reaches the unreadable-payload 500 branch. Malformed hook envelopes retain the separate 400 response. S3 writes are atomic; invalid stored bytes need replacement, not an assumption that another identical read repairs them.
 - **Documentation:** verify all remaining contract/status changes update source docs and their generated copies through the sync script.
 
 ### 1B. Narrow payload reads (#700)
 
-Choose task-scoped transport before describing the backend as suitable for untrusted multi-tenant tasks. The current role reads the payload **before** it establishes task-scoped identity, so merely moving an existing S3 grant onto the session role is not enough.
+**Completed locally for ECS and MicroVM:** every task uses an IAM-authenticated deployment manifest plus a short-lived, single-object signed URL. Worker ambient roles explicitly deny other object reads and payload-bucket listing. The coordinator stores the exact URL privately in S3 for replay, conditionally creates task objects, rejects changed/expired launches, and deletes payload plus launch record at finalization. ECS consumes/removes its capability before the pipeline; errors and Python exception chains must not expose it.
 
-Evaluate a short-lived, single-object signed URL or a trusted bootstrap envelope that safely establishes task identity first. For a signed URL, check whether the guest's network/DNS policy permits its host and whether retry duration fits the URL lifetime; keep the bearer URL out of logs. For role-based fetching, prove how the role/session tags are trusted before the object is read. Test wrong task, guessed key, expired reference, retries and maximum payload size. Preserve the ECS contract or document a deliberate staged rollout. Finalize-time deletion complements this fix; it does not prevent reads of other active tasks.
+The [bootstrap runbook](./645-payload-bootstrap.md) records wire/storage shapes, caps, credential lifetime, the coordinator's `ListBucket` requirement for missing-object detection, coordinated drain/image/controller/policy upgrade and rollback, and the real AWS allow/deny matrix. Old unsigned envelopes are intentionally rejected; this is a coordinated contract change, not a rolling mixed-version deployment.
+
+**Still required:** effective-role cross-task/public-bucket negatives, actual S3 conditional writes and missing-object behavior, signer/URL expiry, runtime DNS/HTTPS and clean launches for both backends. The role/tag and other platform-grant limits in 1G remain; this boot-path fix does not establish complete hostile-worker isolation.
 
 ### 1C. Fix approval/heartbeat ordering
 

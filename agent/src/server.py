@@ -855,7 +855,6 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 
 #: ``s3://`` scheme prefix for the out-of-band payload pointer.
-_S3_URI_SCHEME = "s3://"
 
 # --- platform_config allowlist (ADR-021 P2) --------------------------------
 # WHY the agent's platform env arrives in the ``/run`` payload at all, instead of
@@ -907,70 +906,15 @@ MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS: frozenset[str] = frozenset(
 #: WHAT THIS BUYS, STATED PRECISELY — because the honest answer is narrower than
 #: "stops secret exfiltration", and overstating it would hide the residual gap.
 #:
-#: The key allowlist above stops a payload setting ``LD_PRELOAD``; it does not stop
-#: a payload pointing an *allowlisted* key at a different resource. The value that
-#: matters most is ``github_token_secret_arn``: ``config.resolve_github_token``
-#: fetches whatever ARN it names using the UNSCOPED execution role and caches the
-#: raw ``SecretString`` into ``os.environ["GITHUB_TOKEN"]``, from which ``shell.py``
-#: hands the environment to every repo subprocess — i.e. into the model's tool
-#: surface. So the value is worth validating.
-#:
-#: This check is DEFENCE IN DEPTH AND FAIL-FAST, not the primary control:
-#:
-#: * What actually stops a cross-account read today is IAM. Every grant on the
-#:   execution role is account-scoped by construction — ``grantRead`` on the GitHub
-#:   PAT secret, and the ``bgagent-linear-oauth-*`` / ``bgagent-jira-oauth-*``
-#:   prefix grants built with ``stack.formatArn`` (``lambda-microvm-compute.ts``).
-#:   A foreign-account ARN therefore AccessDenies with or without this check. What
-#:   this adds is a structured 400 at the door instead of an opaque
-#:   ``AccessDeniedException`` mid-startup, and a guard that still holds if a
-#:   future grant is ever widened.
-#: * What this check does NOT stop is an IN-ACCOUNT redirect. The channel-OAuth
-#:   grants are prefix grants (unavoidable: the CLI mints ``bgagent-*-oauth-<id>``
-#:   at setup, so the names are unknown at synth), so a block whose anchor and
-#:   whose ``github_token_secret_arn`` name the SAME account but a DIFFERENT
-#:   workspace's OAuth secret is accepted here. Partition + account is the only
-#:   boundary this check enforces; it is not a per-workspace authorization check.
-#: * That residual gap is currently unreachable from the guest, which is why it is
-#:   left open. ``platform_config`` is produced by the orchestrator Lambda and the
-#:   MicroVM execution role holds ``grantRead`` ONLY on the payload bucket
-#:   (``payloadBucket.grantRead``), so a running MicroVM can read another task's
-#:   payload but cannot write one. Reaching the in-account case requires already
-#:   controlling the orchestrator's environment or the bucket's write path.
-#:
-#: ESCALATION: if the payload path ever becomes less trusted — a third-party
-#: producer, an operator-editable envelope, or any grant that lets the guest write
-#: the payload bucket — this must grow into a name-shape check that ties
-#: ``github_token_secret_arn`` to the task's own channel/workspace, because
-#: partition+account pinning provably does not cover that case.
-#:
-#: The prefix grant itself is at ECS parity. The ASYMMETRY that makes value
-#: validation worth doing here at all is new to this backend: on ECS these ARNs
-#: arrive as deploy-time container env; here they arrive in a network payload.
+#: The allowlist restricts environment-variable names; ARN shape/account checks
+#: below are defense in depth. Startup settings come from an IAM-authenticated
+#: bootstrap manifest read before the task payload. That independent manifest
+#: pins the exact GitHub secret and other deployment identifiers, including valid
+#: cross-region secrets. A same-payload account anchor alone cannot do that.
 MICROVM_PLATFORM_CONFIG_ARN_KEYS: frozenset[str] = frozenset(_PLATFORM_CONFIG_CONTRACT["arn_keys"])
 
-#: The key whose ARN supplies the partition/account every other ARN is checked
-#: against.
-#:
-#: Deliberately a payload key rather than ``os.environ`` or an STS call.
-#: ``os.environ`` is empty here by construction (nothing is baked into the
-#: snapshot — see ``imageEnvironmentVariables``), so anchoring on the environment
-#: would silently degrade this whole check to shape-only in the intended
-#: deployment. An ``sts:GetCallerIdentity`` is not available either: this runs
-#: BEFORE ``platform_config`` is installed, on the path that must make zero AWS
-#: calls beyond the S3 payload fetch.
-#:
-#: CONSEQUENCE, stated plainly: because the anchor travels in the same block as the
-#: values it validates, this check enforces INTERNAL CONSISTENCY of the block, not
-#: agreement with the account the guest is actually running in. A block that names
-#: one foreign account throughout is self-consistent and passes here — it then
-#: fails at IAM, which is the control that really holds (see
-#: :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS`). ``agent_session_role_arn`` is still
-#: the best available anchor: it is REQUIRED (so always present when this check
-#: runs, which is what stops disarm-by-omission) and it is the one value whose
-#: misdirection costs the attacker the run rather than gaining them anything — a
-#: foreign session role fails closed at ``sts:AssumeRole``
-#: (``SessionScopingError``).
+#: Consistency anchor after manifest authentication, not deployment identity.
+#: Required membership is enforced by the shared contract.
 MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY: str = _PLATFORM_CONFIG_CONTRACT["account_anchor_key"]
 
 _PLATFORM_CONFIG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1136,25 +1080,6 @@ class _PlatformConfigError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _absent_required_platform_env() -> list[str]:
-    """Required ``platform_config`` env vars that are unset in the LIVE environment.
-
-    The no-``platform_config`` path's audit. Checks the ENV VAR names rather than
-    the contract keys, because on that path the only possible source is whatever
-    the image snapshot baked — so the effective environment is the thing to
-    interrogate, and a value that arrived by any route counts.
-
-    Blank/whitespace-only counts as absent, matching
-    :func:`_install_platform_config`'s own rule: CloudFormation renders an
-    unresolved value as ``""``, and an empty table name is not a table name.
-    """
-    return sorted(
-        MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]
-        for key in MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
-        if not os.environ.get(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], "").strip()
-    )
 
 
 def _reject_foreign_arns(resolved: dict[str, str]) -> None:
@@ -1459,173 +1384,27 @@ def _parse_terminate_microvm_id(raw: bytes) -> str:
 
 
 class MicrovmRunHookRequest(BaseModel):
-    """Body the MicroVM service POSTs to the ``/run`` hook.
+    """Service request containing a serialized v2 payload reference.
 
-    ``runHookPayload`` is the opaque STRING the orchestrator passed to
-    ``RunMicrovm`` — the service does not parse it. ABCA's contract for that
-    string (``lambda-microvm-strategy.ts``) is one of two shapes, mirroring the
-    ECS container env contract (``AGENT_PAYLOAD`` / ``AGENT_PAYLOAD_S3_URI``):
-
-    * ``{"agent_payload": {...}, "platform_config": {...}}`` — inline.
-    * ``{"agent_payload_s3_uri": "s3://bucket/key", "platform_config": {...}}`` —
-      a pointer; the object at the URI carries the task payload (and a
-      ``platform_config`` copy, so either end of the fetch yields it).
-
-    The pointer form is the DOMINANT one: the service caps ``runHookPayload`` at
-    4 096 bytes and a hydrated payload is essentially always larger.
-
-    ``platform_config`` (ADR-021 P2) is a SIBLING of ``agent_payload``, not a
-    field inside it: it configures the agent's *process*, whereas
-    ``agent_payload`` describes the *task* (``memory_id`` and friends stay
-    inside ``agent_payload``, unchanged). See ``_install_platform_config``.
-
-    Both fields default to empty so a malformed call produces this module's
-    structured 400 rather than FastAPI's 422 — the service surfaces a 4xx as a
-    generic "client error" hook failure either way, and our own body is what ends
-    up in the MicroVM log group.
+    The reference identifies an IAM-authenticated deployment manifest and one
+    task's signed download URL. Unsigned inline and legacy S3 envelopes are
+    refused: this protocol requires a matching coordinator and agent image.
+    Missing fields reach our structured 400 instead of FastAPI's 422.
     """
 
     microvmId: str = ""  # service field name; camelCase on the wire
     runHookPayload: str = ""  # service field name; camelCase on the wire
 
 
-class _PayloadFetchError(Exception):
-    """A fetched ``/run`` payload that could not be read or decoded.
-
-    Exists purely to be *not* a ``ValueError``, because the ``/run`` handler
-    discriminates its 400 from its 500 on exactly that type and the two answers
-    make opposite promises to the operator:
-
-    * 400 ``MICROVM_RUN_PAYLOAD_INVALID`` — "the orchestrator built a bad
-      envelope; retrying an identical body cannot help."
-    * 500 ``MICROVM_RUN_PAYLOAD_UNREADABLE`` — "the payload could not be read;
-      retrying CAN help."
-
-    Corrupt/truncated JSON or an interrupted body read is the SECOND kind, but
-    ``json.JSONDecodeError`` and a closed stream's error are ``ValueError``
-    subclasses. Without this wrapper, the handler mistakes those fetch/decode
-    failures for malformed hook envelopes. Only the pre-fetch URI-shape check
-    should reach the handler's ``ValueError`` branch.
-    S3 publishes object writes atomically: a malformed stored object needs
-    replacement, and retrying the same bytes will not repair them.
-    """
-
-
-def _fetch_microvm_payload_from_s3(uri: str) -> dict:
-    """Read and parse the out-of-band ``/run`` payload from S3.
-
-    Same fetch the ECS boot command performs for ``AGENT_PAYLOAD_S3_URI``; the
-    MicroVM **execution role** holds the read grant, scoped to the platform
-    payload bucket. Errors propagate to the caller, which turns them into a
-    structured 400/500 — silently starting a pipeline with no payload would
-    produce a task that runs with an empty prompt.
-
-    The URI-SHAPE check raises ``ValueError`` (the orchestrator's envelope is
-    wrong → 400). Everything AFTER the fetch raises :class:`_PayloadFetchError`
-    (the object is wrong → 500, retryable). See that class.
-
-    Built through ``aws_session.platform_client`` so the call carries the ABCA
-    ``md/`` solution-attribution segment (#319). Platform, not tenant: the bucket
-    is platform-owned and — decisively — this is the ONE call that must happen
-    BEFORE ``platform_config`` is installed (the config is inside the object
-    being fetched), so ``AGENT_SESSION_ROLE_ARN`` may not be set yet and a
-    tenant-scoped client could not be built. ``platform_client`` does not touch
-    the cached session, so this call also cannot pin an unscoped session for the
-    rest of the task. The ``app/`` UA segment (native, from ``AWS_SDK_UA_APP_ID``)
-    is the one attribution field this single call can miss for the same
-    chicken-and-egg reason.
-    """
-    remainder = uri[len(_S3_URI_SCHEME) :]
-    bucket, _, key = remainder.partition("/")
-    if not bucket or not key:
-        raise ValueError(f"agent_payload_s3_uri is not a bucket/key URI: {uri!r}")
-
-    from aws_session import platform_client
-
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    client = platform_client("s3", region_name=region)
-    try:
-        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-        payload = json.loads(body)
-    except ValueError as exc:
-        # Decode failures and a closed response stream can both raise ValueError.
-        # Keep them out of the handler's malformed-envelope (400) branch.
-        raise _PayloadFetchError(
-            f"S3 payload at {uri!r} could not be read as JSON ({exc})"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise _PayloadFetchError(
-            f"S3 payload at {uri!r} is {type(payload).__name__}, expected an object"
-        )
-    return payload
-
-
-def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, Any]:
-    """Split the ``runHookPayload`` string into (agent payload, platform config).
-
-    The second element is returned RAW (unvalidated) — ``_install_platform_config``
-    owns its allowlist checks so the two failure classes get distinct wire codes.
-    ``None`` means the envelope carried no ``platform_config`` at all.
-
-    Raises ``ValueError`` for every ENVELOPE shape the agent cannot act on — the
-    caller maps that onto its 400 ("the orchestrator built this; a retry cannot
-    help"). Problems with the CONTENT of a fetched S3 object raise
-    :class:`_PayloadFetchError` instead, which the caller maps onto its retryable
-    500: the orchestrator's envelope was fine and the object was not.
-    """
-    if not run_hook_payload.strip():
-        raise ValueError("runHookPayload is empty")
+def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, dict]:
+    """Authenticate deployment settings and resolve the v2 task reference."""
+    from payload_bootstrap import resolve_payload_reference
 
     try:
-        envelope = json.loads(run_hook_payload)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"runHookPayload is not valid JSON: {exc}") from exc
-
-    if not isinstance(envelope, dict):
-        raise ValueError(f"runHookPayload must be a JSON object, got {type(envelope).__name__}")
-
-    inline = envelope.get("agent_payload")
-    if inline is not None:
-        if not isinstance(inline, dict):
-            raise ValueError(f"agent_payload must be an object, got {type(inline).__name__}")
-        return inline, envelope.get("platform_config")
-
-    uri = envelope.get("agent_payload_s3_uri")
-    if isinstance(uri, str) and uri.startswith(_S3_URI_SCHEME):
-        fetched = _fetch_microvm_payload_from_s3(uri)
-        # ``platform_config`` may sit beside the pointer (outer envelope) or
-        # inside the fetched object — the producer writes it in BOTH places on
-        # this path deliberately, so the agent gets it whichever end it reads.
-        # Inner first, outer as the fallback.
-        platform_config = fetched.get("platform_config")
-        if platform_config is None:
-            platform_config = envelope.get("platform_config")
-        # The fetched object is EITHER the same envelope shape as the inline form
-        # ({"agent_payload": …}) or the task payload itself with ``platform_config``
-        # merged in at the top level (what the strategy writes today, and what P1
-        # wrote without the config). Both are accepted because the image snapshot
-        # and the orchestrator Lambda deploy on independent cadences — a new image
-        # must not require a same-instant orchestrator. Discriminating on the
-        # ``agent_payload`` key is unambiguous: no orchestrator task payload has a
-        # field by that name. A stray ``platform_config`` key left in the bare
-        # form is inert — ``_extract_invocation_params`` reads named fields only.
-        nested = fetched.get("agent_payload")
-        if nested is None:
-            return fetched, platform_config
-        if not isinstance(nested, dict):
-            # Content of the FETCHED OBJECT, not of the envelope — so this is the
-            # retryable class, same as a truncated body. See ``_PayloadFetchError``.
-            raise _PayloadFetchError(
-                f"agent_payload in the S3 payload must be an object, got {type(nested).__name__}"
-            )
-        return nested, platform_config
-    if uri is not None:
-        raise ValueError(f"agent_payload_s3_uri must be an s3:// URI, got {uri!r}")
-
-    raise ValueError(
-        "runHookPayload envelope has neither agent_payload nor agent_payload_s3_uri "
-        f"(keys: {sorted(envelope)})"
-    )
+        reference = json.loads(run_hook_payload)
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("runHookPayload is not valid JSON") from exc
+    return resolve_payload_reference(reference, "lambda-microvm")
 
 
 #: The ONE executable whose warm-up gates the snapshot, exec'd FIRST.
@@ -2076,7 +1855,7 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     mechanism ``/invocations`` uses — ``_extract_invocation_params`` →
     ``_validate_required_params`` → ``_spawn_background`` — rather than a second,
     drifting payload mapper. The orchestrator payload is byte-identical across
-    substrates (AgentCore receives it as ``input``, ECS as ``AGENT_PAYLOAD``,
+    substrates (AgentCore receives it as ``input``, ECS through the authenticated payload reference,
     MicroVMs inside this envelope), which is what makes that reuse correct.
 
     ``platform_config`` (P2) is installed into ``os.environ`` FIRST — before
@@ -2093,15 +1872,15 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     has, per ADR-021 sub-decision 3's identity delta.
 
     Sync ``def`` for the same reason as ``/ready``, and additionally because the
-    S3 payload fetch is a blocking boto3 call: in a threadpool it cannot stall
+    manifest read and signed download are blocking calls: in a threadpool it cannot stall
     the event loop.
 
     **Every log line before the install goes through ``_pre_config_log``** (stdout
     only). Until ``platform_config`` is in the environment, a ``_debug_cw`` here
     would resolve AWS credentials and pin ``boto3.DEFAULT_SESSION`` off whatever
     the snapshot happens to carry — the same defect the build hooks avoid, one
-    phase later. The single AWS call this phase is allowed to make is the S3
-    payload fetch, because the config is inside the object being fetched.
+    phase later. Pre-install operations are the IAM-authenticated manifest read
+    and the single-object HTTPS download. Build hooks remain AWS-silent.
     """
     _pre_config_log(
         f"/run hook received: microvm_id={body.microvmId!r} bytes={len(body.runHookPayload)}"
@@ -2122,16 +1901,14 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
         )
     except Exception as exc:
         # Payload could not be READ: S3 AccessDenied / NoSuchKey / transient, or a
-        # `_PayloadFetchError` for an object that fetched but was truncated,
+        # `PayloadFetchError` for an object that fetched but was truncated,
         # non-JSON, or not an object. 500 so the failure is distinguishable from a
-        # malformed ENVELOPE (the 400 above) and is correctly reported as
-        # retryable, and loud enough to find in the MicroVM log group — via the
-        # response body, since the CloudWatch writer is off-limits until the config
-        # is installed.
-        _pre_config_log(
-            f"/run hook payload fetch FAILED [{type(exc).__name__}: {exc}]\n"
-            f"{traceback.format_exc()}"
-        )
+        # malformed reference (the 400 above). The response body preserves the
+        # distinction while CloudWatch is off-limits before config installation.
+        # Corrupt stored bytes require repair, not an assumption that retry helps.
+        # A chained HTTP error may contain the bearer URL. Log only the
+        # bootstrap reader's sanitized message, never its exception chain.
+        _pre_config_log(f"/run hook payload fetch FAILED [{type(exc).__name__}: {exc}]")
         return JSONResponse(
             status_code=500,
             content={
@@ -2143,6 +1920,11 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     task_id_log = str(payload.get("task_id", ""))
 
     try:
+        if platform_config is None:
+            raise _PlatformConfigError(
+                "MICROVM_RUN_PLATFORM_CONFIG_INVALID",
+                "Authenticated platform configuration is required",
+            )
         installed_env = _install_platform_config(platform_config)
     except _PlatformConfigError as exc:
         _pre_config_log(f"/run hook rejected: {exc}")
@@ -2159,55 +1941,6 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
         _debug_cw(
             f"/run hook installed platform_config env: {installed_env}",
             task_id=task_id_log or None,
-        )
-    else:
-        # No `platform_config` — the legacy P1 envelope. This branch must NOT simply
-        # shrug: the required keys exist because without them the agent cannot write
-        # status/progress, resolve the GitHub token, or (decisively)
-        # tenant-scope its credentials — `aws_session.get_session` falls back to the
-        # ambient compute role with scoping silently OFF when
-        # `AGENT_SESSION_ROLE_ARN` is unset. So the check is re-run against the
-        # EFFECTIVE environment: a legacy or hand-built image that bakes those
-        # values still runs (that is the compatibility this branch is for), while
-        # version skew — a pre-Stage-B orchestrator launching a P2 image, which
-        # bakes nothing — is REJECTED instead of running unscoped.
-        #
-        # STILL pre-install, so the line is stdout only. A `_warn_cw` here would
-        # spawn the CloudWatch writer thread and pin `boto3.DEFAULT_SESSION` off the
-        # snapshot's baked env, which is the very defect this branch is reporting.
-        # Nothing is lost: on the intended deployment (no baked `LOG_GROUP_NAME`)
-        # `_warn_cw` would have degraded to this same stdout line, on a legacy image
-        # the log group would be the wrong one anyway, and the rejection reason also
-        # travels in the structured response body the service surfaces.
-        absent = _absent_required_platform_env()
-        if absent:
-            _pre_config_log(
-                f"/run hook REJECTED: no platform_config and the image snapshot does "
-                f"not supply required value(s) either: {absent}"
-                + (f" task_id={task_id_log!r}" if task_id_log else "")
-            )
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "code": "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE",
-                    "message": (
-                        "The /run envelope carried no platform_config and the image "
-                        "snapshot does not carry the required values either, so this "
-                        f"MicroVM cannot run a task: {absent} are unset. This is a "
-                        "version skew — an orchestrator predating ADR-021 P2 launching "
-                        "a P2 image, which bakes no environment by design. Refusing "
-                        "rather than running with tenant scoping disabled. Redeploy the "
-                        "orchestrator so it sends platform_config."
-                    ),
-                    "missing_env": absent,
-                },
-            )
-        _pre_config_log(
-            "/run hook received no platform_config; running on the image snapshot's "
-            "own environment, which is frozen at build time and which DOES supply "
-            "every required value. Expected only from an orchestrator that predates "
-            "ADR-021 P2 paired with an image that bakes its own configuration."
-            + (f" task_id={task_id_log!r}" if task_id_log else "")
         )
 
     try:

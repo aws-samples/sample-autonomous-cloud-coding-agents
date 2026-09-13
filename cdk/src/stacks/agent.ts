@@ -955,10 +955,10 @@ export class AgentStack extends Stack {
     // agentcore-only, matching how other optional constructs are context-gated.
     // (``computeType`` is read near the top of the constructor — TaskApi needs it
     // for the conditional MicroVM cancel grant.)
-    // Ephemeral bucket for ECS task payloads — the orchestrator writes the
-    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
-    // passes only an S3 URI pointer; the container fetches it on boot, the
-    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    // ECS v2 bootstrap storage: deployment manifests, task instructions and
+    // private launch references. Workers read manifests with IAM and download
+    // their task through a signed one-object URL. Finalize deletes task objects;
+    // the one-day lifecycle reaps leftovers. Synthesized only under the ECS gate.
     const ecsPayloadBucket = computeType === 'ecs'
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
@@ -966,7 +966,7 @@ export class AgentStack extends Stack {
       NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
         {
           id: 'AwsSolutions-S1',
-          reason: 'Ephemeral per-task payloads with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+          reason: 'Ephemeral bootstrap storage with a 1-day TTL. The coordinator writes manifests and task objects, signs task reads and deletes task objects at finalize. Workers read only bootstrap/* with IAM and use single-object signed URLs for payloads; other object reads and bucket listing are explicitly denied. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
         },
       ]);
     }

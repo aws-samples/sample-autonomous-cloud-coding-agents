@@ -814,17 +814,17 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
     expect(actions).toContain('s3:DeleteObject');
-    expect(actions.some(action => action.startsWith('s3:Get') || action.startsWith('s3:List'))).toBe(false);
+    expect(actions).toContain('s3:GetObject');
+    expect(actions.filter(action => action.startsWith('s3:List'))).toEqual(['s3:ListBucket']);
+    const list = payloadStatements.find(s => s.Action === 's3:ListBucket');
+    expect(list!.Resource).toEqual({ 'Fn::GetAtt': [expect.stringMatching(/^MicrovmPayloadBucket/), 'Arn'] });
     const deletes = payloadStatements.filter(s =>
       (Array.isArray(s.Action) ? s.Action : [s.Action]).some(action => action.startsWith('s3:Delete')));
     expect(deletes).toHaveLength(1);
-    expect(deletes[0]!.Action).toBe('s3:DeleteObject');
-    expect(deletes[0]!.Resource).toEqual({
-      'Fn::Join': ['', [
-        { 'Fn::GetAtt': [expect.stringMatching(/^MicrovmPayloadBucket/), 'Arn'] },
-        '/*/payload.json',
-      ]],
-    });
+    expect(deletes[0]!.Action).toEqual(['s3:GetObject', 's3:DeleteObject']);
+    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/payload.json');
+    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/launch.json');
+    expect(JSON.stringify(deletes[0]!.Resource)).not.toContain('/bootstrap/*');
   });
 
   test('adds no MicroVM statements when microvmConfig is omitted', () => {

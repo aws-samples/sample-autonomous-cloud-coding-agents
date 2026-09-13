@@ -21,6 +21,8 @@ the contract. This is the neutral location both runtimes read.
 |---|---|---|
 | `agent/src/shared_constants.py` | `/app/contracts/constants.json` | import-time |
 | `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
+| `agent/src/payload_bootstrap.py` | `SHARED_CONSTANTS["payload_bootstrap"]` | import-time |
+| `cdk/src/handlers/shared/payload-bootstrap.ts`, `cdk/src/constructs/payload-bootstrap-permissions.ts` | `payload_bootstrap` | import-time |
 | `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
@@ -77,6 +79,15 @@ JSON at TypeScript compile time via `resolveJsonModule`.
                  "jira_oauth_secret_arn", "agent_session_role_arn"],
     "account_anchor_key": "agent_session_role_arn"
   },
+  "payload_bootstrap": {
+    "version": 2,
+    "manifest_prefix": "bootstrap/",
+    "launch_filename": "launch.json",
+    "max_manifest_bytes": 16384,
+    "max_payload_bytes": 8388608,
+    "url_ttl_seconds": 900,
+    "minimum_url_lifetime_seconds": 300
+  },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,
     "warmup_total_budget_seconds": 240,
@@ -121,7 +132,7 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   variable the agent installs it as (UPPER_SNAKE). This block is unlike the
   others — it is a **security allowlist**, not a tuning bound. The MicroVM image
   is a snapshot whose env is frozen at build time, so the agent's non-secret
-  platform env arrives in the `/run` hook payload instead; the values land in
+  platform env arrives through an authenticated v2 manifest and task payload instead; the values land in
   `os.environ`, which makes an unrecognised key an env-injection attempt. The
   consumer (`agent/src/server.py`) therefore **rejects** any `platform_config`
   carrying a key that is not in this map. Values are non-secret identifiers
@@ -138,15 +149,15 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   that disagrees with the anchor below on partition or account, is rejected
   (HTTP 400 `MICROVM_RUN_PLATFORM_CONFIG_INVALID`). This is **fail-fast plus
   defence in depth, not an ownership proof** — the account-scoped IAM grants are
-  what actually deny a foreign read, and an in-account redirect is deliberately
-  *not* covered (see `MICROVM_PLATFORM_CONFIG_ARN_KEYS` in
-  `agent/src/server.py` for the full statement of what this does and does not buy).
+  what actually deny a foreign read, and this ARN check alone does not cover an in-account redirect. The v2 bootstrap
+  authenticates a deployment manifest with IAM and requires the downloaded config
+  to match it; that separate check rejects same-account workspace substitutions.
 - **`microvm_platform_config.account_anchor_key`** — which `arn_keys` entry supplies
   the expected partition + account. Must be `agent_session_role_arn`-shaped: a
   payload key rather than `os.environ` or an `sts:GetCallerIdentity`, because the
   environment is empty by construction on this backend (the snapshot bakes nothing)
-  and this check runs on the path that must make zero AWS calls beyond the S3
-  payload fetch. Two invariants follow and both are enforced: the anchor must be in
+  and the ARN consistency check itself makes no AWS calls. The v2 bootstrap
+  manifest read and signed task download precede it. Two invariants follow and both are enforced: the anchor must be in
   `arn_keys`, **and** it must be in `required` — an optional anchor would let a
   payload disarm the whole check by simply omitting it.
 
@@ -158,6 +169,18 @@ so a malformed contract fails the drift check *and* the MicroVM image build. The
 duplication is deliberate: a malformed entry here would silently **widen** what the
 agent accepts from a network payload, so neither side is trusted to be the only
 gate.
+
+- **`payload_bootstrap`** — the shared ECS/MicroVM v2 transport. `version` is
+  required on references, manifests and task documents. `manifest_prefix` and
+  `launch_filename` define the authenticated settings directory and private retry
+  record. Byte limits bound manifest and task downloads; URL lifetime is at most
+  `url_ttl_seconds`, shortened by known signer credential expiry, with initial
+  creation requiring `minimum_url_lifetime_seconds`. The constants checker
+  rejects nonpositive/noninteger bounds, unsafe/colliding paths, a minimum above
+  its maximum, and consumers that stop reading the shared block. Changing the
+  protocol requires matching coordinator, worker images and policies; old unsigned
+  transports are rejected. See repository runbook
+  `docs/verification/645-payload-bootstrap.md` for rollout and live checks.
 
 - **`microvm_hook_budgets.ready_hook_timeout_seconds`** — the `/ready` build-hook
   budget the CDK construct declares to `CreateMicrovmImage`

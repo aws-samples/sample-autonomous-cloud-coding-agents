@@ -61,6 +61,15 @@
     ],
     "account_anchor_key": "agent_session_role_arn"
   },
+  "payload_bootstrap": {
+    "version": 2,
+    "manifest_prefix": "bootstrap/",
+    "launch_filename": "launch.json",
+    "max_manifest_bytes": 16384,
+    "max_payload_bytes": 8388608,
+    "url_ttl_seconds": 900,
+    "minimum_url_lifetime_seconds": 300
+  },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,
     "warmup_total_budget_seconds": 240,
