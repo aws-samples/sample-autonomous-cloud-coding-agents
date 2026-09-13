@@ -36,11 +36,9 @@ from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
 
 # --- _debug_cw / _warn_cw failure counter -------------------------------
-# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
-# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
-# is invisible except for this metric. Single counter = single alarm
-# surface — the trade-off is that the alarm can't distinguish which writer
-# is broken (see Chunk 7c review notes). Defined BEFORE any function that
+# Shared counter for BOTH the debug and warn CloudWatch writers. It is not
+# exported or read yet (#810), so it cannot currently reveal a broken writer
+# to an operator. Defined BEFORE any function that
 # references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
 # import-time safe: a daemon thread spawned from a write-blocking function
 # can never race with module-level globals still being assigned.
@@ -143,7 +141,7 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     and the ``capfd``-based unit tests still observe the line.
     CloudWatch delivery is fire-and-forget — failures bump the
     shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
-    so a silently broken writer still surfaces via that single metric.
+    which is currently unexported (#810); it is not an observable metric yet.
     """
     # Redact cached credentials and emit via the same os.write path as
     # ``_debug_cw``: warn messages can embed payload fragments, so they
@@ -173,8 +171,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
     Mirrors ``_debug_cw_write_blocking`` but writes to the
     ``server_warn/<task_id>`` stream so warn-level traffic is easy to
     alarm on independently of debug breadcrumbs. Failures bump the
-    shared ``_debug_cw_failures`` counter — a single alarm surface
-    covers both writers.
+    shared ``_debug_cw_failures`` counter. Nothing exports that counter
+    yet (#810), so it does not currently provide an alarm surface.
     """
     try:
         from aws_session import platform_client
@@ -264,8 +262,8 @@ _background_pipeline_failed: bool = False
 _last_ping_status: str = ""
 
 # Heartbeat cadence for the TaskTable ``agent_heartbeat_at`` writer thread.
-# Each live pipeline bumps the heartbeat every N seconds so operators can
-# distinguish a stuck pipeline from a healthy long-running one.
+# The independent worker reports process/writer liveness. A stuck pipeline can
+# leave this thread running, so a fresh heartbeat does not prove work is progressing.
 _HEARTBEAT_INTERVAL_SECONDS = 45
 
 
@@ -1172,9 +1170,10 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     Region is deliberately NOT compared. Secrets Manager and IAM ARNs legitimately
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
-    would reject valid configurations while adding nothing: the execution role's
-    grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary this checks.
+    would reject valid configurations. IAM grants separately constrain accessible
+    resources. Partition + account consistency does not bind these identifiers
+    to this deployment or prevent selecting another workspace's same-account
+    secret where IAM permits it (#817).
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
@@ -1368,9 +1367,8 @@ def _build_hook_log(msg: str) -> None:
     1. The build role's Logs grant is scoped to the service's own
        ``/aws/lambda-microvms/*`` namespace, so a write to any OTHER
        ``LOG_GROUP_NAME`` — e.g. an APPLICATION_LOGS group baked into a legacy or
-       hand-built image — can only FAIL. That failure bumps the shared
-       ``_debug_cw_failures`` counter, i.e. such an image build would poison the
-       "debug path is blind" signal with a false positive.
+       hand-built image — can fail. The counter incremented by such a failure
+       is currently unexported (#810), so it provides no alarm signal.
     2. ``boto3.DEFAULT_SESSION`` created during ``/ready`` freezes the BUILD role's
        CREDENTIALS into the snapshot, where every launched MicroVM would inherit
        them (region is re-resolved per client; credentials are not — see
@@ -1389,11 +1387,11 @@ def _pre_config_log(msg: str) -> None:
     ``_install_platform_config`` has run, ``LOG_GROUP_NAME`` is whatever the
     snapshot happens to carry — normally nothing, but a legacy or hand-built image
     could bake it, and then a ``_debug_cw`` on this path would resolve credentials
-    and pin ``boto3.DEFAULT_SESSION`` *before* ``AGENT_SESSION_ROLE_ARN`` is in the
-    environment — memoizing the UNSCOPED compute-role credentials for the life of
-    the process, where the whole point of that variable is that every later client
-    is tenant-scoped. (Region and ``AWS_SDK_UA_APP_ID`` are re-resolved per client
-    and so are NOT at risk here; the credentials are the exposure.) The one AWS
+    and create ``boto3.DEFAULT_SESSION`` before configuration is installed.
+    Tenant-data clients use the separate, tag-scoped session in ``aws_session``;
+    setting ``AGENT_SESSION_ROLE_ARN`` does not scope boto3's default session.
+    Platform clients intentionally retain compute-role credentials. Region and
+    ``AWS_SDK_UA_APP_ID`` are re-resolved per client. The one AWS
     call this phase is allowed to make is the S3 payload fetch, because
     ``platform_config`` is inside the object it fetches.
 
@@ -1895,8 +1893,8 @@ def microvm_validate():
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
-    resolved boto3 session — with the build role's credentials and the build
-    region — frozen in the snapshot for every MicroVM launched from it. Hence
+    resolved boto3 session with cached build-role credentials in the snapshot
+    for every MicroVM launched from it (region is re-resolved per client). Hence
     ``_build_hook_log`` instead of ``_debug_cw``, and no import of
     ``aws_session``.
 
@@ -2010,13 +2008,10 @@ async def microvm_terminate(request: Request):
     requires awaiting it. Safe on the event loop: the work is a JSON parse, a
     thread-count read and a fire-and-forget log — no blocking AWS call.
 
-    On flushing: there is nothing buffered to flush. ``_ProgressWriter`` performs
-    a synchronous DynamoDB ``put_item`` per event, and ``task_state`` writes
-    inline, so every progress/status write is already durable at call time — this
-    hook has no queue to drain, which is why it is a log-and-acknowledge rather
-    than a flush loop. (ADR-021 sub-decision 2's "flush progress events before
-    returning 200" applies to ``/suspend`` in P3 for the same reason: durability
-    is per-write, so the hook only has to observe it.)
+    There is no progress queue to drain. ``ProgressWriter`` writes synchronously
+    but catches and drops failures; a return from its event method is not proof
+    of durability. This hook only logs and acknowledges teardown. P3's
+    ``/suspend`` needs a separate acknowledged durability barrier.
     """
     raw = b""
     try:

@@ -47,12 +47,11 @@ import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from
 /**
  * Lifecycle expiry for MicroVM `/run` hook payloads, in days.
  *
- * Mirrors {@link ECS_PAYLOAD_TTL_DAYS} in shape but NOT in role: on ECS the
- * orchestrator deletes the payload at finalize and the rule is only a crash
- * backstop, whereas the MicroVM strategy never deletes (ADR-021 sub-decision 3
- * / `microvmPayloadKey`) — so on this backend the lifecycle rule is the ONLY
- * reaper. Payloads carry the hydrated prompt context, so the TTL stays as tight
- * as the read-once-at-`/run` access pattern allows.
+ * Mirrors {@link ECS_PAYLOAD_TTL_DAYS}. Finalization attempts to delete the
+ * object identified by `microvmPayloadKey`, but the orchestrator is still
+ * missing its DeleteObject grant (#817). Lifecycle expiry is the current
+ * fallback; S3 processes expiry asynchronously, not exactly 24 hours after
+ * upload. Payloads carry hydrated prompt context and are read once at `/run`.
  */
 export const MICROVM_PAYLOAD_TTL_DAYS = 1;
 
@@ -693,7 +692,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * fails fast with the strategy's own "stack deployed without the MicroVM
  * substrate" error, which names the remedy.
  *
- * ## ⚠️ A P2 substrate is fully wired, but still NOT smoke-verified
+ * ## ⚠️ P2 smoke succeeded with an IAM workaround; clean verification is pending
  *
  * Reaching state 1 or 2 provisions a complete substrate, a buildable image, and
  * a payload-deliverable `/run` path: P1 declares AND the agent serves `/ready`
@@ -714,11 +713,12 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * what it can assert) and `/terminate` (in-guest teardown breadcrumb —
  * {@link TERMINATE_HOOK_TIMEOUT_SECONDS}).
  *
- * What is still unverified is the thing no amount of wiring can assert: an
- * end-to-end clone → change → PR run on this substrate, plus egress specifics and
- * heartbeat/progress behaviour from a live MicroVM. That is what the
- * `abca:microvm-image-p1-smoke-unverified` warning below says, and it is repeated
- * in `cdk/scripts/package-microvm-artifact.sh`. Only `/suspend` and `/resume`
+ * The 2026-08-07 smoke completed clone → change → PR with live progress and
+ * heartbeats, but required a manual IAM workaround. The permanent PassRole
+ * fixes still need a clean rerun after re-bootstrap to policy bundle >=1.6.0,
+ * including runtime log verification. The stable
+ * `abca:microvm-image-p1-smoke-unverified` warning below records that remaining
+ * work, as does `cdk/scripts/package-microvm-artifact.sh`. Only `/suspend` and `/resume`
  * remain undeclared, until P3 implements them: a hook the service calls but
  * nothing answers fails the corresponding lifecycle transition.
  *
@@ -1374,11 +1374,9 @@ export class LambdaMicrovmCompute extends Construct {
 
     if (this.imageIdentifier) {
       // Emitted on EVERY deploy that configures an image, in both image states.
-      // Not a throw and not suppressible: the substrate now looks like a working
-      // backend in every observable way — the image builds, launches, receives a
-      // payload, and the execution role holds the full runtime permission set —
-      // while nothing has exercised clone → change → PR on it. The warning's job is
-      // to keep "deploy succeeded" from reading as "backend works".
+      // A successful deploy does not establish a clean end-to-end run. The
+      // successful smoke used a manual IAM workaround; the warning identifies
+      // the source fixes and re-bootstrap/live verification still outstanding.
       //
       // The id is deliberately UNCHANGED across P1→P2 (operators grep for it, and a
       // rename would read as "the old warning is gone, so it must be fine").

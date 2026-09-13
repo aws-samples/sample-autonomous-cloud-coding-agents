@@ -276,7 +276,7 @@ Liveness detection varies by compute backend. AgentCore sessions use DynamoDB he
 
 - **Grace period** (120s) - After entering `RUNNING`, the orchestrator waits before expecting heartbeats (covers container startup).
 - **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
-- **Early crash** - If no heartbeat is ever set after the combined window (360s), the agent died before the pipeline started.
+- **Early crash** - If no heartbeat is ever set after the combined window (360s), the session is treated as lost; a process failure or failed DynamoDB writes can cause this.
 
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
@@ -286,7 +286,7 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 - `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
 - A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
-- Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
+- Substrate state detects a dead VM; heartbeat staleness detects loss of the heartbeat writer inside a VM that still reports `RUNNING`. The independent heartbeat thread can continue during a pipeline hang, so a fresh timestamp is not proof of progress.
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 
@@ -314,7 +314,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
 | Session start | Selected compute service throttled | Exponential backoff. Fail after retries exhausted. |
 | Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure. Lambda MicroVMs: `GetMicrovm` reports terminal state or the heartbeat never appears. |
-| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects an in-guest hang. Finalization inspects GitHub for partial work. |
+| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects loss of the in-guest writer. Finalization inspects GitHub for partial work. |
 | Running | Agent hits turn or budget limit | Session ends normally. Finalize based on what was produced. |
 | Running | Idle for 15 min | AgentCore kills session. Task transitions to `TIMED_OUT`. |
 | Finalization | GitHub API down | Retry 3x. If still failing, mark `FAILED` with infrastructure reason. |

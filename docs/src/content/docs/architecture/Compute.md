@@ -22,7 +22,7 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 | **Startup** | Service-managed | Slim images help | Snapshot resume | Warm ASGs + pre-pull | Karpenter + pre-pull | Backend-dependent | Provisioned concurrency | Snapshot pools (DIY) |
 | **GPU** | No | No | No | Yes | Yes | Yes (EC2/EKS backend) | No | Yes (with passthrough) |
 | **Ops burden** | Low (managed) | Low | Low (managed) | Medium | High | Low-Medium | Low | **Very high** |
-| **Cost model** | vCPU-hrs + GB-hrs | vCPU + mem/sec | Baseline-priced (8 GiB / 4 vCPU) with 4× vertical burst (32 GiB / 16 vCPU peak); suspended time is storage-only | EC2 + EBS | EKS control + EC2 | Underlying compute | Request + duration | EC2 metal + your ops |
+| **Cost model** | vCPU-hrs + GB-hrs | vCPU + mem/sec | Baseline compute (8 GiB / 4 vCPU) plus additional burst usage (up to 32 GiB / 16 vCPU); no suspended compute charge, but snapshot storage and read/write charges remain | EC2 + EBS | EKS control + EC2 | Underlying compute | Request + duration | EC2 metal + your ops |
 | **Fit** | **Default choice** | Repos > 2 GB image | Suspend/resume economics; approval-wait-heavy workloads; default-sized repos. Heavy sustained-memory builds stay on ECS | GPU, heavy toolchains | Max flexibility | Queued batch jobs | **Poor** (15 min cap) | Best potential, highest cost |
 
 > **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).

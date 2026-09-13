@@ -4,24 +4,24 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all platform resources. The stack uses a `ComputeStrategy` interface to support three compute backends within the same stack:
+ABCA deploys through a **root CDK stack** (`backgroundagent-dev`) and nested stacks for parts of the platform, including registry infrastructure. A `ComputeStrategy` interface supports three compute backends:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
 | **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers | AWS Lambda MicroVMs |
-| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM | 8 GB baseline / 32 GB peak memory |
+| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | Build: 4 vCPU / 16 GiB; planning: 2 vCPU / 8 GiB (configurable) | 8 GiB baseline / 32 GiB peak memory |
 | **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` | Same durable Lambda via `ComputeStrategy` |
 | **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) | FastAPI server (lifecycle hooks) |
 | **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) | ~6s to `RUNNING` (live-measured) |
 | **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) | 8 hours (`maximumDurationInSeconds`) |
 
-All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
+All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. Task orchestration does not use Step Functions; other platform features may use them.
 
-ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is present in the stack code but commented out. To enable it, uncomment the ECS blocks in `cdk/src/stacks/agent.ts`.
+ECS Fargate is **opt-in**. Deploy with `--context compute_type=ecs`; the stack enables `EcsAgentCluster` from that context flag.
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
 Selecting it is a synth-time context flag:
 
@@ -53,7 +53,7 @@ mise //cdk:deploy -- --context compute_type=lambda-microvm
 
 Operational notes specific to this backend:
 
-- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
+- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
 - **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
 

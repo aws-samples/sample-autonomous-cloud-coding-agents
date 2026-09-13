@@ -23,9 +23,9 @@
  * isolation (the handler's inline ``start-session`` step is never invoked by
  * the test suite). See #599 review B1/B2.
  *
- * session-start is the ONE place a retry is idempotent by construction — no repo
- * clone, no commits, no PR have happened yet, so re-invoking
- * RunTask/InvokeAgentRuntime can't double-run work. A transient hiccup here (an
+ * This retries the start API, before the caller has a session handle. That does
+ * not guarantee idempotency: a lost success response can leave a live session
+ * behind, so each backend needs an idempotency/reconciliation policy. A transient hiccup here (an
  * ECS deploy-race "TaskDefinition is inactive", ENI/capacity delay, a
  * Bedrock/agentcore throttle) usually clears on a second attempt, so the first
  * transient failure is swallowed and retried once. A NON-transient failure (bad

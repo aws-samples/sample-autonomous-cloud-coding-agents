@@ -369,15 +369,15 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
-    // Fail here, naming both flags, rather than 500 resources later. The two features
-    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
-    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
-    // the resource counter, the operator gets a per-type census and no hint that two
-    // context flags are the cause.
+    // Keep the combination gated pending the bundled feature-matrix/deployment
+    // verification tracked in #857. The original 505-resource measurement predates
+    // #854 and later stack changes; the current offline measurements are recorded
+    // in docs/verification/645-p3-readiness-review.md. Do not treat that historical
+    // count as a current limit check.
     if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
       throw new Error(
-        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
-        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
+        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: this '
+        + 'combination remains gated pending deployment verification (#857). Deploy the '
         + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
         + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
       );

@@ -38,7 +38,7 @@ When a workspace's authorization dies, ABCA records it on the registry row and p
 
 #### Not available with `compute_type=lambda-microvm`
 
-The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
+The vault and the Lambda MicroVMs substrate remain gated from being enabled together ([#857](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/857)). The original 505-resource measurement predates stack-size reductions; the [current offline review](../verification/645-p3-readiness-review.md) finds room in its tested configurations, but bundled feature-matrix and deployment verification are still required before removing the guard. Use the vault on `agentcore` or `ecs`; MicroVM deployments use Secrets Manager while this gate remains.
 
 #### One workload identity per stack
 

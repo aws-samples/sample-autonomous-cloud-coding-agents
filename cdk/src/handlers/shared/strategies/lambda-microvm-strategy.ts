@@ -673,14 +673,11 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // is present, so omission is the unambiguous disabled state. Suspension is
       // orchestrator-owned (P3) — do NOT reintroduce this field.
       //
-      // `clientToken` is also deliberately omitted. It is an idempotency token,
-      // and the one place a MicroVM start is retried is `startSessionWithRetry`,
-      // which retries precisely BECAUSE the first attempt FAILED. Passing a
-      // task-derived token there would ask the service to dedupe against that
-      // failed attempt and could replay its outcome instead of genuinely
-      // retrying — turning the auto-retry into a no-op. Session start is already
-      // idempotent by construction at the ABCA level (no clone, commit, or PR has
-      // happened yet), so the token buys nothing and risks the retry.
+      // No application-stable `clientToken` is supplied. The SDK may generate a
+      // token for one command, but `startSessionWithRetry` constructs another
+      // command on its next attempt. A failed response does not prove the first
+      // VM was never created. Lost-response reconciliation and attempt-scoped
+      // tokens need coverage before this can claim idempotent session starts.
     });
 
     let result;

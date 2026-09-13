@@ -96,14 +96,12 @@ const AGENT_HEARTBEAT_STALE_SEC = 240;
  *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
  *   reports `running`, so a crashed container is invisible without the heartbeat.
  * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
- *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
- *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
- *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
- *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
- *   indefinitely with no `stateReason`). Without the heartbeat check such a task
- *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
- *   reservation, before the safety net fired. So liveness here is substrate state
- *   AND agent heartbeat.
+ *   (ADR-021 P2). `GetMicrovm` reports VM state; a stale heartbeat detects loss
+ *   of the in-guest heartbeat writer even if the VM still reports RUNNING.
+ *   The writer runs in a separate thread, so it can continue during a pipeline
+ *   deadlock: neither signal proves that coding work is progressing. A failed
+ *   run hook can cause service teardown; after an accepted hook, explicit
+ *   termination and the maximum session duration remain cleanup safeguards.
  * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
  *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
  *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",

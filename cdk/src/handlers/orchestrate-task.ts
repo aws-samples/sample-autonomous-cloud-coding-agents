@@ -461,8 +461,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     // bucket (the guest must read its object before any tenant identity exists),
     // keys are `<taskId>/payload.json`, and the guest runs untrusted repo code —
     // so a TTL-only reaper left every finished task's hydrated prompt readable by
-    // any concurrently running MicroVM for up to ~24 h. See
-    // `deleteMicrovmPayload`.
+    // any concurrently running MicroVM until asynchronous lifecycle deletion.
+    // The current MicroVM delete grant is still missing (#817); task-scoped
+    // payload reads are a separate improvement (#700).
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     } else if (blueprintConfig.compute_type === 'lambda-microvm') {
@@ -472,9 +473,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     // orchestrator shall call terminate-microvm (termination shall not rely on
     // any substrate timeout)." Without this the VM lingers until
     // `maximumDurationInSeconds` (8 h) expires — with `idlePolicy` omitted there
-    // is no tighter substrate bound — so we would keep paying for a full 8-hour
-    // reservation after every task, and every SUSPENDED/RUNNING VM keeps counting
-    // against the account memory quota that gates admission.
+    // is no tighter substrate bound. A leaked running VM can keep billing until
+    // that cap; suspended VMs retain snapshot charges. Whether suspended VMs
+    // consume the account memory quota is still unverified (ADR-021).
     //
     // `stopSession` is internally best-effort (it swallows and level-differentiates
     // every failure), so this cannot fail the finalize step or strand the task in

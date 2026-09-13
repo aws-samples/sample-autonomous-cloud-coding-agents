@@ -1737,21 +1737,11 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
   });
 
   test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
-    // — platform_config carries the workload name and the guest's execution role gets the
-    // mint grant — but the two cannot be enabled together today: 505 resources against a
-    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
-    // without saying so would be false.
-    //
-    // The stack refuses the combination itself rather than letting the counter throw,
-    // because the counter's message is a per-type census that never mentions either flag —
-    // the operator cannot tell from it what to change.
-    //
-    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
-    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
-    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
-    //
-    // When the room is found, this test should be replaced by a real parity assertion.
+    // Preserve the current #857 gate until bundled feature-matrix and deployment
+    // verification support removing it. The original 505-resource count is stale;
+    // current measurements and a cycle-free nested-stack prototype are documented
+    // in docs/verification/645-p3-readiness-review.md. Once the combination is
+    // supported, replace this refusal assertion with real parity/size assertions.
     const app = new App({
       context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
     });

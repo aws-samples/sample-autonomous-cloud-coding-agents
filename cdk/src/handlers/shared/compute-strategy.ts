@@ -78,13 +78,10 @@ export type SessionHandle =
  * Declared on all four variants for UNIFORMITY, though only ``completed`` and
  * ``failed`` are read today (``reconcileMicrovmSubstrateState`` returns early for
  * the other two). The wide union is deliberate rather than dead weight:
- * ``suspended.reason`` has a named future consumer — P3's suspend/resume policy
- * (ADR-021 sub-decision 2) has to distinguish an orchestrator-intended suspend
- * during an approval wait from a substrate-side one, and ``stateReason`` is the
- * only evidence the substrate offers for that. Narrowing the union now would mean
- * widening it again there, and a per-variant union would invite call sites to
- * branch on which variant carries a reason — the opposite of the opacity rule
- * above.
+ * ``suspended.reason`` can explain an observation in P3 diagnostics. The policy
+ * must distinguish intended suspension through durable orchestrator intent and
+ * task/approval state, not by parsing this service-provided text. Keeping the
+ * field on every variant preserves the same diagnostic shape.
  */
 export type SessionStatus =
   | { readonly status: 'running'; readonly reason?: string }
