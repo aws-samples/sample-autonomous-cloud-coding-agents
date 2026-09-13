@@ -548,6 +548,37 @@ describe('hydrateAndTransition — Cedar HITL payload threading', () => {
 });
 
 describe('pollTaskStatus', () => {
+  test.each(['agentcore', 'lambda-microvm'] as const)(
+    '%s stays healthy immediately after a long approval wait resumes',
+    async (computeType) => {
+      const beforeApproval = new Date(Date.now() - 600_000).toISOString();
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'AWAITING_APPROVAL',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: beforeApproval,
+        },
+      });
+      const waiting = await pollTaskStatus('TASK001', { attempts: 5 }, computeType);
+      expect(waiting.sessionUnhealthy).toBe(false);
+
+      // The agent's conditional resume transaction refreshes this timestamp with
+      // status RUNNING. Poll before the independent 45-second worker ticks.
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'RUNNING',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: new Date().toISOString(),
+        },
+      });
+      const resumed = await pollTaskStatus('TASK001', waiting, computeType);
+      expect(resumed.lastStatus).toBe('RUNNING');
+      expect(resumed.sessionUnhealthy).toBe(false);
+    },
+  );
+
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
     const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'agentcore');

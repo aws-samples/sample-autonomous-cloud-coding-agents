@@ -807,6 +807,28 @@ class TestTransactWriteApprovalRequest:
 
 
 class TestTransactResumeFromApproval:
+    def test_resume_refreshes_heartbeat_in_the_same_conditional_write(
+        self, approval_tables_env, monkeypatch
+    ):
+        """A poll immediately after a long approval wait must see a fresh heartbeat."""
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-09-13T12:05:00Z")
+        client = MagicMock()
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        client.transact_write_items.assert_called_once()
+        updates = client.transact_write_items.call_args.kwargs["TransactItems"]
+        assert len(updates) == 1
+        update = updates[0]["Update"]
+        assert "agent_heartbeat_at = :heartbeat" in update["UpdateExpression"]
+        assert "#s = :running" in update["UpdateExpression"]
+        assert update["ExpressionAttributeValues"][":heartbeat"] == {"S": "2026-09-13T12:05:00Z"}
+        assert update["ConditionExpression"] == (
+            "#s = :awaiting AND awaiting_approval_request_id = :rid"
+        )
+        # An independent write would leave the old heartbeat visible after RUNNING.
+        client.update_item.assert_not_called()
+
     def test_env_missing_raises(self, monkeypatch):
         monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
         monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
