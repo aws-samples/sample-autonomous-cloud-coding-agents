@@ -14,7 +14,9 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [x] Exercise real S3 bad-byte paths and fix closed-stream error classification (#817).
 - [x] Require new ARN fields to participate in validation; pin contract fields and anchor (#817).
 - [ ] Bind configuration to trusted deployment identity and restrict payload reads per task (#817 / #700).
-- [ ] Resolve uncertain session-start retries without duplicate or orphan VMs.
+- [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
+- [ ] Verify AWS token retention/conflicts and unknown-start cleanup on a live deployment.
+- [ ] Make the shared finalizer's concurrency release atomic per task across crash replay.
 - [ ] Finish logging-failure observability (#810) and registry-overflow coverage (#818).
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [ ] Implement and verify the P3 sleep/wake lifecycle described below.
@@ -39,7 +41,17 @@ Second prerequisite batch completed locally on 2026-09-13:
 | `2e20d54a` | #817: stable terminal failure codes, precise region/auth/config guidance and consistent task/reply classification | New regressions reproduced the prior misclassification. Tests assert saved message → task API → channel/panel guidance, legacy records, hook 4xx/5xx and start-retry decisions. |
 | `cfe95c5e` | #817: exact contract assertions and reverse ARN-validation guards | Negative mutations failed in both Python and the real constants-checker subprocess before the fix. New ARN fields pass only when added to the validation set. |
 
-Final checks for the second batch: `mise run quality` passed **1,797 Python tests**, lint, formatting and type checks (**83.87%** coverage). Eight relevant CDK suites passed **476 tests**; CDK ESLint, TypeScript compilation, constants-sync and Markdown link checks passed. These counts describe the selected suites for each batch, not additional disjoint tests. No cloud resources were changed. Deploy the orchestrator update and an updated agent image to use these fixes; trusted configuration provenance, task-scoped payload reads, uncertain-start retries and P3 remain open.
+Final checks for the second batch: `mise run quality` passed **1,797 Python tests**, lint, formatting and type checks (**83.87%** coverage). Eight relevant CDK suites passed **476 tests**; CDK ESLint, TypeScript compilation, constants-sync and Markdown link checks passed. These counts describe the selected suites for each batch, not additional disjoint tests. No cloud resources were changed. Deploy the orchestrator update and an updated agent image to use these fixes. At the close of that batch, trusted configuration provenance, task-scoped payload reads, uncertain-start retries and P3 remained open.
+
+Third prerequisite batch completed locally on 2026-09-13:
+
+| Commit | Completed work | Proof |
+|---|---|---|
+| `e9944475` | Saved MicroVM start receipts, stable request tokens, immutable payload fingerprints, bounded replay and handle recovery; cancellation/registration reconciliation; one start-failure finalization path; consistent initial finalizer reads | Fault injection covers a lost successful response, process restart, saved-handle reuse, changed/expired requests, cancellation and failed/lost database writes. Three HTTP-timeout cases and two stale-finalization cases reproduced incorrect outcomes before their fixes. |
+
+Final checks for the third batch: CDK ESLint and TypeScript compilation passed. `mise run testf -- test/handlers/ --detectOpenHandles` passed **151 suites / 3,557 tests** and exited successfully. An earlier ordinary broad run reported a delayed-exit warning; the diagnostic run produced no open-handle trace, so its cause remains unidentified. The changed start/recovery integration suites also exited cleanly in isolation. Documentation sync, the **77-page** Astro build and Markdown link checks passed. No Python source changed in this batch.
+
+Deploy the orchestrator update to activate these changes. This batch needs no additional IAM/bootstrap change or agent-image update. The receipt is internal task-table data, not a new public task field. The service emulator proves our retry behavior; AWS token retention/conflicts and unknown-ID cleanup still need live evidence. The shared finalizer's atomic capacity-slot release and the remaining P2/P3 work stay unchecked above.
 
 ## The result we want
 
@@ -126,11 +138,23 @@ Regression coverage includes a task that waits over 240 seconds and resumes befo
 
 ### 1D. Make session-start retries honest
 
-Fault-inject a successful service-side creation followed by a lost response. Observe a second application start attempt, not just retries inside one SDK command. Define a persisted logical start-attempt identity and stable client token for retries of an uncertain attempt. Mint a new attempt only when the old session is known terminal or the service's idempotency semantics require it. Test same-request replay, confirmed failed start, durable Lambda replay, cancellation and orphan cleanup. Check AWS token retention/conflict semantics before finalizing the policy; ECS's existing `clientToken: taskId` is useful precedent, not proof that MicroVM has identical semantics.
+**Implemented locally:** `microvm-start.ts` conditionally records one start per task, using the task ID as its stable token. The internal `microvm_start` attribute stores the request fingerprint, creation time, a 120-second local replay deadline and any recovered handle. The fingerprint includes the full S3 payload, so a changed retry cannot overwrite the first task's instructions. It is checked before uploads and again before `RunMicrovm`. A new attempt requires a new task ID.
+
+The receipt works like an order number: when the reply gets lost, the next call asks about the same order.
+
+Fault tests exercise a successful simulated service creation followed by a lost response, a second application call with the same token, a fresh strategy instance, saved-handle replay, changed input, expired recovery, confirmed rejection, cancellation before/during/after creation, and lost DynamoDB responses. The handler recovers committed registration, treats start-audit failures as non-fatal, and routes start failures through one finalization path. Finalization reads the latest committed task, avoiding a stale cancellation/failure report. An unknown first outcome stays unknown even when the second call gets a definite rejection; HTTP 408 and named service timeouts remain uncertain even with a 4xx status.
+
+**Still required:** the installed SDK documents `clientToken` idempotency but gives no retention period. Public AWS API documentation URLs did not provide a usable RunMicrovm reference during this review. The local 120-second limit is a conservative application cutoff, not evidence of AWS's retention window. Verify same-token replay, changed parameters, simultaneous requests/conflicts, token expiry and returned handles after termination against AWS before accepting this prerequisite. The service emulator proves client behavior only.
+
+For an unknown outcome with no returned ID, the task error or cancellation event identifies the saved token for investigation. Do not automatically submit a replacement task. Verify how operators find and terminate that VM in the deployed service; if they cannot recover an ID, the eight-hour lifetime cap is the remaining bound. Keep this limitation explicit in live evidence.
 
 ### 1E. Make verification observable
 
 Resolve #810 by exposing a useful structured failure signal for CloudWatch writers or removing the dead counter and using another observable signal. Test failure of the logging system itself. For #818, document the shared runtime 443-only rule and test registry payload overflow; do not expand network ports just to satisfy an incorrect issue premise.
+
+### 1F. Make concurrency release safe across replay
+
+`finalizeTask` currently decrements the user's counter directly after terminal events, without atomically recording a per-task release. A crash after the decrement but before the durable checkpoint can repeat it. Reproduce that exact failure locally, then make the release marker and counter change one conditional transaction. Cover normal completion, start failure, cancellation, timeout, competing finalizers, retries and an already-zero counter. Preserve admission-queue behavior. The new MicroVM start path avoids an additional early release; it does not close this shared finalizer window.
 
 ## 2. Nest infrastructure if adopting the split
 
