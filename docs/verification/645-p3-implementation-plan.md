@@ -21,7 +21,7 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. â€œCompletedâ€
 - [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
 - [ ] Verify metadata restrictions with real AWS sessions/transactions; retain status/tag trust limits.
-- [ ] Finish logging-failure observability (#810) and registry-overflow coverage (#818).
+- [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [ ] Implement and verify the P3 sleep/wake lifecycle described below.
 
@@ -74,12 +74,19 @@ Fifth prerequisite batch completed locally on 2026-09-13:
 - The old-policy regression failed on `PutItem`. **1,795 Python tests** pass with **84.47%** coverage, including actual writer-request/permission-contract checks; **268 CDK tests** pass across session-role, ECS, MicroVM and full-stack suites. Python quality, CDK lint/compilation and documentation checks pass. These counts overlap earlier batches; four obsolete helper tests were removed and two contract tests added.
 - [Metadata verification](./645-coordinator-metadata.md) records the effective source-policy boundary, writer inventory, rollback constraints and pending real-AWS allowed/denied transaction matrix. No table migration or bootstrap-policy update is required. Application-role deployment and a matching agent image remain necessary; nothing was deployed.
 
-Sixth prerequisite batch completed locally (2026-09-13):
+Sixth prerequisite batch completed locally (2026-09-13), commit `82a9df80`:
 
 - v2 payload bootstrap for #817/#700 now covers both ECS and MicroVM: IAM-authenticated deployment manifests, one-object signed downloads, immutable private retry references, bounded bytes/expiry and coordinator cleanup of both task objects. Worker reads outside the manifest prefix and payload-bucket listing are explicitly denied.
 - Regressions reproduced and fixed bearer-URL leaks through Python and JavaScript exception chains. Removed the old unsigned transports, stale permission/compatibility comments and unused per-backend key helpers.
 - Python quality passed **1,806 tests / 84.51% coverage**. The broad CDK run passed **159 suites / 3,935 tests** with `--detectOpenHandles` and exited normally; **15 existing DynamoDB Local tests were skipped** because this batch did not start that service or change its transaction protocol. The final five transport/strategy suites passed **187 tests** after the last cleanup (overlapping the broad run); CDK lint/compilation, Python lint/type checks, constants-sync, the **77-page** docs build and link checks also pass.
 - The [bootstrap runbook](./645-payload-bootstrap.md) records the design, AWS documentation evidence, remaining trust boundaries, live allowed/denied matrix and coordinated deployment/rollback procedure. Nothing was deployed; effective IAM, conditional S3 writes, expiry, DNS/HTTPS, ingress negatives and clean launches remain gates.
+
+Seventh prerequisite batch completed locally (2026-09-13):
+
+- #810: removed the unread CloudWatch failure counter, lock and unused threshold. Debug/warn failures emit structured stdout records with writer, task ID and exception class; no AWS retry or failed-message contents. Six client/stream/event failure cases reproduced the old unstructured output and now pass. There is no metric or configured alarm; stdout collection remains a live gate.
+- #818: documented that remote non-443 endpoints are unsupported under all three shipped runtime policies, with no new connectivity validator or port grants. A real-hydration test resolves a large MCP asset, checks its durable audit record and v2 S3 bytes, and verifies that the Run reference stays within 4,096 bytes. Python separately verifies the real download, hook mapping and `.mcp.json` loader. Live remote-tool connectivity is still unproven.
+- Full agent quality passed **1,811 tests / 84.51% coverage**. CDK lint/compilation and **38 tests** in the two relevant orchestrator/registry suites passed. These counts overlap previous runs; no CDK runtime code or IAM changed in this batch.
+- Source/generated registry/compute/deployment documentation, the **77-page** build and link checks pass. An offline coordinator bundle check includes the S3 client, presigner and shared constants; it does not replace a full deployed packaging check. Nothing was deployed or posted to the issue trackers. Package 3's clean P2 rerun and package 7's live P3 matrix remain required.
 
 ## The result we want
 
@@ -181,7 +188,9 @@ For an unknown outcome with no returned ID, the task error or cancellation event
 
 ### 1E. Make verification observable
 
-Resolve #810 by exposing a useful structured failure signal for CloudWatch writers or removing the dead counter and using another observable signal. Test failure of the logging system itself. For #818, document the shared runtime 443-only rule and test registry payload overflow; do not expand network ports just to satisfy an incorrect issue premise.
+**Completed locally:** #810 uses the removal option. Both CloudWatch writers emit `cloudwatch_write_failed` to stdout with `writer`, `task_id` and `error_type`; the unused counter and threshold are gone. Six injected failures cover client creation, stream creation and event submission without recursive logging or sensitive error contents. This is a structured log, not an alarm or metric. Verify guest stdout ingestion while the VM is running; AgentCore APPLICATION_LOGS does not automatically collect it.
+
+For #818, documentation explicitly limits remote MCP endpoints to reachable HTTPS/443 on all shipped backends. No synth/onboarding connectivity probe is added, and no ports are widened. Registry-specific integration tests exercise real resolution/hydration, audit writes, >4,096-byte asset data in S3, the bounded v2 reference, Python hook mapping and the real local loader. The retired inline branch is no longer the acceptance target. Successful config delivery does not prove remote-tool connectivity; test DNS/routing/TLS/auth live.
 
 ### 1F. Make concurrency release safe across replay
 

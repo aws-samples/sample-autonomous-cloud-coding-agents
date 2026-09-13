@@ -87,7 +87,7 @@ A regression reproduced a signed-URL leak through a chained Python traceback. Ro
 
 Permission tests inspect synthesized IAM policies, including the `NotResource` explicit deny and the coordinator's missing-object permission. The constants-checker subprocess rejects invalid bounds/paths and consumers that stop importing the contract.
 
-An offline compatibility probe generated a URL using the actual JavaScript AWS SDK with dummy credentials and passed it through the Python URL parser. That proves the observed SDK URL shape is supported; it makes no AWS authorization claim.
+An offline compatibility probe generated a URL using the actual JavaScript AWS SDK with dummy credentials and passed it through the Python URL parser. That proves the observed SDK URL shape is supported; it makes no AWS authorization claim. An offline esbuild check using the coordinator's external-module settings also includes the matching S3 client, presigner and constants in the JavaScript bundle. It excludes the separately packaged `pdf-parse` dependency and does not replace full CDK packaging or deployment verification.
 
 See the [implementation checklist](./645-p3-implementation-plan.md#implementation-progress) for final suite counts. Mock authorization failures are not proof of effective AWS IAM. Conditional S3 writes and the missing-object behavior must also be checked live.
 
@@ -119,7 +119,7 @@ For **both ECS and MicroVM**, retain source/image identifiers, relevant policy s
 | Same-account other-workspace secret substitution | Reject; cross-region secret explicitly present in the trusted manifest still works. |
 | Two preparations / lost committed S3 reply | Same saved reference or explicit conflict, no overwrite of task instructions. |
 | Lost MicroVM Run reply / coordinator restart | Same client token and exact request; existing VM recovered, no replacement. Record actual AWS retention/conflict behavior. |
-| Typical/large registry-hydrated task | Manifest and exact S3 download work over runtime DNS/HTTPS; hook/override limits hold. #818 still needs its registry-resolution end-to-end case. |
+| Typical/large registry-hydrated task | Manifest and exact S3 download work over runtime DNS/HTTPS; hook/override limits hold. #818 now has local resolution/hydration/storage and hook-to-loader cases; live tool connectivity remains required. |
 | Success, failure, cancellation | Expected terminal status; compute terminated; both private task objects deleted or cleanup failure visibly recorded. |
 | Attempted public MicroVM ingress | No usable public control path with explicit `NO_INGRESS`. Test while the VM is running. |
 | Environment/log inspection | Repository subprocesses do not inherit `AGENT_PAYLOAD_REF`; normal/error logs contain no signed URL. |

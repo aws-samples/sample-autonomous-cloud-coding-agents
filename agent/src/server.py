@@ -35,17 +35,6 @@ from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
 
-# --- _debug_cw / _warn_cw failure counter -------------------------------
-# Shared counter for BOTH the debug and warn CloudWatch writers. It is not
-# exported or read yet (#810), so it cannot currently reveal a broken writer
-# to an operator. Defined BEFORE any function that
-# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
-# import-time safe: a daemon thread spawned from a write-blocking function
-# can never race with module-level globals still being assigned.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
-
 # Only redact secrets at least this long — replacing very short strings
 # would mangle unrelated text that happens to contain them.
 _MIN_REDACTABLE_SECRET_LEN = 12
@@ -82,6 +71,25 @@ def _emit_stdout_line(stamped: str) -> None:
             line = line[n:]
     except OSError:
         pass
+
+
+def _report_cloudwatch_failure(writer: str, task_id: str | None, exc: Exception) -> None:
+    """Emit a stdout fallback without another AWS call or the failed message.
+
+    This is a structured log, not a metric or configured alarm. Its availability
+    depends on the backend collecting guest stdout; AgentCore APPLICATION_LOGS
+    does not automatically forward it.
+    """
+    _emit_stdout_line(
+        json.dumps(
+            {
+                "event": "cloudwatch_write_failed",
+                "writer": writer,
+                "task_id": task_id,
+                "error_type": type(exc).__name__,
+            }
+        )
+    )
 
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
@@ -139,9 +147,9 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
 
     The stdout emission is preserved so local ``docker-compose`` runs
     and the ``capfd``-based unit tests still observe the line.
-    CloudWatch delivery is fire-and-forget — failures bump the
-    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
-    which is currently unexported (#810); it is not an observable metric yet.
+    CloudWatch delivery is fire-and-forget. Failures emit a structured
+    ``cloudwatch_write_failed`` stdout record without retrying through the
+    failed logging path. No metric or alarm is installed by this helper.
     """
     # Redact cached credentials and emit via the same os.write path as
     # ``_debug_cw``: warn messages can embed payload fragments, so they
@@ -170,9 +178,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 
     Mirrors ``_debug_cw_write_blocking`` but writes to the
     ``server_warn/<task_id>`` stream so warn-level traffic is easy to
-    alarm on independently of debug breadcrumbs. Failures bump the
-    shared ``_debug_cw_failures`` counter. Nothing exports that counter
-    yet (#810), so it does not currently provide an alarm surface.
+    filter independently of debug breadcrumbs. Failures emit the shared
+    structured stdout fallback without another AWS call.
     """
     try:
         from aws_session import platform_client
@@ -189,14 +196,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
             logStreamName=stream,
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
-    except Exception as _exc:
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
-        print(
-            f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
-            flush=True,
-        )
+    except Exception as exc:
+        _report_cloudwatch_failure("warn", task_id, exc)
 
 
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
@@ -216,16 +217,9 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logStreamName=stream,
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
-    except Exception as _exc:
-        # Never let debug logging break the request path. Bump the failure
-        # counter so operators can alarm on a blind debug path.
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
-        print(
-            f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
-            flush=True,
-        )
+    except Exception as exc:
+        # Logging failures must not break the request or recursively log to AWS.
+        _report_cloudwatch_failure("debug", task_id, exc)
 
 
 # Log the active event loop policy at import time.

@@ -55,7 +55,9 @@ Operational notes specific to this backend:
 
 - **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
-- **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
+- **Deployment identifiers are not baked into the image.** Current table names, secret ARNs and session-role ARN arrive through the v2 IAM-authenticated manifest and signed task document. Old unsigned envelopes are refused. Deploy matching coordinator code, worker images and IAM with admissions paused and old tasks drained; the repository runbook `docs/verification/645-payload-bootstrap.md` records the procedure and pending live checks.
+- **Registry tools share the runtime network restriction.** Remote HTTP/SSE MCP assets need reachable HTTPS/443 endpoints. AgentCore and ECS defaults also block remote non-443 ports. `stdio` programs run locally but their outbound calls remain restricted; resolution does not test connectivity. The image builder's 80/443 access does not widen runtime egress. See [REGISTRY.md](../design/REGISTRY.md).
+- **Logging failures have a fallback record.** Debug/warn CloudWatch failures emit `cloudwatch_write_failed` to stdout with writer/task/error class, without another AWS call or sensitive log text. This is not a configured metric/alarm; verify collection in the guest log stream while the VM is running.
 
 ### Optional Agent Registry
 

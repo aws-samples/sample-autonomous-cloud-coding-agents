@@ -492,36 +492,47 @@ def test_debug_cw_exc_appends_the_traceback(monkeypatch, capfd):
     assert "Traceback" in out
 
 
-def test_debug_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
-    """On boto errors the failure counter increments so operators can alarm.
+@pytest.mark.parametrize("writer", ["debug", "warn"])
+@pytest.mark.parametrize("stage", ["client", "stream", "events"])
+def test_cloudwatch_failures_emit_structured_stdout_without_recursion(
+    writer, stage, monkeypatch, capfd
+):
+    """The fallback survives a broken writer without exposing the failed log text."""
+    import aws_session
 
-    AgentCore doesn't forward container stdout to APPLICATION_LOGS, so a
-    broken ``_debug_cw`` is invisible except for this counter. If the
-    counter ever stops bumping on error the blind-debug alarm breaks
-    silently.
-    """
-    # Seed the counter to a known value so we can assert the delta without
-    # being sensitive to other tests.
-    with server._debug_cw_failures_lock:
-        server._debug_cw_failures = 0
+    class StreamExists(Exception):
+        pass
 
-    # Stub ``boto3.client`` to raise so the except branch (which bumps
-    # the counter) runs.
-    class _BrokenBoto3:
-        @staticmethod
-        def client(*args, **kwargs):
-            raise RuntimeError("simulated boto failure")
+    logs = MagicMock()
+    logs.exceptions.ResourceAlreadyExistsException = StreamExists
+    failure = RuntimeError("BEARER-SECRET in SDK error")
+    factory = MagicMock(return_value=logs)
+    if stage == "client":
+        factory.side_effect = failure
+    elif stage == "stream":
+        logs.create_log_stream.side_effect = failure
+    else:
+        logs.put_log_events.side_effect = failure
+    monkeypatch.setattr(aws_session, "platform_client", factory)
 
-    monkeypatch.setitem(__import__("sys").modules, "boto3", _BrokenBoto3)
+    def forbidden(*args, **kwargs):
+        pytest.fail("the fallback must not call a CloudWatch writer")
 
-    server._debug_cw_write_blocking(
-        log_group="/some/log-group",
-        task_id="t-1",
-        stamped="2026-01-01T00:00:00Z hello",
+    monkeypatch.setattr(server, "_debug_cw", forbidden)
+    monkeypatch.setattr(server, "_warn_cw", forbidden)
+    getattr(server, f"_{writer}_cw_write_blocking")(
+        log_group="/test/logs", task_id="task-log-failure", stamped="PRIVATE-TASK-PROMPT"
     )
-
-    with server._debug_cw_failures_lock:
-        assert server._debug_cw_failures == 1
+    factory.assert_called_once()
+    output = capfd.readouterr().out
+    assert json.loads(output) == {
+        "event": "cloudwatch_write_failed",
+        "writer": writer,
+        "task_id": "task-log-failure",
+        "error_type": "RuntimeError",
+    }
+    assert "BEARER-SECRET" not in output
+    assert "PRIVATE-TASK-PROMPT" not in output
 
 
 # Chunk 7c — _warn_cw parallels _debug_cw so warn-level invocation-payload
@@ -576,33 +587,6 @@ def test_warn_cw_no_log_group_is_noop(monkeypatch):
         f"_warn_cw must not spawn a thread when LOG_GROUP_NAME is unset, "
         f"got calls: {thread_calls!r}"
     )
-
-
-def test_warn_cw_write_blocking_bumps_failure_counter_on_boto_error(monkeypatch):
-    """Warn-path boto errors bump the same failure counter as debug.
-
-    A single alarm surface is intentional (§server.py comment on
-    ``_debug_cw_failures``). If the counter ever stops bumping on a
-    warn write failure the blind-warn alarm breaks silently.
-    """
-    with server._debug_cw_failures_lock:
-        server._debug_cw_failures = 0
-
-    class _BrokenBoto3:
-        @staticmethod
-        def client(*args, **kwargs):
-            raise RuntimeError("simulated boto failure")
-
-    monkeypatch.setitem(__import__("sys").modules, "boto3", _BrokenBoto3)
-
-    server._warn_cw_write_blocking(
-        log_group="/some/log-group",
-        task_id="t-1",
-        stamped="[server/warn] malformed payload",
-    )
-
-    with server._debug_cw_failures_lock:
-        assert server._debug_cw_failures == 1
 
 
 def test_warn_cw_write_blocking_uses_server_warn_stream(monkeypatch):
@@ -1163,10 +1147,9 @@ class TestMicrovmReadyHookWarmUp:
     def test_the_warm_up_makes_no_aws_call_even_with_a_log_group_baked(
         self, client, monkeypatch, capfd, warm_ready
     ):
-        # /ready runs under the BUILD role: a Logs write can only fail (and each
-        # failure pollutes the shared _debug_cw_failures alarm), and any boto3
-        # client built here freezes the build role's credential chain and the build
-        # region into the snapshot. Adding a subprocess must not have changed that.
+        # The BUILD role cannot write application logs outside its MicroVM log
+        # namespace. Initializing AWS clients here can preserve build credentials
+        # in the snapshot. Warm-up subprocesses must not change the stdout-only rule.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):
@@ -2514,10 +2497,9 @@ class TestMicrovmValidateHook:
     def test_ready_is_also_aws_silent_with_a_log_group_configured(
         self, client, monkeypatch, capfd, warm_ready
     ):
-        # /ready runs under the same build role, so the same rule applies. It used
-        # to route through _debug_cw, whose write can only FAIL under a role with
-        # no Logs grant — and each failure bumps the shared _debug_cw_failures
-        # counter, poisoning the "debug path is blind" signal on every build.
+        # /ready shares the build role's namespace-scoped Logs permissions.
+        # Build diagnostics stay on stdout so no runtime logging client or
+        # build-role credential state is initialized before the snapshot.
         monkeypatch.setenv("LOG_GROUP_NAME", "/abca/agent")
 
         def forbidden(*_args, **_kwargs):

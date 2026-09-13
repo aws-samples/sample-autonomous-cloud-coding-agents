@@ -58,6 +58,21 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
 // PUT and the finalize DELETE are both assertions this file needs to make, and a
 // per-instance mock silently discards them.
 const mockS3Send = jest.fn().mockResolvedValue({});
+const mockDdbSend = jest.fn().mockResolvedValue({});
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockDdbSend })) },
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+}));
+const mockResolveAsset = jest.fn();
+jest.mock('../../src/handlers/shared/registry/factory', () => ({
+  makeRegistryClient: () => ({ resolve: mockResolveAsset }),
+}));
+jest.mock('../../src/handlers/shared/context-hydration', () => ({
+  hydrateContext: jest.fn().mockResolvedValue({ sources: [], token_estimate: 0, truncated: false }),
+}));
 jest.mock('@aws-sdk/s3-request-presigner', () => ({ getSignedUrl: async () => 'https://payloads.s3.us-east-1.amazonaws.com/task/payload.json?X-Amz-Signature=' + Date.now() }));
 const mockObjects = new Map<string, string>();
 jest.mock('@aws-sdk/client-s3', () => ({
@@ -86,6 +101,8 @@ const mockFailTask = jest.fn();
 const mockLoadTask = jest.fn();
 const mockClaimStart = jest.fn();
 const mockSaveHandle = jest.fn();
+const mockHydrateAndTransition = jest.fn();
+const mockLoadBlueprint = jest.fn();
 jest.mock('../../src/handlers/shared/microvm-start', () => ({
   ...jest.requireActual('../../src/handlers/shared/microvm-start'),
   claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
@@ -100,8 +117,8 @@ jest.mock('../../src/handlers/shared/orchestrator', () => ({
   }),
   failTask: (...a: unknown[]) => mockFailTask(...a),
   finalizeTask: (...a: unknown[]) => mockFinalizeTask(...a),
-  hydrateAndTransition: jest.fn().mockResolvedValue({ repo_url: 'org/repo', task_id: 'TASK001' }),
-  loadBlueprintConfig: jest.fn().mockResolvedValue({ compute_type: 'lambda-microvm', runtime_arn: '' }),
+  hydrateAndTransition: (...a: unknown[]) => mockHydrateAndTransition(...a),
+  loadBlueprintConfig: (...a: unknown[]) => mockLoadBlueprint(...a),
   loadTask: (...args: unknown[]) => mockLoadTask(...args),
   pollTaskStatus: (...a: unknown[]) => mockPollTaskStatus(...a),
   reconcileMicrovmSubstrateState: (...a: unknown[]) => mockReconcile(...a),
@@ -140,7 +157,7 @@ process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSe
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { handler } from '../../src/handlers/orchestrate-task';
-import { LambdaMicrovmComputeStrategy } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
+import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 /**
  * Minimal stand-in for the durable-execution context: `step` runs its body
@@ -240,6 +257,10 @@ function failedTransition() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDdbSend.mockReset().mockResolvedValue({});
+  mockResolveAsset.mockReset();
+  mockHydrateAndTransition.mockReset().mockResolvedValue({ repo_url: 'org/repo', task_id: 'TASK001' });
+  mockLoadBlueprint.mockReset().mockResolvedValue({ compute_type: 'lambda-microvm', runtime_arn: '' });
   mockTransitionTask.mockReset().mockResolvedValue(undefined);
   mockEmitTaskEvent.mockReset().mockResolvedValue(undefined);
   mockFinalizeTask.mockReset().mockResolvedValue(undefined);
@@ -269,6 +290,45 @@ beforeEach(() => {
 });
 
 describe('orchestrate-task for a lambda-microvm task', () => {
+  test('registry assets alone exceed the hook cap and survive real hydration and v2 S3 delivery (#818)', async () => {
+    const runtime = {
+      transport: 'http',
+      url: 'https://mcp.example.com/tools',
+      headers: { 'X-Registry-Context': 'x'.repeat(6000) },
+    };
+    const asset = { kind: 'mcp_server', namespace: 'acme', name: 'large', version: '1.0.0', runtime };
+    mockResolveAsset.mockResolvedValue({ ...asset, warnings: [] });
+    mockLoadBlueprint.mockResolvedValue({
+      compute_type: 'lambda-microvm',
+      runtime_arn: '',
+      mcp_servers: ['registry://mcp_server/acme/large@1.0.0'],
+    });
+    // Exercise the real registry resolution, payload assembly and audit writes;
+    // only external service boundaries are stubbed on this hydration path.
+    mockHydrateAndTransition.mockImplementationOnce(realOrchestrator.hydrateAndTransition);
+    runMicrovmOk();
+
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+
+    expect(mockResolveAsset).toHaveBeenCalledTimes(1);
+    const upload = s3CommandsOfType('PutObject').find(c => c.input.Key === 'TASK001/payload.json');
+    const document = JSON.parse(upload.input.Body);
+    expect(document.agent_payload.resolved_assets).toEqual([asset]);
+    const { resolved_assets: assets, ...basePayload } = document.agent_payload;
+    expect(Buffer.byteLength(JSON.stringify(basePayload))).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+    expect(Buffer.byteLength(JSON.stringify(assets))).toBeGreaterThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+    const run = commandsOfType('RunMicrovm');
+    expect(run).toHaveLength(1);
+    const wire = run[0].input.runHookPayload;
+    expect(Buffer.byteLength(wire)).toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+    expect(JSON.parse(wire)).toMatchObject({ version: 2, task_id: 'TASK001', payload_url: expect.any(String) });
+    expect(wire).not.toContain('X-Registry-Context');
+    const audit = mockDdbSend.mock.calls.find(([c]) => c.input.ExpressionAttributeValues?.[':ra']);
+    expect(audit![0].input.ExpressionAttributeValues[':ra']).toEqual([
+      { kind: 'mcp_server', id: 'acme/large', version: '1.0.0' },
+    ]);
+  });
+
   test.each([2, 3])('cancellation on task read %s checks release before leaving the pipeline', async (cancelOnRead) => {
     let reads = 0;
     mockLoadTask.mockImplementation(async () => ({

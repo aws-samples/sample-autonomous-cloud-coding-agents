@@ -122,6 +122,51 @@ def test_authenticates_manifest_before_downloading_and_preserves_cross_region_se
     assert transport["build"].call_args.args[0].proxies == {}
 
 
+def test_large_registry_bundle_reaches_run_mapper_and_mcp_loader(transport, monkeypatch, tmp_path):
+    """Resolve real v2 bytes and carry the bundle from /run into the real local loader."""
+    from registry.loader import apply_resolved_assets
+
+    runtime = {
+        "transport": "http",
+        "url": "https://mcp.example.com/tools",
+        "headers": {"X-Registry-Context": "x" * 6000},
+    }
+    assets = [
+        {
+            "kind": "mcp_server",
+            "namespace": "acme",
+            "name": "large",
+            "version": "1.0.0",
+            "runtime": runtime,
+        }
+    ]
+    transport["payload"]["resolved_assets"] = assets
+    # Isolate real config installation; no task thread or CloudWatch client runs.
+    monkeypatch.setattr(server.os, "environ", dict(server.os.environ))
+    monkeypatch.setattr(server, "_debug_cw", lambda *args, **kwargs: None)
+    spawn = MagicMock()
+    monkeypatch.setattr(server, "_spawn_background", spawn)
+    with TestClient(server.app) as client:
+        response = client.post(
+            server.MICROVM_HOOK_PREFIX + "/run",
+            json={
+                "microvmId": "mvm-registry",
+                "runHookPayload": json.dumps(transport["reference"]),
+            },
+        )
+    assert response.status_code == 200
+    spawn.assert_called_once()
+    received = spawn.call_args.args[0]["resolved_assets"]
+    assert received == assets
+    assert apply_resolved_assets(str(tmp_path), received) == ["acme__large"]
+    saved = json.loads((tmp_path / ".mcp.json").read_text())
+    assert saved["mcpServers"]["acme__large"] == {
+        "type": "http",
+        "url": runtime["url"],
+        "headers": runtime["headers"],
+    }
+
+
 @pytest.mark.parametrize("reference", [{}, {"agent_payload": {}}, {"version": 1}, [], "raw"])
 def test_legacy_and_malformed_envelopes_never_read_or_start(reference, transport):
     with pytest.raises(ValueError, match="v2 is required"):
