@@ -23,12 +23,14 @@ import {
   MicrovmState,
   RunMicrovmCommand,
   TerminateMicrovmCommand,
+  SuspendMicrovmCommand,
+  ResumeMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
 // Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
 import sharedConstants from '../../../../../contracts/constants.json';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
 import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle } from '../microvm-start';
@@ -43,6 +45,9 @@ function getClient(): LambdaMicrovmsClient {
   }
   return sharedClient;
 }
+
+/** Bound a control request, not the transition itself. A timeout needs reconciliation. */
+export const MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Fully-qualified MicroVM image **ARN** passed as `imageIdentifier` on every
@@ -439,11 +444,10 @@ function assertImageArn(identifier: string): void {
  * control-plane state machine the orchestrator can observe through
  * {@link LambdaMicrovmComputeStrategy.pollSession}.
  *
- * P1 scope is start / poll / stop only. ``suspendSession`` / ``resumeSession``
- * (the interface widening across all three strategies) land in P3 — do NOT add
- * them here piecemeal, ADR-021 sub-decision 1 requires them in one commit so
- * the exhaustive-``never`` switch culture forces every backend to make a
- * compile-checked decision about its suspend semantics.
+ * P3 command primitives implement mandatory suspend/resume alongside the
+ * explicit unsupported results in the other two strategies. The supervisor
+ * must still supply gate policy, durable intent and state reconciliation
+ * before automatic suspension can be enabled with compatible agent hooks.
  */
 export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
   readonly type = 'lambda-microvm';
@@ -781,6 +785,41 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       throw new Error('stopSession called with non-lambda-microvm handle');
     }
     await this.terminateBestEffort(handle.microvmId, 'session stop');
+  }
+
+  /** Submit a suspend request; the caller owns gate checks and state reconciliation. */
+  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('suspendSession', handle);
+  }
+
+  /** Submit a resume request; acknowledgement alone does not establish RUNNING. */
+  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('resumeSession', handle);
+  }
+
+  private async requestLifecycle(
+    operation: 'suspendSession' | 'resumeSession',
+    handle: SessionHandle,
+  ): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'lambda-microvm') {
+      throw new Error(`${operation} called with non-lambda-microvm handle`);
+    }
+    if (typeof handle.microvmId !== 'string' || !handle.microvmId.trim()) {
+      throw new Error(`${operation} requires a non-empty MicroVM identifier`);
+    }
+    const suspend = operation === 'suspendSession';
+    const request = { microvmIdentifier: handle.microvmId };
+    try {
+      await getClient().send(
+        suspend ? new SuspendMicrovmCommand(request) : new ResumeMicrovmCommand(request),
+        { abortSignal: AbortSignal.timeout(MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS) },
+      );
+    } catch (error) {
+      // Includes Conflict/NotFound: neither proves the desired state was reached.
+      // Even a timeout may have committed; the durable caller must observe again.
+      throw wrapMicrovmError(suspend ? 'SuspendMicrovm' : 'ResumeMicrovm', error);
+    }
+    return { supported: true };
   }
 
   /**

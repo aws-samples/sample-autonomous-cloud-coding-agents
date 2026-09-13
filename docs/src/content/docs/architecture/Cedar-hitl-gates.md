@@ -234,25 +234,22 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
                 timeout 300s
     ```
     Severity colors the line (respecting `NO_COLOR` env var).
-18. Hook enters poll loop with strongly-consistent reads:
+18. Hook enters poll loop with strongly-consistent reads. The deadline is captured with the original approval row, before database writes/notifications: UTC expiry is `created_at + timeout_s`, capped by the original monotonic remaining duration. `deadline.remaining_s()` takes the smaller remainder and clamps at zero, so a frozen guest clock or backward UTC correction cannot restart the window.
     ```python
-    async def _poll_for_decision(task_id, request_id, timeout_s):
+    async def _poll_for_decision(task_id, request_id, deadline):
         start = time.monotonic()
         interval = 2
         consecutive_failures = 0
         while True:
             elapsed = time.monotonic() - start
-            if elapsed >= timeout_s:
+            if deadline.remaining_s() <= 0:
                 return TimedOut()
             if elapsed > 30:
                 interval = 5  # backoff
             try:
                 row = await _ddb_get_approval(task_id, request_id, ConsistentRead=True)
                 consecutive_failures = 0
-                if row is None:
-                    # Row disappeared between write and poll — treat as stranded
-                    return TimedOut(reason="approval row missing; fail-closed")
-                if row["status"] != "PENDING":
+                if row is not None and row["status"] in ("APPROVED", "DENIED"):
                     return Decided(row)
             except Exception as exc:
                 consecutive_failures += 1
@@ -261,9 +258,13 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
                     emit_milestone("approval_poll_degraded", {...})
                 if consecutive_failures >= 10:
                     return TimedOut(reason="approval poll consecutive failures")
-            await asyncio.sleep(interval)
+            # Missing rows keep waiting within the original deadline; never allow.
+            remaining = deadline.remaining_s()
+            if remaining <= 0:
+                return TimedOut()
+            await asyncio.sleep(min(interval, remaining))
     ```
-19. The approval CAP and local-timeout paths ALWAYS attempt to write the row to TIMED_OUT (best-effort conditional update `status = :pending`) before returning. This prevents orphan PENDING rows when the agent bails internally.
+19. The local-timeout path attempts to write the row to TIMED_OUT (best-effort conditional update `status = :pending`) before returning. If that write loses or fails, the hook rereads consistently to honor an already-committed decision. The approval-cap check runs before row creation and has no row to update.
 
 ### User responds
 
@@ -819,6 +820,7 @@ async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
         "ttl": int(time.time()) + effective_timeout + CLEANUP_MARGIN_120S,
         "user_id": user_id, "repo": engine.repo,
     }
+    deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # ATOMIC: put approval row + transition TaskTable status in one transaction.
     try:
@@ -836,7 +838,7 @@ async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
         "matching_rule_ids": list(decision.matching_rule_ids),
     })
 
-    outcome = await _poll_for_decision(task_id, request_id, effective_timeout)
+    outcome = await _poll_for_decision(task_id, request_id, deadline)
 
     # On TIMED_OUT, attempt to write the row to TIMED_OUT so future reads see
     # a terminal state (not orphaned PENDING). The conditional write is guarded
@@ -924,7 +926,7 @@ async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
 
 `engine._queue_denial_injection` appends to a list consumed by `_denial_between_turns_hook` — registered **after** `_nudge_between_turns_hook` in the `between_turns_hooks` list (which itself runs after `_cancel_between_turns_hook`). At the next Stop hook fire, the denial is emitted as `<user_denial>…</user_denial>` XML (sanitized via `_xml_escape` from the shared utility introduced with Phase 2). If a `bgagent cancel` has landed between the deny and the next Stop seam, `_cancel_between_turns_hook` short-circuits the dispatcher and the denial text is NOT injected — in which case the guaranteed surface is `permissionDecisionReason` on the hook return. See finding #2 scenario in §4 for the cancel-vs-deny race reasoning.
 
-**Scenario (§13.12 VM-throttle + late-approval race).** User Alice hits a soft-deny gate at t=0 with `timeout_s=300`. The AgentCore VM is evicted from its warm CPU share around t=285 due to noisy-neighbor pressure on the host; poll ticks stretch by ~400ms. Alice, seeing the approval prompt in Terminal A, types `bgagent approve 01KPW... 01KPR...` at t=294. The approve-transaction lands in DDB at t=294.7 (APPROVED). The agent's next poll-tick was due at t=290 but the VM throttle delayed it to t=295.1. The monotonic wall-clock already shows elapsed >300 (actual since-start ~300.3s), so `_poll_for_decision` returns `TimedOut()`. The hook runs `_best_effort_update_status("TIMED_OUT", ... WHERE status = :pending)` — the conditional fails because the row is APPROVED. **Without the re-read**, the hook would proceed with stale local `outcome.status = "TIMED_OUT"`, queue a denial injection, and return `{"permissionDecision": "deny"}` — Alice sees "I approved it" on Terminal B but the agent denies the tool call anyway. **With the re-read** (the `wrote_timeout` branch in the pseudocode above): the hook fetches the row with ConsistentRead, sees `status = APPROVED`, rebuilds `outcome` from the row (preserving `scope`, `decided_by`, `decided_at`), emits an `approval_late_win` milestone, runs the normal resume transaction + allow flow, and returns `{"permissionDecision": "allow"}`. Alice's tool runs. The cost is one extra strongly-consistent GetItem on the race path; the benefit is that user intent is authoritative. Without this fix, a timer design that is otherwise sound would produce a confounding and unrecoverable UX. See IMPL-24, §13.12, and §15.2 task #43 for the race test.
+**Scenario (§13.12 VM-throttle + late-approval race).** Alice hits a gate with a 300-second window and commits APPROVED at t=294.7s. Scheduling delays prevent the next agent poll until t=300.2s. That poll sees the original deadline has passed and returns TIMED_OUT before reading the row. The conditional TIMED_OUT write then loses because APPROVED is already stored. The hook rereads with `ConsistentRead`, preserves Alice's scope and decision metadata, emits `approval_late_win`, and proceeds through the guarded resume transaction and allow flow. Without that reread it would deny an already-approved call. See IMPL-24, §13.12, and §15.2 task #43 for the race test.
 
 ---
 
@@ -1814,7 +1816,7 @@ Addressed by the parity contract (decision #23, §15.6). Golden-file CI test run
 
 ### 13.12 VM-throttle + late-approval race
 
-The agent's poll loop computes a local timeout wall-clock (`timeout_s` worth of elapsed monotonic time). If the VM is throttled by the hypervisor — either an AgentCore noisy-neighbor eviction window, or a CPU-throttle under memory pressure — poll ticks can stretch past their nominal cadence. In the worst case, the user's APPROVE transaction lands in DDB a few hundred milliseconds before the agent's local clock trips past `timeout_s` and the agent attempts to write `status = TIMED_OUT WHERE status = :pending`. The ConditionCheckFailed path fires (APPROVED already won), but without a re-read the agent's local state is stale: `outcome.status == "TIMED_OUT"` locally while DDB holds APPROVED. The agent would return DENY, the user sees "I approved it" and the agent still blocks — a confounding experience that also violates the design principle that user-observed state is authoritative.
+The agent's poll loop retains the original approval row's UTC expiry and a monotonic cap, using whichever expires first. Slow writes/notifications count toward that same window. This also covers a MicroVM whose monotonic clock stops while suspended; the future `/resume` hook must reuse this deadline and wake the decision loop. If CPU throttling or suspension delays polling beyond expiry, a user's APPROVE transaction may already have committed. The agent then attempts `status = TIMED_OUT WHERE status = :pending`. The condition fails because APPROVED already won. Without a re-read, the agent's local state would remain TIMED_OUT while DDB holds APPROVED, and it would incorrectly deny the approved call.
 
 **Mitigation**: the §6.5 pseudocode re-reads the approval row with `ConsistentRead=True` whenever `_best_effort_update_status("TIMED_OUT", ...)` returns ConditionCheckFailed, and honors whatever terminal state the row carries:
 - If `status == "APPROVED"`: rebuild the local `outcome` to reflect APPROVED, preserving `scope`, `decided_by`, `decided_at`, and proceed through the normal allow flow (scope-propagation, `approval_granted` milestone, resume transaction, return `{"permissionDecision": "allow"}`). Emit a `approval_late_win` milestone so operator telemetry can count races.
@@ -2029,22 +2031,18 @@ t=0.02s    TransactWriteItems: approval row PENDING + TaskTable AWAITING_APPROVA
 t=0.03s    agent_milestone: approval_requested → Terminal A stream
 t=0.04s    _poll_for_decision begins; interval=2s for first 30s, then 5s
 
-... (poll ticks every 5s from t=30 to t=295) ...
+... (poll ticks every 5s from t=30 to t=285) ...
 
 t=285.0s   host hypervisor evicts VM from warm CPU share (noisy neighbor).
-           Next scheduled poll was t=290.0s; actual scheduling delay ~5.1s.
+           Next scheduled poll was t=290.0s; actual scheduling delay ~10.2s.
 t=294.7s   Alice's bgagent approve lands at API Gateway.
            ApproveTaskFn TransactWriteItems:
              ApprovalsTable: PENDING → APPROVED (user_id matches, status was PENDING)
              TaskTable: state guard holds (still AWAITING_APPROVAL, rid matches)
            → 202 returned to CLI; Alice sees "approved!" in Terminal B
-t=295.1s   agent's delayed poll tick fires. Elapsed wall-clock = 295.1s.
-           Monotonic elapsed is 295.1 > timeout_s=300? NO — but the poll
-           function computes `elapsed >= timeout_s` and on the NEXT tick
-           (t=300.2s) it will exceed.
-t=300.2s   next tick: elapsed=300.2 ≥ timeout_s=300 → TimedOut() returned.
-           (Alice's APPROVED write at t=294.7s was MISSED — the previous
-           poll was due at t=295.0 but the VM throttle stretched it past.)
+t=300.2s   delayed tick: original deadline has passed → TimedOut() returned
+           before reading the approval row. Alice's APPROVED write at
+           t=294.7s has not yet been observed by this agent.
 t=300.3s   _best_effort_update_status("TIMED_OUT", ... WHERE status = :pending)
            → ConditionCheckFailed (row is APPROVED, not PENDING)
            → wrote_timeout = False

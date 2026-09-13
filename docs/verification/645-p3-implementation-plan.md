@@ -23,7 +23,10 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [ ] Verify metadata restrictions with real AWS sessions/transactions; retain status/tag trust limits.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
-- [ ] Implement and verify the P3 sleep/wake lifecycle described below.
+- [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
+- [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
+- [ ] Add durable lifecycle intent/policy, compatible agent hooks and credential/durability barriers.
+- [ ] Connect supervisor and approval handlers, then verify the complete P3 sleep/wake lifecycle in AWS.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -87,6 +90,13 @@ Seventh prerequisite batch completed locally (2026-09-13):
 - #818: documented that remote non-443 endpoints are unsupported under all three shipped runtime policies, with no new connectivity validator or port grants. A real-hydration test resolves a large MCP asset, checks its durable audit record and v2 S3 bytes, and verifies that the Run reference stays within 4,096 bytes. Python separately verifies the real download, hook mapping and `.mcp.json` loader. Live remote-tool connectivity is still unproven.
 - Full agent quality passed **1,811 tests / 84.51% coverage**. CDK lint/compilation and **38 tests** in the two relevant orchestrator/registry suites passed. These counts overlap previous runs; no CDK runtime code or IAM changed in this batch.
 - Source/generated registry/compute/deployment documentation, the **77-page** build and link checks pass. An offline coordinator bundle check includes the S3 client, presigner and shared constants; it does not replace a full deployed packaging check. Nothing was deployed or posted to the issue trackers. Package 3's clean P2 rerun and package 7's live P3 matrix remain required.
+
+First P3 foundation batch completed locally (2026-09-13):
+
+- The shared strategy contract now requires `suspendSession` and `resumeSession`. AgentCore/ECS return `{supported:false}` without calling AWS. MicroVM sends the exact identifier with a 10-second request bound, returns `{supported:true}` only on acknowledgement, and surfaces sanitized errors. Conflicts, missing VMs and uncertain timeouts still require state reconciliation; they are not treated as success.
+- An immutable approval deadline is captured with the original row, before database writes/notifications. Polling uses the smaller UTC/monotonic remainder. Regressions reproduced a frozen-clock gate that waited after ten minutes and a 30-second window stretched to 42 seconds by a slow write. The fix also preserves late committed decisions, missing-row handling and cancellation.
+- CDK lint/compilation and **5 suites / 169 tests** pass. Full agent quality passes **1,823 tests / 84.53% coverage**, including **12 new clock/race/cancellation cases**. Counts overlap earlier runs.
+- No callers, IAM grants or image hooks enable automatic suspension yet. The same deadline must still be registered in the future lifecycle context and checked immediately by `/resume`. Durable intent, policy, credential refresh, acknowledged progress durability and live validation remain open.
 
 ## The result we want
 
@@ -245,9 +255,11 @@ Follow `cdk/scripts/package-microvm-artifact.sh` and the P1/P2 runbooks:
 
 ### Strategy methods
 
-Add mandatory `suspendSession(handle)` and `resumeSession(handle)` to `ComputeStrategy` in the **same commit as all three implementations**. Use an explicit result such as `{ supported: false } | { supported: true }`; supported means the capability/request is supported, not that the VM is already in its final state. Operational failures must remain distinguishable from unsupported capability.
+**Implemented locally:** mandatory `suspendSession(handle)` and `resumeSession(handle)` were added to `ComputeStrategy` together with all three implementations. `SessionLifecycleResult` is `{ supported: false } | { supported: true }`; true means the command was acknowledged, not that the VM reached its final state. Operational failures throw.
 
-AgentCore and ECS return explicit unsupported results. MicroVM issues `SuspendMicrovm`/`ResumeMicrovm` with `microvmIdentifier: handle.microvmId`. Test wrong handle variants, already-target-state requests, state-conflict races, missing/terminated VMs and retriable/permanent API errors. Verify actual AWS behavior before normalizing a conflict into success. Preserve the strategy's existing state mapping; keep `reason` diagnostic.
+AgentCore and ECS return explicit unsupported results without an AWS request. MicroVM issues `SuspendMicrovm`/`ResumeMicrovm` with `microvmIdentifier: handle.microvmId` and a 10-second abort bound. Local tests cover wrong/empty handles, repeated requests, simulated conflicts/not-found and retriable/permanent errors. **Still required:** verify actual AWS behavior for already-target-state/terminated VMs and races before normalizing any conflict into success.
+
+The installed SDK returns empty suspend/resume responses. Its observed states are `PENDING`, `RUNNING`, `SUSPENDING`, `SUSPENDED`, `TERMINATING` and `TERMINATED`; there is no `RESUMING` value. The current coarse poll mapping groups PENDING/unknown with running and SUSPENDING with suspended. Preserve existing consumers, but expose an explicit service-state observation for P3 reconciliation: the coarse `running` result alone cannot prove wake completion. Keep `reason` diagnostic rather than parsing it for policy.
 
 ### Durable intent and policy
 
@@ -283,8 +295,8 @@ Files: `agent/src/server.py`, `hooks.py`, `task_state.py`, `aws_session.py`, `pr
 3. `/resume` refreshes ambient/runtime credential providers as necessary, then ensures tenant-scoped assumed credentials are usable **with the same task/user/repo tags**. Inventory cached DynamoDB/S3/Memory/Logs clients and the Claude Bedrock credential helper; replacing one global session does not replace every already-created client or subprocess cache. Do not call the test-only `reset_session_cache()` and lose identity. Fail closed on refresh failure.
 4. Keep the coding action blocked behind the resume barrier until refresh and gate reconciliation finish. Handle duplicate hook calls and concurrent lifecycle requests without deadlocks. Expired credentials or a slow AWS call must not hold the hook beyond its service budget.
 5. Reseed the application PRNG from fresh OS entropy on **both `/run` and `/resume`**. Do not seed it with task IDs, timestamps or an image-fixed value. Continue using cryptographic randomness for secrets. Test resumed/sibling snapshot uniqueness where meaningful; do not claim that `random` becomes cryptographically safe.
-6. Compute approval remaining time as `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero. Pass the original recorded `created_at` into the gate context; do not create a fresh timeout on resume. Check it on every poll and at resume, then wake the existing agent-owned decision loop to apply its transaction rules.
-7. Preserve the conditional TIMED_OUT write, strongly consistent reread when that write loses, and the late-approval winner behavior. A decision committed before timeout must not be overwritten because the VM woke late. Test forward/backward clock changes, frozen monotonic time, missing/TTL-reaped row, approval at the boundary and cancellation. TTL is asynchronous garbage collection, not a precise alarm clock.
+6. **Polling implemented locally:** `_ApprovalDeadline` captures the original recorded UTC expiry and a monotonic cap before database writes. Remaining time is `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero, including each sleep bound. **Still required:** register this same object in the lifecycle context, check it at resume and wake the existing agent-owned decision loop. Never create a fresh timeout on resume.
+7. **Preserved/tested locally:** conditional TIMED_OUT write, strongly consistent reread when that write loses, and late-decision winner behavior. Forward/backward clocks, frozen monotonic time, slow writes/reads, missing rows and cancellation have regression coverage. **Still required:** exercise these through the actual resume barrier and live AWS lifecycle. TTL is asynchronous garbage collection, not a precise alarm clock.
 8. Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them. Add shared hook-budget constants and route/contract assertions. Keep `/ready` and `/validate` AWS-silent. An old image without the new hooks must not be eligible for automatic suspension; enable policy only after deploying a compatible pinned image, with explicit capability/version gating if mixed versions can coexist.
 
 ## 6. Wire the supervisor and human decisions
@@ -295,7 +307,7 @@ Implement the state/action table in a small testable policy/reconciliation helpe
 
 An approval can arrive before a pending suspend finishes. Even if an inline resume sees “already running,” the orchestrator must later notice that the machine became suspended and wake it. Do not clear durable wake intent merely because one API call appeared successful.
 
-When `ResumeMicrovm` succeeds but the VM is still RESUMING, keep reconciling; grant a bounded recovery interval rather than immediately applying a pre-suspend stale heartbeat. When the agent restores task RUNNING, use the fresh timestamp from prerequisite 1C. Never exempt genuine crashed RUNNING tasks indefinitely.
+When `ResumeMicrovm` is acknowledged but a subsequent observation does not yet confirm `RUNNING`, keep reconciling within a bounded recovery interval. Do not invent a `RESUMING` service state or treat an unknown/coarse state as confirmation. Defer the pre-suspend stale-heartbeat check only within that bound. When the agent restores task RUNNING, use the fresh timestamp from prerequisite 1C. Never exempt genuine crashed RUNNING tasks indefinitely.
 
 Add consecutive MicroVM poll-error tracking. Reset on successful observations; classify permanent failures separately from transient ones. At the chosen threshold, perform a final consistent task read, record an explicit infrastructure failure and finalize/terminate through the existing single-owner path. Emit recovery/orphan diagnostics when termination itself fails; do not silently lose the handle. Keep suspend failures distinguishable from lost compute: failure to save money can leave a task safely awake, whereas failure to wake threatens correctness and needs bounded escalation.
 

@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'crypto';
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -81,6 +81,16 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
 
   async pollSession(_handle: SessionHandle): Promise<SessionStatus> {
     return { status: 'running' };
+  }
+
+  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'agentcore') throw new Error('suspendSession called with non-agentcore handle');
+    return { supported: false };
+  }
+
+  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'agentcore') throw new Error('resumeSession called with non-agentcore handle');
+    return { supported: false };
   }
 
   async stopSession(handle: SessionHandle): Promise<void> {

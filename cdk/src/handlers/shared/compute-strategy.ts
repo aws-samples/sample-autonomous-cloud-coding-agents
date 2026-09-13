@@ -90,6 +90,15 @@ export type SessionStatus =
   | { readonly status: 'completed'; readonly reason?: string }
   | { readonly status: 'failed'; readonly error: string; readonly reason?: string };
 
+/**
+ * `supported: true` means the lifecycle command was acknowledged, not that the
+ * target state has been reached. Callers must observe/reconcile the session.
+ * Failures throw; they must never be disguised as an unsupported capability.
+ */
+export type SessionLifecycleResult =
+  | { readonly supported: false }
+  | { readonly supported: true };
+
 export interface ComputeStrategy {
   readonly type: ComputeType;
   startSession(input: {
@@ -121,6 +130,8 @@ export interface ComputeStrategy {
   }): Promise<SessionHandle>;
   pollSession(handle: SessionHandle): Promise<SessionStatus>;
   stopSession(handle: SessionHandle): Promise<void>;
+  suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult>;
+  resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult>;
 }
 
 export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): ComputeStrategy {

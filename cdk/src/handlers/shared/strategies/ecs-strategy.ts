@@ -18,7 +18,7 @@
  */
 
 import { ECSClient, RunTaskCommand, DescribeTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
@@ -92,6 +92,16 @@ export async function deleteEcsPayload(taskId: string): Promise<void> {
 
 export class EcsComputeStrategy implements ComputeStrategy {
   readonly type = 'ecs';
+
+  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'ecs') throw new Error('suspendSession called with non-ecs handle');
+    return { supported: false };
+  }
+
+  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'ecs') throw new Error('resumeSession called with non-ecs handle');
+    return { supported: false };
+  }
 
   async startSession(input: {
     taskId: string;

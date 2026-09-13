@@ -24,7 +24,8 @@ import os
 import re
 import time
 from collections.abc import Callable
-from datetime import UTC
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -56,6 +57,36 @@ POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecu
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
 TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
+
+
+@dataclass(frozen=True)
+class _ApprovalDeadline:
+    """One gate's deadline, retained across polling and a possible VM sleep.
+
+    UTC counts time while the guest's monotonic clock is frozen. The monotonic
+    cap prevents a backward UTC correction from extending the original window.
+    Create this with the approval row, before database writes or notifications;
+    never recreate it on resume.
+    """
+
+    wall_deadline: float
+    monotonic_deadline: float
+
+    @classmethod
+    def from_recorded(cls, created_at: str, timeout_s: int) -> _ApprovalDeadline:
+        created_epoch = (
+            datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+        )
+        wall_deadline = created_epoch + timeout_s
+        remaining = max(0.0, min(timeout_s, wall_deadline - time.time()))
+        return cls(wall_deadline, time.monotonic() + remaining)
+
+    def remaining_s(self) -> float:
+        return max(
+            0.0,
+            min(self.monotonic_deadline - time.monotonic(), self.wall_deadline - time.time()),
+        )
+
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields, so persisted/logged reasons can't carry
@@ -627,6 +658,7 @@ async def _handle_require_approval(
         "user_id": user_id or "",
         "repo": engine.repo,
     }
+    deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself
@@ -700,7 +732,7 @@ async def _handle_require_approval(
     outcome = await _poll_for_decision(
         task_id=task_id,
         request_id=request_id,
-        timeout_s=effective_timeout,
+        deadline=deadline,
         progress=progress,
         ts=ts,
     )
@@ -937,7 +969,7 @@ async def _poll_for_decision(
     *,
     task_id: str,
     request_id: str,
-    timeout_s: int,
+    deadline: _ApprovalDeadline,
     progress: Any,
     ts: Any,
 ) -> dict:
@@ -949,16 +981,16 @@ async def _poll_for_decision(
     ``approval_poll_degraded``; at ``POLL_MAX_CONSECUTIVE_FAILS`` we
     fall through as TIMED_OUT with a distinct reason.
 
-    Returns an outcome dict mirroring the approval row's terminal fields.
+    Uses the deadline captured with the original approval row, including time
+    spent writing/notifying or suspended. Returns an outcome dict mirroring
+    the approval row's terminal fields.
     """
-    deadline = time.monotonic() + timeout_s
     start = time.monotonic()
     consecutive_fails = 0
     degraded_emitted = False
 
     while True:
-        now = time.monotonic()
-        if now >= deadline:
+        if deadline.remaining_s() <= 0:
             return {"status": "TIMED_OUT", "reason": None}
 
         try:
@@ -1012,7 +1044,7 @@ async def _poll_for_decision(
         elapsed = time.monotonic() - start
         interval = POLL_FAST_INTERVAL_S if elapsed < POLL_FAST_DURATION_S else POLL_SLOW_INTERVAL_S
         # Clamp sleep against remaining deadline so we don't oversleep.
-        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
+        sleep_for = min(interval, deadline.remaining_s())
         if sleep_for <= 0:
             return {"status": "TIMED_OUT", "reason": None}
         await asyncio.sleep(sleep_for)
@@ -1096,8 +1128,6 @@ def _remaining_maxlifetime_s() -> int | None:
         if started_at.isdigit():
             started_epoch = int(started_at)
         else:
-            from datetime import datetime
-
             # The trailing Z means UTC; strptime returns a naive datetime whose
             # .timestamp() would otherwise be interpreted in the container's
             # local TZ, skewing remaining-lifetime math by the UTC offset.

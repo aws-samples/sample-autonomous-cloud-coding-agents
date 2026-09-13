@@ -83,6 +83,8 @@ Because a snapshot freezes its build-time environment, current deployment identi
 
 Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. The P2 image declares and serves `/ready` and `/validate` at build time and `/run` and `/terminate` at runtime. `/suspend` and `/resume` remain disabled until their P3 implementation. Registry HTTP/SSE tools therefore need reachable HTTPS/443 endpoints; remote non-443 tools are unsupported under the default policies of AgentCore and ECS as well. Local `stdio` tools can run, with their outbound traffic subject to the same restriction. Asset resolution/loading does not probe connectivity; see [registry network support](./REGISTRY.md#2-asset-kinds-for-mvp).
 
+The local P3 foundation adds bounded suspend/resume commands to the MicroVM strategy and explicit unsupported results to AgentCore/ECS. These methods are not wired into automatic policy or human-decision handlers yet. Approval polling now retains the original UTC/monotonic deadline through slow writes or a frozen guest clock; resume hooks must still reuse that deadline and refresh credentials before work continues.
+
 ## ECS Fargate task sizing (build vs. planning)
 
 When a repo is `compute_type: ecs`, `EcsAgentCluster` provisions **two** Fargate task definitions, and the orchestrator picks between them per task by whether the resolved workflow is **read-only**:
