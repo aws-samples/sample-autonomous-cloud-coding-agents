@@ -4,7 +4,22 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 ## Implementation progress
 
-First prerequisite batch completed locally on 2026-09-13, on `fix/645-microvm-readiness`:
+Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
+
+- [x] Review current implementation, clean up verified stale comments, and prototype nesting.
+- [x] Fix server-test thread isolation (#841).
+- [x] Grant scoped coordinator payload deletion (#817).
+- [x] Refresh heartbeat atomically after approval.
+- [x] Stabilize terminal failure classification and user retry guidance (#817).
+- [x] Exercise real S3 bad-byte paths and fix closed-stream error classification (#817).
+- [x] Require new ARN fields to participate in validation; pin contract fields and anchor (#817).
+- [ ] Bind configuration to trusted deployment identity and restrict payload reads per task (#817 / #700).
+- [ ] Resolve uncertain session-start retries without duplicate or orphan VMs.
+- [ ] Finish logging-failure observability (#810) and registry-overflow coverage (#818).
+- [ ] Implement production nesting if included, then verify a clean P2 deployment.
+- [ ] Implement and verify the P3 sleep/wake lifecycle described below.
+
+First prerequisite batch completed locally on 2026-09-13:
 
 | Commit | Completed work | Proof |
 |---|---|---|
@@ -14,7 +29,17 @@ First prerequisite batch completed locally on 2026-09-13, on `fix/645-microvm-re
 
 Validation for this batch: `mise run quality` in `agent/` passed lint, formatting, type checks and **1,785 tests**, with **83.75%** coverage. Six relevant CDK suites passed **509 tests** via `mise run testf`; CDK ESLint and TypeScript compilation also passed. The original review/cleanup is commit `19904775`.
 
-These are source changes, not changes to deployed AWS resources. The IAM fix needs a normal stack deployment; the heartbeat fix needs an updated agent image. No bootstrap-policy change is required by this batch. #817's other tracks, #700, start-retry uncertainty, nesting, clean P2 verification and P3 lifecycle work remain open. The historical validation section at the end describes the earlier review commit only.
+These are source changes, not changes to deployed AWS resources. The IAM fix needs a normal stack deployment; the heartbeat fix needs an updated agent image. No bootstrap-policy change is required by this batch. The historical validation section at the end describes the earlier review commit only.
+
+Second prerequisite batch completed locally on 2026-09-13:
+
+| Commit | Completed work | Proof |
+|---|---|---|
+| `8c04dd34` | #817: exercise real S3 body failures; classify a closed stream as unreadable payload | Five route cases cover bad JSON/encoding, incomplete/closed streams and a non-object body. The closed-stream case failed with HTTP 400 before the fix and now returns structured HTTP 500 without installing config or starting work. |
+| `2e20d54a` | #817: stable terminal failure codes, precise region/auth/config guidance and consistent task/reply classification | New regressions reproduced the prior misclassification. Tests assert saved message → task API → channel/panel guidance, legacy records, hook 4xx/5xx and start-retry decisions. |
+| `cfe95c5e` | #817: exact contract assertions and reverse ARN-validation guards | Negative mutations failed in both Python and the real constants-checker subprocess before the fix. New ARN fields pass only when added to the validation set. |
+
+Final checks for the second batch: `mise run quality` passed **1,797 Python tests**, lint, formatting and type checks (**83.87%** coverage). Eight relevant CDK suites passed **476 tests**; CDK ESLint, TypeScript compilation, constants-sync and Markdown link checks passed. These counts describe the selected suites for each batch, not additional disjoint tests. No cloud resources were changed. Deploy the orchestrator update and an updated agent image to use these fixes; trusted configuration provenance, task-scoped payload reads, uncertain-start retries and P3 remain open.
 
 ## The result we want
 
@@ -72,7 +97,7 @@ Keep nesting in a separate change from lifecycle logic. Developing P3 locally ne
 
 1. Record the source commit, dependency lockfiles, bootstrap bundle version, image version and enabled context flags. Track #645, #817, #700, #818, #841 and #857 with concrete remaining checkboxes. Do not reopen consolidated #813–816 as if they represented four separate finished fixes.
 2. Land/review this comment cleanup independently. It deliberately does not repair runtime behavior.
-3. Fix the #841 test fixture: every spawned pipeline thread must finish or be stopped/joined before mocks/environment are restored. Synchronize with events, not arbitrary sleeps; fail teardown if a thread remains alive. Keep test state isolated without discarding references to live threads.
+3. **Completed locally — #841:** every tracked pipeline thread is joined before mocks/environment are restored; teardown reports surviving threads without discarding their handles. A deterministic subprocess regression verifies isolation across successive tests.
 4. Run focused baseline suites for server hooks, task-state approvals, credentials, strategy, orchestrator, approval handlers, construct IAM and bootstrap coverage. Record existing unrelated failures rather than quietly weakening assertions or thresholds.
 5. Make the phase vocabulary explicit: this is P3 of ADR-021. Use different names for PR/work-package sequencing so “P1 priority” on an issue is not confused with phase P1.
 
@@ -80,10 +105,11 @@ Keep nesting in a separate change from lifecycle logic. Developing P3 locally ne
 
 ### 1A. Finish #817
 
-- **Deletion IAM:** grant the coordinator `s3:DeleteObject` on the dedicated MicroVM payload bucket's task-object prefix. The worker gets no delete permission. Update `task-orchestrator.test.ts` and `stacks/agent.test.ts`, which currently assert the wrong absence. Exercise upload → start → finalize → delete, failed deletion logging and lifecycle fallback. Keep deletion best-effort so it does not hide the task's real outcome.
-- **Classifier:** separate a stable MicroVM failure category from untrusted/free-form AWS `stateReason`. Test host unavailable, capacity unavailable, true unsupported region, authorization/configuration, concurrency and hook HTTP 400 cases. Check both stored task classification and user-facing retry advice. Preserve raw reason text for diagnosis without letting it redefine the category.
-- **Trusted configuration:** decide which data is trusted at `/run`. A same-payload account anchor cannot authenticate its siblings. Bind accepted deployment identifiers to trusted deployment configuration or an authenticated payload reference; preserve legitimate cross-region secrets. Reject another workspace's secret even when it has the same account number. Add exact contract key/ARN-key/anchor assertions plus the reverse assertion that newly introduced ARN fields cannot bypass validation.
-- **S3 bad bytes:** feed truncated and invalid-encoding bytes through the real fetch/decode/envelope/route path. Expect a structured unreadable-payload response, no partially installed environment and no pipeline thread. Keep producer-schema mistakes distinguishable from transport failures.
+- [x] **Deletion IAM:** the coordinator has exact `s3:DeleteObject` on `*/payload.json` in the dedicated bucket. Construct and stack tests pin that scope. The worker retains read-only permissions, and deletion failure does not hide the task outcome.
+- [x] **Classifier:** reconciliation persists `MICROVM_SUBSTRATE_TERMINATED` or `MICROVM_RUN_HOOK_REJECTED` separately from the descriptive AWS reason. The known leading run-hook 4xx response selects the latter; arbitrary appended text cannot override the code. Legacy task records remain readable. Tests cover task API classification, channel/panel retry guidance, host/capacity failures, regional faults, authorization/configuration, concurrency words, hook 400/500 and other backends.
+- [ ] **Trusted configuration:** decide which data is trusted at `/run`. A same-payload account anchor cannot authenticate its siblings. Bind accepted deployment identifiers to trusted deployment configuration or an authenticated payload reference; preserve legitimate cross-region secrets. Reject another workspace's secret even when it has the same account number.
+- [x] **Contract guards:** pin exact contract fields, ARN fields and the account anchor in both languages. Python import-time validation and the constants checker reject newly added `*_arn` / `*_ARN` fields omitted from `arn_keys`. This prevents accidental validation gaps; it does not establish deployment identity.
+- [x] **S3 bad bytes:** real `StreamingBody` tests cover truncated JSON, invalid encoding, short and closed streams, and non-object JSON through fetch/decode/envelope/route. They assert a structured unreadable response, no configuration installation/environment mutation, and no pipeline thread. A closed-stream `ValueError` now reaches the unreadable-payload 500 branch. Malformed hook envelopes retain the separate 400 response. S3 writes are atomic; invalid stored bytes need replacement, not an assumption that another identical read repairs them.
 - **Documentation:** verify all remaining contract/status changes update source docs and their generated copies through the sync script.
 
 ### 1B. Narrow payload reads (#700)
@@ -94,9 +120,9 @@ Evaluate a short-lived, single-object signed URL or a trusted bootstrap envelope
 
 ### 1C. Fix approval/heartbeat ordering
 
-Change `task_state.transact_resume_from_approval` to refresh `agent_heartbeat_at` in the **same conditional update** that restores RUNNING. Keep the existing expected status and `awaiting_approval_request_id` conditions.
+**Completed locally:** `task_state.transact_resume_from_approval` refreshes `agent_heartbeat_at` in the **same conditional update** that restores RUNNING. The expected status and `awaiting_approval_request_id` conditions remain in place.
 
-Regression: task starts, waits over 240 seconds, then resumes. Force the orchestrator to poll after the transaction but before the heartbeat thread's next tick. It must remain healthy. Also test cancellation winning the race, wrong request ID, and ECS behavior; do not enable server-thread heartbeat enforcement on ECS.
+Regression coverage includes a task that waits over 240 seconds and resumes before the next heartbeat tick; immediate polling remains healthy for AgentCore and MicroVM. Existing cancellation/wrong-request conditions and ECS behavior are preserved. This is approval-state coverage, not yet a live frozen-MicroVM test.
 
 ### 1D. Make session-start retries honest
 

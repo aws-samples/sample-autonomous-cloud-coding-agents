@@ -4,7 +4,7 @@ Reviewed 2026-09-13 against `main` commit `5e10038c7e28179b302ac4de78b709795aeba
 
 This review covers the existing MicroVM implementation, related P2 follow-ups, comment accuracy and nested-stack feasibility. It includes local experiments, not an AWS deployment or a new live smoke run. The associated [implementation plan](./645-p3-implementation-plan.md) turns the findings into ordered work.
 
-**Implementation update (2026-09-13):** the subsequent prerequisite commits fix #841 thread isolation, #817 coordinator payload-deletion permission and the approval-resume heartbeat race locally. The findings below preserve the reviewed baseline; see [implementation progress](./645-p3-implementation-plan.md#implementation-progress) for commits and validation. Other findings and live verification remain open.
+**Implementation update (2026-09-13):** subsequent prerequisite work fixes #841 thread isolation, #817 coordinator payload-deletion permission, terminal-failure classification, closed S3-stream handling, and the approval-resume heartbeat race locally. Real bad-byte route tests and ARN contract guards are also added. Trusted deployment identity, task-scoped payload reads and live verification remain open. The findings below preserve the reviewed baseline; see [implementation progress](./645-p3-implementation-plan.md#implementation-progress) for commits, checks and remaining work.
 
 ## Start here: the pieces in plain language
 
