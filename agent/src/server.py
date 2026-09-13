@@ -1485,7 +1485,7 @@ class MicrovmRunHookRequest(BaseModel):
 
 
 class _PayloadFetchError(Exception):
-    """A ``/run`` payload the agent could not READ, as opposed to could not PARSE.
+    """A fetched ``/run`` payload that could not be read or decoded.
 
     Exists purely to be *not* a ``ValueError``, because the ``/run`` handler
     discriminates its 400 from its 500 on exactly that type and the two answers
@@ -1496,13 +1496,13 @@ class _PayloadFetchError(Exception):
     * 500 ``MICROVM_RUN_PAYLOAD_UNREADABLE`` — "the payload could not be read;
       retrying CAN help."
 
-    A truncated, racing, or half-written S3 object is the SECOND kind, but its
-    natural exception is ``json.JSONDecodeError`` — a ``ValueError`` subclass — so
-    it landed in the 400 branch and told the operator the orchestrator was at
-    fault when the orchestrator was fine and the object was bad. Only the
-    *pre-fetch* URI-shape check legitimately raises ``ValueError`` on this path,
-    which is why a blanket ``except ValueError`` is the wrong discriminator and
-    this type exists.
+    Corrupt/truncated JSON or an interrupted body read is the SECOND kind, but
+    ``json.JSONDecodeError`` and a closed stream's error are ``ValueError``
+    subclasses. Without this wrapper, the handler mistakes those fetch/decode
+    failures for malformed hook envelopes. Only the pre-fetch URI-shape check
+    should reach the handler's ``ValueError`` branch.
+    S3 publishes object writes atomically: a malformed stored object needs
+    replacement, and retrying the same bytes will not repair them.
     """
 
 
@@ -1539,17 +1539,14 @@ def _fetch_microvm_payload_from_s3(uri: str) -> dict:
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     client = platform_client("s3", region_name=region)
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
     try:
+        body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
         payload = json.loads(body)
     except ValueError as exc:
-        # ``JSONDecodeError`` IS a ``ValueError``, so without this re-raise a
-        # truncated or half-written object would be reported as an orchestrator
-        # envelope bug and marked non-retryable. Re-raised as the type the handler
-        # routes to its retryable 500.
+        # Decode failures and a closed response stream can both raise ValueError.
+        # Keep them out of the handler's malformed-envelope (400) branch.
         raise _PayloadFetchError(
-            f"S3 payload at {uri!r} is not valid JSON ({exc}); the object may be "
-            "truncated or still being written"
+            f"S3 payload at {uri!r} could not be read as JSON ({exc})"
         ) from exc
     if not isinstance(payload, dict):
         raise _PayloadFetchError(

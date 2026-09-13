@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1465,6 +1466,59 @@ class TestMicrovmRunHookS3Payload:
     pointer travels in the hook body.
     """
 
+    @pytest.mark.parametrize(
+        "body_bytes,stream_fault",
+        [
+            (b'{"platform_config":{"task_table_name":"must-not-install"},"task_id":', None),
+            (b'{"task_id":"bad-encoding-\xff"}', None),
+            (b'{"task_id":"short-stream"}', "incomplete"),
+            (b'{"task_id":"closed-stream"}', "closed"),
+            (b"[1,2,3]", None),
+        ],
+        ids=["truncated-json", "invalid-encoding", "incomplete-stream", "closed-stream", "array"],
+    )
+    def test_bad_s3_bytes_use_the_real_fetch_path_and_start_nothing(
+        self, client, monkeypatch, body_bytes, stream_fault
+    ):
+        from botocore.response import StreamingBody
+
+        import aws_session
+
+        raw = BytesIO(body_bytes)
+        if stream_fault == "closed":
+            raw.close()
+        body = StreamingBody(raw, len(body_bytes) + (stream_fault == "incomplete"))
+        s3 = MagicMock()
+        s3.get_object.return_value = {"Body": body}
+        factory = MagicMock(return_value=s3)
+        run_task = MagicMock()
+        install_config = MagicMock(wraps=server._install_platform_config)
+        monkeypatch.setattr(aws_session, "platform_client", factory)
+        monkeypatch.setattr(server, "run_task", run_task)
+        monkeypatch.setattr(server, "_install_platform_config", install_config)
+        before_env = dict(os.environ)
+
+        response = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload_s3_uri": "s3://payload-bucket/t-bad/payload.json",
+                    "platform_config": {"task_table_name": "outer-must-not-install"},
+                }
+            ),
+        )
+
+        assert response.status_code == 500
+        assert response.json()["code"] == "MICROVM_RUN_PAYLOAD_UNREADABLE"
+        assert response.json()["message"]
+        s3.get_object.assert_called_once_with(Bucket="payload-bucket", Key="t-bad/payload.json")
+        assert factory.call_args.args == ("s3",)
+        install_config.assert_not_called()
+        run_task.assert_not_called()
+        assert dict(os.environ) == before_env
+        with server._threads_lock:
+            assert server._active_threads == []
+
     def test_fetches_the_payload_from_s3_and_starts_the_pipeline(
         self, client, monkeypatch, baked_platform_env
     ):
@@ -2681,7 +2735,8 @@ class TestMicrovmRunHookPlatformConfig:
         # Review N1: this is a problem with the FETCHED OBJECT, not with the envelope
         # the orchestrator built, so it belongs on the retryable 500 branch. The old
         # 400 told the operator "the orchestrator built a bad envelope; retrying
-        # cannot help" — both halves wrong for a racing or half-written S3 object.
+        # cannot help". A fetched-object failure is kept distinct from that
+        # producer-envelope error; invalid stored bytes still need replacement.
         monkeypatch.setattr(
             server,
             "_fetch_microvm_payload_from_s3",
