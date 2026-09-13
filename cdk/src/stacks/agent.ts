@@ -738,12 +738,9 @@ export class AgentStack extends Stack {
     // {user_id, repo, task_id}, and that role carries the tenant-data grants
     // constrained by aws:PrincipalTag conditions. The runtime role keeps only
     // non-tenant / shared access:
-    //   - UserConcurrencyTable: user-scoped counter (agent path does not write
-    //     it today; left here for the reconciler/orchestrator parity).
     //   - GitHub PAT secret: read once at startup, before the agent assumes the
     //     SessionRole.
     //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
-    userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
@@ -781,15 +778,17 @@ export class AgentStack extends Stack {
     // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
     // per-user-prefixed trace writes and attachment reads), each constrained
-    // by aws:PrincipalTag conditions so a compromised session reaches only its
-    // own task's data. The agent assumes this with refreshable credentials
+    // by aws:PrincipalTag conditions for the existing session credentials.
+    // The compute role chooses the tags; that choice is not independently
+    // authenticated by this trust policy. Main-task writes are restricted to
+    // reporting attributes. The agent assumes this with refreshable credentials
     // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
     // ExecutionRole as the assuming principal; the ECS task role is added in
     // the ECS block below when that backend is enabled.
     const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
       assumingRoles: [runtime.role],
+      taskTable: taskTable.table,
       taskScopedTables: [
-        taskTable.table,
         taskEventsTable.table,
         taskApprovalsTable.table,
         taskNudgesTable.table,

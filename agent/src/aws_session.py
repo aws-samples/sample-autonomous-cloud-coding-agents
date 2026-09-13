@@ -8,8 +8,11 @@ per-task **SessionRole** with session tags ``{user_id, repo, task_id}`` and
 uses the resulting short-lived, tag-scoped credentials. The SessionRole's IAM
 policy self-constrains via ``aws:PrincipalTag/*`` conditions
 (``dynamodb:LeadingKeys`` on ``task_id`` for the task tables, an S3 prefix
-condition on ``user_id`` for the trace bucket), so a compromised session can
-only reach its own task's data — not other tenants'.
+condition on ``user_id`` for the trace bucket). Existing scoped credentials
+can only reach their tagged task. The compute role chooses those tags: a
+compromised worker with ambient credentials is a separate trust boundary.
+Task updates are additionally restricted to reporting/approval attributes;
+whole-row replacement and coordinator metadata writes are not granted.
 
 Two properties matter for correctness:
 

@@ -8,7 +8,7 @@ This review covers the existing MicroVM implementation, related P2 follow-ups, c
 
 Further local work adds durable MicroVM start receipts, stable request tokens and bounded handle recovery. AWS token-retention/conflict behavior and unknown-ID cleanup remain live verification gates. The shared finalizer's repeated-decrement risk was subsequently reproduced and fixed locally with task-owned reservation transactions, unified counter writers and revision-guarded reconciliation, including approval waits. DynamoDB Local exercises the real transaction conditions; deployed IAM, scan scale and upgrade/drain behavior still need AWS verification.
 
-The reservation review also found a separate trust boundary: the agent role can write/replace/delete its own task row, including coordinator metadata. Internal API fields are not protected from that writer by their naming or TypeScript types. The plan tracks coordinator-only storage or constrained agent writes as a security prerequisite. The replay fix assumes cooperating writers; it is not a hostile-agent isolation claim.
+The reservation review found a separate trust boundary: the old agent role could write/replace/delete its task row, including coordinator metadata. A subsequent local fix restricts main-task writes to reporting/approval attributes, removes replacement/deletion permissions and removes unused worker counter grants. It also removes unused Python submission/session-info helpers and corrects overstated tenant-isolation comments. [Metadata verification](./645-coordinator-metadata.md) records the tests and pending AWS gate. Status reports still come from the agent, and the compute role chooses session tags; this is not complete hostile-worker isolation.
 
 ## Start here: the pieces in plain language
 

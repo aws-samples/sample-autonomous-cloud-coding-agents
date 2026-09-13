@@ -571,6 +571,32 @@ describe('EcsAgentCluster construct', () => {
     });
   });
 
+  test('legacy direct access cannot replace task records, edit coordinator fields or access capacity', () => {
+    const policies = Object.entries(baseTemplate.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('TaskRole'));
+    expect(policies).toHaveLength(1);
+    const statements = policies[0][1].Properties.PolicyDocument.Statement;
+    expect(JSON.stringify(statements)).not.toContain('UserConcurrencyTable');
+    const taskStatements = statements.filter(
+      (s: { Resource: unknown }) => JSON.stringify(s.Resource).includes('TaskTable'),
+    );
+    expect(taskStatements).toHaveLength(2);
+    for (const s of taskStatements) {
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      expect(actions.every((a: string) => [
+        'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query',
+        'dynamodb:ConditionCheckItem', 'dynamodb:UpdateItem',
+      ].includes(a))).toBe(true);
+      if (actions.includes('dynamodb:UpdateItem')) {
+        const attrs = s.Condition['ForAllValues:StringEquals']['dynamodb:Attributes'];
+        expect(attrs).toContain('agent_heartbeat_at');
+        expect(attrs).not.toContain('microvm_start');
+        expect(attrs).not.toContain('concurrency_slot');
+        expect(s.Condition.Null['dynamodb:Attributes']).toBe('false');
+      }
+    }
+  });
+
   test('build def caps build parallelism to prevent OOM (K14 / ABCA-691)', () => {
     // The build task def serializes the mise DAG (MISE_JOBS=1) and pins the jest
     // fleet (JEST_MAX_WORKERS=4) so the cross-package build storm can't OOM the
@@ -695,7 +721,8 @@ describe('EcsAgentCluster construct', () => {
             assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
           }),
         ],
-        taskScopedTables: [taskTable, taskEventsTable],
+        taskTable,
+        taskScopedTables: [taskEventsTable],
         traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
         attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
       });
@@ -712,8 +739,11 @@ describe('EcsAgentCluster construct', () => {
       return Template.fromStack(stack);
     }
 
+    let sessionTemplate: Template;
+    beforeAll(() => { sessionTemplate = createWithSessionRole(); });
+
     test('injects AGENT_SESSION_ROLE_ARN into the container', () => {
-      createWithSessionRole().hasResourceProperties('AWS::ECS::TaskDefinition', {
+      sessionTemplate.hasResourceProperties('AWS::ECS::TaskDefinition', {
         ContainerDefinitions: Match.arrayWith([
           Match.objectLike({
             Environment: Match.arrayWith([
@@ -725,7 +755,7 @@ describe('EcsAgentCluster construct', () => {
     });
 
     test('task role gets sts:AssumeRole on the SessionRole, not direct task-table DDB grants', () => {
-      const template = createWithSessionRole();
+      const template = sessionTemplate;
       const policies = template.findResources('AWS::IAM::Policy');
 
       // Identify the task role's own inline policy: it is the one carrying the
@@ -748,28 +778,10 @@ describe('EcsAgentCluster construct', () => {
       expect(taskRolePolicies).toHaveLength(1);
 
       const taskRoleStatements = taskRolePolicies[0][1].Properties.PolicyDocument.Statement;
-      // No unconditioned dynamodb item grant on the task role (the only DDB the
-      // task role may touch directly is UserConcurrencyTable — assert that any
-      // DDB statement present is NOT a leading-key-less task-table grant by
-      // checking none grant dynamodb write actions without a condition beyond
-      // the concurrency table). Simplest robust check: the task role carries no
-      // dynamodb:GetItem/Query/BatchWriteItem statement at all for the task
-      // tables — grantReadWriteData on a removed table would have produced one.
-      const ddbItemStatements = taskRoleStatements.filter((s: { Action: string | string[] }) => {
-        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-        return actions.some((a: string) =>
-          ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:BatchWriteItem'].includes(a),
-        );
-      });
-      // The only permitted DDB item access on the task role is the
-      // UserConcurrencyTable grant. The two task-scoped tables (TaskTable,
-      // TaskEventsTable) must NOT appear — assert no statement references them.
-      const serialized = JSON.stringify(ddbItemStatements);
-      expect(serialized).not.toContain('TaskTable');
-      expect(serialized).not.toContain('TaskEventsTable');
+      // All tenant data stays on SessionRole; the agent has no counter access.
+      expect(JSON.stringify(taskRoleStatements)).not.toContain('dynamodb:');
 
-      // The conditioned (SessionRole) DDB statements still exist — exactly two
-      // task-scoped tables, each leading-key gated.
+      // Main-task read/update statements plus the events-table grant.
       let conditioned = 0;
       for (const policy of Object.values(policies)) {
         for (const s of policy.Properties.PolicyDocument.Statement) {
@@ -778,7 +790,7 @@ describe('EcsAgentCluster construct', () => {
           }
         }
       }
-      expect(conditioned).toBe(2);
+      expect(conditioned).toBe(3);
     });
   });
 });

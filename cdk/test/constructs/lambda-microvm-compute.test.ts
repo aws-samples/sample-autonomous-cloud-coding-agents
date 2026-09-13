@@ -113,11 +113,10 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     });
     agentSessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
       assumingRoles: [runtimeRole],
-      taskScopedTables: [
-        new dynamodb.Table(stack, 'TaskTable', {
-          partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-        }),
-      ],
+      taskTable: new dynamodb.Table(stack, 'TaskTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
       attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
     });

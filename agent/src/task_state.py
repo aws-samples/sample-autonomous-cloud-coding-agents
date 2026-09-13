@@ -1,8 +1,9 @@
 """Best-effort task state persistence to DynamoDB.
 
-All writes are wrapped in try/except so a DynamoDB outage never breaks the
-agent pipeline. When the TASK_TABLE_NAME environment variable is unset, all
-operations are no-ops.
+Progress/status writes are best-effort; approval transactions fail closed.
+The coordinator creates task records and owns compute identity and capacity
+reservations. This module only reads tasks and updates reporting/approval fields;
+its allowed attributes are pinned by the CDK agent-task-write-attributes contract.
 """
 
 import os
@@ -79,30 +80,6 @@ def _build_logs_url(task_id: str) -> str | None:
     )
 
 
-def write_submitted(
-    task_id: str, repo_url: str = "", issue_number: str = "", task_description: str = ""
-) -> None:
-    """Record a task as SUBMITTED (called from the invoke script or server)."""
-    try:
-        table = _get_table()
-        if table is None:
-            return
-        item = {
-            "task_id": task_id,
-            "status": "SUBMITTED",
-            "created_at": _now_iso(),
-        }
-        if repo_url:
-            item["repo_url"] = repo_url
-        if issue_number:
-            item["issue_number"] = issue_number
-        if task_description:
-            item["task_description"] = task_description
-        table.put_item(Item=item)
-    except Exception as e:
-        log("WARN", f"[task_state] write_submitted failed (best-effort): {e}")
-
-
 def write_heartbeat(task_id: str) -> None:
     """Update ``agent_heartbeat_at`` while the task is RUNNING (orchestrator crash detection)."""
     try:
@@ -125,63 +102,6 @@ def write_heartbeat(task_id: str) -> None:
         ):
             return
         log("WARN", f"[task_state] write_heartbeat failed (best-effort): {type(e).__name__}: {e}")
-
-
-def write_session_info(task_id: str, session_id: str, agent_runtime_arn: str) -> None:
-    """Record session_id + agent_runtime_arn on a pre-RUNNING task.
-
-    The orchestrator Lambda writes these fields on the HYDRATING → RUNNING
-    transition so ``cancel-task`` can ``StopRuntimeSession`` on the right
-    runtime and operators can correlate a stuck task to a specific AgentCore
-    session. Currently only the orchestrator calls this; the agent-side
-    invocation path inherits the fields from the orchestrator's payload.
-
-    Idempotent + best-effort. Skips silently if the task is already
-    past SUBMITTED/HYDRATING (concurrent transition winning is fine).
-    """
-    if not task_id or (not session_id and not agent_runtime_arn):
-        return
-    try:
-        table = _get_table()
-        if table is None:
-            return
-        set_parts: list[str] = []
-        expr_values: dict = {
-            ":submitted": "SUBMITTED",
-            ":hydrating": "HYDRATING",
-        }
-        if session_id:
-            set_parts.append("session_id = :sid")
-            expr_values[":sid"] = session_id
-        if agent_runtime_arn:
-            set_parts.append("agent_runtime_arn = :arn")
-            set_parts.append("compute_type = :ct")
-            set_parts.append("compute_metadata = :cm")
-            expr_values[":arn"] = agent_runtime_arn
-            expr_values[":ct"] = "agentcore"
-            expr_values[":cm"] = {"runtimeArn": agent_runtime_arn}
-        if not set_parts:
-            return
-        table.update_item(
-            Key={"task_id": task_id},
-            UpdateExpression="SET " + ", ".join(set_parts),
-            ConditionExpression="#s IN (:submitted, :hydrating)",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues=expr_values,
-        )
-    except Exception as e:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(e, ClientError)
-            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
-        ):
-            # Task already advanced — concurrent legitimate transition wins.
-            return
-        log(
-            "WARN",
-            f"[task_state] write_session_info failed (best-effort): {type(e).__name__}: {e}",
-        )
 
 
 def write_running(task_id: str) -> None:
@@ -504,11 +424,9 @@ def get_task(task_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 #
 # ``TaskApprovalsTable`` and the AWAITING_APPROVAL status transitions are
-# provisioned by the CDK stack. The agent-side helpers below are written to
-# that contract and exposed so the ``pre_tool_use_hook`` can be implemented +
-# unit-tested (via mocked boto3 clients); once the stack sets
-# ``TASK_APPROVALS_TABLE_NAME`` + grants IAM, the same helpers start making
-# real DDB calls with no further code change on the agent side.
+# provisioned by the CDK stack. The ``pre_tool_use_hook`` uses these helpers
+# with task-scoped credentials. Transactions authorize each item separately:
+# Put on the approvals table and attribute-restricted Update on TaskTable.
 #
 # Primitives exposed:
 #   - ``transact_write_approval_request`` — atomic Put(TaskApprovals) +

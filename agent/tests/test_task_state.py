@@ -1,11 +1,145 @@
-"""Unit tests for pure functions in task_state.py."""
+"""Task persistence behavior and the agent's IAM write contract."""
 
+import ast
+import json
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 import task_state
 from task_state import TaskFetchError, _build_logs_url, _now_iso
+
+
+class TestAgentWriteContract:
+    def test_current_task_writers_fit_the_deployed_attribute_allowlist(self, monkeypatch):
+        """Exercise real writers; detect a new field before IAM rejects it live.
+
+        This checks request/contract compatibility, not AWS IAM enforcement.
+        """
+        table = MagicMock()
+        client = MagicMock()
+        monkeypatch.setattr(task_state, "_get_table", lambda: table)
+        monkeypatch.setenv("TASK_TABLE_NAME", "Tasks")
+        monkeypatch.setenv("TASK_APPROVALS_TABLE_NAME", "Approvals")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("LOG_GROUP_NAME", "/test")
+
+        task_state.write_running("t1")
+        task_state.write_heartbeat("t1")
+        task_state.write_terminal(
+            "t1",
+            "COMPLETED",
+            {
+                "pr_url": "https://example.com/pr/1",
+                "error": "example",
+                "cost_usd": 1,
+                "duration_s": 10,
+                "turns": 3,
+                "turns_attempted": 3,
+                "turns_completed": 2,
+                "prompt_version": "v1",
+                "memory_written": True,
+                "build_passed": True,
+                "lint_passed": True,
+                "code_changed": True,
+                "head_sha": "abc",
+                "answer_text": "done",
+                "otel_trace_id": "trace",
+                "trace_s3_uri": "s3://b/trace",
+                "artifact_uri": "s3://b/artifact",
+            },
+        )
+        assert task_state.write_trace_uri_conditional("t1", "s3://b/trace")
+        task_state.transact_write_approval_request(
+            "t1",
+            "r1",
+            {
+                "task_id": "t1",
+                "request_id": "r1",
+                "status": "PENDING",
+                "tool_name": "Bash",
+                "tool_input_preview": "example",
+                "tool_input_sha256": "a" * 64,
+                "reason": "approval required",
+                "severity": "high",
+                "matching_rule_ids": ["rule1"],
+                "created_at": "2026-09-13T00:00:00Z",
+                "timeout_s": 300,
+                "ttl": 1800000000,
+                "user_id": "u1",
+                "repo": "owner/repo",
+            },
+            client=client,
+        )
+        task_state.transact_resume_from_approval("t1", "r1", client=client)
+        assert task_state.increment_approval_gate_count_in_ddb("t1", client=client)
+
+        requests = [c.kwargs for c in table.update_item.call_args_list]
+        requests += [c.kwargs for c in client.update_item.call_args_list]
+        for call in client.transact_write_items.call_args_list:
+            for item in call.kwargs["TransactItems"]:
+                action, request = next(iter(item.items()))
+                if request["TableName"] == "Tasks":
+                    assert action == "Update"  # Never Put/Delete the task row.
+                    requests.append(request)
+        assert len(requests) == 7
+        table.put_item.assert_not_called()
+        table.delete_item.assert_not_called()
+
+        contract = Path(__file__).resolve().parents[2] / (
+            "cdk/src/constructs/agent-task-write-attributes.json"
+        )
+        allowed = set(json.loads(contract.read_text()))
+        seen: set[str] = set()
+        for request in requests:
+            # Current writers use flat attributes. Resolve aliases and ignore
+            # value placeholders/operators/functions in their DDB expressions.
+            expression = request["UpdateExpression"] + " " + request.get("ConditionExpression", "")
+            expression = re.sub(r":[A-Za-z0-9_]+", "", expression)
+            for alias, name in request.get("ExpressionAttributeNames", {}).items():
+                expression = expression.replace(alias, name)
+            names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression))
+            names -= {"SET", "REMOVE", "ADD", "IN", "AND", "attribute_not_exists"}
+            names |= set(request["Key"])
+            assert names <= allowed, (
+                f"Task writer needs a reviewed IAM contract update: {names - allowed}"
+            )
+            seen |= names
+        # No stale writable attribute may linger after its writer is removed.
+        assert seen == allowed
+
+    def test_write_inventory_requires_review_when_a_new_writer_is_added(self):
+        tree = ast.parse(Path(task_state.__file__).read_text())
+        writers = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr
+                in {
+                    "update_item",
+                    "put_item",
+                    "delete_item",
+                    "transact_write_items",
+                    "batch_writer",
+                }
+                for child in ast.walk(node)
+            )
+        }
+        assert writers == {
+            "write_running",
+            "write_heartbeat",
+            "write_terminal",
+            "write_trace_uri_conditional",
+            "transact_write_approval_request",
+            "transact_resume_from_approval",
+            "increment_approval_gate_count_in_ddb",
+            "best_effort_update_approval_status",  # Writes only the supporting approvals table.
+        }
 
 
 class TestNowIso:
@@ -95,82 +229,6 @@ class TestGetTask:
         with pytest.raises(TaskFetchError) as exc_info:
             task_state.get_task("t-throttled")
         assert "ProvisionedThroughputExceededException" in str(exc_info.value)
-
-
-class TestWriteSessionInfo:
-    """Rev-5 OBS-4: interactive path writes session_id + agent_runtime_arn."""
-
-    def test_writes_session_id_and_arn(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info(
-            "t-interactive",
-            "sess-abc123",
-            "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz",
-        )
-
-        assert len(calls) == 1
-        call = calls[0]
-        assert call["Key"] == {"task_id": "t-interactive"}
-        assert "session_id = :sid" in call["UpdateExpression"]
-        assert "agent_runtime_arn = :arn" in call["UpdateExpression"]
-        assert "compute_type = :ct" in call["UpdateExpression"]
-        assert "compute_metadata = :cm" in call["UpdateExpression"]
-        values = call["ExpressionAttributeValues"]
-        assert values[":sid"] == "sess-abc123"
-        assert values[":arn"] == "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
-        assert values[":ct"] == "agentcore"
-        assert values[":cm"] == {
-            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
-        }
-
-    def test_noop_when_both_empty(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info("t-empty", "", "")
-        assert calls == []
-
-    def test_skips_silently_when_task_already_advanced(self, monkeypatch):
-        from botocore.exceptions import ClientError
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                raise ClientError(
-                    {"Error": {"Code": "ConditionalCheckFailedException"}},
-                    "UpdateItem",
-                )
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        # Must NOT raise — the conditional failure is expected when the
-        # task has already transitioned past SUBMITTED/HYDRATING.
-        task_state.write_session_info("t-raced", "sess-x", "arn:x")
-
-    def test_writes_only_session_when_arn_missing(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info("t-partial", "sess-only", "")
-        assert len(calls) == 1
-        assert "session_id = :sid" in calls[0]["UpdateExpression"]
-        assert "agent_runtime_arn" not in calls[0]["UpdateExpression"]
 
 
 class TestWriteRunningMaintainsStatusCreatedAt:

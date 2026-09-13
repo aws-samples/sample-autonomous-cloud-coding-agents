@@ -45,4 +45,4 @@ docker stop abca645-capacity-ddb
 
 Local tests prove the application requests and DynamoDB Local's transaction behavior. They do not establish deployed IAM, AWS scaling, successful rollout or MicroVM sleep/wake behavior. Terminal events may repeat or be lost independently of the atomic seat update.
 
-The reservation/start markers share an agent-writable task row. Their public-API omission does not protect them against a compromised agent. The [P3 plan](./645-p3-implementation-plan.md#1g-protect-coordinator-owned-metadata) tracks that separate security boundary.
+The reservation/start markers share the task row. Subsequent prerequisite work restricts agent updates to reporting/approval attributes and removes whole-row replacement/deletion plus direct worker access to the counter. Public-API omission alone was not protection. See [coordinator metadata verification](./645-coordinator-metadata.md) for the writer inventory, actual policy boundary, remaining status/tag trust limits and required AWS authorization checks. These local transaction tests do not prove that security boundary.

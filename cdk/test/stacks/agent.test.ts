@@ -45,6 +45,22 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  test('AgentCore runtime has no direct DynamoDB grant, including capacity counters', () => {
+    const roles = Object.entries(template.findResources('AWS::IAM::Role'));
+    const runtimeRoleIds = roles.filter(([, role]) =>
+      JSON.stringify(role.Properties.AssumeRolePolicyDocument).includes('bedrock-agentcore.amazonaws.com'),
+    ).map(([id]) => id);
+    expect(runtimeRoleIds.length).toBeGreaterThan(0);
+    const policies = Object.values(template.findResources('AWS::IAM::Policy')).filter(
+      (policy) => policy.Properties.Roles.some((role: { Ref?: string }) =>
+        role.Ref && runtimeRoleIds.includes(role.Ref),
+      ),
+    );
+    expect(policies.length).toBeGreaterThan(0);
+    expect(JSON.stringify(policies)).not.toContain('dynamodb:');
+    expect(JSON.stringify(roles.filter(([id]) => runtimeRoleIds.includes(id)))).not.toContain('dynamodb:');
+  });
+
   test('creates exactly 22 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),

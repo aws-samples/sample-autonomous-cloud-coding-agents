@@ -29,7 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
-import { AgentSessionRole } from './agent-session-role';
+import { AgentSessionRole, grantAgentTaskTableAccess } from './agent-session-role';
 import { resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import { LinearIdentityVault } from './linear-identity-vault';
 import { buildAppId } from './solution-ua-aspect';
@@ -525,12 +525,10 @@ export class EcsAgentCluster extends Construct {
     if (props.agentSessionRole) {
       props.agentSessionRole.admitComputeRole(taskRole);
     } else {
-      props.taskTable.grantReadWriteData(taskRole);
+      grantAgentTaskTableAccess(props.taskTable, taskRole, false);
       props.taskEventsTable.grantReadWriteData(taskRole);
     }
-    // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
-    // touched by the reconciler/orchestrator path; keep it on the task role.
-    props.userConcurrencyTable.grantReadWriteData(taskRole);
+    // Capacity counters are coordinator-owned. The agent never accesses them.
 
     // Secrets Manager read for GitHub token (read once at startup, before the
     // agent assumes the SessionRole — stays on the task role).
@@ -681,7 +679,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(taskRole, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
+        reason: 'DynamoDB index/* wildcards from the legacy TaskEventsTable grant when no SessionRole is wired (TaskTable allows only reporting updates; the worker has no UserConcurrency access); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',

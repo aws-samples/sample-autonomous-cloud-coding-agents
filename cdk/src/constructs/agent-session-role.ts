@@ -24,6 +24,53 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import agentTaskWriteAttributes from './agent-task-write-attributes.json';
+
+/**
+ * Task reporting may update only the attributes written by task_state.py.
+ * Keep whole-row replacement/deletion and coordinator metadata out of this
+ * grant. DynamoDB evaluates each transaction item using its item action, so
+ * approval UpdateItem operations receive the same restriction.
+ *
+ * This protects writes, not reads: agents may read their complete task record.
+ * The JSON list is also checked against actual Python writer requests in tests.
+ * Used for both scoped sessions and the legacy ECS direct-grant fallback.
+ */
+export function grantAgentTaskTableAccess(
+  table: dynamodb.ITable,
+  grantee: iam.IGrantable,
+  taskScoped: boolean,
+): void {
+  const leadingKeys = taskScoped
+    ? { 'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'] }
+    : {};
+  grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
+    resources: [table.tableArn],
+    ...(taskScoped ? {
+      conditions: {
+        'ForAllValues:StringEquals': leadingKeys,
+        'Null': { 'dynamodb:LeadingKeys': 'false' },
+      },
+    } : {}),
+  }));
+  grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:UpdateItem'],
+    resources: [table.tableArn],
+    conditions: {
+      'ForAllValues:StringEquals': {
+        ...leadingKeys,
+        'dynamodb:Attributes': agentTaskWriteAttributes,
+      },
+      // ForAllValues alone also matches an absent context key. Require the
+      // attribute list (and session key when scoped) to be present.
+      'Null': {
+        'dynamodb:Attributes': 'false',
+        ...(taskScoped ? { 'dynamodb:LeadingKeys': 'false' } : {}),
+      },
+    },
+  }));
+}
 
 /** S3 key prefixes the agent writes/reads, scoped per tenant. */
 const TRACE_KEY_PREFIX = 'traces';
@@ -36,17 +83,24 @@ const ARTIFACT_KEY_PREFIX = 'artifacts';
  */
 export interface AgentSessionRoleProps {
   /**
-   * Compute roles (AgentCore Runtime ExecutionRole and/or ECS Fargate task
-   * role) permitted to assume this SessionRole and pass session tags. These
-   * are the only principals trusted to mint scoped credentials, so they bound
-   * the trust surface. Both run the same trusted agent code, which sources the
+   * Compute roles (AgentCore Runtime, ECS Fargate or Lambda MicroVM) permitted
+   * to assume this SessionRole and pass session tags. These principals mint
+   * scoped credentials. The agent code sources the
    * `{user_id, repo, task_id}` tag values from the resolved TaskConfig.
    */
   readonly assumingRoles: iam.IRole[];
 
   /**
-   * The four task-scoped DynamoDB tables, all partitioned by `task_id`. The
-   * SessionRole receives item-level access constrained by a
+   * The main task table: own-task reads and attribute-scoped reporting updates.
+   * Task creation/deletion, owner identity, compute handles, start receipts and
+   * capacity reservations belong to the coordinator.
+   */
+  readonly taskTable: dynamodb.ITable;
+
+  /**
+   * Supporting task-scoped tables (events, approvals, nudges), all partitioned
+   * by `task_id`. Do not include taskTable here: that would bypass its write
+   * restriction. The SessionRole receives item-level access constrained by a
    * `dynamodb:LeadingKeys` condition on `aws:PrincipalTag/task_id`, so a
    * session can only touch its own task's rows. Order is irrelevant.
    */
@@ -98,12 +152,14 @@ export interface AgentSessionRoleProps {
  * - S3 trace writes and attachment reads are scoped to the
  *   `<prefix>/${aws:PrincipalTag/user_id}/` object prefix.
  *
- * The result: a compromised agent session can reach only its own task's data,
- * not other tenants' — enforced at the IAM layer rather than in application
- * code. Backend-agnostic: the same role serves agents booted under either the
- * AgentCore Runtime execution role or the ECS Fargate task role.
+ * Existing session credentials are limited to their tagged task. Compute roles
+ * choose these tags when assuming this role; the trust policy does not bind
+ * those choices to a particular task. This is not an isolation claim for a
+ * compromised worker that can obtain ambient compute credentials.
+ * TaskTable writes additionally exclude coordinator-owned attributes and
+ * whole-row replacement/deletion. All three compute backends share this role.
  *
- * CloudWatch Logs remains on the compute role (shared, non-tenant access). The
+ * CloudWatch Logs remains on the compute role (shared access). The
  * compute role *also* keeps `InvokeModel`; this role adds a parallel, session-
  * tagged Bedrock grant (#215) used by the Claude Code subprocess for cost
  * attribution. Long-task safety on the 1-hour-capped chained session is handled
@@ -136,6 +192,9 @@ export class AgentSessionRole extends Construct {
         'AgentSessionRole requires at least one assuming role (the compute role[s] that mint scoped credentials)',
       );
     }
+    if (props.taskScopedTables.some((table) => table.tableArn === props.taskTable.tableArn)) {
+      throw new Error('taskTable must not appear in taskScopedTables; it requires restricted writes');
+    }
 
     const [firstAssumingRole] = props.assumingRoles;
 
@@ -153,7 +212,9 @@ export class AgentSessionRole extends Construct {
       maxSessionDuration: Duration.hours(1),
     });
 
-    // --- DynamoDB: item access gated by task_id leading-key ---
+    grantAgentTaskTableAccess(props.taskTable, this.role, true);
+
+    // --- Supporting tables: item access gated by task_id leading-key ---
     // One statement per table keeps the resource ARNs explicit. The condition
     // requires the request's partition key (task_id) to equal the session's
     // task_id tag. ForAllValues is required by DynamoDB for LeadingKeys.
@@ -166,6 +227,7 @@ export class AgentSessionRole extends Construct {
             'ForAllValues:StringEquals': {
               'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'],
             },
+            'Null': { 'dynamodb:LeadingKeys': 'false' },
           },
         }),
       );

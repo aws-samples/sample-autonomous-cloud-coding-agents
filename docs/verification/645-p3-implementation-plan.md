@@ -18,7 +18,8 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. â€œCompletedâ€
 - [ ] Verify AWS token retention/conflicts and unknown-start cleanup on a live deployment.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
 - [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
-- [ ] Protect coordinator-owned task metadata from agent writes before claiming hostile-task isolation.
+- [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
+- [ ] Verify metadata restrictions with real AWS sessions/transactions; retain status/tag trust limits.
 - [ ] Finish logging-failure observability (#810) and registry-overflow coverage (#818).
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [ ] Implement and verify the P3 sleep/wake lifecycle described below.
@@ -64,6 +65,13 @@ Fourth prerequisite batch completed locally on 2026-09-13:
 Final checks for the fourth batch: CDK ESLint and compilation passed. **153 handler suites / 3,600 tests** passed with the local integration suite enabled; **15** of those tests used DynamoDB Local. The focused run passed **323 tests**, including the two relevant IAM construct suites; those counts overlap. Documentation sync, the **77-page** Astro build and Markdown link checks passed. The broad handler run exited successfully after the previously observed delayed-exit warning; the focused run exited normally. The temporary database container was stopped and removed.
 
 No AWS resources changed. Activating this batch requires the coordinated deployment/drain procedure in [capacity verification](./645-capacity-reservations.md), including the reconciler's task-update permission and upload confirmation's narrowed counter access. No agent source/image or bootstrap bundle changed. Coordinator metadata protection is newly tracked in 1G; internal reservation fields currently share an agent-writable row.
+
+Fifth prerequisite batch completed locally on 2026-09-13:
+
+- Main-task agent writes now use a reviewed attribute allowlist; whole-row replacement/deletion and coordinator field updates are excluded. Missing session/attribute context fails closed. ECS's legacy direct path shares the restriction.
+- Removed unused AgentCore/ECS capacity-table grants and the uncalled Python submission/session-registration helpers. Corrected comments that overstated tenant isolation or described approval writes as best-effort.
+- The old-policy regression failed on `PutItem`. **1,795 Python tests** pass with **84.47%** coverage, including actual writer-request/permission-contract checks; **268 CDK tests** pass across session-role, ECS, MicroVM and full-stack suites. Python quality, CDK lint/compilation and documentation checks pass. These counts overlap earlier batches; four obsolete helper tests were removed and two contract tests added.
+- [Metadata verification](./645-coordinator-metadata.md) records the effective source-policy boundary, writer inventory, rollback constraints and pending real-AWS allowed/denied transaction matrix. No table migration or bootstrap-policy update is required. Application-role deployment and a matching agent image remain necessary; nothing was deployed.
 
 ## The result we want
 
@@ -176,9 +184,13 @@ Every counter change carries a fresh revision. Scheduled repair strongly scans t
 
 ### 1G. Protect coordinator-owned metadata
 
-The agent's task-scoped role restricts **which row** it can change, but currently permits replacement/deletion and unrestricted attribute updates within its own row. `microvm_start` and `concurrency_slot` are internal task-table fields; omitting them from API responses does not protect their storage. A compromised agent must not be able to rewrite the coordinator's start identity or revive a released reservation.
+**Implemented locally:** the main task table now permits own-task reads and only `UpdateItem` on an explicit reporting/approval attribute list. Replacement/deletion, start receipts, capacity markers, owner identity and compute handles are excluded. Supporting tables retain their task-scoped access. Missing IAM context keys fail closed. ECS's legacy direct-grant path uses the same attribute restriction; AgentCore/ECS no longer receive the unused shared-counter grant, and MicroVM never had it.
 
-Choose coordinator-only storage or carefully constrained agent write permissions, inventory every task-row writer, and test forged/replaced/deleted rows. Preserve legitimate agent progress/status updates and all backend identity tags. Treat this as a separate security prerequisite; the replay tests in 1D/1F do not establish a hostile-agent guarantee.
+The writer inventory found no production callers of Python `write_submitted` or `write_session_info`; those unused helpers and stale comments are removed. Contract tests exercise every current main-task writer, including complete terminal results and approval transactions, against the JSON attribute list used by CDK. Construct/stack tests inspect the actual grants across all three backends and prevent the main table from being supplied as an unrestricted supporting table.
+
+**Deployment gate:** run the allowed/denied request matrix in [metadata verification](./645-coordinator-metadata.md) using real scoped and ambient credentials, including aliased/nested updates, replacement/deletion and transactions that mix forbidden task writes with valid approval writes. Inspect effective policies and preserve coordinator start/finalize/cancel behavior. This requires no new table or bootstrap policy change, but it does require application-role deployment and matching image verification.
+
+**Remaining trust limits:** agent status/results remain reports from the agent. Compute roles choose their session tags; existing trust does not independently bind those choices to a task. This patch protects coordinator attributes from the resulting session permissions; it does not establish complete hostile-worker tenant isolation. The replay tests in 1D/1F also do not prove AWS authorization.
 
 ## 2. Nest infrastructure if adopting the split
 
