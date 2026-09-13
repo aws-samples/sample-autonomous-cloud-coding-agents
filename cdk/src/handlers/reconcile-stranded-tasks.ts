@@ -48,12 +48,12 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { ulid } from 'ulid';
 import { logger } from './shared/logger';
+import { releaseTaskSlot } from './shared/task-concurrency';
 import { makeClient } from './shared/ua';
 
 const ddb = makeClient(DynamoDBClient);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
-const CONCURRENCY_TABLE = process.env.USER_CONCURRENCY_TABLE_NAME!;
 
 /** Stranded-task timeout. The orchestrator Lambda is async-invoked and
  *  the agent runtime has a cold-start path; 1200 s covers Lambda retries
@@ -286,32 +286,10 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
     }
   }
 
-  // 3. Release the concurrency slot. Best-effort; drift is later corrected
-  //    by the concurrency reconciler.
-  try {
-    await ddb.send(new UpdateItemCommand({
-      TableName: CONCURRENCY_TABLE,
-      Key: { user_id: { S: task.user_id } },
-      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-      ConditionExpression: 'active_count > :zero',
-      ExpressionAttributeValues: {
-        ':one': { N: '1' },
-        ':zero': { N: '0' },
-        ':now': { S: now },
-      },
-    }));
-  } catch (decrErr: unknown) {
-    if (decrErr && typeof decrErr === 'object' && 'name' in decrErr
-        && decrErr.name !== 'ConditionalCheckFailedException') {
-      logger.warn('Failed to decrement concurrency for stranded task', {
-        task_id: task.task_id,
-        user_id: task.user_id,
-        error: decrErr instanceof Error ? decrErr.message : String(decrErr),
-      });
-    }
-    // ConditionalCheckFailedException means the counter is already 0 —
-    // drift the concurrency reconciler will eventually catch.
-  }
+  // 3. Cooperate with normal finalization through the task-owned marker.
+  // If this fails after the terminal write, the capacity reconciler retries
+  // release for terminal held reservations on its next sweep.
+  await releaseTaskSlot(task.task_id, task.user_id);
 
   return true;
 }

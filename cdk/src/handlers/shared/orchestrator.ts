@@ -32,6 +32,7 @@ import { parseRef } from './registry/ref';
 import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
+import { acquireTaskSlot, releaseTaskSlot } from './task-concurrency';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
@@ -41,7 +42,6 @@ const ddb = makeDocClient();
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
-const CONCURRENCY_TABLE_NAME = process.env.USER_CONCURRENCY_TABLE_NAME!;
 const RUNTIME_ARN = process.env.RUNTIME_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -188,31 +188,12 @@ export async function loadTask(taskId: string, consistentRead = false): Promise<
 }
 
 /**
- * Admission control: check user concurrency and increment counter.
+ * Admission control: acquire or recover this task's capacity reservation.
  * @param task - the task record.
  * @returns true if admitted, false if concurrency limit reached.
  */
 export async function admissionControl(task: TaskRecord): Promise<boolean> {
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: task.user_id },
-      UpdateExpression: 'SET active_count = if_not_exists(active_count, :zero) + :one, updated_at = :now',
-      ConditionExpression: 'attribute_not_exists(active_count) OR active_count < :max',
-      ExpressionAttributeValues: {
-        ':zero': 0,
-        ':one': 1,
-        ':max': MAX_CONCURRENT,
-        ':now': new Date().toISOString(),
-      },
-    }));
-    return true;
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      return false;
-    }
-    throw err;
-  }
+  return acquireTaskSlot(task.task_id, task.user_id, MAX_CONCURRENT);
 }
 
 /**
@@ -267,7 +248,9 @@ export async function transitionTask(
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
     UpdateExpression: updateExpression,
-    ConditionExpression: '#status = :fromStatus',
+    ConditionExpression: fromStatus === TaskStatus.SUBMITTED && toStatus === TaskStatus.QUEUED
+      ? '#status = :fromStatus AND attribute_not_exists(concurrency_slot)'
+      : '#status = :fromStatus',
     ExpressionAttributeNames: expressionNames,
     ExpressionAttributeValues: expressionValues,
   }));
@@ -1154,6 +1137,16 @@ export async function finalizeTask(
   pollState: PollState,
   userId: string,
 ): Promise<void> {
+  try {
+    await finalizeTaskOutcome(taskId, pollState);
+  } finally {
+    // The marker makes this safe after a crash, an event failure, or a competing
+    // cleaner. A still-active task keeps its reservation.
+    await releaseTaskSlot(taskId, userId);
+  }
+}
+
+async function finalizeTaskOutcome(taskId: string, pollState: PollState): Promise<void> {
   // Finalization can immediately follow a committed start failure/cancellation.
   // A stale active state would emit the wrong terminal event.
   const task = await loadTask(taskId, true);
@@ -1190,7 +1183,7 @@ export async function finalizeTask(
       transitioned = true;
     } catch (err) {
       // Task may have transitioned concurrently (e.g. agent wrote terminal status).
-      // Re-read to avoid double-decrement or contradictory events.
+      // Re-read to report the terminal status that actually won.
       log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -1200,21 +1193,19 @@ export async function finalizeTask(
         reason: 'agent_heartbeat_stale',
         poll_attempts: pollState.attempts,
       }, correlation);
-      await decrementConcurrency(userId);
     } else {
       // Transition failed — re-read task to determine actual state.
       // If already terminal the block below will handle TTL + concurrency.
-      const reread = await loadTask(taskId);
+      const reread = await loadTask(taskId, true);
       if (TERMINAL_STATUSES.includes(reread.status)) {
         log.info('Heartbeat path: task already terminal after failed transition', { status: reread.status });
         await emitTaskEvent(taskId, `task_${reread.status.toLowerCase()}`, {
           final_status: reread.status,
           poll_attempts: pollState.attempts,
         }, correlation);
-        await decrementConcurrency(userId);
       } else {
-        log.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { status: reread.status });
-        await decrementConcurrency(userId);
+        log.warn('Heartbeat path: task in unexpected state after failed transition, keeping its reservation until terminal', { status: reread.status });
+        throw new Error(`Heartbeat finalization left task ${taskId} active in ${reread.status}`);
       }
     }
     return;
@@ -1281,7 +1272,6 @@ export async function finalizeTask(
       final_status: currentStatus,
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
@@ -1304,8 +1294,14 @@ export async function finalizeTask(
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
-      // Task may have transitioned concurrently — re-read and accept
+      // Accept a committed terminal winner; otherwise retry finalization.
       log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const current = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
+      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
+        final_status: current.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
     await emitTaskEvent(taskId, 'task_timed_out', {
       reason: currentStatus === TaskStatus.AWAITING_APPROVAL
@@ -1313,7 +1309,6 @@ export async function finalizeTask(
         : 'poll_timeout',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
@@ -1327,18 +1322,23 @@ export async function finalizeTask(
       });
     } catch (err) {
       log.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const current = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
+      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
+        final_status: current.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
     await emitTaskEvent(taskId, 'task_failed', {
       reason: 'session_never_started',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
-  // Unexpected state — log and release concurrency
+  // Unexpected active state — retain its reservation until terminal.
   log.error('Unexpected task state during finalization', { status: currentStatus });
-  await decrementConcurrency(userId);
+  throw new Error(`Cannot finalize task ${taskId} in ${currentStatus}`);
 }
 
 /**
@@ -1394,7 +1394,7 @@ export async function queueTask(task: TaskRecord): Promise<boolean> {
  * @param fromStatus - the current status.
  * @param errorMessage - the error reason.
  * @param userId - the user who owns the task.
- * @param releaseConcurrency - whether to decrement the concurrency counter.
+ * @param releaseConcurrency - whether to release this task's held reservation.
  * @param repo - optional target repo (`owner/repo`) for the correlation
  *   envelope; omit for repo-less workflows.
  */
@@ -1418,41 +1418,17 @@ export async function failTask(
     log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });
+    const current = await loadTask(taskId, true);
+    if (!TERMINAL_STATUSES.includes(current.status)) throw err;
   }
-  // Only emit / release concurrency after a successful transition. Callers such as
-  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
-  // would otherwise re-run emit + decrement while the task is already FAILED.
-  if (transitioned) {
-    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
-    if (releaseConcurrency) {
-      await decrementConcurrency(userId);
-    }
-  }
-}
-
-/**
- * Decrement the user's concurrency counter (best-effort).
- * @param userId - the user ID.
- */
-async function decrementConcurrency(userId: string): Promise<void> {
+  // A replay may find the FAILED write already committed. Events remain
+  // transition-owned; reservation release is independently safe to repeat.
   try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: userId },
-      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-      ConditionExpression: 'active_count > :zero',
-      ExpressionAttributeValues: {
-        ':one': 1,
-        ':zero': 0,
-        ':now': new Date().toISOString(),
-      },
-    }));
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      logger.info('Concurrency counter already at zero, nothing to decrement', { user_id: userId });
-    } else {
-      logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
+    if (transitioned) {
+      await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     }
+  } finally {
+    if (releaseConcurrency) await releaseTaskSlot(taskId, userId);
   }
 }
 

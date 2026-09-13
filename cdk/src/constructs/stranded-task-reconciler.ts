@@ -55,7 +55,7 @@ export interface StrandedTaskReconcilerProps {
   /** TaskEventsTable (handler writes task_stranded + task_failed events). */
   readonly taskEventsTable: dynamodb.ITable;
 
-  /** UserConcurrencyTable (handler decrements active_count on fail). */
+  /** UserConcurrencyTable (handler atomically releases held task reservations). */
   readonly userConcurrencyTable: dynamodb.ITable;
 
   /**
@@ -142,7 +142,7 @@ export class StrandedTaskReconciler extends Construct {
     props.taskTable.grantReadWriteData(this.fn);
     // TaskEvents: write task_stranded + task_failed events.
     props.taskEventsTable.grantWriteData(this.fn);
-    // Concurrency: decrement active_count on fail.
+    // Concurrency: read/release a task-owned reservation transactionally.
     props.userConcurrencyTable.grantReadWriteData(this.fn);
 
     const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);

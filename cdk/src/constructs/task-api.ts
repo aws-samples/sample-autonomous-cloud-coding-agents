@@ -228,7 +228,7 @@ export interface TaskApiProps {
   readonly attachmentsBucket?: s3.IBucket;
 
   /**
-   * User concurrency table for admission control during confirm-uploads.
+   * User concurrency table for the advisory confirm-uploads pre-check.
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
@@ -836,7 +836,7 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
       props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
       props.attachmentsBucket.grantDelete(confirmUploadsFn);
-      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadData(confirmUploadsFn);
 
       if (props.orchestratorFunctionArn) {
         confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({

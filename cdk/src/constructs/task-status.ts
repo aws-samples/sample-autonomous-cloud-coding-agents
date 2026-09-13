@@ -112,7 +112,7 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
   // screening failure, CANCELLED on user cancel or 30-min auto-cancel.
   [TaskStatus.PENDING_UPLOADS]: [TaskStatus.SUBMITTED, TaskStatus.FAILED, TaskStatus.CANCELLED],
   // QUEUED (#441): admission-capped task awaiting a free concurrency
-  // slot. SUBMITTED on pickup (slot acquired), CANCELLED on user
+  // slot. SUBMITTED on pickup (orchestrator retries admission), CANCELLED on user
   // cancel, FAILED only via the queue-stranded backstop.
   [TaskStatus.QUEUED]: [TaskStatus.SUBMITTED, TaskStatus.CANCELLED, TaskStatus.FAILED],
   [TaskStatus.SUBMITTED]: [TaskStatus.QUEUED, TaskStatus.HYDRATING, TaskStatus.FAILED, TaskStatus.CANCELLED],

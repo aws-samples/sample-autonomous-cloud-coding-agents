@@ -152,7 +152,7 @@ export async function handler(event: APIGatewayProxyEvent, context: Context): Pr
     }
 
     // 6b. Pre-check concurrency before expensive screening (fail-fast).
-    // The actual atomic increment happens in transitionToSubmitted after screening
+    // The orchestrator reserves capacity atomically after successful submission.
     // passes. This read-only check avoids wasting Bedrock calls when the user is
     // already at their concurrency limit.
     const preCheckAdmitted = await preCheckConcurrency(task.user_id);
@@ -439,13 +439,8 @@ async function transitionToSubmitted(
   const now = new Date().toISOString();
   const taskId = task.task_id;
 
-  // Admission control — check concurrency before transitioning
-  const admitted = await checkConcurrency(task.user_id);
-  if (!admitted) {
-    return errorResponse(429, ErrorCode.RATE_LIMIT_EXCEEDED,
-      'User concurrency limit reached. Wait for a running task to finish or cancel one, then retry.', requestId);
-  }
-
+  // Submission does not reserve capacity. The orchestrator owns atomic
+  // admission for every task, including confirmed uploads and queue pickups.
   // Conditional DynamoDB write: status PENDING_UPLOADS → SUBMITTED
   try {
     await ddb.send(new UpdateCommand({
@@ -467,9 +462,7 @@ async function transitionToSubmitted(
     }));
   } catch (err: any) {
     if (err.name === 'ConditionalCheckFailedException') {
-      // Another caller already transitioned (e.g. cleanup Lambda cancelled
-      // the task). Roll back the concurrency counter we just incremented.
-      await decrementConcurrency(task.user_id);
+      // Another caller already transitioned (e.g. cleanup cancelled the task).
       // Return current state (idempotent)
       const current = await ddb.send(new GetCommand({
         TableName: TABLE_NAME,
@@ -480,9 +473,6 @@ async function transitionToSubmitted(
       }
       return errorResponse(404, ErrorCode.TASK_NOT_FOUND, 'Task not found.', requestId);
     }
-    // Roll back concurrency counter on any other DDB error (throttling,
-    // network timeout, etc.) to prevent permanent slot leaks.
-    await decrementConcurrency(task.user_id);
     throw err;
   }
 
@@ -732,8 +722,8 @@ async function buildScreeningConfig(): Promise<ScreeningConfig | undefined> {
 
 /**
  * Non-mutating read to check if the user is at their concurrency limit.
- * Used as a fast pre-check before expensive screening; the actual atomic
- * increment happens in checkConcurrency() during transitionToSubmitted.
+ * Used as an advisory pre-check before expensive screening. The orchestrator
+ * reserves capacity atomically after submission, queuing if capacity fills.
  */
 async function preCheckConcurrency(userId: string): Promise<boolean> {
   try {
@@ -745,7 +735,7 @@ async function preCheckConcurrency(userId: string): Promise<boolean> {
     return activeCount < MAX_CONCURRENT;
   } catch (err: any) {
     // Only swallow DDB throttling errors — these are transient and the atomic
-    // check in transitionToSubmitted is the authoritative gate.
+    // orchestrator admission transaction is the authoritative gate.
     const throttleErrors = ['ProvisionedThroughputExceededException', 'RequestLimitExceeded', 'ThrottlingException'];
     if (throttleErrors.includes(err?.name)) {
       logger.warn('Pre-check concurrency throttled — allowing request to proceed', {
@@ -763,68 +753,5 @@ async function preCheckConcurrency(userId: string): Promise<boolean> {
       metric_type: 'precheck_concurrency_failure',
     });
     throw err;
-  }
-}
-
-async function checkConcurrency(userId: string): Promise<boolean> {
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: userId },
-      UpdateExpression: 'SET active_count = if_not_exists(active_count, :zero) + :one, updated_at = :now',
-      ConditionExpression: 'attribute_not_exists(active_count) OR active_count < :max',
-      ExpressionAttributeValues: {
-        ':zero': 0,
-        ':one': 1,
-        ':max': MAX_CONCURRENT,
-        ':now': new Date().toISOString(),
-      },
-    }));
-    return true;
-  } catch (err: any) {
-    if (err.name === 'ConditionalCheckFailedException') {
-      return false;
-    }
-    throw err;
-  }
-}
-
-async function decrementConcurrency(userId: string): Promise<void> {
-  const maxAttempts = 3;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: CONCURRENCY_TABLE_NAME,
-        Key: { user_id: userId },
-        UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-        ConditionExpression: 'attribute_exists(active_count) AND active_count > :zero',
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':zero': 0,
-          ':now': new Date().toISOString(),
-        },
-      }));
-      return;
-    } catch (err: any) {
-      if (err.name === 'ConditionalCheckFailedException') {
-        // Counter already at 0 or doesn't exist — nothing to roll back
-        return;
-      }
-      if (attempt < maxAttempts - 1) {
-        // Retry transient DDB errors (throttling, network) with backoff
-        await new Promise(resolve => setTimeout(resolve, 100 * Math.pow(2, attempt)));
-        continue;
-      }
-      logger.error('Failed to decrement concurrency counter after retries (leak possible)', {
-        user_id: userId,
-        attempts: maxAttempts,
-        error: err instanceof Error ? err.message : String(err),
-        metric_type: 'concurrency_counter_leak',
-      });
-      throw new Error(
-        `Concurrency counter decrement failed for user ${userId} after ${maxAttempts} attempts. ` +
-        'Manual intervention may be required to reset the counter.',
-      );
-    }
   }
 }

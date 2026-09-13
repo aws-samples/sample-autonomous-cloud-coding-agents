@@ -23,7 +23,7 @@ The orchestrator sits between the API layer and the agent runtime. Changes to ta
 
 ## Responsibilities
 
-The orchestrator is deliberately scoped. It handles coordination and bookkeeping but never touches agent logic, compute infrastructure, or memory storage. This clear boundary means a crashed agent does not leave orphaned state, and platform invariants (concurrency limits, event audit, cancellation) cannot be bypassed by agent code.
+The orchestrator handles coordination, compute lifecycle calls and finalization bookkeeping. The agent runs the coding workflow. Recovery still needs explicit guards around external effects, including saved start receipts and task-owned capacity reservations.
 
 ### What the orchestrator owns
 
@@ -36,7 +36,7 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 | Result inference | Determine success or failure from agent response, DynamoDB record, and GitHub state |
 | Finalization | Update status, emit events, release concurrency, persist audit records |
 | Cancellation | Stop the session and drive the task to CANCELLED at any point |
-| Concurrency | Track per-user and system-wide running task counts with atomic counters |
+| Concurrency | Track per-user capacity with task-owned reservations and an atomic counter |
 
 ### What the orchestrator does NOT own
 
@@ -182,8 +182,8 @@ The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-executio
 Validates the task before any compute is consumed. Checks run in order:
 
 1. **Repo onboarding** - `GetItem` on `RepoTable`. If not found or inactive, reject with `REPO_NOT_ONBOARDED`. This runs at the API handler level (`createTaskCore`) for fast rejection.
-2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 10), the task is **queued, not failed** (#441): it transitions `SUBMITTED → QUEUED` and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up, flipping `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check; the orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race harmlessly re-queues without losing FIFO position. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
-3. **System concurrency** - Compare total running + hydrating tasks to the configured system limit and selected-backend quotas.
+2. **User concurrency** - One transaction creates an internal `concurrency_slot` reservation on the task and increments `UserConcurrency.active_count`, subject to the configured cap (default 3). A retry reuses a held reservation. At the cap, the task transitions `SUBMITTED → QUEUED` and a scheduled pickup retries in FIFO order by `created_at`. Pickup and upload confirmation only inspect capacity; the orchestrator owns reservation acquisition. A task that acquired a reservation concurrently cannot be put back in the queue. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
+3. **Backend capacity** - AWS also enforces the selected backend's service quotas when compute starts.
 4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Rate-limit rejections happen at submit time and are rejected, not queued (unlike the concurrency cap, which queues).
 5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
 
@@ -335,14 +335,14 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 ### Recovery mechanisms
 
 1. **Durable execution** - Lambda Durable Functions checkpoints at each state transition and replays after crashes.
-2. **Replay guards** - Operations need their own idempotency controls; checkpointing alone does not make external effects exactly-once. MicroVM starts use saved receipts. The shared finalizer's direct concurrency decrement still needs a per-task atomic release guard and a crash-replay test.
+2. **Replay guards** - Operations need their own idempotency controls; checkpointing alone does not make external effects exactly-once. MicroVM starts use saved receipts. Capacity acquisition and release use task-owned markers updated atomically with the user counter. This guards the seat count; terminal audit events are still allowed to repeat on replay.
 3. **Stuck-task scanner** - Periodic Lambda detects tasks stuck beyond expected durations and either resumes or fails them.
-4. **Counter reconciliation** - Lambda runs every 15 minutes, compares counters to actual running task counts, corrects drift. Emits `counter_drift_corrected` CloudWatch metric.
+4. **Counter reconciliation** - Every 15 minutes, the Lambda strongly scans counter records followed by task reservations. It repairs a count only if the saved counter revision is unchanged, then releases terminal held reservations. Structured logs record repairs, failures, empty counters and ambiguous legacy ownership; this handler does not publish a `counter_drift_corrected` metric.
 5. **Dead-letter queue** - Tasks that exhaust retries go to DLQ for investigation.
 
 ## Concurrency and scaling
 
-Each task runs in its own isolated compute session with no shared mutable state at the compute layer. The orchestrator manages concurrency purely at the coordination layer: atomic counters track how many tasks are active per user and system-wide, and admission control enforces limits before resources are consumed.
+Each task runs in an isolated compute session. The orchestrator reserves capacity per user before starting compute; AWS separately enforces backend quotas. Approval waits keep their reservation, including when a future P3 implementation suspends the MicroVM.
 
 ### Capacity limits
 
@@ -350,15 +350,24 @@ Each task runs in its own isolated compute session with no shared mutable state 
 |---|---|---|
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
-| Per-user concurrency | Configurable (default 3-5) | Platform config |
-| System-wide max tasks | Configurable | Bounded by selected-backend quotas |
+| Per-user concurrency | Configurable (default 3) | `MAX_CONCURRENT_TASKS_PER_USER` |
 
 ### Counter management
 
-- **UserConcurrency** - DynamoDB item per user with `active_count`. Incremented atomically (`active_count < max`) at admission, decremented at finalization.
-- **SystemConcurrency** - Single DynamoDB item, same pattern.
+A reservation is a saved seat for one task. `task-concurrency.ts` owns both operations:
 
-Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing — `finalizeTask` handles the single decrement after re-reading the task state. The heartbeat-detected crash path also guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
+- **Acquire:** require a matching owner, `SUBMITTED` status and no prior reservation; set `concurrency_slot.state = held` and increment the counter in the same transaction. A held reservation is reused on replay. A released task cannot reserve again; a new attempt gets a new task ID.
+- **Release:** require a terminal task and a held reservation; mark it `released` and decrement the counter in the same transaction. Normal finalization, early failure and stranded cleanup use this helper. A missing or already-released marker does not decrement. An active task keeps its seat.
+
+Finalization attempts release even if an audit event fails. A failed status write that leaves the task active is propagated for retry. Cancellation before admission/pre-flight completion also checks for a held terminal reservation. If a crash separates the terminal write from release, the scheduled counter reconciler completes release later.
+
+Every reservation change writes a fresh `reservation_version` on the counter. Reconciliation uses strongly consistent **base-table** scans, once for counters and once for tasks, then compares the saved revision before repairing a count. A count-only comparison cannot detect an increment followed by a decrement. Held terminal reservations are included until their release commits. A partial scan never installs a partial count. These scans consume read capacity across retained rows; check scan duration and capacity at deployment scale.
+
+If a release discovers an empty/missing counter, it closes the marker without subtracting from seats reserved meanwhile. A concurrent repair can leave a conservative overcount until the next sweep. `CONCURRENCY_EMPTY_COUNTER` records that condition.
+
+Older active records without reservation markers are ambiguous: status alone does not prove admission. The helper never guesses that they own a seat; reconciliation skips count repair for that user and logs `CONCURRENCY_RESERVATION_UNKNOWN`. Pause new submissions and drain old executions before deploying this protocol across all counter writers. After old tasks settle, reconcile and resume admissions. Rollback also requires draining tasks using the newer protocol; mixing old direct decrements with new markers does not provide this guarantee.
+
+This protocol protects against replay and competing **cooperative** writers. The agent role can currently update/replace its own task row, so internal fields are not yet protected against a compromised agent. Coordinator-only metadata storage or constrained agent writes remain a separate security prerequisite.
 
 ## Implementation
 
@@ -410,7 +419,7 @@ At 500 concurrent tasks, peak TPS is ~16.7 - well within the 25 TPS AgentCore qu
 
 ## Data model
 
-Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task; the orchestrator reads and writes it at every state transition. TaskEvents is append-only and powers the `GET /v1/tasks/{id}/events` API. UserConcurrency is a lightweight counter table used only during admission and finalization.
+Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task; the orchestrator reads and writes it at every state transition. TaskEvents is append-only and powers the `GET /v1/tasks/{id}/events` API. UserConcurrency stores reservation counts and revision tokens used by admission, cleanup and reconciliation.
 
 ### Tasks table (DynamoDB)
 
@@ -429,6 +438,7 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `session_id` | String? | Backend session identifier (AgentCore session ID, ECS task ARN, or MicroVM ID) |
 | `compute_type` | String? | Selected backend: `agentcore`, `ecs`, or `lambda-microvm` |
 | `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId` and `endpoint` |
+| `concurrency_slot` | Map? | Internal reservation `{state, acquired_at, released_at?}`; excluded from public task responses |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |
@@ -464,7 +474,7 @@ Append-only audit log. See [OBSERVABILITY.md](/sample-autonomous-cloud-coding-ag
 | Field | Type | Description |
 |---|---|---|
 | `user_id` (PK) | String | User ID |
-| `active_count` | Number | Running task count |
+| `active_count` | Number | Held reservation count, including approval waits and pending terminal cleanup |
+| `reservation_version` | String? | Fresh revision token on every reservation mutation or count repair |
 
-Increment: `SET active_count = active_count + 1` with `ConditionExpression: active_count < :max`.
-Decrement: `SET active_count = active_count - 1` with `ConditionExpression: active_count > 0`.
+Counter changes belong to the reservation transactions described above. Do not add a standalone increment or decrement: it bypasses per-task replay protection.

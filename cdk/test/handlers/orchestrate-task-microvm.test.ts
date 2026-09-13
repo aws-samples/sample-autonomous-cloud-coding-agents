@@ -64,6 +64,12 @@ jest.mock('@aws-sdk/client-s3', () => ({
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
 
+const mockReleaseTaskSlot = jest.fn().mockResolvedValue(false);
+jest.mock('../../src/handlers/shared/task-concurrency', () => ({
+  acquireTaskSlot: jest.fn().mockResolvedValue(true),
+  releaseTaskSlot: (...args: unknown[]) => mockReleaseTaskSlot(...args),
+}));
+
 // Real orchestrator helpers would talk to DynamoDB; stub them and assert on the
 // calls. `buildComputeMetadata` is kept REAL (re-exported from the actual module)
 // so the persisted metadata shape is genuinely exercised, not mirrored.
@@ -251,6 +257,19 @@ beforeEach(() => {
 });
 
 describe('orchestrate-task for a lambda-microvm task', () => {
+  test.each([2, 3])('cancellation on task read %s checks release before leaving the pipeline', async (cancelOnRead) => {
+    let reads = 0;
+    mockLoadTask.mockImplementation(async () => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: ++reads >= cancelOnRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
+    }));
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(0);
+    expect(mockReleaseTaskSlot).toHaveBeenCalledWith('TASK001', 'user-1');
+  });
+
   test('replaying a persisted start failure reaches finalization once without an earlier slot release', async () => {
     let failed = false;
     mockMicrovmSend.mockRejectedValue(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
@@ -333,7 +352,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       task_id: 'TASK001',
       user_id: 'user-1',
       repo: 'org/repo',
-      status: consistentRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
+      status: consistentRead && commandsOfType('RunMicrovm').length > 0 ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
     }));
     const { ctx, steps } = fakeContext();
     await handler({ task_id: 'TASK001' }, ctx as never);
@@ -387,7 +406,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
       task_id: 'TASK001',
       user_id: 'user-1',
       repo: 'org/repo',
-      status: consistentRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
+      status: consistentRead && commandsOfType('RunMicrovm').length > 0 ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
     }));
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
     expect(commandsOfType('RunMicrovm')).toHaveLength(1);
