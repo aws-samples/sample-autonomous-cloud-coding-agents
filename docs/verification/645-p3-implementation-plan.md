@@ -2,6 +2,20 @@
 
 Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read the [review](./645-p3-readiness-review.md) for evidence and the beginner introduction. This document proposes work; it does not mark P3 as implemented.
 
+## Implementation progress
+
+First prerequisite batch completed locally on 2026-09-13, on `fix/645-microvm-readiness`:
+
+| Commit | Completed work | Proof |
+|---|---|---|
+| `b5155928` | #841: join test pipeline threads before restoring mocks/environment; retain and report timed-out handles; distinct task IDs | A deterministic two-test subprocess regression failed on the old fixture and now passes. All 234 server/isolation tests pass. |
+| `564ccc19` | #817 deletion IAM: exact `s3:DeleteObject` on `*/payload.json` in the dedicated bucket, on the coordinator only | The IAM regression failed before the grant; construct and full-stack assertions now verify the action and resource scope. Worker read-only permissions are unchanged. |
+| `5490d645` | Approval resume: refresh heartbeat in the same conditional write that restores RUNNING | Atomic-write regression failed before the change; immediate post-wait polling is tested for AgentCore and MicroVM. Cancellation/wrong-gate conditions remain intact. |
+
+Validation for this batch: `mise run quality` in `agent/` passed lint, formatting, type checks and **1,785 tests**, with **83.75%** coverage. Six relevant CDK suites passed **509 tests** via `mise run testf`; CDK ESLint and TypeScript compilation also passed. The original review/cleanup is commit `19904775`.
+
+These are source changes, not changes to deployed AWS resources. The IAM fix needs a normal stack deployment; the heartbeat fix needs an updated agent image. No bootstrap-policy change is required by this batch. #817's other tracks, #700, start-retry uncertainty, nesting, clean P2 verification and P3 lifecycle work remain open. The historical validation section at the end describes the earlier review commit only.
+
 ## The result we want
 
 When the coding agent asks a human for permission, its computer may go to sleep. The human can approve or deny while it sleeps. The computer wakes, reads the saved answer, and continues or refuses the action. If nobody answers, it wakes before the deadline and applies the existing timeout-as-denial rule. Its files, task identity, permissions, progress and deadline remain correct.
@@ -219,7 +233,7 @@ For live evidence, retain redacted task IDs, commit/image/bootstrap versions, co
 
 **P3 is complete only when:** the full strategy interface and agent hooks ship; approval/deadline races and credential refresh pass; clean P2 and live P3 gates pass on the final deployment; behavior-changing follow-ups have passing regressions; generated docs, bootstrap artifacts and compatibility controls match; no test VM is left running/suspended; and #645/ADR/runbook status is updated with the actual evidence. An unverified gate must be called out explicitly, not converted to a checked box because unit tests passed.
 
-## Validation of this review branch
+## Validation of the original review commit
 
 Completed locally on 2026-09-13. These checks concern this cleanup/review branch, not the future P3 acceptance tests.
 
@@ -231,4 +245,4 @@ Completed locally on 2026-09-13. These checks concern this cleanup/review branch
 - **Documentation sync and build passed: 77 pages.** The installed mise version could not expand the build task's `:sync` dependency (`':task' pattern should be expanded before matching`), so the declared steps were executed in order with `mise run sync` followed by `mise exec -- ./node_modules/.bin/astro build`. Existing Astro/Cedar highlighting/deprecation warnings remain; they did not fail the build.
 - **Offline nesting probe:** measured five configurations in current, naive-nested and parent-role/stable-name modes. The naive mode failed cycle validation; the corrected prototype passed. Probe output is linked in the review. No AWS resources were created or modified.
 
-The live P2 rerun, production nested-stack migration and P3 implementation/acceptance matrix remain future work. This branch supplies the cleanup, evidence and plan.
+The live P2 rerun, production nested-stack migration and P3 implementation/acceptance matrix remain future work. This original review commit supplies the cleanup, evidence and plan; subsequent prerequisite fixes are tracked at the top of this document.

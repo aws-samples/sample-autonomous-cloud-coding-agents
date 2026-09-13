@@ -282,6 +282,8 @@ Liveness detection varies by compute backend. AgentCore sessions use DynamoDB he
 - **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
 - **Early crash** - If no heartbeat is ever set after the combined window (360s), the session is treated as lost; a process failure or failed DynamoDB writes can cause this.
 
+Approval waits suppress heartbeat writes. When the agent consumes a decision and restores `RUNNING`, its conditional transaction also refreshes `agent_heartbeat_at`, so the first poll after a long wait does not mistake the old timestamp for a crash.
+
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
 **ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
