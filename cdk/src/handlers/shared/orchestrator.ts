@@ -22,6 +22,7 @@ import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
+import { formatMicrovmTerminalFailure } from './error-classifier';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
 import { coerceNumericOrNull } from './numeric';
@@ -503,10 +504,10 @@ export async function reconcileMicrovmSubstrateState(args: {
   // happened. With it the operator gets "substrate state completed (Run lifecycle
   // hook returned HTTP status 400…)", which points at the guest logs where the
   // agent's own structured 4xx body already is.
-  const substrateReason = substrate.reason ? ` (${substrate.reason})` : '';
   const detail = substrate.status === 'failed'
-    ? `${substrate.error}${substrateReason}`
-    : `substrate state ${substrate.status}${substrateReason}`;
+    ? substrate.error
+    : `substrate state ${substrate.status}`;
+  const failureReason = formatMicrovmTerminalFailure(detail, substrate.reason);
 
   const reread = await loadTask(taskId);
   if (TERMINAL_STATUSES.includes(reread.status)) {
@@ -524,14 +525,14 @@ export async function reconcileMicrovmSubstrateState(args: {
   log.error('MicroVM reached a terminal state before the agent wrote a terminal status', {
     microvm_id: microvmId,
     task_status: reread.status,
-    detail,
+    detail: failureReason,
   });
   // `releaseConcurrency: false` — the finalize step sees the now-terminal task
   // and decrements, matching the ECS substrate-failure branch in orchestrate-task.
   await failTask(
     taskId,
     reread.status,
-    `MicroVM substrate terminated before the agent wrote a terminal status: ${detail}`,
+    failureReason,
     userId,
     false,
     repo,

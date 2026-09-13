@@ -71,9 +71,10 @@ export type SessionHandle =
  * ~12 s — reached the operator as the bare, and therefore fabricated,
  * ``"substrate state completed"``.
  *
- * It is OPTIONAL and OPAQUE: no control flow may branch on its content (that would
- * put substrate interpretation back in the strategy), and it is for the reconcile
- * ``detail`` string and logs only.
+ * It is OPTIONAL and OPAQUE to the strategy. The orchestrator retains it as
+ * diagnostic detail and recognizes the service's documented run-hook 4xx shape
+ * to choose a stable failure code. Consumers classify that code, so arbitrary
+ * words in the reason cannot change the category or user-facing retry advice.
  *
  * Declared on all four variants for UNIFORMITY, though only ``completed`` and
  * ``failed`` are read today (``reconcileMicrovmSubstrateState`` returns early for

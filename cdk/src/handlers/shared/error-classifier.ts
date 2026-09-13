@@ -90,6 +90,67 @@ interface ErrorPattern {
   readonly classification: ErrorClassification;
 }
 
+/** Stable codes written by the orchestrator; diagnostic text cannot override them. */
+const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassification>> = {
+  MICROVM_RUN_HOOK_REJECTED: {
+    category: ErrorCategory.CONFIG,
+    title: 'The MicroVM rejected its own run payload',
+    description:
+        'The agent\'s /run hook rejected the request with an HTTP 4xx response before reporting a task result. Common causes are a malformed payload, invalid platform configuration, or mismatched orchestrator and image versions.',
+    remedy:
+        'Retrying as-is will not help — the guest will reject the identical payload again. '
+        + 'Read the agent\'s structured response in the MicroVM log group (/aws/lambda-microvms/<image-name>) for the MICROVM_RUN_* code and any missing environment variables. '
+        + 'MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE means the orchestrator predates the platform_config contract — an admin should redeploy the stack so the orchestrator and image versions match.',
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  },
+  MICROVM_SUBSTRATE_TERMINATED: {
+    category: ErrorCategory.COMPUTE,
+    title: 'The MicroVM stopped before the agent reported a result',
+    description:
+        'The MicroVM ended before the agent reported a task result. Any explanation supplied by AWS is preserved in the original error message for diagnosis.',
+    remedy:
+        'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
+        + 'If the message names a lifecycle-hook HTTP status, the guest rejected the run: check the MicroVM log group for the agent\'s structured response body. '
+        + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
+        + 'a long-running repo may belong on --compute-type ecs.',
+    retryable: true,
+    errorClass: ErrorClass.TRANSIENT,
+  },
+};
+const MICROVM_TERMINAL_PREFIX = 'MicroVM substrate terminated before the agent wrote a terminal status: ';
+const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i;
+
+/**
+ * Preserve the service reason for diagnosis, independently of the persisted code.
+ * GetMicrovm exposes hook status only in stateReason. Recognize that documented
+ * response at this boundary; unknown wording stays a generic terminal failure.
+ * The strategy itself continues to report state without applying health policy.
+ */
+export function formatMicrovmTerminalFailure(detail: string, stateReason?: string): string {
+  const code = stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)
+    ? 'MICROVM_RUN_HOOK_REJECTED'
+    : 'MICROVM_SUBSTRATE_TERMINATED';
+  const reason = stateReason ? ` (${stateReason})` : '';
+  return `${code}: ${MICROVM_TERMINAL_PREFIX}${detail}${reason}`;
+}
+
+/** Classify persisted MicroVM terminal failures, including records without a code. */
+export function classifyMicrovmTerminalFailure(errorMessage?: string | null): ErrorClassification | null {
+  if (!errorMessage) return null;
+  const code = /^(MICROVM_RUN_HOOK_REJECTED|MICROVM_SUBSTRATE_TERMINATED): /.exec(errorMessage)?.[1];
+  if (code) return MICROVM_TERMINAL_CLASSIFICATIONS[code];
+  if (MICROVM_RUN_HOOK_4XX.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RUN_HOOK_REJECTED;
+
+  // Old records have only the descriptive prefix. Do not let other words in
+  // their service reason override the known terminal failure.
+  if (errorMessage.startsWith(MICROVM_TERMINAL_PREFIX)) {
+    const hookRejected = /\(Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i.test(errorMessage);
+    return MICROVM_TERMINAL_CLASSIFICATIONS[hookRejected ? 'MICROVM_RUN_HOOK_REJECTED' : 'MICROVM_SUBSTRATE_TERMINATED'];
+  }
+  return null;
+}
+
 const PATTERNS: readonly ErrorPattern[] = [
   // --- Auth ---
   {
@@ -205,7 +266,7 @@ const PATTERNS: readonly ErrorPattern[] = [
     // anchored on a `lambda`/`microvm` marker precisely so an AgentCore or ECS
     // endpoint failure cannot be hijacked into MicroVM copy — their endpoint
     // hosts are `bedrock-agentcore.*` / `ecs.*`.
-    pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?).{0,60}(?:not available|not supported|unavailable)|(?:not available|not supported|unavailable).{0,60}(?:lambda[- ]?microvms?)/i,
+    pattern: /(?:UnknownEndpoint|Inaccessible host|Could not resolve endpoint).{0,120}lambda|(?:lambda[- ]?microvms?|microvms?)\s+(?:service\s+)?(?:(?:is|are)\s+)?(?:not available|not supported|unavailable)\s+in\s+[^.\n]{0,50}\bregion\b/i,
     classification: {
       category: ErrorCategory.CONFIG,
       title: 'Lambda MicroVMs is not available in this Region',
@@ -224,7 +285,7 @@ const PATTERNS: readonly ErrorPattern[] = [
   },
   // --- Lambda MicroVMs (ADR-021) ---
   //
-  // SCOPING: the three SDK-exception entries below are anchored on the
+  // SCOPING: the SDK-exception entries below are anchored on the
   // ``MicroVM <operation> failed`` marker that
   // ``lambda-microvm-strategy.wrapMicrovmError`` puts on every error it lets
   // escape (see ``MICROVM_ERROR_MARKER``). The anchor is mandatory, not
@@ -237,9 +298,8 @@ const PATTERNS: readonly ErrorPattern[] = [
   // classified them before this section existed (a precise earlier pattern, or
   // UNKNOWN).
   //
-  // Both orders are accepted in each pattern so a future wrapper that puts the
-  // exception name ahead of the marker still matches; ``[\s\S]`` rather than
-  // ``.`` because SDK messages can span lines.
+  // ``[\s\S]`` rather than ``.`` because SDK messages can span lines. The older
+  // quota/throttle/not-found patterns also accept the reverse wrapper order.
   //
   // ORDERING: this section sits immediately ABOVE the generic
   // `Session start failed` catch-all. That is only safe BECAUSE of the marker:
@@ -249,66 +309,6 @@ const PATTERNS: readonly ErrorPattern[] = [
   // the MICROVM_* env vars to check) instead of "Check AgentCore Runtime or ECS
   // cluster health" — advice that names the wrong substrate entirely. If the
   // marker anchor is ever dropped, these MUST move back below the catch-all.
-  {
-    // A LIFECYCLE-HOOK 4xx, which the substrate reports in `stateReason` and
-    // `reconcileMicrovmSubstrateState` appends to the persisted message.
-    //
-    // ORDERING: this MUST stay above the generic `MicroVM substrate terminated`
-    // entry below, which matches the same message (both strings travel in one
-    // `error_message`) and would otherwise win with `retryable: true`.
-    //
-    // WHY it is a distinct, NON-retryable entry: every 4xx the guest can answer is
-    // a config/envelope fault that an identical retry cannot fix —
-    // `MICROVM_RUN_PAYLOAD_INVALID` (bad envelope),
-    // `MICROVM_RUN_PLATFORM_CONFIG_INVALID` (bad `platform_config` value) and
-    // `MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (missing required key / version
-    // skew), all in `agent/src/server.py`'s `microvm_run`. The one genuinely
-    // retryable guest answer, `MICROVM_RUN_PAYLOAD_UNREADABLE`, is deliberately a
-    // **500**, which is why this pattern is scoped to `4\d\d` and a 5xx still falls
-    // through to the retryable entry below. Without this, a permanently-skewed
-    // deployment rendered as TRANSIENT with the remedy "reply here to try again",
-    // i.e. an invitation to loop forever.
-    //
-    // WHAT THE MESSAGE DOES *NOT* CARRY, measured: the guest's structured response
-    // BODY does not reach `stateReason`. Live evidence
-    // (`docs/verification/645-p2-smoke-runbook.md` §6.1) shows the service supplies
-    // exactly `"Run lifecycle hook returned HTTP status 400. Please check your hook
-    // endpoint and application logs for more details."` — the status code and
-    // nothing else. So this entry anchors on the STATUS, which is the only
-    // discriminator that actually travels; the `code` is available to the operator
-    // only in the guest log group, which is what the remedy sends them to. If a
-    // future service release ever enriches `stateReason` with the body, a
-    // code-anchored entry becomes possible and would be strictly better.
-    pattern: /Run lifecycle hook returned HTTP status 4\d\d/i,
-    classification: {
-      category: ErrorCategory.CONFIG,
-      title: 'The MicroVM rejected its own run payload',
-      description:
-        'The Lambda MicroVMs service delivered this task to the in-guest agent\'s /run lifecycle hook and the agent answered 4xx, so the service reaped the MicroVM within ~12 s without the task ever starting. The agent refuses a run for exactly three reasons, all of them wiring faults rather than transient ones: the orchestrator built a malformed envelope, a platform_config value was invalid, or a required platform_config key was missing (a version-skewed orchestrator paired with a current image). The agent writes a structured reason to its log group before answering.',
-      remedy:
-        'Retrying as-is will not help — the guest will reject the identical payload again. '
-        + 'Read the agent\'s own structured response body in the MicroVM log group (/aws/lambda-microvms/<image-name>): it carries a MICROVM_RUN_* code that names which of the three faults occurred, and for a missing-config fault it lists the exact environment variables. '
-        + 'MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE means the orchestrator predates the platform_config contract — an admin should redeploy the stack so the orchestrator and image versions match.',
-      retryable: false,
-      errorClass: ErrorClass.SERVICE,
-    },
-  },
-  {
-    pattern: /MicroVM substrate terminated before the agent wrote a terminal status/i,
-    classification: {
-      category: ErrorCategory.COMPUTE,
-      title: 'The MicroVM stopped before the agent reported a result',
-      description:
-        'The Lambda MicroVM running this task reached a terminal state while the task was still mid-flight, so no result was ever written. When the substrate supplied a reason (GetMicrovm\'s stateReason) the orchestrator appends it in parentheses on the message above — read that first, because it distinguishes the common causes (a /run lifecycle-hook 4xx, which the service reaps in ~12 s) from the rarer ones (the session duration cap, a host fault, or an external terminate).',
-      remedy:
-        'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
-        + 'If the message names a lifecycle-hook HTTP status, the guest rejected the run: check the MicroVM log group for the agent\'s structured response body. '
-        + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
-        + 'a long-running repo may belong on --compute-type ecs.',
-      retryable: true,
-      errorClass: ErrorClass.TRANSIENT,
-    },
-  },
   {
     // A `platform_config` block the orchestrator could not even assemble: a
     // REQUIRED key is absent from the orchestrator Lambda's own environment, so
@@ -335,18 +335,14 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
-    // Account-level MicroVM memory quota. Deliberately TRANSIENT rather than
-    // SERVICE: this quota is capacity-shaped, not configuration-shaped — it
-    // frees as running/suspended MicroVMs terminate (AWS counts SUSPENDED VMs
-    // toward the quota), which is the same "wait and retry" character as the
-    // existing per-user `concurrency limit` entry above. The remedy still names
-    // the quota-increase path for the case where the ceiling is genuinely too
-    // low, so a persistently failing deployment is not left guessing.
+    // Account-level capacity may become available as other sessions terminate.
+    // Suspended-session quota accounting still needs live verification; do not
+    // promise that suspending a session frees capacity.
     pattern: /MicroVM [\w ]+failed[\s\S]*ServiceQuotaExceededException|ServiceQuotaExceededException[\s\S]*MicroVM [\w ]+failed/i,
     classification: {
       category: ErrorCategory.COMPUTE,
       title: 'Couldn\'t start — the MicroVM compute quota is currently exhausted',
-      description: 'Starting the MicroVM was rejected because the account\'s Lambda MicroVMs quota (memory across running and suspended MicroVMs) is fully consumed.',
+      description: 'Starting the MicroVM was rejected because the account\'s Lambda MicroVMs compute quota is fully consumed.',
       remedy:
         'Wait for in-flight tasks to finish and retry — the quota frees as MicroVMs terminate. '
         + 'If the platform hits this routinely, request a Lambda MicroVMs quota increase in Service Quotas, '
@@ -387,6 +383,39 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
 
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:AccessDeniedException|UnauthorizedException)/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'The platform is not authorized to run this MicroVM',
+      description: 'AWS denied the MicroVM lifecycle request with the current permissions.',
+      remedy: 'An admin should check the orchestrator role, iam:PassRole, and the MicroVM execution role against the deployed bootstrap bundle and stack. Correct the permissions before retrying.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    pattern: /MicroVM [\w ]+failed[\s\S]*(?:ValidationException|InvalidParameterValueException)/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'The MicroVM request contains invalid configuration',
+      description: 'AWS rejected a value in the MicroVM request.',
+      remedy: 'An admin should check the image identifier/version, connector ARNs, execution role and hook payload against the service contract, then redeploy the corrected configuration.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    pattern: /MicroVM[\s\S]*(?:host|capacity)[\s\S]*(?:unavailable|not available)|MicroVM[\s\S]*InsufficientCapacityException/i,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM host or capacity is temporarily unavailable',
+      description: 'AWS could not provide the host or capacity needed for this MicroVM.',
+      remedy: 'Retry the task. If the failure persists, an admin should check AWS service health and the available MicroVM capacity.',
+      retryable: true,
+      errorClass: ErrorClass.TRANSIENT,
+    },
+  },
   {
     pattern: /Session start failed/i,
     classification: {
@@ -866,6 +895,10 @@ export function classifyError(errorMessage: string | undefined | null): ErrorCla
   if (!errorMessage) {
     return null;
   }
+
+  // Read the orchestrator's code before scanning any appended service text.
+  const microvmFailure = classifyMicrovmTerminalFailure(errorMessage);
+  if (microvmFailure) return microvmFailure;
 
   // Environmental blockers carry a canonical ``BLOCKED[<kind>]`` prefix
   // and an extractable resource — check them first so the remedy can name the

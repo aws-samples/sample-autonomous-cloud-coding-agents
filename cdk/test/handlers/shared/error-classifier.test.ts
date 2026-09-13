@@ -603,6 +603,59 @@ describe('classifyError', () => {
       'MicroVM substrate terminated before the agent wrote a terminal status: '
       + `substrate state completed (${reason})`;
 
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM capacity unavailable in this Availability Zone.',
+      'MicroVM host unavailable in this region.',
+    ])('does not mistake "%s" for an unsupported region', (reason) => {
+      for (const message of [reason, reconciled(reason)]) {
+        const result = classifyError(message)!;
+        expect(result.category).toBe(ErrorCategory.COMPUTE);
+        expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+        expect(result.retryable).toBe(true);
+        expect(retryGuidance(result)).toMatch(/reply here to try again/i);
+      }
+    });
+
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM unavailable in this region.',
+      'INSUFFICIENT_GITHUB_REPO_PERMISSIONS',
+      'concurrency limit reached',
+      'BLOCKED[missing_secret]: diagnostic text',
+      'Run lifecycle hook returned HTTP status 400.',
+    ])('a stable terminal code cannot be reclassified by diagnostic text: %s', (reason) => {
+      const result = classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled(reason)}`)!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('a stable hook-rejection code keeps configuration guidance despite other diagnostic words', () => {
+      const result = classifyError(
+        `MICROVM_RUN_HOOK_REJECTED: ${reconciled('MicroVM host unavailable; concurrency limit')}`,
+      )!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.retryable).toBe(false);
+      expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+    });
+
+    test.each(['AccessDeniedException', 'UnauthorizedException'])(
+      'does not retry a marked %s when starting a MicroVM', (name) => {
+        const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: denied`)!;
+        expect(result.category).toBe(ErrorCategory.AUTH);
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+      },
+    );
+
+    test.each(['ValidationException', 'InvalidParameterValueException'])('does not retry MicroVM %s', (name) => {
+      const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: invalid connector`)!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(result.retryable).toBe(false);
+    });
+
     test.each([400, 403, 404, 422, 499])(
       'classifies a lifecycle-hook %i as a NON-retryable config fault',
       (status) => {
@@ -612,6 +665,7 @@ describe('classifyError', () => {
         // generic COMPUTE/TRANSIENT entry whose remedy is "reply here to try
         // again" — an invitation to loop forever on a version-skewed deployment.
         const result = classifyError(reconciled(hookReason(status)))!;
+        expect(classifyError(hookReason(status))).toEqual(result);
         expect(result.category).toBe(ErrorCategory.CONFIG);
         expect(result.retryable).toBe(false);
         expect(result.errorClass).toBe(ErrorClass.SERVICE);
@@ -626,7 +680,7 @@ describe('classifyError', () => {
 
     test('a lifecycle-hook 5xx stays RETRYABLE — MICROVM_RUN_PAYLOAD_UNREADABLE is a 500', () => {
       // The scoping that makes the entry above safe. The agent answers 500 for a
-      // truncated/racing S3 payload, which a retry genuinely can fix, so the 4xx
+      // failed S3 read, which a retry may fix, so the 4xx
       // pattern must not swallow the 5xx family.
       const result = classifyError(reconciled(hookReason(500)))!;
       expect(result.category).toBe(ErrorCategory.COMPUTE);
@@ -695,6 +749,9 @@ describe('classifyError', () => {
       ['ServiceQuotaExceededException: quota exceeded'],
       ['ResourceNotFoundException: Requested resource not found'],
       ['TooManyRequestsException: slow down'],
+      ['AccessDeniedException: denied'],
+      ['UnauthorizedException: denied'],
+      ['ValidationException: invalid'],
     ])('an unmarked "%s" still classifies as UNKNOWN, exactly as before', (message) => {
       const result = classifyError(message)!;
       expect(result.category).toBe(PRE_CHANGE_UNKNOWN.category);

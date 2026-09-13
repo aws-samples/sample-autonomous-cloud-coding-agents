@@ -43,7 +43,9 @@ import type { SessionHandle, SessionStatus } from '../../../src/handlers/shared/
 // The real classifier: the reason-append must not break the anchor the substrate
 // -failure classification keys on.
 import { classifyError } from '../../../src/handlers/shared/error-classifier';
+import { renderFailureReply, renderPanelFailureReason } from '../../../src/handlers/shared/failure-reply';
 import { buildComputeMetadata, reconcileMicrovmSubstrateState } from '../../../src/handlers/shared/orchestrator';
+import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
@@ -302,6 +304,35 @@ describe('reconcileMicrovmSubstrateState', () => {
   });
 
   describe('terminal substrate', () => {
+    test.each([
+      ['MicroVM host unavailable.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ['capacity unavailable in this Availability Zone.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ['MicroVM unavailable in this region.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ['INSUFFICIENT_GITHUB_REPO_PERMISSIONS', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ['BLOCKED[missing_secret]: diagnostic text', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ["agent_status='success', build_ok=False", 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ["agent_status='success', build_ok=timeout [auto-retried]", 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+      ['Run lifecycle hook returned HTTP status 400.', 'MICROVM_RUN_HOOK_REJECTED', 'config', false],
+      ['Run lifecycle hook returned HTTP status 500.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ])('persists a stable failure code and consistent user guidance for %s', async (reason, code, category, retryable) => {
+      primeReread(TaskStatus.RUNNING);
+      await reconcile({ status: 'completed', reason }, TaskStatus.RUNNING);
+      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+      const errorMessage = String(values[':attr_error_message']);
+      expect(errorMessage).toMatch(new RegExp(`^${code}: `));
+      expect(errorMessage).toContain(reason);
+      expect(toTaskDetail({
+        task_id: 'TASK001', status: TaskStatus.FAILED, error_message: errorMessage,
+      } as TaskRecord).error_classification).toMatchObject({ category, retryable });
+
+      const input = { status: TaskStatus.FAILED, errorMessage, taskId: 'TASK001' };
+      for (const reply of [renderFailureReply(input), renderPanelFailureReason(input)]) {
+        expect(reply).toMatch(retryable ? /reply here to try again/i : /needs your ABCA admin/i);
+        expect(reply).not.toContain('Lambda MicroVMs is not available in this Region');
+        expect(reply).not.toContain('I automatically tried again');
+      }
+    });
+
     test('fails the task when the re-read status is still non-terminal', async () => {
       primeReread(TaskStatus.RUNNING);
 
@@ -321,7 +352,7 @@ describe('reconcileMicrovmSubstrateState', () => {
       // The reason string is what error-classifier keys the substrate-failure
       // classification on — keep the two in lockstep.
       expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
       );
 
       // Plus the task_failed audit event.
@@ -364,7 +395,7 @@ describe('reconcileMicrovmSubstrateState', () => {
       expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: host fault',
+        'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: host fault',
       );
     });
 
@@ -383,7 +414,7 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: '
+        'MICROVM_RUN_HOOK_REJECTED: MicroVM substrate terminated before the agent wrote a terminal status: '
         + `substrate state completed (${reason})`,
       );
     });
@@ -398,32 +429,23 @@ describe('reconcileMicrovmSubstrateState', () => {
 
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: '
+        'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: '
         + 'host fault (hypervisor evicted the guest)',
       );
     });
 
-    test('renders unchanged when the substrate supplies no reason', async () => {
-      // A live-verified hung MicroVM reports no `stateReason` at all, so the
-      // reason-less string stays the baseline — and stays the one the classifier's
-      // `MicroVM substrate terminated…` pattern is anchored on.
+    test('keeps a stable code when the substrate supplies no reason', async () => {
       primeReread(TaskStatus.RUNNING);
 
       await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
 
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
       expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
       );
     });
 
-    test('a reason-carrying message still classifies, and a hook 4xx outranks the generic entry', async () => {
-      // The append must not break classification — that would trade a misleading
-      // remedy for no remedy. It now does BETTER than preserve the generic anchor:
-      // a hook-4xx reason reaches a dedicated NON-retryable entry, because every
-      // 4xx the guest can answer is a wiring fault an identical retry cannot fix.
-      // Both strings live in one `error_message`, so this is really an assertion
-      // about classifier ORDER.
+    test('a hook 4xx selects the non-retryable failure code', async () => {
       primeReread(TaskStatus.RUNNING);
       await reconcile({ status: 'completed', reason: 'Run lifecycle hook returned HTTP status 400.' }, TaskStatus.RUNNING);
       const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
@@ -435,9 +457,7 @@ describe('reconcileMicrovmSubstrateState', () => {
     });
 
     test('a NON-hook reason keeps the generic retryable substrate-failure entry', async () => {
-      // The other half: the `MicroVM substrate terminated…` anchor must still be
-      // the answer for the reasons it was written for (duration cap, host fault,
-      // external terminate), so the entry above must not have swallowed them.
+      // An ordinary service reason must not select the hook-rejection code.
       primeReread(TaskStatus.RUNNING);
       await reconcile(
         { status: 'completed', reason: 'host fault (hypervisor evicted the guest)' },
