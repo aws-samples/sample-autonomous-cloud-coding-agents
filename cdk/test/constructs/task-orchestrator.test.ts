@@ -803,7 +803,7 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(actions.has('lambda:CreateMicrovmShellAuthToken')).toBe(false);
   });
 
-  test('gets write on the payload bucket but NOT delete (lifecycle rule is the reaper)', () => {
+  test('can upload payloads and delete only task payload objects at finalize', () => {
     const payloadStatements = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{
         Action: string | string[];
@@ -813,7 +813,18 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
 
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    expect(actions).not.toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:DeleteObject');
+    expect(actions.some(action => action.startsWith('s3:Get') || action.startsWith('s3:List'))).toBe(false);
+    const deletes = payloadStatements.filter(s =>
+      (Array.isArray(s.Action) ? s.Action : [s.Action]).some(action => action.startsWith('s3:Delete')));
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.Action).toBe('s3:DeleteObject');
+    expect(deletes[0]!.Resource).toEqual({
+      'Fn::Join': ['', [
+        { 'Fn::GetAtt': [expect.stringMatching(/^MicrovmPayloadBucket/), 'Arn'] },
+        '/*/payload.json',
+      ]],
+    });
   });
 
   test('adds no MicroVM statements when microvmConfig is omitted', () => {

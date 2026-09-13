@@ -462,8 +462,8 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     // keys are `<taskId>/payload.json`, and the guest runs untrusted repo code —
     // so a TTL-only reaper left every finished task's hydrated prompt readable by
     // any concurrently running MicroVM until asynchronous lifecycle deletion.
-    // The current MicroVM delete grant is still missing (#817); task-scoped
-    // payload reads are a separate improvement (#700).
+    // Task-scoped payload reads are a separate improvement (#700); deleting
+    // completed payloads does not isolate other tasks that are still active.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     } else if (blueprintConfig.compute_type === 'lambda-microvm') {

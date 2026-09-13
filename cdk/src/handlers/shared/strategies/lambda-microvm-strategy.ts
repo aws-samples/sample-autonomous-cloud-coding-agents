@@ -385,20 +385,16 @@ export function microvmPayloadKey(taskId: string): string {
 
 /**
  * Delete a task's MicroVM ``/run`` payload object. Best-effort: a failed delete
- * must never fail the task — the bucket's 1-day lifecycle rule reaps it
- * regardless. Called from the orchestrator's ``finalize`` step once the task is
- * terminal. No-ops when the payload bucket isn't configured.
+ * must never fail the task; the bucket's 1-day lifecycle rule is the fallback.
+ * Called from the orchestrator's ``finalize`` step once the task is terminal.
+ * No-ops when the payload bucket isn't configured.
  *
- * WHY this exists rather than leaning on the TTL alone (ECS parity, and a real
- * exposure delta): the execution role's payload-bucket grant is
- * ``grantRead`` on the WHOLE bucket — it cannot be per-task scoped, because the
- * MicroVM has to read its own object before any tenant identity is installed.
- * The key shape is ``<taskId>/payload.json``, so any running MicroVM that knows
- * (or guesses) another task's id can read that task's HYDRATED PROMPT — issue
- * body, comment thread, repo context. The MicroVM also runs untrusted repo code.
- * Relying only on ``MICROVM_PAYLOAD_TTL_DAYS = 1`` left that window open for up
- * to ~24 h; deleting at finalize closes it to the task's own lifetime, which is
- * exactly the posture ``deleteEcsPayload`` already gives the ECS backend.
+ * The execution role currently reads the whole payload bucket before task-scoped
+ * credentials are established. Untrusted task code can therefore read other
+ * tasks' payloads where it knows their keys. Deleting completed payloads shortens
+ * that exposure; it does not isolate active tasks. #700 tracks task-scoped
+ * transport. S3 processes lifecycle expiry asynchronously, so it is not an exact
+ * 24-hour bound on retention if this deletion fails.
  *
  * ISSUED UNCONDITIONALLY, including for a task whose payload went INLINE (under
  * the {@link RUN_HOOK_PAYLOAD_LIMIT_BYTES} cap, so no object was ever written).

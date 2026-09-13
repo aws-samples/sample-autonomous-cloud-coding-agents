@@ -1190,7 +1190,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(rendered).not.toContain('lambda:ConnectMicrovm');
   });
 
-  test('orchestrator may WRITE the payload bucket; nothing grants it delete', () => {
+  test('orchestrator may upload payloads and delete task payload objects at finalize', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('TaskOrchestrator'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
@@ -1202,9 +1202,14 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
 
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    // The bucket's lifecycle rule is the reaper on this backend — unlike the ECS
-    // path the orchestrator never deletes, so the grant must not exist.
-    expect(actions).not.toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:DeleteObject');
+    const deletion = payloadStatements.find(s => s.Action === 's3:DeleteObject');
+    expect(deletion!.Resource).toEqual({
+      'Fn::Join': ['', [
+        { 'Fn::GetAtt': [expect.stringMatching(/^LambdaMicrovmComputePayloadBucket/), 'Arn'] },
+        '/*/payload.json',
+      ]],
+    });
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {

@@ -47,10 +47,9 @@ import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from
 /**
  * Lifecycle expiry for MicroVM `/run` hook payloads, in days.
  *
- * Mirrors {@link ECS_PAYLOAD_TTL_DAYS}. Finalization attempts to delete the
- * object identified by `microvmPayloadKey`, but the orchestrator is still
- * missing its DeleteObject grant (#817). Lifecycle expiry is the current
- * fallback; S3 processes expiry asynchronously, not exactly 24 hours after
+ * Mirrors {@link ECS_PAYLOAD_TTL_DAYS}. Finalization deletes the object
+ * identified by `microvmPayloadKey`; lifecycle expiry is the fallback if that
+ * step fails. S3 processes expiry asynchronously, not exactly 24 hours after
  * upload. Payloads carry hydrated prompt context and are read once at `/run`.
  */
 export const MICROVM_PAYLOAD_TTL_DAYS = 1;

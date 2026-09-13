@@ -575,7 +575,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
   });
 
-  test('payload bucket expires objects (the ONLY reaper on this backend)', () => {
+  test('payload bucket expires objects as a fallback for failed finalization', () => {
     template.hasResourceProperties('AWS::S3::Bucket', {
       LifecycleConfiguration: {
         Rules: Match.arrayWith([
