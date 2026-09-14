@@ -65,13 +65,13 @@ when the helper expiration is missing or six minutes or less away. Therefore:
 - Current documentation for newer Claude default-chain caching is not evidence
   that the pinned helper path has those semantics.
 
-Next, exercise the actual pinned CLI against a local fake Bedrock endpoint with
-synthetic credentials and controlled expiry. Evaluate a supported strict
-credential-provider path, such as `credential_process`, which must await renewal
-before signing, or a supported explicit cache invalidation/continuation method.
-Check this using the actual SDK/CLI, preserve task/user/repo attribution, and
-keep provider failures from falling back to stale or unscoped credentials.
-Do not patch internal minified CLI functions.
+**Follow-up implemented locally:** the [credential verification](./645-p3-credentials.md)
+now exercises that actual CLI. `credential_process` renewed successfully but
+fell through to ambient credentials on failure. The chosen MicroVM path uses a
+single authenticated, scoped container provider; renewal waits before signing,
+and failure sends no model request. Python refresh updates retained credential
+objects with the original identity. Production HTTP callbacks and live runtime
+provider/snapshot verification are still open. No minified CLI internals were patched.
 
 Known background tool flags are tracked, but arbitrary shell/MCP subprocesses
 may also detach work. Their safe-point behavior still requires a conservative
@@ -103,8 +103,8 @@ budgets, durable supervisor recovery or complete P3 acceptance.
 
 ## Remaining integration order
 
-1. Prove the Claude credential path, then implement tenant/ambient refresh for
-   existing clients while preserving attribution.
+1. **Local credential implementation complete:** verify the deployed runtime
+   provider and snapshot behavior; connect retained-client refresh to the resume callback.
 2. Implement the production checkpoint and HTTP suspend/resume routes with
    shared service budgets, duplicate-request handling and deterministic teardown.
 3. Bind lifecycle capability to the image/version that launched each worker;

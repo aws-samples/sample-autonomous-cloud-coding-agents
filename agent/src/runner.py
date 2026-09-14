@@ -638,12 +638,20 @@ async def run_agent(
     # standalone query() function.  This matches the official AWS sample:
     # https://github.com/aws-samples/sample-deploy-ClaudeAgentSDK-based-agents-to-AgentCore-Runtime
     client = ClaudeSDKClient(options=options)
-    log("AGENT", "Connecting to Claude Code CLI subprocess...")
-    await client.connect()
-    log("AGENT", "Connected. Sending prompt...")
-    await client.query(prompt=prompt)
-    log("AGENT", "Prompt sent. Receiving messages...")
+    from microvm_credentials import ScopedCredentialBroker
+    from microvm_lifecycle import get_context
+
+    broker = None
     try:
+        lifecycle = get_context(config.task_id or "")
+        if lifecycle is not None:
+            broker = ScopedCredentialBroker(lifecycle)
+            options.env.update(broker.environment)
+        log("AGENT", "Connecting to Claude Code CLI subprocess...")
+        await client.connect()
+        log("AGENT", "Connected. Sending prompt...")
+        await client.query(prompt=prompt)
+        log("AGENT", "Prompt sent. Receiving messages...")
         async for message in client.receive_response():
             if isinstance(message, SystemMessage):
                 message_counts["system"] += 1
@@ -864,13 +872,21 @@ async def run_agent(
         # see it on the dashboard widget + ``bgagent status`` and not
         # just on the runtime-DEFAULT stream.
         log_error_cw(
-            f"Exception during receive_response(): {type(e).__name__}: {e}",
+            f"Exception during Claude session: {type(e).__name__}: {e}",
             task_id=config.task_id or None,
         )
         progress.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"
-            result.error = f"receive_response() failed: {e}"
+            result.error = f"Claude session failed: {e}"
+    finally:
+        # Also cover startup/query failure and cancellation, before pipeline
+        # teardown removes the task's lifecycle registry entry.
+        try:
+            await client.disconnect()
+        finally:
+            if broker is not None:
+                broker.close()
 
     log("AGENT", f"Generator finished. Messages received: {message_counts}")
     log("AGENT", f"CLI stderr lines received: {stderr_line_count}")

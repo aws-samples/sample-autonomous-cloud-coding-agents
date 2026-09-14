@@ -1,7 +1,7 @@
 """Unit tests for runner.py helpers.
 
-The full ``run_agent`` path is integration-tested via test_pipeline.py
-with a mocked ``pipeline.run_agent``. This module covers the narrower
+Pipeline tests mock ``pipeline.run_agent``; they do not exercise its SDK loop.
+This module covers client/broker ownership and the narrower
 ``_initialize_policy_engine_and_hooks`` helper extracted in Chunk 7 so
 the policy-engine bootstrap + ``pre_approvals_loaded`` emission can be
 verified without spinning up the Claude Agent SDK client.
@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,6 +46,79 @@ def _config(**overrides: Any) -> TaskConfig:
     }
     base.update(overrides)
     return TaskConfig(**base)
+
+
+class TestClaudeSessionOwnership:
+    @pytest.mark.parametrize("microvm", [False, True])
+    @pytest.mark.parametrize("failure", [None, "connect", "query", "receive", "cancel"])
+    def test_broker_selection_and_cleanup_on_every_session_exit(
+        self, monkeypatch, microvm, failure
+    ):
+        import claude_agent_sdk
+
+        import microvm_credentials
+        import microvm_lifecycle
+
+        config = _config()
+        context = microvm_lifecycle.register_task(config.task_id, "vm") if microvm else None
+        client = MagicMock()
+        client.connect = AsyncMock()
+        client.query = AsyncMock()
+        client.disconnect = AsyncMock()
+        if failure in {"connect", "query"}:
+            getattr(client, failure).side_effect = RuntimeError("synthetic failure")
+
+        async def messages():
+            if failure == "receive":
+                raise RuntimeError("synthetic receive failure")
+            if failure == "cancel":
+                raise asyncio.CancelledError
+            yield claude_agent_sdk.ResultMessage(
+                subtype="success",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=0,
+                session_id="synthetic",
+                total_cost_usd=0,
+                usage={},
+            )
+
+        client.receive_response = messages
+        make_client = MagicMock(return_value=client)
+        monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", make_client)
+        broker = MagicMock()
+        broker.environment = {"ABCA_MICROVM_CREDENTIAL_BROKER": "1"}
+        make_broker = MagicMock(return_value=broker)
+        monkeypatch.setattr(microvm_credentials, "ScopedCredentialBroker", make_broker)
+        monkeypatch.setattr(runner, "_setup_agent_env", lambda _config: None)
+        monkeypatch.setattr(runner, "_log_claude_cli_version", lambda: None)
+        monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_kw: (None, {}))
+        monkeypatch.setattr(runner, "_register_gateway_server", lambda _servers: None)
+        monkeypatch.setattr(runner, "build_clarification_server", lambda: None)
+        monkeypatch.setattr(runner, "_ProgressWriter", MagicMock())
+        monkeypatch.setattr(runner, "log_error_cw", MagicMock())
+        try:
+            if failure == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    asyncio.run(runner.run_agent("probe", "probe", config, trajectory=MagicMock()))
+            else:
+                result = asyncio.run(
+                    runner.run_agent("probe", "probe", config, trajectory=MagicMock())
+                )
+                assert result.status == ("error" if failure else "success")
+            options = make_client.call_args.kwargs["options"]
+            if microvm:
+                make_broker.assert_called_once_with(context)
+                assert options.env == broker.environment
+                broker.close.assert_called_once()
+            else:
+                make_broker.assert_not_called()
+                assert options.env == {}
+            client.disconnect.assert_awaited_once()
+        finally:
+            if context is not None:
+                microvm_lifecycle.unregister_task(context)
 
 
 class TestInitializePolicyEngineAndHooks:

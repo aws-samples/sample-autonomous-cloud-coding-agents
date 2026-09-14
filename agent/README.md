@@ -139,6 +139,15 @@ tenant's OAuth or Forge credential to the next task.
 
 † You need valid Bedrock credentials in the container: export keys (Option A), let `run.sh` inject keys from the AWS CLI after `aws sso login` or similar (Option B), or mount `~/.aws` (Option C). `run.sh` also sets `CLAUDE_CODE_USE_BEDROCK=1` so Claude Code uses Bedrock.
 
+MicroVM workers configure Claude's AWS provider internally at runtime. The parent
+sets `ABCA_MICROVM_CREDENTIAL_BROKER=1` **only in the Claude child**, points
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` at an authenticated loopback endpoint, and
+clears alternate credential sources in that child. Operators should not set this
+internal flag themselves. The endpoint serves the current task's scoped session;
+the parent's runtime credentials and other backends' attribution path remain
+separate. See [P3 credential verification](../docs/verification/645-p3-credentials.md)
+for implementation and live-verification limits.
+
 ### Examples
 
 ```bash

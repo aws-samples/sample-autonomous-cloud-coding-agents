@@ -14,6 +14,14 @@ The first local P3 foundation adds the supervisor's pause/wake command methods a
 
 A second foundation adds saved sleep/wake instructions with revision stamps, so an old supervisor cannot overwrite a newer wake request. A policy helper now handles the observed state and current approval deadline. Real DynamoDB Local transaction tests cover competing writers and restart/readback cases; this is a local database test, not an AWS deployment. See the [lifecycle runbook](./645-lifecycle-intent.md). Guest hooks, durable supervisor integration and live verification remain required.
 
+**Further P3 work (2026-09-14):** the [guest pause controller](./645-p3-guest-barrier.md)
+now keeps coding behind a controlled door while approval work is paused. The
+[credential implementation](./645-p3-credentials.md) renews the existing AWS key
+objects and gives Claude one source of task-specific keys. Actual pinned Claude
+tests with fake AWS responses prove renewal before the next request and safe
+failure without borrowing the parent's keys. Production HTTP pause/wake handlers,
+supervisor wiring and real AWS sleep/wake verification remain open.
+
 The reservation review found a separate trust boundary: the old agent role could write/replace/delete its task row, including coordinator metadata. A subsequent local fix restricts main-task writes to reporting/approval attributes, removes replacement/deletion permissions and removes unused worker counter grants. It also removes unused Python submission/session-info helpers and corrects overstated tenant-isolation comments. [Metadata verification](./645-coordinator-metadata.md) records the tests and pending AWS gate. Status reports still come from the agent, and the compute role chooses session tags; this is not complete hostile-worker isolation.
 
 ## Start here: the pieces in plain language
@@ -34,7 +42,7 @@ An **IAM role** is a permission badge. A **trust policy** says who may wear that
 |---|---|---|
 | P1 | Build the computer, start it, deliver a task, check it and stop it | Merged in [#689](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/689). Strategy, infrastructure, bootstrap permissions, packaging, types, `/ready` and `/run` exist. |
 | P2 | Make a real coding task work with configuration, permissions, logs and progress | Merged in [#733](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/733). `/validate`, `/terminate`, warm-up, runtime grants and heartbeat support exist. Two recorded tasks completed and opened PRs on August 7, using a manual IAM workaround. Permanent fixes still need a clean rerun. |
-| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Not implemented. AWS's suspend API was exercised manually; ABCA's integrated pause/resume lifecycle is missing. |
+| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Local foundations now include intent/policy, the guest pause controller and scoped credential renewal. The integrated HTTP/supervisor lifecycle and live acceptance remain open. |
 | P4 | — | ADR-021 defines no P4. Verification runbooks have their own numbered phases; those are not extra ADR milestones. |
 
 The old unchecked checklist and the word “proposed” do not erase the merged work. Conversely, merged code is not proof that the final deployment path works unattended.

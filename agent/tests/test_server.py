@@ -608,12 +608,9 @@ def test_warn_cw_write_blocking_uses_server_warn_stream(monkeypatch):
         def put_log_events(self, *, logGroupName, logStreamName, logEvents):
             captured_streams.append(logStreamName)
 
-    class _FakeBoto3:
-        @staticmethod
-        def client(*args, **kwargs):
-            return _FakeLogs()
-
-    monkeypatch.setitem(__import__("sys").modules, "boto3", _FakeBoto3)
+    # This test owns stream routing. Credential/signing behavior belongs to the
+    # aws_session tests, so stub the attributed client factory at its boundary.
+    monkeypatch.setattr("aws_session.platform_client", lambda *_args, **_kwargs: _FakeLogs())
 
     server._warn_cw_write_blocking(
         log_group="/some/log-group",

@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import UTC
 from typing import Any
 
 # Env var holding the per-task SessionRole ARN. Set by the orchestrator on the
@@ -64,6 +65,8 @@ _MAX_TAG_VALUE_LEN = 256
 _lock = threading.Lock()
 _session: Any = None  # cached boto3.Session (scoped or plain)
 _scoped: bool | None = None  # None until first resolution; True if tag-scoped
+_ambient_lock = threading.Lock()
+_ambient_credentials: dict[int, Any] = {}
 
 # Session-tag values, set once at startup by ``configure_session`` from the
 # resolved TaskConfig. Kept in private module state — NOT os.environ — so the
@@ -105,11 +108,15 @@ def configure_session(user_id: str, repo: str, task_id: str) -> None:
     spawned subprocesses.
     """
     global _tags
-    _tags = {
+    tags = {
         key: value
         for key, value in (("user_id", user_id), ("repo", repo), ("task_id", task_id))
         if value
     }
+    with _lock:
+        if _session is not None and _tags != tags:
+            raise SessionScopingError("Cannot change identity after creating the task session")
+        _tags = tags
 
 
 def reset_session_cache() -> None:
@@ -119,6 +126,8 @@ def reset_session_cache() -> None:
         _session = None
         _scoped = None
         _tags = {}
+    with _ambient_lock:
+        _ambient_credentials.clear()
 
 
 def _session_tags() -> list[dict[str, str]]:
@@ -144,12 +153,14 @@ def _build_scoped_session(role_arn: str) -> Any:
     running past the 1-hour role-chaining cap keeps working.
     """
     import boto3
+    from botocore.config import Config
     from botocore.credentials import (
         DeferredRefreshableCredentials,
     )
     from botocore.session import get_session as get_botocore_session
 
     import ua
+    from microvm_lifecycle import get_context
 
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     task_id = _tags.get("task_id", "")
@@ -163,14 +174,21 @@ def _build_scoped_session(role_arn: str) -> Any:
     # This is the role-chaining caller; the assumed SessionRole credentials it
     # returns must NOT be used to build it, or refresh would recurse. Carries
     # the static md/ UA segment so the assume-role call is attributed too.
-    sts_client = boto3.client("sts", region_name=region, config=ua.client_config())
+    sts_config = (
+        Config(connect_timeout=2, read_timeout=2, retries={"total_max_attempts": 1})
+        if get_context(task_id) is not None
+        else Config()
+    )
+    sts_client = platform_client("sts", region_name=region, config=sts_config)
+    # A retained client's refresh must never pick up another task's identity.
+    tags = _session_tags()
 
     def _refresh() -> dict[str, str]:
         resp = sts_client.assume_role(
             RoleArn=role_arn,
             RoleSessionName=session_name,
             DurationSeconds=_CHAINED_SESSION_DURATION_S,
-            Tags=_session_tags(),
+            Tags=tags,
         )
         creds = resp["Credentials"]
         return {
@@ -334,4 +352,80 @@ def platform_client(service_name: str, **kwargs: Any) -> Any:
     """
     import boto3
 
-    return boto3.client(service_name, **_merge_ua_config(kwargs))
+    client = boto3.client(service_name, **_merge_ua_config(kwargs))
+    credentials = client._request_signer._credentials
+    with _ambient_lock:
+        _ambient_credentials[id(credentials)] = credentials
+    return client
+
+
+def _microvm_scoped_credentials(task_id: str) -> Any:
+    """Require the existing task identity; never reset/rebuild a cached session."""
+    session = get_session()
+    with _lock:
+        if not _scoped or not task_id or _tags.get("task_id") != task_id:
+            raise SessionScopingError("MicroVM credentials require the original scoped task")
+    return session.get_credentials()
+
+
+def _locked_refresh(credentials: Any, *, force: bool) -> dict[str, str]:
+    """Refresh and export one coherent key/expiry pair on the retained object.
+
+    Botocore has no public forced-refresh operation. Keep its lock/private API
+    use here and exercise it against the installed botocore in regression tests.
+    A mandatory refresh propagates errors even while the old keys remain valid.
+    The enclosing lifecycle callback supplies the overall wall-clock budget.
+    """
+    from botocore.credentials import RefreshableCredentials
+
+    if not isinstance(credentials, RefreshableCredentials):
+        # Static env keys cannot prove renewal after sleep. Do not invent a TTL
+        # or claim that rereading the same environment refreshed the runtime role.
+        raise SessionScopingError("MicroVM resume requires a refreshable credential provider")
+    if not credentials._refresh_lock.acquire(timeout=2):
+        raise TimeoutError("Credential refresh lock did not become available")
+    try:
+        if force or credentials.refresh_needed():
+            credentials._protected_refresh(is_mandatory=True)
+        frozen = credentials._frozen_credentials
+        expiry = credentials._expiry_time
+        if (
+            frozen is None
+            or not frozen.access_key
+            or not frozen.secret_key
+            or not frozen.token
+            or expiry is None
+            or credentials._is_expired()
+        ):
+            raise SessionScopingError("Credential provider did not return usable temporary keys")
+        return {
+            "AccessKeyId": frozen.access_key,
+            "SecretAccessKey": frozen.secret_key,
+            "Token": frozen.token,
+            "Expiration": expiry.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    finally:
+        credentials._refresh_lock.release()
+
+
+def export_microvm_credentials(task_id: str) -> dict[str, str]:
+    """Serve only the original task's temporary keys to the local Claude broker."""
+    return _locked_refresh(_microvm_scoped_credentials(task_id), force=False)
+
+
+def refresh_microvm_credentials(task_id: str) -> None:
+    """Refresh ambient callers first, then the same tag-scoped tenant object.
+
+    Call only behind the closed guest resume barrier. Cached DynamoDB/S3 and
+    platform clients keep their credential references; replacing a boto3 session
+    would leave those references stale. Unknown/static ambient providers fail
+    closed until their runtime renewal path has been established.
+    """
+    tenant = _microvm_scoped_credentials(task_id)
+    with _ambient_lock:
+        ambient = tuple(_ambient_credentials.values())
+    if not ambient:
+        raise SessionScopingError("No runtime credential provider was recorded")
+    for credentials in ambient:
+        _locked_refresh(credentials, force=True)
+    _locked_refresh(tenant, force=True)
