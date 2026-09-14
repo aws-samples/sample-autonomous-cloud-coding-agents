@@ -48,6 +48,8 @@ export const PLATFORM_REPO_DEFAULTS = {
   model_id: 'us.anthropic.claude-opus-5',
   max_turns: 200,
   poll_interval_ms: 30_000,
+  build_command: 'mise run build',
+  lint_command: 'mise run lint',
   approval_gate_cap: 50,
 } as const;
 
@@ -70,6 +72,8 @@ export interface RepoConfigDisplay {
     readonly max_turns: number;
     readonly max_budget_usd: string;
     readonly poll_interval_ms: number;
+    readonly build_command: string;
+    readonly lint_command: string;
     readonly approval_gate_cap: number;
     readonly github_token_source: GithubTokenSource;
     readonly github_token_secret_arn?: string;
@@ -108,6 +112,8 @@ export function formatRepoConfigForDisplay(
   mark('max_turns', config.max_turns !== undefined);
   mark('max_budget_usd', config.max_budget_usd !== undefined);
   mark('poll_interval_ms', config.poll_interval_ms !== undefined);
+  mark('build_command', Boolean(config.build_command?.trim()));
+  mark('lint_command', Boolean(config.lint_command?.trim()));
   mark('approval_gate_cap', config.approval_gate_cap !== undefined);
   fieldSources.github_token_secret_arn = usesBlueprintToken ? 'blueprint' : 'platform';
 
@@ -115,7 +121,7 @@ export function formatRepoConfigForDisplay(
   for (const key of [
     'compute_type', 'runtime_arn', 'model_id', 'max_turns', 'max_budget_usd',
     'poll_interval_ms', 'approval_gate_cap', 'system_prompt_overrides',
-    'egress_allowlist', 'cedar_policies', 'github_token_secret_arn',
+    'egress_allowlist', 'cedar_policies', 'github_token_secret_arn', 'build_command', 'lint_command',
   ] as const) {
     const value = config[key];
     if (value !== undefined && value !== null && !(Array.isArray(value) && value.length === 0)) {
@@ -143,6 +149,8 @@ export function formatRepoConfigForDisplay(
         ? String(config.max_budget_usd)
         : 'unlimited',
       poll_interval_ms: config.poll_interval_ms ?? PLATFORM_REPO_DEFAULTS.poll_interval_ms,
+      build_command: config.build_command?.trim() || PLATFORM_REPO_DEFAULTS.build_command,
+      lint_command: config.lint_command?.trim() || PLATFORM_REPO_DEFAULTS.lint_command,
       approval_gate_cap: config.approval_gate_cap ?? PLATFORM_REPO_DEFAULTS.approval_gate_cap,
       github_token_source: usesBlueprintToken ? 'blueprint' : 'platform',
       github_token_secret_arn: effectiveTokenArn
@@ -196,6 +204,14 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
         String(display.effective.poll_interval_ms),
         display.field_sources.poll_interval_ms,
       ),
+    },
+    {
+      key: 'build_command',
+      text: formatSourcedValue(display.effective.build_command, display.field_sources.build_command),
+    },
+    {
+      key: 'lint_command',
+      text: formatSourcedValue(display.effective.lint_command, display.field_sources.lint_command),
     },
     {
       key: 'approval_gate_cap',

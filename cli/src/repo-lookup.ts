@@ -37,6 +37,8 @@ export interface RepoConfigRow {
   readonly model_id?: string;
   readonly max_turns?: number;
   readonly max_budget_usd?: number;
+  readonly build_command?: string;
+  readonly lint_command?: string;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
   readonly poll_interval_ms?: number;

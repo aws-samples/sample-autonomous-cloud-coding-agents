@@ -258,14 +258,32 @@ Register or re-activate a repository in `RepoTable` without a CDK redeploy. With
 
 ```
 bgagent repo onboard owner/repo \
-  --compute-type <agentcore|ecs> \
+  --compute-type <agentcore|ecs|lambda-microvm> \
   --runtime-arn <arn>         AgentCore runtime override (agentcore only) \
   --model <model-id> \
   --token-secret-arn <arn> \
   --max-turns <n> \
   --poll-interval <ms>        Default agent poll interval in milliseconds \
+  --build-command <command>  Build verification override \
+  --lint-command <command>   Lint verification override \
   --output <text|json>
 ```
+
+Verification defaults to `mise run build` and `mise run lint`, using tasks in the
+target repository's `mise.toml`. For an npm repository without mise tasks, set
+the commands explicitly:
+
+```bash
+bgagent repo onboard owner/repo \
+  --build-command 'npm ci && npm test' \
+  --lint-command 'npm run lint'
+```
+
+Re-onboarding preserves existing commands when these flags are omitted. Pass an
+empty string to restore a command's mise default. `bgagent repo show owner/repo`
+shows the effective commands. This operator command updates RepoTable; for a
+repository managed by CDK, also set `Blueprint.pipeline.buildCommand` and
+`lintCommand` in its source so future Blueprint updates retain the configuration.
 
 ### `bgagent repo offboard <owner/repo>`
 
