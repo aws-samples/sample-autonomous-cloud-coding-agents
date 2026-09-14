@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { nestedStackExecutionPolicy } from './nested-stack-policy';
 import { allPolicies } from './policies';
 
 /**
@@ -44,25 +45,39 @@ import { allPolicies } from './policies';
  * `policies/compute-lambda-microvm.ts`), which is exactly the class of breakage a
  * patch-level bump would under-advertise.
  *
- * It is 1.6.0 and not 1.4.0 because #629 and #246 landed on `main` first and took
+ * The 1.6.0 release was not 1.4.0 because #629 and #246 landed on `main` first and took
  * 1.4.0 and 1.5.0 in the interim. The number is an operator-visible contract (the
  * `CDKToolkit` stack's `BootstrapPolicyVersion` output), so re-using a published
  * version would make two different bundles indistinguishable to the `>=` check
  * operators are told to run.
+ *
+ * 1.6.0 → 1.7.0 adds an exact-self, CloudFormation-only PassRole inline policy
+ * for nested stacks (#645 clean deployment). The policy hash now includes that
+ * inline policy and every nested JSON field; the old root-key replacer omitted
+ * Action/Resource/Condition changes from its input.
  */
-export const BOOTSTRAP_VERSION = '1.6.0';
+export const BOOTSTRAP_VERSION = '1.7.0';
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === 'object') {
+    const entries = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(entries).sort().map((key) => [key, canonicalize(entries[key])]),
+    );
+  }
+  return value;
+}
 
 /**
- * Computes a SHA-256 hash over all bootstrap policies.
- * The hash is deterministic: policies are serialized with sorted keys
- * so that object property ordering does not affect the digest.
+ * Hashes all ABCA managed and inline execution policies. Sort object keys
+ * recursively without dropping nested fields; preserve array ordering.
  */
 export function computeBootstrapHash(): string {
-  const policies = allPolicies();
-  const normalized = policies.map((p) => {
-    const json = p.toJSON();
-    return JSON.stringify(json, Object.keys(json).sort());
-  });
-  const payload = JSON.stringify(normalized);
+  const policies = [
+    ...allPolicies().map((policy) => policy.toJSON()),
+    nestedStackExecutionPolicy(),
+  ];
+  const payload = JSON.stringify(canonicalize(policies));
   return createHash('sha256').update(payload).digest('hex');
 }

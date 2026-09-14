@@ -34,7 +34,7 @@ The policies are split into six IAM managed policies (each under the 6,144-chara
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
 
-These policies are not created or attached manually. The repository generates them — and a custom bootstrap template that wires all six into the CloudFormation execution role — from the TypeScript sources, then bootstraps with that template:
+These policies are not created or attached manually. The repository generates them and a custom bootstrap template that attaches the selected policies to the CloudFormation execution role:
 
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
@@ -52,14 +52,29 @@ aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template 
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
-Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+
+**Re-bootstrap to bundle 1.7.0 or later before deploying nested stacks.** The
+execution role also needs the generated inline policy
+`PassExecutionRoleToCloudFormation`, from
+`cdk/src/bootstrap/nested-stack-policy.ts`. It grants `iam:PassRole` on that exact
+execution role, with `iam:PassedToService=cloudformation.amazonaws.com`. The ARN
+uses the bootstrap partition, account, Region and qualifier; it grants no access
+to pass other roles. Without it, a fresh 1.6.0 deployment fails change-set
+validation when CloudFormation tries to pass its role to the registry's nested
+stacks. Preserve all existing bootstrap parameters when updating the template.
+
+Bundle 1.7.0 also corrects `BootstrapPolicyHash`: it includes nested policy fields
+and the generated inline policy. Earlier hashes could remain unchanged after
+Action, Resource or Condition changes. A matching old hash is insufficient proof
+that deployed permissions match source.
 
 > **CloudFormation inline-template limit — 51,200 characters**: This is a second, independent size ceiling, distinct from the per-policy IAM 6,144-character limit above. `cdk bootstrap --template` sends the template inline as `TemplateBody`; above 51,200 characters the CLI has to stage it in S3 instead, which it **cannot** do while bootstrapping a fresh account, because that bucket is one of the resources bootstrap creates. The result is a hard `BootstrapStackRequired` failure with no way through `cdk bootstrap`, `--force` included ([#864](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/864)).
 >
 > Two consequences for anyone editing the policies:
 >
 > - **The gated size is not the file's size on disk.** The CLI parses the file, discards its formatting, and re-serialises the parsed object before measuring. Reformatting `bootstrap-template.yaml` therefore changes nothing; only the *content* moves the number. Check it with `npx cdk bootstrap --show-template --template bootstrap/bootstrap-template.yaml | wc -c`.
-> - **Each `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line — which is what keeps the body under the ceiling (45,743 characters, versus 53,369 as mappings).
+> - **Each managed-policy `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line. The original fix reduced the body to 45,743 characters from 53,369; subsequent policy additions remain subject to the budget. The small inline self-role policy uses a mapping to resolve its ARN with `Fn::Sub`.
 >
 > `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
 
@@ -96,7 +111,7 @@ Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootst
 
 For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
 
-> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (three always-applied, plus three compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
+> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (four always applied, including AgentCore, plus optional ECS and MicroVM policies). The separate inline self-role grant is described above. They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
 ### IaCRole-ABCA-Infrastructure
 
