@@ -17,7 +17,7 @@ deployed `e1d5debe` through a normal reviewed update and activated version `2.0`
 Its ready/validate hooks passed; repeated packaging reused the artifact, and
 redeploying the same cloud assembly reported no changes. The root still has
 474 resources.
-The [live task verification](./645-p2-live-task-20260914.md) subsequently passed
+The [live task verification](./645-p2-live-task-20260914.md) on image `1.0` passed
 normal coding, PR iteration and cancellation on `isadeks/vercel-abca-linear`,
 including heartbeat, npm checks, Memory writes and automatic cleanup. The
 repository's [temporary verification configuration](./645-p2-repository-config-20260914.md)
@@ -25,7 +25,13 @@ passed all four pre/post npm commands live, and a worker-reported failure was
 cleaned up. The user subsequently requested removal of the CLI addition; its
 live overrides were also removed. Repository mise tasks are still needed for
 the restored default commands.
-Failure/recovery and the wider IAM/network matrix still remain.
+The [image 2.0 payload verification](./645-p2-payload-live-20260914.md) passed
+11 transport/failure cases, including URL expiry/revocation, a foreign-manifest
+denial and a payload over 1 MiB. Concurrent/repeated preparation and immediate
+identical Run replay passed; all 12 disposable workers and 29 synthetic object
+locations were cleaned up. These direct probes use operator credentials for
+preparation and bypass coordinator admission/finalization.
+Crash/recovery and the wider IAM/network matrix still remain.
 Full P2 acceptance and all P3 live gates remain open. The batch notes below
 record what was verified at their original completion; their deployment status
 is superseded by these records.
@@ -38,9 +44,11 @@ is superseded by these records.
 - [x] Exercise real S3 bad-byte paths and fix closed-stream error classification (#817).
 - [x] Require new ARN fields to participate in validation; pin contract fields and anchor (#817).
 - [x] Bind configuration to IAM-authenticated deployment manifests and use single-object payload links for ECS/MicroVM (#817 / #700).
-- [ ] Verify v2 bootstrap policies, S3 conditional writes, expiry, networking and coordinated rollout in AWS.
+- [x] Verify MicroVM manifest/download transport, malformed or mismatched inputs, URL expiry/revocation, a foreign private-bucket denial and >1 MiB transport in AWS; verify concurrent/repeated/conflicting S3 preparation with operator credentials.
+- [ ] Complete v2 effective-role/public-bucket tests, expired signer credentials, coordinator recovery and the ECS/coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
-- [ ] Verify AWS token retention/conflicts and unknown-start cleanup on a live deployment.
+- [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
+- [ ] Verify delayed AWS token retention, simultaneous/changed-request conflicts, lost Run replies and unknown-start cleanup on a live deployment.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
 - [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
@@ -216,7 +224,17 @@ Keep nesting in a separate change from lifecycle logic. Developing P3 locally ne
 
 The [bootstrap runbook](./645-payload-bootstrap.md) records wire/storage shapes, caps, credential lifetime, the coordinator's `ListBucket` requirement for missing-object detection, coordinated drain/image/controller/policy upgrade and rollback, and the real AWS allow/deny matrix. Old unsigned envelopes are intentionally rejected; this is a coordinated contract change, not a rolling mixed-version deployment.
 
-**Still required:** effective-role cross-task/public-bucket negatives, actual S3 conditional writes and missing-object behavior, signer/URL expiry, runtime DNS/HTTPS and clean launches for both backends. The role/tag and other platform-grant limits in 1G remain; this boot-path fix does not establish complete hostile-worker isolation.
+**Live subset completed:** [image 2.0 probes](./645-p2-payload-live-20260914.md)
+verify MicroVM manifest/download access through the runtime connector, invalid
+task/config/path/bytes/signature rejection, URL expiry/revocation, foreign
+private-bucket denial and >1 MiB transport. Concurrent/repeated preparation and
+changed-input conflicts exercise real S3 with operator credentials.
+
+**Still required:** effective-role cross-task/list/write/public-bucket negatives,
+expired signer credentials, lost committed replies and restart under the
+coordinator role, and equivalent ECS/upgrade evidence. The role/tag and other
+platform-grant limits in 1G remain; this boot-path fix does not establish complete
+hostile-worker isolation.
 
 ### 1C. Fix approval/heartbeat ordering
 
@@ -232,7 +250,11 @@ The receipt works like an order number: when the reply gets lost, the next call 
 
 Fault tests exercise a successful simulated service creation followed by a lost response, a second application call with the same token, a fresh strategy instance, saved-handle replay, changed input, expired recovery, confirmed rejection, cancellation before/during/after creation, and lost DynamoDB responses. The handler recovers committed registration, treats start-audit failures as non-fatal, and routes start failures through one finalization path. Finalization reads the latest committed task, avoiding a stale cancellation/failure report. An unknown first outcome stays unknown even when the second call gets a definite rejection; HTTP 408 and named service timeouts remain uncertain even with a 4xx status.
 
-**Still required:** the installed SDK documents `clientToken` idempotency but gives no retention period. Public AWS API documentation URLs did not provide a usable RunMicrovm reference during this review. The local 120-second limit is a conservative application cutoff, not evidence of AWS's retention window. Verify same-token replay, changed parameters, simultaneous requests/conflicts, token expiry and returned handles after termination against AWS before accepting this prerequisite. The service emulator proves client behavior only.
+**Live subset completed:** every passing [payload probe](./645-p2-payload-live-20260914.md)
+immediately repeated the exact Run request and received the same worker ID.
+The probes do not simulate a lost reply or coordinator restart.
+
+**Still required:** the installed SDK documents `clientToken` idempotency but gives no retention period. Public AWS API documentation URLs did not provide a usable RunMicrovm reference during this review. The local 120-second limit is a conservative application cutoff, not evidence of AWS's retention window. Verify delayed replay, changed parameters, simultaneous requests/conflicts, token expiry and returned handles after termination against AWS before accepting this prerequisite. The service emulator proves client behavior only.
 
 For an unknown outcome with no returned ID, the task error or cancellation event identifies the saved token for investigation. Do not automatically submit a replacement task. Verify how operators find and terminate that VM in the deployed service; if they cannot recover an ID, the eight-hour lifetime cap is the remaining bound. Keep this limitation explicit in live evidence.
 
@@ -285,8 +307,11 @@ steps 1–2 below. The [live task follow-up](./645-p2-live-task-20260914.md)
 provides positive runtime evidence for steps 3–5 and success/cancellation cleanup
 in step 6. The [configuration follow-up](./645-p2-repository-config-20260914.md)
 also verifies automatic pre/post npm checks and cleanup after a worker-reported
-delivery failure. Crash/rejected-hook/cleanup-error paths, recovery and negative
-IAM/network cases remain unverified.
+delivery failure. The [image 2.0 payload follow-up](./645-p2-payload-live-20260914.md)
+verifies direct startup-hook transport/rejections, immediate Run replay and
+operator cleanup. Coordinator classification/finalization after rejected hooks,
+crash/recovery/cleanup-error paths and the wider negative IAM/network matrix
+remain unverified.
 `isadeks/vercel-abca-linear` explicitly selects `lambda-microvm`; the original
 seeded repository retains AgentCore.
 

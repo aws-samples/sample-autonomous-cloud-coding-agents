@@ -1,6 +1,6 @@
 # #645: trusted task delivery for ECS and MicroVM
 
-Implementation date: 2026-09-13. Tracks the local prerequisites in #817 and #700. **Implemented locally; AWS authorization, networking, expiry and deployment checks below are still pending.** This does not implement P3 sleep/wake.
+Implementation date: 2026-09-13. Tracks the prerequisites in #817 and #700. **Deployed for MicroVM; 11 live transport/failure cases passed on 2026-09-14.** The [live evidence](./645-p2-payload-live-20260914.md) covers real worker reads/rejections, URL expiry/revocation, operator-side conditional preparation and immediate Run replay. The broader authorization/recovery matrix and ECS rollout below remain open. This does not implement P3 sleep/wake.
 
 ## What changed, in plain language
 
@@ -61,7 +61,7 @@ AWS documents this in [GetObject permissions](https://docs.aws.amazon.com/Amazon
 
 The worker reads the manifest through the attributed `platform_client("s3")` before installing configuration. It then downloads the payload over HTTPS without adding worker credentials. Only the exact bucket/task key on a regional S3 host is accepted; redirects, environment proxies, alternate hosts, credentials in URLs, custom ports, duplicate query parameters and non-HTTPS URLs are rejected. AWS validates the actual signature and expiry; local URL checks are not a cryptographic verifier.
 
-The runtime still needs HTTPS/443 and DNS access to the selected S3 region. The source checks do not establish that the deployed connector permits it. Build hooks remain AWS-silent; before configuration installation, runtime bootstrap uses manifest-read and payload-download operations, and diagnostics go to stdout.
+The runtime needs HTTPS/443 and DNS access to the selected S3 region. The live MicroVM probes verified manifest and signed-task downloads through the deployed runtime connector, including a payload over 1 MiB. Other connectors, ECS and remote-tool connectivity still need their own evidence. Build hooks remain AWS-silent; before configuration installation, runtime bootstrap uses manifest-read and payload-download operations, and diagnostics go to stdout.
 
 ## Retry, expiry and cleanup
 
@@ -105,6 +105,15 @@ The normal stack already creates distinct payload buckets for the selected backe
 ## Required AWS evidence
 
 For **both ECS and MicroVM**, retain source/image identifiers, relevant policy snippets, sanitized error codes, AWS request IDs and timing. Never retain signed URLs, credentials or downloaded customer prompts in evidence.
+
+**Partial completion, 2026-09-14:** [11 live MicroVM cases](./645-p2-payload-live-20260914.md)
+verify own-manifest/download access, task/config/path checks, bad bytes and
+signature, URL expiry/revocation, another private bucket's manifest denial,
+manifest digest validation and large-file transport. Every passing case also
+checks concurrent/repeated producer preparation, changed-input conflict and
+immediate identical Run replay. Producer calls use operator credentials;
+direct Runs bypass coordinator admission/finalization. The table remains the
+full acceptance target, including combinations those probes do not cover.
 
 | Check | Expected result |
 |---|---|
