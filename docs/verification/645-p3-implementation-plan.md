@@ -6,6 +6,17 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Live infrastructure and image deployed (2026-09-14):** the
+[clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
+Oregon environment, four deployment fixes and actual verification results.
+Bootstrap 1.7.0 and application source `29dcaa74` are deployed. CloudFormation
+reached `UPDATE_COMPLETE`; managed image version `1.0` is active, its ready and
+validate hooks passed, and authenticated API reads passed after the update.
+The normal task test still needs a selected repository, GitHub token setup and
+explicit per-repository MicroVM routing. P2 acceptance and all P3 live gates
+remain open. The batch notes below record what was verified at their original
+completion; their deployment status is superseded by this record.
+
 - [x] Review current implementation, clean up verified stale comments, and prototype nesting.
 - [x] Fix server-test thread isolation (#841).
 - [x] Grant scoped coordinator payload deletion (#817).
@@ -22,6 +33,7 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
 - [ ] Verify metadata restrictions with real AWS sessions/transactions; retain status/tag trust limits.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
+- [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
@@ -247,7 +259,13 @@ The writer inventory found no production callers of Python `write_submitted` or 
 
 ## 3. Re-prove P2 on the final infrastructure
 
-Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.6.0, or the newer bundle produced by nesting). Compare effective policies as well as the displayed version. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
+Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.7.0 for this source, including exact-self CloudFormation PassRole, or a newer required bundle). Compare effective policies as well as the displayed version. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
+
+The [2026-09-13–14 clean deployment](./645-p2-clean-deployment-20260913.md)
+completed the infrastructure, managed-image creation and build-hook checks in
+steps 1–2 below. Live runtime credential behavior and steps 3–6 remain
+unverified. The stack is configured to offer MicroVM, but the seeded repository
+still uses AgentCore; explicitly select `lambda-microvm` for the test repository.
 
 Follow `cdk/scripts/package-microvm-artifact.sh` and the P1/P2 runbooks:
 
