@@ -25,7 +25,7 @@ Set AWS_SDK_UA_APP_ID='' to confirm the app/ segment drops (customer opt-out).
 The md/ component is hard-wired to ``agent`` in ua.py (this surface IS the
 agent), unlike the Node tier where ABCA_COMPONENT selects api/orchestr/webhook.
 
-See docs/verification/319-ua-wire-runbook.md for the full runbook.
+See docs/verification/ua-wire-check-runbook.md for the full runbook.
 """
 
 from __future__ import annotations

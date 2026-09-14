@@ -24,7 +24,7 @@
  * Vary ABCA_COMPONENT (api | orchestr | webhook | agent) to see each md/ label.
  * Set AWS_SDK_UA_APP_ID='' to confirm the app/ segment drops (customer opt-out).
  *
- * See docs/verification/319-ua-wire-runbook.md for the full runbook.
+ * See docs/verification/ua-wire-check-runbook.md for the full runbook.
  */
 
 import { LambdaClient, GetAccountSettingsCommand } from '@aws-sdk/client-lambda';
