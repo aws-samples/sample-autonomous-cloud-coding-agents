@@ -115,6 +115,12 @@ immediate identical Run replay. Producer calls use operator credentials;
 direct Runs bypass coordinator admission/finalization. The table remains the
 full acceptance target, including combinations those probes do not cover.
 
+The [start/recovery follow-up](./645-p2-start-recovery-live-20260914.md) also
+verifies real S3 recovery after committed payload/launch replies are lost or a
+local process exits between writes. Production start code preserves the saved
+capability through a lost Run reply and a fresh process. These use operator
+credentials; deployed durable-Lambda recovery and effective-role tests remain.
+
 | Check | Expected result |
 |---|---|
 | New task with no stored launch | Coordinator gets `NoSuchKey`, creates immutable payload/reference, worker starts successfully. |

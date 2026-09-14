@@ -176,9 +176,10 @@ const MICROVM_BENIGN_STATE_REASON = 'Success.';
  * ## What may and may not go in here
  *
  * NON-SECRET IDENTIFIERS ONLY — table names, bucket names, log-group names, and
- * secret/role **ARNs**. Never a token, never a secret *value*: the envelope is
- * written to an S3 object and echoed into MicroVM logs on a hook failure, and
- * the agent resolves an ARN itself through its own (SessionRole /
+ * secret/role **ARNs**. Never a token, never a secret *value*: configuration is
+ * stored in the worker-readable deployment manifest and task object. Hook
+ * diagnostics omit payloads and redact signed URLs. The agent resolves an ARN
+ * itself through its own (SessionRole /
  * execution-role) credentials. The producer below is a map over exactly the
  * contract's keys, so a value can only reach the wire by being added to the
  * contract — an unrelated `process.env` entry (`GITHUB_TOKEN`,
@@ -579,11 +580,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     const { microvmId, endpoint } = result;
     if (!microvmId || !endpoint) {
-      // A malformed response means a MicroVM may ALREADY BE RUNNING (and billing)
-      // that no caller will ever receive a handle for — nothing self-terminates on
-      // this substrate. Reap it here, best-effort, before failing: this is the one
-      // orphan window the orchestrator's own catch cannot cover, because
-      // `startSession` never returned a handle to it.
+      // A malformed response may describe an existing VM without a usable handle.
+      // The eight-hour service lifetime is a backstop, not prompt cleanup.
+      // Clean up any available ID here: the caller will not receive a handle
+      // it can use to stop this VM.
       if (microvmId) {
         await this.terminateBestEffort(microvmId, 'incomplete RunMicrovm response');
       }

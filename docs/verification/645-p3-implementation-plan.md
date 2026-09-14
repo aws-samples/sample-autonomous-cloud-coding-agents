@@ -31,7 +31,13 @@ denial and a payload over 1 MiB. Concurrent/repeated preparation and immediate
 identical Run replay passed; all 12 disposable workers and 29 synthetic object
 locations were cleaned up. These direct probes use operator credentials for
 preparation and bypass coordinator admission/finalization.
-Crash/recovery and the wider IAM/network matrix still remain.
+The [start/recovery follow-up](./645-p2-start-recovery-live-20260914.md)
+passed simultaneous/changed-request service checks, terminated-worker replay
+through roughly five minutes, and 13 production-code cases against AWS storage
+with local process/reply faults. Saved-handle recovery, changed-input refusal,
+cancellation and the actual 120-second cutoff passed. These tests use operator
+credentials and do not interrupt the deployed durable Lambda.
+Deployed-coordinator recovery and the wider IAM/network matrix still remain.
 Full P2 acceptance and all P3 live gates remain open. The batch notes below
 record what was verified at their original completion; their deployment status
 is superseded by these records.
@@ -48,7 +54,9 @@ is superseded by these records.
 - [ ] Complete v2 effective-role/public-bucket tests, expired signer credentials, coordinator recovery and the ECS/coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
-- [ ] Verify delayed AWS token retention, simultaneous/changed-request conflicts, lost Run replies and unknown-start cleanup on a live deployment.
+- [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
+- [x] Verify production start/receipt/payload code against AWS with lost replies and local process death, saved-handle recovery, changed-input/cancellation refusal and actual receipt expiry.
+- [ ] Verify deployed durable-Lambda checkpoint/registration recovery and races, AWS behavior after token retention expires, and operator cleanup of genuinely unknown worker IDs.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
 - [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
@@ -229,10 +237,13 @@ verify MicroVM manifest/download access through the runtime connector, invalid
 task/config/path/bytes/signature rejection, URL expiry/revocation, foreign
 private-bucket denial and >1 MiB transport. Concurrent/repeated preparation and
 changed-input conflicts exercise real S3 with operator credentials.
+The [start/recovery follow-up](./645-p2-start-recovery-live-20260914.md)
+also verifies recovery after committed S3 replies are lost or the local process
+exits after payload/launch writes.
 
 **Still required:** effective-role cross-task/list/write/public-bucket negatives,
-expired signer credentials, lost committed replies and restart under the
-coordinator role, and equivalent ECS/upgrade evidence. The role/tag and other
+expired signer credentials, recovery under the deployed coordinator role and
+durable execution, and equivalent ECS/upgrade evidence. The role/tag and other
 platform-grant limits in 1G remain; this boot-path fix does not establish complete
 hostile-worker isolation.
 
@@ -250,11 +261,15 @@ The receipt works like an order number: when the reply gets lost, the next call 
 
 Fault tests exercise a successful simulated service creation followed by a lost response, a second application call with the same token, a fresh strategy instance, saved-handle replay, changed input, expired recovery, confirmed rejection, cancellation before/during/after creation, and lost DynamoDB responses. The handler recovers committed registration, treats start-audit failures as non-fatal, and routes start failures through one finalization path. Finalization reads the latest committed task, avoiding a stale cancellation/failure report. An unknown first outcome stays unknown even when the second call gets a definite rejection; HTTP 408 and named service timeouts remain uncertain even with a 4xx status.
 
-**Live subset completed:** every passing [payload probe](./645-p2-payload-live-20260914.md)
-immediately repeated the exact Run request and received the same worker ID.
-The probes do not simulate a lost reply or coordinator restart.
+**Live subset completed:** [service and application recovery probes](./645-p2-start-recovery-live-20260914.md)
+extend immediate replay with simultaneous identical requests, changed-parameter
+rejection and terminated-worker replay through roughly five minutes. Production
+strategy/storage code recovered lost successful replies and local process death
+using real AWS; it also reused saved handles without Run, refused changed input
+and cancellation, and stopped replay after its actual 120-second deadline.
+These use operator credentials and do not kill the deployed durable Lambda.
 
-**Still required:** the installed SDK documents `clientToken` idempotency but gives no retention period. Public AWS API documentation URLs did not provide a usable RunMicrovm reference during this review. The local 120-second limit is a conservative application cutoff, not evidence of AWS's retention window. Verify delayed replay, changed parameters, simultaneous requests/conflicts, token expiry and returned handles after termination against AWS before accepting this prerequisite. The service emulator proves client behavior only.
+**Still required:** the installed SDK documents `clientToken` idempotency but gives no retention period. Public AWS API documentation URLs did not provide a usable RunMicrovm reference during this review. The local 120-second limit is a conservative application cutoff; roughly five minutes of observed AWS replay does not establish maximum retention or post-expiry behavior. Verify deployed durable-Lambda interruption, registration/cancellation races and operator recovery of an unknown worker ID before accepting this prerequisite. Cached `RunMicrovm` replay responses can still say `PENDING` after the worker terminated; use `GetMicrovm` for current state.
 
 For an unknown outcome with no returned ID, the task error or cancellation event identifies the saved token for investigation. Do not automatically submit a replacement task. Verify how operators find and terminate that VM in the deployed service; if they cannot recover an ID, the eight-hour lifetime cap is the remaining bound. Keep this limitation explicit in live evidence.
 
@@ -309,8 +324,10 @@ in step 6. The [configuration follow-up](./645-p2-repository-config-20260914.md)
 also verifies automatic pre/post npm checks and cleanup after a worker-reported
 delivery failure. The [image 2.0 payload follow-up](./645-p2-payload-live-20260914.md)
 verifies direct startup-hook transport/rejections, immediate Run replay and
-operator cleanup. Coordinator classification/finalization after rejected hooks,
-crash/recovery/cleanup-error paths and the wider negative IAM/network matrix
+operator cleanup. The [recovery follow-up](./645-p2-start-recovery-live-20260914.md)
+adds service replay through five minutes and real-storage application tests with
+local process/reply faults. Deployed coordinator classification/finalization
+after rejected hooks, durable restart/cleanup-error paths and the wider IAM/network matrix
 remain unverified.
 `isadeks/vercel-abca-linear` explicitly selects `lambda-microvm`; the original
 seeded repository retains AgentCore.

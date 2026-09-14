@@ -1150,10 +1150,10 @@ def _install_platform_config(raw: Any) -> list[str]:
 
     Returns the sorted env var names actually installed. Rules, all deliberate:
 
-    * ``None`` / absent → install nothing and return ``[]``. This is the P1
-      envelope (no ``platform_config`` sibling), where the snapshot's own env is
-      all there is; a MicroVM image can be launched by an orchestrator that
-      predates Stage B, and the two deploy on independent cadences.
+    * ``None`` → install nothing and return ``[]`` for direct helper callers.
+      The v2 ``/run`` path requires a dictionary from the authenticated manifest
+      before calling this helper. This no-op does not accept legacy unsigned
+      envelopes or permit an independent coordinator/image contract rollout.
     * present but not an object, or carrying ANY key outside the allowlist, or
       carrying a non-string value, or carrying a control character in a value →
       reject the run (``…_INVALID``). Unknown keys are an env-injection attempt,
@@ -1161,13 +1161,12 @@ def _install_platform_config(raw: Any) -> list[str]:
       block is refused rather than filtered. Control characters are refused for
       the reason in ``_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS``.
     * ``None`` / blank / whitespace-only values are treated as ABSENT, not as an
-      instruction to clear the variable: the natural TypeScript producer
-      (``process.env.X ?? ''``) emits an empty string for a resource the
-      deployment does not have, and clobbering an image value with ``""`` would
-      turn "not configured over there" into "unconfigured here".
+      instruction to clear the variable. The current TypeScript producer omits
+      unconfigured values; this helper also filters explicit empty values
+      instead of installing them into the environment.
     * every required key must survive that filter, else reject
-      (``…_INCOMPLETE``). An explicitly-sent-but-empty ``{}`` therefore fails —
-      a producer with nothing to say must omit the key entirely.
+      (``…_INCOMPLETE``). An explicitly-sent-but-empty ``{}`` therefore fails;
+      the live v2 boot path always requires the complete required subset.
     * every ARN-shaped value must agree with the anchor ARN's partition + account,
       else reject (``…_INVALID``) — see :func:`_reject_foreign_arns`, which is
       explicit that this is internal consistency plus fail-fast, not an
