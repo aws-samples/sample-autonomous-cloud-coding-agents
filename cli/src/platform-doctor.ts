@@ -285,8 +285,9 @@ export async function checkLinearProjectWorkspaces(
       status: 'warn',
       detail: `${unbacked.length} of ${active.length} active Linear project mapping(s) do not record an `
         + 'owning workspace, so a webhook naming them cannot be checked against the workspace that '
-        + `signed it: ${projectIds}. Run \`bgagent linear backfill-project-workspaces --stack-name `
-        + '<stack>\` (add `--dry-run` first).',
+        + `signed it: ${projectIds}. Harmless while one workspace is active — there is no other `
+        + 'tenant to reach — but re-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` '
+        + 'for each of them before onboarding a second workspace.',
     };
   } catch (err) {
     return {

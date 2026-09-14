@@ -130,7 +130,7 @@ Pass `--label <name>` to use a trigger label other than `bgagent`. Also availabl
 
 `onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
 
-Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them, and `bgagent linear backfill-project-workspaces` fills them in (run it with `--dry-run` first).
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
 
 ### Signing secrets in a multi-workspace install
 

@@ -162,7 +162,7 @@ describe('doctor verdict for Linear project → workspace binding', () => {
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('proj-unbacked');
     expect(check.detail).not.toContain('proj-backed');
-    expect(check.detail).toContain('bgagent linear backfill-project-workspaces');
+    expect(check.detail).toContain('bgagent linear onboard-project');
   });
 
   test('caps the named ids so a large install does not bury the rest of the report', async () => {

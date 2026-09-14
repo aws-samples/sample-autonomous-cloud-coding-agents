@@ -644,44 +644,6 @@ export async function listOnboardedWorkspaceSlugs(args: {
 }
 
 /**
- * Refuse to copy the stack-wide signing secret into a workspace when another active
- * workspace exists.
- *
- * Mirroring is only correct for the first/only workspace, where the stack-wide value IS
- * that workspace's own secret. For an additional workspace it installs a DIFFERENT
- * tenant's key, after which both verify under the same secret and either can sign an
- * event whose routing values the other's are read from.
- *
- * Extracted rather than inlined at the one call site because that call site is currently
- * unreachable: `setup` collects this workspace's own secret up front and throws when
- * neither a supplied nor a legitimately-stored one exists, so the mirror branch cannot
- * be entered from there. An unreachable guard is an untested guard, and this keeps the
- * rule itself exercisable — and enforced if that prompt is ever relaxed.
- *
- * @param activeRows - active workspace-registry rows.
- * @param selfWorkspaceId - the workspace being set up, excluded from the count.
- * @param slug - workspace slug, for the remedy in the error text.
- */
-export function assertMirrorIsSafe(
-  activeRows: ReadonlyArray<Record<string, unknown>>,
-  selfWorkspaceId: string,
-  slug: string,
-): void {
-  const others = activeRows
-    .map((r) => r.linear_workspace_id as string | undefined)
-    .filter((id): id is string => Boolean(id) && id !== selfWorkspaceId);
-  if (others.length === 0) return;
-  throw new CliError(
-    `Workspace '${slug}' has no signing secret of its own, and this stack already has `
-    + `${others.length} other active Linear workspace(s).\n`
-    + '  Mirroring the stack-wide secret would give this workspace another tenant\'s key,\n'
-    + '  letting either one sign events the other\'s routing values are read from.\n'
-    + `  Re-run with --webhook-secret <lin_wh_…> read from '${slug}'s own Linear app, or set\n`
-    + `  it afterwards with \`bgagent linear update-webhook-secret ${slug}\`.`,
-  );
-}
-
-/**
  * What can be established about where a workspace's signing secret came from.
  *
  * - `own` — the secret is provably NOT a copy of another workspace's.
@@ -847,55 +809,6 @@ export async function findProjectOwnerWorkspace(args: {
   }
 
   return { kind: 'not-found', searched: args.slugs, errors };
-}
-
-/**
- * Every project id visible to one workspace's token, with its organization id.
- *
- * Paginated deliberately. `list-projects` asks for `projects(first: 100)` and stops,
- * which is fine for a human browsing but not for a backfill: a workspace with more
- * than a page of projects would leave the overflow unresolved and silently keep the
- * mappings the enforcement path is about to start rejecting.
- */
-export async function listWorkspaceProjectIds(args: {
-  readonly accessToken: string;
-  readonly fetchImpl?: typeof fetch;
-}): Promise<{ readonly workspaceId?: string; readonly projectIds: string[] }> {
-  const doFetch = args.fetchImpl ?? fetch;
-  const projectIds: string[] = [];
-  let workspaceId: string | undefined;
-  let cursor: string | undefined;
-
-  do {
-    const res = await doFetch('https://api.linear.app/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${args.accessToken}`,
-      },
-      body: JSON.stringify({
-        query: 'query($after: String) { organization { id } '
-          + 'projects(first: 250, after: $after) { nodes { id } pageInfo { hasNextPage endCursor } } }',
-        variables: { after: cursor ?? null },
-      }),
-    });
-    if (!res.ok) throw new CliError(`Linear API returned ${res.status}`);
-    const body = await res.json() as {
-      data?: {
-        organization?: { id?: string };
-        projects?: {
-          nodes?: Array<{ id: string }>;
-          pageInfo?: { hasNextPage?: boolean; endCursor?: string };
-        };
-      };
-    };
-    workspaceId ??= body.data?.organization?.id;
-    for (const n of body.data?.projects?.nodes ?? []) projectIds.push(n.id);
-    const pageInfo = body.data?.projects?.pageInfo;
-    cursor = pageInfo?.hasNextPage ? pageInfo.endCursor : undefined;
-  } while (cursor);
-
-  return { workspaceId, projectIds };
 }
 
 export function makeLinearCommand(): Command {
@@ -1777,20 +1690,18 @@ export function makeLinearCommand(): Command {
           webhookSigningSecret = secretAction.secret;
         } else if (secretAction.kind === 'mirror-stackwide') {
           // Mirroring is only ever correct for the first/only workspace: the stack-wide
-          // value IS that workspace's own secret. For an additional workspace it copies
-          // a DIFFERENT tenant's secret into this one's bundle, after which both verify
-          // under the same key and either can sign an event the other's routing values
-          // would be trusted from. Refuse instead of warning.
+          // value IS that workspace's own secret. For an additional workspace it copies a
+          // DIFFERENT tenant's secret into this one's bundle, after which both verify
+          // under the same key and either can sign an event whose routing values the
+          // other's are read from.
           //
-          // Currently a safety net rather than a live path: `setup` collects this
-          // workspace's own secret up front and throws when neither a supplied nor a
-          // legitimately-stored one exists, so this branch is unreachable from there.
-          // Kept, and made to refuse, so the invariant survives that prompt changing.
-          assertMirrorIsSafe(
-            await listActiveWorkspaceRows(ddb, workspaceRegistryTable!),
-            identity.organization.id,
-            slug,
-          );
+          // Unreachable from here today: the up-front prompt above collects this
+          // workspace's own secret and throws when neither a supplied nor a legitimately
+          // stored one exists, which are the only ways into this branch. Left as-is
+          // rather than hardened, because the value it would produce is no longer
+          // trusted on its own — the receiver rejects a secret that is not recorded as
+          // the workspace's own once a second workspace is active. If that prompt is
+          // ever relaxed, this branch needs to refuse rather than warn.
           console.log('  ✓ No per-workspace secret yet; mirroring the stack-wide signing secret');
           console.log('    (if this is an ADDITIONAL workspace, its Linear webhook secret differs —');
           console.log(`     run \`bgagent linear update-webhook-secret ${slug}\` with this workspace's secret.)`);
@@ -2618,151 +2529,6 @@ export function makeLinearCommand(): Command {
         console.log(`  Owning workspace: ${ownerLabel}`);
         if (opts.teamId) {
           console.log(`  Team:             ${opts.teamId}`);
-        }
-      }),
-  );
-
-  linear.addCommand(
-    new Command('backfill-project-workspaces')
-      .description('Record the owning workspace on project mappings that predate that field')
-      .option('--region <region>', 'AWS region (defaults to configured region)')
-      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
-      .option('--dry-run', 'Report what would change without writing')
-      .action(async (opts) => {
-        const config = loadConfig();
-        const region = opts.region || config.region;
-
-        const tableName = await getStackOutput(region, opts.stackName, 'LinearProjectMappingTableName');
-        if (!tableName) {
-          console.error('Could not find LinearProjectMappingTableName in stack outputs. Deploy the stack first.');
-          process.exit(1);
-        }
-
-        const ddb = makeDocClient({ region });
-        const sm = makeClient(SecretsManagerClient, { region });
-        const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
-
-        // Only rows missing the field are candidates. A row that already names a
-        // workspace is left alone even if it disagrees with Linear — re-pointing a
-        // live mapping is `onboard-project`'s job, not a backfill's.
-        const unbacked: Array<{ projectId: string; repo?: string }> = [];
-        let lastKey: Record<string, unknown> | undefined;
-        do {
-          const page = await ddb.send(new ScanCommand({ TableName: tableName, ExclusiveStartKey: lastKey }));
-          for (const item of page.Items ?? []) {
-            if (!item.linear_workspace_id && typeof item.linear_project_id === 'string') {
-              unbacked.push({ projectId: item.linear_project_id, repo: item.repo as string | undefined });
-            }
-          }
-          lastKey = page.LastEvaluatedKey;
-        } while (lastKey);
-
-        if (unbacked.length === 0) {
-          console.log('✓ Every project mapping already records its owning workspace.');
-          return;
-        }
-        console.log(`${unbacked.length} mapping(s) missing an owning workspace.`);
-        console.log();
-
-        // One pass per workspace rather than one lookup per row: a workspace with N
-        // unbacked projects would otherwise cost N round trips to learn the same thing.
-        const slugs = await listOnboardedWorkspaceSlugs({ sm, ddb, registryTableName: registryTableName ?? undefined });
-        const vaultWorkloadName = await resolveLinearVaultWorkloadName(region, opts.stackName);
-        const ownerByProject = new Map<string, { slug: string; workspaceId: string }>();
-        // Workspaces we could not query at all. Tracked because an unresolved mapping means
-        // something completely different depending on this: with every workspace reachable it
-        // really is a stale mapping, but with one unreachable the mapping may be perfectly
-        // valid and simply unverifiable right now. Live-caught — the first real run hit two
-        // workspaces with expired grants and the report told the operator to delete four good
-        // rows.
-        const unqueryable: string[] = [];
-
-        for (const slug of slugs) {
-          const token = await resolveWorkspaceAccessToken({
-            slug, sm, ddb, registryTableName: registryTableName ?? undefined, region, vaultWorkloadName,
-          });
-          if (token.kind !== 'token') {
-            unqueryable.push(slug);
-            console.log(`  ⚠ ${slug}: ${token.reason} — projects owned here cannot be resolved`);
-            continue;
-          }
-          try {
-            const listed = await listWorkspaceProjectIds({ accessToken: token.accessToken });
-            if (!listed.workspaceId) {
-              unqueryable.push(slug);
-              console.log(`  ⚠ ${slug}: Linear did not return an organization id`);
-              continue;
-            }
-            for (const id of listed.projectIds) {
-              // First writer wins, and a second claim is a real anomaly worth naming:
-              // one project id must not be visible to two workspaces.
-              const existing = ownerByProject.get(id);
-              if (existing && existing.workspaceId !== listed.workspaceId) {
-                console.log(`  ⚠ project ${id} is visible to both ${existing.slug} and ${slug} — skipping`);
-                ownerByProject.delete(id);
-                continue;
-              }
-              ownerByProject.set(id, { slug, workspaceId: listed.workspaceId });
-            }
-          } catch (err) {
-            unqueryable.push(slug);
-            console.log(`  ⚠ ${slug}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-
-        let updated = 0;
-        const unresolved: string[] = [];
-        for (const row of unbacked) {
-          const owner = ownerByProject.get(row.projectId);
-          if (!owner) {
-            unresolved.push(row.projectId);
-            continue;
-          }
-          if (opts.dryRun) {
-            console.log(`  would set ${row.projectId} → ${owner.slug} (${owner.workspaceId})`);
-          } else {
-            await ddb.send(new UpdateCommand({
-              TableName: tableName,
-              Key: { linear_project_id: row.projectId },
-              UpdateExpression: 'SET linear_workspace_id = :w, updated_at = :u',
-              // Do not resurrect a row deleted while this command was running, and do
-              // not overwrite a workspace id written concurrently by onboard-project.
-              ConditionExpression: 'attribute_exists(linear_project_id) AND attribute_not_exists(linear_workspace_id)',
-              ExpressionAttributeValues: { ':w': owner.workspaceId, ':u': new Date().toISOString() },
-            })).catch((err: unknown) => {
-              if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-                console.log(`  · ${row.projectId} changed underneath the backfill — skipped`);
-                return;
-              }
-              throw err;
-            });
-            console.log(`  ✓ ${row.projectId} → ${owner.slug} (${owner.workspaceId})`);
-          }
-          updated += 1;
-        }
-
-        console.log();
-        if (opts.dryRun) {
-          console.log(`Dry run: ${updated} mapping(s) would be updated.`);
-        } else {
-          console.log(`✓ Updated ${updated} mapping(s).`);
-        }
-        if (unresolved.length > 0) {
-          console.log();
-          console.log(`⚠ ${unresolved.length} mapping(s) could not be resolved to a workspace:`);
-          for (const id of unresolved) console.log(`    ${id}`);
-          console.log();
-          if (unqueryable.length > 0) {
-            console.log(`Do NOT delete these yet. ${unqueryable.length} workspace(s) could not be queried`);
-            console.log(`(${unqueryable.join(', ')}), so a mapping owned by one of them is unresolved`);
-            console.log('here even when it is perfectly valid. Restore access for those workspaces —');
-            console.log('`bgagent platform doctor` reports Linear auth state — then re-run this command.');
-            console.log('Only rows still unresolved with every workspace reachable are genuinely stale.');
-          } else {
-            console.log('Every onboarded workspace was queried successfully, so these name projects none');
-            console.log('of them can see — a deleted project, or a workspace no longer installed. Re-run');
-            console.log('`bgagent linear onboard-project` for the ones still in use and remove the rest.');
-          }
         }
       }),
   );

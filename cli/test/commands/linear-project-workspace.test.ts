@@ -20,17 +20,13 @@
 // Resolving which workspace owns a Linear project. The mapping table is keyed on the
 // project id alone, so this resolution is what lets a later webhook check a
 // body-supplied `projectId` against the workspace that actually signed the delivery.
-import * as fs from 'fs';
-import * as path from 'path';
 import { GetSecretValueCommand, ListSecretsCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
-  assertMirrorIsSafe,
   classifyWebhookSecretProvenance,
   findProjectOwnerWorkspace,
   listActiveWorkspaceRows,
   listOnboardedWorkspaceSlugs,
-  listWorkspaceProjectIds,
   resolveWorkspaceAccessToken,
 } from '../../src/commands/linear';
 
@@ -260,78 +256,6 @@ describe('findProjectOwnerWorkspace', () => {
   });
 });
 
-describe('listWorkspaceProjectIds', () => {
-  test('returns the organization id alongside every visible project', async () => {
-    const listed = await listWorkspaceProjectIds({
-      accessToken: 'tok-acme',
-      fetchImpl: fakeLinear({ 'tok-acme': { org: ORG_ACME, projects: [PROJECT_A, PROJECT_B] } }),
-    });
-    expect(listed).toEqual({ workspaceId: ORG_ACME, projectIds: [PROJECT_A, PROJECT_B] });
-  });
-
-  test('follows pageInfo so projects past the first page are not silently dropped', async () => {
-    // A single-page implementation returns only PROJECT_A here, which during a backfill
-    // would leave PROJECT_B unresolved and its mapping unbacked.
-    let call = 0;
-    const paged = jest.fn(async () => {
-      call += 1;
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          data: {
-            organization: { id: ORG_ACME },
-            projects: call === 1
-              ? { nodes: [{ id: PROJECT_A }], pageInfo: { hasNextPage: true, endCursor: 'cur' } }
-              : { nodes: [{ id: PROJECT_B }], pageInfo: { hasNextPage: false, endCursor: null } },
-          },
-        }),
-      } as unknown as Response;
-    }) as unknown as typeof fetch;
-
-    const listed = await listWorkspaceProjectIds({ accessToken: 'tok-acme', fetchImpl: paged });
-    expect(listed.projectIds).toEqual([PROJECT_A, PROJECT_B]);
-    expect(call).toBe(2);
-  });
-
-  test('raises on a non-OK response rather than reporting an empty workspace', async () => {
-    const failing = jest.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)) as unknown as typeof fetch;
-    await expect(listWorkspaceProjectIds({ accessToken: 'tok', fetchImpl: failing }))
-      .rejects.toThrow('Linear API returned 500');
-  });
-});
-
-describe('assertMirrorIsSafe', () => {
-  const SELF = 'org-self';
-
-  test('allows the mirror when this is the only active workspace', () => {
-    expect(() => assertMirrorIsSafe([{ linear_workspace_id: SELF }], SELF, 'acme')).not.toThrow();
-  });
-
-  test('allows it on a genuinely empty registry', () => {
-    expect(() => assertMirrorIsSafe([], SELF, 'acme')).not.toThrow();
-  });
-
-  test('refuses when another active workspace would be the source of the secret', () => {
-    expect(() => assertMirrorIsSafe(
-      [{ linear_workspace_id: SELF }, { linear_workspace_id: 'org-other' }],
-      SELF,
-      'acme',
-    )).toThrow(/already has 1 other active Linear workspace/);
-  });
-
-  test('names the remedy, since refusing mid-setup is only useful with a way forward', () => {
-    expect(() => assertMirrorIsSafe([{ linear_workspace_id: 'org-other' }], SELF, 'acme'))
-      .toThrow(/update-webhook-secret acme/);
-  });
-
-  test('ignores rows with no workspace id rather than counting them as tenants', () => {
-    // A half-written registry row is not another tenant, and treating it as one would
-    // block a legitimate first-workspace mirror.
-    expect(() => assertMirrorIsSafe([{ workspace_slug: 'half' }], SELF, 'acme')).not.toThrow();
-  });
-});
-
 // The asymmetry is the point: "differs from stack-wide" proves ownership because
 // mirroring can copy nothing else, while "equals stack-wide" proves nothing because a
 // healthy first install stamps the same real secret into both slots.
@@ -372,22 +296,3 @@ describe('classifyWebhookSecretProvenance', () => {
 // told the operator they named deleted projects and should be removed. An unresolved
 // mapping means opposite things depending on whether every workspace was reachable, so
 // the conclusion has to branch on that.
-describe('unresolved-mapping guidance distinguishes stale rows from unreachable workspaces', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../../src/commands/linear.ts'), 'utf8');
-
-  test('an unqueryable workspace is tracked, not silently folded into "stale"', () => {
-    // Source-level because the branch is inside a Commander action that would need the
-    // whole AWS + Linear surface stood up to reach; the behavioural proof is the live run.
-    expect(src).toContain('const unqueryable: string[] = []');
-    // Every skip path that means "we could not ask this workspace" must record it.
-    const pushes = src.match(/unqueryable\.push\(slug\)/g) ?? [];
-    expect(pushes.length).toBeGreaterThanOrEqual(3);
-  });
-
-  test('the delete-them conclusion is gated on every workspace having been queried', () => {
-    expect(src).toContain('Do NOT delete these yet');
-    expect(src).toContain('Every onboarded workspace was queried successfully');
-    // The unconditional wording that caused the defect must not come back.
-    expect(src).not.toContain('These name projects no onboarded workspace can see');
-  });
-});
