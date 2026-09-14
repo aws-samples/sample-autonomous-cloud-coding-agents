@@ -2933,3 +2933,38 @@ class TestParseTerminateMicrovmId:
 
     def test_ignores_unrelated_fields(self):
         assert server._parse_terminate_microvm_id(b'{"reason": "idle", "x": 1}') == ""
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(monkeypatch, crash):
+    from microvm_lifecycle import get_context
+
+    observed = []
+
+    def run_task(**kwargs):
+        context = get_context("lifecycle-server-task")
+        assert context is not None
+        assert context.microvm_id == "microvm-server"
+        assert "microvm_id" not in kwargs
+        observed.append(context)
+        if crash:
+            raise RuntimeError("pipeline crashed")
+
+    monkeypatch.setattr(server, "run_task", run_task)
+    monkeypatch.setattr(server, "_heartbeat_worker", lambda *_: None)
+    monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+    server._run_task_background(
+        repo_url="owner/repo",
+        task_description="test",
+        issue_number="",
+        github_token="test-token",
+        anthropic_model="model",
+        max_turns=1,
+        max_budget_usd=None,
+        aws_region="us-west-2",
+        task_id="lifecycle-server-task",
+        microvm_id="microvm-server",
+    )
+    assert len(observed) == 1
+    assert get_context("lifecycle-server-task") is None
+    assert server._background_pipeline_failed is crash

@@ -2236,3 +2236,66 @@ class TestStuckGuardHookIntegration:
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         matchers = build_hook_matchers(engine, task_id="t")
         assert "PostToolUse" in matchers and "Stop" in matchers
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_microvm_approval_cannot_return_until_resume_barrier_opens(
+    monkeypatch, engine_with_soft_gate, fake_task_state, progress, cancelled
+):
+    import threading
+
+    from microvm_lifecycle import register_task, unregister_task
+
+    context = register_task("lifecycle-hook-task", "microvm-hook")
+    entered = threading.Event()
+    answer = threading.Event()
+    original_read = fake_task_state.get_approval_row
+
+    def read(*args, **kwargs):
+        entered.set()
+        return {"status": "APPROVED", "scope": "once"} if answer.is_set() else {"status": "PENDING"}
+
+    fake_task_state.get_approval_row = read
+    monkeypatch.setattr(hooks, "task_state", fake_task_state)
+    monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.01)
+    if cancelled:
+        fake_task_state.resume_raises = _FakeApprovalResumeError("cancel won")
+    matchers = build_hook_matchers(
+        engine=engine_with_soft_gate,
+        task_id=context.task_id,
+        progress=progress,
+    )
+
+    async def scenario():
+        pending = asyncio.create_task(matchers["PreToolUse"][0].hooks[0](_hook_input(), "tu-1", {}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            checkpoints = []
+            await context.suspend(checkpoints.append, budget_s=1)
+            park = checkpoints[0]
+            assert park.request_id == fake_task_state.write_calls[0][1]
+            assert park.deadline.remaining_s() > 0
+            answer.set()
+            await asyncio.sleep(0.04)
+            assert not pending.done()
+            assert fake_task_state.resume_calls == []
+            refreshed = []
+            await context.resume(refreshed.append, budget_s=1)
+            assert refreshed == [park]
+            result = await asyncio.wait_for(pending, 1)
+            expected = "deny" if cancelled else "allow"
+            assert result["hookSpecificOutput"]["permissionDecision"] == expected
+            if not cancelled:
+                await matchers["PostToolUse"][0].hooks[0](
+                    {"tool_name": "Bash", "tool_response": "ok"}, "tu-1", {}
+                )
+        finally:
+            answer.set()
+            context.close()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    try:
+        _run(scenario())
+    finally:
+        fake_task_state.get_approval_row = original_read
+        unregister_task(context)

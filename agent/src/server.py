@@ -30,6 +30,13 @@ from pydantic import BaseModel
 
 import task_state
 from config import resolve_github_token
+from microvm_lifecycle import (
+    LifecycleUnavailable,
+    get_context,
+    register_task,
+    reseed_random,
+    unregister_task,
+)
 from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
@@ -265,7 +272,16 @@ def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
     while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
-            task_state.write_heartbeat(task_id)
+            lifecycle = get_context(task_id)
+            if lifecycle:
+                with lifecycle.activity():
+                    task_state.write_heartbeat(task_id)
+            else:
+                task_state.write_heartbeat(task_id)
+        except LifecycleUnavailable:
+            # An approval waiter has no liveness obligation while frozen.
+            # Resume must refresh credentials before another heartbeat writes.
+            continue
         except Exception as e:
             print(
                 f"[heartbeat] write_heartbeat error (will retry): {type(e).__name__}: {e}",
@@ -409,6 +425,7 @@ def _run_task_background(
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    microvm_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -448,18 +465,18 @@ def _run_task_background(
         task_id=task_id,
     )
 
+    lifecycle = register_task(task_id, microvm_id) if microvm_id else None
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
-    if task_id:
-        hb_thread = threading.Thread(
-            target=_heartbeat_worker,
-            args=(task_id, stop_heartbeat),
-            name=f"heartbeat-{task_id}",
-            daemon=True,
-        )
-        hb_thread.start()
-
     try:
+        if task_id:
+            hb_thread = threading.Thread(
+                target=_heartbeat_worker,
+                args=(task_id, stop_heartbeat),
+                name=f"heartbeat-{task_id}",
+                daemon=True,
+            )
+            hb_thread.start()
         # Propagate the correlation envelope into this thread's OTEL context
         # so spans are correlated with the AgentCore session and the platform
         # identity in CloudWatch (#245). Runs whenever any field is present —
@@ -513,6 +530,8 @@ def _run_task_background(
             )
             task_state.write_terminal(task_id, "FAILED", backup.model_dump())
     finally:
+        if lifecycle:
+            unregister_task(lifecycle)
         stop_heartbeat.set()
         if hb_thread is not None and hb_thread.is_alive():
             hb_thread.join(timeout=3)
@@ -1962,7 +1981,8 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             },
         )
 
-    _spawn_background(params)
+    reseed_random()
+    _spawn_background({**params, "microvm_id": body.microvmId})
     task_id = params["task_id"]
     # Carries microvm_id as well as task_id: the "/run hook received" line that
     # used to correlate the two is stdout-only now (pre-install), so this is the

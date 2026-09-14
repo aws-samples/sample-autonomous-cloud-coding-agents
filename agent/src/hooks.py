@@ -24,12 +24,14 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
 import task_state
+from microvm_lifecycle import get_context
 from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
@@ -538,6 +540,7 @@ async def pre_tool_use_hook(
         user_id=user_id,
         progress=progress,
         ts=ts_module,
+        tool_use_id=tool_use_id,
     )
 
 
@@ -551,6 +554,7 @@ async def _handle_require_approval(
     user_id: str | None,
     progress: Any,
     ts: Any,
+    tool_use_id: str | None = None,
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
@@ -728,14 +732,24 @@ async def _handle_require_approval(
             matching_rule_ids=list(decision.matching_rule_ids),
         )
 
-    # Step 9 — poll for a decision.
-    outcome = await _poll_for_decision(
-        task_id=task_id,
-        request_id=request_id,
-        deadline=deadline,
-        progress=progress,
-        ts=ts,
-    )
+    # Step 9 — register the exact persisted gate and its ORIGINAL deadline.
+    # The SDK wrapper already tracks this tool; direct/legacy callers without a
+    # lifecycle context keep their existing approval behavior.
+    lifecycle = get_context(task_id)
+    park = lifecycle.park_approval(request_id, tool_use_id, deadline) if lifecycle else None
+    try:
+        outcome = await _poll_for_decision(
+            task_id=task_id,
+            request_id=request_id,
+            deadline=deadline,
+            progress=progress,
+            ts=ts,
+        )
+    finally:
+        if lifecycle and park:
+            # Clear the safe point before ANY approval/task-state mutation or
+            # hook return. A concurrent suspend owns the barrier until resume.
+            await lifecycle.leave_approval(park)
 
     # Step 10 — VM-throttle + late-approval race. Best-effort flip to
     # TIMED_OUT; if ConditionCheckFailed, the user beat us — read and honor.
@@ -989,56 +1003,58 @@ async def _poll_for_decision(
     consecutive_fails = 0
     degraded_emitted = False
 
+    lifecycle = get_context(task_id)
     while True:
-        if deadline.remaining_s() <= 0:
-            return {"status": "TIMED_OUT", "reason": None}
+        async with lifecycle.approval_poll() if lifecycle else nullcontext():
+            if deadline.remaining_s() <= 0:
+                return {"status": "TIMED_OUT", "reason": None}
 
-        try:
-            row = await asyncio.to_thread(
-                ts.get_approval_row,
-                task_id,
-                request_id,
-                consistent_read=True,
-            )
-            consecutive_fails = 0
-        except Exception as exc:
-            consecutive_fails += 1
-            log(
-                "WARN",
-                f"approval poll get_item raised ({consecutive_fails}/"
-                f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
-            )
-            if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
-                if progress is not None:
-                    _try_progress(
-                        progress,
-                        "write_approval_poll_degraded",
-                        request_id=request_id,
-                        consecutive_failures=consecutive_fails,
-                    )
-                degraded_emitted = True
-            if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
-                return {
-                    "status": "TIMED_OUT",
-                    "reason": f"poll failed {consecutive_fails} consecutive times",
-                }
-            row = None  # force sleep below
+            try:
+                row = await asyncio.to_thread(
+                    ts.get_approval_row,
+                    task_id,
+                    request_id,
+                    consistent_read=True,
+                )
+                consecutive_fails = 0
+            except Exception as exc:
+                consecutive_fails += 1
+                log(
+                    "WARN",
+                    f"approval poll get_item raised ({consecutive_fails}/"
+                    f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
+                )
+                if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
+                    if progress is not None:
+                        _try_progress(
+                            progress,
+                            "write_approval_poll_degraded",
+                            request_id=request_id,
+                            consecutive_failures=consecutive_fails,
+                        )
+                    degraded_emitted = True
+                if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
+                    return {
+                        "status": "TIMED_OUT",
+                        "reason": f"poll failed {consecutive_fails} consecutive times",
+                    }
+                row = None  # force sleep below
 
-        if row is not None:
-            status = row.get("status")
-            if status == "APPROVED":
-                return {
-                    "status": "APPROVED",
-                    "scope": row.get("scope"),
-                    "decided_at": row.get("decided_at"),
-                    "decided_by": row.get("user_id"),
-                }
-            if status == "DENIED":
-                return {
-                    "status": "DENIED",
-                    "reason": row.get("deny_reason") or "denied",
-                    "decided_at": row.get("decided_at"),
-                }
+            if row is not None:
+                status = row.get("status")
+                if status == "APPROVED":
+                    return {
+                        "status": "APPROVED",
+                        "scope": row.get("scope"),
+                        "decided_at": row.get("decided_at"),
+                        "decided_by": row.get("user_id"),
+                    }
+                if status == "DENIED":
+                    return {
+                        "status": "DENIED",
+                        "reason": row.get("deny_reason") or "denied",
+                        "decided_at": row.get("decided_at"),
+                    }
 
         # Compute sleep interval based on elapsed since poll started.
         elapsed = time.monotonic() - start
@@ -1781,6 +1797,9 @@ def build_hook_matchers(
     # PostToolUse closure feeds it every tool result; the Stop closure reads it
     # between turns to steer / bail on a repeating failing command.
     _stuck_guard = StuckGuard()
+    # Retain the controller even after registry removal. A late callback must
+    # see its CLOSED barrier, not fall back to the non-MicroVM path.
+    lifecycle = get_context(task_id)
 
     # Closure-based wrapper matches the HookCallback signature exactly:
     # (HookInput, str | None, HookContext) -> Awaitable[HookJSONOutput]
@@ -1794,7 +1813,17 @@ def build_hook_matchers(
         # undefined — we MUST NOT trust it to fail closed. Mapping every
         # uncaught exception to a DENY here makes the security posture
         # explicit at the SDK boundary.
+        allowed = False
         try:
+            if lifecycle:
+                await lifecycle.tool_started(tool_use_id)
+                if isinstance(hook_input, dict):
+                    tool_input = hook_input.get("tool_input")
+                    # Legacy serialized inputs are normalized deeper in the
+                    # policy hook. Keep their tool behavior, but do not infer a
+                    # safe foreground-only execution from an opaque value here.
+                    if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
+                        lifecycle.disable_suspend()
             result = await pre_tool_use_hook(
                 hook_input,
                 tool_use_id,
@@ -1806,6 +1835,10 @@ def build_hook_matchers(
                 progress=progress,
                 repo_url=repo_url or None,
             )
+            if result.get("hookSpecificOutput", {}).get("permissionDecision") == "allow":
+                if lifecycle:
+                    await lifecycle.wait_until_open()
+                allowed = True
         except Exception as exc:
             log(
                 "ERROR",
@@ -1818,6 +1851,9 @@ def build_hook_matchers(
             return SyncHookJSONOutput(
                 **_deny_response("Hook error — fail-closed deny"),
             )
+        finally:
+            if lifecycle and not allowed:
+                lifecycle.tool_finished(tool_use_id)
         return SyncHookJSONOutput(**result)
 
     async def _post(
@@ -1840,6 +1876,25 @@ def build_hook_matchers(
                 "updatedMCPToolOutput": "[Output redacted: hook error — fail-closed]",
             }
             return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
+        finally:
+            if lifecycle:
+                # Background Bash may be promoted after invocation. A returned
+                # background identifier means the tool's post hook is not a
+                # reliable indication that its child stopped.
+                if isinstance(hook_input, dict):
+                    response = hook_input.get("tool_response")
+                    if isinstance(response, dict) and (
+                        response.get("backgroundTaskId") or response.get("background_task_id")
+                    ):
+                        lifecycle.disable_suspend()
+                lifecycle.tool_finished(tool_use_id)
+
+    async def _post_failure(
+        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+    ) -> HookJSONOutput:
+        if lifecycle:
+            lifecycle.tool_finished(tool_use_id)
+        return SyncHookJSONOutput()
 
     async def _stop(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
@@ -1866,8 +1921,11 @@ def build_hook_matchers(
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.
         return SyncHookJSONOutput(**result)
 
-    return {
+    matchers = {
         "PreToolUse": [HookMatcher(matcher=None, hooks=[_pre])],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }
+    if lifecycle:
+        matchers["PostToolUseFailure"] = [HookMatcher(matcher=None, hooks=[_post_failure])]
+    return matchers

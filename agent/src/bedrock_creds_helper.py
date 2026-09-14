@@ -7,7 +7,10 @@ not the agent's boto3 — so the per-task tenant-data SessionRole in
 ``awsCredentialExport`` setting (in the image's managed-settings layer) runs
 this script, captures its JSON stdout, and signs Bedrock requests with the
 returned credentials. With a real ``Expiration`` it re-runs ~5 min before
-expiry, so an 8 h task survives the 1 h role-chaining cap.
+expiry during active use. Pinned Claude 2.1.191 returns its previous cached
+value while that refresh runs in the background: this is NOT an acknowledged
+refresh barrier after MicroVM sleep. P3 must cover that subprocess cache before
+enabling suspension; refreshing Python's boto3 session does not clear it.
 
 Goal: assume the per-task SessionRole with ``{user_id, repo, task_id}`` STS
 session tags so Bedrock spend is attributable per user/repo in AWS Cost
