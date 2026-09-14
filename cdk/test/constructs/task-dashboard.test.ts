@@ -22,9 +22,11 @@ import { Template } from 'aws-cdk-lib/assertions';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { TaskDashboard } from '../../src/constructs/task-dashboard';
 
-function createStack(): { stack: Stack; template: Template } {
+function createStack(region?: string): { stack: Stack; template: Template } {
   const app = new App();
-  const stack = new Stack(app, 'TestStack');
+  const stack = new Stack(app, 'TestStack', region
+    ? { env: { account: '123456789012', region } }
+    : {});
 
   const logGroup = new logs.LogGroup(stack, 'AppLogGroup');
 
@@ -38,16 +40,36 @@ function createStack(): { stack: Stack; template: Template } {
 }
 
 describe('TaskDashboard construct', () => {
+  let template: Template;
+  let regionalTemplates: Template[];
+
+  beforeAll(() => {
+    ({ template } = createStack());
+    regionalTemplates = ['us-east-1', 'us-west-2'].map((region) => createStack(region).template);
+  });
+
   test('creates a CloudWatch Dashboard', () => {
-    const { template } = createStack();
     template.resourceCountIs('AWS::CloudWatch::Dashboard', 1);
   });
 
-  test('dashboard name includes stack name', () => {
-    const { template } = createStack();
+  test('dashboard name includes stack name and deployment region', () => {
     template.hasResourceProperties('AWS::CloudWatch::Dashboard', {
-      DashboardName: 'BackgroundAgent-Tasks-TestStack',
+      DashboardName: {
+        'Fn::Join': ['', ['BackgroundAgent-Tasks-TestStack-', { Ref: 'AWS::Region' }]],
+      },
     });
+  });
+
+  test('same stack name in two regions creates distinct global dashboard names', () => {
+    const names = regionalTemplates.map((regionalTemplate) => {
+      const dashboards = regionalTemplate.findResources('AWS::CloudWatch::Dashboard');
+      return Object.values(dashboards)[0].Properties.DashboardName;
+    });
+    expect(names).toEqual([
+      'BackgroundAgent-Tasks-TestStack-us-east-1',
+      'BackgroundAgent-Tasks-TestStack-us-west-2',
+    ]);
+    expect(new Set(names).size).toBe(2);
   });
 
   // --- Chunk 8b: Cedar HITL approval widgets (§11.3, IMPL-28) ------------
@@ -55,8 +77,8 @@ describe('TaskDashboard construct', () => {
   // The dashboard body is serialized as CloudFormation ``Fn::Join`` parts
   // with CDK tokens for the stack region/account. Use ``Match.serializedJson``
   // / substring checks via template rendering.
-  function dashboardBodyContains(template: Template, needle: string): boolean {
-    const dashboards = template.findResources('AWS::CloudWatch::Dashboard');
+  function dashboardBodyContains(source: Template, needle: string): boolean {
+    const dashboards = source.findResources('AWS::CloudWatch::Dashboard');
     for (const res of Object.values(dashboards)) {
       const body = (res as any).Properties?.DashboardBody;
       if (typeof body === 'string') {
@@ -72,12 +94,10 @@ describe('TaskDashboard construct', () => {
   }
 
   test('dashboard references ABCA/Cedar-HITL namespace for the new metrics', () => {
-    const { template } = createStack();
     expect(dashboardBodyContains(template, 'ABCA/Cedar-HITL')).toBe(true);
   });
 
   test('dashboard includes ApprovalTimeoutClipRate widget (MathExpression with IF guard)', () => {
-    const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Timeout Clip Rate')).toBe(true);
     // The IF(requested > 0, ...) guard is critical to avoid divide-by-zero
     // NaN renders (silent gap). Assert the expression ships in the widget.
@@ -89,13 +109,11 @@ describe('TaskDashboard construct', () => {
   });
 
   test('dashboard references ClippedApprovalCount and ApprovalRequestCount metrics', () => {
-    const { template } = createStack();
     expect(dashboardBodyContains(template, 'ClippedApprovalCount')).toBe(true);
     expect(dashboardBodyContains(template, 'ApprovalRequestCount')).toBe(true);
   });
 
   test('dashboard includes ApprovalTimeoutBreakdown widget with p50/p90/p99 on TimedOutEffectiveTimeout', () => {
-    const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Timeout Breakdown')).toBe(true);
     expect(dashboardBodyContains(template, 'TimedOutEffectiveTimeout')).toBe(true);
     // All three percentiles required by §11.3.
@@ -105,7 +123,6 @@ describe('TaskDashboard construct', () => {
   });
 
   test('dashboard includes ApprovalDecisionLatency widget with outcome dims', () => {
-    const { template } = createStack();
     expect(dashboardBodyContains(template, 'Approval Decision Latency')).toBe(true);
     expect(dashboardBodyContains(template, 'ApprovalDecisionLatencyMs')).toBe(true);
     // Three outcome dim values — one series set per outcome per percentile.
