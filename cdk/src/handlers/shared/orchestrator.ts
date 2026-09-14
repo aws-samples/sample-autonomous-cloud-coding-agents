@@ -957,6 +957,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
 
   const payload: Record<string, unknown> = {
     repo_url: task.repo,
+    git_provider: blueprintConfig?.provider ?? 'github',
     task_id: task.task_id,
     // user_id is required by the agent ONLY when ``trace`` is true —
     // the agent writes the trajectory to

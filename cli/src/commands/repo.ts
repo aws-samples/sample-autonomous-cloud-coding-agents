@@ -34,6 +34,7 @@ import {
 import { offboardRepo, onboardRepo } from '../repo-onboard';
 import { buildRepoOnboardNotes } from '../repo-onboard-notes';
 import { getStackOutput } from '../stack-outputs';
+import type { GitProviderType } from '../types';
 
 /**
  * Redact the per-repo secret ARN before a `RepoConfigRow` is serialized to JSON.
@@ -159,6 +160,7 @@ export function makeRepoCommand(): Command {
       .option('--token-secret-arn <arn>', 'Per-repo GitHub token Secrets Manager ARN')
       .option('--max-turns <n>', 'Default max turns for tasks', parseInt)
       .option('--poll-interval <ms>', 'Default agent poll interval in milliseconds', parseInt)
+      .option('--provider <type>', 'Git provider: github or bitbucket', 'github')
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (repoId: string, opts) => {
         assertRepoFormat(repoId);
@@ -167,6 +169,9 @@ export function makeRepoCommand(): Command {
           && opts.computeType !== 'ecs'
           && opts.computeType !== 'lambda-microvm') {
           throw new CliError("--compute-type must be 'agentcore', 'ecs', or 'lambda-microvm'.");
+        }
+        if (opts.provider && opts.provider !== 'github' && opts.provider !== 'bitbucket') {
+          throw new CliError("--provider must be 'github' or 'bitbucket'.");
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
@@ -210,6 +215,7 @@ export function makeRepoCommand(): Command {
           githubTokenSecretArn: opts.tokenSecretArn,
           maxTurns: opts.maxTurns,
           pollIntervalMs: opts.pollInterval,
+          provider: opts.provider as GitProviderType,
         });
         const notes = buildRepoOnboardNotes({
           config,

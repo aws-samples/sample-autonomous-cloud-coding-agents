@@ -27,6 +27,7 @@ import { Construct, IValidation } from 'constructs';
 // the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
 import { parseRef } from '../handlers/shared/registry/ref';
+import type { GitProviderType } from '../handlers/shared/types';
 
 const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
@@ -128,6 +129,12 @@ export interface BlueprintProps {
      * ARN of the Secrets Manager secret containing a per-repo GitHub token.
      */
     readonly githubTokenSecretArn?: string;
+
+    /**
+     * Git hosting provider for this repository.
+     * @default 'github'
+     */
+    readonly provider?: GitProviderType;
   };
 
   /**
@@ -326,6 +333,9 @@ export class Blueprint extends Construct {
     if (props.credentials?.githubTokenSecretArn) {
       item.github_token_secret_arn = { S: props.credentials.githubTokenSecretArn };
     }
+    if (props.credentials?.provider) {
+      item.provider = { S: props.credentials.provider };
+    }
     if (props.pipeline?.pollIntervalMs !== undefined) {
       item.poll_interval_ms = { N: String(props.pipeline.pollIntervalMs) };
     }
@@ -423,6 +433,7 @@ export class Blueprint extends Construct {
     if (this.maxBudgetUsd !== undefined) fields.push(', #max_budget_usd = :max_budget_usd');
     if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
     if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
+    if (props.credentials?.provider) fields.push(', #provider = :provider');
     if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
     if (props.pipeline?.buildCommand) fields.push(', #build_command = :build_command');
     if (props.pipeline?.lintCommand) fields.push(', #lint_command = :lint_command');
@@ -446,6 +457,7 @@ export class Blueprint extends Construct {
     if (this.maxBudgetUsd !== undefined) names['#max_budget_usd'] = 'max_budget_usd';
     if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
     if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
+    if (props.credentials?.provider) names['#provider'] = 'provider';
     if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
     if (props.pipeline?.buildCommand) names['#build_command'] = 'build_command';
     if (props.pipeline?.lintCommand) names['#lint_command'] = 'lint_command';
@@ -467,6 +479,7 @@ export class Blueprint extends Construct {
     if (this.maxBudgetUsd !== undefined) values[':max_budget_usd'] = { N: String(this.maxBudgetUsd) };
     if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
     if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
+    if (props.credentials?.provider) values[':provider'] = { S: props.credentials.provider };
     if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
     if (props.pipeline?.buildCommand) values[':build_command'] = { S: props.pipeline.buildCommand };
     if (props.pipeline?.lintCommand) values[':lint_command'] = { S: props.pipeline.lintCommand };
