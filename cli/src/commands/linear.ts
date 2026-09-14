@@ -2300,31 +2300,42 @@ export function makeLinearCommand(): Command {
         // succeeded, so a silent miss here leaves the operator believing the fix landed
         // when the state that verification reads is unchanged.
         const registryTableName = await getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName');
-        if (registryTableName) {
-          try {
-            await makeDocClient({ region }).send(new UpdateCommand({
-              TableName: registryTableName,
-              Key: { linear_workspace_id: stored.workspace_id },
-              UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
-              ConditionExpression: 'attribute_exists(linear_workspace_id)',
-              ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
-            }));
-            console.log('  ✓ Recorded that this workspace owns its signing secret');
-          } catch (err) {
-            if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-              throw new CliError(
-                `Updated the signing secret, but workspace '${slug}' has no registry row `
-                + `(${stored.workspace_id}).\n  Run \`bgagent linear setup ${slug}\` so the workspace `
-                + 'is registered; the secret you just entered will be preserved.',
-              );
-            }
+        if (!registryTableName) {
+          // Refuse rather than skip. Skipping is the failure this whole block exists to
+          // avoid: the secret write above already succeeded, so an operator who defaulted
+          // or mistyped --stack-name would see "Updated" and keep 401ing, with nothing
+          // in the output pointing at the reason.
+          throw new CliError(
+            'Updated the signing secret, but could not find LinearWorkspaceRegistryTableName in '
+            + `stack '${opts.stackName}'.\n`
+            + '  The secret is only half the repair — verification also reads a registry flag\n'
+            + '  recording that this workspace owns it, and that flag was not written.\n'
+            + '  Re-run with --stack-name <your-stack> (the secret you entered is preserved).',
+          );
+        }
+        try {
+          await makeDocClient({ region }).send(new UpdateCommand({
+            TableName: registryTableName,
+            Key: { linear_workspace_id: stored.workspace_id },
+            UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+            ConditionExpression: 'attribute_exists(linear_workspace_id)',
+            ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
+          }));
+          console.log('  ✓ Recorded that this workspace owns its signing secret');
+        } catch (err) {
+          if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
             throw new CliError(
-              'Updated the signing secret, but could not record its provenance: '
-              + `${err instanceof Error ? err.message : String(err)}\n`
-              + '  Re-run this command once the registry table is writable, otherwise this\n'
-              + '  workspace is still treated as carrying an inherited secret.',
+              `Updated the signing secret, but workspace '${slug}' has no registry row `
+              + `(${stored.workspace_id}).\n  Run \`bgagent linear setup ${slug}\` so the workspace `
+              + 'is registered; the secret you just entered will be preserved.',
             );
           }
+          throw new CliError(
+            'Updated the signing secret, but could not record its provenance: '
+            + `${err instanceof Error ? err.message : String(err)}\n`
+            + '  Re-run this command once the registry table is writable, otherwise this\n'
+            + '  workspace is still treated as carrying an inherited secret.',
+          );
         }
 
         console.log();
