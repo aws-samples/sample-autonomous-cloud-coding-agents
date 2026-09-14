@@ -6,8 +6,9 @@ The original managed image referenced `microvm-images/agent-artifact.zip`.
 Uploading new bytes to that filename did not change the CloudFormation
 template, so an ordinary deployment could leave the old agent image active.
 
-The source fix is implemented and four targeted suites pass 229 tests.
-Full-build and live-update results are recorded separately below. This work
+The fix is committed as `e1d5debe`. The full build passed, the normal
+CloudFormation update built and activated image version `2.0`, and a repeat
+deployment reported no changes. This work
 does not complete the remaining P2 acceptance matrix or enable P3 suspension.
 
 ## Deployment workflow
@@ -80,10 +81,52 @@ Before this update, CloudFormation was `UPDATE_COMPLETE`, the managed image
 listed task MicroVMs were terminated. AWS's resource schema marks only `Name`
 as create-only; `CodeArtifact.Uri` supports an in-place update.
 
-- [ ] Upload and checksum-verify the immutable artifact in S3.
-- [ ] Review a change set preserving image identity and existing infrastructure.
-- [ ] Execute the normal update and verify a successful new active image version.
-- [ ] Verify repeating the same artifact digest requests no further image change.
+- [x] Upload and checksum-verify the immutable artifact in S3.
+- [x] Review a change set preserving image identity and existing infrastructure.
+- [x] Execute the normal update and verify a successful new active image version.
+- [x] Verify repeating the same artifact digest requests no further image change.
+
+The uploaded ZIP contains **106 files / 467,322 bytes**. Every archived file
+matches its source bytes; ZIP integrity checks pass. S3 reports the matching
+SHA-256 checksum and AES256 encryption. The artifact digest is
+`86219317d92fc501b58d21df02dcb298955576c28751703f0753cc655c1c0a21`.
+
+CDK prepared change set `abca-645-image-rebuild-20260914`. AWS reported ten
+modifications and no additions/removals: the image URI and build-role policy,
+six metadata-only changes, the AgentCore container reference and the existing
+`awslabs/agent-plugins` blueprint timestamp refresh. The image has
+`Replacement: False`. The blueprint's custom-resource physical ID is stable;
+its update refreshes active status/time for that blueprint. No target-repository
+verification overrides were restored.
+
+The incidental AgentCore update comes from its existing repository-root asset
+fingerprint; `agent/` and `contracts/` source still match the earlier deployed
+`29dcaa74`. A textual `GetTemplate` comparison also showed Unicode characters
+as question marks, including a layer description, although the original
+synthesized template contains Unicode. The actual AWS change set excludes
+those apparent description changes and does not replace that layer.
+
+The build-role policy completed its update at **16:08:15 UTC**, before the image
+update started at **16:08:17 UTC**. Version `2.0` used the hash-suffixed URI;
+`/ready` and `/validate` returned HTTP 200 in its version-specific log streams.
+Validation reported zero warnings. The version reached `SUCCESSFUL` / `ACTIVE`,
+and the image's `latestActiveImageVersion` became `2.0` under its original ARN:
+`arn:aws:lambda:us-west-2:<account-id>:microvm-image:backgroundagent-dev-abca-agent`.
+CloudFormation reached `UPDATE_COMPLETE`, retaining **474 root resources**.
+No manual IAM changes or image API updates were needed.
+
+Running the packager again against the upgraded stack outputs reused the same
+checksum-verified object and printed the same digest. A normal CDK deployment
+of the identical reviewed cloud assembly exited 0 with **`(no changes)`** and
+zero deployment time. The subsequent version list contains `1.0` and `2.0`;
+no `3.0` was created. Fresh synthesis can still refresh the unrelated blueprint
+timestamps described above, while unchanged artifact input preserves the image URI.
+
+All four listed task MicroVMs remain terminated. This verification covers image
+rebuild and activation; no new coding task was launched. The earlier coding,
+iteration and cancellation evidence remains in the
+[version 1.0 live task record](./645-p2-live-task-20260914.md).
+P3 `/suspend` and `/resume` hooks remain undeclared.
 
 Private command output and AWS responses are retained under
 `/tmp/abca-645-p2-clean-20260913/image-rebuild-*`.

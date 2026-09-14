@@ -342,7 +342,10 @@ steps and the remaining limits:
 5. Record those results before discharging P2 warnings or enabling automatic
    P3 suspension.
 
-A separate rebuild follow-up remains: overwriting the fixed artifact S3 key does
-not itself change the CloudFormation image properties. Code-only redeployments
-need a content/version-based image update trigger. This first image creation is
-unaffected; later automatic rebuilds have not been verified.
+The rebuild follow-up identified here is now resolved in the
+[managed image update record](./645-microvm-image-rebuild-20260914.md):
+overwriting the fixed S3 key did not change CloudFormation image properties.
+Commit `e1d5debe` adds immutable hash-suffixed artifacts and requires their digest
+in deployment context. A normal update built and activated image `2.0`; repeat
+packaging reused the verified object and a same-assembly deployment made no
+changes. Packaging and passing the printed digest remain explicit operator steps.

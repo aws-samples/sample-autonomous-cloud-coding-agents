@@ -9,9 +9,14 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. â€œCompletedâ€
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
 Oregon environment, four deployment fixes and actual verification results.
-Bootstrap 1.7.0 and application source `29dcaa74` are deployed. CloudFormation
-reached `UPDATE_COMPLETE`; managed image version `1.0` is active, its ready and
+The clean deployment used bootstrap 1.7.0 and application source `29dcaa74`.
+CloudFormation reached `UPDATE_COMPLETE`; managed image version `1.0` became active, its ready and
 validate hooks passed, and authenticated API reads passed after the update.
+The subsequent [image rebuild fix](./645-microvm-image-rebuild-20260914.md)
+deployed `e1d5debe` through a normal reviewed update and activated version `2.0`.
+Its ready/validate hooks passed; repeated packaging reused the artifact, and
+redeploying the same cloud assembly reported no changes. The root still has
+474 resources.
 The [live task verification](./645-p2-live-task-20260914.md) subsequently passed
 normal coding, PR iteration and cancellation on `isadeks/vercel-abca-linear`,
 including heartbeat, npm checks, Memory writes and automatic cleanup. The
@@ -44,8 +49,8 @@ is superseded by these records.
 - [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [x] Verify normal coding, PR iteration, Memory writes, live logging and successful/canceled-task cleanup in AWS; observe cancellation preserve another task's capacity.
 - [x] Verify automatic pre/post npm checks under temporary overrides and worker-reported failure cleanup in AWS.
-- [x] Give managed image builds immutable, checksum-verified artifacts and require their digest in deployment context; packaging, construct, stack and CDK-nag regressions pass locally.
-- [ ] Verify a normal CloudFormation update builds a new managed image version from the changed artifact URI, then verify repeating the same digest makes no image change.
+- [x] Give managed image builds immutable, checksum-verified artifacts and require their digest in deployment context; packaging, construct, stack and CDK-nag regressions and the full build pass.
+- [x] Verify a normal CloudFormation update builds and activates image `2.0` from the changed artifact URI; repeat packaging reuses the verified object and a same-assembly redeploy reports no changes.
 - [ ] Make repository mise tasks available and verify the restored default commands; the CLI addition and temporary overrides were withdrawn at user request.
 - Optional: production nesting remains unimplemented; the clean deployment uses 474 of the root stack's 500 resource slots. P3 does not inherently require nesting. Recheck the count for supported feature combinations and validate the split/migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
