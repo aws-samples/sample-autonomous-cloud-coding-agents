@@ -108,9 +108,9 @@ const AGENT_HOOK_PORT = 8080;
  * surface: the service calls fixed well-known routes, which
  * {@link MICROVM_AGENT_HOOK_ROUTES} records and the live build/run logs confirm.
  *
- * `DISABLED` is never emitted: a hook the agent does not serve is OMITTED rather
- * than disabled, so the exactness test can assert the declared set in both
- * directions (see `/suspend` + `/resume`, P3).
+ * `DISABLED` is never emitted: hooks outside the image's enabled capability are
+ * omitted. The guest now serves `/suspend` + `/resume`, but their image
+ * declaration remains gated on the P3 capability rollout and live verification.
  */
 const HOOK_ENABLED = 'ENABLED';
 
@@ -121,8 +121,9 @@ const HOOK_ENABLED = 'ENABLED';
 const MICROVM_HOOK_ROUTE_PREFIX = '/aws/lambda-microvms/runtime/v1';
 
 /**
- * The service's fixed hook ROUTES, keyed by hook name — the paths
- * `agent/src/server.py` must serve.
+ * The service's fixed routes for the hooks this image currently enables.
+ * `agent/src/server.py` must serve each; additional guest routes alone do not
+ * enable an image capability.
  *
  * ## ⚠️ These are AGENT ROUTE CONSTANTS ONLY. Never send them to an AWS API.
  *

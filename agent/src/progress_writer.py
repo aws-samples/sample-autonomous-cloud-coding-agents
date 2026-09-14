@@ -360,7 +360,7 @@ def _reset_circuit_breakers() -> None:
 class _ProgressWriter:
     """Write AG-UI-style progress events to the existing DynamoDB TaskEventsTable.
 
-    Fail-open: a DDB write failure is logged but never raises.  After
+    Ordinary event methods fail open: a DDB write failure is logged but never raises. After
     ``_MAX_FAILURES`` consecutive *transient* failures the task's stream
     is permanently disabled (circuit breaker).  Permanent errors
     (``ValidationException`` et al.) drop the individual event without
@@ -453,6 +453,46 @@ class _ProgressWriter:
         self._table = dynamodb.Table(self._table_name)
 
     # -- core write ------------------------------------------------------------
+
+    def write_microvm_checkpoint(
+        self, *, metadata: dict, condition_checks: list[dict], client
+    ) -> None:
+        """Atomically acknowledge a pause marker and its task/gate preconditions.
+
+        Called only by the lifecycle checkpoint callback after activity drains.
+        This deliberately bypasses the best-effort event path: absent tables,
+        disabled progress, failed conditions and uncertain writes must raise.
+        A saved marker records a safe point, not proof that AWS froze the VM.
+        """
+        if not self._table_name or self._disabled:
+            raise RuntimeError("Checkpoint progress table is unavailable")
+        from boto3.dynamodb.types import TypeSerializer
+
+        now = datetime.now(UTC)
+        item = {
+            "task_id": self._task_id,
+            "event_id": _generate_ulid(),
+            "event_type": "agent_milestone",
+            "metadata": {"milestone": "microvm_suspend_checkpoint", **metadata},
+            "timestamp": now.isoformat(),
+            "ttl": int(now.timestamp()) + _TTL_SECONDS,
+            "user_id": self._user_id,
+        }
+        if self._repo:
+            item["repo"] = self._repo
+        serializer = TypeSerializer()
+        client.transact_write_items(
+            TransactItems=[
+                *({"ConditionCheck": check} for check in condition_checks),
+                {
+                    "Put": {
+                        "TableName": self._table_name,
+                        "Item": {key: serializer.serialize(value) for key, value in item.items()},
+                        "ConditionExpression": "attribute_not_exists(task_id)",
+                    }
+                },
+            ]
+        )
 
     def _put_event(self, event_type: str, metadata: dict) -> None:
         from microvm_lifecycle import LifecycleUnavailable, get_context

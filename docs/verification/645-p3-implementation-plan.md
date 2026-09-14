@@ -6,6 +6,15 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Latest local P3 milestone (2026-09-14):** production
+[worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
+barrier to atomic checkpoint writes and retained-credential refresh followed by
+task/gate reconciliation. Duplicate acknowledgments stay within one approval
+generation; a new gate cannot reuse an old wake result. Shared handler/service
+budgets are 20/30 seconds. Image declaration/capability, durable supervisor
+integration, approval-triggered wake and live sleep/wake verification remain open.
+No deployment or automatic suspension was enabled in this milestone.
+
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
 Oregon environment, four deployment fixes and actual verification results.
@@ -67,13 +76,14 @@ is superseded by these records.
 - [x] Verify automatic pre/post npm checks under temporary overrides and worker-reported failure cleanup in AWS.
 - [x] Give managed image builds immutable, checksum-verified artifacts and require their digest in deployment context; packaging, construct, stack and CDK-nag regressions and the full build pass.
 - [x] Verify a normal CloudFormation update builds and activates image `2.0` from the changed artifact URI; repeat packaging reuses the verified object and a same-assembly redeploy reports no changes.
-- [ ] Make repository mise tasks available and verify the restored default commands; the CLI addition and temporary overrides were withdrawn at user request.
+- Deferred at user request: publish mise tasks in the target repository and verify its default commands. The CLI addition and temporary overrides were withdrawn; this repository configuration work is outside the current P3 implementation.
 - Optional: production nesting remains unimplemented; the clean deployment uses 474 of the root stack's 500 resource slots. P3 does not inherently require nesting. Recheck the count for supported feature combinations and validate the split/migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
 - [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.
 - [x] Add the guest pause controller, original-gate registration, parallel-tool tracking, progress acknowledgment tracking, heartbeat/read drain and generation-guarded wake completion; reseed the application PRNG at run and controller resume.
-- [ ] Add compatible agent hooks and credential/durability barriers.
+- [x] Add production agent hooks with acknowledged checkpoints, retained ambient/tenant credential renewal, a sole scoped Claude provider and atomic task/gate reconciliation; verify duplicates, original deadlines, timeout and teardown behavior locally.
+- [ ] Declare compatible image hooks using shared budgets and bind lifecycle capability to the actual image/version used by each worker; keep automatic sleep disabled until integration/live acceptance.
 - [ ] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
 - [ ] Connect supervisor and approval handlers, then verify the complete P3 sleep/wake lifecycle in AWS.
 
@@ -393,26 +403,26 @@ keeps suspension disabled even after later successful writes. Failed or timed-ou
 wake callbacks cannot release coding through a late thread completion. The
 controller and `/run` reseed `random` using fresh OS entropy.
 
-This is **not the completed hook implementation**. No HTTP suspend/resume routes,
-image capability, production checkpoint/refresh callbacks, IAM changes or
-automatic sleep have been enabled. See the [guest barrier review](./645-p3-guest-barrier.md)
-for the implemented boundary, tests and remaining credential/subprocess work.
+The [guest barrier review](./645-p3-guest-barrier.md) records that controller
+milestone. The subsequent [HTTP hook implementation](./645-p3-lifecycle-hooks.md)
+now supplies production checkpoint and refresh/reconciliation callbacks. No image
+capability, new IAM grants or automatic sleep have been enabled.
 
 **Credential implementation added locally (2026-09-14):** the
 [credential verification](./645-p3-credentials.md) records actual pinned-CLI
 expiry/failure probes, the MicroVM-only scoped loopback provider, retained
 ambient/tenant refresh and SDK/broker teardown. Static/unknown runtime providers
 fail closed; their real renewal path must be verified before enabling suspension.
-This refresh function is not yet wired to a production HTTP resume callback.
+The production HTTP resume callback now invokes this refresh before any AWS reads.
 
-1. **Implemented:** a per-task context holds task/VM identity, active approval and the original deadline. MicroVM background startup registers it; pipeline exit/crash unregisters it. The SDK hook removes the approval safe point before changing task state or returning a permission result. **Still required:** supply this context to the HTTP lifecycle handlers and finish duplicate-hook admission/acknowledgment behavior.
-2. `/suspend` validates that the task is still parked on the intended gate. Wait for lifecycle/progress work already in progress to finish, establish an acknowledged durability barrier, and return success only within the hook budget. Existing best-effort event methods cannot establish that barrier. On timeout/write failure, report a hook failure so the coordinator keeps/reconciles the running VM. Test approval or cancellation arriving during this boundary.
-3. `/resume` refreshes ambient/runtime credential providers as necessary, then ensures tenant-scoped assumed credentials are usable **with the same task/user/repo tags**. **Implemented/tested locally:** `refresh_microvm_credentials` forces mandatory ambient renewal before renewing the same tenant credential object. Existing DynamoDB/S3/platform clients retain their references; session identity cannot change after construction. The Claude child uses only the scoped container provider and its managed export helper returns no cached keys. Actual pinned CLI probes establish first-request renewal and failure without fallback; a `credential_process` fallback control demonstrates why provider isolation matters. **Remaining:** wire refresh behind the HTTP resume barrier; verify actual runtime provider, long sleep, Gateway signing and managed image behavior in AWS. Never use test-only `reset_session_cache()` to simulate renewal.
-4. Keep the coding action blocked behind the resume barrier until refresh and gate reconciliation finish. Handle duplicate hook calls and concurrent lifecycle requests without deadlocks. Expired credentials or a slow AWS call must not hold the hook beyond its service budget.
-5. **Implemented locally:** `/run` and successful controller resume reseed the application PRNG from fresh OS entropy. The future `/resume` HTTP route must use this controller. Do not seed it with task IDs, timestamps or an image-fixed value. Continue using cryptographic randomness for secrets. Test resumed/sibling snapshot uniqueness where meaningful; do not claim that `random` becomes cryptographically safe.
-6. **Polling implemented locally:** `_ApprovalDeadline` captures the original recorded UTC expiry and a monotonic cap before database writes. Remaining time is `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero, including each sleep bound. **Registered locally:** the lifecycle context retains this exact object and releases the existing approval loop after successful controller resume. **Still required:** the production resume callback must reconcile the gate and check the original deadline. Never create a fresh timeout on resume.
+1. **Implemented locally:** a per-task context holds task/VM identity, active approval and the original deadline. MicroVM background startup registers it; pipeline exit/crash unregisters it. The SDK hook removes the approval safe point before changing task state or returning a permission result. HTTP handlers use this context, cache completed acknowledgments and reject conflicting transitions. A new gate clears the previous wake result.
+2. **Implemented locally:** `/suspend` drains tracked activity, strongly reads the task/gate and atomically checks current coordinator intent plus the original PENDING approval while writing an acknowledged TaskEvents checkpoint. Failed/uncertain writes never acknowledge suspension. Real DynamoDB Local transactions cover approval, cancellation, deadline and intent changes between reads and commit. Existing best-effort event methods are not used for this barrier.
+3. **Implemented/tested locally:** `/resume` invokes `refresh_microvm_credentials` behind the closed barrier, forcing ambient renewal before renewing the same tenant credential object **with the same task/user/repo tags**. Existing DynamoDB/S3/platform clients retain their references; session identity cannot change after construction. The Claude child uses only the scoped container provider and its managed export helper returns no cached keys. Actual pinned CLI probes establish first-request renewal and failure without fallback. **Remaining:** verify actual runtime provider, long sleep, Gateway signing and managed image behavior in AWS. Never use test-only `reset_session_cache()` to simulate renewal.
+4. **Implemented locally:** coding remains blocked until refresh and atomic task/gate reconciliation finish. Completed duplicates acknowledge cached results; concurrent requests receive 409. The 20-second handler budget includes body reads and all lifecycle work. A timed-out or terminated callback cannot release work through a late thread completion.
+5. **Implemented locally:** `/run` and successful HTTP/controller resume reseed the application PRNG from fresh OS entropy. Do not seed it with task IDs, timestamps or an image-fixed value. Continue using cryptographic randomness for secrets. Test resumed/sibling snapshot uniqueness where meaningful; do not claim that `random` becomes cryptographically safe.
+6. **Implemented locally:** `_ApprovalDeadline` captures the original recorded UTC expiry and a monotonic cap before database writes. Remaining time is `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero, including each sleep bound. Resume verifies the original recorded creation time/timeout and coordinator deadline, then releases the same approval loop with this exact object. Expired wake enters the existing timeout/late-decision path; it never creates a fresh window.
 7. **Preserved/tested locally:** conditional TIMED_OUT write, strongly consistent reread when that write loses, and late-decision winner behavior. Forward/backward clocks, frozen monotonic time, slow writes/reads, missing rows and cancellation have regression coverage. **Still required:** exercise these through the actual resume barrier and live AWS lifecycle. TTL is asynchronous garbage collection, not a precise alarm clock.
-8. Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them. Add shared hook-budget constants and route/contract assertions. Keep `/ready` and `/validate` AWS-silent. An old image without the new hooks must not be eligible for automatic suspension. Bind capability to the image/version that **actually launched each VM**, using coordinator-owned launch metadata; current deployment settings alone cannot prove an older VM supports the hooks. Unknown/legacy capability keeps new suspends off. A verified full drain can establish a clean boundary, but must not be assumed.
+8. **Shared budgets and served-route checks implemented locally; image declaration still pending.** Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them, using the shared 30-second service timeout. `/ready` and `/validate` remain AWS-silent. An old image without the new hooks must not be eligible for automatic suspension. Bind capability to the image/version that **actually launched each VM**, using coordinator-owned launch metadata; current deployment settings alone cannot prove an older VM supports the hooks. Unknown/legacy capability keeps new suspends off. A verified full drain can establish a clean boundary, but must not be assumed.
 
 ## 6. Wire the supervisor and human decisions
 

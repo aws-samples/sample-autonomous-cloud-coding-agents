@@ -5,8 +5,8 @@
 
 This controller does not call AWS or decide approvals. The server owns one
 controller per running MicroVM task; tool hooks register work and the *original*
-approval deadline. Future HTTP lifecycle handlers must supply the durable
-checkpoint and credential-refresh operations before declaring image capability.
+approval deadline. HTTP lifecycle handlers supply the durable checkpoint and
+credential-refresh operations; this controller owns permission to release work.
 
 Returning from a suspend callback is not proof that AWS actually froze the VM.
 Once acknowledged, the barrier opens only after a successful resume callback.
@@ -44,12 +44,23 @@ def reseed_random() -> None:
 
 
 @dataclass(frozen=True)
+class ApprovalRecord:
+    """Original durable gate fields, captured when its request is written."""
+
+    user_id: str
+    repo: str
+    created_at: str
+    timeout_s: int
+
+
+@dataclass(frozen=True)
 class ApprovalPark:
     task_id: str
     microvm_id: str
     request_id: str
     tool_use_id: str
     deadline: ApprovalDeadline
+    record: ApprovalRecord | None = None
 
 
 class MicrovmLifecycle:
@@ -74,6 +85,7 @@ class MicrovmLifecycle:
         self._progress_failed = False
         self._suspend_ineligible = False
         self._slept_request_id: str | None = None
+        self._last_resume_park: ApprovalPark | None = None
 
     def _check_open(self) -> bool:
         if self._phase in {"closed", "failed"}:
@@ -113,7 +125,12 @@ class MicrovmLifecycle:
             self._suspend_ineligible = True
 
     def park_approval(
-        self, request_id: str, tool_use_id: str | None, deadline: ApprovalDeadline
+        self,
+        request_id: str,
+        tool_use_id: str | None,
+        deadline: ApprovalDeadline,
+        *,
+        record: ApprovalRecord | None = None,
     ) -> ApprovalPark | None:
         with self._lock:
             if (
@@ -125,8 +142,13 @@ class MicrovmLifecycle:
             ):
                 self._suspend_ineligible = True
                 return None
-            park = ApprovalPark(self.task_id, self.microvm_id, request_id, tool_use_id, deadline)
+            park = ApprovalPark(
+                self.task_id, self.microvm_id, request_id, tool_use_id, deadline, record
+            )
             self._park = park
+            # A new gate cannot acknowledge a wake using the previous gate's
+            # cached result. Its own suspend must establish a fresh safe point.
+            self._last_resume_park = None
             self._phase = "parked"
             return park
 
@@ -202,6 +224,15 @@ class MicrovmLifecycle:
         with self._lock:
             park = self._park
             if (
+                self._phase == "suspend-ready"
+                and park is not None
+                and not self._progress_failed
+                and park.deadline.remaining_s() > 0
+            ):
+                # An already-acknowledged HTTP retry neither checkpoints again
+                # nor opens the barrier. Expired/unsafe retries remain closed.
+                return park
+            if (
                 park is None
                 or self._phase != "parked"
                 or self._suspend_ineligible
@@ -256,6 +287,10 @@ class MicrovmLifecycle:
         end = self._budget(budget_s)
         with self._lock:
             park = self._park
+            if self._phase in {"active", "parked"} and self._last_resume_park is not None:
+                # A duplicate wake acknowledgment cannot renew the approval
+                # timeout or re-run credential refresh on an executing task.
+                return self._last_resume_park
             if self._phase != "suspend-ready" or park is None:
                 raise LifecycleUnavailable("No acknowledged suspend to resume")
             self._phase = "resuming"
@@ -270,6 +305,7 @@ class MicrovmLifecycle:
                 # One sleep per approval gate. A duplicate suspend must not
                 # race the newly released decision loop.
                 self._slept_request_id = park.request_id
+                self._last_resume_park = park
             return park
         except BaseException:
             with self._lock:
@@ -316,6 +352,12 @@ def register_task(task_id: str, microvm_id: str) -> MicrovmLifecycle:
 def get_context(task_id: str | None) -> MicrovmLifecycle | None:
     with _registry_lock:
         return _contexts.get(task_id or "")
+
+
+def get_registered_context() -> MicrovmLifecycle | None:
+    """The service hook belongs to the sole task registered by this VM's /run."""
+    with _registry_lock:
+        return next(iter(_contexts.values()), None)
 
 
 def unregister_task(context: MicrovmLifecycle) -> None:

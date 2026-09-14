@@ -63,6 +63,7 @@ const FIXTURE_FILES = [
   'agent/src/server.py',
   'agent/src/config.py',
   'agent/src/payload_bootstrap.py',
+  'agent/src/microvm_http.py',
   'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
 ];
@@ -466,6 +467,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('hook-budget invariant', () => {
+    test.each(['LIFECYCLE_HANDLER_BUDGET_S', 'LIFECYCLE_HOOK_TIMEOUT_S'])(
+      'rejects a hardcoded lifecycle budget %s',
+      (name) => {
+        const result = runInMutatedRepo((root) => {
+          write(root, 'agent/src/microvm_http.py',
+            `${read(root, 'agent/src/microvm_http.py')}\n${name}: float = 20\n`);
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(name);
+      },
+    );
+
+    test.each([0, 1])('rejects a lifecycle handler budget %s seconds beyond the service timeout', (offset) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_hook_budgets.lifecycle_handler_budget_seconds =
+            json.microvm_hook_budgets.lifecycle_hook_timeout_seconds + offset;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('lifecycle_handler_budget_seconds must be <');
+    });
+
     test('rejects a warm-up budget that does not fit inside the hook timeout', () => {
       // The relationship the two-sided contract exists for: a warm-up that cannot
       // answer inside the service's hook budget turns a runtime fix into a build

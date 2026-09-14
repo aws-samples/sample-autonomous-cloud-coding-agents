@@ -24,7 +24,7 @@ scoped container provider and keeps keys out of Claude's stale export cache.
 AgentCore/ECS/local attribution retains its existing helper behavior.
 
 `aws_session.py` exports a coherent key/expiry pair under botocore's refresh lock.
-The future resume callback can force recorded ambient providers to refresh first,
+The production resume callback forces recorded ambient providers to refresh first,
 then force the original tenant credential object to renew with the original STS
 tags. Existing clients keep their references. Changing the configured identity
 after session construction is rejected. Mandatory renewal propagates failure
@@ -110,9 +110,9 @@ normal completion and failure/cancellation for MicroVM and other backends.
 
 Before automatic suspension can ship:
 
-1. Connect the refresh operation to the bounded production `/resume` callback,
-   followed by durable gate/deadline reconciliation. Finish acknowledged checkpoint
-   writes and `/suspend` admission.
+1. **Implemented locally in the [HTTP hook milestone](./645-p3-lifecycle-hooks.md):**
+   bounded `/resume` invokes refresh before atomic task/gate reconciliation;
+   `/suspend` requires an acknowledged checkpoint.
 2. Verify actual MicroVM runtime credential-provider type and renewal after sleep.
    Static or unknown providers currently reject resume; rereading an unchanged
    environment is not proof of renewal. Botocore's forced-refresh private API is

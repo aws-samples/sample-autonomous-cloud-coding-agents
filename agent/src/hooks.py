@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 import nudge_reader
 import task_state
-from microvm_lifecycle import get_context
+from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
@@ -736,7 +736,21 @@ async def _handle_require_approval(
     # The SDK wrapper already tracks this tool; direct/legacy callers without a
     # lifecycle context keep their existing approval behavior.
     lifecycle = get_context(task_id)
-    park = lifecycle.park_approval(request_id, tool_use_id, deadline) if lifecycle else None
+    park = (
+        lifecycle.park_approval(
+            request_id,
+            tool_use_id,
+            deadline,
+            record=ApprovalRecord(
+                user_id=row["user_id"],
+                repo=row["repo"],
+                created_at=row["created_at"],
+                timeout_s=effective_timeout,
+            ),
+        )
+        if lifecycle
+        else None
+    )
     try:
         outcome = await _poll_for_decision(
             task_id=task_id,

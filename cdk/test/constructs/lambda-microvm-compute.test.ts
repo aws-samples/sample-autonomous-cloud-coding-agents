@@ -226,13 +226,11 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(Math.max(...MICROVM_SUPPORTED_MEMORY_MIB)).toBe(DEFAULT_MINIMUM_MEMORY_MIB);
   });
 
-  test('declares EXACTLY the four hooks the agent serves (P2), and no more', () => {
-    // `toEqual` on the whole object, not per-key assertions: the invariant runs in
-    // BOTH directions. A hook the agent serves but the image does not declare is
-    // never called (the P2 R2 regression this replaces — the agent gained
-    // /validate and /terminate while the construct still advertised two hooks);
-    // a hook the image declares but the agent does not serve fails the
-    // corresponding build or lifecycle transition. Only an exact set catches both.
+  test('declares exactly the four enabled P2 image hooks until the P3 capability rollout', () => {
+    // Compare the whole enabled set. A declared hook must be served or the
+    // corresponding build/lifecycle transition fails. The guest additionally
+    // serves /suspend and /resume, but they stay undeclared until the P3 image
+    // capability rollout; a route alone must not opt existing workers into sleep.
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
@@ -248,8 +246,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       RunTimeoutInSeconds: 60,
       Terminate: 'ENABLED',
       // Near the BOTTOM of the service's 1–60 s window on purpose: the handler is
-      // a log-and-acknowledge with nothing to drain (progress writes are already
-      // durable per event), and the budget bounds how long teardown waits on a
+      // a barrier close plus log-and-acknowledge with no progress queue to drain
+      // (ordinary event writes are best effort), and the budget bounds teardown on a
       // WEDGED guest that is still holding admission-gating memory quota.
       TerminateTimeoutInSeconds: 15,
     });

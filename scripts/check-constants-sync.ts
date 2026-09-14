@@ -50,8 +50,11 @@ const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
 const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
 const PAYLOAD_BOOTSTRAP_PY = path.join(REPO_ROOT, 'agent/src/payload_bootstrap.py');
+const MICROVM_HTTP_PY = path.join(REPO_ROOT, 'agent/src/microvm_http.py');
 const PAYLOAD_BOOTSTRAP_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/payload-bootstrap.ts');
-const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY];
+const PYTHON_CONSUMERS = [
+  POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY, MICROVM_HTTP_PY,
+];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
 
@@ -120,6 +123,14 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
     name: '_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS',
     regex: /^\s*_READY_WARMUP_REQUIRED_TIMEOUT_SECONDS\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
   },
+  {
+    name: 'LIFECYCLE_HANDLER_BUDGET_S',
+    regex: /^\s*LIFECYCLE_HANDLER_BUDGET_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
+  },
+  {
+    name: 'LIFECYCLE_HOOK_TIMEOUT_S',
+    regex: /^\s*LIFECYCLE_HOOK_TIMEOUT_S\s*(?::\s*(?:int|float))?\s*=\s*-?\d+\b/m,
+  },
 ];
 
 /**
@@ -186,6 +197,8 @@ function main(): number {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
+      lifecycle_hook_timeout_seconds: number;
+      lifecycle_handler_budget_seconds: number;
     };
     payload_bootstrap?: {
       version: number;
@@ -349,6 +362,8 @@ function main(): number {
     'ready_hook_timeout_seconds',
     'warmup_total_budget_seconds',
     'warmup_required_timeout_seconds',
+    'lifecycle_hook_timeout_seconds',
+    'lifecycle_handler_budget_seconds',
   ] as const;
   if (!mhb || BUDGET_FIELDS.some(field => !Number.isInteger(mhb[field]))) {
     console.error(
@@ -371,6 +386,12 @@ function main(): number {
       'microvm_hook_budgets.warmup_required_timeout_seconds must be < ' +
       'warmup_total_budget_seconds (the required warm-up must leave the ' +
       'best-effort ones something to share)',
+    );
+  }
+  if (mhb.lifecycle_handler_budget_seconds >= mhb.lifecycle_hook_timeout_seconds) {
+    invariantErrors.push(
+      'microvm_hook_budgets.lifecycle_handler_budget_seconds must be < '
+      + 'lifecycle_hook_timeout_seconds (pause/wake must leave time to answer)',
     );
   }
 

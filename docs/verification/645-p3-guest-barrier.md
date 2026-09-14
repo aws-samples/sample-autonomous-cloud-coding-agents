@@ -36,15 +36,15 @@ AWS, authorize a human decision or extend an approval's deadline.
 - `/run` and successful controller resume reseed Python's application PRNG with
   `os.urandom(32)`. This does not make `random` suitable for secrets.
 
-Concurrent lifecycle requests receive a controlled rejection rather than
-sharing ownership or holding a lock across network work. HTTP retry/duplicate
-acknowledgment semantics still need integration with the future routes.
+Concurrent lifecycle requests receive a controlled rejection without holding a
+lock across network work. The later [HTTP hook milestone](./645-p3-lifecycle-hooks.md)
+adds cached successful acknowledgments and clears an old wake result for each new gate.
 
 ## Why the image is not eligible for sleep yet
 
-The controller's checkpoint and refresh operations are currently test-supplied
-callbacks. Production HTTP handlers must supply bounded, acknowledged database
-checks and credential renewal before returning success.
+The later [HTTP hook milestone](./645-p3-lifecycle-hooks.md) supplies production
+callbacks for atomic checkpoint writes, credential renewal and gate reconciliation.
+Image capability, supervisor integration and live service verification remain open.
 
 The worker has several independent credential consumers:
 
@@ -70,8 +70,9 @@ now exercises that actual CLI. `credential_process` renewed successfully but
 fell through to ambient credentials on failure. The chosen MicroVM path uses a
 single authenticated, scoped container provider; renewal waits before signing,
 and failure sends no model request. Python refresh updates retained credential
-objects with the original identity. Production HTTP callbacks and live runtime
-provider/snapshot verification are still open. No minified CLI internals were patched.
+objects with the original identity. The HTTP resume callback now invokes this
+operation; live runtime provider/snapshot verification remains open.
+No minified CLI internals were patched.
 
 Known background tool flags are tracked, but arbitrary shell/MCP subprocesses
 may also detach work. Their safe-point behavior still requires a conservative
@@ -103,10 +104,11 @@ budgets, durable supervisor recovery or complete P3 acceptance.
 
 ## Remaining integration order
 
-1. **Local credential implementation complete:** verify the deployed runtime
-   provider and snapshot behavior; connect retained-client refresh to the resume callback.
-2. Implement the production checkpoint and HTTP suspend/resume routes with
-   shared service budgets, duplicate-request handling and deterministic teardown.
+1. **Local credential implementation complete:** retained-client refresh is now
+   connected to resume; verify the deployed runtime provider and snapshot behavior.
+2. **Local HTTP integration complete:** acknowledged production checkpoints,
+   shared budgets, duplicate handling and teardown are covered in the
+   [hook verification](./645-p3-lifecycle-hooks.md).
 3. Bind lifecycle capability to the image/version that launched each worker;
    declare compatible hooks, initially leaving automatic suspension disabled.
 4. Wire persistent intent/policy into durable supervisor polling with bounded

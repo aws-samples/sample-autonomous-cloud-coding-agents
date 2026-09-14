@@ -1012,14 +1012,13 @@ class TestMicrovmReadyHook:
         with server._threads_lock:
             assert server._active_threads == []
 
-    def test_suspend_and_resume_are_NOT_served(self, client):
-        # Declaring a hook nothing answers fails the corresponding build or
-        # lifecycle transition, so the construct declares exactly the hooks the
-        # agent serves. /validate + /terminate joined that set in P2; /suspend +
-        # /resume need the ComputeStrategy interface widening (P3), so they must
-        # still 404 — the assertion that keeps the construct honest.
+    def test_suspend_and_resume_require_a_registered_task(self, client):
+        # Runtime routes exist before the image declares the P3 capability.
+        # Snapshot warm-up has no task and cannot authorize a lifecycle change.
         for hook in ("suspend", "resume"):
-            assert client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}").status_code == 404
+            response = client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}")
+            assert response.status_code == 409
+            assert response.json()["code"] == "MICROVM_LIFECYCLE_UNAVAILABLE"
 
 
 class TestMicrovmReadyHookWarmUp:
@@ -2546,7 +2545,9 @@ class TestMicrovmValidateHook:
         assert "hook_routes_registered" in r.json()["failed_checks"]
         assert r.json()["missing_routes"] == [
             "/typo/prefix/ready",
+            "/typo/prefix/resume",
             "/typo/prefix/run",
+            "/typo/prefix/suspend",
             "/typo/prefix/terminate",
             "/typo/prefix/validate",
         ]

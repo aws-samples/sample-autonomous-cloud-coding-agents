@@ -30,9 +30,11 @@ from pydantic import BaseModel
 
 import task_state
 from config import resolve_github_token
+from microvm_http import microvm_resume, microvm_suspend
 from microvm_lifecycle import (
     LifecycleUnavailable,
     get_context,
+    get_registered_context,
     register_task,
     reseed_random,
     unregister_task,
@@ -848,7 +850,8 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # (8080 — the same uvicorn process that serves /invocations and /ping), so the
 # hooks live here rather than in a sidecar.
 #
-# Four hooks are served; ``/suspend`` + ``/resume`` are still P3:
+# Six hooks are served; image declaration/capability and supervisor wiring for
+# ``/suspend`` + ``/resume`` remain a separate P3 rollout step:
 #   * ``/ready`` (build, P1) is MANDATORY. ``CreateMicrovmImage`` refuses an image
 #     that enables ANY lifecycle hook without it ("The ready (/ready) MicroVM
 #     image hook must be enabled when any MicroVM lifecycle hook … is enabled"),
@@ -861,13 +864,13 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 #     BUILD role and makes ZERO AWS calls — see ``microvm_validate``.
 #   * ``/terminate`` (runtime, P2) is a best-effort final flush. It never writes
 #     terminal task status — the orchestrator owns terminal state.
-# ``/suspend`` and ``/resume`` are P3 (they need the ComputeStrategy interface
-# widening). Declaring a hook the agent does not answer fails the corresponding
-# build or lifecycle transition, which is why the construct declares exactly the
-# hooks served here.
+# ``/suspend`` and ``/resume`` use a drained, acknowledged checkpoint and mandatory
+# credential/gate reconciliation. The image must declare them with the shared
+# service budget before it can advertise lifecycle capability.
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 
-#: ``s3://`` scheme prefix for the out-of-band payload pointer.
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/suspend", microvm_suspend, methods=["POST"])
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/resume", microvm_resume, methods=["POST"])
 
 # --- platform_config allowlist (ADR-021 P2) --------------------------------
 # WHY the agent's platform env arrives in the ``/run`` payload at all, instead of
@@ -1720,7 +1723,8 @@ def microvm_validate():
     would fail every build. Names only — never values.
     """
     expected_routes = {
-        f"{MICROVM_HOOK_PREFIX}/{hook}" for hook in ("ready", "validate", "run", "terminate")
+        f"{MICROVM_HOOK_PREFIX}/{hook}"
+        for hook in ("ready", "validate", "run", "terminate", "suspend", "resume")
     }
     registered = {getattr(route, "path", None) for route in app.routes}
     missing_routes = sorted(expected_routes - registered)
@@ -1774,6 +1778,11 @@ def microvm_validate():
     return body
 
 
+# The terminate body is only optional correlation data. Leave ample headroom
+# inside the image's 15-second hook timeout if the service stream stalls.
+_TERMINATE_BODY_BUDGET_SECONDS = 1.0
+
+
 @app.post(f"{MICROVM_HOOK_PREFIX}/terminate")
 async def microvm_terminate(request: Request):
     """MicroVM ``/terminate`` runtime hook — best-effort flush, always 200.
@@ -1803,12 +1812,21 @@ async def microvm_terminate(request: Request):
 
     There is no progress queue to drain. ``ProgressWriter`` writes synchronously
     but catches and drops failures; a return from its event method is not proof
-    of durability. This hook only logs and acknowledges teardown. P3's
-    ``/suspend`` needs a separate acknowledged durability barrier.
+    of durability. This hook closes the coding barrier, logs and acknowledges
+    teardown. ``/suspend`` uses a separate acknowledged checkpoint transaction.
     """
+    # Close the local barrier before reading the body or emitting diagnostics.
+    # A slow checkpoint/refresh thread must not release coding during teardown.
+    try:
+        lifecycle = get_registered_context()
+        if lifecycle is not None:
+            lifecycle.close()
+    except Exception as exc:
+        _emit_stdout_line(f"[server/warn] /terminate barrier close failed: {type(exc).__name__}")
     raw = b""
     try:
-        raw = await request.body()
+        async with asyncio.timeout(_TERMINATE_BODY_BUDGET_SECONDS):
+            raw = await request.body()
     except Exception as exc:
         # A truncated/aborted body must not become a 5xx: the VM is going away and
         # the id is only a correlation string. Logged, not swallowed.

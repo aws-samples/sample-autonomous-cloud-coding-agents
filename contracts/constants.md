@@ -24,6 +24,7 @@ the contract. This is the neutral location both runtimes read.
 | `agent/src/payload_bootstrap.py` | `SHARED_CONSTANTS["payload_bootstrap"]` | import-time |
 | `cdk/src/handlers/shared/payload-bootstrap.ts`, `cdk/src/constructs/payload-bootstrap-permissions.ts` | `payload_bootstrap` | import-time |
 | `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
+| `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
 | `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
@@ -91,7 +92,9 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,
     "warmup_total_budget_seconds": 240,
-    "warmup_required_timeout_seconds": 120
+    "warmup_required_timeout_seconds": 120,
+    "lifecycle_hook_timeout_seconds": 30,
+    "lifecycle_handler_budget_seconds": 20
   }
 }
 ```
@@ -196,7 +199,7 @@ gate.
   purpose: a cold 225 MiB `exec` has no predictable duration, which is the lesson of
   P2-F5.
 
-Unlike every other block here, these three are not independent tuning bounds — they
+These three warm-up values are not independent tuning bounds — they
 are a **relationship**: `warmup_required < warmup_total < ready_hook`. The warm-up
 must finish inside the budget the service holds the hook to, or a fix for a runtime
 failure turns into a build failure. A relationship cannot be enforced from one side,
@@ -206,6 +209,15 @@ literal re-declaration on **either** side — the Python constants *and*
 `READY_HOOK_TIMEOUT_SECONDS` in the TypeScript construct — and
 `agent/src/server.py` re-checks the same ordering at import time, so a bad contract
 fails the drift check *and* the image build.
+
+The runtime lifecycle pair has its own relationship:
+`lifecycle_handler_budget_seconds < lifecycle_hook_timeout_seconds`. The 20-second
+handler limit covers reading the body, draining activity and checkpoint/refresh
+work together. The planned 30-second service hook timeout leaves response headroom.
+`microvm_http.py` checks the ordering at import time; the drift script checks
+positive integer values, ordering and hardcoded Python redeclarations. The image
+does not declare suspend/resume hooks yet; its later capability rollout must use
+this service timeout. These values do not enable automatic suspension.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and
