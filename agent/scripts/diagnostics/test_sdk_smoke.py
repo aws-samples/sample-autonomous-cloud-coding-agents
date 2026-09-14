@@ -26,10 +26,22 @@ async def smoke_test():
     # Ensure required env vars
     os.environ.setdefault("CLAUDE_CODE_USE_BEDROCK", "1")
     region = os.environ.get("AWS_REGION", "")
-    model = os.environ.get("ANTHROPIC_MODEL", "us.anthropic.claude-sonnet-4-6")
+    # No hardcoded fallback: this file drifted to a model and geography the platform
+    # no longer defaults to, so the diagnostic silently tested something other than
+    # what runs. Require the caller to state it — a diagnostic that quietly probes the
+    # wrong model is worse than one that refuses.
+    model = os.environ.get("ANTHROPIC_MODEL", "")
 
     if not region:
         print("ERROR: AWS_REGION not set", file=sys.stderr)
+        sys.exit(1)
+
+    if not model:
+        print(
+            "ERROR: ANTHROPIC_MODEL not set. Pass the geo-prefixed inference-profile "
+            "id the deployment uses, e.g. ANTHROPIC_MODEL=global.anthropic.claude-opus-5",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"Region:  {region}")
@@ -108,9 +120,12 @@ async def smoke_test():
     print(f"Duration: {elapsed:.1f}s")
     print(f"Counts:   {counts}")
 
-    if counts["assistant"] > 0 and counts["result"] > 0:
-        print("\nPASS — SDK yields messages. Issue is specific to the")
-        print("       server threading context, not SDK/CLI/Bedrock.")
+    ok = counts["assistant"] > 0 and counts["result"] > 0
+    if ok:
+        print("\nPASS — SDK yields messages for this model in this Region.")
+        print("       Rules OUT the SDK/CLI/Bedrock path. It does not identify the")
+        print("       cause of any other failure — threading is one candidate, not a")
+        print("       conclusion this test can reach.")
     elif counts["system"] > 0 and counts["assistant"] == 0:
         print("\nFAIL — Got init but zero AssistantMessages.")
         print("       Same symptom as production. Issue is SDK/CLI level,")
@@ -118,7 +133,6 @@ async def smoke_test():
         print("         1. CLI stderr output above for errors")
         print("         2. Bedrock model availability / permissions")
         print("         3. SDK ↔ CLI version compatibility")
-        print("         SDK: claude-agent-sdk==0.1.43")
         try:
             import importlib.metadata
 
@@ -129,9 +143,25 @@ async def smoke_test():
     elif counts["system"] == 0:
         print("\nFAIL — Zero messages at all. CLI subprocess may not start.")
         print("       Check: is claude-code installed? Run: claude --version")
+    else:
+        # Reachable: assistant>0 but result==0 (the model spoke, the run never
+        # terminated cleanly). Without this branch the script printed NO verdict at
+        # all and still exited 1 — a diagnostic that fails silently is the thing this
+        # file exists to rule out.
+        print("\nINDETERMINATE — Got AssistantMessages but no ResultMessage.")
+        print("       The model responded, so the SDK/CLI/Bedrock path works, but the")
+        print("       run did not terminate normally. Treat as a FAILURE of this")
+        print("       diagnostic, not evidence about the model. Check the CLI stderr")
+        print("       above for a mid-stream error, and whether the run was killed")
+        print("       (timeout, OOM, cancelled) before it could emit its result.")
     if errors:
         print(f"\nErrors: {errors}")
 
+    # Exit code must match the verdict. It printed FAIL and exited 0, so any caller
+    # that checked the status — CI, a script, a person using `&&` — read a failure as
+    # success. A diagnostic that lies in its exit code is worse than no diagnostic.
+    return ok
+
 
 if __name__ == "__main__":
-    asyncio.run(smoke_test())
+    sys.exit(0 if asyncio.run(smoke_test()) else 1)

@@ -72,6 +72,7 @@ for (const optional of [
   'JIRA_OAUTH_SECRET_ARN',
   'AWS_SDK_UA_APP_ID',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+  'ANTHROPIC_MODEL',
 ]) {
   delete process.env[optional];
 }
@@ -1235,6 +1236,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
     AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
+    ANTHROPIC_MODEL: 'us.anthropic.claude-opus-5',
   };
 
   test('sources the wire key allow-list from the cross-language contract', () => {
@@ -1267,8 +1269,15 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'agent_session_role_arn',
       'aws_sdk_ua_app_id',
       'anthropic_default_haiku_model',
+      // The MAIN model. Absent until now, and silently so: the two substrates that
+      // inject the model straight into a runtime env (the AgentCore runtime block,
+      // the ECS task definitions) were unaffected, so every synth assertion passed
+      // while MicroVM fell back to the `global.`-prefixed literal in
+      // `agent/src/config.py` — wrong on any deployment whose geography is not
+      // `global`, and wrong in a way that surfaces only as AccessDenied at turn 0.
+      'anthropic_model',
     ]);
-    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(13);
+    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(14);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
@@ -1289,13 +1298,18 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     }
   });
 
-  test('emits all thirteen keys, in declaration order, from a full environment', () => {
+  test('emits all fourteen keys, in declaration order, from a full environment', () => {
     const config = buildMicrovmPlatformConfig(FULL_ENV);
     expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
     expect(config.task_table_name).toBe('tasks');
     expect(config.nudges_table_name).toBe('nudges');
     expect(config.agent_session_role_arn).toBe('arn:aws:iam::123456789012:role/SessionRole');
     expect(config.anthropic_default_haiku_model).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+    // The MAIN model, asserted BY VALUE rather than presence. This is the whole
+    // point of the key: the agent's fallback is a `global.`-prefixed literal, so on
+    // a `us` deployment a missing value is not an error anywhere — it is a wrong
+    // model that the IAM grant does not cover, surfacing as AccessDenied at turn 0.
+    expect(config.anthropic_model).toBe('us.anthropic.claude-opus-5');
   });
 
   test('OMITS optional keys the orchestrator does not carry (no `undefined` placeholders)', () => {
@@ -1430,6 +1444,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'TASK_APPROVALS_TABLE_NAME', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
       'JIRA_OAUTH_SECRET_ARN', 'AWS_SDK_UA_APP_ID', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      'ANTHROPIC_MODEL',
     ]) {
       delete env[optional];
     }
