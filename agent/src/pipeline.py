@@ -38,6 +38,7 @@ from post_hooks import (
     _extract_agent_notes,
     ensure_committed,
     ensure_pr,
+    post_self_review_comment,
     reconcile_agent_branch,
     verify_build,
     verify_lint,
@@ -264,6 +265,50 @@ def _execute_agent_step(
         )
         raise RuntimeError(f"Workflow run_agent step failed: {detail}")
     return ctx.agent_result
+
+
+def _execute_self_review_step(
+    workflow: Workflow | None,
+    config,
+    setup,
+    agent_result,
+    hydrated,
+    trajectory,
+    progress,
+) -> bool:
+    """Drive the workflow's ``self_review`` step (if declared) through the runner.
+
+    Mirrors ``_execute_agent_step``: only the ``self_review`` step is dispatched
+    (``only_kinds={"self_review"}``) so clone / build / PR stay on the inline
+    path. The step's handler accumulates the review loop's turns/cost back onto
+    ``agent_result`` (a shared mutable model), so the terminal result reflects
+    implement + review.
+
+    Returns True when the review actually ran (so the caller posts the summary
+    PR comment after ``ensure_pr``); False when no ``self_review`` step is
+    declared, the workflow failed to reload, or the review was skipped (read-only
+    / empty diff / no remaining turns). Fully fail-open — a review failure is
+    recorded as a step outcome and never propagates to block PR creation.
+    """
+    if workflow is None or not any(s.kind == "self_review" for s in workflow.steps):
+        return False
+
+    from workflow import StepContext, run_workflow
+
+    ctx = StepContext(
+        workflow=workflow,
+        config=config,
+        hydrated=hydrated,
+        progress=progress,
+        trajectory=trajectory,
+        setup=setup,
+        # The implement step's result, threaded in so the handler can size the
+        # review's turn budget and accumulate its turns/cost onto it.
+        agent_result=agent_result,
+    )
+    with task_span("task.self_review"):
+        run_workflow(workflow, ctx, only_kinds={"self_review"})
+    return bool(ctx.artifacts.get("self_review_ran", False))
 
 
 def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> bool:
@@ -1397,6 +1442,11 @@ def run_task(
                 and (clarification_q or _starts_with_needs_input_marker(agent_result.result_text))
             )
 
+            # Whether a self_review step ran (set in the PR-producing branch
+            # below). Default False so the hold-and-ask / artifact branches — which
+            # produce no diff or PR to review — never post a review comment.
+            self_review_ran = False
+
             # Post-hooks (agent_result is guaranteed set by the try/except above)
             with task_span("task.post_hooks") as post_span:
                 if needs_input:
@@ -1436,11 +1486,37 @@ def run_task(
                     # backstop if reconcile can't recover the work.
                     if not workflow_read_only:
                         reconcile_agent_branch(setup.repo_dir, setup.branch)
-                    # Safety net: commit any uncommitted tracked changes (skip read-only tasks)
+                    # Safety net: commit any uncommitted tracked changes (skip
+                    # read-only tasks) BEFORE self-review. The critic's diff is
+                    # ``git diff origin/{default}...HEAD`` — committed work only —
+                    # so reviewing first would hide uncommitted changes from it
+                    # entirely. Worst case (turn-limit/timeout runs that leave
+                    # everything uncommitted — exactly where review matters most)
+                    # the diff comes back empty and the review silently skips.
                     safety_committed = (
                         False if workflow_read_only else ensure_committed(setup.repo_dir)
                     )
                     post_span.set_attribute("safety_net.committed", safety_committed)
+
+                    # Self-review step: if the resolved workflow declares a
+                    # ``self_review`` step, drive it through the workflow runner
+                    # (same pattern as ``_execute_agent_step``). The step has the
+                    # LLM critique its own diff (read-only) and report findings to
+                    # a summary file, accumulating its turns/cost onto
+                    # ``agent_result``. Runs AFTER the safety-net commit above so
+                    # the critic sees all implement-phase work, and only on the
+                    # PR-producing path (there is a diff to review and a PR to
+                    # comment on). Fail-open: a review failure/skip never blocks
+                    # PR creation.
+                    self_review_ran = _execute_self_review_step(
+                        _workflow,
+                        config,
+                        setup,
+                        agent_result,
+                        hc,
+                        trajectory,
+                        progress,
+                    )
 
                     build_outcome = verify_build(setup.repo_dir, config.build_command)
                     build_passed = build_outcome.passed
@@ -1523,6 +1599,10 @@ def run_task(
                         "Jira card NOT moved to In Review — PR opened with a FAILED build "
                         "(build_ok=False); leaving it In Progress with the failure comment (#9a).",
                     )
+
+            # Post self-review summary as PR comment (if the self_review step ran)
+            if pr_url and self_review_ran:
+                post_self_review_comment(setup.repo_dir, pr_url, config)
 
             # Memory write — capture task episode and repo learnings
             memory_written = False
