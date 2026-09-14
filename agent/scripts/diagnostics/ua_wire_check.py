@@ -42,13 +42,13 @@ from botocore.exceptions import BotoCoreError, ClientError
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 # The REAL agent helper — the thing under test, not a copy.
-from ua import COMPONENT, SOLUTION_ID, client_config  # noqa: E402
+from ua import COMPONENT, SOLUTION_ID, client_config
 
 
 def _make_capture(label: str):
     """Return a botocore ``before-send`` handler that prints the wire UA."""
 
-    def _capture(request, **_kwargs):  # noqa: ANN001
+    def _capture(request, **_kwargs):
         ua = request.headers.get("User-Agent") or request.headers.get("user-agent") or "(none)"
         if isinstance(ua, (bytes, bytearray)):
             ua = ua.decode("utf-8", "replace")
