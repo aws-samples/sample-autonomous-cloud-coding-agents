@@ -27,7 +27,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { NagSuppressions } from 'cdk-nag';
+import { NagSuppressions, type NagPackSuppression } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
 import { AdmissionQueuePickup } from '../constructs/admission-queue-pickup';
 import { AgentMemory } from '../constructs/agent-memory';
@@ -813,24 +813,15 @@ export class AgentStack extends Stack {
       },
     ], true);
 
-    // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
-    // grant + extra env vars) pushed the runtime
-    // execution role past CDK's per-inline-policy size limit, causing CDK
-    // to auto-split excess statements into ``OverflowPolicy1`` / etc.
-    // Those overflow policies inherit the same wildcard
-    // ``bedrock:InvokeModel*`` / CloudWatch / cross-region-inference
-    // actions as the base policy but live at paths that any suppression
-    // placed at constructor time does NOT reach (CDK creates the
-    // overflow policies lazily during synth ``prepare()``, after the
-    // construct tree has been frozen). Use an Aspect that visits every
-    // node during synth and matches overflow-policy children of the
-    // runtime ExecutionRole so any present or future overflow is
-    // suppressed automatically without hardcoding
-    // ``OverflowPolicy<N>`` indices.
-    // Roles known to overflow, with the evidence for each. Keyed by a path
-    // fragment rather than an `OverflowPolicy<N>` index so future splits are
-    // covered automatically.
-    const OVERFLOW_SUPPRESSIONS: readonly { readonly pathFragment: string; readonly reason: string }[] = [
+    // CDK splits large role policies during synth, after constructor-time
+    // suppressions have visited the existing children. Apply the documented
+    // exceptions to those later policies before cdk-nag inspects them, matching
+    // the owning role without relying on a particular OverflowPolicy<N> index.
+    const OVERFLOW_SUPPRESSIONS: readonly {
+      readonly pathFragment: string;
+      readonly reason: string;
+      readonly appliesTo?: NagPackSuppression['appliesTo'];
+    }[] = [
       {
         pathFragment: '/Runtime/ExecutionRole/OverflowPolicy',
         reason:
@@ -846,14 +837,25 @@ export class AgentStack extends Stack {
         reason:
           'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
       },
+      {
+        // Image lifecycle grants can push the existing Jira secret grant into
+        // an overflow policy. Exempt only that resource pattern; other wildcard
+        // grants in this role's future overflow documents still require review.
+        pathFragment: '/TaskOrchestrator/OrchestratorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'The orchestrator reads and refreshes per-tenant Jira OAuth secrets created by bgagent jira setup. Their cloudId-based names are unknown at synth, so GetSecretValue/PutSecretValue use the account- and Region-scoped bgagent-jira-oauth-* prefix.',
+        appliesTo: [{
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bgagent-jira-oauth-\\*$/',
+        }],
+      },
     ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
         const nodePath = node.node.path;
         if (!nodePath.endsWith('/Resource')) return;
-        for (const { pathFragment, reason } of OVERFLOW_SUPPRESSIONS) {
+        for (const { pathFragment, reason, appliesTo } of OVERFLOW_SUPPRESSIONS) {
           if (nodePath.includes(pathFragment)) {
-            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason }]);
+            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason, appliesTo }]);
             return;
           }
         }
