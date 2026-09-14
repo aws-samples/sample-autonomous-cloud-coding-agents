@@ -82,36 +82,6 @@ describe('formatRepoConfigForDisplay', () => {
 });
 
 describe('buildRepoShowLines', () => {
-  test.each([undefined, '', '   '])('shows actual worker defaults for unset verification commands: %p', (command) => {
-    const display = formatRepoConfigForDisplay({
-      repo: 'acme/foo', status: 'active', build_command: command, lint_command: command,
-    }, PLATFORM);
-    const lines = buildRepoShowLines(display);
-    const postHooks = fs.readFileSync(
-      path.resolve(__dirname, '../../../agent/src/post_hooks.py'), 'utf8',
-    );
-    for (const kind of ['build', 'lint'] as const) {
-      const field = `${kind}_command` as const;
-      const match = postHooks.match(new RegExp(`DEFAULT_${kind.toUpperCase()}_COMMAND = "([^"]+)"`));
-      expect(match).not.toBeNull();
-      expect(display.effective[field]).toBe(match![1]);
-      expect(lines.find((line) => line.key === field)?.text).toBe(`(platform default) ${match![1]}`);
-    }
-  });
-
-  test('shows verification overrides in text and JSON', () => {
-    const commands = { build_command: 'npm ci && npm test', lint_command: 'npm run lint' };
-    const display = formatRepoConfigForDisplay({
-      repo: 'acme/foo', status: 'active', ...commands,
-    }, PLATFORM);
-    expect(display.blueprint_overrides).toMatchObject(commands);
-    expect(display.effective).toMatchObject(commands);
-    const lines = buildRepoShowLines(display);
-    for (const [key, value] of Object.entries(commands)) {
-      expect(lines.find((line) => line.key === key)?.text).toBe(`${value} (per-blueprint override)`);
-    }
-  });
-
   test('shows platform defaults instead of dash for unset blueprint fields', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },

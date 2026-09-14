@@ -41,8 +41,6 @@ export interface OnboardRepoOptions {
   readonly maxTurns?: number;
   readonly githubTokenSecretArn?: string;
   readonly pollIntervalMs?: number;
-  readonly buildCommand?: string;
-  readonly lintCommand?: string;
 }
 
 export interface OnboardRepoDependencies {
@@ -116,11 +114,6 @@ export async function onboardRepo(
     item.approval_gate_cap = existing.approval_gate_cap;
   }
   if (existing?.max_budget_usd !== undefined) item.max_budget_usd = existing.max_budget_usd;
-  // Retain verification recipes when the operator leaves their flags unset.
-  if (options.buildCommand !== undefined) item.build_command = options.buildCommand;
-  else if (existing?.build_command !== undefined) item.build_command = existing.build_command;
-  if (options.lintCommand !== undefined) item.lint_command = options.lintCommand;
-  else if (existing?.lint_command !== undefined) item.lint_command = existing.lint_command;
 
   await ddb.send(new PutCommand({
     TableName: tableName,

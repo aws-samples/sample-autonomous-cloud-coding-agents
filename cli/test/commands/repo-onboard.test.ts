@@ -178,37 +178,6 @@ describe('repo onboard/offboard', () => {
     expect(put.input.Item?.poll_interval_ms).toBe(12345);
   });
 
-  test.each(['active', 'removed'])(
-    'onboardRepo keeps Blueprint verification commands when status is %s',
-    async (status) => {
-      const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
-        loadRepoConfig: jest.Mock;
-      };
-      const commands = {
-        build_command: 'npm ci && npm test',
-        lint_command: 'npm run lint',
-      };
-      loadRepoConfig.mockResolvedValueOnce({
-        repo: 'acme/a',
-        status,
-        compute_type: 'agentcore',
-        ...commands,
-      });
-
-      const result = await onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
-        computeType: 'ecs',
-      });
-
-      const put = ddbSend.mock.calls[0][0] as PutCommand;
-      expect(put.input.Item).toMatchObject({
-        status: 'active',
-        compute_type: 'ecs',
-        ...commands,
-      });
-      expect(result).toMatchObject(commands);
-    },
-  );
-
   test('onboardRepo treats a missing row as a fresh onboard', async () => {
     const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
       loadRepoConfig: jest.Mock;
@@ -217,32 +186,6 @@ describe('repo onboard/offboard', () => {
 
     await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a')).resolves.toBeDefined();
     expect(ddbSend).toHaveBeenCalledTimes(1);
-    const put = ddbSend.mock.calls[0][0] as PutCommand;
-    expect(put.input.Item).not.toHaveProperty('build_command');
-    expect(put.input.Item).not.toHaveProperty('lint_command');
-  });
-
-  test.each([
-    { buildCommand: 'npm ci && npm test', lintCommand: 'npm run lint' },
-    { buildCommand: '', lintCommand: '' },
-  ])('onboardRepo replaces verification commands, including resetting to defaults: %p', async (options) => {
-    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as {
-      loadRepoConfig: jest.Mock;
-    };
-    loadRepoConfig.mockResolvedValueOnce({
-      repo: 'acme/a',
-      status: 'active',
-      build_command: 'old-build',
-      lint_command: 'old-lint',
-    });
-
-    await onboardRepo('us-east-1', 'RepoTable', 'acme/a', options);
-
-    const put = ddbSend.mock.calls[0][0] as PutCommand;
-    expect(put.input.Item).toMatchObject({
-      build_command: options.buildCommand,
-      lint_command: options.lintCommand,
-    });
   });
 
   test('onboardRepo re-throws non-not-found load errors instead of wiping overrides', async () => {

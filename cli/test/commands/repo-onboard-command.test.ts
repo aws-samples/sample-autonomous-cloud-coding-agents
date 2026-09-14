@@ -22,10 +22,7 @@ import { onboardRepo, offboardRepo } from '../../src/repo-onboard';
 import { getStackOutput } from '../../src/stack-outputs';
 
 jest.mock('../../src/repo-onboard');
-jest.mock('../../src/stack-outputs', () => ({
-  ...jest.requireActual('../../src/stack-outputs'),
-  getStackOutput: jest.fn(),
-}));
+jest.mock('../../src/stack-outputs');
 
 describe('repo onboard/offboard commands', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -129,21 +126,5 @@ describe('repo onboard/offboard commands', () => {
 
     expect(offboardRepo).toHaveBeenCalled();
     expect(consoleSpy.mock.calls[0][0]).toContain('offboarded');
-  });
-
-  test.each([
-    ['npm ci && npm test', 'npm run lint'],
-    ['', ''],
-  ])('repo onboard forwards build/lint commands without interpreting their contents', async (build, lint) => {
-    const cmd = makeRepoCommand();
-    await cmd.parseAsync([
-      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
-      '--build-command', build, '--lint-command', lint,
-    ]);
-
-    expect(onboardRepo).toHaveBeenLastCalledWith(
-      'us-east-1', 'RepoTable', 'acme/a',
-      expect.objectContaining({ buildCommand: build, lintCommand: lint }),
-    );
   });
 });
