@@ -53,6 +53,7 @@ import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/micr
 // keep passing after someone lowered the real budget.
 
 const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
+const ARTIFACT_SHA256 = 'a'.repeat(64);
 const GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 /**
@@ -67,6 +68,7 @@ interface BuildOptions {
   readonly region?: string;
   readonly context?: Record<string, unknown>;
   readonly withImage?: boolean;
+  readonly artifactSha256?: string | null;
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
   readonly withSessionRole?: boolean;
@@ -140,6 +142,7 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     ...(options.withImage && {
       baseImageArn: BASE_IMAGE_ARN,
       baseImageVersion: '1',
+      artifactSha256: options.artifactSha256 === null ? undefined : options.artifactSha256 ?? ARTIFACT_SHA256,
     }),
     externalImageIdentifier: options.externalImageIdentifier,
     externalImageVersion: options.externalImageVersion,
@@ -174,12 +177,32 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
           'Fn::Join': ['', [
             's3://',
             { Ref: Match.stringLikeRegexp('LambdaMicrovmComputeArtifactBucket') },
-            `/${MICROVM_ARTIFACT_OBJECT_KEY}`,
+            `/microvm-images/agent-artifact-${ARTIFACT_SHA256}.zip`,
           ]],
         },
       },
     });
   });
+
+  test('a changed artifact updates the URI without replacing the image identity', () => {
+    const next = build({ withImage: true, artifactSha256: 'b'.repeat(64) });
+    const firstImages = template.findResources('AWS::Lambda::MicrovmImage');
+    const nextImages = next.template.findResources('AWS::Lambda::MicrovmImage');
+    expect(Object.keys(nextImages)).toEqual(Object.keys(firstImages));
+    const first = Object.values(firstImages)[0]!.Properties;
+    const second = Object.values(nextImages)[0]!.Properties;
+    expect(second.Name).toEqual(first.Name);
+    expect(second.CodeArtifact.Uri).not.toEqual(first.CodeArtifact.Uri);
+    expect(JSON.stringify(second.CodeArtifact.Uri)).toContain(`agent-artifact-${'b'.repeat(64)}.zip`);
+  });
+
+  test.each([null, '', 'not-a-sha256', 'A'.repeat(64), 'a'.repeat(63)])(
+    'rejects managed builds without an exact artifact digest: %p',
+    artifactSha256 => {
+      expect(() => instantiate({ withImage: true, artifactSha256 }))
+        .toThrow(/microvm_artifact_sha256/);
+    },
+  );
 
   test('builds an ARM64 image at the largest ACCEPTED BASELINE (8 GiB)', () => {
     // 32768 was rejected live: "The requested memory size of 32768 MiB is not
@@ -662,7 +685,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
   });
 
-  test('build role reads exactly the one artifact object and writes MicroVM logs', () => {
+  test('build role reads exactly the selected and manual artifacts and writes MicroVM logs', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole'));
     expect(policies).toHaveLength(1);
@@ -678,6 +701,12 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // Object-scoped, not bucket-scoped.
     const s3Statement = statements.find((s: { Action: string }) => s.Action === 's3:GetObject');
     expect(JSON.stringify(s3Statement.Resource)).toContain(MICROVM_ARTIFACT_OBJECT_KEY);
+    expect(s3Statement.Resource).toEqual([
+      built.stack.resolve(built.construct.artifactBucket.arnForObjects(
+        `microvm-images/agent-artifact-${ARTIFACT_SHA256}.zip`,
+      )),
+      built.stack.resolve(built.construct.artifactBucket.arnForObjects(MICROVM_ARTIFACT_OBJECT_KEY)),
+    ]);
   });
 
   test('execution role gets only bootstrap reads, explicit payload/list denies and no writes', () => {
@@ -949,11 +978,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(template.toJSON())).not.toContain('CreateMicrovmAuthToken');
   });
 
-  test('warns that a configured image has no smoke-parity guarantee (hook phasing)', () => {
-    // ADR-021 sub-decision 3, as corrected by the live P1 run and completed in P2:
-    // all four served hooks are declared, so the image is creatable, launchable and
-    // payload-deliverable — which makes it look even MORE like a working backend,
-    // while nothing has exercised clone → change → PR on it.
+  test('distinguishes clean P2 smoke evidence from remaining acceptance and P3 hooks', () => {
+    // Coding, iteration and cancellation have live evidence. The warning must
+    // identify the remaining matrix and retain the served/undeclared hook list.
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
@@ -961,7 +988,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // The superseded id must be gone, not merely reworded — operators grep for it.
     expect(JSON.stringify(built.construct.node.metadata))
       .not.toContain('abca:microvm-image-p1-not-runnable');
-    expect(message).toContain('smoke');
+    expect(message).toContain('Clean P2 deployment');
+    expect(message).toContain('2026-09-14 without manual IAM changes');
+    expect(message).toContain('failure/recovery, effective IAM and networking matrix');
     expect(message).toContain('P2');
     // It must state what IS true now, or it reads as the old (wrong) claim — and
     // the hook list here is what an operator compares against a failed build or a

@@ -34,6 +34,7 @@ describe.each([false, true])('managed MicroVM image security checks (extra wildc
           compute_type: 'lambda-microvm',
           microvm_base_image_arn: 'arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1',
           microvm_base_image_version: '1',
+          microvm_artifact_sha256: 'a'.repeat(64),
           [AGENTCORE_AZS_CONTEXT_KEY]: ['us-west-2a', 'us-west-2b'],
         },
       },

@@ -75,10 +75,9 @@ export const MICROVM_BACKEND_TAG_VALUE = 'lambda-microvm';
 export const MICROVM_LOG_GROUP_PREFIX = '/aws/lambda-microvms';
 
 /**
- * Default S3 key the packaging helper (`cdk/scripts/package-microvm-artifact.sh`)
- * uploads the zip + Dockerfile artifact to, inside the artifact bucket this
- * construct creates. Kept in one place so the script, the `CfnMicrovmImage`
- * `codeArtifact.uri`, and the build role's `s3:GetObject` scope cannot drift.
+ * Base S3 key for image artifacts. Managed builds insert the ZIP's SHA-256
+ * before `.zip`, so changing code changes CodeArtifact.Uri. The unsuffixed key
+ * remains available to the explicit out-of-band image builder.
  */
 export const MICROVM_ARTIFACT_OBJECT_KEY = 'microvm-images/agent-artifact.zip';
 
@@ -442,7 +441,7 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
 }
 
 /**
- * The four operator-supplied image inputs, read from CDK context by the stack.
+ * Operator-supplied image inputs, read from CDK context by the stack.
  *
  * Extracted into a type so the stack can resolve them ONCE, before `TaskApi` is
  * constructed, and hand the same object to this construct — see
@@ -451,6 +450,7 @@ export function assertLambdaMicrovmRegionSupported(scope: Construct): void {
 export interface LambdaMicrovmImageInputs {
   readonly baseImageArn?: string;
   readonly baseImageVersion?: string;
+  readonly artifactSha256?: string;
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
 }
@@ -575,6 +575,12 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   readonly baseImageVersion?: string;
 
   /**
+   * SHA-256 of the uploaded ZIP, printed by package-microvm-artifact.sh.
+   * Required for managed images: a mutable fixed key does not trigger updates.
+   */
+  readonly artifactSha256?: string;
+
+  /**
    * Identifier (name or ARN) of a MicroVM image built **out of band** — i.e. by
    * running `cdk/scripts/package-microvm-artifact.sh` and then
    * `aws lambda-microvms create-microvm-image` by hand.
@@ -601,7 +607,8 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   readonly imageName?: string;
 
   /**
-   * S3 key of the zip + Dockerfile artifact inside the artifact bucket.
+   * Base S3 key of the zip + Dockerfile artifact. Managed builds append the
+   * artifact digest before `.zip`; the manual builder uses this base key.
    * @default MICROVM_ARTIFACT_OBJECT_KEY
    */
   readonly artifactObjectKey?: string;
@@ -679,7 +686,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  *
  * | Props supplied | What happens | When to use it |
  * |---|---|---|
- * | `baseImageArn` + `baseImageVersion` | `AWS::Lambda::MicrovmImage` L1 is synthesized from `s3://<artifactBucket>/<artifactObjectKey>`; {@link imageIdentifier} is its ARN | steady state |
+ * | `baseImageArn` + `baseImageVersion` + `artifactSha256` | `AWS::Lambda::MicrovmImage` L1 uses the immutable hash-suffixed artifact key; {@link imageIdentifier} is its ARN | steady state |
  * | `externalImageIdentifier` | no image resource; the supplied identifier is resolved to its exact ARN and handed to the orchestrator | iterating on the snapshot out of band |
  * | neither | roles + buckets + connectors only; a synth-time **warning**, no image, and no `MICROVM_IMAGE_IDENTIFIER` for the orchestrator | first deploy — you cannot upload the artifact before the bucket that holds it exists |
  *
@@ -687,12 +694,13 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * stack, so the very first `--context compute_type=lambda-microvm` deploy has
  * nowhere to have put the zip yet. It is a **warning rather than a throw**
  * precisely so the bootstrap sequence (deploy → run the packaging script
- * against the now-existing bucket → redeploy with `microvm_base_image_arn`) is
+ * against the now-existing bucket → redeploy with the base image and printed
+ * `microvm_artifact_sha256`) is
  * possible at all. A `lambda-microvm` task submitted in that interim window
  * fails fast with the strategy's own "stack deployed without the MicroVM
  * substrate" error, which names the remedy.
  *
- * ## ⚠️ P2 smoke succeeded with an IAM workaround; clean verification is pending
+ * ## P2 clean smoke passed; broader acceptance remains open
  *
  * Reaching state 1 or 2 provisions a complete substrate, a buildable image, and
  * a payload-deliverable `/run` path: P1 declares AND the agent serves `/ready`
@@ -713,13 +721,14 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * what it can assert) and `/terminate` (in-guest teardown breadcrumb —
  * {@link TERMINATE_HOOK_TIMEOUT_SECONDS}).
  *
- * The 2026-08-07 smoke completed clone → change → PR with live progress and
- * heartbeats, but required a manual IAM workaround. The permanent PassRole
- * fixes still need a clean rerun after re-bootstrap to policy bundle >=1.6.0,
- * including runtime log verification. The stable
- * `abca:microvm-image-p1-smoke-unverified` warning below records that remaining
- * work, as does `cdk/scripts/package-microvm-artifact.sh`. Only `/suspend` and `/resume`
- * remain undeclared, until P3 implements them: a hook the service calls but
+ * The 2026-09-14 clean deployment with bootstrap bundle 1.7.0 and subsequent
+ * coding, iteration and cancellation runs passed without manual IAM changes,
+ * including heartbeat, runtime logs, Memory writes and cleanup. The full
+ * failure/recovery, effective IAM and network matrix remains open; see
+ * docs/verification/645-p3-implementation-plan.md. The stable
+ * `abca:microvm-image-p1-smoke-unverified` warning below records that scope.
+ * Only `/suspend` and `/resume` remain undeclared, until P3 implements compatible
+ * agent hooks: a hook the service calls but
  * nothing answers fails the corresponding lifecycle transition.
  *
  * ## Deliberately NOT here
@@ -740,6 +749,8 @@ export class LambdaMicrovmCompute extends Construct {
 
   /** Key of the artifact object inside {@link artifactBucket}. */
   public readonly artifactObjectKey: string;
+  /** Unsuffixed key used by the manual builder and packaging helper. */
+  public readonly artifactBaseObjectKey: string;
 
   /** S3 bucket holding bootstrap manifests, task payloads and private launch references. */
   public readonly payloadBucket: s3.Bucket;
@@ -833,7 +844,18 @@ export class LambdaMicrovmCompute extends Construct {
     assertLambdaMicrovmRegionSupported(this);
 
     const stack = Stack.of(this);
-    this.artifactObjectKey = props.artifactObjectKey ?? MICROVM_ARTIFACT_OBJECT_KEY;
+    const managedImage = Boolean(props.baseImageArn && props.baseImageVersion);
+    if ((managedImage || props.artifactSha256 !== undefined)
+      && !/^[a-f0-9]{64}$/.test(props.artifactSha256 ?? '')) {
+      throw new Error(
+        'Managed MicroVM images require microvm_artifact_sha256 (64 lowercase hex characters). '
+        + 'Run cdk/scripts/package-microvm-artifact.sh and deploy with its printed artifact digest.',
+      );
+    }
+    this.artifactBaseObjectKey = props.artifactObjectKey ?? MICROVM_ARTIFACT_OBJECT_KEY;
+    this.artifactObjectKey = props.artifactSha256
+      ? `${this.artifactBaseObjectKey.replace(/\.zip$/, '')}-${props.artifactSha256}.zip`
+      : this.artifactBaseObjectKey;
     this.imageName = props.imageName ?? sanitizeImageName(`${stack.stackName}-abca-agent`);
 
     // Fail at SYNTH on an unsupported memory size. The service enumerates the
@@ -1036,8 +1058,8 @@ export class LambdaMicrovmCompute extends Construct {
         {
           id: 'microvm-artifact-mpu-abort',
           enabled: true,
-          // The artifact is tens/hundreds of MB, so uploads are multipart; a
-          // failed `aws s3 cp` otherwise leaves billable parts forever.
+          // Abort abandoned multipart uploads from alternative publishers.
+          // The packaging helper currently uses a single PutObject.
           abortIncompleteMultipartUploadAfter: Duration.days(1),
         },
       ],
@@ -1084,12 +1106,12 @@ export class LambdaMicrovmCompute extends Construct {
     });
     grantTagSession(this.buildRole, microvmAssumedBy);
 
-    // s3:GetObject only, scoped to the single artifact key — not the bucket.
-    // The build role runs the `/ready` and `/validate` build hooks, i.e. code
-    // from the repo under build, so it gets the narrowest possible read.
+    // Exact selected artifact plus the legacy manual-build key, never the
+    // bucket or every hash. The managed image only reads its immutable key.
     this.buildRole.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject'],
-      resources: [this.artifactBucket.arnForObjects(this.artifactObjectKey)],
+      resources: [...new Set([this.artifactObjectKey, this.artifactBaseObjectKey])]
+        .map(key => this.artifactBucket.arnForObjects(key)),
     }));
     // Build role: keeps `logs:CreateLogGroup` — see `grantMicrovmLogWrites`.
     this.grantMicrovmLogWrites(this.buildRole, { allowCreateLogGroup: true });
@@ -1291,8 +1313,8 @@ export class LambdaMicrovmCompute extends Construct {
             // so each is enabled only once it is served.
             //
             // `/suspend` and `/resume` stay OMITTED (not `DISABLED`) until P3,
-            // where the suspend/resume interface widening lands across all three
-            // strategies. Note that termination does NOT depend on this hook:
+            // where compatible agent hooks and durability barriers are integrated.
+            // Note that termination does NOT depend on this hook:
             // `TerminateMicrovm` removes the VM with or without in-guest
             // cooperation, which is what makes a best-effort `/terminate` safe to
             // declare.
@@ -1366,47 +1388,40 @@ export class LambdaMicrovmCompute extends Construct {
         + 'deploy (the artifact bucket must exist before the artifact can be uploaded). Next: run '
         + 'cdk/scripts/package-microvm-artifact.sh to upload the zip+Dockerfile, then redeploy with '
         + '--context microvm_base_image_arn=<arn> --context microvm_base_image_version=<version> '
+        + '--context microvm_artifact_sha256=<digest printed by the script> '
         + '(or point at an image you built by hand with --context microvm_image_identifier=<name|arn>).',
       );
     }
 
     if (this.imageIdentifier) {
       // Emitted on EVERY deploy that configures an image, in both image states.
-      // A successful deploy does not establish a clean end-to-end run. The
-      // successful smoke used a manual IAM workaround; the warning identifies
-      // the source fixes and re-bootstrap/live verification still outstanding.
+      // Clean coding runs exist; they do not cover the broader failure/security
+      // matrix. Keep the warning scoped to those remaining acceptance gates.
       //
       // The id is deliberately UNCHANGED across P1→P2 (operators grep for it, and a
       // rename would read as "the old warning is gone, so it must be fine").
       Annotations.of(this).addWarningV2(
         'abca:microvm-image-p1-smoke-unverified',
-        'A MicroVM image is configured. A P2 smoke run HAS now completed clone -> change -> PR on '
-        + 'this substrate (2026-08-07: two tasks COMPLETED with pull requests, progress streaming to '
-        + 'bgagent watch, and the 45s agent heartbeat observed live), the agent serves the /ready, '
-        + '/validate, /run and /terminate hooks, and the execution role holds its full runtime '
-        + 'permission set. What is still MISSING is a run with no manual intervention: that smoke '
-        + 'needed a live IAM workaround, and the two defects behind it (ADR-021 P2r2-F9 / P2r2-F10 — '
-        + 'the iam:PassedToService condition on both PassRole paths) are fixed in source but NOT yet '
-        + 're-exercised live. ALSO REQUIRED: re-bootstrap to policy bundle 1.6.0 or the CDK-managed '
-        + 'image path fails with iam:PassRole AccessDenied on the build role. So the backend still '
-        + 'carries no smoke-parity guarantee for an unattended deployment - keep production repos on '
-        + 'compute_type=agentcore or ecs until a clean run is on record. Only the /suspend and '
-        + '/resume runtime hooks remain undeclared, until P3 implements them: a hook the service '
-        + 'calls but nothing answers fails the corresponding lifecycle transition. '
-        + "(This warning's id still reads p1- by design: it is frozen across phases so operator "
-        + 'greps and suppression lists keep matching — read the text, not the id, for the phase.)',
+        'A MicroVM image is configured. Clean P2 deployment with bootstrap bundle 1.7.0 and '
+        + 'coding, iteration and cancellation runs passed on 2026-09-14 without manual IAM changes. '
+        + 'The agent serves the declared /ready, /validate, /run and /terminate hooks. '
+        + 'Heartbeat, logs, Memory writes and cleanup have live evidence. Full P2 acceptance '
+        + 'still needs the failure/recovery, effective IAM and networking matrix in '
+        + 'docs/verification/645-p3-implementation-plan.md. The /suspend and /resume hooks remain '
+        + 'undeclared until compatible P3 agent hooks are integrated. The warning ID is retained '
+        + 'across phases for existing operator filters.',
       );
     }
 
     NagSuppressions.addResourceSuppressions([this.artifactBucket, this.payloadBucket], [
       {
         id: 'AwsSolutions-S1',
-        reason: 'Artifact bucket holds a single build input (the agent zip+Dockerfile) read only by '
+        reason: 'Artifact bucket holds versioned agent zip+Dockerfile build inputs read only by '
           + 'the Lambda MicroVMs build role; the payload bucket holds ephemeral per-task /run payloads '
           + `with a ${MICROVM_PAYLOAD_TTL_DAYS}-day TTL, written only by the orchestrator and `
           + 'read through single-object signed URLs; the worker reads only bootstrap manifests. Object-level access '
-          + 'logging (a second log bucket + CloudTrail data events) is not justified for a single '
-          + 'build input or for transient boot payloads.',
+          + 'logging (a second log bucket + CloudTrail data events) is not justified for these '
+          + 'build inputs or for transient boot payloads.',
       },
     ], true);
 

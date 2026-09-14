@@ -400,6 +400,7 @@ export class AgentStack extends Stack {
     const microvmImageInputs: LambdaMicrovmImageInputs = {
       baseImageArn: this.node.tryGetContext('microvm_base_image_arn'),
       baseImageVersion: this.node.tryGetContext('microvm_base_image_version'),
+      artifactSha256: this.node.tryGetContext('microvm_artifact_sha256'),
       externalImageIdentifier: this.node.tryGetContext('microvm_image_identifier'),
       externalImageVersion: this.node.tryGetContext('microvm_image_version'),
     };
@@ -1154,6 +1155,10 @@ export class AgentStack extends Stack {
       new CfnOutput(this, 'MicrovmArtifactObjectKey', {
         value: lambdaMicrovm.artifactObjectKey,
         description: 'S3 key the Lambda MicroVMs artifact must be uploaded to (matches the build role\'s s3:GetObject scope)',
+      });
+      new CfnOutput(this, 'MicrovmArtifactBaseObjectKey', {
+        value: lambdaMicrovm.artifactBaseObjectKey,
+        description: 'Base artifact key; managed packaging adds the ZIP SHA-256, manual builds use this key',
       });
       new CfnOutput(this, 'MicrovmBuildRoleArn', {
         value: lambdaMicrovm.buildRole.roleArn,

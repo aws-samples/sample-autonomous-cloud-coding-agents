@@ -44,8 +44,10 @@ is superseded by these records.
 - [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [x] Verify normal coding, PR iteration, Memory writes, live logging and successful/canceled-task cleanup in AWS; observe cancellation preserve another task's capacity.
 - [x] Verify automatic pre/post npm checks under temporary overrides and worker-reported failure cleanup in AWS.
+- [x] Give managed image builds immutable, checksum-verified artifacts and require their digest in deployment context; packaging, construct, stack and CDK-nag regressions pass locally.
+- [ ] Verify a normal CloudFormation update builds a new managed image version from the changed artifact URI, then verify repeating the same digest makes no image change.
 - [ ] Make repository mise tasks available and verify the restored default commands; the CLI addition and temporary overrides were withdrawn at user request.
-- Optional: production nesting remains unimplemented; the clean deployment uses the existing root layout. Validate the split and migration if adopted.
+- Optional: production nesting remains unimplemented; the clean deployment uses 474 of the root stack's 500 resource slots. P3 does not inherently require nesting. Recheck the count for supported feature combinations and validate the split/migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
 - [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.

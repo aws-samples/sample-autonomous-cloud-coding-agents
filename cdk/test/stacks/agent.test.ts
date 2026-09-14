@@ -1086,6 +1086,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         compute_type: 'lambda-microvm',
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
       },
     });
     const stack = new AgentStack(app, 'TestAgentStackMicrovm', {
@@ -1114,6 +1115,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     for (const output of [
       'MicrovmArtifactBucketName',
       'MicrovmArtifactObjectKey',
+      'MicrovmArtifactBaseObjectKey',
       'MicrovmBuildRoleArn',
       'MicrovmExecutionRoleArn',
       'MicrovmEgressConnectorArns',
@@ -1124,6 +1126,14 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     ]) {
       template.hasOutput(output, {});
     }
+  });
+
+  test('forwards the uploaded artifact digest into the image URI and outputs', () => {
+    const key = `microvm-images/agent-artifact-${'a'.repeat(64)}.zip`;
+    template.hasOutput('MicrovmArtifactObjectKey', { Value: key });
+    template.hasOutput('MicrovmArtifactBaseObjectKey', { Value: 'microvm-images/agent-artifact.zip' });
+    const image = Object.values(template.findResources('AWS::Lambda::MicrovmImage'))[0]!;
+    expect(JSON.stringify(image.Properties.CodeArtifact.Uri)).toContain(key);
   });
 
   test('the build and runtime egress connector outputs are DIFFERENT connectors', () => {
@@ -1319,6 +1329,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
           microvm_region_override: true,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
+          microvm_artifact_sha256: 'a'.repeat(64),
         },
       });
       overriddenTemplate = Template.fromStack(new AgentStack(app, 'TestAgentStackMicrovmOverride', {
