@@ -124,10 +124,98 @@ export async function runPlatformDoctor(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
     linearVaultWorkloadName,
   ));
+  checks.push(await checkLinearSecretProvenance(region, linearRegistryTableName));
   checks.push(await checkLinearProjectWorkspaces(region, linearProjectMappingTableName));
   checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
+}
+
+/**
+ * Report workspaces whose signing secret is not recorded as provably their own.
+ *
+ * These are the workspaces whose deliveries get rejected once a stack has two or more
+ * active workspaces, because a secret shared between tenants attests only that the sender
+ * knows *some* tenant's secret. Reported before that bites rather than after: the failure
+ * mode otherwise is every webhook 401ing at once with the cause two layers down.
+ *
+ * Severity follows the workspace count, matching the enforcement path exactly. With one
+ * active workspace a shared secret cannot cross a boundary, so an unrecorded provenance
+ * is the normal, harmless state for every row written before that field existed.
+ */
+export async function checkLinearSecretProvenance(
+  region: string,
+  registryTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_secret_provenance';
+  const label = 'Linear per-workspace signing secrets';
+  if (!registryTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Linear workspace registry on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: Array<{ workspace_slug?: string; status?: string; webhook_secret_owned?: boolean }> = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: ['workspace_slug', '#status', 'webhook_secret_owned'].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as typeof rows);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Linear workspaces onboarded yet.' };
+    }
+
+    const unproven = active.filter((row) => row.webhook_secret_owned !== true);
+    if (unproven.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `All ${active.length} active Linear workspace(s) own their signing secret.`,
+      };
+    }
+
+    const slugs = unproven.map((row) => row.workspace_slug ?? '<unknown-slug>').join(', ');
+    if (active.length === 1) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: 'Single active Linear workspace, so a shared signing secret cannot reach another '
+          + 'tenant and provenance is not enforced. Onboarding a second workspace makes it matter — '
+          + 'run `bgagent linear backfill-secret-provenance` then.',
+      };
+    }
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unproven.length} of ${active.length} active Linear workspace(s) are not recorded as `
+        + `owning their signing secret, so their webhook deliveries are rejected: ${slugs}. Run `
+        + '`bgagent linear backfill-secret-provenance --dry-run` to see which can be recorded '
+        + 'automatically, then `bgagent linear update-webhook-secret <slug>` for the rest.',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear workspace registry: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /**

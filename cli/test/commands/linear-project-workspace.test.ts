@@ -24,6 +24,7 @@ import { GetSecretValueCommand, ListSecretsCommand, SecretsManagerClient } from 
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   assertMirrorIsSafe,
+  classifyWebhookSecretProvenance,
   findProjectOwnerWorkspace,
   listActiveWorkspaceRows,
   listOnboardedWorkspaceSlugs,
@@ -326,5 +327,40 @@ describe('assertMirrorIsSafe', () => {
     // A half-written registry row is not another tenant, and treating it as one would
     // block a legitimate first-workspace mirror.
     expect(() => assertMirrorIsSafe([{ workspace_slug: 'half' }], SELF, 'acme')).not.toThrow();
+  });
+});
+
+// The asymmetry is the point: "differs from stack-wide" proves ownership because
+// mirroring can copy nothing else, while "equals stack-wide" proves nothing because a
+// healthy first install stamps the same real secret into both slots.
+describe('classifyWebhookSecretProvenance', () => {
+  const STACK_WIDE = 'lin_wh_firstWorkspaceSecret';
+
+  test('a secret that differs from the stack-wide one is provably own', () => {
+    expect(classifyWebhookSecretProvenance('lin_wh_mine', STACK_WIDE)).toBe('own');
+  });
+
+  test('a secret equal to the stack-wide one withholds a verdict', () => {
+    // NOT 'own' — it may be a mirror. Also NOT asserted as un-owned, because a
+    // single-workspace install legitimately looks exactly like this.
+    expect(classifyWebhookSecretProvenance(STACK_WIDE, STACK_WIDE)).toBe('inherited');
+  });
+
+  test('no per-workspace secret at all is its own category', () => {
+    expect(classifyWebhookSecretProvenance(undefined, STACK_WIDE)).toBe('absent');
+  });
+
+  test('owns it when no stack-wide secret exists, since nothing could have been mirrored', () => {
+    expect(classifyWebhookSecretProvenance('lin_wh_mine', undefined)).toBe('own');
+  });
+
+  test('absent beats a missing stack-wide secret — nothing to own', () => {
+    expect(classifyWebhookSecretProvenance(undefined, undefined)).toBe('absent');
+  });
+
+  test('an empty stored secret is absent, not an own secret equal to nothing', () => {
+    // Guards the falsy-vs-undefined edge: '' must not fall through to the comparison and
+    // read as 'own' just because it differs from the stack-wide value.
+    expect(classifyWebhookSecretProvenance('', STACK_WIDE)).toBe('absent');
   });
 });

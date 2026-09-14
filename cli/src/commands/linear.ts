@@ -681,6 +681,41 @@ export function assertMirrorIsSafe(
   );
 }
 
+/**
+ * What can be established about where a workspace's signing secret came from.
+ *
+ * - `own` — the secret is provably NOT a copy of another workspace's.
+ * - `inherited` — it equals the stack-wide value, so ownership cannot be established.
+ * - `absent` — the workspace has no per-workspace secret at all.
+ */
+export type SecretProvenance = 'own' | 'inherited' | 'absent';
+
+/**
+ * Decide whether a workspace's signing secret is provably its own.
+ *
+ * Sound in ONE direction only, and the asymmetry is the whole point. `mirror-stackwide`
+ * can copy nothing except the stack-wide value, so a secret that DIFFERS from it was
+ * never mirrored and is therefore owned — a conclusion that cannot be wrong. The
+ * converse is not available: a secret that EQUALS the stack-wide value is equally
+ * consistent with a healthy single-workspace install, whose first `setup` stamps the
+ * same real secret into both slots. That is why `inherited` withholds a verdict rather
+ * than asserting "not owned", and why only the `own` case is written to the registry.
+ *
+ * A stack with no stack-wide secret at all cannot have mirrored anything, so any stored
+ * per-workspace secret there is owned by the same argument.
+ *
+ * @param workspaceSecret - the workspace's stored `webhook_signing_secret`.
+ * @param stackWideSecret - the stack-wide back-compat secret, if it is set.
+ */
+export function classifyWebhookSecretProvenance(
+  workspaceSecret: string | undefined,
+  stackWideSecret: string | undefined,
+): SecretProvenance {
+  if (!workspaceSecret) return 'absent';
+  if (!stackWideSecret) return 'own';
+  return workspaceSecret === stackWideSecret ? 'inherited' : 'own';
+}
+
 /** Outcome of resolving a usable Linear access token for one workspace. */
 export type WorkspaceTokenResult =
   | { readonly kind: 'token'; readonly accessToken: string }
@@ -2699,6 +2734,144 @@ export function makeLinearCommand(): Command {
           console.log('These name projects no onboarded workspace can see — a deleted project, or a');
           console.log('workspace that is no longer installed. Re-run `bgagent linear onboard-project`');
           console.log('for the ones still in use and remove the rest before enforcement is enabled.');
+        }
+      }),
+  );
+
+  linear.addCommand(
+    new Command('backfill-secret-provenance')
+      .description('Record which workspaces provably own their webhook signing secret')
+      .option('--region <region>', 'AWS region (defaults to configured region)')
+      .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
+      .option('--dry-run', 'Report what would change without writing')
+      .action(async (opts) => {
+        const config = loadConfig();
+        const region = opts.region || config.region;
+
+        const [registryTableName, webhookSecretArn] = await Promise.all([
+          getStackOutput(region, opts.stackName, 'LinearWorkspaceRegistryTableName'),
+          getStackOutput(region, opts.stackName, 'LinearWebhookSecretArn'),
+        ]);
+        if (!registryTableName) {
+          console.error('Could not find LinearWorkspaceRegistryTableName in stack outputs. Deploy the stack first.');
+          process.exit(1);
+        }
+
+        const ddb = makeDocClient({ region });
+        const sm = makeClient(SecretsManagerClient, { region });
+
+        // The comparison value. Absent is meaningful rather than an error: a stack with
+        // no stack-wide secret cannot have mirrored one, so every stored secret is owned.
+        // Read as a BARE string, not through `readExistingWebhookSecret` — that reader
+        // parses an OAuth bundle and pulls `webhook_signing_secret` out of it, whereas
+        // this secret holds the `lin_wh_…` value directly.
+        //
+        // A read failure here is fatal rather than treated as "not set". Silently
+        // continuing with `undefined` would classify every workspace as `own`, since
+        // nothing can equal a value we failed to fetch — recording exactly the shared
+        // secrets this command exists to withhold.
+        let stackWideSecret: string | undefined;
+        if (webhookSecretArn) {
+          try {
+            const v = await sm.send(new GetSecretValueCommand({ SecretId: webhookSecretArn }));
+            stackWideSecret = v.SecretString?.trim() || undefined;
+          } catch (err) {
+            if ((err as { name?: string })?.name !== 'ResourceNotFoundException') {
+              throw new CliError(
+                `Could not read the stack-wide webhook secret: ${err instanceof Error ? err.message : String(err)}\n`
+                + '  Without it, ownership cannot be established for any workspace — refusing to\n'
+                + '  guess. Re-run once the secret is readable (check IAM and KMS permissions).',
+              );
+            }
+            // Genuinely absent: nothing was ever mirrored, so every stored secret is owned.
+          }
+        }
+
+        const rows = await listActiveWorkspaceRows(ddb, registryTableName);
+        if (rows.length === 0) {
+          console.log('No active Linear workspaces in the registry.');
+          return;
+        }
+        console.log(`${rows.length} active workspace(s). Stack-wide secret: ${stackWideSecret ? 'set' : 'not set'}`);
+        console.log();
+
+        let recorded = 0;
+        const needsOperator: Array<{ slug: string; why: SecretProvenance }> = [];
+
+        for (const row of rows) {
+          const slug = (row.workspace_slug as string | undefined) ?? '<unknown-slug>';
+          const workspaceId = row.linear_workspace_id as string | undefined;
+          const secretArn = row.oauth_secret_arn as string | undefined;
+          if (!workspaceId || !secretArn) {
+            console.log(`  ⚠ ${slug}: registry row is incomplete — skipping`);
+            continue;
+          }
+          if (row.webhook_secret_owned === true) {
+            console.log(`  · ${slug}: already recorded as owning its secret`);
+            continue;
+          }
+
+          let workspaceSecret: string | undefined;
+          try {
+            workspaceSecret = await readExistingWebhookSecret(
+              async () => {
+                const v = await sm.send(new GetSecretValueCommand({ SecretId: secretArn }));
+                return v.SecretString ?? undefined;
+              },
+              (err) => (err as { name?: string })?.name === 'ResourceNotFoundException',
+            );
+          } catch (err) {
+            // Fail closed per workspace: an unreadable bundle must not be recorded as
+            // owned just because the read failed.
+            console.log(`  ⚠ ${slug}: could not read its OAuth bundle — ${err instanceof Error ? err.message : String(err)}`);
+            continue;
+          }
+
+          const provenance = classifyWebhookSecretProvenance(workspaceSecret, stackWideSecret);
+          if (provenance !== 'own') {
+            needsOperator.push({ slug, why: provenance });
+            console.log(`  ⚠ ${slug}: ${provenance === 'absent'
+              ? 'has no signing secret of its own'
+              : 'holds the stack-wide secret, so ownership cannot be established'}`);
+            continue;
+          }
+
+          if (opts.dryRun) {
+            console.log(`  would record ${slug} as owning its secret`);
+          } else {
+            await ddb.send(new UpdateCommand({
+              TableName: registryTableName,
+              Key: { linear_workspace_id: workspaceId },
+              UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+              // Do not resurrect a row deleted mid-run.
+              ConditionExpression: 'attribute_exists(linear_workspace_id)',
+              ExpressionAttributeValues: { ':t': true, ':u': new Date().toISOString() },
+            })).catch((err: unknown) => {
+              if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
+                console.log(`  · ${slug}: row changed underneath the backfill — skipped`);
+                return;
+              }
+              throw err;
+            });
+            console.log(`  ✓ ${slug}: recorded as owning its secret`);
+          }
+          recorded += 1;
+        }
+
+        console.log();
+        console.log(opts.dryRun
+          ? `Dry run: ${recorded} workspace(s) would be recorded.`
+          : `✓ Recorded ${recorded} workspace(s).`);
+
+        if (needsOperator.length > 0) {
+          console.log();
+          console.log(`⚠ ${needsOperator.length} workspace(s) need a signing secret of their own.`);
+          console.log('  Until then, on a stack with two or more active workspaces their webhook');
+          console.log('  deliveries are rejected, because a shared secret cannot attest which');
+          console.log('  workspace sent them. Fix each one with its own secret from Linear:');
+          for (const w of needsOperator) {
+            console.log(`    bgagent linear update-webhook-secret ${w.slug}`);
+          }
         }
       }),
   );

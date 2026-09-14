@@ -48,6 +48,7 @@ jest.mock('@aws-sdk/client-bedrock', () => ({
 import {
   checkJiraAppIdentity,
   checkLinearProjectWorkspaces,
+  checkLinearSecretProvenance,
   runPlatformDoctor,
   type DoctorCheckResult,
 } from '../src/platform-doctor';
@@ -71,6 +72,78 @@ beforeEach(() => {
   ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor verdict for Linear signing-secret provenance', () => {
+  const REG = 'LinearWorkspaceRegistry';
+
+  test('warns and names the workspaces whose deliveries are now rejected', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'acme', status: 'active', webhook_secret_owned: true },
+        { workspace_slug: 'shared-one', status: 'active' },
+        { workspace_slug: 'shared-two', status: 'active' },
+      ],
+    });
+
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('shared-one');
+    expect(check.detail).toContain('shared-two');
+    expect(check.detail).not.toContain('acme');
+    expect(check.detail).toContain('backfill-secret-provenance');
+  });
+
+  test('passes on a single-workspace stack even with no provenance recorded', async () => {
+    // The enforcement path is gated on the same count, so warning here would flag every
+    // pre-existing single-workspace install for a risk it does not carry.
+    ddbSendMock.mockResolvedValue({ Items: [{ workspace_slug: 'solo', status: 'active' }] });
+
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('cannot reach another tenant');
+  });
+
+  test('passes when every active workspace owns its secret', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'a', status: 'active', webhook_secret_owned: true },
+        { workspace_slug: 'b', status: 'active', webhook_secret_owned: true },
+      ],
+    });
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('All 2 active');
+  });
+
+  test('ignores revoked rows when counting tenants', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'live', status: 'active' },
+        { workspace_slug: 'dead', status: 'revoked' },
+      ],
+    });
+    // One ACTIVE workspace ⇒ the single-workspace pass, not a two-tenant warn.
+    expect((await checkLinearSecretProvenance('us-east-1', REG)).status).toBe('pass');
+  });
+
+  test('warns when the registry cannot be read', async () => {
+    ddbSendMock.mockRejectedValue(new Error('AccessDeniedException'));
+    expect((await checkLinearSecretProvenance('us-east-1', REG)).status).toBe('warn');
+  });
+
+  test('passes when Linear is not deployed', async () => {
+    expect((await checkLinearSecretProvenance('us-east-1', null)).status).toBe('pass');
+  });
+
+  test('is reported by the full doctor run', async () => {
+    stackOutputMock.mockImplementation(async (_r: string, _s: string, output: string) =>
+      (output === 'LinearWorkspaceRegistryTableName' ? REG : null));
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    expect(checks.map((c) => c.id)).toContain('linear_secret_provenance');
+  });
 });
 
 describe('doctor verdict for Linear project → workspace binding', () => {

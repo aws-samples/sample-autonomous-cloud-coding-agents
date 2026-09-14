@@ -142,6 +142,8 @@ Every workspace must have its own webhook signing secret, read from its own Line
 
 A workspace onboarded by an older release may instead be holding a copy of the first workspace's secret. Two workspaces sharing one secret means either can produce a delivery the other's signature check accepts, so **on a stack with more than one active workspace those deliveries are rejected with a 401** until each workspace has its own. Fix it per workspace with `bgagent linear update-webhook-secret <slug>`, which also records that the secret is that workspace's own — pass `--stack-name` if you are not using the default.
 
+On an existing multi-workspace stack, run `bgagent linear backfill-secret-provenance --dry-run` before deploying this change. It records ownership automatically for every workspace whose stored secret differs from the stack-wide value — which proves the secret was never copied from it, since copying is the only way a workspace ends up with someone else's — and names the ones that still need `update-webhook-secret`. `bgagent platform doctor` reports the same thing, and stays quiet on a single-workspace stack where a shared secret cannot reach another tenant.
+
 For the same reason, the stack-wide back-compat secret is only accepted on a single-workspace stack. It cannot say which workspace sent a delivery, and with two or more tenants there is no safe way to guess, so a stack-wide-signed delivery is rejected instead. Single-workspace installs are unaffected: every check here compares against the number of active workspaces first, and with one tenant none of them changes behaviour.
 
 ### 6. Test
