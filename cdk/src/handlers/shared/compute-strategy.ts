@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
@@ -84,11 +85,18 @@ export type SessionHandle =
  * task/approval state, not by parsing this service-provided text. Keeping the
  * field on every variant preserves the same diagnostic shape.
  */
-export type SessionStatus =
+/** UNKNOWN/NOT_FOUND are local observations, not AWS service states. */
+export type MicrovmObservedState = MicrovmState | 'UNKNOWN' | 'NOT_FOUND';
+
+export type SessionStatus = (
   | { readonly status: 'running'; readonly reason?: string }
   | { readonly status: 'suspended'; readonly reason?: string }
   | { readonly status: 'completed'; readonly reason?: string }
-  | { readonly status: 'failed'; readonly error: string; readonly reason?: string };
+  | { readonly status: 'failed'; readonly error: string; readonly reason?: string }
+) & {
+  /** Explicit MicroVM observation; coarse `running` also covers pending/unknown. */
+  readonly microvmState?: MicrovmObservedState;
+};
 
 /**
  * `supported: true` means the lifecycle command was acknowledged, not that the

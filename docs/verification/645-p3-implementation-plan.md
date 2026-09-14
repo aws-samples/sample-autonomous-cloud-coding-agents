@@ -25,7 +25,9 @@ Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed�
 - [ ] Implement production nesting if included, then verify a clean P2 deployment.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
-- [ ] Add durable lifecycle intent/policy, compatible agent hooks and credential/durability barriers.
+- [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.
+- [ ] Add compatible agent hooks and credential/durability barriers.
+- [ ] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
 - [ ] Connect supervisor and approval handlers, then verify the complete P3 sleep/wake lifecycle in AWS.
 
 First prerequisite batch completed locally on 2026-09-13:
@@ -97,6 +99,14 @@ First P3 foundation batch completed locally (2026-09-13):
 - An immutable approval deadline is captured with the original row, before database writes/notifications. Polling uses the smaller UTC/monotonic remainder. Regressions reproduced a frozen-clock gate that waited after ten minutes and a 30-second window stretched to 42 seconds by a slow write. The fix also preserves late committed decisions, missing-row handling and cancellation.
 - CDK lint/compilation and **5 suites / 169 tests** pass. Full agent quality passes **1,823 tests / 84.53% coverage**, including **12 new clock/race/cancellation cases**. Counts overlap earlier runs.
 - No callers, IAM grants or image hooks enable automatic suspension yet. The same deadline must still be registered in the future lifecycle context and checked immediately by `/resume`. Durable intent, policy, credential refresh, acknowledged progress durability and live validation remain open.
+
+Second P3 foundation batch implemented locally (2026-09-13):
+
+- Added `microvm_lifecycle` coordinator records with unique generations, VM/gate identity, desired action, original request time and deadline. Writes check the current task/handle/gate/generation; suspend also transaction-checks the exact PENDING approval. Wake remains sticky within one gate, records are retained, and repeated saves preserve the recovery age.
+- Added explicit `microvmState` observations without changing existing coarse status/reason semantics, plus a policy helper for grace, useful sleep, pre-deadline wake, image/enable guards, missing/unreadable data, cancellation and delayed suspend-after-wake races.
+- DynamoDB Local verifies actual transaction conditions, rollback, competing writers, changed identities, lost committed replies, cancellation/decision during recovery and a fresh module/client loading saved intent. See the [lifecycle runbook](./645-lifecycle-intent.md) for protocol and remaining integration/deployment gates.
+- CDK lint/compilation passed. The broad handler/session-role run passed **158 suites / 3,738 tests**, including **23 lifecycle** and **15 existing capacity** DynamoDB Local tests. Five relevant suites passed **218 overlapping tests** and exited normally. The broad run exited successfully after a delay (about 72 seconds total versus 17.5 seconds reported test execution), with no open-handle trace; its cause is not established. Documentation sync, the **77-page** build and link checks pass. No Python source changed. The temporary local database was removed.
+- No production caller uses this policy/store yet. No IAM grants, image hooks or automatic suspension were enabled. Durable poll failure/recovery tracking, guest barriers, supervisor/decision-handler wiring and live AWS gates remain unfinished.
 
 ## The result we want
 
@@ -259,17 +269,17 @@ Follow `cdk/scripts/package-microvm-artifact.sh` and the P1/P2 runbooks:
 
 AgentCore and ECS return explicit unsupported results without an AWS request. MicroVM issues `SuspendMicrovm`/`ResumeMicrovm` with `microvmIdentifier: handle.microvmId` and a 10-second abort bound. Local tests cover wrong/empty handles, repeated requests, simulated conflicts/not-found and retriable/permanent errors. **Still required:** verify actual AWS behavior for already-target-state/terminated VMs and races before normalizing any conflict into success.
 
-The installed SDK returns empty suspend/resume responses. Its observed states are `PENDING`, `RUNNING`, `SUSPENDING`, `SUSPENDED`, `TERMINATING` and `TERMINATED`; there is no `RESUMING` value. The current coarse poll mapping groups PENDING/unknown with running and SUSPENDING with suspended. Preserve existing consumers, but expose an explicit service-state observation for P3 reconciliation: the coarse `running` result alone cannot prove wake completion. Keep `reason` diagnostic rather than parsing it for policy.
+The installed SDK returns empty suspend/resume responses. Its observed states are `PENDING`, `RUNNING`, `SUSPENDING`, `SUSPENDED`, `TERMINATING` and `TERMINATED`; there is no `RESUMING` value. The coarse poll mapping groups PENDING/unknown with running and SUSPENDING with suspended. **Implemented locally:** `SessionStatus.microvmState` carries explicit state, including local `UNKNOWN`/`NOT_FOUND` observations, while preserving existing coarse status/reason semantics. The policy uses this field; the coarse `running` result alone cannot prove wake completion. `reason` remains diagnostic.
 
 ### Durable intent and policy
 
-Store a small typed optional lifecycle record on the task row, separate from the existing string-only `compute_metadata` handle: active `request_id`, desired action (`suspend` or `resume`), request timestamp and gate deadline. Guard writes by task status, matching gate ID and matching MicroVM handle; do not overwrite another gate's intent. Add a generation/version condition if needed to prevent an older request from undoing a newer one. Reuse the task table, not a new coordination service.
+**Implemented locally:** `microvm-lifecycle.ts` stores a typed optional record on the existing task row, separate from `compute_metadata`. It includes format version, generation, VM/gate identity, desired action, original timestamp and deadline. Conditions guard owner/status/gate/handle/generation; suspend atomically checks the same PENDING approval row and unchanged deadline inputs. A wake cannot become a sleep for that gate, and retaining the record prevents an older absent-record snapshot from recreating a sleep intent. A new gate may establish a new generation. No credentials or bearer URLs are stored.
 
-Persist failure counters/backoff and anomaly episode tracking in durable poll-loop state so Lambda replay does not reset them. Update shared/public types and sync guards only where that record is actually exposed. Store no credentials or bearer URLs in the lifecycle record.
+**Still required:** persist failure counters/backoff, anomaly episodes and bounded wake recovery in durable poll-loop state so Lambda replay does not reset them. Repeated intent saves already retain the original timestamp/generation. The record is internal and has no public task API field. Database success is not a lock over a later AWS command: reread before suspend and reconcile after every command outcome.
 
-The policy combines task status, the **specific current approval row's status**, desired action, VM state and current time. A PENDING row already exists throughout every wait: “approval row exists” is not a reason to resume. Check APPROVED/DENIED, deadline proximity, missing-row recovery or other explicit wake conditions.
+**Implemented as an unwired helper:** the policy combines task status, the **specific current approval row's status**, desired action, explicit VM state and current time. PENDING alone is not a reason to resume. All terminal approval states, deadline proximity, missing/unreadable data or unintended suspension can require wake. SUSPENDING records desired wake but returns `requestReady: false` until SUSPENDED is observed.
 
-Proposed initial tuning for the implementation: 30-second suspend grace, 60-second pre-deadline wake margin, and three consecutive poll failures before escalation. Treat these as measured/tunable policy values, not AWS facts. Only suspend after grace when enough time remains to pay for resume overhead and a useful sleep. Clamp polling/backoff to the next wake deadline and session lifetime; do not let a user-configured long poll interval oversleep it.
+Initial local policy values: 30-second suspend grace, 60-second pre-deadline wake margin, 30-second minimum useful sleep and at most 5-second transition polling. Long intervals are clamped to the relevant grace/wake/session deadline. These are tunable choices requiring live measurement, not AWS facts. Three consecutive poll failures before escalation remains proposed supervisor work. The future integration must bound its whole operation, including the store's 5-second request/read-sequence budgets and any lost-reply recovery.
 
 ### State/action table
 
@@ -297,7 +307,7 @@ Files: `agent/src/server.py`, `hooks.py`, `task_state.py`, `aws_session.py`, `pr
 5. Reseed the application PRNG from fresh OS entropy on **both `/run` and `/resume`**. Do not seed it with task IDs, timestamps or an image-fixed value. Continue using cryptographic randomness for secrets. Test resumed/sibling snapshot uniqueness where meaningful; do not claim that `random` becomes cryptographically safe.
 6. **Polling implemented locally:** `_ApprovalDeadline` captures the original recorded UTC expiry and a monotonic cap before database writes. Remaining time is `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero, including each sleep bound. **Still required:** register this same object in the lifecycle context, check it at resume and wake the existing agent-owned decision loop. Never create a fresh timeout on resume.
 7. **Preserved/tested locally:** conditional TIMED_OUT write, strongly consistent reread when that write loses, and late-decision winner behavior. Forward/backward clocks, frozen monotonic time, slow writes/reads, missing rows and cancellation have regression coverage. **Still required:** exercise these through the actual resume barrier and live AWS lifecycle. TTL is asynchronous garbage collection, not a precise alarm clock.
-8. Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them. Add shared hook-budget constants and route/contract assertions. Keep `/ready` and `/validate` AWS-silent. An old image without the new hooks must not be eligible for automatic suspension; enable policy only after deploying a compatible pinned image, with explicit capability/version gating if mixed versions can coexist.
+8. Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them. Add shared hook-budget constants and route/contract assertions. Keep `/ready` and `/validate` AWS-silent. An old image without the new hooks must not be eligible for automatic suspension. Bind capability to the image/version that **actually launched each VM**, using coordinator-owned launch metadata; current deployment settings alone cannot prove an older VM supports the hooks. Unknown/legacy capability keeps new suspends off. A verified full drain can establish a clean boundary, but must not be assumed.
 
 ## 6. Wire the supervisor and human decisions
 
@@ -315,11 +325,13 @@ Add consecutive MicroVM poll-error tracking. Reset on successful observations; c
 
 After the existing authorization checks and decision transaction **commit**, use a shared helper to load `compute_metadata` with a strongly consistent task read. Validate compute type, complete handle and current task/gate identity. For MicroVM, request resume with a short bound. No HTTP call to the guest is necessary.
 
-Missing handle, read failure, wrong/terminal state or resume failure must produce a warning and a structured resume-orphan event (include task ID, gate ID, VM ID when known, stage, reason and safe AWS request ID). Audit-event failure is also best-effort. **None of these post-commit failures may turn a successful decision into a 500 or undo the transaction.** Preserve the current response/status and cross-tenant/expired/wrong-gate protections. The poll loop is the repair path.
+Missing handle, read failure, wrong/terminal state or resume failure must produce a warning and a structured resume-orphan event (include task ID, gate ID, VM ID when known, stage, reason and safe AWS request ID). Audit-event failure is also best-effort. **None of these post-commit failures may turn a successful decision into a 500 or undo the transaction.** Preserve the current response/status and ownership/already-decided/wrong-gate protections. The poll loop is the repair path. The current API has no independent wall-clock expiry check: the agent owns TIMED_OUT, and the first committed decision wins. Strict API expiry would be a separate behavior change.
 
 ### IAM and deployment
 
 Grant orchestrator SuspendMicrovm/ResumeMicrovm on the exact configured image ARN and required version suffix, alongside its existing lifecycle actions. Grant approve/deny ResumeMicrovm, and GetMicrovm only if the shared wake helper uses it, with the same image scope. Do not grant these actions to the agent execution role. Add no token-minting, broad role-passing or network ingress permission.
+
+Verify the lifecycle store's DynamoDB permissions too: task GetItem/UpdateItem and approval GetItem/ConditionCheckItem for the supervisor's cross-table suspend transaction. Confirm environment wiring for both table names and test effective permissions. Worker writes to `microvm_lifecycle` must remain excluded.
 
 Check `task-api.ts`'s lazy image-ARN wiring and no-image branch, bootstrap deployment-role coverage, tests/suppressions and CloudFormation resource counts. Image-hook changes and runtime hook serving must deploy together; automatic suspension remains off until the compatible image is ready. Provide an operational disable switch that stops **new suspends while still allowing resume, timeout handling and termination** for already-sleeping tasks.
 

@@ -649,7 +649,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(args.microvmId).toBe(MICROVM_ID);
     expect(args.ddbStatus).toBe(TaskStatus.RUNNING);
     // The strategy's mechanical mapping is what the orchestrator interprets.
-    expect(args.substrate).toEqual({ status: 'suspended' });
+    expect(args.substrate).toEqual({ status: 'suspended', microvmState: 'SUSPENDED' });
   });
 
   test('returns a failed poll state when reconciliation fails the task', async () => {

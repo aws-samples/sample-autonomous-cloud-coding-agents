@@ -657,9 +657,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *     because the VM is already on its way to frozen; reporting ``running``
    *     would tell the orchestrator compute is still progressing when it is not.
    *     Both map to a state the orchestrator treats as benign-or-anomalous
-   *     depending on the task status, never as a failure. (``SUSPENDING`` was
-   *     never observable live — suspend reaches ``SUSPENDED`` in under a second
-   *     — so nothing may WAIT for it; it is mapped for completeness only.)
+   *     depending on the task status, never as a failure. Earlier probes skipped
+   *     this short transition, but P3 must handle it if observed: save wake intent
+   *     and wait for SUSPENDED before issuing ResumeMicrovm.
    *   - ``TERMINATING`` / ``TERMINATED`` → ``completed``. Both are terminal or
    *     terminal-bound and carry no exit code, so "the substrate is gone" is all
    *     the strategy can honestly say; whether that is success or failure is the
@@ -669,6 +669,8 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *     that waited for NotFound would spin on a finished VM.
    *   - anything else (an unrecognized future state) → ``running``, so a service
    *     enum addition can never fail a healthy task.
+   * ``microvmState`` also reports the explicit observed state (or local UNKNOWN /
+   * NOT_FOUND). P3 uses it to distinguish readiness from the coarse status.
    *
    * ``stateReason`` is carried through on every mapped state as
    * ``SessionStatus.reason``, VERBATIM and uninterpreted. It is the substrate's
@@ -729,7 +731,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
         logger.info('MicroVM not found on poll — treating as terminal', {
           microvm_id: microvmId,
         });
-        return { status: 'completed' };
+        return { status: 'completed', microvmState: 'NOT_FOUND' };
       }
       throw wrapMicrovmError('GetMicrovm', err);
     }
@@ -737,10 +739,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     switch (state) {
       case MicrovmState.PENDING:
       case MicrovmState.RUNNING:
-        return { status: 'running', ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: state, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.SUSPENDING:
       case MicrovmState.SUSPENDED:
-        return { status: 'suspended', ...(stateReason && { reason: stateReason }) };
+        return { status: 'suspended', microvmState: state, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.TERMINATING:
       case MicrovmState.TERMINATED:
         if (stateReason) {
@@ -754,14 +756,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
             state_reason: stateReason,
           });
         }
-        return { status: 'completed', ...(stateReason && { reason: stateReason }) };
+        return { status: 'completed', microvmState: state, ...(stateReason && { reason: stateReason }) };
       default:
         logger.warn('Unrecognized MicroVM state — reporting running', {
           microvm_id: microvmId,
           state,
           ...(stateReason && { state_reason: stateReason }),
         });
-        return { status: 'running', ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: 'UNKNOWN', ...(stateReason && { reason: stateReason }) };
     }
   }
 

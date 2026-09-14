@@ -590,7 +590,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state });
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: expected });
+      expect(result).toEqual({ status: expected, microvmState: state });
     });
 
     test('sends GetMicrovm keyed on microvmIdentifier', async () => {
@@ -609,7 +609,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       // No task id, no DDB read — the strategy cannot see the task row at all,
       // which is exactly why the health rules live in the orchestrator.
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'suspended' });
+      expect(result).toEqual({ status: 'suspended', microvmState: 'SUSPENDED' });
     });
 
     test('treats ResourceNotFoundException as completed (a reaped MicroVM is gone, not broken)', async () => {
@@ -618,7 +618,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockRejectedValueOnce(err);
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'completed' });
+      expect(result).toEqual({ status: 'completed', microvmState: 'NOT_FOUND' });
     });
 
     test('rethrows non-NotFound errors so the caller can count poll failures', async () => {
@@ -632,7 +632,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'HIBERNATING_SOMEDAY' });
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'running' });
+      expect(result).toEqual({ status: 'running', microvmState: 'UNKNOWN' });
     });
 
     test('throws when the handle is not a lambda-microvm handle', async () => {
@@ -659,7 +659,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'completed', reason });
+      expect(result).toEqual({ status: 'completed', microvmState: 'TERMINATED', reason });
     });
 
     test('logs a WARNING when a terminal MicroVM carries a reason', async () => {
@@ -683,7 +683,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'completed' });
+      expect(result).toEqual({ status: 'completed', microvmState: 'TERMINATED' });
       expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
@@ -695,7 +695,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'running' });
+      expect(result).toEqual({ status: 'running', microvmState: 'RUNNING' });
       expect('reason' in result).toBe(false);
     });
 
@@ -708,7 +708,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: expected, reason: 'because' });
+      expect(result).toEqual({ status: expected, microvmState: state === 'HIBERNATING_SOMEDAY' ? 'UNKNOWN' : state, reason: 'because' });
     });
   });
 

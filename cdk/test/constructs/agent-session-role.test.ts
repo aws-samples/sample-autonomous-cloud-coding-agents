@@ -157,7 +157,7 @@ describe('AgentSessionRole construct', () => {
         expect(attrs).toEqual(taskWriteAttributes);
         expect(s.Condition.Null['dynamodb:Attributes']).toBe('false');
         for (const protectedAttribute of [
-          'microvm_start', 'concurrency_slot', 'user_id', 'created_at',
+          'microvm_start', 'microvm_lifecycle', 'concurrency_slot', 'user_id', 'created_at',
           'session_id', 'compute_type', 'compute_metadata', 'agent_runtime_arn',
         ]) {
           expect(attrs).not.toContain(protectedAttribute);
