@@ -20,6 +20,8 @@
 // Resolving which workspace owns a Linear project. The mapping table is keyed on the
 // project id alone, so this resolution is what lets a later webhook check a
 // body-supplied `projectId` against the workspace that actually signed the delivery.
+import * as fs from 'fs';
+import * as path from 'path';
 import { GetSecretValueCommand, ListSecretsCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
@@ -362,5 +364,30 @@ describe('classifyWebhookSecretProvenance', () => {
     // Guards the falsy-vs-undefined edge: '' must not fall through to the comparison and
     // read as 'own' just because it differs from the stack-wide value.
     expect(classifyWebhookSecretProvenance('', STACK_WIDE)).toBe('absent');
+  });
+});
+
+// Regression guard for a copy defect the first LIVE run surfaced: two workspaces had
+// expired grants, so four perfectly valid mappings came back unresolved and the report
+// told the operator they named deleted projects and should be removed. An unresolved
+// mapping means opposite things depending on whether every workspace was reachable, so
+// the conclusion has to branch on that.
+describe('unresolved-mapping guidance distinguishes stale rows from unreachable workspaces', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../../src/commands/linear.ts'), 'utf8');
+
+  test('an unqueryable workspace is tracked, not silently folded into "stale"', () => {
+    // Source-level because the branch is inside a Commander action that would need the
+    // whole AWS + Linear surface stood up to reach; the behavioural proof is the live run.
+    expect(src).toContain('const unqueryable: string[] = []');
+    // Every skip path that means "we could not ask this workspace" must record it.
+    const pushes = src.match(/unqueryable\.push\(slug\)/g) ?? [];
+    expect(pushes.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('the delete-them conclusion is gated on every workspace having been queried', () => {
+    expect(src).toContain('Do NOT delete these yet');
+    expect(src).toContain('Every onboarded workspace was queried successfully');
+    // The unconditional wording that caused the defect must not come back.
+    expect(src).not.toContain('These name projects no onboarded workspace can see');
   });
 });

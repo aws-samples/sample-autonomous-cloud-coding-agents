@@ -2658,18 +2658,27 @@ export function makeLinearCommand(): Command {
         const slugs = await listOnboardedWorkspaceSlugs({ sm, ddb, registryTableName: registryTableName ?? undefined });
         const vaultWorkloadName = await resolveLinearVaultWorkloadName(region, opts.stackName);
         const ownerByProject = new Map<string, { slug: string; workspaceId: string }>();
+        // Workspaces we could not query at all. Tracked because an unresolved mapping means
+        // something completely different depending on this: with every workspace reachable it
+        // really is a stale mapping, but with one unreachable the mapping may be perfectly
+        // valid and simply unverifiable right now. Live-caught — the first real run hit two
+        // workspaces with expired grants and the report told the operator to delete four good
+        // rows.
+        const unqueryable: string[] = [];
 
         for (const slug of slugs) {
           const token = await resolveWorkspaceAccessToken({
             slug, sm, ddb, registryTableName: registryTableName ?? undefined, region, vaultWorkloadName,
           });
           if (token.kind !== 'token') {
+            unqueryable.push(slug);
             console.log(`  ⚠ ${slug}: ${token.reason} — projects owned here cannot be resolved`);
             continue;
           }
           try {
             const listed = await listWorkspaceProjectIds({ accessToken: token.accessToken });
             if (!listed.workspaceId) {
+              unqueryable.push(slug);
               console.log(`  ⚠ ${slug}: Linear did not return an organization id`);
               continue;
             }
@@ -2685,6 +2694,7 @@ export function makeLinearCommand(): Command {
               ownerByProject.set(id, { slug, workspaceId: listed.workspaceId });
             }
           } catch (err) {
+            unqueryable.push(slug);
             console.log(`  ⚠ ${slug}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
@@ -2731,9 +2741,17 @@ export function makeLinearCommand(): Command {
           console.log(`⚠ ${unresolved.length} mapping(s) could not be resolved to a workspace:`);
           for (const id of unresolved) console.log(`    ${id}`);
           console.log();
-          console.log('These name projects no onboarded workspace can see — a deleted project, or a');
-          console.log('workspace that is no longer installed. Re-run `bgagent linear onboard-project`');
-          console.log('for the ones still in use and remove the rest before enforcement is enabled.');
+          if (unqueryable.length > 0) {
+            console.log(`Do NOT delete these yet. ${unqueryable.length} workspace(s) could not be queried`);
+            console.log(`(${unqueryable.join(', ')}), so a mapping owned by one of them is unresolved`);
+            console.log('here even when it is perfectly valid. Restore access for those workspaces —');
+            console.log('`bgagent platform doctor` reports Linear auth state — then re-run this command.');
+            console.log('Only rows still unresolved with every workspace reachable are genuinely stale.');
+          } else {
+            console.log('Every onboarded workspace was queried successfully, so these name projects none');
+            console.log('of them can see — a deleted project, or a workspace no longer installed. Re-run');
+            console.log('`bgagent linear onboard-project` for the ones still in use and remove the rest.');
+          }
         }
       }),
   );
