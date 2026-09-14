@@ -5,9 +5,14 @@ Live verification of the P2 source fixes and deployment prerequisites from
 
 **Status: infrastructure and managed image deployed.** CloudFormation reached
 `UPDATE_COMPLETE`; image version `1.0` is `SUCCESSFUL` and `ACTIVE`. Build hooks
-and authenticated API reads pass. The normal coding-task test remains pending
-repository choice and GitHub token setup. P2 acceptance remains open, and the
-smoke warnings have not been discharged.
+and authenticated API reads pass. The later
+[live task verification](./645-p2-live-task-20260914.md) also passed normal-task,
+PR-iteration and cancellation checks. Remaining P2 acceptance conditions are
+listed there; the broad smoke warnings have not been discharged.
+
+The detailed chronology below records the infrastructure handoff at
+2026-09-14 04:48 UTC. Repository/PAT setup and task execution occurred afterward
+and are documented in the linked follow-up.
 
 ## Target and isolation
 
@@ -65,8 +70,9 @@ not run concurrently with tests/synthesis using the shared CDK temporary files.
 - [x] CloudFormation creates the managed image using the pinned base.
 - [x] Image version is active; `/ready` and `/validate` return HTTP 200.
 - [x] Coordinator image/network/role configuration and authenticated API reads are verified.
-- [ ] A normal task completes with live progress and heartbeat evidence.
-- [ ] Runtime logs, payload cleanup and VM termination are verified.
+- [x] A normal task completes with live progress and heartbeat evidence (follow-up).
+- [x] Runtime logs, successful/canceled-task payload cleanup and VM termination are verified (follow-up).
+- [ ] Failure/recovery cleanup and automatic repository build/lint gates are verified.
 - [ ] Relevant allowed/denied IAM and network cases are exercised.
 - [x] Current resource state, temporary-login cleanup and remaining limits are recorded.
 
@@ -315,7 +321,9 @@ and cached CLI credentials were removed. The non-secret isolated CLI
 configuration and deployment evidence remain. Evidence:
 `verification-user-cleanup.json`.
 
-The next verification sequence is:
+At infrastructure handoff, the planned verification sequence was the following.
+The [live task record](./645-p2-live-task-20260914.md) records the completed
+steps and the remaining limits:
 
 1. Select the test repository and populate the new deployment's GitHub token
    using `bgagent github set-token --region us-west-2 --stack-name backgroundagent-dev`.
