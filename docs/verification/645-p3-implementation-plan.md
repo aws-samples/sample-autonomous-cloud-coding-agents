@@ -15,8 +15,10 @@ validate hooks passed, and authenticated API reads passed after the update.
 The [live task verification](./645-p2-live-task-20260914.md) subsequently passed
 normal coding, PR iteration and cancellation on `isadeks/vercel-abca-linear`,
 including heartbeat, npm checks, Memory writes and automatic cleanup. The
-repository's automatic mise build/lint defaults still need proper npm command
-configuration; failure/recovery and the wider IAM/network matrix also remain.
+repository's [automatic verification configuration](./645-p2-repository-config-20260914.md)
+now runs real npm checks through per-repository overrides; all four pre/post
+commands passed live, and a worker-reported failure was cleaned up.
+Failure/recovery and the wider IAM/network matrix still remain.
 Full P2 acceptance and all P3 live gates remain open. The batch notes below
 record what was verified at their original completion; their deployment status
 is superseded by these records.
@@ -39,7 +41,8 @@ is superseded by these records.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
 - [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [x] Verify normal coding, PR iteration, Memory writes, live logging and successful/canceled-task cleanup in AWS; observe cancellation preserve another task's capacity.
-- [ ] Implement production nesting if included, then verify a clean P2 deployment.
+- [x] Configure repository verification commands, preserve them through re-onboarding, and verify actual automatic pre/post checks and worker-reported failure cleanup in AWS.
+- Optional: production nesting remains unimplemented; the clean deployment uses the existing root layout. Validate the split and migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
 - [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.
@@ -270,8 +273,10 @@ The [2026-09-13–14 clean deployment](./645-p2-clean-deployment-20260913.md)
 completed the infrastructure, managed-image creation and build-hook checks in
 steps 1–2 below. The [live task follow-up](./645-p2-live-task-20260914.md)
 provides positive runtime evidence for steps 3–5 and success/cancellation cleanup
-in step 6. Automatic repository build/lint command configuration, failure
-cleanup, recovery and negative IAM/network cases remain unverified.
+in step 6. The [configuration follow-up](./645-p2-repository-config-20260914.md)
+also verifies automatic pre/post npm checks and cleanup after a worker-reported
+delivery failure. Crash/rejected-hook/cleanup-error paths, recovery and negative
+IAM/network cases remain unverified.
 `isadeks/vercel-abca-linear` explicitly selects `lambda-microvm`; the original
 seeded repository retains AgentCore.
 
