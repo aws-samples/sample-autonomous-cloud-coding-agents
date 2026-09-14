@@ -15,9 +15,11 @@ validate hooks passed, and authenticated API reads passed after the update.
 The [live task verification](./645-p2-live-task-20260914.md) subsequently passed
 normal coding, PR iteration and cancellation on `isadeks/vercel-abca-linear`,
 including heartbeat, npm checks, Memory writes and automatic cleanup. The
-repository's [automatic verification configuration](./645-p2-repository-config-20260914.md)
-now runs real npm checks through per-repository overrides; all four pre/post
-commands passed live, and a worker-reported failure was cleaned up.
+repository's [temporary verification configuration](./645-p2-repository-config-20260914.md)
+passed all four pre/post npm commands live, and a worker-reported failure was
+cleaned up. The user subsequently requested removal of the CLI addition; its
+live overrides were also removed. Repository mise tasks are still needed for
+the restored default commands.
 Failure/recovery and the wider IAM/network matrix still remain.
 Full P2 acceptance and all P3 live gates remain open. The batch notes below
 record what was verified at their original completion; their deployment status
@@ -41,7 +43,8 @@ is superseded by these records.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
 - [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [x] Verify normal coding, PR iteration, Memory writes, live logging and successful/canceled-task cleanup in AWS; observe cancellation preserve another task's capacity.
-- [x] Configure repository verification commands, preserve them through re-onboarding, and verify actual automatic pre/post checks and worker-reported failure cleanup in AWS.
+- [x] Verify automatic pre/post npm checks under temporary overrides and worker-reported failure cleanup in AWS.
+- [ ] Make repository mise tasks available and verify the restored default commands; the CLI addition and temporary overrides were withdrawn at user request.
 - Optional: production nesting remains unimplemented; the clean deployment uses the existing root layout. Validate the split and migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.

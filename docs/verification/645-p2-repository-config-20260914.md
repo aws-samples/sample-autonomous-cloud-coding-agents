@@ -4,35 +4,40 @@ Date: 2026-09-14. Follows the [clean deployment](./645-p2-clean-deployment-20260
 and [first live tasks](./645-p2-live-task-20260914.md). The user selected
 `isadeks/vercel-abca-linear` and authorized completing its configuration.
 
-## Configuration
+**Current status — withdrawn at user request:** commit `4e616679` reverts the
+entire CLI addition `62cce37d`. At 13:29:11 UTC, the two live command overrides
+were also removed from the west repository row using a conditional update.
+A strongly consistent read confirmed their absence and retained
+`lambda-microvm` routing. Future tasks use the existing `mise run build` /
+`mise run lint` defaults. The remote repository still has no `mise.toml`, so
+verification setup is open again. The results below preserve the earlier test
+evidence; they do not describe the current configuration.
+
+## Historical configuration
 
 The selected repository has npm lint/test scripts but no mise tasks. All three
 compute backends use the same worker defaults (`mise run build` and
 `mise run lint`), and all accept per-repository command overrides.
 
-The operator CLI now exposes those existing settings:
+The temporary operator CLI exposed those existing settings and was used to set
+`build_command = npm ci && npm test` and `lint_command = npm run lint` for
+this repository in `us-west-2`, stack `backgroundagent-dev`.
 
-```bash
-bgagent repo onboard isadeks/vercel-abca-linear \
-  --region us-west-2 --stack-name backgroundagent-dev \
-  --compute-type lambda-microvm \
-  --build-command 'npm ci && npm test' \
-  --lint-command 'npm run lint'
-```
-
-This command was executed against account `<account-id>`. A separate
+The configuration was applied to account `<account-id>`. A separate
 `repo show` confirmed both effective commands and `lambda-microvm` routing.
 The east deployment was not changed. No infrastructure or image update is
 required: the deployed coordinator already forwards these fields to the worker.
 The build command installs the pinned dependencies before running tests, so the
 following lint command has its tools available.
 
-The CLI also preserves existing commands on re-onboarding and displays their
-effective values. Previously, its replacement row silently omitted both fields.
-Two regressions failed before the preservation fix. Tests now cover active and
+The temporary CLI also preserved existing commands on re-onboarding and displayed
+their effective values. Its original replacement row silently omitted both fields.
+Two regressions failed before the preservation fix. Tests covered active and
 removed repositories, backend changes, explicit overrides, empty-string resets,
 fresh defaults, command parsing and text/JSON display. CLI compile/lint and all
-**62 suites / 938 tests** pass. The implementation is commit `62cce37d`.
+**62 suites / 938 tests** passed on commit `62cce37d`. The full revert also removes
+that preservation fix; the known omission remains a separate follow-up, not a
+completed fix on the current branch.
 
 For a repository managed through CDK, put the same values in
 `Blueprint.pipeline.buildCommand` / `lintCommand`; CLI changes alone do not edit
@@ -49,7 +54,8 @@ assets or establish functional application coverage.
 Code Defender rejected the push because it considers the public repository
 unapproved. The hook was not bypassed and the commit was not published through
 another channel. PR #584 remains at its previously published README-only head.
-The live RepoTable configuration above works independently of that local file.
+The historical RepoTable configuration worked independently of that local file;
+it is now removed. No publication was attempted as part of the CLI revert.
 
 `npm ci` reported nine existing dependency vulnerabilities (three moderate,
 five high and one critical). Dependencies and the lockfile were not changed by
@@ -78,8 +84,8 @@ and `lint_passed=true`.
 
 The overall task ended **FAILED** at 13:15:58 UTC: `coding/new-task-v1` requires a
 commit/PR, and the inspection intentionally produced neither. Its error records
-`agent_status=success, deliverable=lost`. This is evidence that configuration
-works and a worker-reported failure is finalized, **not** another successful
+`agent_status=success, deliverable=lost`. This is evidence that the tested
+configuration worked and a worker-reported failure was finalized, **not** another successful
 coding/PR smoke test. The earlier successful coding/PR tests remain the evidence
 for that path. Reported model cost was $0.14489115 and duration 95.1 seconds.
 
@@ -103,7 +109,7 @@ lost start reply, or failed cleanup API. Those need their own cases.
 |---|---|---|
 | P1 start/poll/stop | Merged; exercised again by the clean deployment | Keep service-fact limits in the original runbook explicit |
 | P2 managed build and normal work | Clean bootstrap/image deployment; coding, PR iteration, Memory writes, live logs, cancellation and a worker-reported failure cleanup observed | Complete failure/recovery and effective permission/network matrix |
-| Repository command configuration | CLI configured and independently read back; all four automatic pre/post commands pass live; cleanup verified | Local mise file remains unpublished; CLI source still needs upstream review/merge |
+| Repository command configuration | Temporary npm overrides passed all four pre/post checks; CLI addition and live overrides subsequently removed at user request | Repository mise tasks must be available before the restored default commands can pass |
 | #817 review fixes | Error classification, deletion grants, trusted configuration, malformed-byte handling and comment fixes on takeover branch | Effective-role and ingress negatives; upstream review/merge |
 | #700 task-scoped payloads | v2 signed references and deployment manifests implemented; real launches work | Cross-task/public-object denials, expiry, conditional-write and coordinated migration cases |
 | #818 registry portability | Large-payload transport/local loader tests; shared HTTPS/443 limits documented | Real remote-tool DNS/TLS/auth/connectivity |
@@ -129,3 +135,13 @@ AWS/task/log observations. `config-command-execution-evidence.json` contains the
 four commands and their successful completion lines; `config-final-*.json` and
 `config-verification-user-cleanup.json` record cleanup. The documentation sync
 and **77-page** site build also passed.
+
+Rollback evidence is in `cli-revert-config-{before,update,after}.json`. The
+update required the old command values and timestamp to match before removing
+only those two settings and refreshing `updated_at`. No test task was launched
+for the revert, and the existing deployment/image and east environment were
+unchanged.
+
+After the revert, CLI compile/lint and **62 suites / 928 tests** passed. The
+entire `cli/` tree matches its pre-addition state at `396a31e0`, and the rebuilt
+`repo onboard --help` no longer includes either new command flag.
