@@ -305,6 +305,12 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
 
 DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
 
+Agent Registry provisioning also uses a Step Functions workflow to wait for
+asynchronous creation and deletion. Its construct explicitly names the workflow
+with the parent stack's `backgroundagent-dev-` prefix so it fits this policy,
+including when deployed in a nested stack. Adopting this name in an existing
+deployment replaces the provider's waiter state machine.
+
 ```json
 {
   "Version": "2012-10-17",
