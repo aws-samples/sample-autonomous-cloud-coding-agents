@@ -311,6 +311,12 @@ After the PR exists, add a Jira comment such as `@bgagent update the README too`
 1. Replace the progress text with a short `Finished — result posted below` pointer.
 2. Add a separate terminal comment containing the outcome, metrics, and a clickable PR link.
 
+When a successful GitHub preview deployment is captured, ABCA also adds **Open screenshot** and **Open live preview** links to the originating Jira issue. Configure the GitHub deployment-status webhook described in the [deploy-preview screenshots guide](DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md). Jira uses explicit ADF links because these externally hosted screenshots do not have Atlassian media IDs.
+
+For an iteration, the links appear in its existing status comment and survive later heartbeat and terminal edits. A fan-out orchestration's combined preview appears in the parent rollup. Routing uses stored Jira tenant/issue metadata and the iteration's commit SHA, so branch text cannot redirect Jira feedback. Duplicate deployment events update the existing preview comment or block.
+
+Preview feedback is best effort. Jira authentication, API, or persistence failures are logged as `screenshot.jira_delivery_failed` or `jira.preview.status_failed` and do not fail the deployment or task. A standalone comment creation is claimed before posting; an uncertain or failed POST is not automatically repeated, avoiding duplicates if Jira accepted it before a network timeout. Check `screenshot.jira_delivery_claimed` when a claim has no saved comment ID.
+
 The progress comment author and transition actor should be the `bgagent` app. The task owner shown by `bgagent list`, audit records, concurrency accounting, and cost attribution should remain the linked human who triggered the Jira event.
 
 Comments created before `app-setup` remain attributed to the 3LO setup user; only new outbound writes use the Forge app. A successful end-to-end test therefore produces a new start or terminal comment whose Jira author is `bgagent` with `accountType=app`.

@@ -124,6 +124,17 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
   };
 
   while (cursor < line.length) {
+    const image = line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
+    if (image) {
+      append({ text: 'Open screenshot', href: image[2] });
+      if (image[3]) {
+        append({ text: ' · ' });
+        append({ text: 'Open live preview', href: image[3] });
+      }
+      cursor += image[0].length;
+      continue;
+    }
+
     if (line.startsWith('**', cursor)) {
       const end = line.indexOf('**', cursor + 2);
       if (end !== -1) {
@@ -157,6 +168,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
       line.indexOf('**', cursor + 1),
       line.indexOf('`', cursor + 1),
       line.indexOf('[', cursor + 1),
+      line.indexOf('!', cursor + 1),
     ].filter((index) => index !== -1);
     const next = nextTokens.length > 0 ? Math.min(...nextTokens) : line.length;
     append({ text: line.slice(cursor, next) });

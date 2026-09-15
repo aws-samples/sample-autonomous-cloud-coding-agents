@@ -81,6 +81,13 @@ const jiraBuildAdfDocumentMock = jest.fn(
   (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
 );
 const jiraTransitionIssueStateMock = jest.fn();
+// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
+jest.mock('../../src/handlers/shared/jira-preview', () => ({
+  updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
+    ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) =>
+    jiraUpdateIssueCommentAdfMock(ctx, issue, comment, status.body),
+}));
+
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...args: unknown[]) => jiraPostIssueCommentMock(...args),
   updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
@@ -516,11 +523,14 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('an all-terminal epic with an integration node → embeds its combined screenshot in the panel', async () => {
+  test.each(['linear', 'jira'])('an all-terminal %s epic embeds the integration preview on its parent', async (source) => {
     upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
     const meta = {
+      channel_source: source,
+      parent_issue_ref: 'PARENT',
+      credentials_ref: 'WS',
       sub_issue_id: '#meta',
       orchestration_id: 'orch_1',
       parent_linear_issue_id: 'PARENT',
@@ -582,8 +592,11 @@ describe('orchestration-reconciler handler', () => {
       })],
     } as never);
 
-    expect(upsertStatusCommentMock).toHaveBeenCalled();
-    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    const calls = source === 'jira' ? jiraUpdateIssueCommentMock.mock.calls : upsertStatusCommentMock.mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toBe('PARENT');
+    const body = calls[0][source === 'jira' ? 3 : 2] as string;
+    if (source === 'jira') expect(jiraPostIssueCommentMock).not.toHaveBeenCalled();
     expect(body).toContain('✅'); // complete
     // The panel embeds the image AND deep-links to the live combined deploy.
     expect(body).toContain('[![combined preview](https://cdn.example/combined.png)](https://combined.vercel.app)');

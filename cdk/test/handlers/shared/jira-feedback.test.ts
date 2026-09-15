@@ -675,3 +675,16 @@ describe('jira-feedback: updateIssueComment', () => {
     expect(resolveJiraOauthTokenMock).not.toHaveBeenCalled();
   });
 });
+
+describe('preview Markdown to Jira ADF fallback links', () => {
+  test.each([
+    '[![combined preview](https://cdn.example.com/a.png)](https://preview.example.com/a%29)',
+    '![preview](https://cdn.example.com/a.png)',
+  ])('renders supported links for %s', (markdown) => {
+    const runs = parseMarkdownRuns(markdown);
+    expect(runs[0]).toEqual({ text: 'Open screenshot', href: 'https://cdn.example.com/a.png' });
+    if (markdown.startsWith('[')) {
+      expect(runs[2]).toEqual({ text: 'Open live preview', href: 'https://preview.example.com/a%29' });
+    }
+  });
+});

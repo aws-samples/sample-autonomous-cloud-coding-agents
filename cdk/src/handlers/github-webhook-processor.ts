@@ -27,6 +27,7 @@ import {
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
 import { renderPreviewBlock } from './shared/iteration-reply';
+import { deliverJiraDeploymentPreview } from './shared/jira-deployment-preview';
 import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
 import {
   extractLinearIdentifier,
@@ -37,6 +38,7 @@ import { logger } from './shared/logger';
 import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
+import type { TaskRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 
 const s3 = makeClient(S3Client);
@@ -271,7 +273,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // skip it. The return tells us whether this is the synthetic integration
   // node — whose screenshot belongs in the panel only, never as a standalone
   // Linear comment on the parent epic.
-  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy } = await persistScreenshotUrl(
+  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy, task } = await persistScreenshotUrl(
     pr.headRefName,
     publicUrl,
     previewUrl,
@@ -309,6 +311,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
   }
 
+  const jiraRegistry = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  if (task?.channel_source === 'jira' && TASK_TABLE && jiraRegistry) {
+    await deliverJiraDeploymentPreview(ddb, TASK_TABLE, jiraRegistry, task, repo, sha, publicUrl, previewUrl);
+  } else if (task?.channel_source === 'jira') {
+    logger.warn('Jira preview registry is not configured', {
+      event: 'screenshot.jira_missing_registry', task_id: task.task_id,
+    });
+  }
+
   // Best-effort Linear comment. The GitHub PR comment above is the
   // load-bearing artifact; the Linear comment is bonus surface for
   // reviewers who live in Linear. Only fires when the registry table
@@ -320,7 +331,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // cluttering the maturing panel (which already embeds the combined preview
   // via the persisted screenshot_url). Skip the Linear post for the integration
   // node; the panel is the only Linear surface for the combined result.
-  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy) {
+  if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy && task?.channel_source !== 'jira') {
     // Branch-name first — it deterministically encodes this PR's own
     // issue (`bgagent/{taskId}/eng-151-...`). Title/body are ambiguous
     // fallbacks: in a stacked orchestration the body often names a
@@ -662,8 +673,8 @@ async function persistScreenshotUrl(
   branchName: string,
   publicUrl: string,
   previewUrl: string,
-): Promise<{ isIntegrationNode: boolean; isIteration: boolean }> {
-  const result = { isIntegrationNode: false, isIteration: false };
+): Promise<{ isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord }> {
+  const result: { isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord } = { isIntegrationNode: false, isIteration: false };
   if (!TASK_TABLE) return result;
   const taskId = extractTaskIdFromBranch(branchName);
   if (!taskId) return result;
@@ -685,6 +696,7 @@ async function persistScreenshotUrl(
       ExpressionAttributeValues: { ':u': publicUrl, ':p': previewUrl },
       ReturnValues: 'ALL_OLD',
     }));
+    if (upd.Attributes) result.task = { ...upd.Attributes, task_id: taskId } as TaskRecord;
     const subIssueId = upd.Attributes?.channel_metadata?.orchestration_sub_issue_id;
     result.isIntegrationNode = typeof subIssueId === 'string' && isIntegrationNode(subIssueId);
     // Suppress the standalone "🖼️ Preview screenshot" Linear comment
