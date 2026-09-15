@@ -19,10 +19,10 @@
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
-    "@astrojs/starlight": "^0.41.2",
-    "astro": "7.2.8",
+    "@astrojs/starlight": "^0.42.0",
+    "astro": "7.3.1",
     "remark-gfm": "^4.0.1",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "main": "lib/index.js",
   "engines": {
