@@ -1,8 +1,12 @@
 # ADR-021 P3: per-worker image capability
 
 Date: 2026-09-15. Local implementation on `fix/645-microvm-readiness`, following
-the [guest hook milestone](./645-p3-lifecycle-hooks.md). This has not been deployed;
-the last verified AWS image is still `2.0`. Automatic suspension remains disabled.
+the [guest hook milestone](./645-p3-lifecycle-hooks.md). At this milestone, the
+last verified AWS image was `2.0` and automatic suspension was disabled.
+
+**Deployment follow-up:** the [P3 live record](./645-p3-live-deployment-20260915.md)
+verifies active image `3.0`, protocol `1`, and initial isolated guest checks.
+Automatic suspension remains disabled; full live acceptance is still open.
 
 ## What this adds
 

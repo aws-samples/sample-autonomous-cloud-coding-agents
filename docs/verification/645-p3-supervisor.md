@@ -1,9 +1,10 @@
 # ADR-021 P3: supervisor and approval wake
 
-Status (2026-09-15): production integration and full repository validation pass
-locally. This milestone has not been deployed. Automatic suspension defaults
-off. The [P3 plan](./645-p3-implementation-plan.md) retains the live acceptance
-gates and remaining P2 checks.
+Status (2026-09-15): production integration and full repository validation pass.
+The [development deployment](./645-p3-live-deployment-20260915.md) now runs the
+supervisor and six-hook image `3.0`; initial isolated guest checks
+pass. Automatic suspension remains off. The [P3 plan](./645-p3-implementation-plan.md)
+retains the remaining live acceptance gates and P2 checks.
 
 ## What this does
 

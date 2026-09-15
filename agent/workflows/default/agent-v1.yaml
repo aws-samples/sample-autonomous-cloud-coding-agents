@@ -6,7 +6,7 @@
 # hatch — so its behavior is auditable and overridable per-repo via the Blueprint.
 #
 # Deliberately conservative because it runs when *nothing* was specified:
-# requires_repo:false (no clone), a read-leaning tool set (no Bash/Write/Edit),
+# requires_repo:false (repository optional), a read-leaning tool set (no Bash/Write/Edit),
 # and delivery to S3 + a comment milestone. A caller who wants coding selects
 # (or maps to) a coding workflow. soft_deny is still mandatory (read_only:false)
 # so any future tool addition stays HITL-gated.
@@ -23,7 +23,9 @@ domain: hybrid
 description: >-
   Run the user's request through the agent and deliver the result. Minimal
   default — no repo, build, or PR assumptions.
-# No clone; if a repo is supplied it is hydrated as context, not scaffolded.
+# Without a repo, pipeline.py skips cloning and delivers an S3 artifact. When a
+# repo is supplied, the current shared pipeline clones it and runs its repo-bound
+# build/PR post-hooks. This flag alone does not disable that delivery path.
 requires_repo: false
 read_only: false
 prompt:

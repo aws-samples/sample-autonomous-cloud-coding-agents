@@ -23,7 +23,16 @@ or unreadable support permits normal coding and disables new suspension. Databas
 race tests reject changed identities and recover a committed capability after a
 lost reply. No deployment or automatic sleep was enabled in that milestone.
 
-**Supervisor milestone (2026-09-15):** [production supervision and approval wake](./645-p3-supervisor.md) now connect the policy/store to durable polling and post-commit approve/deny handlers. Recovery clocks and the original service lifetime survive replay; failed wake and cleanup remain visible. The rollout flag defaults off and uses a live Parameter Store switch for existing durable executions. Full repository validation passes (5,028 CDK, 1,951 Python and 928 CLI tests); all live P3 gates remain open.
+**Supervisor milestone (2026-09-15):** [production supervision and approval wake](./645-p3-supervisor.md) connect the policy/store to durable polling and post-commit approve/deny handlers. Recovery clocks and the original service lifetime survive replay; failed wake and cleanup remain visible. The rollout flag defaults off and uses a live Parameter Store switch for existing durable executions. That milestone passed full repository validation (5,028 CDK, 1,951 Python and 928 CLI tests).
+
+**P3 deployment follow-up (2026-09-15):** the [live record](./645-p3-live-deployment-20260915.md)
+verifies bootstrap `1.8.0`, source `9a5f4606`, six-hook image `3.0`, 475 root resources
+and both suspension settings off. Rollout review exposed missing retention for
+pinned coordinator/guardrail versions; the fix passed another full build
+(5,030 CDK tests), and existing versions were protected before replacement.
+Initial isolated guest cases pass. These use a local production
+supervisor and manual guarded Suspend; deployed durable entrypoint, automatic
+suspension admission and the rest of the acceptance matrix remain open.
 
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
@@ -34,8 +43,8 @@ validate hooks passed, and authenticated API reads passed after the update.
 The subsequent [image rebuild fix](./645-microvm-image-rebuild-20260914.md)
 deployed `e1d5debe` through a normal reviewed update and activated version `2.0`.
 Its ready/validate hooks passed; repeated packaging reused the artifact, and
-redeploying the same cloud assembly reported no changes. The root still has
-474 resources.
+redeploying the same cloud assembly reported no changes. The root had
+474 resources at that milestone.
 The [live task verification](./645-p2-live-task-20260914.md) on image `1.0` passed
 normal coding, PR iteration and cancellation on `isadeks/vercel-abca-linear`,
 including heartbeat, npm checks, Memory writes and automatic cleanup. The
@@ -57,7 +66,7 @@ with local process/reply faults. Saved-handle recovery, changed-input refusal,
 cancellation and the actual 120-second cutoff passed. These tests use operator
 credentials and do not interrupt the deployed durable Lambda.
 Deployed-coordinator recovery and the wider IAM/network matrix still remain.
-Full P2 acceptance and all P3 live gates remain open. The batch notes below
+Full P2 acceptance and the remaining P3 live gates remain open. The batch notes below
 record what was verified at their original completion; their deployment status
 is superseded by these records.
 
@@ -87,7 +96,7 @@ is superseded by these records.
 - [x] Give managed image builds immutable, checksum-verified artifacts and require their digest in deployment context; packaging, construct, stack and CDK-nag regressions and the full build pass.
 - [x] Verify a normal CloudFormation update builds and activates image `2.0` from the changed artifact URI; repeat packaging reuses the verified object and a same-assembly redeploy reports no changes.
 - Deferred at user request: publish mise tasks in the target repository and verify its default commands. The CLI addition and temporary overrides were withdrawn; this repository configuration work is outside the current P3 implementation.
-- Optional: production nesting remains unimplemented; the clean deployment uses 474 of the root stack's 500 resource slots. P3 does not inherently require nesting. Recheck the count for supported feature combinations and validate the split/migration if adopted.
+- Optional: production nesting remains unimplemented; the P3 deployment uses 475 of the root stack's 500 resource slots. P3 does not inherently require nesting. Recheck the count for supported feature combinations and validate the split/migration if adopted.
 - [x] Add mandatory pause/wake command methods across all three compute strategies, with explicit unsupported results and bounded MicroVM requests.
 - [x] Keep the original approval deadline through database writes and polling, including frozen/backward clocks; preserve decision races and cancellation.
 - [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.
@@ -97,6 +106,7 @@ is superseded by these records.
 - [x] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
 - [x] Connect post-commit approval wake, bounded diagnostics/cleanup, the default-off rollout flag and scoped IAM.
 - [x] Complete full repository validation with the P3 supervisor and live switch.
+- [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 
 First prerequisite batch completed locally on 2026-09-13:
