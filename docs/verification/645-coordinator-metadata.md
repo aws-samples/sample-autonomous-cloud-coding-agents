@@ -39,7 +39,11 @@ The regression first failed against the old policy because the main-table grant 
 
 Python contract tests run the real task writers against recording clients, including all terminal-result fields and both approval transactions. They compare the requested attributes against the same JSON list used by CDK and require review when a new writer is added.
 
-These checks inspect generated policies and request compatibility. They do **not** execute AWS authorization. DynamoDB Local, used for the capacity tests, also does not implement IAM. Keep the following live gate open.
+These local checks inspect generated policies and request compatibility; they do
+not execute AWS authorization. DynamoDB Local also does not implement IAM.
+The subsequent [37-case AWS matrix](./645-effective-iam-20260915.md) passed using
+the unchanged deployed MicroVM role and real tagged sessions from a temporary
+Lambda. Other backend ambient roles and migration/scale remain open.
 
 ## AWS acceptance and rollout gate
 

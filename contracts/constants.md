@@ -25,6 +25,7 @@ the contract. This is the neutral location both runtimes read.
 | `cdk/src/handlers/shared/payload-bootstrap.ts`, `cdk/src/constructs/payload-bootstrap-permissions.ts` | `payload_bootstrap` | import-time |
 | `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]`, `SHARED_CONSTANTS["microvm_lifecycle"]` | import-time |
 | `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
+| `agent/src/hooks.py` | `microvm_lifecycle.maximum_duration_seconds`, `approval_timeout_s.max` | SDK matcher construction |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
 | `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
@@ -100,7 +101,8 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "microvm_lifecycle": {
     "protocol_version": 1,
     "image_protocol_env": "ABCA_MICROVM_LIFECYCLE_PROTOCOL",
-    "hook_port": 8080
+    "hook_port": 8080,
+    "maximum_duration_seconds": 28800
   }
 }
 ```
@@ -226,7 +228,14 @@ The image declares suspend/resume using this service timeout. These values do no
 enable automatic suspension.
 
 `microvm_lifecycle` owns protocol version `1`, marker name
-`ABCA_MICROVM_LIFECYCLE_PROTOCOL` and hook port `8080`. The marker is baked into
+`ABCA_MICROVM_LIFECYCLE_PROTOCOL`, hook port `8080`, and the 28,800-second
+maximum VM lifetime. The strategy sends that lifetime to `RunMicrovm`; the
+agent sizes its PreToolUse SDK callback timeout to outlive the same bound by
+120 seconds. This callback timeout lets an expired approval finish reconciliation
+after a delayed wake; the original approval deadline still controls permission.
+Other backends use the maximum approval interval plus the same margin.
+
+The marker is baked into
 the immutable image; it is neither a credential nor task/deployment configuration.
 `/validate` rejects a supplied unsupported marker. The coordinator checks the exact
 image ARN/version returned by Run, including all six enabled hooks and lifecycle

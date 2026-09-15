@@ -36,6 +36,7 @@ from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
 from progress_writer import _generate_ulid
+from shared_constants import SHARED_CONSTANTS
 from shell import log, log_error_cw
 from stuck_guard import StuckGuard
 
@@ -1790,8 +1791,9 @@ def build_hook_matchers(
     Returns a dict mapping HookEvent strings to lists of HookMatcher
     instances, ready to pass as ``hooks=...`` to ClaudeAgentOptions.
 
-    The SDK expects ``dict[HookEvent, list[HookMatcher]]`` where HookMatcher
-    has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
+    The SDK expects ``dict[HookEvent, list[HookMatcher]]``. PreToolUse also needs
+    an explicit callback timeout: the CLI can otherwise cancel a live approval
+    wait and return a generic denial without completing its approval record.
 
     ``progress`` is forwarded to both the PreToolUse hook (approval gate
     milestones) and the Stop hook (nudge/denial acks). ``user_id`` is
@@ -1821,12 +1823,13 @@ def build_hook_matchers(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
-        # or its dispatch path raises an unexpected exception (asyncio
-        # cancellation, TypeError from a malformed payload, etc.), the
+        # or its dispatch path raises an unexpected exception (for example,
+        # TypeError from a malformed payload), the
         # SDK's default behaviour for an unhandled hook exception is
         # undefined — we MUST NOT trust it to fail closed. Mapping every
         # uncaught exception to a DENY here makes the security posture
-        # explicit at the SDK boundary.
+        # explicit at the SDK boundary. SDK cancellation propagates and still
+        # releases the tool registration in finally.
         allowed = False
         try:
             if lifecycle:
@@ -1935,8 +1938,23 @@ def build_hook_matchers(
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.
         return SyncHookJSONOutput(**result)
 
+    # The callback transport must outlive the approval loop. A frozen MicroVM
+    # may wake after the gate deadline during supervisor recovery, so keep that
+    # callback alive for the bounded VM lifetime. The original gate deadline
+    # still decides permission; this does not give the user more approval time.
+    callback_window_s = (
+        SHARED_CONSTANTS["microvm_lifecycle"]["maximum_duration_seconds"]
+        if lifecycle
+        else SHARED_CONSTANTS["approval_timeout_s"]["max"]
+    )
     matchers = {
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[_pre])],
+        "PreToolUse": [
+            HookMatcher(
+                matcher=None,
+                hooks=[_pre],
+                timeout=callback_window_s + CLEANUP_MARGIN_120S,
+            )
+        ],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }

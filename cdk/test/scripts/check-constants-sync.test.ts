@@ -67,6 +67,7 @@ const FIXTURE_FILES = [
   'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
   'cdk/src/handlers/shared/microvm-image-capability.ts',
+  'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
 ];
 
 interface RunResult {
@@ -134,6 +135,8 @@ describe('check-constants-sync', () => {
     test.each([
       ['protocol_version', 0], ['protocol_version', 1.5], ['protocol_version', '1'],
       ['hook_port', 0], ['hook_port', 65536], ['hook_port', 8080.5],
+      ['maximum_duration_seconds', 0], ['maximum_duration_seconds', 28801],
+      ['maximum_duration_seconds', 28800.5], ['maximum_duration_seconds', '28800'],
       ['image_protocol_env', 'AWS_ACCESS_KEY_ID'], ['image_protocol_env', 'ABCA_MICROVM_bad'],
     ])('rejects invalid %s=%s', (key, value) => {
       const result = runInMutatedRepo(root => patchContract(root, json => {
@@ -144,6 +147,7 @@ describe('check-constants-sync', () => {
     });
     test.each([
       ['cdk/src/constructs/lambda-microvm-compute.ts', 'AGENT_HOOK_PORT', '8080'],
+      ['cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts', 'MICROVM_MAX_DURATION_SECONDS', '28_800'],
       ['cdk/src/constructs/lambda-microvm-compute.ts', 'LIFECYCLE_HOOK_TIMEOUT_SECONDS', '30'],
       ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
       ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],

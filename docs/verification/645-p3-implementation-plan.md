@@ -34,6 +34,24 @@ Initial isolated guest cases pass. These use a local production
 supervisor and manual guarded Suspend; deployed durable entrypoint, automatic
 suspension admission and the rest of the acceptance matrix remain open.
 
+**AWS durable follow-up (2026-09-15):** a
+[temporary isolated durable supervisor](./645-p3-durable-live-20260915.md)
+now exercises the production handler and automatic lifecycle policy in AWS.
+Eleven complete cases pass, including original-deadline timeout, cancellation
+during real process-crash recovery, worker death, live-switch rollback and
+wake after an actual supervisor outage past the approval deadline.
+Three approval wakes failed with a service-reported connection-refused error;
+a fresh retry passed, but the cause remains open. The long case renewed actual
+expired credentials, but its pending approval callback was abandoned before the
+original deadline, so overall acceptance failed. Temporary AWS fixtures have been
+removed. The [callback-timeout follow-up](./645-p3-callback-timeout.md) records the
+reproduction and local correction; its updated image still needs AWS validation.
+The [effective IAM follow-up](./645-effective-iam-20260915.md) adds
+37 actual AWS metadata checks, 10 S3 checks, and failure after real signer
+credential expiry. Public-object checks pair anonymous success with worker-signed
+denial. These results supersede corresponding untested items
+above without completing the full acceptance matrix.
+
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
 Oregon environment, four deployment fixes and actual verification results.
@@ -79,16 +97,18 @@ is superseded by these records.
 - [x] Require new ARN fields to participate in validation; pin contract fields and anchor (#817).
 - [x] Bind configuration to IAM-authenticated deployment manifests and use single-object payload links for ECS/MicroVM (#817 / #700).
 - [x] Verify MicroVM manifest/download transport, malformed or mismatched inputs, URL expiry/revocation, a foreign private-bucket denial and >1 MiB transport in AWS; verify concurrent/repeated/conflicting S3 preparation with operator credentials.
-- [ ] Complete v2 effective-role/public-bucket tests, expired signer credentials, coordinator recovery and the ECS/coordinated-rollout matrix in AWS.
+- [x] Verify deployed MicroVM-role metadata/S3 permissions, public-object denial and actual signer-credential expiry in AWS; see the [effective IAM evidence](./645-effective-iam-20260915.md) for scope.
+- [ ] Complete other-backend roles, runtime network paths and the ECS/coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
 - [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
 - [x] Verify production start/receipt/payload code against AWS with lost replies and local process death, saved-handle recovery, changed-input/cancellation refusal and actual receipt expiry.
-- [ ] Verify deployed durable-Lambda checkpoint/registration recovery and races, AWS behavior after token retention expires, and operator cleanup of genuinely unknown worker IDs.
+- [x] Verify real AWS durable replay after a saved worker receipt and process exit, including cancellation during recovery, in the isolated production-handler fixture.
+- [ ] Complete remaining durable registration races, AWS behavior after token retention expires, and operator cleanup of genuinely unknown worker IDs.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
 - [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
-- [ ] Verify metadata restrictions with real AWS sessions/transactions; retain status/tag trust limits.
+- [x] Verify metadata restrictions with real AWS task-tagged sessions and mixed transactions under the deployed MicroVM role; retain status/tag trust limits and the separate other-role gate.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
 - [x] Deploy a fresh bootstrap, application and managed image from current source; verify build hooks and API reads.
 - [x] Verify normal coding, PR iteration, Memory writes, live logging and successful/canceled-task cleanup in AWS; observe cancellation preserve another task's capacity.
@@ -108,6 +128,8 @@ is superseded by these records.
 - [x] Complete full repository validation with the P3 supervisor and live switch.
 - [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
+- [ ] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup.
+- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the three failed wakes.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -428,7 +450,9 @@ controller and `/run` reseed `random` using fresh OS entropy.
 The [guest barrier review](./645-p3-guest-barrier.md) records that controller
 milestone. The subsequent [HTTP hook implementation](./645-p3-lifecycle-hooks.md)
 now supplies production checkpoint and refresh/reconciliation callbacks. No image
-capability, new IAM grants or automatic sleep have been enabled.
+capability, new IAM grants or automatic sleep were enabled at that guest-barrier
+milestone. The later image, supervisor and live-verification milestones above
+record their implementation and deployment.
 
 **Credential implementation added locally (2026-09-14):** the
 [credential verification](./645-p3-credentials.md) records actual pinned-CLI

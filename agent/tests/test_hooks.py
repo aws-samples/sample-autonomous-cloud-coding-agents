@@ -726,6 +726,31 @@ class TestBuildHookMatchers:
         assert post_matcher.matcher is None
         assert len(post_matcher.hooks) == 1
 
+    @pytest.mark.parametrize("microvm", [False, True])
+    def test_callback_budget_outlives_approval_without_changing_its_deadline(self, microvm):
+        from hooks import _ApprovalDeadline
+        from microvm_lifecycle import register_task, unregister_task
+        from shared_constants import SHARED_CONSTANTS
+
+        context = register_task("callback-budget", "owned-vm") if microvm else None
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", task_default_timeout_s=30)
+        original = _ApprovalDeadline.from_recorded("2026-09-15T23:00:00Z", 30)
+        try:
+            matchers = build_hook_matchers(engine=engine, task_id="callback-budget")
+            protected_window = (
+                SHARED_CONSTANTS["microvm_lifecycle"]["maximum_duration_seconds"]
+                if microvm
+                else SHARED_CONSTANTS["approval_timeout_s"]["max"]
+            )
+            assert matchers["PreToolUse"][0].timeout > protected_window
+            assert engine.task_default_timeout_s == 30
+            assert original.wall_deadline == 1789513230
+            assert matchers["PostToolUse"][0].timeout is None
+            assert matchers["Stop"][0].timeout is None
+        finally:
+            if context:
+                unregister_task(context)
+
     def test_matchers_with_trajectory(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         # Pass None for trajectory — should still work

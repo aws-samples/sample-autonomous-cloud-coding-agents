@@ -26,6 +26,16 @@ The [image capability milestone](./645-p3-image-capability.md) (2026-09-15) decl
 
 The reservation review found a separate trust boundary: the old agent role could write/replace/delete its task row, including coordinator metadata. A subsequent local fix restricts main-task writes to reporting/approval attributes, removes replacement/deletion permissions and removes unused worker counter grants. It also removes unused Python submission/session-info helpers and corrects overstated tenant-isolation comments. [Metadata verification](./645-coordinator-metadata.md) records the tests and pending AWS gate. Status reports still come from the agent, and the compute role chooses session tags; this is not complete hostile-worker isolation.
 
+The [AWS durable follow-up](./645-p3-durable-live-20260915.md) records eleven
+passing cases, including real process-crash/cancellation recovery, automatic
+deadline wake, supervisor outage and coordinator-owned cleanup. Three approval
+wakes failed with a service-reported connection-refused error. A long frozen
+worker renewed expired task credentials but lost its approval callback; the
+[local callback fix](./645-p3-callback-timeout.md) still needs an updated image and
+fresh AWS acceptance. The [effective permissions record](./645-effective-iam-20260915.md)
+adds 37 metadata checks, 10 S3 checks and real signer-credential expiry.
+Production automatic suspension remains disabled.
+
 ## Start here: the pieces in plain language
 
 A **MicroVM** is a small, isolated computer rented from AWS. **Firecracker** is the technology that keeps these small computers separate. A **backend** is the kind of rented computer ABCA chooses to run a coding task.

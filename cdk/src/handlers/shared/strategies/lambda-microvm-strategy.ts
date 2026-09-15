@@ -107,7 +107,7 @@ const HTTP_REQUEST_TIMEOUT = 408;
  * so a Blueprint override would be policy without a driver; add one only if a
  * real need appears.
  */
-export const MICROVM_MAX_DURATION_SECONDS = 28_800;
+export const MICROVM_MAX_DURATION_SECONDS = sharedConstants.microvm_lifecycle.maximum_duration_seconds;
 
 /**
  * Hard service cap on ``runHookPayload`` (bytes), measured live rather than read
@@ -460,10 +460,10 @@ function assertImageArn(identifier: string): void {
  * control-plane state machine the orchestrator can observe through
  * {@link LambdaMicrovmComputeStrategy.pollSession}.
  *
- * P3 command primitives implement mandatory suspend/resume alongside the
- * explicit unsupported results in the other two strategies. The supervisor
- * must still supply gate policy, durable intent and state reconciliation
- * before automatic suspension can be enabled with compatible agent hooks.
+ * Suspend/resume submit service commands; the other two strategies return
+ * explicit unsupported results. microvm-supervisor supplies gate policy,
+ * durable intent and state reconciliation. Automatic suspension additionally
+ * requires compatible image hooks and enabled static/live rollout settings.
  */
 export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
   readonly type = 'lambda-microvm';

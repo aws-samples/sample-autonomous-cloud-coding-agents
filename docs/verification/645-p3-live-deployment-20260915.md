@@ -237,8 +237,13 @@ Private evidence directory: `/tmp/abca-645-p2-clean-20260913/`.
 - `p3-cancel-deployment-verified-20260915.json`: deployed code checksum.
 - `p3-guest-payload-cleanup-verified-20260915.json`: empty task-owned S3 prefixes.
 
-Remaining acceptance includes deployed durable
-replay/recovery, live suspension admission/rollback, credentials expiring while
-frozen, lifecycle fault/race injection, and the residual P2 effective-IAM,
-network and capacity/migration checks. These remain open in the
+The subsequent [AWS durable record](./645-p3-durable-live-20260915.md) adds
+automatic suspension, timeout, rollback, crash/cancellation recovery and cleanup
+evidence, plus an unresolved intermittent approval-wake failure.
+The [effective IAM record](./645-effective-iam-20260915.md) adds actual metadata
+and S3 permission checks plus real signer-credential expiry. The long durable
+case also proves scoped credential renewal after expiry, but exposes an
+[approval callback timeout](./645-p3-callback-timeout.md). Its updated-image
+verification, remaining lifecycle faults/deadline races, network and
+capacity/migration checks remain tracked in the
 [implementation plan](./645-p3-implementation-plan.md).
