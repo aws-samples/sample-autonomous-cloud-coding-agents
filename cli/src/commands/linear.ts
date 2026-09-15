@@ -1954,6 +1954,108 @@ export function makeLinearCommand(): Command {
   );
 
   linear.addCommand(
+    new Command('remove-workspace')
+      .description('Deregister a Linear workspace: revoke the registry row + delete its OAuth secret')
+      .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
+      .option('--purge', 'Delete the registry row entirely instead of keeping it with status=revoked (no audit trail)')
+      .option('--yes', 'Skip the slug-confirmation prompt (for scripted use)')
+      .action(async (slug: string, opts) => {
+        // Undoes `bgagent linear setup` / `add-workspace`. The destructive
+        // work (registry revoke, Secrets Manager delete) happens server-side
+        // behind a DELETE call so DDB / Secrets Manager grants stay on the
+        // API role, not on every CLI user's IAM identity. This mirrors
+        // `link`, which also delegates its writes to the backend rather than
+        // touching AWS directly.
+        //
+        // By default this is a SOFT removal: the registry row is flipped to
+        // status=revoked with revoked_reason=admin_removed (preserving the
+        // audit trail), so the workspace can no longer resolve a token or
+        // route webhooks the instant this returns. The resolver refuses every
+        // non-active row *except* one it re-probes — a `revoked` row whose
+        // reason is `vault_consent_required` — and `admin_removed` is
+        // deliberately not that reason, which is what makes an admin removal
+        // terminal rather than a latch a later vault probe can clear.
+        //
+        // Project→repo mappings are NOT touched: mapping rows carry no
+        // workspace id, so they can't be attributed to a workspace. Remove
+        // a mapping by project id (see LINEAR_SETUP_GUIDE).
+        if (!SLUG_RE.test(slug)) {
+          throw new CliError(
+            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+          );
+        }
+
+        const purge = Boolean(opts.purge);
+
+        // Slug-confirmation prompt (skipped by --yes). Typing the slug is a
+        // deliberate speed-bump before an irreversible teardown — the same
+        // "type the name to confirm" pattern used by destructive CLIs.
+        if (!opts.yes) {
+          console.log(`About to remove Linear workspace '${slug}'. This will:`);
+          console.log(purge
+            ? '  • DELETE the registry row entirely (no audit trail)'
+            : '  • Mark the registry row status=revoked (preserves audit trail)');
+          console.log(`  • Delete the Secrets Manager secret '${linearOauthSecretName(slug)}' if it exists`);
+          console.log('  • Leave project→repo mappings in place (remove those by project id)');
+          // Whether this workspace is vault-managed is only known server-side
+          // (it is a registry-row attribute), so the follow-up command can't be
+          // named until the response comes back — hence the warning here and
+          // the exact command after.
+          console.log('  • NOT delete an AgentCore credential provider, if this workspace is vault-managed');
+          console.log();
+          const confirm = (await promptLine('Type the workspace slug to confirm')).trim();
+          if (confirm !== slug) {
+            console.log('Aborted — the confirmation did not match the slug. Nothing was removed.');
+            return;
+          }
+        }
+
+        const client = new ApiClient();
+        const result = await client.linearRemoveWorkspace(slug, { purge });
+
+        console.log();
+        console.log(`✅ Workspace '${result.workspace_slug}' removed (${result.status}).`);
+        console.log(result.status === 'purged'
+          ? '  ✓ Registry row deleted'
+          : '  ✓ Registry row revoked');
+        // Three states, not a boolean: `absent` and `not_applicable` both mean
+        // "nothing was deleted here", but only `absent` means teardown is
+        // finished. A vault-managed workspace keeps its credential in an
+        // AgentCore OAuth2 credential provider that lives outside
+        // CloudFormation — `cdk destroy` will not remove it and it never shows
+        // up in `cdk diff`/drift — so leaving that as a silent "nothing to
+        // delete" strands a live, self-refreshing Linear grant.
+        switch (result.secret) {
+          case 'deleted':
+            console.log('  ✓ OAuth secret deleted');
+            break;
+          case 'absent':
+            console.log('  • OAuth secret was already absent (nothing to delete)');
+            break;
+          case 'not_applicable':
+            console.log('  • No Secrets Manager secret for this workspace — its credential is vault-managed');
+            break;
+        }
+        console.log('  • Project→repo mappings left in place — remove by project id if needed');
+
+        if (result.provider_name) {
+          // Printed verbatim from the response rather than re-derived from the
+          // slug: the provider name is chosen at onboarding time and the docs
+          // are not a reliable source for its prefix. Echoing the server's
+          // value keeps this command copy-pasteable even if that naming
+          // changes.
+          console.log();
+          console.log('⚠️  Teardown is NOT complete. This workspace is vault-managed, and its');
+          console.log('   AgentCore credential provider still holds the Linear client secret and a');
+          console.log('   live refresh grant. It is not managed by CloudFormation — delete it with:');
+          console.log();
+          console.log(`     aws bedrock-agentcore-control delete-oauth2-credential-provider --name ${result.provider_name}`);
+        }
+      }),
+  );
+
+  linear.addCommand(
     new Command('invite-user')
       .description('Generate a one-time code for a Linear teammate to redeem via `bgagent linear link <code>`')
       .argument('<slug>', 'Linear workspace urlKey (e.g. "acme" from linear.app/acme/...)')
