@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import type { SessionHandle } from './compute-strategy';
+import type { SessionControlOptions, SessionHandle } from './compute-strategy';
 import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
 import type { ApprovalStatus } from './types';
 import { makeDocClient } from './ua';
@@ -60,6 +60,9 @@ export interface MicrovmLifecycleSnapshot {
   readonly requestId: string | null;
   readonly intent?: MicrovmLifecycleIntent;
   readonly approval: LifecycleApproval;
+  /** Latest persisted guest heartbeat; used only to bound recovery liveness grace. */
+  readonly heartbeatAtMs?: number;
+  readonly taskStartedAtMs?: number;
 }
 
 export type SaveLifecycleResult =
@@ -74,6 +77,13 @@ const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME!;
 const APPROVAL_STATUSES: readonly ApprovalStatus[] = ['PENDING', 'APPROVED', 'DENIED', 'TIMED_OUT', 'STRANDED'];
 const LIVE_TASK_STATUSES: readonly TaskStatusType[] = [TaskStatus.HYDRATING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL];
+
+function storeSignal(options?: SessionControlOptions): AbortSignal {
+  const limit = AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS);
+  const signal = options?.abortSignal ? AbortSignal.any([limit, options.abortSignal]) : limit;
+  signal.throwIfAborted();
+  return signal;
+}
 
 function nonblank(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
@@ -112,9 +122,12 @@ function parseApproval(row: Record<string, unknown> | undefined, taskId: string,
 }
 
 /** Missing/non-MicroVM tasks are inapplicable. Invalid identity/state fails visibly. */
-export async function readMicrovmLifecycleSnapshot(taskId: string, userId: string): Promise<MicrovmLifecycleSnapshot | undefined> {
-  const abortSignal = AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS);
+export async function readMicrovmLifecycleSnapshot(
+  taskId: string, userId: string, options?: SessionControlOptions,
+): Promise<MicrovmLifecycleSnapshot | undefined> {
+  const abortSignal = storeSignal(options);
   const result = await ddb.send(new GetCommand({ TableName: TASK_TABLE, Key: { task_id: taskId }, ConsistentRead: true }), { abortSignal });
+  abortSignal.throwIfAborted();
   const task = result.Item;
   if (!task) return undefined;
   if (task.user_id !== userId || task.task_id !== taskId) throw new Error('MicroVM lifecycle task identity mismatch');
@@ -141,6 +154,7 @@ export async function readMicrovmLifecycleSnapshot(taskId: string, userId: strin
         Key: { task_id: taskId, request_id: requestId },
         ConsistentRead: true,
       }), { abortSignal });
+      abortSignal.throwIfAborted();
       approval = parseApproval(response.Item, taskId, userId, requestId);
     } catch (error) {
       // This explicit observation forbids suspend and permits conservative wake.
@@ -156,6 +170,10 @@ export async function readMicrovmLifecycleSnapshot(taskId: string, userId: strin
     requestId,
     approval,
     intent: task.microvm_lifecycle,
+    ...(typeof task.agent_heartbeat_at === 'string' && Number.isSafeInteger(Date.parse(task.agent_heartbeat_at))
+      && { heartbeatAtMs: Date.parse(task.agent_heartbeat_at) }),
+    ...(typeof task.started_at === 'string' && Number.isSafeInteger(Date.parse(task.started_at))
+      && { taskStartedAtMs: Date.parse(task.started_at) }),
     handle: {
       strategyType: 'lambda-microvm',
       sessionId: task.session_id,
@@ -188,6 +206,7 @@ function eligible(snapshot: MicrovmLifecycleSnapshot, action: LifecycleAction, n
  */
 export async function saveMicrovmLifecycleIntent(
   snapshot: MicrovmLifecycleSnapshot, action: LifecycleAction, nowMs = Date.now(),
+  options?: SessionControlOptions,
 ): Promise<SaveLifecycleResult> {
   if (!timestamp(nowMs)) throw new Error('MicroVM lifecycle time must be epoch milliseconds');
   if (!eligible(snapshot, action, nowMs)) return { status: 'ineligible' };
@@ -262,7 +281,9 @@ export async function saveMicrovmLifecycleIntent(
     ],
   });
   try {
-    await ddb.send(command, { abortSignal: AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS) });
+    const abortSignal = storeSignal(options);
+    await ddb.send(command, { abortSignal });
+    abortSignal.throwIfAborted();
     return { status: 'saved', intent };
   } catch (error) {
     const failure = error as { name?: string; CancellationReasons?: { Code?: string }[] };
@@ -270,7 +291,7 @@ export async function saveMicrovmLifecycleIntent(
       && failure.CancellationReasons?.some(reason => reason.Code === 'ConditionalCheckFailed')) return { status: 'stale' };
     // Lost committed reply: observe exactly our generation and unchanged task
     // identity before reporting success. Unknown/unreadable outcomes stay errors.
-    const current = await readMicrovmLifecycleSnapshot(snapshot.taskId, snapshot.userId);
+    const current = await readMicrovmLifecycleSnapshot(snapshot.taskId, snapshot.userId, options);
     if (current?.intent?.generation === intent.generation) {
       if (current.status === snapshot.status && current.requestId === snapshot.requestId
         && current.handle.microvmId === snapshot.handle.microvmId && current.handle.endpoint === snapshot.handle.endpoint

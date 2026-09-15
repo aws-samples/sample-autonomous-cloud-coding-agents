@@ -814,7 +814,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
     test.each([
       ['ResourceNotFoundException', 'info'],
-      ['ConflictException', 'info'],
+      ['ConflictException', 'warn'],
       ['ThrottlingException', 'error'],
       ['AccessDeniedException', 'error'],
       ['InternalServerException', 'warn'],
@@ -823,7 +823,10 @@ describe('LambdaMicrovmComputeStrategy', () => {
       err.name = errName;
       mockSend.mockRejectedValueOnce(err);
 
-      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toBeUndefined();
+      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toEqual(
+        errName === 'ResourceNotFoundException' ? { outcome: 'not-found' }
+          : { outcome: 'unconfirmed', error_type: errName },
+      );
 
       const byLevel: Record<string, jest.Mock> = {
         info: mockLogger.info,

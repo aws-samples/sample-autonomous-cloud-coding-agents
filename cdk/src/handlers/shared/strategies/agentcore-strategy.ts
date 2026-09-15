@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'crypto';
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -79,7 +79,8 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     };
   }
 
-  async pollSession(_handle: SessionHandle): Promise<SessionStatus> {
+  async pollSession(_handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
+    options?.abortSignal?.throwIfAborted();
     return { status: 'running' };
   }
 
@@ -93,17 +94,18 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     return { supported: false };
   }
 
-  async stopSession(handle: SessionHandle): Promise<void> {
+  async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<void> {
     if (handle.strategyType !== 'agentcore') {
       throw new Error('stopSession called with non-agentcore handle');
     }
     const { runtimeArn } = handle;
 
     try {
+      options?.abortSignal?.throwIfAborted();
       await getClient().send(new StopRuntimeSessionCommand({
         agentRuntimeArn: runtimeArn,
         runtimeSessionId: handle.sessionId,
-      }));
+      }), options);
       logger.info('AgentCore session stopped', { session_id: handle.sessionId });
     } catch (err) {
       const errName = err instanceof Error ? err.name : undefined;

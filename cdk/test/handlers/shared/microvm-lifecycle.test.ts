@@ -169,6 +169,34 @@ describe('MicroVM lifecycle policy', () => {
 });
 
 describe('MicroVM lifecycle store', () => {
+  test('an expired caller budget prevents reads, writes and lost-reply recovery', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('caller deadline'));
+    const options = { abortSignal: controller.signal };
+    await expect(readMicrovmLifecycleSnapshot('task', 'user', options)).rejects.toThrow('caller deadline');
+    await expect(saveMicrovmLifecycleIntent(snapshot(), 'resume', NOW, options)).rejects.toThrow('caller deadline');
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+  test('a task read finishing after the caller budget cannot start the approval read', async () => {
+    const controller = new AbortController();
+    mockSend.mockImplementationOnce(async () => {
+      controller.abort(new Error('caller deadline'));
+      return { Item: task };
+    });
+    await expect(readMicrovmLifecycleSnapshot('task', 'user', { abortSignal: controller.signal }))
+      .rejects.toThrow('caller deadline');
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+  test('a write finishing after the caller budget cannot start another recovery budget', async () => {
+    const controller = new AbortController();
+    mockSend.mockImplementationOnce(async () => {
+      controller.abort(new Error('caller deadline'));
+      return {};
+    });
+    await expect(saveMicrovmLifecycleIntent(snapshot(), 'resume', NOW, { abortSignal: controller.signal }))
+      .rejects.toThrow('caller deadline');
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
   test('a cancelled task may retain its gate pointer and needs no approval read', async () => {
     mockSend.mockResolvedValueOnce({ Item: { ...task, status: 'CANCELLED' } });
     const closed = await readMicrovmLifecycleSnapshot('task', 'user');

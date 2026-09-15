@@ -84,7 +84,7 @@ focused reruns. There was no production-code failure in that run.
 
 ## Remaining completion gates
 
-Connect durable supervisor recovery and approval-triggered wake, then deploy and
+Durable supervisor recovery and approval-triggered wake are now [connected locally](./645-p3-supervisor.md). Next deploy and
 test the matching coordinator/image together. Verify effective image-read and
 lifecycle permissions, actual service hooks, expired credentials, approval and
 cancellation races, failures and cleanup in AWS. The

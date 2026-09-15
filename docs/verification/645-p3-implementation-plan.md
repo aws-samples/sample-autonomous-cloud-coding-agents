@@ -1,6 +1,6 @@
 # ADR-021 P3 implementation and completion plan
 
-Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read the [review](./645-p3-readiness-review.md) for evidence and the beginner introduction. This document proposes work; it does not mark P3 as implemented.
+Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read the [review](./645-p3-readiness-review.md) for evidence and the beginner introduction. This document tracks implementation and validation; local completion does not mark P3 live acceptance complete.
 
 ## Implementation progress
 
@@ -15,14 +15,15 @@ budgets are 20/30 seconds. At this milestone, image capability and supervisor
 integration remained open.
 No deployment or automatic suspension was enabled in this milestone.
 
-**Latest local P3 milestone (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md)
+**Image milestone (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md)
 now declares all six hooks and the shared protocol marker. The coordinator saves
 the worker handle first, verifies the exact returned image ARN/version, then
 conditionally records support in both start receipt and compute metadata. Missing
 or unreadable support permits normal coding and disables new suspension. Database
 race tests reject changed identities and recover a committed capability after a
-lost reply. Durable supervisor integration, approval-triggered wake and live
-sleep/wake verification remain open; no deployment or automatic sleep was enabled.
+lost reply. No deployment or automatic sleep was enabled in that milestone.
+
+**Supervisor milestone (2026-09-15):** [production supervision and approval wake](./645-p3-supervisor.md) now connect the policy/store to durable polling and post-commit approve/deny handlers. Recovery clocks and the original service lifetime survive replay; failed wake and cleanup remain visible. The rollout flag defaults off and uses a live Parameter Store switch for existing durable executions. Full repository validation passes (5,028 CDK, 1,951 Python and 928 CLI tests); all live P3 gates remain open.
 
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
@@ -93,8 +94,10 @@ is superseded by these records.
 - [x] Add the guest pause controller, original-gate registration, parallel-tool tracking, progress acknowledgment tracking, heartbeat/read drain and generation-guarded wake completion; reseed the application PRNG at run and controller resume.
 - [x] Add production agent hooks with acknowledged checkpoints, retained ambient/tenant credential renewal, a sole scoped Claude provider and atomic task/gate reconciliation; verify duplicates, original deadlines, timeout and teardown behavior locally.
 - [x] Declare compatible image hooks using shared budgets and bind lifecycle capability to the actual image/version used by each worker; keep automatic sleep disabled until integration/live acceptance.
-- [ ] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
-- [ ] Connect supervisor and approval handlers, then verify the complete P3 sleep/wake lifecycle in AWS.
+- [x] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
+- [x] Connect post-commit approval wake, bounded diagnostics/cleanup, the default-off rollout flag and scoped IAM.
+- [x] Complete full repository validation with the P3 supervisor and live switch.
+- [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -172,7 +175,7 @@ Second P3 foundation batch implemented locally (2026-09-13):
 - Added explicit `microvmState` observations without changing existing coarse status/reason semantics, plus a policy helper for grace, useful sleep, pre-deadline wake, image/enable guards, missing/unreadable data, cancellation and delayed suspend-after-wake races.
 - DynamoDB Local verifies actual transaction conditions, rollback, competing writers, changed identities, lost committed replies, cancellation/decision during recovery and a fresh module/client loading saved intent. See the [lifecycle runbook](./645-lifecycle-intent.md) for protocol and remaining integration/deployment gates.
 - CDK lint/compilation passed. The broad handler/session-role run passed **158 suites / 3,738 tests**, including **23 lifecycle** and **15 existing capacity** DynamoDB Local tests. Five relevant suites passed **218 overlapping tests** and exited normally. The broad run exited successfully after a delay (about 72 seconds total versus 17.5 seconds reported test execution), with no open-handle trace; its cause is not established. Documentation sync, the **77-page** build and link checks pass. No Python source changed. The temporary local database was removed.
-- No production caller uses this policy/store yet. No IAM grants, image hooks or automatic suspension were enabled. Durable poll failure/recovery tracking, guest barriers, supervisor/decision-handler wiring and live AWS gates remain unfinished.
+- At that foundation milestone, no production caller used this policy/store. No IAM grants, image hooks or automatic suspension were enabled. Durable poll failure/recovery tracking, guest barriers, supervisor/decision-handler wiring and live AWS gates remain unfinished.
 
 ## The result we want
 
@@ -334,7 +337,7 @@ The writer inventory found no production callers of Python `write_submitted` or 
 
 ## 3. Re-prove P2 on the final infrastructure
 
-Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.7.0 for this source, including exact-self CloudFormation PassRole, or a newer required bundle). Compare effective policies as well as the displayed version. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
+Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.8.0 for this source, including exact-self CloudFormation PassRole and the scoped live-suspension parameter permissions, or a newer required bundle). Compare effective policies as well as the displayed version. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
 
 The [2026-09-13–14 clean deployment](./645-p2-clean-deployment-20260913.md)
 completed the infrastructure, managed-image creation and build-hook checks in
@@ -378,11 +381,11 @@ The installed SDK returns empty suspend/resume responses. Its observed states ar
 
 **Implemented locally:** `microvm-lifecycle.ts` stores a typed optional record on the existing task row, separate from `compute_metadata`. It includes format version, generation, VM/gate identity, desired action, original timestamp and deadline. Conditions guard owner/status/gate/handle/generation; suspend atomically checks the same PENDING approval row and unchanged deadline inputs. A wake cannot become a sleep for that gate, and retaining the record prevents an older absent-record snapshot from recreating a sleep intent. A new gate may establish a new generation. No credentials or bearer URLs are stored.
 
-**Still required:** persist failure counters/backoff, anomaly episodes and bounded wake recovery in durable poll-loop state so Lambda replay does not reset them. Repeated intent saves already retain the original timestamp/generation. The record is internal and has no public task API field. Database success is not a lock over a later AWS command: reread before suspend and reconcile after every command outcome.
+**Implemented locally:** the durable supervisor persists failure counters, anomaly episodes, next-poll delay and fixed recovery/session deadlines. Lambda replay does not reset them. Repeated intent saves already retain the original timestamp/generation. The record is internal and has no public task API field. Database success is not a lock over a later AWS command: reread before suspend and reconcile after every command outcome.
 
-**Implemented as an unwired helper:** the policy combines task status, the **specific current approval row's status**, desired action, explicit VM state and current time. PENDING alone is not a reason to resume. All terminal approval states, deadline proximity, missing/unreadable data or unintended suspension can require wake. SUSPENDING records desired wake but returns `requestReady: false` until SUSPENDED is observed.
+**Connected to the durable supervisor:** the policy combines task status, the **specific current approval row's status**, desired action, explicit VM state and current time. PENDING alone is not a reason to resume. All terminal approval states, deadline proximity, missing/unreadable data or unintended suspension can require wake. SUSPENDING records desired wake but returns `requestReady: false` until SUSPENDED is observed.
 
-Initial local policy values: 30-second suspend grace, 60-second pre-deadline wake margin, 30-second minimum useful sleep and at most 5-second transition polling. Long intervals are clamped to the relevant grace/wake/session deadline. These are tunable choices requiring live measurement, not AWS facts. Three consecutive poll failures before escalation remains proposed supervisor work. The future integration must bound its whole operation, including the store's 5-second request/read-sequence budgets and any lost-reply recovery.
+Initial local policy values: 30-second suspend grace, 60-second pre-deadline wake margin, 30-second minimum useful sleep and at most 5-second transition polling. Long intervals are clamped to the relevant grace/wake/session deadline. These are tunable choices requiring live measurement, not AWS facts. The supervisor now escalates after three consecutive failed cycles and bounds the entire cycle to 45 seconds, including the store's 5-second request/read-sequence budgets and lost-reply recovery. Wake/unknown recovery is bounded to 120 seconds and startup to 300 seconds; see the supervisor runbook for the complete budgets.
 
 ### State/action table
 
@@ -437,27 +440,27 @@ The production HTTP resume callback now invokes this refresh before any AWS read
 
 ### Orchestrator
 
-Implement the state/action table in a small testable policy/reconciliation helper called by the durable poll loop. Read current gate identity/status/deadline consistently. Record intent before requesting suspension; reread after uncertain outcomes and after suspend success to catch an approval that won concurrently. API acknowledgement is not final VM state: poll it.
+**Implemented locally; live acceptance pending.** The production path implements the state/action table in a small testable policy/reconciliation helper called by the durable poll loop. Read current gate identity/status/deadline consistently. Record intent before requesting suspension; reread after uncertain outcomes and after suspend success to catch an approval that won concurrently. API acknowledgement is not final VM state: poll it.
 
 An approval can arrive before a pending suspend finishes. Even if an inline resume sees “already running,” the orchestrator must later notice that the machine became suspended and wake it. Do not clear durable wake intent merely because one API call appeared successful.
 
 When `ResumeMicrovm` is acknowledged but a subsequent observation does not yet confirm `RUNNING`, keep reconciling within a bounded recovery interval. Do not invent a `RESUMING` service state or treat an unknown/coarse state as confirmation. Defer the pre-suspend stale-heartbeat check only within that bound. When the agent restores task RUNNING, use the fresh timestamp from prerequisite 1C. Never exempt genuine crashed RUNNING tasks indefinitely.
 
-Add consecutive MicroVM poll-error tracking. Reset on successful observations; classify permanent failures separately from transient ones. At the chosen threshold, perform a final consistent task read, record an explicit infrastructure failure and finalize/terminate through the existing single-owner path. Emit recovery/orphan diagnostics when termination itself fails; do not silently lose the handle. Keep suspend failures distinguishable from lost compute: failure to save money can leave a task safely awake, whereas failure to wake threatens correctness and needs bounded escalation.
+Consecutive MicroVM poll-error tracking resets after a complete successful observation cycle; classify permanent failures separately from transient ones. At the chosen threshold, perform a final consistent task read, record an explicit infrastructure failure and finalize/terminate through the existing single-owner path. Emit recovery/orphan diagnostics when termination itself fails; do not silently lose the handle. Keep suspend failures distinguishable from lost compute: failure to save money can leave a task safely awake, whereas failure to wake threatens correctness and needs bounded escalation.
 
 ### Approve and deny handlers
 
-After the existing authorization checks and decision transaction **commit**, use a shared helper to load `compute_metadata` with a strongly consistent task read. Validate compute type, complete handle and current task/gate identity. For MicroVM, request resume with a short bound. No HTTP call to the guest is necessary.
+**Implemented locally; live acceptance pending.** After the existing authorization checks and decision transaction **commit**, use a shared helper to load `compute_metadata` with a strongly consistent task read. Validate compute type, complete handle and current task/gate identity. For MicroVM, request resume with a short bound. No HTTP call to the guest is necessary.
 
 Missing handle, read failure, wrong/terminal state or resume failure must produce a warning and a structured resume-orphan event (include task ID, gate ID, VM ID when known, stage, reason and safe AWS request ID). Audit-event failure is also best-effort. **None of these post-commit failures may turn a successful decision into a 500 or undo the transaction.** Preserve the current response/status and ownership/already-decided/wrong-gate protections. The poll loop is the repair path. The current API has no independent wall-clock expiry check: the agent owns TIMED_OUT, and the first committed decision wins. Strict API expiry would be a separate behavior change.
 
 ### IAM and deployment
 
-Grant orchestrator SuspendMicrovm/ResumeMicrovm on the exact configured image ARN and required version suffix, alongside its existing lifecycle actions. Grant approve/deny ResumeMicrovm, and GetMicrovm only if the shared wake helper uses it, with the same image scope. Do not grant these actions to the agent execution role. Add no token-minting, broad role-passing or network ingress permission.
+**Implemented in CDK; effective AWS permissions pending.** Grant orchestrator SuspendMicrovm/ResumeMicrovm on the exact configured image ARN and required version suffix, alongside its existing lifecycle actions. Grant approve/deny ResumeMicrovm, and GetMicrovm only if the shared wake helper uses it, with the same image scope. Do not grant these actions to the agent execution role. Add no token-minting, broad role-passing or network ingress permission.
 
 Verify the lifecycle store's DynamoDB permissions too: task GetItem/UpdateItem and approval GetItem/ConditionCheckItem for the supervisor's cross-table suspend transaction. Confirm environment wiring for both table names and test effective permissions. Worker writes to `microvm_lifecycle` must remain excluded.
 
-Check `task-api.ts`'s lazy image-ARN wiring and no-image branch, bootstrap deployment-role coverage, tests/suppressions and CloudFormation resource counts. Image-hook changes and runtime hook serving must deploy together; automatic suspension remains off until the compatible image is ready. Provide an operational disable switch that stops **new suspends while still allowing resume, timeout handling and termination** for already-sleeping tasks.
+Check `task-api.ts`'s lazy image-ARN wiring and no-image branch, bootstrap deployment-role coverage, tests/suppressions and CloudFormation resource counts. Image-hook changes and runtime hook serving must deploy together; automatic suspension remains off until the compatible image is ready. The `microvm_approval_suspend_enabled` context defaults false and sets both the static opt-in and a live SSM parameter. Durable executions pin their original environment, so rollback must verify the live parameter is false to stop new suspends in existing executions. Resume, timeout handling and termination remain available. See the [supervisor runbook](./645-p3-supervisor.md#deployment-configuration-and-permissions) for drift/rollback details. Deploy matching source/image with false before controlled opt-in.
 
 ## 7. Acceptance matrix and completion gates
 

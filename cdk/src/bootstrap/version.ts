@@ -55,8 +55,11 @@ import { allPolicies } from './policies';
  * for nested stacks (#645 clean deployment). The policy hash now includes that
  * inline policy and every nested JSON field; the old root-key replacer omitted
  * Action/Resource/Condition changes from its input.
+ *
+ * 1.7.0 → 1.8.0 adds scoped SSM parameter lifecycle/tag permissions for the P3
+ * MicroVM suspension switch. Re-bootstrap before deploying the live parameter.
  */
-export const BOOTSTRAP_VERSION = '1.7.0';
+export const BOOTSTRAP_VERSION = '1.8.0';
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);

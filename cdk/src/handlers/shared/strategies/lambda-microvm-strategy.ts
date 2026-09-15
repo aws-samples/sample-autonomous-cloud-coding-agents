@@ -31,9 +31,10 @@ import {
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
 import sharedConstants from '../../../../../contracts/constants.json';
-import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus, SessionStopResult } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
+import { microvmErrorIdentity } from '../microvm-control';
 import {
   MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
   readMicrovmImageMetadata, verifyMicrovmImageLifecycle,
@@ -53,6 +54,13 @@ function getClient(): LambdaMicrovmsClient {
 
 /** Bound a control request, not the transition itself. A timeout needs reconciliation. */
 export const MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS = 10_000;
+
+function controlSignal(options?: SessionControlOptions): AbortSignal {
+  const limit = AbortSignal.timeout(MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS);
+  const signal = options?.abortSignal ? AbortSignal.any([limit, options.abortSignal]) : limit;
+  signal.throwIfAborted();
+  return signal;
+}
 
 /**
  * Fully-qualified MicroVM image **ARN** passed as `imageIdentifier` on every
@@ -368,6 +376,8 @@ function wrapMicrovmError(operation: string, err: unknown): Error {
     : message;
   const safeCause = new Error(message);
   safeCause.name = name ?? 'Error';
+  const requestId = microvmErrorIdentity(err).aws_request_id;
+  if (requestId) Object.assign(safeCause, { $metadata: { requestId } });
   return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: safeCause });
 }
 
@@ -682,7 +692,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * Report the substrate's view of the session — MECHANICALLY. No task-state
    * interpretation happens here (ADR-021 sub-decision 1): this method sees only
    * the handle, so the health rules that need the task's DynamoDB status live in
-   * the orchestrator (``reconcileMicrovmSubstrateState``).
+   * the durable supervisor (``superviseMicrovm``).
    *
    * State mapping:
    *   - ``PENDING`` / ``RUNNING`` → ``running`` (PENDING is still booting, the
@@ -718,7 +728,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * its remedy suggested. Reporting the reason keeps this method mechanical (no
    * branch reads it) while giving the orchestrator something true to say.
    */
-  async pollSession(handle: SessionHandle): Promise<SessionStatus> {
+  async pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error('pollSession called with non-lambda-microvm handle');
     }
@@ -726,11 +736,20 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     let state: string | undefined;
     let stateReason: string | undefined;
+    let lifetime: Pick<SessionStatus, 'microvmStartedAtMs' | 'microvmMaximumDurationSeconds'> = {};
     try {
       const result = await getClient().send(new GetMicrovmCommand({
         microvmIdentifier: microvmId,
-      }));
+      }), { abortSignal: controlSignal(options) });
       state = result.state;
+      const startedAtMs = result.startedAt instanceof Date ? result.startedAt.getTime() : NaN;
+      if (Number.isSafeInteger(startedAtMs) && startedAtMs >= 0
+        && Number.isSafeInteger(result.maximumDurationInSeconds) && result.maximumDurationInSeconds! > 0) {
+        lifetime = {
+          microvmStartedAtMs: startedAtMs,
+          microvmMaximumDurationSeconds: result.maximumDurationInSeconds,
+        };
+      }
       // `Success.` is the service's own "nothing to report" value on a clean
       // termination — carrying it would append noise to every healthy task's
       // detail string, so it is normalized away here rather than filtered at
@@ -773,10 +792,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     switch (state) {
       case MicrovmState.PENDING:
       case MicrovmState.RUNNING:
-        return { status: 'running', microvmState: state, ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.SUSPENDING:
       case MicrovmState.SUSPENDED:
-        return { status: 'suspended', microvmState: state, ...(stateReason && { reason: stateReason }) };
+        return { status: 'suspended', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.TERMINATING:
       case MicrovmState.TERMINATED:
         if (stateReason) {
@@ -790,14 +809,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
             state_reason: stateReason,
           });
         }
-        return { status: 'completed', microvmState: state, ...(stateReason && { reason: stateReason }) };
+        return { status: 'completed', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       default:
         logger.warn('Unrecognized MicroVM state — reporting running', {
           microvm_id: microvmId,
           state,
           ...(stateReason && { state_reason: stateReason }),
         });
-        return { status: 'running', microvmState: 'UNKNOWN', ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: 'UNKNOWN', ...lifetime, ...(stateReason && { reason: stateReason }) };
     }
   }
 
@@ -816,26 +835,27 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * ``stateReason`` — nothing self-terminates, so nothing cleans up if the
    * orchestrator does not.
    */
-  async stopSession(handle: SessionHandle): Promise<void> {
+  async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error('stopSession called with non-lambda-microvm handle');
     }
-    await this.terminateBestEffort(handle.microvmId, 'session stop');
+    return this.terminateBestEffort(handle.microvmId, 'session stop', options);
   }
 
   /** Submit a suspend request; the caller owns gate checks and state reconciliation. */
-  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
-    return this.requestLifecycle('suspendSession', handle);
+  async suspendSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('suspendSession', handle, options);
   }
 
   /** Submit a resume request; acknowledgement alone does not establish RUNNING. */
-  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
-    return this.requestLifecycle('resumeSession', handle);
+  async resumeSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('resumeSession', handle, options);
   }
 
   private async requestLifecycle(
     operation: 'suspendSession' | 'resumeSession',
     handle: SessionHandle,
+    options?: SessionControlOptions,
   ): Promise<SessionLifecycleResult> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error(`${operation} called with non-lambda-microvm handle`);
@@ -848,7 +868,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     try {
       await getClient().send(
         suspend ? new SuspendMicrovmCommand(request) : new ResumeMicrovmCommand(request),
-        { abortSignal: AbortSignal.timeout(MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS) },
+        { abortSignal: controlSignal(options) },
       );
     } catch (error) {
       // Includes Conflict/NotFound: neither proves the desired state was reached.
@@ -872,40 +892,41 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * @param reason - why we are terminating, for the log line (the orphan-reap and
    *   the ordinary finalize path are worth telling apart in CloudWatch).
    */
-  private async terminateBestEffort(microvmId: string, reason: string): Promise<void> {
+  private async terminateBestEffort(microvmId: string, reason: string, options?: SessionControlOptions): Promise<SessionStopResult> {
     try {
       await getClient().send(new TerminateMicrovmCommand({
         microvmIdentifier: microvmId,
-      }));
-      logger.info('Lambda MicroVM terminated', { microvm_id: microvmId, reason });
+      }), { abortSignal: controlSignal(options) });
+      logger.info('Lambda MicroVM termination requested', { microvm_id: microvmId, reason });
+      return { outcome: 'requested' };
     } catch (err) {
-      const errName = err instanceof Error ? err.name : undefined;
-      if (errName === 'ResourceNotFoundException' || errName === 'ConflictException') {
-        // Already terminated (reaped) or already TERMINATING — the desired end
-        // state either way. ConflictException joins the info branch because a
-        // concurrent terminate (orchestrator finalize racing a user cancel) is
-        // routine here, and warning on it would train operators to ignore warns.
-        logger.info('MicroVM already terminated or terminating', {
+      const identity = microvmErrorIdentity(err);
+      const errName = identity.error_type;
+      if (errName === 'ResourceNotFoundException') {
+        logger.info('MicroVM no longer found during termination', {
           microvm_id: microvmId,
           reason,
           error_type: errName,
         });
+        return { outcome: 'not-found' };
       } else if (errName === 'ThrottlingException' || errName === 'AccessDeniedException') {
         // A throttle or a missing lambda:TerminateMicrovm grant means the VM is
         // probably STILL RUNNING and billing — escalate.
         logger.error('Failed to terminate MicroVM', {
           microvm_id: microvmId,
           reason,
-          error_type: errName,
-          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
+          ...identity,
         });
       } else {
         logger.warn('Failed to terminate MicroVM (best-effort)', {
           microvm_id: microvmId,
           reason,
-          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
+          ...identity,
         });
       }
+      // Conflict can mean another lifecycle operation is in flight. It does not
+      // prove termination; retain that uncertainty for caller orphan reporting.
+      return { outcome: 'unconfirmed', ...identity };
     }
   }
 }

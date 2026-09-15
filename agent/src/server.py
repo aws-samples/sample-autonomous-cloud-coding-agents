@@ -842,7 +842,7 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 
 
 # --------------------------------------------------------------------------
-# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 + P2)
+# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 through P3)
 # --------------------------------------------------------------------------
 # The MicroVM backend has NO orchestrator→agent HTTP path: the task payload
 # arrives as the ``/run`` hook's request body and nothing else dials in. The
@@ -850,8 +850,8 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # (8080 — the same uvicorn process that serves /invocations and /ping), so the
 # hooks live here rather than in a sidecar.
 #
-# Six hooks are served; image declaration/capability and supervisor wiring for
-# ``/suspend`` + ``/resume`` remain a separate P3 rollout step:
+# Six hooks are served and declared in managed images. The supervisor checks the
+# launched version's capability and rollout settings before requesting suspension:
 #   * ``/ready`` (build, P1) is MANDATORY. ``CreateMicrovmImage`` refuses an image
 #     that enables ANY lifecycle hook without it ("The ready (/ready) MicroVM
 #     image hook must be enabled when any MicroVM lifecycle hook … is enabled"),

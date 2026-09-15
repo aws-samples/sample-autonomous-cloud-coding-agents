@@ -1,6 +1,6 @@
 # MicroVM lifecycle intent: local implementation and verification
 
-Status: implemented locally on 2026-09-13, **not connected to automatic suspension or deployed**. This is the next foundation after `f3e684d4`. The [P3 checklist](./645-p3-implementation-plan.md) tracks the remaining integration and live gates.
+Status: foundation implemented locally on 2026-09-13; [production supervisor/API integration](./645-p3-supervisor.md) added on 2026-09-15. **Not deployed; new suspension defaults off.** This is the next foundation after `f3e684d4`. The [P3 checklist](./645-p3-implementation-plan.md) tracks the remaining integration and live gates.
 
 ## In plain language
 
@@ -11,7 +11,7 @@ Each instruction has a unique revision stamp. A supervisor holding an older stam
 ## What the code does
 
 - `cdk/src/handlers/shared/microvm-lifecycle.ts` reads the task and its current approval consistently, validates identity, and saves intent with database conditions.
-- `cdk/src/handlers/shared/microvm-lifecycle-policy.ts` chooses an action from observations. It makes no AWS calls or human decisions. Its returned action is a recommendation for the future supervisor integration.
+- `cdk/src/handlers/shared/microvm-lifecycle-policy.ts` chooses an action from observations. It makes no AWS calls or human decisions. Its returned action is reconciled by the durable supervisor.
 - `SessionStatus.microvmState` carries explicit MicroVM state alongside the existing coarse status. Known SDK states are preserved; absent/future states become local `UNKNOWN`, and a not-found response becomes local `NOT_FOUND`. These last two are observations defined by this application, not service states. Existing status/reason behavior is preserved.
 
 The internal `microvm_lifecycle` task attribute contains:
@@ -56,7 +56,7 @@ A caller supplies valid times, session expiry, its normal poll interval and an e
 
 A PENDING approval alone is not a wake condition. An intended suspended VM can wait while there is sufficient time. APPROVED, DENIED, TIMED_OUT, STRANDED, deadline proximity, missing/invalid data or unintended suspension require wake/recovery. While the service reports SUSPENDING, save desired resume but return `requestReady: false`; issue ResumeMicrovm only after observing SUSPENDED. A wake acknowledgement followed by a delayed old suspend remains repairable because wake intent is retained.
 
-Terminal/cancelled/finalizing tasks cannot resume. Terminal VM observations go through existing task reconciliation. PENDING/UNKNOWN or a legacy coarse `running` result cannot authorize suspend or confirm wake. Persistent failures/unconfirmed states still need bounded escalation in the supervisor.
+Terminal/cancelled/finalizing tasks cannot resume. Terminal VM observations go through existing task reconciliation. PENDING/UNKNOWN or a legacy coarse `running` result cannot authorize suspend or confirm wake. The supervisor now bounds persistent failures and unconfirmed recovery across serialized polls.
 
 ## Verification and deployment gates
 
@@ -76,7 +76,7 @@ Before enabling automatic sleep:
 
 1. Complete a clean P2 deployment/rerun, including the earlier bootstrap, metadata, capacity and managed-image gates. Follow the coordinated v2 drain/rollout procedure.
 2. Implement guest lifecycle context, acknowledged progress durability, credential refresh preserving task identity, resume barriers and snapshot randomness handling. Reuse the original approval deadline.
-3. Connect policy/store to durable supervisor polling, preserving counters, backoff, anomaly episodes and a bounded wake-recovery clock. Handle stale results by observing again. Never reset the recovery clock on repeated saves.
+3. **Implemented locally:** policy/store are connected to durable supervisor polling, preserving counters, next-poll delay, anomaly episodes and a bounded wake-recovery clock. Handle stale results by observing again. Never reset the recovery clock on repeated saves.
 4. Connect approve/deny after the decision commits, with bounded best-effort wake and repair diagnostics. Preserve current decision responses on wake failure.
 5. Add and verify the coordinator's required task/approval transaction permissions and scoped MicroVM lifecycle grants. Grant no lifecycle action or intent-write permission to workers. Check the total handler time budget, not only each individual call.
 6. Deploy compatible hooks/image and coordinator together with automatic suspension initially disabled. Validate actual transition/conflict/timeout behavior and then the full P3 acceptance matrix in an isolated development deployment.

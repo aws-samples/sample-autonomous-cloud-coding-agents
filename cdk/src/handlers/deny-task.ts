@@ -19,11 +19,13 @@
 
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import { PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { scanDenyReason } from './shared/deny-reason-scanner';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
+import { APPROVAL_AUDIT_TIMEOUT_MS, approvalPostCommitOptions, wakeMicrovmAfterApproval } from './shared/microvm-approval-wake';
+import { microvmErrorIdentity } from './shared/microvm-control';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
@@ -62,7 +64,10 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
  * @param event - API Gateway proxy event.
  * @returns API Gateway proxy result.
  */
-export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+export async function handler(
+  event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
+): Promise<APIGatewayProxyResult> {
+  const invocationStartedMs = Date.now();
   const requestId = ulid();
 
   try {
@@ -186,8 +191,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
+    const postCommit = approvalPostCommitOptions(invocationStartedMs, context);
     // 5. Audit event.
     try {
+      const abortSignal = AbortSignal.any([postCommit.abortSignal!, AbortSignal.timeout(APPROVAL_AUDIT_TIMEOUT_MS)]);
+      abortSignal.throwIfAborted();
       await ddb.send(new PutCommand({
         TableName: EVENTS_TABLE_NAME,
         Item: {
@@ -204,12 +212,43 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             caller_user_id: callerUserId,
           },
         },
-      }));
+      }), { abortSignal });
     } catch (auditErr) {
       logger.warn('approval_decision_recorded audit write failed (decision already committed)', {
         task_id: taskId,
         request_id,
-        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+        ...microvmErrorIdentity(auditErr),
+      });
+    }
+
+    // Wake is best-effort after commit. Even an unexpected helper failure must
+    // not turn an accepted human decision into an HTTP failure.
+    try {
+      await wakeMicrovmAfterApproval({
+        taskId,
+        userId: callerUserId,
+        requestId: request_id,
+        decision: 'DENIED',
+        options: postCommit,
+        emitEvent: async (eventType, metadata, options) => {
+          options.abortSignal?.throwIfAborted();
+          await ddb.send(new PutCommand({
+            TableName: EVENTS_TABLE_NAME,
+            Item: {
+              task_id: taskId,
+              user_id: callerUserId,
+              event_id: ulid(),
+              event_type: eventType,
+              timestamp: new Date().toISOString(),
+              ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
+              metadata,
+            },
+          }), options);
+        },
+      });
+    } catch (wakeError) {
+      logger.warn('MicroVM wake helper failed after decision commit', {
+        task_id: taskId, request_id, ...microvmErrorIdentity(wakeError),
       });
     }
 

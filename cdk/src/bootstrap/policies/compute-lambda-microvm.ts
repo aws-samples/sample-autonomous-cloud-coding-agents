@@ -157,6 +157,21 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
           'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
         ],
       }),
+      // A shared value is required because durable executions retain their
+      // original Lambda version/environment. This grants only deploy-time
+      // management of the MicroVM switch, outside CDK's bootstrap namespace.
+      new iam.PolicyStatement({
+        sid: 'MicrovmSuspendConfiguration',
+        actions: [
+          'ssm:GetParameters',
+          'ssm:PutParameter',
+          'ssm:DeleteParameter',
+          'ssm:AddTagsToResource',
+          'ssm:RemoveTagsFromResource',
+          'ssm:ListTagsForResource',
+        ],
+        resources: ['arn:aws:ssm:*:*:parameter/backgroundagent-*/microvm-approval-suspend-enabled'],
+      }),
     ],
   });
 }

@@ -20,10 +20,11 @@
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
-import { MicrovmStartUncertainError } from './shared/error-classifier';
+import { formatMicrovmTerminalFailure, MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
+import { stopMicrovmWithDiagnostics, superviseMicrovm } from './shared/microvm-supervisor';
 import {
   admissionControl,
   buildComputeMetadata,
@@ -36,7 +37,6 @@ import {
   loadTask,
   pollTaskStatus,
   queueTask,
-  reconcileMicrovmSubstrateState,
   transitionTask,
   type PollState,
 } from './shared/orchestrator';
@@ -375,10 +375,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
-  // Kept as a SEPARATE local rather than widening `computeStrategy`'s condition:
-  // the ECS cross-check below is gated on `computeStrategy` truthiness, so
-  // reusing that local for lambda-microvm would route MicroVM polls through the
-  // ECS exit-code/patience logic. Two locals keep the ECS path byte-identical.
+  // ECS crash checks and MicroVM lifecycle supervision have separate policies.
   const microvmStrategy = blueprintConfig.compute_type === 'lambda-microvm'
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
@@ -388,18 +385,40 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
   // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
   // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
-  // HYDRATING without transition to RUNNING is still bounded by MAX_NON_RUNNING_POLLS (~5min).
+  // ECS/AgentCore retain their poll-count startup/total bounds. MicroVM uses
+  // persisted wall-clock deadlines so faster transition polls cannot shorten a session.
 
   const finalPollState = await context.waitForCondition<PollState>(
     'await-agent-completion',
     async (state) => {
+      if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
+        const supervised = await superviseMicrovm({
+          taskId,
+          userId: task.user_id,
+          handle: sessionHandle,
+          strategy: microvmStrategy,
+          previous: state.microvmSupervisor,
+          pollIntervalMs: blueprintConfig.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_SECONDS * 1000,
+          suspendEnabled: process.env.MICROVM_APPROVAL_SUSPEND_ENABLED === 'true',
+          emitEvent: (type, metadata, options) => emitTaskEvent(taskId, type, metadata, correlation, options),
+        });
+        const failure = supervised.kind === 'failure' ? supervised.reason
+          : supervised.kind === 'substrate-terminal' ? 'substrate-terminal' : undefined;
+        return {
+          attempts: state.attempts + 1,
+          lastStatus: supervised.snapshot?.status ?? state.lastStatus,
+          sessionUnhealthy: supervised.heartbeatUnhealthy,
+          microvmSupervisor: supervised.state,
+          microvmFailureReason: failure,
+          microvmFailureMessage: supervised.kind === 'substrate-terminal' ? formatMicrovmTerminalFailure(
+            `substrate state ${supervised.substrate!.status}`, supervised.substrate!.reason,
+          ) : undefined,
+          microvmOwnershipLost: supervised.kind === 'ownership-lost',
+        };
+      }
       const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
       let consecutiveEcsCompletedPolls = 0;
-      // Carried forward by default: an unrelated poll (or a MicroVM poll that
-      // threw) must not silently re-arm the once-per-episode anomaly event.
-      let microvmSuspendAnomalyReported = state.microvmSuspendAnomalyReported ?? false;
-
       // ECS compute-level crash detection: if DDB is not terminal, check ECS task status
       if (
         ddbState.lastStatus &&
@@ -448,52 +467,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
       }
 
-      // Lambda MicroVMs substrate cross-check (ADR-021 sub-decision 1). Same
-      // division of labour as the ECS block above — the strategy reports raw
-      // substrate state and `reconcileMicrovmSubstrateState` interprets it
-      // against the DDB status — but the rules differ: a `suspended` VM is
-      // healthy during an approval wait, an anomaly (not a failure) otherwise,
-      // and a terminal VM with a non-terminal task row is a substrate failure.
-      if (
-        ddbState.lastStatus
-        && !TERMINAL_STATUSES.includes(ddbState.lastStatus)
-        && microvmStrategy
-        && sessionHandle.strategyType === 'lambda-microvm'
-      ) {
-        try {
-          const substrateStatus = await microvmStrategy.pollSession(sessionHandle);
-          const { taskFailed, suspendAnomalyReported } = await reconcileMicrovmSubstrateState({
-            taskId,
-            ddbStatus: ddbState.lastStatus,
-            substrate: substrateStatus,
-            microvmId: sessionHandle.microvmId,
-            userId: task.user_id,
-            correlation,
-            log,
-            repo: task.repo,
-            // Threaded so `microvm_suspend_anomaly` is emitted once per anomaly
-            // EPISODE rather than on every ~30 s poll; a non-anomalous observation
-            // re-arms it (see reconcileMicrovmSubstrateState).
-            suspendAnomalyReported: microvmSuspendAnomalyReported,
-          });
-          microvmSuspendAnomalyReported = suspendAnomalyReported;
-          if (taskFailed) {
-            return { attempts: ddbState.attempts, lastStatus: TaskStatus.FAILED };
-          }
-        } catch (err) {
-          // Non-fatal: a GetMicrovm hiccup must not abort the durable poll step.
-          // The task stays bounded by MAX_POLL_ATTEMPTS (~8.5 h) and, once the
-          // agent is RUNNING, by its own terminal write. A repeated-failure
-          // escalation counter (the ECS `MAX_CONSECUTIVE_ECS_POLL_FAILURES`
-          // analogue) is deliberately deferred — it would add PollState fields
-          // that P3's suspend policy will need to reshape anyway.
-          log.warn('MicroVM pollSession check failed (non-fatal)', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-
-      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls, microvmSuspendAnomalyReported };
+      return { ...ddbState, consecutiveEcsPollFailures, consecutiveEcsCompletedPolls };
     },
     {
       initialState: { attempts: 0 },
@@ -503,6 +477,13 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         }
         if (state.sessionUnhealthy) {
           return { shouldContinue: false };
+        }
+        if (state.microvmSupervisor) {
+          if (state.microvmFailureReason || state.microvmOwnershipLost) return { shouldContinue: false };
+          return {
+            shouldContinue: true,
+            delay: { seconds: Math.max(1, Math.ceil(state.microvmSupervisor.nextPollInMs / 1000)) },
+          };
         }
         if (state.attempts >= MAX_POLL_ATTEMPTS) {
           return { shouldContinue: false };
@@ -523,39 +504,30 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
-    await finalizeTask(taskId, finalPollState, task.user_id);
-    // The task is terminal — the substrate has long since read its payload, so
-    // delete the ephemeral S3 payload object now. Best-effort (both deleters
-    // swallow errors) and a no-op for AgentCore tasks / deployments without a
-    // payload bucket; the bucket's 1-day lifecycle rule is the backstop if this
-    // delete or the whole step never runs.
-    //
-    // Both payload-carrying backends get this, and the MicroVM one is NOT
-    // optional polish: its execution role holds `grantRead` on the WHOLE payload
-    // bucket (the guest must read its object before any tenant identity exists),
-    // keys are `<taskId>/payload.json`, and the guest runs untrusted repo code —
-    // so a TTL-only reaper left every finished task's hydrated prompt readable by
-    // any concurrently running MicroVM until asynchronous lifecycle deletion.
-    // Task-scoped payload reads are a separate improvement (#700); deleting
-    // completed payloads does not isolate other tasks that are still active.
+    let finalized = false;
+    try {
+      if (!finalPollState.microvmOwnershipLost) {
+        finalized = (await finalizeTask(taskId, finalPollState, task.user_id)) !== false;
+      }
+    } finally {
+      // Even a database finalization failure must not lose cleanup of this handle.
+      // A replacement worker, if any, is never followed or terminated here.
+      if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
+        await stopMicrovmWithDiagnostics({
+          taskId,
+          handle: sessionHandle,
+          strategy: microvmStrategy,
+          emitEvent: (type, metadata, options) => emitTaskEvent(taskId, type, metadata, correlation, options),
+        });
+      }
+    }
+    if (!finalized) return;
+    // Delete task instructions and their saved signed download capability after
+    // finalization. Shared manifests remain; bucket lifecycle is a backstop.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     } else if (blueprintConfig.compute_type === 'lambda-microvm') {
       await deleteMicrovmPayload(taskId);
-    }
-    // ADR-021: "When the orchestrator finalizes a `lambda-microvm` task, the
-    // orchestrator shall call terminate-microvm (termination shall not rely on
-    // any substrate timeout)." Without this the VM lingers until
-    // `maximumDurationInSeconds` (8 h) expires — with `idlePolicy` omitted there
-    // is no tighter substrate bound. A leaked running VM can keep billing until
-    // that cap; suspended VMs retain snapshot charges. Whether suspended VMs
-    // consume the account memory quota is still unverified (ADR-021).
-    //
-    // `stopSession` is internally best-effort (it swallows and level-differentiates
-    // every failure), so this cannot fail the finalize step or strand the task in
-    // a non-terminal state.
-    if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
-      await microvmStrategy.stopSession(sessionHandle);
     }
   });
 };

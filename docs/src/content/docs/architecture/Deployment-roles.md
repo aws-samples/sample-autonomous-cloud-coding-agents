@@ -848,6 +848,13 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 
 > **Operators must re-bootstrap for this.** The statement ships in bootstrap policy bundle **1.6.0**; a CDKToolkit stack bootstrapped at 1.5.0 or earlier will fail the CDK-managed MicroVM image deploy with a caller-side `iam:PassRole` AccessDenied on the build role. Check `CDKToolkit`'s `BootstrapPolicyVersion` output, and re-run `mise //cdk:bootstrap` (with `ComputeTypes` including `lambda-microvm`) if it is behind.
 
+P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
+This statement lets CloudFormation manage and tag the live suspension setting
+at `/<backgroundagent-stack-name>/microvm-approval-suspend-enabled`. The
+coordinator gets only `GetParameter` on its exact parameter. Existing durable
+executions retain their Lambda version and reread this setting before new
+suspension, so disable can reach executions already running.
+
 ```json
 {
   "Statement": [
@@ -885,6 +892,19 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
       ],
       "Sid": "MicrovmPassRoles"
+    },
+    {
+      "Action": [
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:*:*:parameter/backgroundagent-*/microvm-approval-suspend-enabled",
+      "Sid": "MicrovmSuspendConfiguration"
     }
   ],
   "Version": "2012-10-17"

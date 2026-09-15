@@ -49,6 +49,91 @@ const microvm = handles[2] as Extract<SessionHandle, { strategyType: 'lambda-mic
 beforeEach(() => {
   jest.clearAllMocks();
   mockMicrovmSend.mockReset().mockResolvedValue({});
+  mockEcsSend.mockReset().mockResolvedValue({});
+  mockAgentcoreSend.mockReset().mockResolvedValue({});
+});
+
+describe.each(handles.filter(handle => handle.strategyType !== 'lambda-microvm'))(
+  '$strategyType caller budgets', handle => {
+    test('an expired budget prevents poll/stop requests', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('caller deadline'));
+      const options = { abortSignal: controller.signal };
+      const strategy = resolveComputeStrategy({ compute_type: handle.strategyType, runtime_arn: '' });
+      await expect(strategy.pollSession(handle, options)).rejects.toThrow('caller deadline');
+      await expect(strategy.stopSession(handle, options)).resolves.toBeUndefined();
+      expect(mockEcsSend).not.toHaveBeenCalled();
+      expect(mockAgentcoreSend).not.toHaveBeenCalled();
+    });
+    test('stop propagates caller cancellation into its pending SDK request', async () => {
+      const controller = new AbortController();
+      const send = handle.strategyType === 'ecs' ? mockEcsSend : mockAgentcoreSend;
+      send.mockImplementationOnce((_command, options) => new Promise((_resolve, reject) => {
+        options.abortSignal.addEventListener('abort', () => reject(new Error('caller deadline')));
+      }));
+      const strategy = resolveComputeStrategy({ compute_type: handle.strategyType, runtime_arn: '' });
+      const result = strategy.stopSession(handle, { abortSignal: controller.signal });
+      controller.abort();
+      await expect(result).resolves.toBeUndefined();
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+  },
+);
+
+describe.each(['pollSession', 'suspendSession', 'resumeSession', 'stopSession'] as const)(
+  '%s composed budget', operation => {
+    test('does not send a control request after its caller deadline', async () => {
+      const controller = new AbortController();
+      controller.abort(new Error('caller deadline'));
+      const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
+      const result = strategy[operation](microvm, { abortSignal: controller.signal });
+      if (operation === 'stopSession') await expect(result).resolves.toMatchObject({ outcome: 'unconfirmed' });
+      else await expect(result).rejects.toThrow('caller deadline');
+      expect(mockMicrovmSend).not.toHaveBeenCalled();
+    });
+    test('a caller can end the in-flight request before the default limit', async () => {
+      const controller = new AbortController();
+      mockMicrovmSend.mockImplementationOnce((_command, options) => new Promise((_resolve, reject) => {
+        options.abortSignal.addEventListener('abort', () => reject(new Error('caller deadline')));
+      }));
+      const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
+      const result = strategy[operation](microvm, { abortSignal: controller.signal });
+      const assertion = operation === 'stopSession'
+        ? expect(result).resolves.toMatchObject({ outcome: 'unconfirmed' })
+        : expect(result).rejects.toThrow('caller deadline');
+      controller.abort();
+      await assertion;
+      expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
+      expect(mockMicrovmSend.mock.calls[0][1].abortSignal.aborted).toBe(true);
+    });
+  },
+);
+
+describe('MicroVM lifetime observations', () => {
+  const startedAt = new Date('2026-09-15T10:00:00Z');
+  test.each(['RUNNING', 'SUSPENDING', 'SUSPENDED', 'TERMINATED', 'UNKNOWN'])(
+    'retains the original service lifetime in %s as durable JSON data', async state => {
+      mockMicrovmSend.mockResolvedValue({ state, startedAt, maximumDurationInSeconds: 28_800 });
+      const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
+      const observation = await strategy.pollSession(microvm);
+      expect(JSON.parse(JSON.stringify(observation))).toMatchObject({
+        microvmStartedAtMs: startedAt.getTime(), microvmMaximumDurationSeconds: 28_800,
+      });
+    },
+  );
+  test.each([
+    { startedAt: new Date('invalid'), maximumDurationInSeconds: 28_800 },
+    { startedAt, maximumDurationInSeconds: 0 },
+    { startedAt, maximumDurationInSeconds: -1 },
+    { startedAt, maximumDurationInSeconds: 1.5 },
+    { maximumDurationInSeconds: 28_800 },
+  ])('does not invent a lifetime from incomplete service data: %j', async lifetime => {
+    mockMicrovmSend.mockResolvedValue({ state: 'RUNNING', ...lifetime });
+    const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
+    const observation = await strategy.pollSession(microvm);
+    expect(observation.microvmStartedAtMs).toBeUndefined();
+    expect(observation.microvmMaximumDurationSeconds).toBeUndefined();
+  });
 });
 
 describe.each(['suspendSession', 'resumeSession'] as const)('%s contract', operation => {

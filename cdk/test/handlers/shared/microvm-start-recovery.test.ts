@@ -256,7 +256,7 @@ test('a cancelled task with a saved handle reaps that computer instead of starti
   expect(runCalls()).toHaveLength(1);
   expect(mockMicrovmSend).toHaveBeenLastCalledWith({
     kind: 'terminate', input: { microvmIdentifier: handle.microvmId },
-  });
+  }, { abortSignal: expect.any(AbortSignal) });
 });
 
 test('failure to save a returned handle terminates the known computer', async () => {
@@ -269,7 +269,7 @@ test('failure to save a returned handle terminates the known computer', async ()
     .rejects.toThrow('MICROVM_START_RECEIPT_SAVE_FAILED');
   expect(mockMicrovmSend).toHaveBeenLastCalledWith({
     kind: 'terminate', input: { microvmIdentifier: handle.microvmId },
-  });
+  }, { abortSignal: expect.any(AbortSignal) });
 });
 
 test('a lost receipt-write response recovers the committed handle without termination', async () => {

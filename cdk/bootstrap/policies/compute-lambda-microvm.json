@@ -34,6 +34,19 @@
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
       ],
       "Sid": "MicrovmPassRoles"
+    },
+    {
+      "Action": [
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:*:*:parameter/backgroundagent-*/microvm-approval-suspend-enabled",
+      "Sid": "MicrovmSuspendConfiguration"
     }
   ],
   "Version": "2012-10-17"

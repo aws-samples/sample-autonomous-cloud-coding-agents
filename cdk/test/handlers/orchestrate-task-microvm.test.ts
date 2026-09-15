@@ -39,10 +39,17 @@ const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
 const mockMicrovmSend = jest.fn();
+const mockSsmSend = jest.fn();
+jest.mock('@aws-sdk/client-ssm', () => ({
+  SSMClient: jest.fn(() => ({ send: mockSsmSend })),
+  GetParameterCommand: jest.fn((input: unknown) => ({ input })),
+}));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  SuspendMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'SuspendMicrovm', input })),
+  ResumeMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'ResumeMicrovm', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
   MicrovmState: {
     PENDING: 'PENDING',
@@ -96,7 +103,13 @@ const mockTransitionTask = jest.fn();
 const mockEmitTaskEvent = jest.fn();
 const mockFinalizeTask = jest.fn();
 const mockPollTaskStatus = jest.fn();
-const mockReconcile = jest.fn();
+const mockReadLifecycle = jest.fn();
+const mockSaveIntent = jest.fn();
+jest.mock('../../src/handlers/shared/microvm-lifecycle', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm-lifecycle'),
+  readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockReadLifecycle(...args),
+  saveMicrovmLifecycleIntent: (...args: unknown[]) => mockSaveIntent(...args),
+}));
 const mockFailTask = jest.fn();
 const mockLoadTask = jest.fn();
 const mockClaimStart = jest.fn();
@@ -121,7 +134,6 @@ jest.mock('../../src/handlers/shared/orchestrator', () => ({
   loadBlueprintConfig: (...a: unknown[]) => mockLoadBlueprint(...a),
   loadTask: (...args: unknown[]) => mockLoadTask(...args),
   pollTaskStatus: (...a: unknown[]) => mockPollTaskStatus(...a),
-  reconcileMicrovmSubstrateState: (...a: unknown[]) => mockReconcile(...a),
   transitionTask: (...a: unknown[]) => mockTransitionTask(...a),
   buildComputeMetadata: realOrchestrator.buildComputeMetadata,
 }));
@@ -157,6 +169,7 @@ process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSe
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { handler } from '../../src/handlers/orchestrate-task';
+import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm-lifecycle';
 import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 /**
@@ -255,6 +268,19 @@ function failedTransition() {
   return mockTransitionTask.mock.calls.find(([, , to]) => to === TaskStatus.FAILED)!;
 }
 
+function lifecycle(status: MicrovmLifecycleSnapshot['status'] = 'RUNNING'): MicrovmLifecycleSnapshot {
+  return {
+    taskId: 'TASK001',
+    userId: 'user-1',
+    status,
+    requestId: null,
+    approval: { kind: 'none' },
+    taskStartedAtMs: Date.now() - 600_000,
+    heartbeatAtMs: Date.now(),
+    handle: { strategyType: 'lambda-microvm', sessionId: MICROVM_ID, microvmId: MICROVM_ID, endpoint: ENDPOINT },
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockDdbSend.mockReset().mockResolvedValue({});
@@ -285,11 +311,67 @@ beforeEach(() => {
     return {};
   });
   mockMicrovmSend.mockReset();
+  mockSsmSend.mockReset();
   mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.COMPLETED });
-  mockReconcile.mockResolvedValue({ taskFailed: false });
+  mockReadLifecycle.mockReset().mockResolvedValue(lifecycle('COMPLETED'));
+  mockSaveIntent.mockReset().mockImplementation(async (snapshot, action) => {
+    const intent = {
+      version: 1,
+      generation: 'generation',
+      microvm_id: MICROVM_ID,
+      request_id: snapshot.requestId,
+      action,
+      requested_at_ms: Date.now(),
+      deadline_ms: snapshot.approval.kind === 'present' ? snapshot.approval.deadlineMs : null,
+    };
+    mockReadLifecycle.mockResolvedValue({ ...snapshot, intent });
+    return { status: 'saved', intent };
+  });
+  delete process.env.MICROVM_APPROVAL_SUSPEND_ENABLED;
+  delete process.env.MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME;
 });
 
 describe('orchestrate-task for a lambda-microvm task', () => {
+  test.each(['true', 'false', 'unavailable'])('real supervisor checks live setting %s before Suspend', async value => {
+    runMicrovmOk();
+    const now = Date.now();
+    const snapshot = lifecycle('AWAITING_APPROVAL');
+    mockReadLifecycle.mockResolvedValue({
+      ...snapshot,
+      requestId: 'gate',
+      handle: {
+        ...snapshot.handle,
+        imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:agent',
+        imageVersion: '3.0',
+        lifecycleProtocol: '1',
+      },
+      approval: {
+        kind: 'present',
+        status: 'PENDING',
+        created_at: new Date(now - 45_000).toISOString(),
+        timeout_s: 600,
+        createdAtMs: now - 45_000,
+        deadlineMs: now + 555_000,
+      },
+    });
+    const parameterName = '/backgroundagent-dev/microvm-approval-suspend-enabled';
+    process.env.MICROVM_APPROVAL_SUSPEND_ENABLED = 'true';
+    process.env.MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME = parameterName;
+    if (value === 'unavailable') mockSsmSend.mockRejectedValue(new Error('unavailable'));
+    else mockSsmSend.mockResolvedValue({ Parameter: { Name: parameterName, Value: value } });
+    mockMicrovmSend.mockResolvedValueOnce({
+      microvmId: MICROVM_ID,
+      state: 'RUNNING',
+      startedAt: new Date(now - 60_000),
+      maximumDurationInSeconds: 28_800,
+    }).mockResolvedValue({});
+    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
+    expect(mockSsmSend).toHaveBeenCalledWith({ input: { Name: parameterName } }, { abortSignal: expect.any(AbortSignal) });
+    expect(commandsOfType('SuspendMicrovm')).toHaveLength(value === 'true' ? 1 : 0);
+    expect(mockFinalizeTask.mock.calls[0][1].microvmFailureReason).toBeUndefined();
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+  });
+
   test('registry assets alone exceed the hook cap and survive real hydration and v2 S3 delivery (#818)', async () => {
     const runtime = {
       transport: 'http',
@@ -591,149 +673,110 @@ describe('orchestrate-task for a lambda-microvm task', () => {
   // billed. `fakeContext` runs one iteration and ignores `waitStrategy`, so this
   // needed `loopingContext` to be assertable at all.
 
-  test('a stale agent heartbeat stops the poll AND reclaims the MicroVM', async () => {
+  test('a stale agent heartbeat stops the real supervisor and reclaims the MicroVM', async () => {
     runMicrovmOk();
-    // The substrate stays healthy throughout — this is the blind spot.
     mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
-    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: false });
-    mockPollTaskStatus.mockResolvedValue({
-      attempts: 1,
-      lastStatus: TaskStatus.RUNNING,
-      sessionUnhealthy: true,
-    });
-
+    mockReadLifecycle.mockResolvedValue({ ...lifecycle(), heartbeatAtMs: Date.now() - 300_000 });
     const looping = loopingContext();
     await handler({ task_id: 'TASK001' }, looping.ctx as never);
-
-    // Exited on the FIRST unhealthy observation — not after burning the 8.5 h window.
     expect(looping.iterations).toHaveLength(1);
-    // finalize ran, and it saw the unhealthy flag (that is what writes FAILED).
-    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
     expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({ sessionUnhealthy: true });
-    // ...and the reservation was actually reclaimed. This is the billing outcome.
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
-    expect(commandsOfType('TerminateMicrovm')[0].input)
-      .toEqual({ microvmIdentifier: MICROVM_ID });
+    expect(mockPollTaskStatus).not.toHaveBeenCalled();
   });
 
   test('a healthy heartbeat keeps polling until a terminal task status', async () => {
-    // The other side of the same predicate: without this, a `sessionUnhealthy: true`
-    // hard-coded into the poll would pass the test above.
     runMicrovmOk();
     mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
-    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: false });
-    mockPollTaskStatus
-      .mockResolvedValueOnce({ attempts: 1, lastStatus: TaskStatus.RUNNING, sessionUnhealthy: false })
-      .mockResolvedValueOnce({ attempts: 2, lastStatus: TaskStatus.RUNNING, sessionUnhealthy: false })
-      .mockResolvedValue({ attempts: 3, lastStatus: TaskStatus.COMPLETED, sessionUnhealthy: false });
-
+    mockReadLifecycle.mockResolvedValueOnce(lifecycle()).mockResolvedValueOnce(lifecycle());
     const looping = loopingContext();
     await handler({ task_id: 'TASK001' }, looping.ctx as never);
-
     expect(looping.iterations).toHaveLength(3);
     expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({ lastStatus: TaskStatus.COMPLETED });
-    // Terminate happens on every finalize, healthy or not — the VM does not
-    // self-terminate on this substrate.
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
   });
 
-  test('cross-checks the substrate through reconcileMicrovmSubstrateState while non-terminal', async () => {
+  test('unexpected suspension uses durable wake intent and requests Resume', async () => {
     runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
-    // GetMicrovm during the poll, then TerminateMicrovm on finalize.
+    mockReadLifecycle.mockResolvedValue(lifecycle());
     mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'SUSPENDED' });
-
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
-
     expect(commandsOfType('GetMicrovm')).toHaveLength(1);
-    expect(mockReconcile).toHaveBeenCalledTimes(1);
-    const args = mockReconcile.mock.calls[0][0];
-    expect(args.microvmId).toBe(MICROVM_ID);
-    expect(args.ddbStatus).toBe(TaskStatus.RUNNING);
-    // The strategy's mechanical mapping is what the orchestrator interprets.
-    expect(args.substrate).toEqual({ status: 'suspended', microvmState: 'SUSPENDED' });
+    expect(mockSaveIntent.mock.calls[0][1]).toBe('resume');
+    expect(commandsOfType('ResumeMicrovm')).toHaveLength(1);
+    expect(mockFinalizeTask.mock.calls[0][1].microvmSupervisor.recovery.kind).toBe('wake');
+    expect(mockEmitTaskEvent.mock.calls.filter(c => c[1] === 'microvm_suspend_anomaly')).toHaveLength(1);
   });
 
-  test('returns a failed poll state when reconciliation fails the task', async () => {
+  test('terminal substrate carries its classified reason into strong finalization', async () => {
     runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 3, lastStatus: TaskStatus.RUNNING });
-    mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'TERMINATED' });
-    mockReconcile.mockResolvedValue({ taskFailed: true });
-
-    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
-
-    expect(mockFinalizeTask).toHaveBeenCalledWith(
-      'TASK001',
-      { attempts: 3, lastStatus: TaskStatus.FAILED },
-      'user-1',
-    );
+    mockReadLifecycle.mockResolvedValue(lifecycle());
+    mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'TERMINATED', stateReason: 'Run lifecycle hook returned HTTP status 400.' });
+    const looping = loopingContext();
+    await handler({ task_id: 'TASK001' }, looping.ctx as never);
+    expect(looping.iterations).toHaveLength(1);
+    expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({
+      microvmFailureReason: 'substrate-terminal',
+      microvmFailureMessage: expect.stringMatching(/^MICROVM_RUN_HOOK_REJECTED:/),
+    });
   });
 
-  test('skips the substrate cross-check once the DDB status is terminal', async () => {
+  test('a terminal task skips Get but still terminates its original handle', async () => {
     runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.COMPLETED });
-
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
-
     expect(commandsOfType('GetMicrovm')).toHaveLength(0);
-    expect(mockReconcile).not.toHaveBeenCalled();
-    // Finalize still terminates.
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
   });
 
-  test('a GetMicrovm poll failure is non-fatal and finalize still terminates', async () => {
+  test('three Get failures stop the real durable loop and reclaim the VM', async () => {
     runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
-    mockMicrovmSend.mockRejectedValueOnce(new Error('transient'));
-
-    await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never)).resolves.toBeUndefined();
-
-    expect(mockReconcile).not.toHaveBeenCalled();
-    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+    mockReadLifecycle.mockResolvedValue(lifecycle());
+    mockMicrovmSend.mockRejectedValue(new Error('transient'));
+    const looping = loopingContext();
+    await handler({ task_id: 'TASK001' }, looping.ctx as never);
+    expect(looping.iterations).toHaveLength(3);
+    expect(mockFinalizeTask.mock.calls[0][1]).toMatchObject({
+      microvmFailureReason: 'substrate-read-failed', microvmSupervisor: { consecutivePollFailures: 3 },
+    });
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(2);
+    expect(mockEmitTaskEvent.mock.calls.filter(c => c[1] === 'microvm_cleanup_unconfirmed')).toHaveLength(1);
   });
 
-  test('threads suspendAnomalyReported into the reconcile call so the event fires once', async () => {
+  test('fast polls cannot exhaust the old attempt cap while the session deadline remains', async () => {
     runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
-    mockMicrovmSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'SUSPENDED' });
-    mockReconcile.mockResolvedValue({ taskFailed: false, suspendAnomalyReported: true });
-
-    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
-
-    // First poll of the task: nothing reported yet.
-    expect(mockReconcile.mock.calls[0][0].suspendAnomalyReported).toBe(false);
-    // ...and the reconciler's answer is carried into the state the next poll reads.
-    expect(mockFinalizeTask).toHaveBeenCalledWith(
-      'TASK001',
-      expect.objectContaining({ microvmSuspendAnomalyReported: true }),
-      'user-1',
-    );
-  });
-
-  test('a MicroVM poll failure carries the anomaly flag forward rather than re-arming it', async () => {
-    // A GetMicrovm hiccup is not evidence that the anomaly ended, so it must not
-    // silently re-arm the event and produce a duplicate on the next cycle.
-    runMicrovmOk();
-    mockPollTaskStatus.mockResolvedValue({ attempts: 1, lastStatus: TaskStatus.RUNNING });
-    mockMicrovmSend.mockRejectedValueOnce(new Error('transient'));
-
+    mockReadLifecycle.mockResolvedValue(lifecycle());
+    mockMicrovmSend.mockResolvedValue({ microvmId: MICROVM_ID, state: 'RUNNING' });
     const { ctx } = fakeContext();
-    // Seed the poll state as if a previous cycle had already reported.
-    const seededCtx = {
+    let continued: boolean | undefined;
+    await handler({ task_id: 'TASK001' }, {
       ...ctx,
-      waitForCondition: async (
-        _name: string,
-        fn: (state: Record<string, unknown>) => Promise<unknown>,
-      ) => fn({ attempts: 1, microvmSuspendAnomalyReported: true }),
-    };
+      waitForCondition: async (_name: string, fn: (state: Record<string, unknown>) => Promise<Record<string, unknown>>, cfg: any) => {
+        const state = JSON.parse(JSON.stringify(await fn({ attempts: 2000 })));
+        continued = cfg.waitStrategy(state).shouldContinue;
+        return state;
+      },
+    } as never);
+    expect(continued).toBe(true);
+  });
 
-    await handler({ task_id: 'TASK001' }, seededCtx as never);
+  test('lost worker ownership skips task finalization and payload deletion, but reaps only the old VM', async () => {
+    runMicrovmOk();
+    mockReadLifecycle.mockResolvedValue({ ...lifecycle(), handle: { ...lifecycle().handle, microvmId: 'other' } });
+    const looping = loopingContext();
+    await handler({ task_id: 'TASK001' }, looping.ctx as never);
+    expect(looping.iterations).toHaveLength(1);
+    expect(mockFinalizeTask).not.toHaveBeenCalled();
+    expect(s3CommandsOfType('DeleteObject')).toHaveLength(0);
+    expect(commandsOfType('GetMicrovm')).toHaveLength(0);
+    expect(commandsOfType('TerminateMicrovm')[0].input.microvmIdentifier).toBe(MICROVM_ID);
+  });
 
-    expect(mockFinalizeTask).toHaveBeenCalledWith(
-      'TASK001',
-      expect.objectContaining({ microvmSuspendAnomalyReported: true }),
-      'user-1',
-    );
+  test('database finalization failure still requests termination and propagates for durable retry', async () => {
+    runMicrovmOk();
+    mockFinalizeTask.mockRejectedValue(new Error('database unavailable'));
+    await expect(handler({ task_id: 'TASK001' }, fakeContext().ctx as never)).rejects.toThrow('database unavailable');
+    expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
+    expect(s3CommandsOfType('DeleteObject')).toHaveLength(0);
   });
 
   describe('orphan reap when session start fails AFTER RunMicrovm succeeded', () => {

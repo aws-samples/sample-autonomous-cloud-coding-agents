@@ -1149,6 +1149,8 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
 
     expect(Object.keys(env).filter(k => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_APPROVAL_SUSPEND_ENABLED',
+      'MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME',
       'MICROVM_EGRESS_CONNECTOR_ARNS',
       'MICROVM_EXECUTION_ROLE_ARN',
       'MICROVM_IMAGE_IDENTIFIER',
@@ -1157,6 +1159,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     ]);
     // Image version is deliberately unpinned.
     expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    expect(env.MICROVM_APPROVAL_SUSPEND_ENABLED).toBe('false');
     // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
     // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
     // so "no inbound" is an explicit control on every launch.
@@ -1191,6 +1194,8 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       'lambda:GetMicrovm',
       'lambda:GetMicrovmImageVersion',
       'lambda:TerminateMicrovm',
+      'lambda:SuspendMicrovm',
+      'lambda:ResumeMicrovm',
     ]);
     // Every MicroVM lifecycle action authorizes against the *image* resource,
     // which is why "scoped to platform-created images" is achievable at all.
@@ -1208,10 +1213,10 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(passRole.Action).toBe('iam:PassRole');
   });
 
-  test('does NOT grant suspend/resume (P3) or auth-token minting (never)', () => {
+  test('grants supervisor sleep/wake without auth-token minting or shell access', () => {
     const rendered = JSON.stringify(template.toJSON());
-    expect(rendered).not.toContain('lambda:SuspendMicrovm');
-    expect(rendered).not.toContain('lambda:ResumeMicrovm');
+    expect(rendered).toContain('lambda:SuspendMicrovm');
+    expect(rendered).toContain('lambda:ResumeMicrovm');
     expect(rendered).not.toContain('lambda:CreateMicrovmAuthToken');
     expect(rendered).not.toContain('lambda:CreateMicrovmShellAuthToken');
     expect(rendered).not.toContain('lambda:ConnectMicrovm');

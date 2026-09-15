@@ -346,6 +346,11 @@ export class AgentStack extends Stack {
     // MicroVM termination grant (ADR-021 sub-decision 4).
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
     const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+    const suspendContext = this.node.tryGetContext('microvm_approval_suspend_enabled');
+    if (suspendContext !== undefined && ![true, false, 'true', 'false'].includes(suspendContext)) {
+      throw new Error('microvm_approval_suspend_enabled must be true or false');
+    }
+    const microvmApprovalSuspendEnabled = suspendContext === true || suspendContext === 'true';
 
     // --- Tool-federation Gateway deploy gate (ADR-019 P1) ---
     // Whether to provision the AgentCore Gateway that federates the agent's MCP
@@ -408,7 +413,7 @@ export class AgentStack extends Stack {
       && isLambdaMicrovmImageConfigured(microvmImageInputs);
 
     // MicroVM image ARN placeholder — the image is created AFTER TaskApi, but the
-    // cancel Lambda's grant must be scoped to it. Same Lazy.string cycle-break as
+    // cancel and decision-handler grants must be scoped to it. Same Lazy.string cycle-break as
     // the runtime / orchestrator / SessionRole ARNs below.
     let microvmImageArnHolder: string | undefined;
     const lazyMicrovmImageArn = Lazy.string({
@@ -1121,7 +1126,7 @@ export class AgentStack extends Stack {
       })
       : undefined;
 
-    // Resolve the Lazy TaskApi's cancel grant is scoped by. The invariant the
+    // Resolve the image ARN used by TaskApi's cancel and wake grants. The invariant the
     // Lazy's `produce` guards: `microvmImageConfigured` (computed from the same
     // inputs, via the same predicate) is true exactly when the construct sets
     // `imageArn`, so a configured deployment always has an ARN to resolve and an
@@ -1285,6 +1290,8 @@ export class AgentStack extends Stack {
           imageIdentifier: lambdaMicrovm.imageIdentifier,
           imageArn: lambdaMicrovm.imageArn,
           imageVersion: lambdaMicrovm.imageVersion,
+          approvalsTable: taskApprovalsTable.table,
+          approvalSuspendEnabled: microvmApprovalSuspendEnabled,
           executionRoleArn: lambdaMicrovm.executionRole.roleArn,
           egressConnectorArns: lambdaMicrovm.egressConnectorArns,
           // Explicit NO_INGRESS, not an omission: RunMicrovm attaches a PUBLIC

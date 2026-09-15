@@ -585,8 +585,7 @@ describe('classifyError', () => {
     });
 
     test('classifies a MicroVM substrate-failure reason written by the orchestrator', () => {
-      // Must stay in lockstep with the reason string
-      // `reconcileMicrovmSubstrateState` persists.
+      // Retain classification of legacy messages persisted by the P2 reconciler.
       const result = classifyError(
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
       )!;
@@ -599,7 +598,7 @@ describe('classifyError', () => {
     // --- lifecycle-hook 4xx: non-retryable, and it must OUTRANK the generic entry ---
     //
     // The service reports a guest 4xx in `stateReason`, which
-    // `reconcileMicrovmSubstrateState` appends to the persisted message — so BOTH
+    // the P2 reconciler appended to its persisted message — so BOTH
     // the generic `MicroVM substrate terminated` string and the hook-status string
     // are present in one `error_message` and ORDER decides the answer. These tests
     // exist because the wrong order is invisible to a message-only assertion.
@@ -608,7 +607,7 @@ describe('classifyError', () => {
     const hookReason = (status: number) =>
       `Run lifecycle hook returned HTTP status ${status}. `
       + 'Please check your hook endpoint and application logs for more details.';
-    /** ...as `reconcileMicrovmSubstrateState` persists it. */
+    /** Legacy persisted form; current finalization also supplies stable MICROVM_* codes. */
     const reconciled = (reason: string) =>
       'MicroVM substrate terminated before the agent wrote a terminal status: '
       + `substrate state completed (${reason})`;

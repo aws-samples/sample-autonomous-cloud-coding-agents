@@ -29,6 +29,9 @@ if (endpoint && (new URL(endpoint).hostname !== '127.0.0.1' || new URL(endpoint)
 const mockBeforeSend = jest.fn();
 const mockAfterSend = jest.fn();
 const mockClients: DynamoDBDocumentClient[] = [];
+jest.mock('../../../src/handlers/shared/microvm-suspend-config', () => ({
+  readMicrovmSuspendEnabled: async () => true,
+}));
 jest.mock('../../../src/handlers/shared/ua', () => {
   const actual = jest.requireActual('../../../src/handlers/shared/ua');
   return {
@@ -57,6 +60,7 @@ const approvals = `lifecycle-approvals-${suffix}`;
 Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals });
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../src/handlers/shared/microvm-lifecycle';
 import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../src/handlers/shared/microvm-start';
+import { superviseMicrovm, type MicrovmSupervisorState } from '../../../src/handlers/shared/microvm-supervisor';
 
 const raw = new DynamoDBClient({
   endpoint: endpoint ?? 'http://127.0.0.1:1',
@@ -136,6 +140,109 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
     if (!value) throw new Error('Expected a MicroVM task');
     return value;
   }
+
+  test('real supervisor and store preserve approval-during-suspend wake across serialized polls', async () => {
+    const handle = (await current()).handle;
+    let observed = 'RUNNING';
+    const strategy = {
+      type: 'lambda-microvm' as const,
+      startSession: jest.fn(),
+      pollSession: jest.fn(async () => ({
+        status: 'running' as const,
+        microvmState: observed as 'RUNNING' | 'SUSPENDING' | 'SUSPENDED',
+        microvmStartedAtMs: Date.now() - 60_000,
+        microvmMaximumDurationSeconds: 28_800,
+      })),
+      stopSession: jest.fn(),
+      suspendSession: jest.fn(async () => {
+        expect((await current()).intent?.action).toBe('suspend');
+        await admin.send(new UpdateCommand({
+          TableName: approvals,
+          Key: { task_id: 'task', request_id: 'gate' },
+          UpdateExpression: 'SET #s = :s',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':s': 'APPROVED' },
+        }));
+        return { supported: true as const };
+      }),
+      resumeSession: jest.fn(async () => ({ supported: true as const })),
+    };
+    const cycle = (previous?: MicrovmSupervisorState) => superviseMicrovm({
+      taskId: 'task',
+      userId: 'user',
+      handle,
+      strategy,
+      suspendEnabled: true,
+      pollIntervalMs: 30_000,
+      previous: previous ? JSON.parse(JSON.stringify(previous)) : undefined,
+    });
+    const first = await cycle();
+    expect(first.kind).toBe('continue');
+    const savedWake = (await current()).intent;
+    expect(savedWake?.action).toBe('resume');
+    observed = 'SUSPENDING';
+    const second = await cycle(first.state);
+    expect(strategy.resumeSession.mock.calls).toHaveLength(0);
+    observed = 'SUSPENDED';
+    const third = await cycle(second.state);
+    expect(strategy.resumeSession.mock.calls).toHaveLength(1);
+    expect((await current()).intent).toEqual(savedWake);
+    await admin.send(new UpdateCommand({
+      TableName: tasks,
+      Key: { task_id: 'task' },
+      UpdateExpression: 'SET #s = :s, agent_heartbeat_at = :now REMOVE awaiting_approval_request_id',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: { ':s': 'RUNNING', ':now': new Date().toISOString() },
+    }));
+    observed = 'RUNNING';
+    const restored = await cycle(third.state);
+    expect((await current()).intent).toMatchObject({ action: 'resume', request_id: null });
+    expect((await cycle(restored.state)).state.recovery).toBeUndefined();
+    expect(strategy.suspendSession.mock.calls).toHaveLength(1);
+  });
+
+  test('real pre-command read prevents Suspend when approval wins just after intent commit', async () => {
+    mockAfterSend.mockImplementation(async command => {
+      const intent = command instanceof TransactWriteCommand
+        ? command.input.TransactItems?.[0].Update?.ExpressionAttributeValues?.[':intent'] : undefined;
+      if (intent?.action === 'suspend') {
+        await admin.send(new UpdateCommand({
+          TableName: approvals,
+          Key: { task_id: 'task', request_id: 'gate' },
+          UpdateExpression: 'SET #s = :s',
+          ExpressionAttributeNames: { '#s': 'status' },
+          ExpressionAttributeValues: { ':s': 'APPROVED' },
+        }));
+      }
+    });
+    const strategy = {
+      type: 'lambda-microvm' as const,
+      startSession: jest.fn(),
+      stopSession: jest.fn(),
+      pollSession: jest.fn(async () => ({
+        status: 'running' as const,
+        microvmState: 'RUNNING' as const,
+        microvmStartedAtMs: Date.now() - 60_000,
+        microvmMaximumDurationSeconds: 28_800,
+      })),
+      suspendSession: jest.fn(),
+      resumeSession: jest.fn(),
+    };
+    const result = await superviseMicrovm({
+      taskId: 'task',
+      userId: 'user',
+      handle: (await current()).handle,
+      strategy,
+      suspendEnabled: true,
+      pollIntervalMs: 30_000,
+    });
+    expect(result.kind).toBe('continue');
+    expect(strategy.suspendSession.mock.calls).toHaveLength(0);
+    expect(strategy.resumeSession.mock.calls).toHaveLength(0);
+    expect(await current()).toMatchObject({
+      status: 'AWAITING_APPROVAL', approval: { status: 'APPROVED' }, intent: { action: 'resume' },
+    });
+  });
   async function taskRow() {
     return (await admin.send(new GetCommand({ TableName: tasks, Key: { task_id: 'task' }, ConsistentRead: true }))).Item!;
   }

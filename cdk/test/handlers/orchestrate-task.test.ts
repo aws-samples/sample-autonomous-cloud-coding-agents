@@ -1226,6 +1226,79 @@ describe('hydrateAndTransition — registry asset resolution (#246)', () => {
 });
 
 describe('finalizeTask', () => {
+  const supervisor = {
+    version: 1 as const,
+    microvmId: 'vm',
+    firstObservedAtMs: 1,
+    sessionDeadlineMs: 28_800_001,
+    lifetimeVerified: true,
+    consecutivePollFailures: 3,
+    consecutiveResumeFailures: 0,
+    anomalyReported: false,
+    nextPollInMs: 5_000,
+  };
+  const vmTask = () => ({
+    ...baseTask,
+    status: 'AWAITING_APPROVAL',
+    compute_type: 'lambda-microvm',
+    session_id: 'vm',
+    compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example' },
+  });
+
+  test.each(['AWAITING_APPROVAL', 'RUNNING', 'HYDRATING'])('supervisor failure strongly reads %s and conditionally fails only its worker', async status => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123');
+    const read = mockDdbSend.mock.calls[0][0];
+    expect(read.input.ConsistentRead).toBe(true);
+    const write = mockDdbSend.mock.calls[1][0];
+    expect(write.input.ConditionExpression).toContain('compute_metadata.microvmId = :microvmId');
+    expect(write.input.ExpressionAttributeValues).toMatchObject({
+      ':fromStatus': status,
+      ':toStatus': 'FAILED',
+      ':microvmId': 'vm',
+      ':attr_error_message': 'MicroVM supervisor: substrate-read-failed',
+    });
+    expect(mockReleaseTaskSlot).toHaveBeenCalledTimes(1);
+  });
+
+  test('supervisor finalization preserves a committed cancellation', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status: 'CANCELLED', memory_written: true } })
+      .mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'resume-request-failed-repeatedly',
+    }, 'user-123');
+    expect(mockDdbSend.mock.calls.some(([command]) => command.input.ExpressionAttributeValues?.[':toStatus'])).toBe(false);
+    expect(mockDdbSend.mock.calls.find(([command]) => command._type === 'Put')?.[0].input.Item.event_type).toBe('task_cancelled');
+  });
+
+  test('changed worker ownership skips both task mutation and reservation release', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), session_id: 'replacement' } });
+    await expect(finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123')).resolves.toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    expect(mockReleaseTaskSlot).not.toHaveBeenCalled();
+  });
+
+  test.each([['RUNNING', 'TIMED_OUT'], ['AWAITING_APPROVAL', 'FAILED'], ['HYDRATING', 'FAILED']])(
+    'absolute session expiry in %s uses the allowed %s task outcome', async (status, expected) => {
+      mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+      await finalizeTask('TASK001', {
+        attempts: 2000, microvmSupervisor: supervisor, microvmFailureReason: 'session-deadline',
+      }, 'user-123');
+      expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe(expected);
+    },
+  );
+
+  test('the legacy approval poll timeout also uses FAILED without changing the approval decision', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: vmTask() }).mockResolvedValue({});
+    await finalizeTask('TASK001', { attempts: 1020 }, 'user-123');
+    expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
+    expect(mockDdbSend.mock.calls[2][0].input.Item.event_type).toBe('task_failed');
+  });
+
   test.each([
     ['FAILED', 'HYDRATING'],
     ['CANCELLED', 'RUNNING'],
@@ -1393,7 +1466,7 @@ describe('finalizeTask', () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } })
       .mockResolvedValue({});
     mockReleaseTaskSlot.mockResolvedValue(false);
-    await expect(finalizeTask('TASK001', { attempts: 10 }, 'user-123')).resolves.toBeUndefined();
+    await expect(finalizeTask('TASK001', { attempts: 10 }, 'user-123')).resolves.toBe(true);
   });
 
   test('a reservation release outage propagates for retry', async () => {

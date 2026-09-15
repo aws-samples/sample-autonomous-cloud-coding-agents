@@ -26,6 +26,7 @@ import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
@@ -210,11 +211,9 @@ export interface TaskOrchestratorProps {
    * ## Names, ARNs — and NO grants
    *
    * Every field is an identifier, never a secret value, and NONE of them adds an
-   * IAM grant to the orchestrator role: it forwards these strings and never calls
-   * the resources they name (the agent does, through its own execution role /
-   * SessionRole). The approvals and nudges tables in particular stay ungranted to
-   * the orchestrator, which is asserted by a unit test — a "while I'm here" grant
-   * would hand the orchestration plane tenant-data access it has never needed.
+   * IAM grant to the orchestrator role. P3's separate `microvmConfig` grants
+   * explicit approval reads/condition checks for lifecycle supervision. Forwarding
+   * these names alone still grants no access to approvals, nudges or tenant roles.
    *
    * ## All-or-nothing, and wired unconditionally
    *
@@ -283,8 +282,8 @@ export interface TaskOrchestratorProps {
    *
    * `ingressConnectorArns` is required for a different reason — it is a security
    * control whose absence has a *wider* meaning than "off" (see the field). Only
-   * `imageVersion` is genuinely optional, and its absent state ("let the service
-   * resolve the latest ACTIVE version") is a real, intended configuration.
+   * `imageVersion` may be omitted to resolve the latest ACTIVE version.
+   * Approval suspension defaults off while wake/cleanup stay available.
    */
   readonly microvmConfig?: {
     /**
@@ -315,6 +314,10 @@ export interface TaskOrchestratorProps {
      * active version, which is what a rebuild-in-place flow wants.
      */
     readonly imageVersion?: string;
+    /** Coordinator reads and condition-checks the current gate before sleeping. */
+    readonly approvalsTable: dynamodb.ITable;
+    /** Static opt-in and live Parameter Store value for new suspends; default false. */
+    readonly approvalSuspendEnabled?: boolean;
     /** Role the MicroVM assumes at runtime; passed on `RunMicrovm`. */
     readonly executionRoleArn: string;
     /** Egress network connectors; comma-joined into the env var. */
@@ -386,6 +389,12 @@ export class TaskOrchestrator extends Construct {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
+    const suspendParameter = props.microvmConfig ? new ssm.StringParameter(this, 'MicrovmApprovalSuspendEnabled', {
+      parameterName: `/${Stack.of(this).stackName}/microvm-approval-suspend-enabled`,
+      stringValue: String(props.microvmConfig.approvalSuspendEnabled ?? false),
+      description: 'Allow new approval suspensions; existing durable executions reread before suspending.',
+      allowedPattern: '^(true|false)$',
+    }) : undefined;
 
     // Hydration pulls in bedrock-agentcore (bundled), durable-execution, and
     // attachment screening (URL resolution). pdf-parse is needed for PDF text
@@ -476,6 +485,9 @@ export class TaskOrchestrator extends Construct {
           // unconditional; there is no "no ingress configured" state to express.
           MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
           MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
+          TASK_APPROVALS_TABLE_NAME: props.microvmConfig.approvalsTable.tableName,
+          MICROVM_APPROVAL_SUSPEND_ENABLED: String(props.microvmConfig.approvalSuspendEnabled ?? false),
+          MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME: suspendParameter!.parameterName,
           ...(props.microvmConfig.imageVersion && {
             MICROVM_IMAGE_VERSION: props.microvmConfig.imageVersion,
           }),
@@ -489,7 +501,7 @@ export class TaskOrchestrator extends Construct {
         // PLATFORM_CONFIG_ENV_VARS map verbatim — one stack value, one name, three
         // backends. NO IAM grant accompanies any of these (see the prop docs).
         ...(props.agentPlatformConfig && {
-          TASK_APPROVALS_TABLE_NAME: props.agentPlatformConfig.taskApprovalsTableName,
+          TASK_APPROVALS_TABLE_NAME: props.microvmConfig?.approvalsTable.tableName ?? props.agentPlatformConfig.taskApprovalsTableName,
           NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
           LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
           ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
@@ -616,13 +628,11 @@ export class TaskOrchestrator extends Construct {
     //   GetMicrovm       — pollSession
     //   GetMicrovmImageVersion — attest the actual launched snapshot's lifecycle hooks
     //   TerminateMicrovm — stopSession / finalize (the active cleanup path)
+    //   SuspendMicrovm / ResumeMicrovm — durable approval-wait supervision
     //   PassNetworkConnector — required to attach egress connectors, even the
     //                          AWS-managed ones
     //
     // NOT granted, deliberately:
-    //   - lambda:SuspendMicrovm / lambda:ResumeMicrovm — the ADR's grant list
-    //     names them and strategy methods exist, but no supervisor caller is
-    //     wired yet. Grant them when that integration adds actual calls.
     //   - lambda:CreateMicrovmAuthToken — granted to no role in any phase; no
     //     JWE consumer exists (ADR-021 sub-decision 3).
     if (props.microvmConfig) {
@@ -657,8 +667,20 @@ export class TaskOrchestrator extends Construct {
           'lambda:GetMicrovm',
           'lambda:GetMicrovmImageVersion',
           'lambda:TerminateMicrovm',
+          'lambda:SuspendMicrovm',
+          'lambda:ResumeMicrovm',
         ],
         resources: microvmImageResources,
+      }));
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmApprovalObservation',
+        actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
+        resources: [props.microvmConfig.approvalsTable.tableArn],
+      }));
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmSuspendConfiguration',
+        actions: ['ssm:GetParameter'],
+        resources: [suspendParameter!.parameterArn],
       }));
 
       // `lambda:PassNetworkConnector` supports NO resource-level permissions
@@ -786,7 +808,7 @@ export class TaskOrchestrator extends Construct {
       },
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com; S3 writes restricted to bootstrap manifests and task payload/launch objects; GetObject and DeleteObject restricted to */payload.json and */launch.json for signing, replay and cleanup; ListBucket is scoped to each payload bucket so absent launch records return NoSuchKey; MicroVM launch/state/cleanup and image-capability actions (RunMicrovm/GetMicrovm/TerminateMicrovm/GetMicrovmImageVersion) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (every one of them authorizes against the image resource, not the per-session instance; no account-wide wildcard is used); lambda:PassNetworkConnector requires Resource:* because the action supports no resource-level permissions and the AWS-managed connectors live outside this account; iam:PassRole is scoped to the exact MicroVM execution role without iam:PassedToService (ADR-021 P2r2-F10); Agent Registry read scoped to the wired registry ARN, with a record/* suffix wildcard because record ids are server-assigned and unknown at synth (#246)',
+        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com; S3 writes restricted to bootstrap manifests and task payload/launch objects; GetObject and DeleteObject restricted to */payload.json and */launch.json for signing, replay and cleanup; ListBucket is scoped to each payload bucket so absent launch records return NoSuchKey; MicroVM launch/state/sleep/wake/cleanup and image-capability actions (RunMicrovm/GetMicrovm/SuspendMicrovm/ResumeMicrovm/TerminateMicrovm/GetMicrovmImageVersion) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (every one of them authorizes against the image resource, not the per-session instance; no account-wide wildcard is used); lambda:PassNetworkConnector requires Resource:* because the action supports no resource-level permissions and the AWS-managed connectors live outside this account; iam:PassRole is scoped to the exact MicroVM execution role without iam:PassedToService (ADR-021 P2r2-F10); Agent Registry read scoped to the wired registry ARN, with a record/* suffix wildcard because record ids are server-assigned and unknown at synth (#246)',
       },
     ], true);
   }

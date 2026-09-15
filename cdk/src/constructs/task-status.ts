@@ -130,8 +130,8 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
     TaskStatus.FAILED,
   ],
   // AWAITING_APPROVAL transitions back to RUNNING on approve or denial
-  // resume; CANCELLED on user cancel mid-approval; FAILED only via the
-  // stranded-approval reconciler.
+  // resume; CANCELLED on user cancel mid-approval; FAILED on infrastructure
+  // loss, an exhausted supervisor window or stranded-approval reconciliation.
   [TaskStatus.AWAITING_APPROVAL]: [
     TaskStatus.RUNNING,
     TaskStatus.CANCELLED,

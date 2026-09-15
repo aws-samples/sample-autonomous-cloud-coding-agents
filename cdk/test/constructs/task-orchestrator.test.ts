@@ -608,6 +608,7 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     imageIdentifier?: string;
     imageArn?: string;
     imageVersion?: string;
+    approvalSuspendEnabled?: boolean;
     ingressConnectorArns?: string[];
   }): { template: Template } {
     const app = new App();
@@ -627,6 +628,8 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
       }),
       runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-runtime',
       microvmConfig: {
+        approvalsTable: mkTable('MicrovmApprovalsTable', 'request_id'),
+        approvalSuspendEnabled: config?.approvalSuspendEnabled,
         imageIdentifier: config?.imageIdentifier ?? IMAGE_ARN,
         imageArn: config?.imageArn ?? IMAGE_ARN,
         imageVersion: config?.imageVersion,
@@ -672,12 +675,13 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     template = createMicrovmStack().template;
     pinnedTemplate = createMicrovmStack({
       imageVersion: '4',
+      approvalSuspendEnabled: true,
       ingressConnectorArns: ['arn:aws:lambda:us-east-1:aws:network-connector:x', 'arn:y'],
     }).template;
     // What LambdaMicrovmCompute passes when the operator gave a bare image NAME:
     // the exact ARN it derived, never a wildcard.
     nameDerivedTemplate = createMicrovmStack({
-      imageIdentifier: 'abca-agent',
+      imageIdentifier: NAME_DERIVED_IMAGE_ARN,
       imageArn: NAME_DERIVED_IMAGE_ARN,
     }).template;
     noMicrovmTemplate = createStack().template;
@@ -690,6 +694,34 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(env.MICROVM_EGRESS_CONNECTOR_ARNS).toBe(CONNECTOR_ARN);
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).toBe(NO_INGRESS_ARN);
     expect(env.MICROVM_PAYLOAD_BUCKET).toBeDefined();
+  });
+
+  test('new sleep defaults off while explicit opt-in enables it', () => {
+    expect(orchestratorEnv(template).MICROVM_APPROVAL_SUSPEND_ENABLED).toBe('false');
+    expect(orchestratorEnv(pinnedTemplate).MICROVM_APPROVAL_SUSPEND_ENABLED).toBe('true');
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/TestStack/microvm-approval-suspend-enabled', Type: 'String', Value: 'false',
+    });
+    pinnedTemplate.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: '/TestStack/microvm-approval-suspend-enabled', Type: 'String', Value: 'true',
+    });
+  });
+
+  test('existing executions receive a stable parameter name with exact read-only permission', () => {
+    const [parameterId] = Object.keys(template.findResources('AWS::SSM::Parameter'));
+    expect(orchestratorEnv(template).MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME).toEqual({ Ref: parameterId });
+    const statement = microvmStatements(template).find(s => s.Sid === 'MicrovmSuspendConfiguration')!;
+    expect(statement.Action).toBe('ssm:GetParameter');
+    expect(statement.Resource).toEqual({
+      'Fn::Join': ['', ['arn:', { Ref: 'AWS::Partition' }, ':ssm:us-east-1:123456789012:parameter', { Ref: parameterId }]],
+    });
+  });
+
+  test('approval observation grants read and transaction condition checks, never approval writes', () => {
+    const statement = microvmStatements(template).find(s => s.Sid === 'MicrovmApprovalObservation')!;
+    expect(statement.Action).toEqual(['dynamodb:GetItem', 'dynamodb:ConditionCheckItem']);
+    expect(JSON.stringify(statement.Resource)).toContain('MicrovmApprovalsTable');
+    expect(orchestratorEnv(template).TASK_APPROVALS_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^MicrovmApprovalsTable/) });
   });
 
   test('ALWAYS injects the ingress var, carrying the NO_INGRESS control', () => {
@@ -715,6 +747,8 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     // ingress included, is present whenever microvmConfig is.
     const env = orchestratorEnv(template);
     expect(Object.keys(env).filter((k) => k.startsWith('MICROVM_')).sort()).toEqual([
+      'MICROVM_APPROVAL_SUSPEND_ENABLED',
+      'MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME',
       'MICROVM_EGRESS_CONNECTOR_ARNS',
       'MICROVM_EXECUTION_ROLE_ARN',
       'MICROVM_IMAGE_IDENTIFIER',
@@ -733,7 +767,7 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toContain('NO_INGRESS');
   });
 
-  test('grants lifecycle calls and image-version discovery without enabling pause/wake callers yet', () => {
+  test('grants the lifecycle actions used by the supervisor and image discovery', () => {
     const actions = microvmStatements(template)
       .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action])
       .filter(a => a.startsWith('lambda:'));
@@ -741,7 +775,9 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
       'lambda:GetMicrovm',
       'lambda:GetMicrovmImageVersion',
       'lambda:PassNetworkConnector',
+      'lambda:ResumeMicrovm',
       'lambda:RunMicrovm',
+      'lambda:SuspendMicrovm',
       'lambda:TerminateMicrovm',
     ]);
   });
@@ -754,11 +790,9 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   });
 
   test('a name-derived image ARN is scoped to that exact name, never a wildcard', () => {
-    // An out-of-band image referenced by bare NAME is a valid RunMicrovm
-    // identifier but not an IAM resource. LambdaMicrovmCompute resolves it to the
-    // exact `microvmImage` ARN, so ADR-021's "scoped to platform-created images"
-    // holds here too — the account/Region-wide `microvm-image:*` widening this
-    // test previously accepted is a compliance violation, not a fallback.
+    // LambdaMicrovmCompute resolves a configured image name to an exact ARN
+    // for both RunMicrovm and IAM. Neither path may fall back to an account-wide
+    // image wildcard; the service does not accept a bare RunMicrovm image name.
     const lifecycle = microvmStatements(nameDerivedTemplate).find(s => s.Sid === 'MicrovmLifecycle')!;
     expect(lifecycle.Resource).toEqual([
       NAME_DERIVED_IMAGE_ARN,
@@ -792,14 +826,14 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(JSON.stringify(passRole.Resource)).not.toContain('*');
   });
 
-  test('grants NO suspend/resume (P3) and NO auth-token minting (never)', () => {
+  test('grants supervisor control but no auth-token minting', () => {
     const actions = new Set(
       Object.values(template.findResources('AWS::IAM::Policy'))
         .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
         .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]),
     );
-    expect(actions.has('lambda:SuspendMicrovm')).toBe(false);
-    expect(actions.has('lambda:ResumeMicrovm')).toBe(false);
+    expect(actions.has('lambda:SuspendMicrovm')).toBe(true);
+    expect(actions.has('lambda:ResumeMicrovm')).toBe(true);
     expect(actions.has('lambda:CreateMicrovmAuthToken')).toBe(false);
     expect(actions.has('lambda:CreateMicrovmShellAuthToken')).toBe(false);
   });
@@ -831,6 +865,8 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
   test('adds no MicroVM statements when microvmConfig is omitted', () => {
     expect(microvmStatements(noMicrovmTemplate)).toEqual([]);
     expect(orchestratorEnv(noMicrovmTemplate).MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
+    expect(orchestratorEnv(noMicrovmTemplate).MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME).toBeUndefined();
+    noMicrovmTemplate.resourceCountIs('AWS::SSM::Parameter', 0);
   });
 });
 

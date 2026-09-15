@@ -100,7 +100,7 @@ stateDiagram-v2
 
     AWAITING_APPROVAL --> RUNNING : Approved or denied (resume)
     AWAITING_APPROVAL --> CANCELLED : User cancels mid-approval
-    AWAITING_APPROVAL --> FAILED : Stranded-approval reconciler
+    AWAITING_APPROVAL --> FAILED : Infrastructure loss or stranded wait
 
     FINALIZING --> COMPLETED : PR or commits found
     FINALIZING --> FAILED : No useful work
@@ -125,11 +125,11 @@ stateDiagram-v2
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
 | `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
-| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
+| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; MicroVM supervision retains the original service deadline across replay; other backends retain the 1,020-attempt safety window (about 8.5h at 30s) |
 | `RUNNING` | `FAILED` | Session crash | Heartbeat or substrate liveness lost (see Liveness monitoring) |
 | `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
 | `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
-| `AWAITING_APPROVAL` | `FAILED` | Stranded reconciler | Approval request orphaned (agent died mid-wait) |
+| `AWAITING_APPROVAL` | `FAILED` | Infrastructure failure or stranded wait | Lost compute, exhausted supervisor recovery/window, or an orphaned approval; the approval decision is not rewritten |
 | `FINALIZING` | `COMPLETED` | Success inferred | PR exists or commits on branch |
 | `FINALIZING` | `FAILED` | Failure inferred | No commits, no PR, or agent reported error |
 
@@ -156,7 +156,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Substrate ti
 
 | Type | Default | Effect |
 |---|---|---|
-| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
+| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. MicroVM uses the saved absolute service deadline, so fast transition polling cannot shorten the session. Other backends retain the 1,020-attempt safety window. An exhausted approval wait uses FAILED, its allowed infrastructure-failure transition. |
 | Idle timeout | Backend-specific | AgentCore has an idle timeout. Lambda MicroVMs omit `idlePolicy` because inbound-traffic idleness would suspend an outbound-only agent while it is working. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
 | Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
@@ -227,7 +227,7 @@ The orchestrator polls for completion using `waitForCondition` from the Durable 
 | ECS | `DescribeTasks`, including container exit status and exit code |
 | Lambda MicroVMs | `GetMicrovm` state plus agent heartbeat |
 
-While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
+While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization after a strongly consistent task read; it preserves an already committed terminal result.
 
 ### Step 6: Finalization
 
@@ -296,9 +296,11 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
-- `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
-- A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
+- Intentional suspension requires the matching pending gate and saved suspend intent. Unexpected suspension emits one anomaly per episode and starts bounded wake recovery, preserving recoverable work.
+- A terminal substrate report paired with a non-terminal task is a failure, but finalization first strongly re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
 - Substrate state detects a dead VM; heartbeat staleness detects loss of the heartbeat writer inside a VM that still reports `RUNNING`. The independent heartbeat thread can continue during a pipeline hang, so a fresh timestamp is not proof of progress.
+
+The P3 supervisor saves intent before control calls and rechecks the gate before and after them. Its durable state retains an absolute service lifetime, consecutive failures, recovery start time and next delay. Three failed cycles or 120 seconds of unconfirmed wake cannot become an indefinite wait. AWS RUNNING does not end recovery while the guest remains stuck on a decided/expired approval; fresh guest liveness is required. API approve/deny commit first, then attempt a bounded wake without changing the decision response. Automatic suspension defaults off via `microvm_approval_suspend_enabled`; disabling new sleep preserves wake and cleanup. See the [supervisor runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-supervisor).
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 
@@ -326,7 +328,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
 | Session start | Selected compute service throttled | Exponential backoff. Fail after retries exhausted. |
 | Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure. Lambda MicroVMs: `GetMicrovm` reports terminal state or the heartbeat never appears. |
-| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects loss of the in-guest writer. Finalization inspects GitHub for partial work. |
+| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects loss of the in-guest writer. Finalization preserves committed task results and records a specific failure for an active lost session. |
 | Running | Agent hits turn or budget limit | Session ends normally. Finalize based on what was produced. |
 | Running | Idle for 15 min | AgentCore kills session. Task transitions to `TIMED_OUT`. |
 | Finalization | GitHub API down | Retry 3x. If still failing, mark `FAILED` with infrastructure reason. |
@@ -342,7 +344,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 
 ## Concurrency and scaling
 
-Each task runs in an isolated compute session. The orchestrator reserves capacity per user before starting compute; AWS separately enforces backend quotas. Approval waits keep their reservation, including when a future P3 implementation suspends the MicroVM.
+Each task runs in an isolated compute session. The orchestrator reserves capacity per user before starting compute; AWS separately enforces backend quotas. Approval waits keep their reservation, including when P3 suspends the MicroVM. This bounds unfinished sessions and their eventual resume demand; AWS memory-quota use while suspended remains unverified.
 
 ### Capacity limits
 
@@ -437,7 +439,7 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks; PR's `head_ref` for PR tasks |
 | `session_id` | String? | Backend session identifier (AgentCore session ID, ECS task ARN, or MicroVM ID) |
 | `compute_type` | String? | Selected backend: `agentcore`, `ecs`, or `lambda-microvm` |
-| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId` and `endpoint` |
+| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId`, `endpoint`, actual image identity and verified lifecycle protocol when available |
 | `concurrency_slot` | Map? | Internal reservation `{state, acquired_at, released_at?}`; excluded from public task responses |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |

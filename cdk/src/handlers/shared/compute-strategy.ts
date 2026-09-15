@@ -77,10 +77,9 @@ export type SessionHandle =
  * to choose a stable failure code. Consumers classify that code, so arbitrary
  * words in the reason cannot change the category or user-facing retry advice.
  *
- * Declared on all four variants for UNIFORMITY, though only ``completed`` and
- * ``failed`` are read today (``reconcileMicrovmSubstrateState`` returns early for
- * the other two). The wide union is deliberate rather than dead weight:
- * ``suspended.reason`` can explain an observation in P3 diagnostics. The policy
+ * Declared on all four variants for uniform diagnostics. Terminal failure
+ * formatting consumes ``completed`` and ``failed``; ``suspended.reason`` can
+ * explain an observation without deciding whether it is healthy. The policy
  * must distinguish intended suspension through durable orchestrator intent and
  * task/approval state, not by parsing this service-provided text. Keeping the
  * field on every variant preserves the same diagnostic shape.
@@ -96,7 +95,15 @@ export type SessionStatus = (
 ) & {
   /** Explicit MicroVM observation; coarse `running` also covers pending/unknown. */
   readonly microvmState?: MicrovmObservedState;
+  /** Service observations used to retain the original lifetime across durable replay. */
+  readonly microvmStartedAtMs?: number;
+  readonly microvmMaximumDurationSeconds?: number;
 };
+
+/** A caller may impose a shorter total budget across several control operations. */
+export interface SessionControlOptions {
+  readonly abortSignal?: AbortSignal;
+}
 
 /**
  * `supported: true` means the lifecycle command was acknowledged, not that the
@@ -106,6 +113,11 @@ export type SessionStatus = (
 export type SessionLifecycleResult =
   | { readonly supported: false }
   | { readonly supported: true };
+
+/** Optional evidence from best-effort cleanup. A request is not confirmed teardown. */
+export type SessionStopResult =
+  | { readonly outcome: 'requested' | 'not-found' }
+  | { readonly outcome: 'unconfirmed'; readonly error_type: string; readonly aws_request_id?: string };
 
 export interface ComputeStrategy {
   readonly type: ComputeType;
@@ -136,10 +148,10 @@ export interface ComputeStrategy {
      */
     readOnly?: boolean;
   }): Promise<SessionHandle>;
-  pollSession(handle: SessionHandle): Promise<SessionStatus>;
-  stopSession(handle: SessionHandle): Promise<void>;
-  suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult>;
-  resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult>;
+  pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus>;
+  stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult | void>;
+  suspendSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult>;
+  resumeSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult>;
 }
 
 export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): ComputeStrategy {
