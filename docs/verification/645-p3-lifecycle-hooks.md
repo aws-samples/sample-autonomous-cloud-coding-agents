@@ -1,11 +1,11 @@
 # #645 P3: worker suspend/resume hooks
 
-**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) now declares the served hooks and verifies the actual launched image version locally. The milestone below records its original scope; supervisor integration and live sleep/wake acceptance remain open.
+**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) declares the served hooks and verifies the actual launched image version. The [supervisor milestone](./645-p3-supervisor.md) implements durable recovery and approval wake; the full repository build passes. The record below preserves this milestone's original scope. Live sleep/wake acceptance remains open.
 
 Date: 2026-09-14. Local implementation and DynamoDB Local verification.
 Nothing in this milestone was deployed. Managed image **2.0** and automatic
-suspension remain unchanged. P3 still requires image capability, supervisor
-integration and the live acceptance matrix in the [plan](./645-p3-implementation-plan.md).
+suspension were unchanged. At that point, P3 still required image capability,
+supervisor integration and the live acceptance matrix in the [plan](./645-p3-implementation-plan.md).
 
 ## Behavior
 

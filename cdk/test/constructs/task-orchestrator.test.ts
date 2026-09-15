@@ -187,6 +187,14 @@ describe('TaskOrchestrator construct', () => {
     });
   });
 
+  test('retains published versions so in-flight durable executions can replay after deployment', () => {
+    baseTemplate.resourceCountIs('AWS::Lambda::Version', 1);
+    baseTemplate.hasResource('AWS::Lambda::Version', {
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+    });
+  });
+
   test('grants AgentCore runtime invocation permissions with wildcard sub-resource', () => {
     baseTemplate.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {

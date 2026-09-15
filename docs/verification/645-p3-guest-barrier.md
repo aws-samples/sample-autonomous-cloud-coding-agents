@@ -1,9 +1,9 @@
 # #645 P3 guest pause controller
 
-**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) now declares the served hooks and verifies the actual launched image version locally. The milestone below records its original scope; supervisor integration and live sleep/wake acceptance remain open.
+**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) declares the served hooks and verifies the actual launched image version. The [supervisor milestone](./645-p3-supervisor.md) implements durable recovery and approval wake; the full repository build passes. The record below preserves this milestone's original scope. Live sleep/wake acceptance remains open.
 
-Date: 2026-09-14. Local implementation; deployed image `2.0` still has only
-ready, validate, run and terminate hooks. Automatic sleeping remains disabled.
+Date: 2026-09-14. Local implementation; at this milestone, deployed image `2.0`
+had only ready, validate, run and terminate hooks. Automatic sleeping was disabled.
 
 ## What is implemented
 
@@ -46,7 +46,8 @@ adds cached successful acknowledgments and clears an old wake result for each ne
 
 The later [HTTP hook milestone](./645-p3-lifecycle-hooks.md) supplies production
 callbacks for atomic checkpoint writes, credential renewal and gate reconciliation.
-Image capability, supervisor integration and live service verification remain open.
+At this milestone, image capability, supervisor integration and live service
+verification remained open; the follow-up above records later implementation.
 
 The worker has several independent credential consumers:
 

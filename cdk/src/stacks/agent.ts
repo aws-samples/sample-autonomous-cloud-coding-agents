@@ -478,6 +478,13 @@ export class AgentStack extends Stack {
     });
 
     inputGuardrail.createVersion('Initial version');
+    // A retained durable Lambda version also pins GUARDRAIL_VERSION. Preserve
+    // that immutable dependency across updates, even when CDK creates a new one.
+    for (const child of inputGuardrail.node.findAll()) {
+      if (child instanceof CfnResource && child.cfnResourceType === 'AWS::Bedrock::GuardrailVersion') {
+        child.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      }
+    }
 
     // --- TaskApi is constructed before the orchestrator (which it needs the
     // ARN of) and before the Runtime (which it needs the ARN of, for the

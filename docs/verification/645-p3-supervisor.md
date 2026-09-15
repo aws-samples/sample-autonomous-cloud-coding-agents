@@ -109,6 +109,15 @@ independent admission check.
 
 Durable executions retain their original Lambda version and environment.
 An environment-only redeploy therefore cannot disable an existing execution.
+The stack retains published coordinator versions and their immutable guardrail
+versions across updates. Otherwise, a rollout could delete the code or guardrail
+that an older execution still references. The live alias advances to the new
+coordinator version. Retained versions require operator cleanup only after no
+execution can resume or retry them; changing the live alias is not that proof.
+For the first upgrade from an unretained deployment, drain existing executions
+before removing the old versions, or retain those existing resources in a
+separate update before replacing them.
+
 The supervisor rereads Parameter Store without caching before saving new
 suspend intent and again before the pre-command gate read. Missing, invalid or
 unavailable values disable new sleep without counting as compute failure.
@@ -169,6 +178,12 @@ The full run caught two old start-recovery assertions omitting the newly bounded
 Terminate request's AbortSignal; they now assert it. A subsequent comment lint
 failure was corrected before the final passing run. Final evidence:
 `p3-supervisor-root-build-r4-20260915.log`.
+
+The deployment change-set review then exposed missing retention for published
+coordinator and guardrail versions. The fix passed 192 focused infrastructure
+tests and another complete root build in 657.59 seconds: 5,030 CDK tests,
+1,951 Python tests, 928 CLI tests and all other configured checks. DynamoDB Local
+remained enabled. Evidence: `p3-retention-root-build-20260915.log`.
 
 Local evidence does not establish AWS timing, IAM effectiveness, actual frozen
 credential renewal or deployed durable replay.

@@ -45,6 +45,14 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  test('retains the guardrail version referenced by pinned durable environments', () => {
+    template.resourceCountIs('AWS::Bedrock::GuardrailVersion', 1);
+    template.hasResource('AWS::Bedrock::GuardrailVersion', {
+      DeletionPolicy: 'Retain',
+      UpdateReplacePolicy: 'Retain',
+    });
+  });
+
   test('AgentCore runtime has no direct DynamoDB grant, including capacity counters', () => {
     const roles = Object.entries(template.findResources('AWS::IAM::Role'));
     const runtimeRoleIds = roles.filter(([, role]) =>

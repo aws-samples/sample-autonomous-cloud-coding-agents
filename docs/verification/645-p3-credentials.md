@@ -1,10 +1,10 @@
 # #645 P3: scoped credentials across sleep
 
-**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) now declares the served hooks and verifies the actual launched image version locally. The milestone below records its original scope; supervisor integration and live sleep/wake acceptance remain open.
+**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) declares the served hooks and verifies the actual launched image version. The [supervisor milestone](./645-p3-supervisor.md) implements durable recovery and approval wake; the full repository build passes. The record below preserves this milestone's original scope. Live sleep/wake acceptance remains open.
 
 Date: 2026-09-14. Local implementation and actual pinned Claude process probes.
 No AWS deployment or suspension was performed for this milestone. Deployed
-image **2.0** remains unchanged; P3 is not complete.
+image **2.0** was unchanged at that milestone; P3 was not complete.
 
 ## What changed
 
@@ -123,5 +123,6 @@ Before automatic suspension can ship:
    subprocess behavior and long-expiry sleep in AWS. The local CLI probe uses an
    explicit settings file containing the production helper command; it does not
    install `/etc/claude-code/managed-settings.json` on the developer machine.
-4. Finish image capability, durable supervisor recovery and approval-triggered wake,
-   then complete the [P3 plan](./645-p3-implementation-plan.md), including its P2 gates.
+4. **Implemented locally in the later image/supervisor milestones:** image capability,
+   durable supervisor recovery and approval-triggered wake. Complete their live
+   verification and the [P3 plan](./645-p3-implementation-plan.md), including its P2 gates.

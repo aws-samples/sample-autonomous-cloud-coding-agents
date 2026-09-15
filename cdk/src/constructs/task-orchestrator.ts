@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -437,6 +437,9 @@ export class TaskOrchestrator extends Construct {
         executionTimeout: Duration.hours(DURABLE_EXECUTION_TIMEOUT_HOURS),
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
+      // Durable executions replay their original code and environment after a
+      // deployment. Keep published versions until no execution can resume them.
+      currentVersionOptions: { removalPolicy: RemovalPolicy.RETAIN },
       environment: {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
