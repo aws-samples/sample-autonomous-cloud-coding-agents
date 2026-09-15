@@ -7,7 +7,7 @@
 # CI if the engines diverge on any (policy, input) pair.
 #   - agent:   cedarpy==4.8.4                 (agent/pyproject.toml)
 #   - cdk:     @cedar-policy/cedar-wasm@4.8.2  (cdk/package.json)
-min_version = "2026.2.6"
+min_version = "2026.7.11"
 
 monorepo_root = true
 
