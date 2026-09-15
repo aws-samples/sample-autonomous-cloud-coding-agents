@@ -493,7 +493,7 @@ export async function resolveLinearOauthToken(
         error: err instanceof Error ? err.message : String(err),
       });
       // Resolution fails for THIS event; the next one retries. Nothing is latched.
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- null IS this resolver's whole failure encoding ("Returns null on any failure … so callers can gracefully no-op", see the contract on the function); it can never be confused with an empty success because no success path returns null, and the cause is logged with full context immediately above
     }
     if (!fetched) {
       logger.error('Linear OAuth secret missing or unreadable', {
