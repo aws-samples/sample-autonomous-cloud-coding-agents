@@ -266,7 +266,9 @@ REMINDER (ADR-021 P2): clean deployment and coding, iteration and cancellation
    Ready/validate hooks, heartbeat, logging, Memory writes and cleanup have live
    evidence. Full P2 acceptance still needs the failure/recovery, effective IAM
    and networking matrix in docs/verification/645-p3-implementation-plan.md.
-   /suspend and /resume are declared; supervisor integration and live P3 acceptance remain open.
+   /suspend and /resume are declared; supervisor integration is implemented.
+   P3 requires bootstrap bundle 1.8.0 and defaults new suspension off.
+   Live P3 acceptance remains open.
    CDK retains warning ID abca:microvm-image-p1-smoke-unverified for compatibility;
    its text describes the current verification gaps.
 EOF

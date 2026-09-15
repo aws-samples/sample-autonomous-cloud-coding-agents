@@ -1009,7 +1009,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     for (const hook of ['/ready', '/validate', '/run', '/terminate', '/suspend', '/resume']) {
       expect(message).toContain(hook);
     }
-    expect(message).toContain('supervisor integration and live sleep/wake acceptance remain open');
+    expect(message).toContain('supervisor integration is implemented');
+    expect(message).toContain('P3 requires bootstrap bundle 1.8.0 and defaults new suspension off');
+    expect(message).toContain('Live sleep/wake acceptance remains open');
   });
 
   test('enables every hook the agent serves, and only those (rendered form)', () => {

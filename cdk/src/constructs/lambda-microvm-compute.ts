@@ -733,8 +733,8 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * `abca:microvm-image-p1-smoke-unverified` warning below records that scope.
  * P3 also declares the served `/suspend` and `/resume` hooks and bakes a non-secret
  * protocol marker into the image. The coordinator verifies the actual launched
- * version before allowing suspension; supervisor integration and live acceptance
- * remain separate rollout gates.
+ * version before allowing suspension. Supervisor integration is implemented;
+ * live acceptance remains a separate rollout gate and automatic sleep defaults off.
  *
  * ## Deliberately NOT here
  *
@@ -1426,7 +1426,8 @@ export class LambdaMicrovmCompute extends Construct {
         + 'Heartbeat, logs, Memory writes and cleanup have live evidence. Full P2 acceptance '
         + 'still needs the failure/recovery, effective IAM and networking matrix in '
         + 'docs/verification/645-p3-implementation-plan.md. P3 checks the actual launched image version; '
-        + 'supervisor integration and live sleep/wake acceptance remain open. The warning ID is retained '
+        + 'P3 requires bootstrap bundle 1.8.0 and defaults new suspension off; supervisor integration is implemented. '
+        + 'Live sleep/wake acceptance remains open. The warning ID is retained '
         + 'across phases for existing operator filters.',
       );
     }
