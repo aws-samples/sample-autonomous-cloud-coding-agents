@@ -19,6 +19,7 @@
 
 import {
   GetMicrovmCommand,
+  GetMicrovmImageVersionCommand,
   LambdaMicrovmsClient,
   MicrovmState,
   RunMicrovmCommand,
@@ -33,7 +34,11 @@ import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
-import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle } from '../microvm-start';
+import {
+  MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
+  readMicrovmImageMetadata, verifyMicrovmImageLifecycle,
+} from '../microvm-image-capability';
+import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle, saveMicrovmImageCapability } from '../microvm-start';
 import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -603,8 +608,12 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       throw incomplete;
     }
 
-    const handle: Extract<SessionHandle, { strategyType: 'lambda-microvm' }> = {
-      sessionId: microvmId, strategyType: 'lambda-microvm', microvmId, endpoint,
+    let handle: Extract<SessionHandle, { strategyType: 'lambda-microvm' }> = {
+      sessionId: microvmId,
+      strategyType: 'lambda-microvm',
+      microvmId,
+      endpoint,
+      ...readMicrovmImageMetadata({ imageArn: result.imageArn, imageVersion: result.imageVersion }),
     };
     try {
       await saveMicrovmStartHandle(taskId, latest.clientToken, handle);
@@ -621,16 +630,41 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       throw new Error(`MICROVM_START_RECEIPT_SAVE_FAILED: ${String(err)}`, { cause: err });
     }
 
-    // Image ARN/version is logged, NOT carried in the handle (ADR-021
-    // sub-decision 1) — it is deployment-time config, and this line is the
-    // diagnostic record of which snapshot a given session actually booted.
+    // Persist the known worker above BEFORE optional image discovery. A crash or
+    // failed lookup must not widen the orphan window or break ordinary coding.
+    // Never infer capability from a requested pin or the deployment's latest image.
+    if (handle.imageArn === MICROVM_IMAGE_IDENTIFIER && handle.imageVersion) {
+      try {
+        const identity = { imageArn: handle.imageArn, imageVersion: handle.imageVersion };
+        const version = await getClient().send(new GetMicrovmImageVersionCommand({
+          imageIdentifier: identity.imageArn, imageVersion: identity.imageVersion,
+        }), { abortSignal: AbortSignal.timeout(MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS) });
+        if (verifyMicrovmImageLifecycle(identity, version)) {
+          const capable = { ...handle, lifecycleProtocol: MICROVM_LIFECYCLE_PROTOCOL };
+          await saveMicrovmImageCapability(taskId, latest.clientToken, capable);
+          handle = capable;
+        }
+      } catch (error) {
+        // Explicit degraded mode: the saved worker remains usable, with new
+        // suspension disabled. Do not expose image environment or AWS error text.
+        const name = (error as { name?: unknown })?.name;
+        logger.warn('MicroVM image capability unavailable; automatic suspension remains disabled', {
+          task_id: taskId,
+          microvm_id: microvmId,
+          error_type: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error',
+        });
+      }
+    }
+
+    // The durable handle carries actual identity/capability for later decisions.
     logger.info('Lambda MicroVM session started', {
       task_id: taskId,
       microvm_id: microvmId,
       state: result.state,
       image_identifier: MICROVM_IMAGE_IDENTIFIER,
       image_arn: result.imageArn,
-      image_version: result.imageVersion ?? MICROVM_IMAGE_VERSION,
+      image_version: handle.imageVersion ?? null,
+      lifecycle_protocol: handle.lifecycleProtocol ?? 'unverified',
       maximum_duration_seconds: MICROVM_MAX_DURATION_SECONDS,
       payload_delivery: 'signed_reference',
       // KEY NAMES only, never values: this is the one operator-visible record of

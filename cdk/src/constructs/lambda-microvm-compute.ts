@@ -86,7 +86,8 @@ export const MICROVM_ARTIFACT_OBJECT_KEY = 'microvm-images/agent-artifact.zip';
  * (`agent/Dockerfile` → `EXPOSE 8080`), and therefore the port the MicroVM
  * lifecycle-hook listener is configured for.
  */
-const AGENT_HOOK_PORT = 8080;
+const AGENT_HOOK_PORT = sharedConstants.microvm_lifecycle.hook_port;
+const LIFECYCLE_HOOK_TIMEOUT_SECONDS = sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds;
 
 /**
  * Value every hook field on `AWS::Lambda::MicrovmImage` takes to turn a hook ON.
@@ -109,8 +110,8 @@ const AGENT_HOOK_PORT = 8080;
  * {@link MICROVM_AGENT_HOOK_ROUTES} records and the live build/run logs confirm.
  *
  * `DISABLED` is never emitted: hooks outside the image's enabled capability are
- * omitted. The guest now serves `/suspend` + `/resume`, but their image
- * declaration remains gated on the P3 capability rollout and live verification.
+ * omitted. All six guest hooks are now declared for managed images. The separate
+ * supervisor enable flag still controls whether new automatic suspends are allowed.
  */
 const HOOK_ENABLED = 'ENABLED';
 
@@ -149,6 +150,8 @@ export const MICROVM_AGENT_HOOK_ROUTES = {
   validate: `${MICROVM_HOOK_ROUTE_PREFIX}/validate`,
   run: `${MICROVM_HOOK_ROUTE_PREFIX}/run`,
   terminate: `${MICROVM_HOOK_ROUTE_PREFIX}/terminate`,
+  suspend: `${MICROVM_HOOK_ROUTE_PREFIX}/suspend`,
+  resume: `${MICROVM_HOOK_ROUTE_PREFIX}/resume`,
 } as const;
 
 /**
@@ -635,7 +638,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
   /**
    * Non-secret environment variables baked into the snapshot at build time.
    *
-   * Deliberately empty by default, and expected to STAY empty. ADR-021
+   * Empty by default; the construct adds only its invariant lifecycle protocol marker. ADR-021
    * sub-decision 3 forbids secrets, tokens, and per-task identity in the snapshot
    * — and P2 resolved the remaining question (where the agent's non-secret
    * configuration parity with the ECS container comes from) in favour of the
@@ -728,9 +731,10 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * failure/recovery, effective IAM and network matrix remains open; see
  * docs/verification/645-p3-implementation-plan.md. The stable
  * `abca:microvm-image-p1-smoke-unverified` warning below records that scope.
- * Only `/suspend` and `/resume` remain undeclared, until P3 implements compatible
- * agent hooks: a hook the service calls but
- * nothing answers fails the corresponding lifecycle transition.
+ * P3 also declares the served `/suspend` and `/resume` hooks and bakes a non-secret
+ * protocol marker into the image. The coordinator verifies the actual launched
+ * version before allowing suspension; supervisor integration and live acceptance
+ * remain separate rollout gates.
  *
  * ## Deliberately NOT here
  *
@@ -1274,6 +1278,10 @@ export class LambdaMicrovmCompute extends Construct {
     // ad-hoc condition, so this construct and the stack's pre-TaskApi decision
     // (isLambdaMicrovmImageConfigured) can never disagree.
     if (props.baseImageArn && props.baseImageVersion) {
+      const requestedProtocol = props.imageEnvironmentVariables?.[sharedConstants.microvm_lifecycle.image_protocol_env];
+      if (requestedProtocol !== undefined && requestedProtocol !== String(sharedConstants.microvm_lifecycle.protocol_version)) {
+        throw new Error('The managed MicroVM lifecycle protocol marker is owned by the image source');
+      }
       this.image = new lambda.CfnMicrovmImage(this, 'Image', {
         name: this.imageName,
         description: `ABCA agent snapshot for ${stack.stackName} (ADR-021 lambda-microvm backend)`,
@@ -1295,8 +1303,13 @@ export class LambdaMicrovmCompute extends Construct {
         logging: { cloudWatch: { logGroup: this.logGroup.logGroupName } },
         // No extra OS capabilities: the agent runs ordinary user-space tooling.
         additionalOsCapabilities: [],
-        // Nothing baked in — see `imageEnvironmentVariables`.
-        environmentVariables: Object.entries(props.imageEnvironmentVariables ?? {})
+        // The non-secret protocol marker belongs to this immutable image version.
+        // Task/deployment identity still arrives only through /run.
+        environmentVariables: Object.entries({
+          ...props.imageEnvironmentVariables,
+          [sharedConstants.microvm_lifecycle.image_protocol_env]:
+            String(sharedConstants.microvm_lifecycle.protocol_version),
+        })
           .map(([key, value]) => ({ key, value })),
         hooks: {
           port: AGENT_HOOK_PORT,
@@ -1313,8 +1326,8 @@ export class LambdaMicrovmCompute extends Construct {
             // hook nothing answers fails the corresponding lifecycle transition,
             // so each is enabled only once it is served.
             //
-            // `/suspend` and `/resume` stay OMITTED (not `DISABLED`) until P3,
-            // where compatible agent hooks and durability barriers are integrated.
+            // The served P3 hooks use the shared service budget. Declaring them
+            // enables service callbacks; automatic suspension remains supervisor-gated.
             // Note that termination does NOT depend on this hook:
             // `TerminateMicrovm` removes the VM with or without in-guest
             // cooperation, which is what makes a best-effort `/terminate` safe to
@@ -1323,6 +1336,10 @@ export class LambdaMicrovmCompute extends Construct {
             runTimeoutInSeconds: RUN_HOOK_TIMEOUT_SECONDS,
             terminate: HOOK_ENABLED,
             terminateTimeoutInSeconds: TERMINATE_HOOK_TIMEOUT_SECONDS,
+            suspend: HOOK_ENABLED,
+            suspendTimeoutInSeconds: LIFECYCLE_HOOK_TIMEOUT_SECONDS,
+            resume: HOOK_ENABLED,
+            resumeTimeoutInSeconds: LIFECYCLE_HOOK_TIMEOUT_SECONDS,
           },
           microvmImageHooks: {
             // `/ready` is MANDATORY whenever any lifecycle hook is enabled — the
@@ -1405,11 +1422,11 @@ export class LambdaMicrovmCompute extends Construct {
         'abca:microvm-image-p1-smoke-unverified',
         'A MicroVM image is configured. Clean P2 deployment with bootstrap bundle 1.7.0 and '
         + 'coding, iteration and cancellation runs passed on 2026-09-14 without manual IAM changes. '
-        + 'The agent serves the declared /ready, /validate, /run and /terminate hooks. '
+        + 'The agent serves /ready, /validate, /run, /terminate, /suspend and /resume; managed images declare all six. '
         + 'Heartbeat, logs, Memory writes and cleanup have live evidence. Full P2 acceptance '
         + 'still needs the failure/recovery, effective IAM and networking matrix in '
-        + 'docs/verification/645-p3-implementation-plan.md. The /suspend and /resume hooks remain '
-        + 'undeclared until compatible P3 agent hooks are integrated. The warning ID is retained '
+        + 'docs/verification/645-p3-implementation-plan.md. P3 checks the actual launched image version; '
+        + 'supervisor integration and live sleep/wake acceptance remain open. The warning ID is retained '
         + 'across phases for existing operator filters.',
       );
     }

@@ -25,6 +25,7 @@ import { AttachmentBudgetExceededError, AttachmentConfigurationError, Attachment
 import { formatMicrovmTerminalFailure } from './error-classifier';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
+import { readMicrovmImageMetadata } from './microvm-image-capability';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { makeRegistryClient } from './registry/factory';
@@ -340,7 +341,7 @@ export function buildComputeMetadata(handle: SessionHandle): Record<string, stri
       // ADR-021: `microvmId` keys every lifecycle API; `endpoint` is per-session
       // state that becomes load-bearing the day an orchestrator→agent HTTP
       // consumer appears (none exists in P1–P3).
-      return { microvmId: handle.microvmId, endpoint: handle.endpoint };
+      return { microvmId: handle.microvmId, endpoint: handle.endpoint, ...readMicrovmImageMetadata(handle) };
     default: {
       const _exhaustive: never = handle;
       throw new Error(`Unknown strategyType on session handle: ${JSON.stringify(_exhaustive)}`);

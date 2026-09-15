@@ -733,12 +733,13 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(env.MICROVM_INGRESS_CONNECTOR_ARNS).not.toContain('NO_INGRESS');
   });
 
-  test('grants exactly the four P1 lifecycle actions and nothing more', () => {
+  test('grants lifecycle calls and image-version discovery without enabling pause/wake callers yet', () => {
     const actions = microvmStatements(template)
       .flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action])
       .filter(a => a.startsWith('lambda:'));
     expect(actions.sort()).toEqual([
       'lambda:GetMicrovm',
+      'lambda:GetMicrovmImageVersion',
       'lambda:PassNetworkConnector',
       'lambda:RunMicrovm',
       'lambda:TerminateMicrovm',

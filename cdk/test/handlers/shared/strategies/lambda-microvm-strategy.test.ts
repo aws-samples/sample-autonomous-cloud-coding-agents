@@ -79,15 +79,18 @@ for (const optional of [
 const mockSend = jest.fn();
 const mockClaimStart = jest.fn();
 const mockSaveHandle = jest.fn();
+const mockSaveCapability = jest.fn();
 jest.mock('../../../../src/handlers/shared/microvm-start', () => ({
   ...jest.requireActual('../../../../src/handlers/shared/microvm-start'),
   claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
   saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
+  saveMicrovmImageCapability: (...args: unknown[]) => mockSaveCapability(...args),
 }));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  GetMicrovmImageVersionCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovmImageVersion', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
   // Mirrors the real SDK's const-object enum so the strategy's switch keys on
   // the same literals the service returns.
@@ -234,10 +237,93 @@ async function withoutEnvAsync(keys: string[], body: () => Promise<void>): Promi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockSend.mockReset();
   mockPrepare.mockReset().mockImplementation(async ({ taskId }: { taskId: string }) => ({ version: 2, task_id: taskId, bootstrap_s3_uri: 's3://b/bootstrap/example.json', payload_url: 'https://signed.example/task', expires_at: Date.now()+900000 }));
   mockDelete.mockResolvedValue(undefined);
   mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
   mockSaveHandle.mockReset().mockResolvedValue(undefined);
+  mockSaveCapability.mockReset().mockResolvedValue(undefined);
+});
+
+describe('per-worker image capability', () => {
+  const input = {
+    taskId: 'CAP001',
+    userId: 'cognito-test',
+    payload: { task_id: 'CAP001' },
+    blueprintConfig: BLUEPRINT,
+  };
+  const identity = { imageArn: IMAGE_IDENTIFIER, imageVersion: 'actual-3.0' };
+  const version = () => ({
+    ...identity,
+    environmentVariables: {
+      [sharedConstants.microvm_lifecycle.image_protocol_env]: String(sharedConstants.microvm_lifecycle.protocol_version),
+    },
+    hooks: {
+      port: sharedConstants.microvm_lifecycle.hook_port,
+      microvmImageHooks: { ready: 'ENABLED', validate: 'ENABLED' },
+      microvmHooks: {
+        run: 'ENABLED',
+        terminate: 'ENABLED',
+        suspend: 'ENABLED',
+        resume: 'ENABLED',
+        suspendTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+        resumeTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+      },
+    },
+  });
+
+  test('saves the known worker before querying its actual image and conditionally enriching it', async () => {
+    mockSend.mockResolvedValueOnce({ ...makeHandle(), ...identity })
+      .mockImplementationOnce(async (command, options) => {
+        expect(mockSaveHandle).toHaveBeenCalledWith(input.taskId, input.taskId, { ...makeHandle(), ...identity });
+        expect(command).toEqual({
+          _type: 'GetMicrovmImageVersion',
+          input: { imageIdentifier: IMAGE_IDENTIFIER, imageVersion: identity.imageVersion },
+        });
+        expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+        return version();
+      });
+    const result = await new LambdaMicrovmComputeStrategy().startSession(input);
+    const expected = { ...makeHandle(), ...identity, lifecycleProtocol: '1' };
+    expect(result).toEqual(expected);
+    expect(mockSaveCapability).toHaveBeenCalledWith(input.taskId, input.taskId, expected);
+    expect(mockSaveHandle.mock.invocationCallOrder[0]).toBeLessThan(mockSaveCapability.mock.invocationCallOrder[0]);
+  });
+
+  test.each(['lookup', 'marker', 'persistence'])('failed %s keeps the saved worker usable without enabling sleep', async failure => {
+    mockSend.mockResolvedValueOnce({ ...makeHandle(), ...identity, lifecycleProtocol: '1' });
+    if (failure === 'lookup') {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('do-not-log-secret'), { name: 'AbortError' }));
+    } else {
+      const response = version();
+      if (failure === 'marker') response.environmentVariables = {};
+      mockSend.mockResolvedValueOnce(response);
+      if (failure === 'persistence') mockSaveCapability.mockRejectedValueOnce(new Error('do-not-log-secret'));
+    }
+    expect(await new LambdaMicrovmComputeStrategy().startSession(input)).toEqual({ ...makeHandle(), ...identity });
+    expect(mockSaveHandle.mock.calls[0][2]).not.toHaveProperty('lifecycleProtocol');
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'RunMicrovm')).toHaveLength(1);
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'TerminateMicrovm')).toHaveLength(0);
+    expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain('do-not-log-secret');
+  });
+
+  test.each([{}, { imageArn: IMAGE_IDENTIFIER }, { ...identity, imageArn: 'arn:other-image' }])(
+    'missing or mismatched returned identity cannot borrow deployment capability: %j', async returned => {
+      mockSend.mockResolvedValueOnce({ ...makeHandle(), ...returned });
+      const result = await new LambdaMicrovmComputeStrategy().startSession(input);
+      expect(result).not.toHaveProperty('lifecycleProtocol');
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(mockSaveCapability).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([undefined, '1'])('replay preserves saved capability %s without querying the current deployment', async lifecycleProtocol => {
+    const saved = lifecycleProtocol ? { ...makeHandle(), ...identity, lifecycleProtocol } : makeHandle();
+    mockClaimStart.mockResolvedValue({ clientToken: input.taskId, handle: saved, closed: false });
+    expect(await new LambdaMicrovmComputeStrategy().startSession(input)).toEqual(saved);
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockSaveCapability).not.toHaveBeenCalled();
+  });
 });
 
 describe('LambdaMicrovmComputeStrategy', () => {
@@ -256,7 +342,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
         blueprintConfig: BLUEPRINT,
       });
 
-      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(mockSend).toHaveBeenCalledTimes(2);
       const call = mockSend.mock.calls[0][0];
       expect(call._type).toBe('RunMicrovm');
       expect(call.input.imageIdentifier).toBe(IMAGE_IDENTIFIER);
@@ -269,6 +355,8 @@ describe('LambdaMicrovmComputeStrategy', () => {
         strategyType: 'lambda-microvm',
         microvmId: MICROVM_ID,
         endpoint: ENDPOINT,
+        imageArn: IMAGE_IDENTIFIER,
+        imageVersion: IMAGE_VERSION,
       });
     });
 

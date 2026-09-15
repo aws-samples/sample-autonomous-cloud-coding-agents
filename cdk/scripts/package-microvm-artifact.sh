@@ -104,9 +104,9 @@
 #                                   breadcrumb that must not write terminal task
 #                                   status — the orchestrator finalizes the task
 #                                   and THEN calls TerminateMicrovm.
-#   /suspend, /resume               P3. A hook the service calls but nothing
-#                                   answers fails its lifecycle transition, so
-#                                   each is enabled only once it is served.
+#   /suspend, /resume               declared AND served in P3, with the image
+#                                   protocol marker. The coordinator verifies the
+#                                   actual launched version before allowing sleep.
 #
 # The clean P2 deployment used bootstrap policy bundle 1.7.0. The Dockerfile is
 # copied unmodified; image build success does not establish full P2 acceptance.
@@ -266,7 +266,7 @@ REMINDER (ADR-021 P2): clean deployment and coding, iteration and cancellation
    Ready/validate hooks, heartbeat, logging, Memory writes and cleanup have live
    evidence. Full P2 acceptance still needs the failure/recovery, effective IAM
    and networking matrix in docs/verification/645-p3-implementation-plan.md.
-   /suspend and /resume remain undeclared until compatible P3 agent hooks land.
+   /suspend and /resume are declared; supervisor integration and live P3 acceptance remain open.
    CDK retains warning ID abca:microvm-image-p1-smoke-unverified for compatibility;
    its text describes the current verification gaps.
 EOF
@@ -417,12 +417,11 @@ echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
 #   * `/ready` is MANDATORY whenever any lifecycle hook is enabled:
 #       "The ready (/ready) MicroVM image hook must be enabled when any MicroVM
 #        lifecycle hook (run, resume, suspend, or terminate) is enabled."
-#   * all four hooks the agent serves are enabled: `/ready` + `/validate` (build)
-#     and `/run` + `/terminate` (runtime). `/suspend` and `/resume` stay DISABLED
-#     until P3 implements them — a hook the service calls but nothing answers
-#     fails the corresponding build or lifecycle transition.
+#   * all six served hooks are enabled: `/ready` + `/validate` (build), `/run`,
+#     `/terminate`, `/suspend` and `/resume` (runtime). The non-secret lifecycle
+#     protocol marker describes the source's checkpoint/credential/gate protocol.
 #   * the timeouts mirror the construct's constants
-#     (`RUN_/READY_/VALIDATE_/TERMINATE_HOOK_TIMEOUT_SECONDS` in
+#     (`RUN_/READY_/VALIDATE_/TERMINATE_/LIFECYCLE_HOOK_TIMEOUT_SECONDS` in
 #     `cdk/src/constructs/lambda-microvm-compute.ts`), which carry the rationale
 #     for each value. A bash helper cannot import them, and "keep the two in step"
 #     as prose already FAILED once — `readyTimeoutInSeconds` stayed at 60 here when
@@ -449,7 +448,8 @@ CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --resources "[{\"minimumMemoryInMiB\":${MEMORY_MIB}}]" \
   --egress-network-connectors "${BUILD_EGRESS_CONNECTORS}" \
   --logging "{\"cloudWatch\":{\"logGroup\":\"${LOG_GROUP}\"}}" \
-  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
+  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15,"suspend":"ENABLED","suspendTimeoutInSeconds":30,"resume":"ENABLED","resumeTimeoutInSeconds":30},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
+  --environment-variables '{"ABCA_MICROVM_LIFECYCLE_PROTOCOL":"1"}' \
   --tags "abca:compute-backend=lambda-microvm" \
   --output json)"
 

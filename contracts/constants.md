@@ -23,11 +23,12 @@ the contract. This is the neutral location both runtimes read.
 | `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
 | `agent/src/payload_bootstrap.py` | `SHARED_CONSTANTS["payload_bootstrap"]` | import-time |
 | `cdk/src/handlers/shared/payload-bootstrap.ts`, `cdk/src/constructs/payload-bootstrap-permissions.ts` | `payload_bootstrap` | import-time |
-| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
+| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]`, `SHARED_CONSTANTS["microvm_lifecycle"]` | import-time |
 | `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
-| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
+| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
+| `cdk/src/handlers/shared/microvm-image-capability.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | runtime `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
@@ -95,6 +96,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
     "warmup_required_timeout_seconds": 120,
     "lifecycle_hook_timeout_seconds": 30,
     "lifecycle_handler_budget_seconds": 20
+  },
+  "microvm_lifecycle": {
+    "protocol_version": 1,
+    "image_protocol_env": "ABCA_MICROVM_LIFECYCLE_PROTOCOL",
+    "hook_port": 8080
   }
 }
 ```
@@ -213,11 +219,21 @@ fails the drift check *and* the image build.
 The runtime lifecycle pair has its own relationship:
 `lifecycle_handler_budget_seconds < lifecycle_hook_timeout_seconds`. The 20-second
 handler limit covers reading the body, draining activity and checkpoint/refresh
-work together. The planned 30-second service hook timeout leaves response headroom.
+work together. The declared 30-second service hook timeout leaves response headroom.
 `microvm_http.py` checks the ordering at import time; the drift script checks
-positive integer values, ordering and hardcoded Python redeclarations. The image
-does not declare suspend/resume hooks yet; its later capability rollout must use
-this service timeout. These values do not enable automatic suspension.
+positive integer values, ordering and hardcoded Python/TypeScript redeclarations.
+The image declares suspend/resume using this service timeout. These values do not
+enable automatic suspension.
+
+`microvm_lifecycle` owns protocol version `1`, marker name
+`ABCA_MICROVM_LIFECYCLE_PROTOCOL` and hook port `8080`. The marker is baked into
+the immutable image; it is neither a credential nor task/deployment configuration.
+`/validate` rejects a supplied unsupported marker. The coordinator checks the exact
+image ARN/version returned by Run, including all six enabled hooks and lifecycle
+budgets, before persisting `lifecycleProtocol` alongside that worker's `imageArn`
+and `imageVersion`. Legacy or unverified workers cannot start a new suspension.
+The drift gate validates this shape and rejects literal copies in its TypeScript
+consumers; the artifact-script parity test checks the shell hook/environment JSON.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

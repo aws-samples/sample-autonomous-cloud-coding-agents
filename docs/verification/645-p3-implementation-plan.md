@@ -6,14 +6,23 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
-**Latest local P3 milestone (2026-09-14):** production
+**Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
 task/gate reconciliation. Duplicate acknowledgments stay within one approval
 generation; a new gate cannot reuse an old wake result. Shared handler/service
-budgets are 20/30 seconds. Image declaration/capability, durable supervisor
-integration, approval-triggered wake and live sleep/wake verification remain open.
+budgets are 20/30 seconds. At this milestone, image capability and supervisor
+integration remained open.
 No deployment or automatic suspension was enabled in this milestone.
+
+**Latest local P3 milestone (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md)
+now declares all six hooks and the shared protocol marker. The coordinator saves
+the worker handle first, verifies the exact returned image ARN/version, then
+conditionally records support in both start receipt and compute metadata. Missing
+or unreadable support permits normal coding and disables new suspension. Database
+race tests reject changed identities and recover a committed capability after a
+lost reply. Durable supervisor integration, approval-triggered wake and live
+sleep/wake verification remain open; no deployment or automatic sleep was enabled.
 
 **Live infrastructure and image deployed (2026-09-14):** the
 [clean P2 deployment record](./645-p2-clean-deployment-20260913.md) tracks the new
@@ -83,7 +92,7 @@ is superseded by these records.
 - [x] Save gate/VM-bound lifecycle intent with stale-writer protection; add explicit VM observations and a tested policy helper.
 - [x] Add the guest pause controller, original-gate registration, parallel-tool tracking, progress acknowledgment tracking, heartbeat/read drain and generation-guarded wake completion; reseed the application PRNG at run and controller resume.
 - [x] Add production agent hooks with acknowledged checkpoints, retained ambient/tenant credential renewal, a sole scoped Claude provider and atomic task/gate reconciliation; verify duplicates, original deadlines, timeout and teardown behavior locally.
-- [ ] Declare compatible image hooks using shared budgets and bind lifecycle capability to the actual image/version used by each worker; keep automatic sleep disabled until integration/live acceptance.
+- [x] Declare compatible image hooks using shared budgets and bind lifecycle capability to the actual image/version used by each worker; keep automatic sleep disabled until integration/live acceptance.
 - [ ] Persist bounded poll/recovery counters and connect lifecycle policy to the supervisor.
 - [ ] Connect supervisor and approval handlers, then verify the complete P3 sleep/wake lifecycle in AWS.
 
@@ -422,7 +431,7 @@ The production HTTP resume callback now invokes this refresh before any AWS read
 5. **Implemented locally:** `/run` and successful HTTP/controller resume reseed the application PRNG from fresh OS entropy. Do not seed it with task IDs, timestamps or an image-fixed value. Continue using cryptographic randomness for secrets. Test resumed/sibling snapshot uniqueness where meaningful; do not claim that `random` becomes cryptographically safe.
 6. **Implemented locally:** `_ApprovalDeadline` captures the original recorded UTC expiry and a monotonic cap before database writes. Remaining time is `min(monotonic_deadline - monotonic_now, created_at + timeout_s - wall_now)`, clamped at zero, including each sleep bound. Resume verifies the original recorded creation time/timeout and coordinator deadline, then releases the same approval loop with this exact object. Expired wake enters the existing timeout/late-decision path; it never creates a fresh window.
 7. **Preserved/tested locally:** conditional TIMED_OUT write, strongly consistent reread when that write loses, and late-decision winner behavior. Forward/backward clocks, frozen monotonic time, slow writes/reads, missing rows and cancellation have regression coverage. **Still required:** exercise these through the actual resume barrier and live AWS lifecycle. TTL is asynchronous garbage collection, not a precise alarm clock.
-8. **Shared budgets and served-route checks implemented locally; image declaration still pending.** Declare `/suspend` and `/resume` as enabled image hooks only when the same source version serves them, using the shared 30-second service timeout. `/ready` and `/validate` remain AWS-silent. An old image without the new hooks must not be eligible for automatic suspension. Bind capability to the image/version that **actually launched each VM**, using coordinator-owned launch metadata; current deployment settings alone cannot prove an older VM supports the hooks. Unknown/legacy capability keeps new suspends off. A verified full drain can establish a clean boundary, but must not be assumed.
+8. **Implemented locally:** managed images and the packaging helper declare all six served hooks with shared budgets and the source's non-secret protocol marker. `/ready` and `/validate` remain AWS-silent; validation rejects a supplied incompatible marker. The coordinator first saves the known worker handle, then verifies the exact Run-returned image ARN/version and conditionally persists support. Both policy and store require this evidence for new suspend; unknown/legacy workers keep new suspends off. See [image capability verification](./645-p3-image-capability.md). Matching artifact/coordinator deployment and live acceptance remain required.
 
 ## 6. Wire the supervisor and human decisions
 

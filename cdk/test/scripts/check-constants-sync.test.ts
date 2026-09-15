@@ -66,6 +66,7 @@ const FIXTURE_FILES = [
   'agent/src/microvm_http.py',
   'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
+  'cdk/src/handlers/shared/microvm-image-capability.ts',
 ];
 
 interface RunResult {
@@ -128,6 +129,34 @@ describe('check-constants-sync', () => {
   // Node's type-stripping runs the script from source; the suite is a handful of
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
+
+  describe('MicroVM lifecycle image contract', () => {
+    test.each([
+      ['protocol_version', 0], ['protocol_version', 1.5], ['protocol_version', '1'],
+      ['hook_port', 0], ['hook_port', 65536], ['hook_port', 8080.5],
+      ['image_protocol_env', 'AWS_ACCESS_KEY_ID'], ['image_protocol_env', 'ABCA_MICROVM_bad'],
+    ])('rejects invalid %s=%s', (key, value) => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.microvm_lifecycle[key] = value;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('microvm_lifecycle');
+    });
+    test.each([
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'AGENT_HOOK_PORT', '8080'],
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'LIFECYCLE_HOOK_TIMEOUT_SECONDS', '30'],
+      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
+      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],
+      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_IMAGE_PROTOCOL_ENV', '"ABCA_MICROVM_LIFECYCLE_PROTOCOL"'],
+    ])('rejects a literal %s/%s', (file, name, value) => {
+      const result = runInMutatedRepo(root => {
+        write(root, file, `${read(root, file)}\nexport const ${name} = ${value};\n`);
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(name);
+      expect(result.stderr).toContain('Cross-language constants drift detected');
+    });
+  });
 
   describe('payload bootstrap contract', () => {
     test.each([

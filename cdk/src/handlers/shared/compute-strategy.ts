@@ -18,6 +18,7 @@
  */
 
 import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
+import type { MicrovmImageMetadata } from './microvm-image-capability';
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
@@ -37,16 +38,15 @@ import { LambdaMicrovmComputeStrategy } from './strategies/lambda-microvm-strate
  * ADR-021 sub-decision 1: the MicroVM variant carries ``microvmId`` (every
  * lifecycle API — suspend/resume/terminate/get — takes only that identifier)
  * and ``endpoint`` (minted per session by ``RunMicrovm``, required for any
- * future orchestrator→agent HTTP interaction). The image ARN/version is
- * deliberately NOT in the handle: like the ECS task-definition ARN it is
- * deployment-time configuration consumed by ``startSession`` from the
- * construct-injected environment and recorded in the session-start log entry
- * for diagnostics, not per-session lifecycle state.
+ * future orchestrator→agent HTTP interaction). P3 additionally retains the actual
+ * image ARN/version and verified lifecycle protocol. These describe the snapshot
+ * that launched this worker; current deployment settings cannot substitute for it.
+ * Legacy handles remain usable for cleanup, with new suspension disabled.
  */
 export type SessionHandle =
   | { readonly sessionId: string; readonly strategyType: 'agentcore'; readonly runtimeArn: string }
   | { readonly sessionId: string; readonly strategyType: 'ecs'; readonly clusterArn: string; readonly taskArn: string }
-  | { readonly sessionId: string; readonly strategyType: 'lambda-microvm'; readonly microvmId: string; readonly endpoint: string };
+  | ({ readonly sessionId: string; readonly strategyType: 'lambda-microvm'; readonly microvmId: string; readonly endpoint: string } & MicrovmImageMetadata);
 
 /**
  * Substrate-observed session state. Deliberately mechanical: the strategy

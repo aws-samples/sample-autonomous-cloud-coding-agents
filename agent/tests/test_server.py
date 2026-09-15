@@ -2458,9 +2458,32 @@ class TestMicrovmValidateHook:
             "hook_routes_registered": True,
             "python_version_supported": True,
             "platform_config_contract_loaded": True,
+            "image_lifecycle_protocol_supported": True,
         }
         assert body["hook_prefix"] == server.MICROVM_HOOK_PREFIX
         assert body["platform_config_keys"] == len(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY)
+
+    @pytest.mark.parametrize(
+        "marker",
+        [None, str(server.SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"]), "", "999"],
+    )
+    def test_build_rejects_an_image_marker_the_source_does_not_support(
+        self, client, monkeypatch, marker
+    ):
+        contract = server.SHARED_CONSTANTS["microvm_lifecycle"]
+        key = contract["image_protocol_env"]
+        if marker is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, marker)
+        forbidden = MagicMock(side_effect=AssertionError("image validation contacted AWS"))
+        monkeypatch.setattr("aws_session.platform_client", forbidden)
+        monkeypatch.setattr("aws_session.tenant_client", forbidden)
+        response = client.post(VALIDATE_HOOK)
+        expected = marker in (None, str(contract["protocol_version"]))
+        assert response.status_code == (200 if expected else 503)
+        assert response.json()["checks"]["image_lifecycle_protocol_supported"] is expected
+        forbidden.assert_not_called()
 
     def test_makes_zero_aws_calls_even_with_a_log_group_configured(
         self, client, monkeypatch, capfd

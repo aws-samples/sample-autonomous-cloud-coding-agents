@@ -22,7 +22,7 @@ tests with fake AWS responses prove renewal before the next request and safe
 failure without borrowing the parent's keys. The subsequent
 [HTTP hook milestone](./645-p3-lifecycle-hooks.md) connects pause to an atomic
 checkpoint and wake to credential renewal plus task/gate reconciliation.
-Image capability, supervisor wiring and real AWS sleep/wake verification remain open.
+The [image capability milestone](./645-p3-image-capability.md) (2026-09-15) now declares the six hooks and checks/persists support for the actual launched image version. Supervisor wiring and real AWS sleep/wake verification remain open.
 
 The reservation review found a separate trust boundary: the old agent role could write/replace/delete its task row, including coordinator metadata. A subsequent local fix restricts main-task writes to reporting/approval attributes, removes replacement/deletion permissions and removes unused worker counter grants. It also removes unused Python submission/session-info helpers and corrects overstated tenant-isolation comments. [Metadata verification](./645-coordinator-metadata.md) records the tests and pending AWS gate. Status reports still come from the agent, and the compute role chooses session tags; this is not complete hostile-worker isolation.
 
@@ -44,7 +44,7 @@ An **IAM role** is a permission badge. A **trust policy** says who may wear that
 |---|---|---|
 | P1 | Build the computer, start it, deliver a task, check it and stop it | Merged in [#689](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/689). Strategy, infrastructure, bootstrap permissions, packaging, types, `/ready` and `/run` exist. |
 | P2 | Make a real coding task work with configuration, permissions, logs and progress | Merged in [#733](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/733). `/validate`, `/terminate`, warm-up, runtime grants and heartbeat support exist. Two recorded tasks completed and opened PRs on August 7, using a manual IAM workaround. Permanent fixes still need a clean rerun. |
-| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Local foundations include intent/policy, guest pause control, scoped credential renewal and production HTTP checkpoint/wake hooks. Image capability, supervisor integration and live acceptance remain open. |
+| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Local foundations include intent/policy, guest pause control, scoped credential renewal, production HTTP checkpoint/wake hooks and per-worker image capability. Supervisor integration and live acceptance remain open. |
 | P4 | — | ADR-021 defines no P4. Verification runbooks have their own numbered phases; those are not extra ADR milestones. |
 
 The old unchecked checklist and the word “proposed” do not erase the merged work. Conversely, merged code is not proof that the final deployment path works unattended.

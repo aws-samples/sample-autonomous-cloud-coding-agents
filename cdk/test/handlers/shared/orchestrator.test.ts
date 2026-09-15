@@ -134,14 +134,23 @@ describe('buildComputeMetadata', () => {
     expect(buildComputeMetadata(handle)).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
   });
 
-  test('never carries the MicroVM image ARN (deployment config, not session state)', () => {
+  test('preserves actual image identity and verified capability for later policy decisions', () => {
     const metadata = buildComputeMetadata({
       sessionId: MICROVM_ID,
       strategyType: 'lambda-microvm',
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+      lifecycleProtocol: '1',
     });
-    expect(Object.keys(metadata).sort()).toEqual(['endpoint', 'microvmId']);
+    expect(metadata).toEqual({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+      lifecycleProtocol: '1',
+    });
   });
 
   test('produces only string values (compute_metadata is Record<string, string> in DDB)', () => {

@@ -20,6 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionHandle } from './compute-strategy';
+import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
 import type { ApprovalStatus } from './types';
 import { makeDocClient } from './ua';
 import { TaskStatus, type TaskStatusType } from '../../constructs/task-status';
@@ -155,7 +156,13 @@ export async function readMicrovmLifecycleSnapshot(taskId: string, userId: strin
     requestId,
     approval,
     intent: task.microvm_lifecycle,
-    handle: { strategyType: 'lambda-microvm', sessionId: task.session_id, microvmId: metadata.microvmId, endpoint: metadata.endpoint },
+    handle: {
+      strategyType: 'lambda-microvm',
+      sessionId: task.session_id,
+      microvmId: metadata.microvmId,
+      endpoint: metadata.endpoint,
+      ...readMicrovmImageMetadata(metadata),
+    },
   };
 }
 
@@ -166,7 +173,8 @@ export function intentMatchesGate(snapshot: MicrovmLifecycleSnapshot): boolean {
 function eligible(snapshot: MicrovmLifecycleSnapshot, action: LifecycleAction, nowMs: number): boolean {
   if (!LIVE_TASK_STATUSES.includes(snapshot.status)) return false;
   if (action === 'resume') return true;
-  return snapshot.status === TaskStatus.AWAITING_APPROVAL && snapshot.requestId !== null
+  return supportsMicrovmLifecycle(snapshot.handle)
+    && snapshot.status === TaskStatus.AWAITING_APPROVAL && snapshot.requestId !== null
     && snapshot.approval.kind === 'present' && snapshot.approval.status === 'PENDING'
     && nowMs >= snapshot.approval.createdAtMs && nowMs < snapshot.approval.deadlineMs
     && !(intentMatchesGate(snapshot) && (snapshot.intent?.action === 'resume'
@@ -206,6 +214,13 @@ export async function saveMicrovmLifecycleIntent(
   };
   let condition = 'user_id = :user AND #status = :status AND compute_type = :type AND session_id = :id '
     + 'AND compute_metadata.microvmId = :id AND compute_metadata.endpoint = :endpoint';
+  if (action === 'suspend') {
+    condition += ' AND compute_metadata.imageArn = :imageArn AND compute_metadata.imageVersion = :imageVersion'
+      + ' AND compute_metadata.lifecycleProtocol = :protocol';
+    values[':imageArn'] = snapshot.handle.imageArn;
+    values[':imageVersion'] = snapshot.handle.imageVersion;
+    values[':protocol'] = snapshot.handle.lifecycleProtocol;
+  }
   if (snapshot.requestId === null) {
     condition += ' AND attribute_not_exists(awaiting_approval_request_id)';
   } else {

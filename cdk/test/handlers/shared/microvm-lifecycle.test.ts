@@ -33,13 +33,18 @@ import { decideMicrovmLifecycle, type MicrovmLifecyclePolicyInput } from '../../
 const NOW = 1_800_000_000_000;
 const CREATED = new Date(NOW - 45_000).toISOString();
 const DEADLINE = NOW + 555_000;
+const imageMetadata = {
+  imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+  imageVersion: '3.0',
+  lifecycleProtocol: '1',
+};
 const task = {
   task_id: 'task',
   user_id: 'user',
   status: 'AWAITING_APPROVAL',
   compute_type: 'lambda-microvm',
   session_id: 'vm',
-  compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example' },
+  compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example', ...imageMetadata },
   awaiting_approval_request_id: 'gate',
 };
 const row = { task_id: 'task', user_id: 'user', request_id: 'gate', status: 'PENDING', created_at: CREATED, timeout_s: 600 };
@@ -57,7 +62,7 @@ const snapshot = (overrides: Partial<MicrovmLifecycleSnapshot> = {}): MicrovmLif
   userId: 'user',
   status: 'AWAITING_APPROVAL',
   requestId: 'gate',
-  handle: { strategyType: 'lambda-microvm', sessionId: 'vm', microvmId: 'vm', endpoint: 'https://vm.example' },
+  handle: { strategyType: 'lambda-microvm', sessionId: 'vm', microvmId: 'vm', endpoint: 'https://vm.example', ...imageMetadata },
   approval: { kind: 'present', status: 'PENDING', created_at: CREATED, timeout_s: 600, createdAtMs: NOW - 45_000, deadlineMs: DEADLINE },
   ...overrides,
 });
@@ -68,7 +73,6 @@ const policy = (state: MicrovmObservedState = 'RUNNING', change: Partial<Microvm
   sessionDeadlineMs: NOW + 3_600_000,
   pollIntervalMs: 30_000,
   suspendEnabled: true,
-  imageSupportsLifecycle: true,
   ...change,
 });
 
@@ -89,7 +93,10 @@ describe('MicroVM lifecycle policy', () => {
   test('legacy coarse running without a service observation cannot trigger suspend', () => {
     expect(policy('RUNNING', { substrate: { status: 'running' } })).toMatchObject({ action: 'wait', reason: 'unconfirmed-state' });
   });
-  test.each([{ suspendEnabled: false }, { imageSupportsLifecycle: false }])('requires both enable and compatible image: %j', change => {
+  test.each([
+    { suspendEnabled: false },
+    { snapshot: snapshot({ handle: { ...snapshot().handle, lifecycleProtocol: undefined } }) },
+  ])('requires both enable and the actual worker capability: %j', change => {
     expect(policy('RUNNING', change)).toMatchObject({ action: 'wait', reason: 'suspend-disabled' });
   });
   test('long poll setting is clamped to the end of grace', () => {

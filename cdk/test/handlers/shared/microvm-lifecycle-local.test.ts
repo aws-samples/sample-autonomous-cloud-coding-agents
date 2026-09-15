@@ -56,6 +56,7 @@ const tasks = `lifecycle-tasks-${suffix}`;
 const approvals = `lifecycle-approvals-${suffix}`;
 Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals });
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../src/handlers/shared/microvm-lifecycle';
+import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../src/handlers/shared/microvm-start';
 
 const raw = new DynamoDBClient({
   endpoint: endpoint ?? 'http://127.0.0.1:1',
@@ -102,7 +103,13 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
         status: 'AWAITING_APPROVAL',
         compute_type: 'lambda-microvm',
         session_id: 'vm',
-        compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example' },
+        compute_metadata: {
+          microvmId: 'vm',
+          endpoint: 'https://vm.example',
+          imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+          imageVersion: '3.0',
+          lifecycleProtocol: '1',
+        },
         awaiting_approval_request_id: 'gate',
       },
     }));
@@ -148,12 +155,101 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
     expect(result.status).toBe('saved');
     const saved = await taskRow();
     expect(saved.status).toBe('AWAITING_APPROVAL');
-    expect(saved.compute_metadata).toEqual({ microvmId: 'vm', endpoint: 'https://vm.example' });
+    expect(saved.compute_metadata).toEqual({
+      microvmId: 'vm',
+      endpoint: 'https://vm.example',
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+      lifecycleProtocol: '1',
+    });
     expect(saved.microvm_lifecycle).toMatchObject({
       action: 'suspend',
       request_id: 'gate',
       microvm_id: 'vm',
       deadline_ms: observed.approval.kind === 'present' ? observed.approval.deadlineMs : NaN,
+    });
+  });
+  test.each([
+    ['imageArn', 'arn:aws:lambda:us-east-1:123456789012:microvm-image:replacement'],
+    ['imageVersion', '4.0'], ['lifecycleProtocol', '999'], ['lifecycleProtocol', undefined],
+  ])('changed image %s fences an already planned suspend', async (field, value) => {
+    const old = await current();
+    const metadata = { ...(await taskRow()).compute_metadata, [field]: value };
+    if (value === undefined) delete metadata[field];
+    await set(tasks, 'compute_metadata', metadata);
+    expect(await saveMicrovmLifecycleIntent(old, 'suspend')).toEqual({ status: 'stale' });
+    expect((await taskRow()).microvm_lifecycle).toBeUndefined();
+  });
+  test('legacy image cannot sleep but can be recovered with a wake', async () => {
+    await set(tasks, 'compute_metadata', { microvmId: 'vm', endpoint: 'https://vm.example' });
+    const legacy = await current();
+    expect(await saveMicrovmLifecycleIntent(legacy, 'suspend')).toEqual({ status: 'ineligible' });
+    expect((await saveMicrovmLifecycleIntent(legacy, 'resume')).status).toBe('saved');
+  });
+  describe('image capability enrichment', () => {
+    const handle = {
+      strategyType: 'lambda-microvm' as const,
+      sessionId: 'vm',
+      microvmId: 'vm',
+      endpoint: 'https://vm.example',
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+    };
+    const capable = { ...handle, lifecycleProtocol: '1' };
+    beforeEach(async () => {
+      await set(tasks, 'status', 'HYDRATING');
+      await set(tasks, 'microvm_start', {
+        clientToken: 'task', requestHash: 'original', expiresAt: Date.now() + 120_000,
+      });
+      await saveMicrovmStartHandle('task', 'task', handle);
+    });
+    test('persists support in both records without changing a concurrent terminal state', async () => {
+      await set(tasks, 'status', 'CANCELLED');
+      await saveMicrovmImageCapability('task', 'task', capable);
+      const saved = await taskRow();
+      expect(saved.status).toBe('CANCELLED');
+      expect(saved.microvm_start.handle).toEqual(capable);
+      expect(saved.compute_metadata).toEqual({
+        microvmId: handle.microvmId,
+        endpoint: handle.endpoint,
+        imageArn: handle.imageArn,
+        imageVersion: handle.imageVersion,
+        lifecycleProtocol: '1',
+      });
+      expect(await claimMicrovmStart('task', 'user', 'changed-request')).toEqual({
+        clientToken: 'task', closed: true, handle: capable,
+      });
+    });
+    test.each([
+      'session_id', 'microvm_start.clientToken', 'microvm_start.handle.microvmId',
+      'microvm_start.handle.imageArn', 'microvm_start.handle.imageVersion',
+      'compute_metadata.microvmId', 'compute_metadata.imageArn', 'compute_metadata.imageVersion',
+    ])('changed %s rejects the entire capability update', async path => {
+      const changed = await taskRow();
+      const fields = path.split('.');
+      let parent = changed;
+      for (const field of fields.slice(0, -1)) parent = parent[field];
+      parent[fields[fields.length - 1]] = 'replacement';
+      await admin.send(new PutCommand({ TableName: tasks, Item: changed }));
+      await expect(saveMicrovmImageCapability('task', 'task', capable))
+        .rejects.toMatchObject({ name: 'ConditionalCheckFailedException' });
+      expect(await taskRow()).toEqual(changed);
+    });
+    test('lost committed reply is recovered by the original start receipt', async () => {
+      mockAfterSend.mockImplementationOnce(() => {
+        throw Object.assign(new Error('lost reply'), { name: 'TimeoutError' });
+      });
+      await expect(saveMicrovmImageCapability('task', 'task', capable)).rejects.toThrow('lost reply');
+      expect(await claimMicrovmStart('task', 'user', 'original')).toEqual({
+        clientToken: 'task', closed: false, handle: capable,
+      });
+    });
+    test('incomplete capability rejects before a database mutation', async () => {
+      const saved = await taskRow();
+      mockBeforeSend.mockClear();
+      await expect(saveMicrovmImageCapability('task', 'task', handle)).rejects.toThrow('incomplete');
+      expect(mockBeforeSend).not.toHaveBeenCalled();
+      expect(await taskRow()).toEqual(saved);
     });
   });
   test('a wake blocks an older absent-record sleep and remains sticky on fresh reads', async () => {

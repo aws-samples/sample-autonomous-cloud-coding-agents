@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionHandle } from './compute-strategy';
+import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
 import { makeDocClient } from './ua';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
@@ -83,6 +84,7 @@ function recordedHandle(record: StartRecord): MicrovmHandle | undefined {
       sessionId: record.session_id,
       microvmId: metadata.microvmId,
       endpoint: metadata.endpoint,
+      ...readMicrovmImageMetadata(metadata),
     };
   }
   return undefined;
@@ -185,7 +187,33 @@ export async function saveMicrovmStartHandle(
       ':id': handle.microvmId,
       ':handle': handle,
       ':type': 'lambda-microvm',
-      ':metadata': { microvmId: handle.microvmId, endpoint: handle.endpoint },
+      ':metadata': {
+        microvmId: handle.microvmId, endpoint: handle.endpoint, ...readMicrovmImageMetadata(handle),
+      },
     },
   }));
+}
+
+/** Enrich only the same durably saved launch; never replace its identity or task state. */
+export async function saveMicrovmImageCapability(
+  taskId: string, clientToken: string, handle: MicrovmHandle,
+): Promise<void> {
+  if (!supportsMicrovmLifecycle(handle)) throw new Error('MicroVM image capability is incomplete');
+  await ddb.send(new UpdateCommand({
+    TableName: TABLE_NAME,
+    Key: { task_id: taskId },
+    UpdateExpression: 'SET microvm_start.#handle.lifecycleProtocol = :protocol, compute_metadata.lifecycleProtocol = :protocol',
+    ConditionExpression: 'microvm_start.clientToken = :token AND session_id = :id AND '
+      + 'microvm_start.#handle.microvmId = :id AND compute_metadata.microvmId = :id AND '
+      + 'microvm_start.#handle.imageArn = :arn AND compute_metadata.imageArn = :arn AND '
+      + 'microvm_start.#handle.imageVersion = :version AND compute_metadata.imageVersion = :version',
+    ExpressionAttributeNames: { '#handle': 'handle' },
+    ExpressionAttributeValues: {
+      ':token': clientToken,
+      ':id': handle.microvmId,
+      ':arn': handle.imageArn,
+      ':version': handle.imageVersion,
+      ':protocol': handle.lifecycleProtocol,
+    },
+  }), { abortSignal: AbortSignal.timeout(MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS) });
 }

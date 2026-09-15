@@ -68,6 +68,7 @@ interface BuildOptions {
   readonly region?: string;
   readonly context?: Record<string, unknown>;
   readonly withImage?: boolean;
+  readonly imageEnvironmentVariables?: Record<string, string>;
   readonly artifactSha256?: string | null;
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
@@ -146,6 +147,7 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     }),
     externalImageIdentifier: options.externalImageIdentifier,
     externalImageVersion: options.externalImageVersion,
+    imageEnvironmentVariables: options.imageEnvironmentVariables,
     minimumMemoryInMiB: options.minimumMemoryInMiB,
   });
 
@@ -226,11 +228,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(Math.max(...MICROVM_SUPPORTED_MEMORY_MIB)).toBe(DEFAULT_MINIMUM_MEMORY_MIB);
   });
 
-  test('declares exactly the four enabled P2 image hooks until the P3 capability rollout', () => {
-    // Compare the whole enabled set. A declared hook must be served or the
-    // corresponding build/lifecycle transition fails. The guest additionally
-    // serves /suspend and /resume, but they stay undeclared until the P3 image
-    // capability rollout; a route alone must not opt existing workers into sleep.
+  test('declares all six served hooks with the shared P3 lifecycle budget', () => {
+    // Compare the whole set; declaration and runtime support must move together.
+    // The supervisor still gates automatic sleep on each worker's saved capability.
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
@@ -250,6 +250,10 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       // (ordinary event writes are best effort), and the budget bounds teardown on a
       // WEDGED guest that is still holding admission-gating memory quota.
       TerminateTimeoutInSeconds: 15,
+      Suspend: 'ENABLED',
+      SuspendTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+      Resume: 'ENABLED',
+      ResumeTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
     });
 
     // BUILD (image) hooks. /ready is MANDATORY: create-microvm-image refuses ANY
@@ -323,27 +327,25 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     };
 
     const image = Object.values(template.findResources('AWS::Lambda::MicrovmImage'))[0]!;
-    // Hooks: all four states AND all four timeouts, in one comparison — which is
+    // Hooks: all six states AND all six timeouts, in one comparison — which is
     // precisely the assertion the missing one would have been.
     expect(toCfnKeys(flagJson('hooks'))).toEqual(image.Properties.Hooks);
     // ...and the architecture enum, the other half of P2-F2.
     expect(toCfnKeys(flagJson('cpu-configurations'))).toEqual(image.Properties.CpuConfigurations);
+    expect(Object.entries(flagJson('environment-variables') as Record<string, string>)
+      .map(([Key, Value]) => ({ Key, Value }))).toEqual(image.Properties.EnvironmentVariables);
   });
 
-  test('does NOT declare /suspend or /resume — they are P3 and nothing answers them yet', () => {
-    // The remaining half of the exactness rule, called out separately because it
-    // is the one that must survive P3 landing suspend/resume in ONE commit across
-    // all three strategies: until then, declaring either fails the corresponding
-    // lifecycle transition on a real suspend attempt.
+  test('pause/wake handlers leave response headroom inside declared service timeouts', () => {
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
-    expect(hooks.MicrovmHooks.Suspend).toBeUndefined();
-    expect(hooks.MicrovmHooks.SuspendTimeoutInSeconds).toBeUndefined();
-    expect(hooks.MicrovmHooks.Resume).toBeUndefined();
-    expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds).toBeUndefined();
+    expect(hooks.MicrovmHooks.SuspendTimeoutInSeconds)
+      .toBeGreaterThan(sharedConstants.microvm_hook_budgets.lifecycle_handler_budget_seconds);
+    expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds)
+      .toBeGreaterThan(sharedConstants.microvm_hook_budgets.lifecycle_handler_budget_seconds);
   });
 
-  test('the agent hook routes are exactly the four the service calls, under one prefix', () => {
+  test('the six declared agent hook routes share the service-owned prefix', () => {
     // The cross-package contract that used to be checked against the rendered
     // template. It cannot be any more: the template carries `ENABLED`, not a path
     // (P2-F2), so the routes now have a dedicated source — MICROVM_AGENT_HOOK_ROUTES
@@ -354,13 +356,15 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // service POSTs to exactly these paths ("POST /aws/lambda-microvms/runtime/v1/
     // ready HTTP/1.1" 200 OK, and the same for the other three).
     const routes = Object.values(MICROVM_AGENT_HOOK_ROUTES);
-    expect(routes).toHaveLength(4);
+    expect(routes).toHaveLength(6);
     for (const route of routes) {
-      expect(route).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate)$/);
+      expect(route).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate|suspend|resume)$/);
     }
     expect([...routes].sort()).toEqual([
       '/aws/lambda-microvms/runtime/v1/ready',
+      '/aws/lambda-microvms/runtime/v1/resume',
       '/aws/lambda-microvms/runtime/v1/run',
+      '/aws/lambda-microvms/runtime/v1/suspend',
       '/aws/lambda-microvms/runtime/v1/terminate',
       '/aws/lambda-microvms/runtime/v1/validate',
     ]);
@@ -368,7 +372,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // Hooks properties use — so "the agent serves every hook the image enables"
     // stays checkable from one place.
     expect(Object.keys(MICROVM_AGENT_HOOK_ROUTES).sort())
-      .toEqual(['ready', 'run', 'terminate', 'validate']);
+      .toEqual(['ready', 'resume', 'run', 'suspend', 'terminate', 'validate']);
   });
 
   test('every declared hook timeout sits inside the service window for its kind', () => {
@@ -415,10 +419,19 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       .toBeGreaterThanOrEqual(30);
   });
 
-  test('bakes NO environment variables into the snapshot (ADR-021: no secrets in the image)', () => {
+  test('bakes only the non-secret image protocol marker by default', () => {
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
-      EnvironmentVariables: [],
+      EnvironmentVariables: [{
+        Key: sharedConstants.microvm_lifecycle.image_protocol_env,
+        Value: String(sharedConstants.microvm_lifecycle.protocol_version),
+      }],
     });
+  });
+  test('rejects an override of the image source protocol', () => {
+    expect(() => instantiate({
+      withImage: true,
+      imageEnvironmentVariables: { [sharedConstants.microvm_lifecycle.image_protocol_env]: '999' },
+    })).toThrow('protocol marker is owned by the image source');
   });
 
   test('routes image build-time egress through the BUILD connector, not the runtime one', () => {
@@ -992,14 +1005,11 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(message).toContain('P2');
     // It must state what IS true now, or it reads as the old (wrong) claim — and
     // the hook list here is what an operator compares against a failed build or a
-    // failed lifecycle transition, so all four have to be named.
-    for (const hook of ['/ready', '/validate', '/run', '/terminate']) {
+    // failed lifecycle transition, so all six have to be named.
+    for (const hook of ['/ready', '/validate', '/run', '/terminate', '/suspend', '/resume']) {
       expect(message).toContain(hook);
     }
-    // ...and it must still say which two are NOT declared, or the enumeration
-    // above reads as "everything is wired".
-    expect(message).toContain('/suspend');
-    expect(message).toContain('/resume');
+    expect(message).toContain('supervisor integration and live sleep/wake acceptance remain open');
   });
 
   test('enables every hook the agent serves, and only those (rendered form)', () => {
@@ -1008,13 +1018,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // the shape CloudFormation validates. `"ENABLED"`, never a path (P2-F2).
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const rendered = JSON.stringify(Object.values(images)[0]!.Properties.Hooks);
-    for (const hook of ['Run', 'Terminate', 'Ready', 'Validate']) {
+    for (const hook of ['Run', 'Terminate', 'Ready', 'Validate', 'Suspend', 'Resume']) {
       expect(rendered).toContain(`"${hook}":"ENABLED"`);
-    }
-    // P3, and nothing answers them yet. OMITTED rather than "DISABLED", so the
-    // absence assertion stays meaningful.
-    for (const hook of ['Suspend', 'Resume']) {
-      expect(rendered).not.toContain(hook);
     }
     expect(rendered).not.toContain('DISABLED');
   });

@@ -487,7 +487,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(mockFailTask).not.toHaveBeenCalled();
   });
 
-  test('persists microvmId and endpoint in compute_metadata on the RUNNING transition', async () => {
+  test('persists the worker and actual image identity on the RUNNING transition', async () => {
     runMicrovmOk();
     const { ctx } = fakeContext();
 
@@ -502,7 +502,9 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(to).toBe(TaskStatus.RUNNING);
     expect(attrs.compute_type).toBe('lambda-microvm');
     // ADR-021: the P3 approve/deny Lambdas resume from exactly these two keys.
-    expect(attrs.compute_metadata).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+    expect(attrs.compute_metadata).toEqual({
+      microvmId: MICROVM_ID, endpoint: ENDPOINT, imageArn: 'arn:image', imageVersion: '7',
+    });
     // sessionId is the microvmId (substrate identifier, mirroring ECS).
     expect(attrs.session_id).toBe(MICROVM_ID);
     // agent_runtime_arn is an AgentCore-only attribute and must not appear.

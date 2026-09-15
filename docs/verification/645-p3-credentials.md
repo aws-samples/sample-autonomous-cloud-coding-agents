@@ -1,5 +1,7 @@
 # #645 P3: scoped credentials across sleep
 
+**Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) now declares the served hooks and verifies the actual launched image version locally. The milestone below records its original scope; supervisor integration and live sleep/wake acceptance remain open.
+
 Date: 2026-09-14. Local implementation and actual pinned Claude process probes.
 No AWS deployment or suspension was performed for this milestone. Deployed
 image **2.0** remains unchanged; P3 is not complete.

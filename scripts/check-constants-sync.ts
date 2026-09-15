@@ -56,7 +56,8 @@ const PYTHON_CONSUMERS = [
   POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY, MICROVM_HTTP_PY,
 ];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
-const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
+const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm-image-capability.ts');
+const TS_CONSUMERS = [MICROVM_COMPUTE_TS, MICROVM_IMAGE_CAPABILITY_TS];
 
 /** Env var names must be UPPER_SNAKE — they are installed into a process env. */
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -145,6 +146,22 @@ const OWNED_PYTHON_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
  */
 const OWNED_TS_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
   {
+    name: 'LIFECYCLE_HOOK_TIMEOUT_SECONDS',
+    regex: /^\s*(?:export\s+)?const\s+LIFECYCLE_HOOK_TIMEOUT_SECONDS\s*(?::\s*number)?\s*=\s*-?\d+\b/m,
+  },
+  {
+    name: 'AGENT_HOOK_PORT',
+    regex: /^\s*(?:export\s+)?const\s+AGENT_HOOK_PORT\s*(?::\s*number)?\s*=\s*-?\d+\b/m,
+  },
+  {
+    name: 'MICROVM_LIFECYCLE_PROTOCOL',
+    regex: /^\s*(?:export\s+)?const\s+MICROVM_LIFECYCLE_PROTOCOL\s*(?::\s*string)?\s*=\s*(?:String\(\s*)?["'\d]/m,
+  },
+  {
+    name: 'MICROVM_IMAGE_PROTOCOL_ENV',
+    regex: /^\s*(?:export\s+)?const\s+MICROVM_IMAGE_PROTOCOL_ENV\s*(?::\s*string)?\s*=\s*["']/m,
+  },
+  {
     name: 'READY_HOOK_TIMEOUT_SECONDS',
     regex: /^\s*(?:export\s+)?const\s+READY_HOOK_TIMEOUT_SECONDS\s*(?::\s*number)?\s*=\s*-?\d+\b/m,
   },
@@ -200,6 +217,7 @@ function main(): number {
       lifecycle_hook_timeout_seconds: number;
       lifecycle_handler_budget_seconds: number;
     };
+    microvm_lifecycle?: { protocol_version: number; image_protocol_env: string; hook_port: number };
     payload_bootstrap?: {
       version: number;
       manifest_prefix: string;
@@ -358,6 +376,12 @@ function main(): number {
   // for a runtime failure becomes a build failure. Both halves live here precisely
   // so the relationship is checkable; this is the check.
   const mhb = json.microvm_hook_budgets;
+  const lifecycle = json.microvm_lifecycle;
+  if (!lifecycle || !Number.isSafeInteger(lifecycle.protocol_version) || lifecycle.protocol_version <= 0
+    || !Number.isInteger(lifecycle.hook_port) || lifecycle.hook_port < 1 || lifecycle.hook_port > 65535
+    || typeof lifecycle.image_protocol_env !== 'string' || !/^ABCA_MICROVM_[A-Z0-9_]+$/.test(lifecycle.image_protocol_env)) {
+    invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port and ABCA_MICROVM_ marker name');
+  }
   const BUDGET_FIELDS = [
     'ready_hook_timeout_seconds',
     'warmup_total_budget_seconds',

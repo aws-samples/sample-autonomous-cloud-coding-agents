@@ -45,6 +45,7 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  GetMicrovmImageVersionCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovmImageVersion', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
   MicrovmState: {
     PENDING: 'PENDING',
@@ -218,7 +219,7 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
     });
   });
 
-  test('startSession → buildComputeMetadata → transitionTask persists microvmId and endpoint', async () => {
+  test('startSession → buildComputeMetadata → transitionTask persists the worker and actual image', async () => {
     mockMicrovmSend.mockResolvedValueOnce({
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
@@ -246,27 +247,38 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
       c[0]._type === 'Update' && c[0].input.ExpressionAttributeValues[':toStatus'] === TaskStatus.RUNNING)![0];
     const values = update.input.ExpressionAttributeValues as Record<string, unknown>;
     expect(values[':attr_compute_type']).toBe('lambda-microvm');
-    expect(values[':attr_compute_metadata']).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+    expect(values[':attr_compute_metadata']).toEqual({
+      microvmId: MICROVM_ID, endpoint: ENDPOINT, imageArn: 'arn:image', imageVersion: '7',
+    });
     expect(values[':attr_session_id']).toBe(MICROVM_ID);
     expect(values[':toStatus']).toBe(TaskStatus.RUNNING);
   });
 
-  test('compute_metadata carries ONLY the two lifecycle keys (no image ARN)', async () => {
+  test('image identity alone does not claim verified lifecycle support', async () => {
     mockMicrovmSend.mockResolvedValueOnce({
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
       state: 'RUNNING',
       imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
       imageVersion: '7',
+    }).mockResolvedValueOnce({
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
+      imageVersion: '7',
+      hooks: {},
     });
 
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
     const metadata = buildComputeMetadata(handle);
 
-    // ADR-021: the image ARN is deployment-time config, logged not persisted.
-    expect(Object.keys(metadata).sort()).toEqual(['endpoint', 'microvmId']);
-    expect(JSON.stringify(metadata)).not.toContain('microvm-image');
+    expect(metadata).toEqual({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
+      imageVersion: '7',
+    });
+    expect(metadata.lifecycleProtocol).toBeUndefined();
+    expect(mockMicrovmSend.mock.calls[1][0]._type).toBe('GetMicrovmImageVersion');
   });
 
   test('a rejected RunMicrovm preserves its marked AWS exception for the caller', async () => {

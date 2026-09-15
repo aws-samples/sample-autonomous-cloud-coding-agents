@@ -1734,6 +1734,12 @@ def microvm_validate():
         "hook_routes_registered": not missing_routes,
         "python_version_supported": sys.version_info[:2] >= _MIN_PYTHON_VERSION,
         "platform_config_contract_loaded": bool(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY),
+        # Absent markers support ordinary/legacy images. A marked image must
+        # actually contain the protocol it advertises, before AWS snapshots it.
+        "image_lifecycle_protocol_supported": os.environ.get(
+            SHARED_CONSTANTS["microvm_lifecycle"]["image_protocol_env"]
+        )
+        in (None, str(SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"])),
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
 

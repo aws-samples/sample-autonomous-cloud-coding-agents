@@ -18,6 +18,7 @@
  */
 
 import type { SessionStatus } from './compute-strategy';
+import { supportsMicrovmLifecycle } from './microvm-image-capability';
 import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './microvm-lifecycle';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
@@ -35,8 +36,6 @@ export interface MicrovmLifecyclePolicyInput {
   readonly pollIntervalMs: number;
   /** Stops new suspends; already-sleeping VMs can still wake or terminate. */
   readonly suspendEnabled: boolean;
-  /** True only for the compatible pinned image once hooks/barriers are deployed. */
-  readonly imageSupportsLifecycle: boolean;
 }
 
 export type MicrovmLifecycleDecision = (
@@ -98,7 +97,7 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
     }
     return { action: 'wait', reason: 'intentionally-suspended', nextPollInMs: Math.min(nextPollInMs, wakeAt - nowMs) };
   }
-  if (!input.suspendEnabled || !input.imageSupportsLifecycle) {
+  if (!input.suspendEnabled || !supportsMicrovmLifecycle(snapshot.handle)) {
     return { action: 'wait', reason: 'suspend-disabled', nextPollInMs };
   }
   // A prior gate's in-flight suspend must be resolved conservatively. Persist a

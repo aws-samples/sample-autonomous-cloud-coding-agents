@@ -1176,7 +1176,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
   });
 
-  test('grants the orchestrator exactly the P1 lifecycle actions, image-scoped', () => {
+  test('grants the orchestrator its launch, state, cleanup and image-capability actions, image-scoped', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('TaskOrchestrator'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
@@ -1189,6 +1189,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(lifecycle.Action).toEqual([
       'lambda:RunMicrovm',
       'lambda:GetMicrovm',
+      'lambda:GetMicrovmImageVersion',
       'lambda:TerminateMicrovm',
     ]);
     // Every MicroVM lifecycle action authorizes against the *image* resource,
@@ -1202,7 +1203,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(pass.Action).toBe('lambda:PassNetworkConnector');
     expect(pass.Resource).toBe('*');
 
-    // iam:PassRole for the execution role hand-off, service-conditioned.
+    // iam:PassRole for the execution role hand-off is scoped to the exact role.
     const passRole = statements.find(s => s.Sid === 'MicrovmPassExecutionRole')!;
     expect(passRole.Action).toBe('iam:PassRole');
   });
