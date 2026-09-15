@@ -29,6 +29,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
 }));
 
@@ -61,6 +62,12 @@ jest.mock('../../src/handlers/shared/linear-issue-lookup', () => ({
   extractLinearIdentifierFromBranch: (...args: unknown[]) => extractFromBranchMock(...args),
 }));
 
+const deliverJiraMock = jest.fn();
+jest.mock('../../src/handlers/shared/jira-deployment-preview', () => ({
+  deliverJiraDeploymentPreview: (...args: unknown[]) => deliverJiraMock(...args),
+}));
+
+process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
 process.env.SCREENSHOT_BUCKET_NAME = 'screenshot-bucket';
 process.env.SCREENSHOT_PUBLIC_HOST = 'd1.cloudfront.net';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:gh-token';
@@ -429,5 +436,30 @@ describe('github-webhook-processor handler', () => {
     // … but NO standalone Linear comment on the parent epic.
     expect(findLinearIssueMock).not.toHaveBeenCalled();
     expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('authoritative Jira deployment routing', () => {
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    deliverJiraMock.mockReset().mockResolvedValue(undefined);
+    resolveGitHubTokenMock.mockResolvedValue('token');
+    captureScreenshotMock.mockResolvedValue(Buffer.from('png'));
+    s3Send.mockResolvedValue({});
+    upsertTaskCommentMock.mockReset().mockResolvedValue({ commentId: 12 });
+    postIssueCommentMock.mockReset();
+    findLinearIssueMock.mockReset();
+  });
+  test.each(['jira', 'linear'])('routes a %s task by the record even when the branch contains a Jira key', async (source) => {
+    fetchOk([{ number: 12, state: 'open', title: 'ENG-42', body: '', head: { ref: 'bgagent/task-1/ENG-42', sha: 'abc1234' } }]);
+    ddbSend.mockResolvedValue({ Attributes: { task_id: 'task-1', repo: 'owner/repo', channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ACTUAL-7' } } });
+    await handler(payload());
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    if (source === 'jira') {
+      expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', expect.objectContaining({ channel_source: 'jira' }), 'owner/repo', 'abc1234', expect.stringContaining('https://d1.cloudfront.net/'), 'https://preview.example.com');
+      expect(findLinearIssueMock).not.toHaveBeenCalled();
+    } else {
+      expect(deliverJiraMock).not.toHaveBeenCalled();
+    }
   });
 });

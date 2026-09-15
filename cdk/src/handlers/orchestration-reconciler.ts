@@ -55,8 +55,8 @@ import { claimTerminalReply, releaseReplyClaim } from './shared/iteration-reply-
 import {
   buildAdfDocument,
   postIssueCommentAdf,
-  updateIssueCommentAdf,
 } from './shared/jira-feedback';
+import { updateJiraIterationComment } from './shared/jira-preview';
 import {
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
@@ -458,6 +458,7 @@ async function resolveCombinedScreenshotUrl(
     const res = await ddb.send(new GetCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
+      ConsistentRead: true,
       ProjectionExpression: 'screenshot_url, screenshot_preview_url',
     }));
     const url = res.Item?.screenshot_url;
@@ -1254,11 +1255,12 @@ async function replyToIterationComment(
       errorTitle: classifyError(evt.errorMessage)?.title ?? null,
     }));
     if (existing) {
-      const pointer = await updateIssueCommentAdf(
+      const pointer = await updateJiraIterationComment(
+        ddb, TASK_TABLE, evt.taskId,
         jiraCtx,
         target.issueId,
         existing.commentId,
-        buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
+        { body: buildAdfDocument(renderJiraFinishedPointer(pointerKind)), terminal: true },
       );
       if (!pointer.ok) {
         reply = null;
@@ -1272,11 +1274,12 @@ async function replyToIterationComment(
       );
       reply = finalResult.ok ? { commentId: finalResult.commentId } : null;
       if (!finalResult.ok && !finalResult.retryable && existing) {
-        const fallback = await updateIssueCommentAdf(
+        const fallback = await updateJiraIterationComment(
+          ddb, TASK_TABLE, evt.taskId,
           jiraCtx,
           target.issueId,
           existing.commentId,
-          jiraFinalBody,
+          { body: jiraFinalBody, terminal: true },
         );
         if (fallback.ok) {
           logger.warn('Jira iteration result post failed terminally — folded outcome into status comment', {
@@ -1322,14 +1325,15 @@ async function replyToIterationComment(
       return;
     }
     if (channel.kind === 'jira' && existing && jiraFinalBody) {
-      const fallback = await updateIssueCommentAdf(
+      const fallback = await updateJiraIterationComment(
+        ddb, TASK_TABLE, evt.taskId,
         {
           cloudId: workspaceId,
           registryTableName: JIRA_REGISTRY_TABLE!,
         },
         target.issueId,
         existing.commentId,
-        jiraFinalBody,
+        { body: jiraFinalBody, terminal: true },
       );
       if (fallback.ok) {
         logger.warn('Jira iteration retries exhausted — folded outcome into status comment', {
