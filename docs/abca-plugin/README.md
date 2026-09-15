@@ -22,6 +22,7 @@ Or add to your project's `.claude/settings.json`:
 
 | Skill | Trigger | Description |
 |-------|---------|-------------|
+| `/pickup-issue` | Start work, implement, claim issue | ADR-003 governance gate — verify an approved, assigned issue exists before writing code (hard-fails otherwise) |
 | `/setup` | First-time setup, prerequisites | Walk through prerequisites, toolchain, and first deployment |
 | `/deploy` | Deploy, diff, destroy | Deploy, diff, or destroy the CDK stack |
 | `/onboard-repo` | Add a repository | Onboard a GitHub repo via Blueprint CDK construct |
@@ -51,6 +52,7 @@ docs/abca-plugin/
   hooks/
     hooks.json             # SessionStart capability advertisement
   skills/
+    pickup-issue/SKILL.md  # ADR-003 governance gate (approved+assigned issue)
     setup/SKILL.md         # First-time setup workflow
     deploy/SKILL.md        # CDK deployment management
     onboard-repo/SKILL.md  # Repository onboarding
