@@ -14,5 +14,8 @@
       "yarn.lock",
       "node_modules"
     ]
+  },
+  "context": {
+    "bedrockGeoRegion": "global"
   }
 }

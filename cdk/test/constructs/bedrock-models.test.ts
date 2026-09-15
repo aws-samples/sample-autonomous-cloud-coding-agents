@@ -36,6 +36,38 @@ function nodeWithContext(context?: Record<string, unknown>) {
   return new Stack(app, 'TestStack').node;
 }
 
+/**
+ * The bundle boundary, asserted.
+ *
+ * `BEDROCK_GEO_REGIONS` is now a hand-written literal in the dependency-free
+ * `handlers/shared/bedrock-model-constants.ts` rather than
+ * `Object.values(CrossRegionInferenceProfileRegion)`. That was not a style choice:
+ * reading the alpha enum is a RUNTIME use of a module that top-level `require`s
+ * `aws-cdk-lib`, so when `handlers/shared/workflows.ts` imported the list from the
+ * construct layer, esbuild put the entire CDK into every Lambda reaching that file
+ * — measured at 6.8 KB → 57 MB with 9,679 `aws-cdk-lib` references, on the
+ * orchestrator, create-task, webhook create-task, three channel webhook processors
+ * and the reconcilers. `aws-cdk-lib` is in no construct's `externalModules`, so
+ * nothing downstream strips it.
+ *
+ * The cost of a literal is drift, and this is the test that pays it: a CDK release
+ * adding a geography fails HERE, loudly, instead of silently leaving the literal
+ * one short — which would make `resolveBedrockGeoRegion` accept a geography the
+ * workflow allow-list rejects.
+ */
+describe('the geography literal stays in step with the CDK enum', () => {
+  it('equals Object.values(CrossRegionInferenceProfileRegion), as a set', () => {
+    expect([...BEDROCK_GEO_REGIONS].sort())
+      .toEqual(Object.values(CrossRegionInferenceProfileRegion).sort());
+  });
+
+  it('is the same LENGTH, so neither side has a stray or duplicate entry', () => {
+    // Set equality above would pass if one side repeated a value.
+    expect(BEDROCK_GEO_REGIONS).toHaveLength(Object.values(CrossRegionInferenceProfileRegion).length);
+    expect(new Set(BEDROCK_GEO_REGIONS).size).toBe(BEDROCK_GEO_REGIONS.length);
+  });
+});
+
 describe('resolveBedrockModelIds', () => {
   it('returns the default set when no context override is present', () => {
     const ids = resolveBedrockModelIds(nodeWithContext());
@@ -102,6 +134,36 @@ describe('resolveBedrockModelIds', () => {
     expect(() =>
       resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [`${geo}.anthropic.claude-opus-5`] })),
     ).toThrow(/bare foundation-model IDs/);
+  });
+
+  // These entries become the RESOURCE half of the Bedrock IAM grant, so a `*` is
+  // not a malformed model name — it is a working wildcard. `bedrockModels: ['*']`
+  // synthed clean and produced `inference-profile/global.*`, i.e. every profile in
+  // the account, which is the `Resource: '*'` grant the per-model scoping exists to
+  // avoid, arrived at through a context value rather than a reviewable policy edit.
+  it.each(['*', 'anthropic.*', 'anthropic.claude-opus-?', '*.anthropic.claude-opus-5'])(
+    'throws on the pattern entry %p rather than granting it as a resource wildcard',
+    (pattern) => {
+      expect(() =>
+        resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [pattern] })),
+      ).toThrow(/literal foundation-model IDs, not patterns/);
+    },
+  );
+
+  it('says WHY a pattern is refused, not just that it is', () => {
+    // An operator reading "invalid id" would reasonably retry with a different
+    // pattern. The message has to name the consequence — the grant is what widens.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: ['*'] })),
+    ).toThrow(/grant every inference profile in the account/);
+  });
+
+  it('still accepts every shipped default (the guard is not over-broad)', () => {
+    // `?` and `*` are the only rejected characters, and no real model id contains
+    // them — but `:` and `.` and digits abound, so assert the default list survives.
+    expect(() =>
+      resolveBedrockModelIds(nodeWithContext({ [BEDROCK_MODELS_CONTEXT_KEY]: [...DEFAULT_BEDROCK_MODEL_IDS] })),
+    ).not.toThrow();
   });
 
   it('names the bare id and the geo context key in the rejection message', () => {
@@ -197,5 +259,27 @@ describe('DEFAULT_BEDROCK_MODEL_IDS covers the agent runtime default', () => {
     // same matcher against the shape the guard exists to catch.
     const bareDefault = 'anthropic.claude-opus-4-8';
     expect(bareDefault.match(new RegExp(`^(${[...BEDROCK_GEO_REGIONS].join('|')})\\.`))).toBeNull();
+  });
+});
+
+describe('the shipped cdk.json geography', () => {
+  it('is a value resolveBedrockGeoRegion accepts, and is what tests claim it is', () => {
+    // Nothing read cdk.json, so the suite exercised the CODE default (`us`) while every
+    // deployment shipped `global`. Deleting the context block, or setting it to a
+    // different geography, survived the whole suite — the value the thesis rests on was
+    // unguarded.
+    const cdkJson = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../cdk.json'), 'utf8'),
+    ) as { context?: Record<string, unknown> };
+    const shipped = cdkJson.context?.[BEDROCK_GEO_REGION_CONTEXT_KEY];
+    expect(typeof shipped).toBe('string');
+    // Must be resolvable — a typo here fails every deploy at synth, but only if
+    // something checks.
+    expect(() => resolveBedrockGeoRegion(
+      nodeWithContext({ [BEDROCK_GEO_REGION_CONTEXT_KEY]: shipped }),
+    )).not.toThrow();
+    // Pinned deliberately: this is a deploy-affecting default with data-residency
+    // implications, so changing it should require changing a test that says so.
+    expect(shipped).toBe('global');
   });
 });

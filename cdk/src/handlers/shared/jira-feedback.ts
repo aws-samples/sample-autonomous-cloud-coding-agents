@@ -23,6 +23,7 @@ import {
   type ResolvedJiraOutboundAuth,
 } from './jira-oauth-resolver';
 import { logger } from './logger';
+import { type LookupResult, isLookupFailure, lookupFailed, lookupFound } from './lookup-result';
 import type { StateIntent, TransitionOptions } from './orchestration-channel';
 
 /**
@@ -331,11 +332,17 @@ interface JiraTransitionSnapshot {
   readonly transitions?: unknown;
 }
 
+// The snapshot always exists for a real issue, so there is no genuine "absent"
+// state — the read either loads the snapshot or it failed. Returning a
+// {@link LookupResult} lets the caller log a Jira outage distinctly from a
+// legitimate "no matching transition" no-op instead of collapsing both into a
+// bare `null` (#756 Cat 2). ``:395`` in particular masked invalid JSON from
+// Jira, a distinct class from a network timeout.
 async function readTransitionSnapshot(
   ctx: JiraFeedbackContext,
   issueIdOrKey: string,
   auth: ResolvedJiraOutboundAuth,
-): Promise<JiraTransitionSnapshot | null> {
+): Promise<LookupResult<JiraTransitionSnapshot>> {
   let status: number;
   let body: string;
   if (auth.kind === 'app') {
@@ -345,7 +352,13 @@ async function readTransitionSnapshot(
       cloud_id: ctx.cloudId,
       issue_key: issueIdOrKey,
     });
-    if (!result.ok) return null;
+    if (!result.ok) {
+      logger.warn('Jira transition lookup (app actor) failed', {
+        jira_cloud_id: ctx.cloudId,
+        issue_id_or_key: issueIdOrKey,
+      });
+      return lookupFailed(new Error('Jira app-actor get_transitions returned not-ok'));
+    }
     status = result.status;
     body = result.body;
   } else {
@@ -369,7 +382,7 @@ async function readTransitionSnapshot(
         issue_id_or_key: issueIdOrKey,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      return lookupFailed(err);
     } finally {
       clearTimeout(timer);
     }
@@ -380,19 +393,19 @@ async function readTransitionSnapshot(
       issue_id_or_key: issueIdOrKey,
       status,
     });
-    return null;
+    return lookupFailed(new Error(`Jira transition lookup returned HTTP ${status}`));
   }
   try {
     const parsed = JSON.parse(body) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as JiraTransitionSnapshot
-      : null;
+      ? lookupFound(parsed as JiraTransitionSnapshot)
+      : lookupFailed(new Error('Jira transition lookup returned a non-object body'));
   } catch (err) {
     logger.warn('Jira transition lookup returned invalid JSON', {
       issue_id_or_key: issueIdOrKey,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 
@@ -486,8 +499,20 @@ export async function transitionIssueState(
 ): Promise<boolean> {
   const auth = await resolveTenantAuth(ctx);
   if (!auth) return false;
-  const snapshot = await readTransitionSnapshot(ctx, issueIdOrKey, auth);
-  if (!snapshot) return false;
+  const snapshotResult = await readTransitionSnapshot(ctx, issueIdOrKey, auth);
+  if (!snapshotResult.ok) {
+    // A lookup failure is NOT the same as "transition not allowed" — log the
+    // outage distinctly, but stay best-effort (callers proceed regardless).
+    logger.warn('Jira transition: snapshot lookup failed — not transitioning', {
+      jira_cloud_id: ctx.cloudId,
+      issue_id_or_key: issueIdOrKey,
+      ...(isLookupFailure(snapshotResult) && {
+        error: snapshotResult.error instanceof Error ? snapshotResult.error.message : String(snapshotResult.error),
+      }),
+    });
+    return false;
+  }
+  const snapshot = snapshotResult.value;
 
   const currentCategory = typeof snapshot.fields?.status?.statusCategory?.key === 'string'
     ? snapshot.fields.status.statusCategory.key

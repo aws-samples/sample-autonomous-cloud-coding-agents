@@ -585,10 +585,12 @@ describe('generateInviteCode', () => {
 describe('queryLinearTeamKeys', () => {
   // Returned keys are persisted on the registry row at install time and
   // drive prefix-routing inside the screenshot processor — see #96. The
-  // helper intentionally swallows every failure path (returns []) so a
-  // transient Linear outage during `setup` doesn't abort the OAuth
-  // dance. Coverage verifies (a) the happy-path normalization and (b)
-  // every failure mode collapses to [].
+  // helper never throws (a transient Linear outage during `setup` must not
+  // abort the OAuth dance), but it distinguishes success-with-keys from a
+  // network/auth/GraphQL failure via a discriminated result (#756 Cat 2) so
+  // the caller can warn instead of silently persisting "no teams". Coverage
+  // verifies (a) happy-path normalization, (b) an empty-but-valid workspace
+  // is `ok`, and (c) every failure mode surfaces `ok: false`.
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
@@ -611,9 +613,9 @@ describe('queryLinearTeamKeys', () => {
       }),
     }) as unknown as typeof fetch;
 
-    const keys = await queryLinearTeamKeys('Bearer tok');
+    const result = await queryLinearTeamKeys('Bearer tok');
 
-    expect(keys).toEqual(['ABCA', 'PLAT', 'WEB']);
+    expect(result).toEqual({ ok: true, keys: ['ABCA', 'PLAT', 'WEB'] });
     expect(global.fetch).toHaveBeenCalledWith(
       'https://api.linear.app/graphql',
       expect.objectContaining({
@@ -640,32 +642,89 @@ describe('queryLinearTeamKeys', () => {
       }),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual(['ABCA']);
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: true, keys: ['ABCA'] });
   });
 
-  test('returns [] when Linear responds non-2xx', async () => {
+  test('fails (ok: false) when Linear responds non-2xx', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: false,
       status: 500,
       json: async () => ({}),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    const result = await queryLinearTeamKeys('Bearer tok');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBeInstanceOf(Error);
   });
 
-  test('returns [] when fetch itself throws (network failure)', async () => {
-    global.fetch = jest.fn().mockRejectedValue(new Error('ECONNRESET')) as unknown as typeof fetch;
+  test('fails (ok: false) when fetch itself throws (network failure)', async () => {
+    const err = new Error('ECONNRESET');
+    global.fetch = jest.fn().mockRejectedValue(err) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: false, error: err });
   });
 
-  test('returns [] when GraphQL response shape is missing teams.nodes', async () => {
+  // Linear's dominant auth/scope failure is NOT a non-2xx: it answers HTTP 200
+  // with an `errors` array and no `data`. A token minted without `read` team
+  // scope hits exactly this. Reading `data.teams.nodes ?? []` off that body was
+  // the masking #792 named for this site — "no teams" and "auth failed" became
+  // the same `keys: []`, the caller printed no warning, and every later issue
+  // lookup silently degraded to scanning every workspace.
+  test('fails (ok: false) on HTTP 200 with a GraphQL errors array — an unscoped token', async () => {
+    const errors = [{ message: 'Authentication required' }];
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ errors }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: false, error: errors });
+  });
+
+  // `errors` wins even when a partial `data` came back with it — a partial
+  // GraphQL result is not a team list we should persist as authoritative.
+  test('fails (ok: false) when errors accompany a partial data payload', async () => {
+    const errors = [{ message: 'Field "key" is restricted' }];
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { teams: { nodes: [{ key: 'ABCA' }] } }, errors }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: false, error: errors });
+  });
+
+  // A real workspace always returns the `teams` connection — empty when it has
+  // no teams. A body with no connection at all is malformed, not an empty
+  // workspace, so it must not be persisted as "this workspace has no teams".
+  test('fails (ok: false) when the response carries no teams connection', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: {} }),
     }) as unknown as typeof fetch;
 
-    expect(await queryLinearTeamKeys('Bearer tok')).toEqual([]);
+    const result = await queryLinearTeamKeys('Bearer tok');
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.error).toBeInstanceOf(Error);
+  });
+
+  // The one genuine empty: the connection is present and its node list is empty.
+  test('succeeds with no keys for a workspace that genuinely has no teams', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { teams: { nodes: [] } } }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: true, keys: [] });
+  });
+
+  // `nodes` omitted but the connection present — tolerated as empty, since the
+  // connection itself proves the query resolved.
+  test('succeeds with no keys when the teams connection omits nodes', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { teams: {} } }),
+    }) as unknown as typeof fetch;
+
+    expect(await queryLinearTeamKeys('Bearer tok')).toEqual({ ok: true, keys: [] });
   });
 });
 

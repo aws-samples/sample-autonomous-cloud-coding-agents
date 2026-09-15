@@ -62,6 +62,7 @@ import {
   renderJiraFinishedPointer,
 } from './shared/jira-status-comment';
 import { logger } from './shared/logger';
+import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import type { Channel, CommentRef, IssueRef } from './shared/orchestration-channel';
 import { channelForSource, type ChannelRegistryTables } from './shared/orchestration-channel-factory';
 import { computeLeaves, isIntegrationNode } from './shared/orchestration-integration-node';
@@ -84,6 +85,7 @@ import {
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { readTaskPrNumber } from './shared/task-pr-number';
 import { makeDocClient } from './shared/ua';
 import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
@@ -450,8 +452,8 @@ function soleLeafChild(
  */
 async function resolveCombinedScreenshotUrl(
   taskId?: string,
-): Promise<{ url: string; previewUrl?: string } | null> {
-  if (!taskId) return null;
+): Promise<LookupResult<{ url: string; previewUrl?: string }>> {
+  if (!taskId) return LOOKUP_ABSENT;
   try {
     const res = await ddb.send(new GetCommand({
       TableName: TASK_TABLE,
@@ -459,19 +461,19 @@ async function resolveCombinedScreenshotUrl(
       ProjectionExpression: 'screenshot_url, screenshot_preview_url',
     }));
     const url = res.Item?.screenshot_url;
-    if (typeof url !== 'string' || url.length === 0) return null;
+    if (typeof url !== 'string' || url.length === 0) return LOOKUP_ABSENT;
     const previewUrl = res.Item?.screenshot_preview_url;
     // The live preview-deploy URL makes the panel's combined
     // preview a clickable deep-link to the running combined site.
-    return {
+    return lookupFound({
       url,
       ...(typeof previewUrl === 'string' && previewUrl.length > 0 && { previewUrl }),
-    };
+    });
   } catch (err) {
     logger.warn('Combined screenshot read failed (non-fatal) — panel posts without it', {
       task_id: taskId, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 
@@ -782,7 +784,7 @@ export async function refreshPanelAndSettle(
   // Only read on the all-terminal settle (the node has deployed by then); skip
   // the extra Get on every in-flight panel edit.
   const combinedScreenshot = (allTerminal && previewNode)
-    ? await resolveCombinedScreenshotUrl(previewNode.child_task_id)
+    ? lookupValueOr(await resolveCombinedScreenshotUrl(previewNode.child_task_id), null)
     : null;
 
   if (allTerminal) {
@@ -801,7 +803,7 @@ export async function refreshPanelAndSettle(
   // all-terminal caller. The panel BODY edit is naturally idempotent.
   const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
-  const newId = await upsertEpicPanel({
+  const newId = lookupValueOr(await upsertEpicPanel({
     channel,
     parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
@@ -815,7 +817,7 @@ export async function refreshPanelAndSettle(
     mirrorParentState: allTerminal ? won : false,
     ...(meta.release_context?.trigger_label !== undefined
       && { labelFilter: meta.release_context.trigger_label }),
-  });
+  }), null);
   // Persist a freshly-created panel comment id so later edits reuse it.
   if (newId && !meta.status_comment_id) {
     try {
@@ -1172,8 +1174,15 @@ async function replyToIterationComment(
   // Mature the settle reply (👀→✅/💬) with cost + running total,
   // editing the trigger-time reply when its id was captured. A failure keeps the
   // standard failure reply (which a human can reply to, to retry).
-  const prNumber = await resolvePrNumber(evt.taskId);
-  const prUrl = await resolvePrUrl(evt.taskId);
+  const prNumberResult = await readTaskPrNumber(ddb, TASK_TABLE, evt.taskId);
+  if (isLookupFailure(prNumberResult)) {
+    logger.warn('Settle reply: PR number read failed (non-fatal) — number omitted', {
+      task_id: evt.taskId,
+      error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+    });
+  }
+  const prNumber = lookupValueOr(prNumberResult, null);
+  const prUrl = lookupValueOr(await resolvePrUrl(evt.taskId), null);
   const { total: runningTotalUsd, partial: runningTotalPartial } = await sumIterationCostForIssue({
     ddb,
     taskTableName: TASK_TABLE,
@@ -1380,15 +1389,28 @@ async function spawnRestackTask(
   changedSubIssueId: string,
 ): Promise<'created' | 'exists' | 'failed'> {
   const child = step.child;
-  const prNumber = await resolvePrNumber(child.child_task_id);
-  if (prNumber === null) {
-    logger.warn('Restack cascade: dependent has no resolvable PR number — skipping', {
-      orchestration_id: child.orchestration_id,
-      sub_issue_id: child.sub_issue_id,
-      child_task_id: child.child_task_id,
-    });
+  const prNumberResult = child.child_task_id
+    ? await readTaskPrNumber(ddb, TASK_TABLE, child.child_task_id)
+    : LOOKUP_ABSENT;
+  if (!prNumberResult.ok) {
+    // Both variants can't restack (no PR to re-stack onto), but log them
+    // distinctly: an outage ("read failed") is actionable, "no PR yet" is not.
+    logger.warn(
+      isLookupFailure(prNumberResult)
+        ? 'Restack cascade: dependent TaskRecord read failed — cannot restack'
+        : 'Restack cascade: dependent has no resolvable PR number — skipping',
+      {
+        orchestration_id: child.orchestration_id,
+        sub_issue_id: child.sub_issue_id,
+        child_task_id: child.child_task_id,
+        ...(isLookupFailure(prNumberResult) && {
+          error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+        }),
+      },
+    );
     return 'failed';
   }
+  const prNumber = prNumberResult.value;
 
   // Idempotency keyed on the SOURCE task id: this exact completion re-stacks
   // a given dependent at most once. Within [A-Za-z0-9_-], ≤128 chars.
@@ -1441,42 +1463,22 @@ async function spawnRestackTask(
   }
 }
 
-/**
- * Read a dependent's PR number from its TaskRecord. Prefers numeric
- * ``pr_number``; orchestration child tasks commonly persist only ``pr_url``
- * (``.../pull/N``) with ``pr_number`` null — fall back to parsing it.
- */
-/** The dependent's PR URL (for a clickable reply link). Null when absent. */
-async function resolvePrUrl(taskId?: string): Promise<string | null> {
-  if (!taskId) return null;
+/** The dependent's PR URL (for a clickable reply link). */
+async function resolvePrUrl(taskId: string): Promise<LookupResult<string>> {
   try {
     const res = await ddb.send(new GetCommand({
       TableName: TASK_TABLE, Key: { task_id: taskId }, ProjectionExpression: 'pr_url',
     }));
-    return typeof res.Item?.pr_url === 'string' ? res.Item.pr_url : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolvePrNumber(taskId?: string): Promise<number | null> {
-  if (!taskId) return null;
-  try {
-    const res = await ddb.send(new GetCommand({ TableName: TASK_TABLE, Key: { task_id: taskId } }));
-    const pr = res.Item?.pr_number;
-    if (typeof pr === 'number') return pr;
     const url = res.Item?.pr_url;
-    if (typeof url === 'string') {
-      const m = url.match(/\/pull\/(\d+)\b/);
-      if (m) return Number(m[1]);
-    }
-    return null;
+    return typeof url === 'string' ? lookupFound(url) : LOOKUP_ABSENT;
   } catch (err) {
-    logger.warn('Restack cascade: failed to read dependent TaskRecord for PR number', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
+    // Was a bare `catch { return null; }` with no logging (#756 Cat 2): a
+    // failed read was indistinguishable from "task has no PR". Surface both —
+    // the settle reply still degrades to omitting the link, but observably.
+    logger.warn('Settle reply: PR URL read failed (non-fatal) — link omitted', {
+      task_id: taskId, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 
