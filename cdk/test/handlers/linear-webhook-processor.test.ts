@@ -1085,6 +1085,14 @@ describe('every channel_metadata builder carries the vault fields', () => {
     'utf8',
   );
 
+  // Both guards below match CODE, never prose (#880 review). The handler's own rationale
+  // names `Object.assign` and `...vaultMetadata(resolved)`, and a comment mentioning the
+  // spread used to SATISFY the vaultMetadata guard — deleting the real merge and leaving
+  // the prose behind passed. Whole-line only, so a trailing `// …` still counts: a false
+  // positive, which is the safe direction.
+  const isCommentLine = (trimmed: string) =>
+    trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*');
+
   test('each builder that writes the workspace slug also spreads vaultMetadata', () => {
     // Scans to the end of the enclosing object literal rather than demanding the spread
     // on the very next line: adjacency made a harmless key reorder fail, which trains
@@ -1117,15 +1125,28 @@ describe('every channel_metadata builder carries the vault fields', () => {
     // End-of-scope is detected by DEDENT rather than a closing brace: an assignment form
     // has no literal to terminate, so the first non-blank line indented less than the
     // trigger is the end of the scope the trigger lives in.
+    //
+    // The accepting line must also merge into the SAME identifier the trigger wrote to
+    // (#880 review): that dedent window runs ~45 lines to the end of
+    // `if (WORKSPACE_REGISTRY_TABLE)`, so a spread in any later sibling block would
+    // otherwise satisfy a builder that merged nothing. Tightening the dedent to `<=` is
+    // NOT the fix — the real spread sits one level DEEPER, inside
+    // `if (resolved.providerName)`, because the merge is conditional and the slug write is
+    // not. Same-object, not same-scope.
     const lines = src.split('\n');
     const offenders: number[] = [];
     lines.forEach((line, i) => {
-      if (!/^\w+\.linear_workspace_slug = resolved\.workspaceSlug;$/.test(line.trim())) return;
+      const trigger = /^(\w+)\.linear_workspace_slug = resolved\.workspaceSlug;$/.exec(line.trim());
+      if (!trigger) return;
+      const target = trigger[1]!;
       const indent = line.length - line.trimStart().length;
       for (let j = i + 1; j < lines.length; j += 1) {
         const cur = lines[j]!;
-        if (cur.includes('...vaultMetadata(resolved)')) return;
-        if (cur.trim() !== '' && cur.length - cur.trimStart().length < indent) break;
+        const trimmed = cur.trim();
+        if (trimmed === '' || isCommentLine(trimmed)) continue;
+        // Left the trigger's scope without finding the merge.
+        if (cur.length - cur.trimStart().length < indent) break;
+        if (trimmed.includes('...vaultMetadata(resolved)') && trimmed.includes(target)) return;
       }
       offenders.push(i + 1);
     });
@@ -1142,10 +1163,17 @@ describe('every channel_metadata builder carries the vault fields', () => {
     // which runs only the ranged gates. A reintroduction therefore passes PR CI and then
     // rejects every contributor's `git push` once it is on main — which is exactly how
     // #879 happened. This test reds the PR that causes it instead.
+    //
+    // UNQUALIFIED over this file (#880 review). The first form required the first argument
+    // to be a bare identifier containing "metadata", so `Object.assign(md, …)` and
+    // `Object.assign(row.channelMetadata, …)` reintroduced the sink without redding the
+    // test — `\w*` cannot cross a `.`. Scope stays this ONE handler on purpose; the
+    // class-level net is the whole-repo semgrep gate `security-pr.yml` omits (#235).
     const offenders = src
       .split('\n')
-      .map((line, i) => ({ text: line, n: i + 1 }))
-      .filter(({ text }) => /Object\.assign\s*\(\s*\w*[Mm]etadata\b/.test(text))
+      .map((line, i) => ({ text: line.trim(), n: i + 1 }))
+      .filter(({ text }) => !isCommentLine(text))
+      .filter(({ text }) => /Object\.assign\s*\(/.test(text))
       .map(({ n }) => n);
     expect(offenders).toEqual([]);
   });
