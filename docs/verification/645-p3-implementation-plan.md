@@ -20,6 +20,17 @@ all six workers and temporary verification infrastructure were cleaned up.
 The normal deployed capacity reconciler also passed an owned overcount and
 terminal-reservation repair while preserving the real waiting worker.
 
+**AgentCore compatibility follow-up (2026-09-16):** the
+[reviewed container update and live checks](./645-p3-agentcore-20260916.md)
+advanced the normal AgentCore runtime and its default endpoint to version 5.
+The actual change modified only its container URI; all 475 resource identities
+and normal MicroVM settings stayed unchanged. Fresh production-handler fixtures
+passed approval and cancellation, kept AgentCore awake beyond a requested
+MicroVM sleep delay, and released both reservations. Both test sessions were
+verified absent. An earlier wrapper-invalidated attempt is explicitly excluded.
+ECS, the wider role/network matrix and the unexplained MicroVM wake failures
+remain separate gates.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
@@ -300,6 +311,10 @@ handoff, use this order:
    plus runtime/remote-MCP connectivity. Verify a full cloned-repository P3
    workflow on the final image, including mutable workspace state and normal
    P2 behavior. Respect the target repository's publication checks.
+   The [AgentCore follow-up](./645-p3-agentcore-20260916.md) now verifies its
+   current shared container, approval/cancellation, exclusion from MicroVM sleep,
+   reservation release and owned-session cleanup. The stack has no ECS resources;
+   those checks require a separate bounded deployment.
 4. Exercise the coordinated capacity upgrade/drain and rollback procedure under
    deployed writer roles, including realistic scan volume. Retain the verified
    local transaction and isolated-live results as evidence for their narrower
@@ -309,7 +324,9 @@ handoff, use this order:
    equivalent table permissions, zero writes after interrupted scans, and
    conservative handling until an older task settles. Its temporary tables and
    function were removed. This bounds the verified volume without claiming the
-   production migration or arbitrary retention scale.
+   production migration or arbitrary retention scale. A subsequent measurement
+   found 86 task rows and 36 counter rows in the normal development deployment,
+   below the fixture's 600 rows per table.
 5. Perform the final compatible rollout, including shared runtime changes for
    ECS/AgentCore, pinned-version retention and rollback checks. Enable automatic
    suspension only after the remaining gates pass, then finish the ADR/runbook

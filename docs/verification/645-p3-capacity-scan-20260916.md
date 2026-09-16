@@ -28,6 +28,12 @@ same tables. The deployed handler uses projections and does not itself request
 consumed-capacity telemetry. Its successful results required accounting for
 all 600 users.
 
+A subsequent read-only measurement of the normal development deployment found
+86 task rows in one page (58 read capacity units) and 36 counter rows in one page
+(4 units). The 600-row fixture therefore exceeded this deployment's current
+row count and scan volume. It does not establish capacity for a future production
+retention policy or workload.
+
 ## Results
 
 The first deployed invocation:
