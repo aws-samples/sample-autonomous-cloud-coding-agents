@@ -20,10 +20,11 @@
 import type { SessionStatus } from './compute-strategy';
 import { supportsMicrovmLifecycle } from './microvm-image-capability';
 import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './microvm-lifecycle';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from './types';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
 // Initial policy values, not service limits. Live timings must validate them.
-export const MICROVM_SUSPEND_GRACE_MS = 30_000;
+export const MICROVM_SUSPEND_GRACE_MS = MICROVM_SLEEP_AFTER_S_DEFAULT * 1000;
 export const MICROVM_WAKE_MARGIN_MS = 60_000;
 export const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
 export const MICROVM_TRANSITION_POLL_MS = 5_000;
@@ -91,6 +92,14 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
   const wakeAt = Math.min(approval.deadlineMs, sessionDeadlineMs) - MICROVM_WAKE_MARGIN_MS;
   if (nowMs >= wakeAt) return wake('wake-deadline');
 
+  const sleepAfterSeconds = snapshot.sleepAfterSeconds === undefined
+    ? MICROVM_SLEEP_AFTER_S_DEFAULT : snapshot.sleepAfterSeconds;
+  // A malformed stored preference loses savings, never wake or cleanup.
+  if (!Number.isInteger(sleepAfterSeconds) || sleepAfterSeconds <= 0 || sleepAfterSeconds > MICROVM_SLEEP_AFTER_S_MAX) {
+    return sleeping || snapshot.intent ? wake('task-sleep-disabled')
+      : { action: 'wait', reason: 'task-sleep-disabled', nextPollInMs };
+  }
+
   if (sleeping) {
     if (!sameGate || snapshot.intent?.action !== 'suspend' || snapshot.intent.deadline_ms !== approval.deadlineMs) {
       return wake('unintended-suspension');
@@ -103,7 +112,7 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
   // A prior gate's in-flight suspend must be resolved conservatively. Persist a
   // wake for this gate rather than attributing that old sleep request to it.
   if (snapshot.intent?.action === 'suspend' && !sameGate) return wake('previous-gate-suspend');
-  const graceEndsAt = approval.createdAtMs + MICROVM_SUSPEND_GRACE_MS;
+  const graceEndsAt = approval.createdAtMs + sleepAfterSeconds * 1000;
   if (nowMs < graceEndsAt) {
     return { action: 'wait', reason: 'suspend-grace', nextPollInMs: Math.min(nextPollInMs, graceEndsAt - nowMs, wakeAt - nowMs) };
   }

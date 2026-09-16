@@ -9,6 +9,11 @@
     "max": 3600,
     "default": 300
   },
+  "microvm_sleep_after_s": {
+    "min": 0,
+    "max": 3600,
+    "default": 600
+  },
   "max_budget_usd": {
     "min": 0.01,
     "max": 100

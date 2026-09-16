@@ -289,7 +289,7 @@ When the coding agent asks a human for permission, its computer may go to sleep.
 
 P3 coordinates the supervisor, approval records and the sleeping computer.
 
-For example, with a five-minute approval window and the suggested settings below: the question appears at **12:00**; after **12:00:30** the VM can sleep. If approval arrives at **12:02**, ABCA wakes it and it reads the saved answer. If nobody answers, ABCA wakes it around **12:04** so the agent can deny at **12:05**. Waking must not start a new five-minute timer.
+For example, with a thirty-minute approval window and the default ten-minute sleep delay: the question appears at **12:00**; after **12:10** the VM can sleep. If approval arrives at **12:15**, ABCA wakes it and reads the saved answer. If nobody answers, ABCA wakes it around **12:29** so the agent can deny at **12:30**. Waking must not start a new timer. Default five-minute approval windows stay awake. Users can choose a different delay or disable task sleep.
 
 A few implementation words used below:
 
@@ -489,7 +489,7 @@ The installed SDK returns empty suspend/resume responses. Its observed states ar
 
 **Connected to the durable supervisor:** the policy combines task status, the **specific current approval row's status**, desired action, explicit VM state and current time. PENDING alone is not a reason to resume. All terminal approval states, deadline proximity, missing/unreadable data or unintended suspension can require wake. SUSPENDING records desired wake but returns `requestReady: false` until SUSPENDED is observed.
 
-Initial local policy values: 30-second suspend grace, 60-second pre-deadline wake margin, 30-second minimum useful sleep and at most 5-second transition polling. Long intervals are clamped to the relevant grace/wake/session deadline. These are tunable choices requiring live measurement, not AWS facts. The supervisor now escalates after three consecutive failed cycles and bounds the entire cycle to 45 seconds, including the store's 5-second request/read-sequence budgets and lost-reply recovery. Wake/unknown recovery is bounded to 120 seconds and startup to 300 seconds; see the supervisor runbook for the complete budgets.
+Current local policy values: a per-task suspend delay of 600 seconds by default (`microvm_sleep_after_s`, 0–3600 seconds, zero disables sleep), 60-second pre-deadline wake margin, 30-second minimum available sleep window and at most 5-second transition polling. The earlier 30-second grace remains explicit in historical verification fixtures; it is no longer the application default. Long intervals are clamped to the relevant grace/wake/session deadline. Snapshot costs and actual wait distributions still need measurement; the 30-second available window does not promise financial savings. The supervisor escalates after three consecutive failed cycles and bounds the entire cycle to 45 seconds, including the store's 5-second request/read-sequence budgets and lost-reply recovery. Wake/unknown recovery is bounded to 120 seconds and startup to 300 seconds; see the supervisor runbook for the complete budgets.
 
 ### State/action table
 

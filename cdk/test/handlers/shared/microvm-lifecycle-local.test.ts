@@ -103,6 +103,7 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
       TableName: tasks,
       Item: {
         task_id: 'task',
+        microvm_sleep_after_s: 30,
         user_id: 'user',
         status: 'AWAITING_APPROVAL',
         compute_type: 'lambda-microvm',

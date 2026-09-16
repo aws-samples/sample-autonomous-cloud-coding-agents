@@ -87,6 +87,15 @@ Networking separates image build from execution: the build-only connector permit
 
 Local P3 now connects the guest checkpoint/credential hooks, actual image-version capability, durable supervisor and post-commit approval wake. The `microvm_approval_suspend_enabled` deployment context defaults false and controls both a static opt-in and a live Parameter Store switch. Existing durable executions reread the live switch before new suspension because their original Lambda environment is pinned. Recovery and the original service lifetime survive supervisor replay; the API preserves accepted decisions when optional wake fails. AgentCore/ECS retain explicit unsupported pause/wake results. Approval expiry still uses the original UTC/monotonic deadline. See the [supervisor runbook](../verification/645-p3-supervisor.md) for budgets, scoped permissions and remaining live gates.
 
+Tasks can set `microvm_sleep_after_s` (CLI: `--microvm-sleep-after <seconds|off>`).
+The default is 600 seconds of waiting for each approval; zero disables sleep.
+Creation persists the resolved preference, while legacy rows use the default.
+The global suspension switch still takes precedence. The five-minute default
+approval window therefore stays awake; only longer windows can reach the
+ten-minute sleep delay. Neither this setting nor suspension extends a gate's
+original deadline. Snapshot storage and save/restore fees mean the delay is a
+user preference, not a guarantee of savings for every pause.
+
 ## ECS Fargate task sizing (build vs. planning)
 
 When a repo is `compute_type: ecs`, `EcsAgentCluster` provisions **two** Fargate task definitions, and the orchestrator picks between them per task by whether the resolved workflow is **read-only**:

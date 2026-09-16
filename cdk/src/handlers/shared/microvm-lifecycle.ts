@@ -63,6 +63,8 @@ export interface MicrovmLifecycleSnapshot {
   /** Latest persisted guest heartbeat; used only to bound recovery liveness grace. */
   readonly heartbeatAtMs?: number;
   readonly taskStartedAtMs?: number;
+  /** Persisted approval-wait preference; absent legacy values use the current default. */
+  readonly sleepAfterSeconds?: number;
 }
 
 export type SaveLifecycleResult =
@@ -170,6 +172,7 @@ export async function readMicrovmLifecycleSnapshot(
     requestId,
     approval,
     intent: task.microvm_lifecycle,
+    ...(task.microvm_sleep_after_s !== undefined && { sleepAfterSeconds: task.microvm_sleep_after_s }),
     ...(typeof task.agent_heartbeat_at === 'string' && Number.isSafeInteger(Date.parse(task.agent_heartbeat_at))
       && { heartbeatAtMs: Date.parse(task.agent_heartbeat_at) }),
     ...(typeof task.started_at === 'string' && Number.isSafeInteger(Date.parse(task.started_at))

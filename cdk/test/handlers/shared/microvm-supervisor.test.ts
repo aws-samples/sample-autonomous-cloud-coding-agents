@@ -114,6 +114,7 @@ beforeEach(() => {
   jest.spyOn(Date, 'now').mockImplementation(() => time);
   row = {
     taskId: 'task',
+    sleepAfterSeconds: 30,
     userId: 'user',
     status: 'AWAITING_APPROVAL',
     handle,
@@ -199,6 +200,26 @@ test.each(['disabled', 'legacy', 'unverified-lifetime', 'short-window'])('%s kee
   expect(strategy.suspendSession).not.toHaveBeenCalled();
   expect(strategy.resumeSession).not.toHaveBeenCalled();
   expect(mockSuspendEnabled).not.toHaveBeenCalled();
+});
+
+test('per-task off overrides enabled deployment and records the reason', async () => {
+  row = { ...row, sleepAfterSeconds: 0 };
+  expect((await run()).kind).toBe('continue');
+  expect(strategy.suspendSession).not.toHaveBeenCalled();
+  expect(mockLogger.info).toHaveBeenCalledWith('MicroVM supervisor observation changed', expect.objectContaining({
+    sleep_after_s: 0, policy_reason: 'task-sleep-disabled',
+  }));
+});
+
+test('fresh task preference after intent commit prevents an in-flight suspend', async () => {
+  mockSave.mockImplementationOnce(async () => {
+    intent('suspend', time);
+    row = { ...row, sleepAfterSeconds: 0 };
+    return { status: 'saved', intent: row.intent };
+  });
+  expect((await run()).kind).toBe('continue');
+  expect(strategy.suspendSession).not.toHaveBeenCalled();
+  expect(row.intent?.action).toBe('resume');
 });
 
 test('an existing opt-in execution observes live disable without failing healthy compute', async () => {

@@ -39,6 +39,7 @@ const imageMetadata = {
   lifecycleProtocol: '1',
 };
 const task = {
+  microvm_sleep_after_s: 30,
   task_id: 'task',
   user_id: 'user',
   status: 'AWAITING_APPROVAL',
@@ -58,6 +59,7 @@ const intent = (action: 'suspend' | 'resume' = 'suspend'): MicrovmLifecycleInten
   deadline_ms: DEADLINE,
 });
 const snapshot = (overrides: Partial<MicrovmLifecycleSnapshot> = {}): MicrovmLifecycleSnapshot => ({
+  sleepAfterSeconds: 30,
   taskId: 'task',
   userId: 'user',
   status: 'AWAITING_APPROVAL',
@@ -83,6 +85,49 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('MicroVM lifecycle policy', () => {
+  test('default waits ten minutes from the original gate creation before sleeping', () => {
+    const current = snapshot({
+      sleepAfterSeconds: undefined,
+      approval: {
+        kind: 'present',
+        status: 'PENDING',
+        created_at: new Date(NOW).toISOString(),
+        createdAtMs: NOW,
+        timeout_s: 1800,
+        deadlineMs: NOW + 1_800_000,
+      },
+    });
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 599_000 }))
+      .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 1000 });
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 600_000 })).toMatchObject({ action: 'suspend' });
+  });
+  test('a default five-minute gate stays awake and retains its original deadline', () => {
+    const current = snapshot({
+      sleepAfterSeconds: undefined,
+      approval: {
+        kind: 'present',
+        status: 'PENDING',
+        created_at: new Date(NOW).toISOString(),
+        createdAtMs: NOW,
+        timeout_s: 300,
+        deadlineMs: NOW + 300_000,
+      },
+    });
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 200_000 }))
+      .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 30_000 });
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 240_000 }))
+      .toMatchObject({ action: 'resume', reason: 'wake-deadline' });
+    expect(current.approval).toMatchObject({ deadlineMs: NOW + 300_000 });
+  });
+  test.each([0, -1, NaN, Infinity, 0.5, 3601, '30', null])('off or malformed delay %s keeps awake and repairs existing sleep', value => {
+    const current = snapshot({ sleepAfterSeconds: value as number });
+    expect(policy('RUNNING', { snapshot: current })).toMatchObject({ action: 'wait', reason: 'task-sleep-disabled' });
+    expect(policy('SUSPENDED', { snapshot: { ...current, intent: intent() } }))
+      .toMatchObject({ action: 'resume', requestReady: true, reason: 'task-sleep-disabled' });
+    expect(policy('SUSPENDING', { snapshot: { ...current, intent: intent() } }))
+      .toMatchObject({ action: 'resume', requestReady: false, reason: 'task-sleep-disabled' });
+    expect(policy('SUSPENDED', { snapshot: { ...current, status: 'CANCELLED' } })).toMatchObject({ action: 'terminate' });
+  });
   test('long pending gate may suspend only after grace and explicit RUNNING', () => {
     expect(policy()).toEqual({ action: 'suspend', requestReady: true, reason: 'pending-long-gate', nextPollInMs: 5_000 });
     expect(mockSend).not.toHaveBeenCalled();

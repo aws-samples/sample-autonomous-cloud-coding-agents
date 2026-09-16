@@ -167,6 +167,8 @@ export interface ErrorClassification {
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -451,6 +453,8 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = 600). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Optional since #248 Phase 3: repo-less workflows submit without it. */
   readonly repo?: string;
   readonly issue_number?: number;
@@ -801,6 +805,11 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = 0;
+export const MICROVM_SLEEP_AFTER_S_MAX = 3600;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = 600;
 
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */

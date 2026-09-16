@@ -118,6 +118,22 @@ The stable parameter name is passed as `MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME`
 Both must allow sleep. Compatible per-worker image evidence remains an
 independent admission check.
 
+Task submission accepts `microvm_sleep_after_s`: an integer from 0 to 3600,
+default 600 seconds. Zero disables new sleep for that task. The CLI exposes
+`--microvm-sleep-after <seconds|off>`. Creation stores the resolved default,
+and task details return it. Legacy task rows without the setting use 600;
+malformed stored values prohibit new sleep and permit wake/cleanup.
+Fresh observations recheck the preference before Suspend. Supervisor logs
+include the validated delay and policy reason, without echoing malformed input.
+The worker role cannot modify this coordinator-owned setting.
+
+The delay is measured from each original approval creation time. The
+60-second pre-deadline wake margin and 30-second minimum available sleep
+window remain safety bounds, not financial break-even promises. Default
+five-minute approvals stay awake with a ten-minute sleep delay. The choice
+does not change approval deadlines, the eight-hour worker lifetime, or the
+global enablement requirements.
+
 Durable executions retain their original Lambda version and environment.
 An environment-only redeploy therefore cannot disable an existing execution.
 The stack retains published coordinator versions and their immutable guardrail

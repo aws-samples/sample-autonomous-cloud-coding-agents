@@ -270,6 +270,7 @@ function failedTransition() {
 
 function lifecycle(status: MicrovmLifecycleSnapshot['status'] = 'RUNNING'): MicrovmLifecycleSnapshot {
   return {
+    sleepAfterSeconds: 30,
     taskId: 'TASK001',
     userId: 'user-1',
     status,

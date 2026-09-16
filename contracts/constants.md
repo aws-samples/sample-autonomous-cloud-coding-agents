@@ -124,6 +124,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   (1 hour).
 - **`approval_timeout_s.default`** — value applied when the submit payload
   omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
+- **`microvm_sleep_after_s`** — per-task delay before sleeping during a
+  pending human approval: whole seconds from 0 to 3600, default 600
+  (10 minutes). Zero disables sleep. Task creation persists the resolved
+  preference; only the MicroVM supervisor consumes it. It does not extend
+  approval deadlines or override the deployment's suspension switch.
 - **`max_budget_usd.min`** — floor for a task's `max_budget_usd` (1 cent).
   Validated server-side (`validation.ts`) and pre-validated by
   `bgagent submit --max-budget` (#258).

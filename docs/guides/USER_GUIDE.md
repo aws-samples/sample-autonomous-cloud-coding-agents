@@ -639,6 +639,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--idempotency-key` | Idempotency key for deduplication. |
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
+| `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 600 = 10 minutes; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
 | `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
@@ -931,6 +932,20 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 6
 `--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, `--microvm-sleep-after 600` selects the default
+10-minute delay; `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created. Waking for approval, denial, or an approaching
+deadline remains automatic. Sleep never starts a new approval timer.
+
+The default approval timeout is five minutes, so those requests stay awake
+with the ten-minute sleep delay. A longer task timeout does not override a
+shorter policy-rule timeout. Sleeping saves compute charges but adds snapshot
+save/restore charges and wake-up time; short pauses can cost more than staying
+awake. The API equivalent is `microvm_sleep_after_s` (zero means off); task
+details return the saved setting. Automatic suspension remains disabled by
+default pending the [P3 acceptance checks](../verification/645-p3-implementation-plan.md).
 
 ## Webhook integration
 

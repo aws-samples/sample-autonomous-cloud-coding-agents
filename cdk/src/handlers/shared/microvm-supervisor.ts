@@ -30,6 +30,7 @@ import {
 import { decideMicrovmLifecycle, MICROVM_TRANSITION_POLL_MS } from './microvm-lifecycle-policy';
 import { readMicrovmSuspendEnabled } from './microvm-suspend-config';
 import { MICROVM_MAX_DURATION_SECONDS } from './strategies/lambda-microvm-strategy';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from './types';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../../constructs/task-status';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
@@ -134,6 +135,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
   let stage = 'task-read';
   let readFailed = false;
   let suspendRequested = false;
+  let policyReason: string | undefined;
   const result = (outcome: SupervisorOutcome): MicrovmSupervisorResult => {
     if (outcome.kind === 'continue') {
       if (!readFailed) {state = { ...state, consecutivePollFailures: 0 };} else if (state.consecutivePollFailures >= MICROVM_MAX_POLL_FAILURES) {
@@ -152,6 +154,10 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       recovery_since_ms: state.recovery?.sinceMs ?? null,
       outcome: outcome.kind,
       reason: 'reason' in outcome ? outcome.reason : null,
+      policy_reason: policyReason ?? null,
+      sleep_after_s: snapshot?.sleepAfterSeconds === undefined ? MICROVM_SLEEP_AFTER_S_DEFAULT
+        : Number.isInteger(snapshot.sleepAfterSeconds) && snapshot.sleepAfterSeconds >= 0
+          && snapshot.sleepAfterSeconds <= MICROVM_SLEEP_AFTER_S_MAX ? snapshot.sleepAfterSeconds : null,
       consecutive_poll_failures: state.consecutivePollFailures,
       consecutive_resume_failures: state.consecutiveResumeFailures,
     };
@@ -314,6 +320,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       suspendEnabled = await readMicrovmSuspendEnabled(options);
       decision = policy();
     }
+    policyReason = decision.reason;
     state = { ...state, nextPollInMs: decision.nextPollInMs };
     if (decision.action === 'reconcile-terminal') return result({ kind: 'substrate-terminal' });
     if (decision.action === 'terminate') return result({ kind: 'failure', reason: decision.reason });
@@ -371,7 +378,9 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     if (!sameWorker(snapshot, input)) return result({ kind: 'ownership-lost', reason: 'worker-record-changed-or-missing' });
     if (closed(snapshot!.status)) return result({ kind: 'closed', status: snapshot!.status });
     if (snapshot!.intent?.generation !== saved.intent.generation || snapshot.requestId !== saved.intent.request_id) return retry();
-    if (decision.action === 'suspend' && policy().action !== 'suspend') {
+    const latestDecision = policy();
+    policyReason = latestDecision.reason;
+    if (decision.action === 'suspend' && latestDecision.action !== 'suspend') {
       // Approval/deadline/disable can win after intent was saved but before the call.
       beginRecovery('wake');
       await saveMicrovmLifecycleIntent(snapshot!, 'resume', Date.now(), options);
