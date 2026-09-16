@@ -61,6 +61,13 @@ All five functions, two roles, two tables and five log groups were removed.
 This verifies the bounded table protocol, not a completed migration of the
 normal deployment's admission routes and retained durable executions.
 
+**Comment cleanup follow-up (2026-09-16):** ECS comments now describe the actual
+4-vCPU/16-GiB/50-GiB build defaults and the scope of its existing build settings.
+Shared role and runner documentation now distinguishes AgentCore/ECS credential
+export from MicroVM's retained scoped provider. TypeScript emitted code and
+Python executable syntax trees were unchanged. These corrections did not change
+sizing, build settings or credential behavior; ECS live acceptance remains open.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by

@@ -90,3 +90,11 @@ migration.
 
 Raw evidence:
 `/tmp/abca-645-p2-clean-20260913/p3-capacity-upgrade-20260916`.
+
+Permanent private archive:
+`/Users/sphias/.local/share/abca-verification/645-p3-20260916/capacity-upgrade-evidence.tar.gz`
+(56 files, 9,265,702 bytes, mode `0600`, SHA-256
+`e1499cdde2ad8573996365b09553f4a62fc7ec790a932c0054370b5ded03784e`).
+Every file was checked against its hash manifest. It includes source
+`2b12ce88`, both exact function ZIPs, the legacy function bodies, all receipts,
+logs and cleanup evidence, plus the subsequent ECS sizing-comment check.
