@@ -65,3 +65,10 @@ capacity-protocol rollback exercise.
 
 Raw deployment, package and API evidence:
 `/tmp/abca-645-p2-clean-20260913/p3-wake-feedback-20260916`.
+
+The permanent private archive is
+`/Users/sphias/.local/share/abca-verification/645-p3-20260916/generic-wake-feedback-evidence.tar.gz`
+(60 files, 820,897,318 bytes, mode `0600`, SHA-256
+`ab24324c8b6b12c3fb8efce4fd6f75a9d6f0ecbd1dae25d4fbfbe260939e79e9`).
+All file hashes were verified against its manifest. It retains the exact 11
+deployed Lambda ZIPs and source/docs commit `0090a713`.

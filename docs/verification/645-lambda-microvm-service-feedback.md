@@ -121,9 +121,11 @@ coordinator 7 and verified through the normal task API. These controlled failure
 and passing race cases do not explain F01.
 
 F08 exposed another service message, `Resume lifecycle hook failed.`, without
-an HTTP status or underlying connection error. The local classifier correction
-recognizes that observed wording and prevents misleading retry advice. It does
-not establish why the service failed to complete the hook.
+an HTTP status or underlying connection error. The
+[classifier correction deployed in coordinator 9](./645-p3-wake-feedback-20260916.md)
+recognizes that observed wording and prevents misleading retry advice for newly
+classified failures. Previously persisted stable error codes remain unchanged.
+This does not establish why the service failed to complete the hook.
 
 **Ask:** provide a service-side lifecycle attempt timeline or equivalent
 structured fields: originating API receipt, hook kind/attempt ID, start/end

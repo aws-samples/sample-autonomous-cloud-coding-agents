@@ -52,6 +52,13 @@ terminal reservation while preserving a real waiting worker. The bounded
 volume and role checks do not complete the old-writer drain/upgrade/rollback
 procedure or establish arbitrary production scale.
 
+The subsequent [isolated upgrade/rollback rehearsal](./645-p3-capacity-upgrade-20260916.md)
+passed admission fences, legacy/current writer drains, lost-finalization replay,
+drained rollback and re-upgrade using real AWS functions and restricted table
+permissions. All temporary resources were removed. It exercised the table
+protocol with fixture-managed task statuses; the normal deployment's complete
+admission-route and durable-execution drain remains a separate operational gate.
+
 A subsequent read-only deployment audit checked upload confirmation, coordinator
 version 8, counter reconciliation, queue pickup and stranded-task reconciliation.
 All five referenced the same code assets as the `a81c565d` assembly, and each

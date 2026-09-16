@@ -52,6 +52,15 @@ The observed generic wake failure now receives specific service/admin guidance;
 already-persisted stable codes remain unchanged. This corrects feedback, not
 the unresolved wake failure.
 
+**Capacity upgrade rehearsal (2026-09-16):** the
+[isolated AWS protocol check](./645-p3-capacity-upgrade-20260916.md) passed 12
+checks: admission fences, old/current task drains, safe repeated finalization,
+drained rollback and re-upgrade. It used unchanged old function bodies, the
+current reservation helper and the exact deployed reconciler artifact.
+All five functions, two roles, two tables and five log groups were removed.
+This verifies the bounded table protocol, not a completed migration of the
+normal deployment's admission routes and retained durable executions.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
@@ -349,6 +358,10 @@ handoff, use this order:
    deployed writer roles, including realistic scan volume. Retain the verified
    local transaction and isolated-live results as evidence for their narrower
    scope.
+   The [isolated protocol rehearsal](./645-p3-capacity-upgrade-20260916.md) now
+   passes enforced admission pauses, old/current drains, rollback and re-upgrade.
+   Its private helper entry points and fixture-managed task states do not replace
+   the normal deployment's complete admission-route/durable-execution drain.
    The [AWS scan follow-up](./645-p3-capacity-scan-20260916.md) now passes a
    600-user fixture with real multi-page reads, exact normal Lambda artifact,
    equivalent table permissions, zero writes after interrupted scans, and
