@@ -60,6 +60,50 @@ export interface GitHubDeploymentStatusPayload {
 }
 
 /**
+ * Amplify Hosting publishes successful PR previews as check runs, not GitHub
+ * deployments. Normalize its signed webhook into the existing capture contract.
+ * Ignore other apps/checks and reject console links or non-preview destinations.
+ */
+export function normalizeAmplifyPreviewCheck(value: unknown): GitHubDeploymentStatusPayload | null {
+  const record = (input: unknown): Record<string, unknown> =>
+    input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? input as Record<string, unknown>
+      : {};
+  const raw = record(value);
+  const check = record(raw.check_run);
+  const app = record(check.app);
+  if (raw.action !== 'completed' || check.status !== 'completed' || check.conclusion !== 'success'
+    || check.name !== 'AWS Amplify Console Web Preview'
+    || record(app.owner).login !== 'aws-amplify-console'
+    || typeof app.slug !== 'string' || !/^aws-amplify-[a-z0-9-]+$/.test(app.slug)
+    || typeof check.id !== 'number' || !Number.isSafeInteger(check.id) || check.id <= 0
+    || typeof check.head_sha !== 'string' || !/^[0-9a-f]{40}$/i.test(check.head_sha)
+    || typeof check.details_url !== 'string') {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(check.details_url);
+  } catch {
+    return null;
+  }
+  const preview = /^pr-(\d+)\.[a-z0-9]+\.amplifyapp\.com$/.exec(url.hostname);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !preview
+    || !Array.isArray(check.pull_requests)
+    || !check.pull_requests.some((pr: unknown) => record(pr).number === Number(preview[1])
+      && record(record(pr).head).sha === check.head_sha)) {
+    return null;
+  }
+  const repository = record(raw.repository);
+  if (typeof repository.full_name !== 'string' || !isValidRepo(repository.full_name)) return null;
+  return {
+    repository: { full_name: repository.full_name },
+    deployment: { id: check.id, sha: check.head_sha, environment: 'Preview' },
+    deployment_status: { id: check.id, state: 'success', environment_url: check.details_url },
+  };
+}
+
+/**
  * Validated `deployment_status` payload — every field the processor
  * requires to do useful work is present and non-empty. Returned by
  * `validateDeploymentStatusPayload` so callers can stop carrying

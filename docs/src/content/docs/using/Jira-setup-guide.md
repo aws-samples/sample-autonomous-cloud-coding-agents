@@ -317,6 +317,8 @@ After the PR exists, add a Jira comment such as `@bgagent update the README too`
 
 When a successful GitHub preview deployment is captured, ABCA also adds **Open screenshot** and **Open live preview** links to the originating Jira issue. Configure the GitHub deployment-status webhook described in the [deploy-preview screenshots guide](/sample-autonomous-cloud-coding-agents/using/deploy-preview-screenshots-guide). Jira uses explicit ADF links because these externally hosted screenshots do not have Atlassian media IDs.
 
+For AWS Amplify Hosting, enable PR previews and select **Check runs** on that GitHub webhook. Amplify's successful preview check triggers capture and Jira delivery automatically; subscribing only to Deployment statuses does not capture Amplify previews.
+
 For an iteration, the links appear in its existing status comment and survive later heartbeat and terminal edits. A fan-out orchestration's combined preview appears in the parent rollup. Routing uses stored Jira tenant/issue metadata and the iteration's commit SHA, so branch text cannot redirect Jira feedback. Duplicate deployment events update the existing preview comment or block.
 
 Preview feedback is best effort. Jira authentication, API, or persistence failures are logged as `screenshot.jira_delivery_failed` or `jira.preview.status_failed` and do not fail the deployment or task. A standalone comment creation is claimed before posting; an uncertain or failed POST is not automatically repeated, avoiding duplicates if Jira accepted it before a network timeout. Check `screenshot.jira_delivery_claimed` when a claim has no saved comment ID.
