@@ -10,11 +10,11 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | P3 blocker | Accepted wake ends in connection refusal | Six recorded failures; latest captures idle-timer closure and a live listener; three close-header cases verify closure before freeze |
+| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and four Durable workflows passed |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
-| F05 | Medium | HTTP connection handling across suspend/resume | Exact refusal now correlates with expired idle connection; service dispatch details still needed |
+| F05 | Medium | HTTP connection handling across suspend/resume | Exact refusal correlates with expired idle connection; explicit close header deployed; service dispatch details still needed |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
 | F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Guest-log recovery verified; maximum retention, post-expiry behavior and recovery without identity logs unknown |
 | F08 | P3 blocker | Generic wake-hook failure with an observed listener | PID 1 owned its listener after restore, 519 ms before termination; no resume hook entry |
@@ -23,7 +23,8 @@ is the receipt that lets the service team find a particular call.
 
 **Impact:** the user approves an action, but the worker stops before continuing.
 The coordinator releases capacity correctly; the requested coding workflow
-still fails. This prevents enabling automatic suspension for normal tasks.
+failed in these recorded cases. The application correction below is deployed;
+automatic suspension remains disabled pending the remaining P3 acceptance gates.
 
 **Observed:** five failures on normal images `3.0`, `4.0` and `5.0`, plus a sixth
 on a private image retaining 5.0's application and connection behavior with
@@ -77,10 +78,16 @@ show the service's actual dispatch error or socket choice. The Mac was the test
 controller; the failing connection was inside AWS. Passing controls do not
 establish a failure rate or discharge the earlier failures.
 
-**Next:** complete normal-image rollout and acceptance of the explicit close
-header, retain the exact failure, and obtain service-side dispatch details.
+**Application correction:** the [normal rollout](./645-p3-connection-close-rollout-20260916.md)
+deployed explicit close headers in image 6.0, with coordinator 10 and both sleep
+switches off. Approval, denial, timeout and cancellation while asleep passed on
+that image through a private real Durable coordinator and normal decision APIs.
 Two unchanged sleeps longer than 90 seconds and three candidate cases passed;
 the candidate trace verifies actual connection closure before freeze.
+
+**Next:** obtain service-side dispatch details for the retained failures and
+confirm supported connection handling across suspension. The application
+evidence does not establish the exact service error in every historical case.
 Service response: pending. F08 records an independently observed failed wake
 with different wording; a shared cause remains unconfirmed.
 
@@ -145,6 +152,12 @@ recognizes that observed wording and prevents misleading retry advice for newly
 classified failures. Previously persisted stable error codes remain unchanged.
 This does not establish why the service failed to complete the hook.
 
+The subsequent image 6.0 / coordinator 10 rollout also classifies
+`Resume lifecycle hook timed out` as a nonretryable service failure. Six normal
+task-handler checks cover raw/legacy/stable timeout forms, refusal, generic
+failure and preservation of an older stable code. They use synthetic terminal
+records and verify feedback, not a new service failure.
+
 **Ask:** provide a service-side lifecycle attempt timeline or equivalent
 structured fields: originating API receipt, hook kind/attempt ID, start/end
 times, connection versus HTTP failure, HTTP status, underlying error code and
@@ -206,6 +219,11 @@ uses an explicit response header, not the earlier timer flag. All three candidat
 cases verified response-driven closure before freeze, no armed idle timer on the
 suspend connection, and a fresh resume connection.
 
+That correction is now deployed in normal image 6.0. Four real Durable
+approval/denial/timeout/cancellation workflows passed on the normal image;
+the [rollout record](./645-p3-connection-close-rollout-20260916.md) includes
+actual wake receipts, guest acknowledgments and final task/tool evidence.
+
 **Ask:** does the service reuse hook TCP connections across suspend/resume,
 honor `Connection: close`, and retry a failed reused connection on a fresh socket?
 How are reset, refused and timeout errors classified? What ordering is guaranteed
@@ -215,7 +233,8 @@ semantics should guest timeout/keep-alive timers expect across suspension?
 **Limits:** the guest now records exact connection identity and timer closure,
 but it cannot expose the service client's pool or failed dispatch. A paused
 Linux process is not an AWS MicroVM restore, and the earlier timer-flag comparison
-did not reproduce F01. Normal deployment connection handling remains unchanged.
+did not reproduce F01. The normal image now sends explicit close headers; these
+passing cases do not reveal the service's earlier dispatch error.
 Service response: pending; retain the service contract questions above.
 
 ## F06 — Make the VPC connector role requirement obvious before deployment
@@ -306,7 +325,7 @@ added a separate observer child. Application code, connection keepalive,
 receipt, was the hook attempted on a fresh or reused socket, what bytes/status
 were received, and was another connection attempted before termination?
 Does the service retain the hook-attempt timeline separately from the API
-receipt? Compare it with the five exact connection refusals in F01.
+receipt? Compare it with the six exact connection refusals in F01.
 
 **Limits:** the observed process and listener existed 519 ms before termination.
 This does not prove continuous health or event-loop responsiveness, and it does

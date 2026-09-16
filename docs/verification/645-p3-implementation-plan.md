@@ -14,9 +14,14 @@ cases sleeping longer than 90 seconds passed. Three private candidate cases
 with explicit `Connection: close` passed, each proving socket closure before
 freeze, no idle timer on that socket, fresh resume connection, original timeout,
 late approval rejection and complete cleanup. This supplies a concrete
-application correction; service dispatch traces remain unavailable and normal
-deployment plus final-image acceptance remain separate steps. Wake-hook timeouts
-also now receive nonretryable service/admin feedback in source.
+application correction. The [normal rollout and acceptance](./645-p3-connection-close-rollout-20260916.md)
+now verify image 6.0 and coordinator 10, 8,192 MiB, both sleep switches off,
+and four real Durable workflows: approve, deny, timeout winning over a late
+decision, and cancellation while asleep. All four finalized without watcher
+repair; temporary infrastructure was removed. Six deployed task-handler checks
+also verify wake feedback, including nonretryable service/admin guidance for
+hook timeouts. Service dispatch traces and the wider final-image matrix remain
+separate gates.
 
 **Adjustable sleep deployed (2026-09-16):** source `a81c565d` adds
 `microvm_sleep_after_s` and CLI `--microvm-sleep-after <seconds|off>`, with a
@@ -210,7 +215,8 @@ is superseded by these records.
 - [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 - [x] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup. Image `4.0` passed these checks, including real renewal after credential expiry.
-- [ ] Complete normal-image rollout and acceptance of the explicit connection-close correction; retain all six exact refusals and the generic failure. The [transport comparison](./645-p3-wake-transport-20260916.md) verifies actual closure before freeze on the private candidate.
+- [x] Deploy the explicit connection-close correction and verify approve, deny, timeout and cancel-asleep on normal image 6.0 through real Durable execution; retain all six exact refusals and the generic failure. The [transport comparison](./645-p3-wake-transport-20260916.md) proves closure before freeze; the [rollout record](./645-p3-connection-close-rollout-20260916.md) records normal-image acceptance and cleanup.
+- [ ] Complete the wider final-image workspace, multiple-gate, late-decision-winner and expired-credential checks before enabling automatic suspension.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -304,53 +310,30 @@ absence of all temporary infrastructure.
 The detailed batches below preserve the implementation history. For the current
 handoff, use this order:
 
-1. Complete normal-image rollout and acceptance of the
-   [connection-close correction](./645-p3-wake-transport-20260916.md), retaining
-   the six [exact refusals](./645-p3-resume-refusal-investigation.md) and F08.
-   Service-side dispatch diagnostics remain missing, but the sixth refusal now
-   captures exact idle-timer closure and a live listener. The private candidate
-   proves the suspend socket closes before freeze and resume uses a new one.
-   Passing retries, the callback-timeout fix and cleanup alone do not close
-   this gate.
-   The [minimal listener experiment](./645-p3-listener-probe-20260916.md) also
-   exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md).
-   Its correction and startup-confirmation follow-up are deployed in coordinator
-   version 5. Local checks, real first-start observations and the exact API-issued
-   old-worker `PENDING` branch pass in the
-   [full-agent observer experiment](./645-p3-process-observer-20260916.md).
-   Its seven workers and temporary infrastructure were removed, and the exact
-   evidence was privately archived. These timer results do not explain the
-   separate connection refusals.
+1. Complete the wider final-image lifecycle matrix on image 6.0: a cloned
+   repository with mutable files across multiple approval gates, the late-decision
+   winner, and wake after actual credential expiry. Earlier image 4.0/5.0 results
+   remain evidence for their recorded scope.
+   The [connection-close correction](./645-p3-wake-transport-20260916.md) and
+   [normal rollout](./645-p3-connection-close-rollout-20260916.md) are complete.
+   Three instrumented candidates proved socket closure before freeze and a new
+   resume connection; four normal-image Durable workflows passed approval,
+   denial, the original timeout winning, and cancellation while asleep.
+   Coordinator 10 and image 6.0 are deployed with both sleep gates off.
+   Retain the six [exact refusals](./645-p3-resume-refusal-investigation.md) and
+   F08, and obtain service-side dispatch details separately. The guest evidence
+   does not reveal the actual service error in every historical case.
    The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) describes
-   the new hook-stage, AWS request-ID and durable state-change logging.
-   Three isolated AWS workflows verified it, including actual API wake and
-   coordinator recovery. The [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
-   first deployed coordinator version 6 and image 5.0 with both suspension
-   switches off; subsequent feedback updates advanced the coordinator to 9.
-   The original server remained PID 1. Logging and successful controls alone
-   do not close the defect.
-   The same record covers a bounded AWS comparison with connection reuse disabled:
-   both quick/long wakes and both missing-approval HTTP 409 controls passed,
-   with specific guest-stage diagnostics and deployed task-API feedback.
-   Two mistitled long-hold attempts were excluded and replaced by fresh measured
-   cases. No unexpected refusal appeared; production connection handling is unchanged.
-   A subsequent image 5.0 timeout-race case reproduced the refusal after a normal
-   pre-deadline wake. The guest logged a successful checkpoint and suspend HTTP
-   200, but no resume hook entry. The prepared service report now includes its
-   API receipts and precise timeline; the new diagnostics have not established
-   the cause.
-   The [independent PID 1 follow-up](./645-p3-pid1-observer-20260916.md) now
-   captures process/listener evidence during a separate generic wake-hook
-   failure. F08 records its service question. An observed listening socket does
-   not prove the event loop processed the hook or identify the failing connection.
+   the deployed hook-stage, AWS request-ID and durable state-change logging,
+   including the distinction between an accepted Resume and a successful hook.
 2. The [command-race checks](./645-p3-command-races-20260916.md) now pass cancellation
    before/after Suspend, during observed `SUSPENDING`, and during restore
    `PENDING`; approval during an accepted suspension and three consecutive
    polling failures also pass. Six required cases used nine workers, with three
    harness-invalidated attempts explicitly excluded and replaced. All temporary
    resources were removed. The same follow-up deployed clearer status-read
-   failure guidance in coordinator version 7 and verified the normal task API;
-   image 5.0 and disabled suspension settings remain in place.
+   failure guidance in coordinator version 7 and verified the normal task API.
+   Those cases used image 5.0; disabled suspension settings remain in place.
    Complete the remaining live fault matrix:
    service token-retention expiry and recovery
    when guest identity evidence is unavailable. Keep each injected failure distinct from an
@@ -363,7 +346,9 @@ handoff, use this order:
    passes on the private PID 1 diagnostic image with unchanged application code,
    the original deadline, late HTTP 404 rejection and automatic cleanup.
    The diagnostic also reproduced a distinct generic wake failure, so this
-   individual passing case does not complete final-image enablement.
+   individual passing case did not complete final-image enablement. The timeout
+   winner now also passes on normal image 6.0 through real Durable execution,
+   with a late HTTP 404 and no unapproved Read; the wider gate in step 1 remains.
    The [durable registration follow-up](./645-p3-registration-20260916.md)
    passed a lost reply after an actual registration commit, cancellation before
    identity registration, and explicit operator recovery/termination of a live

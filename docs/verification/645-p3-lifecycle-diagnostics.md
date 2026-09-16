@@ -2,8 +2,12 @@
 
 Updated 2026-09-16. The logging changes passed local checks and three isolated
 AWS workflows. The [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
-now runs coordinator version 6 and image 5.0. They do not resolve the four
-[recorded wake refusals](./645-p3-resume-refusal-investigation.md).
+first deployed coordinator version 6 and image 5.0. The latest
+[connection-close rollout](./645-p3-connection-close-rollout-20260916.md) runs
+coordinator 10 and image 6.0, adds specific timeout feedback, and passed four
+real Durable workflows. Automatic suspension remains disabled. The six
+[recorded wake refusals](./645-p3-resume-refusal-investigation.md) are retained
+for service-side diagnosis.
 
 ## What the records tell us
 

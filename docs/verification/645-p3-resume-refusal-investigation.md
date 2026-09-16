@@ -6,8 +6,11 @@ captured a sixth exact refusal. The old connection's five-second idle timer
 expired at restoration; PID 1 still owned its listener, and no fresh HTTP
 connection or resume request appeared. Three explicit `Connection: close`
 candidate cases passed on a private image, proving closure before freeze and
-fresh resume connections. Normal-image rollout and acceptance remain separate
-steps; automatic suspension remains disabled.
+fresh resume connections. The subsequent
+[normal rollout](./645-p3-connection-close-rollout-20260916.md) deployed image 6.0
+and coordinator 10; approval, denial, timeout and cancellation while asleep
+passed on the normal image using a private real Durable coordinator.
+Automatic suspension remains disabled while the remaining P3 gates are open.
 
 An earlier
 [diagnostic retaining the original PID 1 server](./645-p3-pid1-observer-20260916.md)
@@ -46,9 +49,9 @@ The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) documents
 the new logging and wake-failure feedback. Three isolated AWS workflows verified
 the instrumentation with the original server running as PID 1, including actual
 API wake and coordinator recovery. None reproduced refusal. The
-[normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md) now runs coordinator
-version 9 and image 5.0 after subsequent coordinator fixes. The fifth failure
-on image 5.0 includes those application diagnostics, as recorded below.
+[normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md) first installed
+these diagnostics in image 5.0. The fifth failure on that image includes them,
+as recorded below. The current image and coordinator are identified above.
 
 ## Recorded failures
 
@@ -159,7 +162,7 @@ Suspend drains tracked work and checkpoints; it does not intentionally close
 the HTTP listener. The server's shutdown path is separate. That source review
 does not exclude a process crash or a lower-level restore problem.
 
-## Next investigation
+## Earlier experiments and remaining investigation
 
 The [minimal listener experiment](./645-p3-listener-probe-20260916.md) completed
 four full normal cases and recorded 14 guest resume acknowledgments without an
@@ -185,16 +188,17 @@ the observer.
 The subsequent [local transport control](./645-p3-transport-control-20260916.md)
 reproduced a reset on an old connection after a six-second process pause, while
 all eight fresh-connection checks succeeded and the servers remained alive.
-This is not a reproduction of the AWS refusal. It supplies a specific comparison
-for the next cloud investigation without establishing a production fix.
+This was not a reproduction of the AWS refusal. It supplied a specific comparison
+for the later instrumented cloud investigation.
 
-The [AWS connection comparison](./645-p3-diagnostics-rollout-20260916.md) has now
-tested normal image 5.0 against a private image with HTTP connection reuse
-disabled, keeping the original server as PID 1. Both quick and longer wakes
+The earlier [AWS connection comparison](./645-p3-diagnostics-rollout-20260916.md)
+tested normal image 5.0 against a private image with
+`--timeout-keep-alive 0`, keeping the original server as PID 1. Both quick and longer wakes
 passed, and both missing-approval controls produced the expected guest HTTP 409
 with a failed identity-read stage. The longer normal wake used a fresh client
 port; quick normal wakes reused one. No refusal was reproduced. These results
-do not identify F01's cause or justify a production connection-setting change.
+alone did not identify F01's cause. The later instrumented refusal and explicit
+response-header comparison supply the additional evidence for the deployed fix.
 
 1. Use the recorded worker IDs, region, timestamps and Resume request IDs to
    inspect service-side lifecycle diagnostics. Determine the actual connection
@@ -203,14 +207,15 @@ do not identify F01's cause or justify a production connection-setting change.
    Application access logs do not provide that missing evidence.
    The latest failure now supplies these observations with the original PID 1.
    Compare its expired connection against the successful fresh-connection wake.
-3. Verify the explicit close response on a private candidate image, including
-   its actual socket closure before freeze and fresh connection after restore.
-   Do not hide a failed wake by silently
+3. Retain the verified private-candidate socket closure and normal-image
+   acceptance evidence. Do not hide a failed wake by silently
    launching another worker: the approved action and workspace may already have
    changed.
-4. Repeat approval, denial, original/late deadline, multiple-gate persistence and
-   expired-credential cases on the corrected image. Keep the previous failures
-   in the evidence record.
+4. Approval, denial, the original timeout winning over a late approval, and
+   cancellation while asleep now pass on image 6.0. Complete the wider final-image
+   checks, including multiple-gate workspace persistence, the late-decision
+   winner and actual expired-credential renewal. Earlier-image results remain
+   evidence for their recorded scope.
 5. Leave production automatic suspension off until this gate and the
    [remaining acceptance plan](./645-p3-implementation-plan.md) are satisfied.
 

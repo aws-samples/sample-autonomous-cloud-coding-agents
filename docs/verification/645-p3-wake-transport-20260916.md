@@ -8,6 +8,10 @@ deployment was unchanged during this comparison. This record separates
 actual AWS wake evidence from local calibration and attempts that failed before
 any sleep. Nothing here has been submitted to the service team.
 
+The subsequent [normal rollout](./645-p3-connection-close-rollout-20260916.md)
+deployed image 6.0 and coordinator 10. Four real Durable workflows passed on that
+image; the normal automatic-suspension switches remain off.
+
 ## Question and instrumentation
 
 An HTTP keep-alive connection lets a client reuse an existing connection for its
@@ -249,8 +253,13 @@ An initial cleanup preflight rejected `/tmp` versus `/private/tmp` spellings of
 the same directory before any resource deletion. It was corrected by comparing
 resolved paths; that failed preflight and the successful cleanup are both retained.
 
-The evidence is being preserved in the private permanent archive
+The evidence is preserved in the private permanent archive
 `~/.local/share/abca-verification/645-p3-20260916/wake-transport-evidence.tar.gz`.
+It contains 255 files, occupies 17,981,013 bytes, and has SHA-256
+`c949e28f68b0884d84c3b9d0ced6d166ed307d4f2fc8f876b89a1f1474e9b0f8`.
+Every member's size and hash were checked against its manifest; archive
+permissions are `0600`.
+
 At comparison cleanup, the normal deployment remained coordinator 9 / image
-5.0, 8,192 MiB, with automatic suspension disabled. Normal rollout is a separate
-verification step.
+5.0, 8,192 MiB, with automatic suspension disabled. The subsequent normal rollout
+and its separate acceptance archive are recorded in the linked rollout report.
