@@ -2,6 +2,14 @@
 
 **Follow-up (2026-09-15):** [per-worker image capability](./645-p3-image-capability.md) declares the served hooks and verifies the actual launched image version. The [supervisor milestone](./645-p3-supervisor.md) implements durable recovery and approval wake; the full repository build passes. The record below preserves this milestone's original scope. Live sleep/wake acceptance remains open.
 
+**Live follow-up (2026-09-16):** the
+[image `4.0` long-sleep test](./645-p3-callback-live-20260915.md#real-credential-expiry-and-the-original-approval-deadline)
+kept the worker frozen beyond real STS expiry, renewed the same role and task/user
+tags, and completed a further model response, database writes and S3 upload.
+The approval retained its original deadline. Gateway signing and the wider
+lifecycle matrix remain separate gates; this supersedes the untested long-expiry
+item below without completing P3.
+
 Date: 2026-09-14. Local implementation and actual pinned Claude process probes.
 No AWS deployment or suspension was performed for this milestone. Deployed
 image **2.0** was unchanged at that milestone; P3 was not complete.
@@ -24,6 +32,13 @@ MicroVM mode, `bedrock_creds_helper.py` emits `{"Credentials": {}}` without read
 attribution files or resolving AWS credentials. That leaves resolution to the
 scoped container provider and keeps keys out of Claude's stale export cache.
 AgentCore/ECS/local attribution retains its existing helper behavior.
+
+With pinned Claude `2.1.191`, this deliberately empty export logs
+`awsCredentialExport did not return valid AWS STS output structure`. The live
+long-sleep case showed that message both before and after suspension, followed
+by successful model requests through the scoped provider. It is expected for
+this provider-selection design; returning cached keys merely to silence the
+message would restore the stale-key path the implementation avoids.
 
 `aws_session.py` exports a coherent key/expiry pair under botocore's refresh lock.
 The production resume callback forces recorded ambient providers to refresh first,

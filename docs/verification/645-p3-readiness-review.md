@@ -31,8 +31,12 @@ passing cases, including real process-crash/cancellation recovery, automatic
 deadline wake, supervisor outage and coordinator-owned cleanup. Three approval
 wakes failed with a service-reported connection-refused error. A long frozen
 worker renewed expired task credentials but lost its approval callback; the
-[local callback fix](./645-p3-callback-timeout.md) still needs an updated image and
-fresh AWS acceptance. The [effective permissions record](./645-effective-iam-20260915.md)
+[callback fix](./645-p3-callback-timeout.md) is deployed in image `4.0`.
+[Fresh AWS acceptance](./645-p3-callback-live-20260915.md) passed all nine core
+callback cases, including real expired-key renewal and the original approval
+deadline. A fourth [connection refusal](./645-p3-resume-refusal-investigation.md)
+occurred on image `4.0`; it remains a separate P3 blocker.
+The [effective permissions record](./645-effective-iam-20260915.md)
 adds 37 metadata checks, 10 S3 checks and real signer-credential expiry.
 Production automatic suspension remains disabled.
 

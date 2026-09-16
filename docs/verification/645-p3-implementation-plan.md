@@ -45,7 +45,12 @@ a fresh retry passed, but the cause remains open. The long case renewed actual
 expired credentials, but its pending approval callback was abandoned before the
 original deadline, so overall acceptance failed. Temporary AWS fixtures have been
 removed. The [callback-timeout follow-up](./645-p3-callback-timeout.md) records the
-reproduction and local correction; its updated image still needs AWS validation.
+reproduction and correction. Image `4.0` is now deployed; its
+[fresh AWS acceptance run](./645-p3-callback-live-20260915.md) passed all nine
+core callback cases, including renewal after real credential expiry and the
+original approval timeout. Mutable files also survived two approval generations.
+A fourth [connection refusal](./645-p3-resume-refusal-investigation.md) occurred
+on this image and remains unresolved.
 The [effective IAM follow-up](./645-effective-iam-20260915.md) adds
 37 actual AWS metadata checks, 10 S3 checks, and failure after real signer
 credential expiry. Public-object checks pair anonymous success with worker-signed
@@ -128,8 +133,8 @@ is superseded by these records.
 - [x] Complete full repository validation with the P3 supervisor and live switch.
 - [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
-- [ ] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup.
-- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the three failed wakes.
+- [x] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup. Image `4.0` passed these checks, including real renewal after credential expiry.
+- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the four failures across images 3.0 and 4.0. See the [investigation and request IDs](./645-p3-resume-refusal-investigation.md).
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -208,6 +213,42 @@ Second P3 foundation batch implemented locally (2026-09-13):
 - DynamoDB Local verifies actual transaction conditions, rollback, competing writers, changed identities, lost committed replies, cancellation/decision during recovery and a fresh module/client loading saved intent. See the [lifecycle runbook](./645-lifecycle-intent.md) for protocol and remaining integration/deployment gates.
 - CDK lint/compilation passed. The broad handler/session-role run passed **158 suites / 3,738 tests**, including **23 lifecycle** and **15 existing capacity** DynamoDB Local tests. Five relevant suites passed **218 overlapping tests** and exited normally. The broad run exited successfully after a delay (about 72 seconds total versus 17.5 seconds reported test execution), with no open-handle trace; its cause is not established. Documentation sync, the **77-page** build and link checks pass. No Python source changed. The temporary local database was removed.
 - At that foundation milestone, no production caller used this policy/store. No IAM grants, image hooks or automatic suspension were enabled. Durable poll failure/recovery tracking, guest barriers, supervisor/decision-handler wiring and live AWS gates remain unfinished.
+
+## Remaining work in execution order
+
+The image `4.0` long-sleep acceptance and verification-infrastructure cleanup are
+complete. The original approval timed out correctly, real credentials renewed
+after expiry, and coordinator cleanup passed without watcher repair. The
+[live record](./645-p3-callback-live-20260915.md) records the evidence and verified
+absence of all temporary infrastructure.
+
+The detailed batches below preserve the implementation history. For the current
+handoff, use this order:
+
+1. Resolve the four [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
+   Service-side connection diagnostics and guest/listener health are still
+   missing. Passing retries, the callback-timeout fix and successful cleanup
+   do not close this gate.
+2. Complete the remaining live race/fault matrix: cancellation during transitions,
+   late decision races, repeated polling/credential-refresh failures, durable
+   registration races, service token-retention expiry and recovery of a worker
+   whose ID was genuinely lost. Keep each injected failure distinct from an
+   unrelated service failure.
+3. Complete effective permissions and network checks for the other backends,
+   plus runtime/remote-MCP connectivity. Verify a full cloned-repository P3
+   workflow on the final image, including mutable workspace state and normal
+   P2 behavior. Respect the target repository's publication checks.
+4. Exercise the coordinated capacity upgrade/drain and rollback procedure under
+   deployed writer roles, including realistic scan volume. Retain the verified
+   local transaction and isolated-live results as evidence for their narrower
+   scope.
+5. Perform the final compatible rollout, including shared runtime changes for
+   ECS/AgentCore, pinned-version retention and rollback checks. Enable automatic
+   suspension only after the remaining gates pass, then finish the ADR/runbook
+   and issue handoff with the actual results.
+
+Nested CloudFormation stacks remain optional. The current root has 475
+resources; moving existing resources is a separate migration decision.
 
 ## The result we want
 

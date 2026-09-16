@@ -744,7 +744,9 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  * grant either) and every table the agent touches is `task_id`-partitioned
  * SessionRole territory. It also has no UserConcurrencyTable grant — that counter
  * is orchestrator/reconciler-owned and the agent path never writes it.
- * `lambda:SuspendMicrovm` / `lambda:ResumeMicrovm` are absent (P3), and
+ * The coordinator receives scoped `lambda:SuspendMicrovm` / `lambda:ResumeMicrovm`
+ * grants, and decision handlers also receive scoped Resume permission. Neither
+ * action is granted to this construct's build or execution role.
  * `lambda:CreateMicrovmAuthToken` is granted to no role in any phase — no JWE
  * consumer exists (sub-decision 3).
  */
@@ -1512,35 +1514,18 @@ export class LambdaMicrovmCompute extends Construct {
    *   failure mode we have actually hit (ADR-021 P1 4.3: the 443-only SG made the
    *   image unbuildable, and the root cause was only readable from this group).
    *   So the build role keeps it.
-   * - The EXECUTION role does not get it. Across all three live runs (P1, P2 run
-   *   1, P2 run 2) the only group ever *named* under this prefix in any log or
-   *   inventory was `/aws/lambda-microvms/<imageName>`, the one CloudFormation
-   *   pre-creates below, and both build-time and guest-runtime lines landed in it
-   *   (P1 runbook line 1833 records that single group being deleted with the
-   *   stack). A create right the runtime never exercises does not belong on the
-   *   role that runs untrusted repo code.
+   * - The EXECUTION role does not get it. CloudFormation pre-creates
+   *   `/aws/lambda-microvms/<imageName>`; build and guest-runtime lines use that
+   *   group. The 2026-09-16 verification enumerated this prefix while an image
+   *   3.0 worker was RUNNING before and after the query. It found only the
+   *   stack-managed image group. Image 4.0 runtime logs also arrived there.
+   *   The live execution role had only CreateLogStream/PutLogEvents grants
+   *   and no attached managed policies.
    *
-   *   EVIDENCE STRENGTH, stated honestly, because it is a security narrowing:
-   *   the corroborating inventory is an ABSENCE measured AFTER teardown, not a
-   *   during-run enumeration. `645-p2-smoke-runbook.md` **§8.6** ("Billing
-   *   confirmed stopped") records `/aws/lambda-microvms/*` log groups: **none**
-   *   once the stack was deleted, and **§8.8** item 4 (a separate section — the
-   *   deliberately-retained list) names the only service-vended groups created
-   *   outside CloudFormation as `/aws/bedrock-agentcore/runtimes/…` and
-   *   `/aws/lambda/backgroundagent-dev-…`. That combination is load-bearing
-   *   because a service-created group is NOT a CloudFormation resource and so
-   *   would have survived the stack delete and appeared in §8.6 — but it is
-   *   inference from an absence, not a positive observation that no sub-group was
-   *   ever created mid-run. Treat it as strong-but-indirect.
-   *
-   * ⚠️ RE-VERIFY on the pending clean re-run (ADR-021 P2 "the row is not yet
-   * fully closed"), and make it a DURING-RUN enumeration this time — an
-   * `aws logs describe-log-groups --log-group-name-prefix /aws/lambda-microvms/`
-   * taken while a task is `RUNNING` is the positive observation the post-teardown
-   * absence above only implies. If guest logging ever goes silent on this backend,
-   * this narrowing is the first thing to re-widen — the symptom would be an
-   * `AccessDeniedException` naming `logs:CreateLogGroup` in the guest's stdout
-   * fallback, which the MicroVM group still captures.
+   * See docs/verification/645-p3-callback-live-20260915.md for the inventory and
+   * policy evidence. This records the tested service behavior, not a guarantee
+   * about future log-group naming. Investigate a specific CreateLogGroup denial
+   * before changing runtime permissions.
    *
    * @param role - the role to grant.
    * @param options - `allowCreateLogGroup` gates the build-role-only half.

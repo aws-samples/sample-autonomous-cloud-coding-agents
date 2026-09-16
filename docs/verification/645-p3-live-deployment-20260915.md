@@ -243,7 +243,11 @@ evidence, plus an unresolved intermittent approval-wake failure.
 The [effective IAM record](./645-effective-iam-20260915.md) adds actual metadata
 and S3 permission checks plus real signer-credential expiry. The long durable
 case also proves scoped credential renewal after expiry, but exposes an
-[approval callback timeout](./645-p3-callback-timeout.md). Its updated-image
-verification, remaining lifecycle faults/deadline races, network and
+[approval callback timeout](./645-p3-callback-timeout.md). Image `4.0` now carries
+the correction; the [fresh live record](./645-p3-callback-live-20260915.md)
+verifies nine core callback cases, including real expired-key renewal with the
+original approval deadline preserved. A fourth
+[connection refusal](./645-p3-resume-refusal-investigation.md) occurred on that
+image. Remaining lifecycle faults/deadline races, network and
 capacity/migration checks remain tracked in the
 [implementation plan](./645-p3-implementation-plan.md).

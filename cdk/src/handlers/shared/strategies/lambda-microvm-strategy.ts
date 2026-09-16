@@ -700,19 +700,20 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *   - ``SUSPENDING`` / ``SUSPENDED`` → ``suspended``. SUSPENDING is folded in
    *     because the VM is already on its way to frozen; reporting ``running``
    *     would tell the orchestrator compute is still progressing when it is not.
-   *     Both map to a state the orchestrator treats as benign-or-anomalous
-   *     depending on the task status, never as a failure. Earlier probes skipped
-   *     this short transition, but P3 must handle it if observed: save wake intent
-   *     and wait for SUSPENDED before issuing ResumeMicrovm.
+   *     The supervisor checks task/gate state to distinguish an expected wait
+   *     from an anomaly. When a wake is needed, it saves wake intent and waits
+   *     for SUSPENDED before issuing ResumeMicrovm. Unresolved transitions have
+   *     a bounded recovery deadline.
    *   - ``TERMINATING`` / ``TERMINATED`` → ``completed``. Both are terminal or
-   *     terminal-bound and carry no exit code, so "the substrate is gone" is all
-   *     the strategy can honestly say; whether that is success or failure is the
-   *     orchestrator's call (it cross-references the DynamoDB status). This is
+   *     terminal-bound and carry no exit code. TERMINATING confirms shutdown is
+   *     underway, not that it has finished. The orchestrator determines task
+   *     success or failure by cross-referencing DynamoDB status. This is
    *     the load-bearing terminal signal: a terminated MicroVM stays observable
    *     as ``TERMINATED`` for at least ~10 minutes (live-measured), so a poller
    *     that waited for NotFound would spin on a finished VM.
-   *   - anything else (an unrecognized future state) → ``running``, so a service
-   *     enum addition can never fail a healthy task.
+   *   - anything else (an unrecognized future state) → ``running`` with explicit
+   *     UNKNOWN state. The supervisor applies bounded recovery instead of
+   *     immediately declaring the task finished.
    * ``microvmState`` also reports the explicit observed state (or local UNKNOWN /
    * NOT_FOUND). P3 uses it to distinguish readiness from the coarse status.
    *

@@ -2,7 +2,8 @@
 
 Date: 2026-09-15. This follows the
 [real long-sleep failure](./645-p3-durable-live-20260915.md#expired-credentials-passed-long-approval-semantics-failed).
-The change below is local and has not been deployed.
+The change below is deployed in MicroVM image `4.0`; the
+[live retest record](./645-p3-callback-live-20260915.md) tracks AWS acceptance.
 
 ## Problem
 
@@ -74,7 +75,9 @@ cancelled at 600.034 seconds; the explicit one-second failure control cancelled
 without reading the marker. A final short configured probe also verified that
 diagnostics go to stderr and stdout remains valid JSON.
 
-This probe does not simulate a real VM snapshot. AWS acceptance still requires
-an updated image and a fresh long-sleep run with the original approval deadline,
-the expected tool result and coordinator cleanup. The separate service-reported
-resume-hook connection refusal remains unresolved.
+The local probe does not simulate a real VM snapshot. The subsequent
+[image `4.0` AWS retest](./645-p3-callback-live-20260915.md#real-credential-expiry-and-the-original-approval-deadline)
+passed a real freeze beyond credential expiry, renewed the same task's keys and
+preserved the callback until its original approval deadline. Approval, denial,
+cancellation, short/grace windows and wake after a supervisor outage also passed.
+The separate service-reported resume-hook connection refusal remains unresolved.
