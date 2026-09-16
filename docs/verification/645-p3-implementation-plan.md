@@ -43,6 +43,15 @@ late-decision contract is HTTP 404. The final planned attempt was not started.
 The new failure is tracked separately as F08; neither it nor the five exact
 connection refusals is resolved.
 
+**Generic wake feedback deployed (2026-09-16):** the
+[reviewed code-only update](./645-p3-wake-feedback-20260916.md) advanced the normal
+coordinator to version 9, retaining version 8 and changing no image, policy or
+sleep setting. All 11 deployed classifier consumers matched the reviewed ZIPs.
+Four normal task-API checks passed, with synthetic rows removed afterward.
+The observed generic wake failure now receives specific service/admin guidance;
+already-persisted stable codes remain unchanged. This corrects feedback, not
+the unresolved wake failure.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
@@ -268,8 +277,9 @@ The detailed batches below preserve the implementation history. For the current
 handoff, use this order:
 
 1. Resolve the five [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
-   Service-side connection diagnostics and guest/listener health are still
-   missing. Passing retries, the callback-timeout fix and successful cleanup
+   Service-side connection diagnostics during those exact failures are still
+   missing. The later F08 observation supplies partial guest/listener evidence
+   for a distinct generic failure. Passing retries, the callback-timeout fix and successful cleanup
    do not close this gate.
    The [minimal listener experiment](./645-p3-listener-probe-20260916.md) also
    exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md).

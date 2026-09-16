@@ -61,6 +61,10 @@ execution. This establishes artifact alignment and a point-in-time execution
 inventory; it does not prove admissions were paused or the upgrade/rollback
 sequence was rehearsed. Evidence is in
 `/tmp/abca-645-p2-clean-20260913/p3-capacity-writer-inventory-20260916`.
+The [PID 1 evidence record](./645-p3-pid1-observer-20260916.md) links its
+permanent archive, which also contains this writer inventory. The subsequent
+[feedback-only rollout](./645-p3-wake-feedback-20260916.md) advanced the normal
+coordinator to version 9; it did not change the capacity protocol.
 
 Local tests prove the application requests and DynamoDB Local's transaction behavior. They do not establish deployed IAM, AWS scaling, successful rollout or MicroVM sleep/wake behavior. Terminal events may repeat or be lost independently of the atomic seat update.
 
