@@ -85,7 +85,7 @@ export function normalizeAmplifyPreviewCheck(value: unknown): GitHubDeploymentSt
   try {
     url = new URL(check.details_url);
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- Invalid URL means an ineligible check; the receiver returns skipped_check without starting capture.
   }
   const preview = /^pr-(\d+)\.[a-z0-9]+\.amplifyapp\.com$/.exec(url.hostname);
   if (url.protocol !== 'https:' || url.username || url.password || url.port || !preview
