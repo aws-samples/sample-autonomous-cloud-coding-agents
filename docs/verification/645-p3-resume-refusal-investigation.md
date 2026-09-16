@@ -109,6 +109,12 @@ That is an observed transport difference, not an established cause. None of
 the four original failures has independent process/listener evidence at restore,
 and the guest does not expose the cgroup OOM counters sampled by the observer.
 
+The subsequent [local transport control](./645-p3-transport-control-20260916.md)
+reproduced a reset on an old connection after a six-second process pause, while
+all eight fresh-connection checks succeeded and the servers remained alive.
+This is not a reproduction of the AWS refusal. It supplies a specific comparison
+for the next cloud investigation without establishing a production fix.
+
 1. Use the recorded worker IDs, region, timestamps and Resume request IDs to
    inspect service-side lifecycle diagnostics. Determine the actual connection
    error and whether the request reached the guest, including any transport retry.
