@@ -231,8 +231,13 @@ handoff, use this order:
    do not close this gate.
    The [minimal listener experiment](./645-p3-listener-probe-20260916.md) also
    exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md).
-   Its correction passed the full build and is deployed in coordinator version 4;
-   it needs a live coordinator acceptance check.
+   Its correction and startup-confirmation follow-up are deployed in coordinator
+   version 5. Local checks, real first-start observations and the exact API-issued
+   old-worker `PENDING` branch pass in the
+   [full-agent observer experiment](./645-p3-process-observer-20260916.md).
+   Its seven workers and temporary infrastructure were removed, and the exact
+   evidence was privately archived. These timer results do not explain the
+   separate connection refusals.
 2. Complete the remaining live race/fault matrix: cancellation during transitions,
    late decision races, repeated polling/credential-refresh failures, durable
    registration races, service token-retention expiry and recovery of a worker

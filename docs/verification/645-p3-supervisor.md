@@ -1,7 +1,7 @@
 # ADR-021 P3: supervisor and approval wake
 
 Status (2026-09-16): production integration and full repository validation pass.
-The development deployment now runs coordinator version `4`, including the
+The development deployment now runs coordinator version `5`, including the
 [pending-wake correction](./645-p3-pending-wake.md), and agent image `4.0`,
 including the [approval callback correction](./645-p3-callback-timeout.md).
 Automatic suspension remains off. The [P3 plan](./645-p3-implementation-plan.md)
@@ -60,11 +60,12 @@ Faster polls do not consume the older 1,020-attempt limit used by other backends
 
 AWS can report `PENDING` while restoring a suspended worker. A matching saved
 wake instruction starts wake recovery at that instruction's original request
-time. The local follow-up also preserves the startup clock until an actual AWS
+time. The startup follow-up also preserves the startup clock until an actual AWS
 observation confirms startup, because the coordinator can mark a task `RUNNING`
 earlier. Another unexpected pending observation gets bounded uncertainty
-recovery. Existing recovery clocks are preserved. See the linked correction
-record for the distinction between deployed version 4 and this follow-up.
+recovery. Existing recovery clocks are preserved. Both corrections are deployed;
+the exact API-issued pending-wake branch and initial-startup clock have live
+evidence in the linked verification record.
 
 Control calls and database recovery reads share the caller's AbortSignal, a
 cancellation notice. An expired operation cannot start another request with a

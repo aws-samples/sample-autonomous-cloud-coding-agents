@@ -127,10 +127,10 @@ export async function handler(
     const nowIso = new Date().toISOString();
     const nowEpoch = Math.floor(Date.now() / 1000);
 
-    // 3. Per-user per-minute rate limit. Uses a synthetic row in the
-    // approvals table keyed on `RATE#<user_id>#MINUTE#<yyyymmddhhmm>`
-    // so the existing grantReadWriteData wiring carries forward; TTL
-    // reaps the counter after ~120s.
+    // 3. Per-user per-minute rate limit, shared with deny. The approvals-table
+    // partition key is RATE#<user_id>#APPROVE; the sort key is MINUTE#<bucket>.
+    // TTL makes old counters eligible for eventual cleanup, not deletion at
+    // an exact time. Each minute uses its own counter regardless of that delay.
     const minuteBucket = formatMinuteBucket(new Date());
     try {
       await ddb.send(new UpdateCommand({

@@ -100,15 +100,24 @@ That experiment also exposed a separate [pending-wake timer bug](./645-p3-pendin
 in the supervisor. Its correction does not account for these four failures,
 whose worker termination reason was the service-reported connection refusal.
 
+The [full-agent observer experiment](./645-p3-process-observer-20260916.md)
+adds the independent parent and listener sampling described below. Its completed
+fallback and direct API wakes retained a healthy child-owned listener, without
+reproducing the refusal. Short full-agent cases reused the same client port for
+`/suspend` and `/resume`, unlike the minimal listener's closed connections.
+That is an observed transport difference, not an established cause. None of
+the four original failures has independent process/listener evidence at restore,
+and the guest does not expose the cgroup OOM counters sampled by the observer.
+
 1. Use the recorded worker IDs, region, timestamps and Resume request IDs to
    inspect service-side lifecycle diagnostics. Determine the actual connection
    error and whether the request reached the guest, including any transport retry.
 2. Correlate guest process/kernel health and the port-8080 listener at restoration.
    Application access logs do not provide that missing evidence.
-   A diagnostic full-agent image can add an independent parent-process observer
-   to record child exit status and listener health without changing approval
-   decisions or granting public ingress. Preserve the original image and compare
-   a fixed, bounded set of owned tasks.
+   The diagnostic parent now supplies these observations in successful controls;
+   a refusal must be captured with those observations to make the comparison.
+   Preserve the original image and use fixed, bounded owned cases if further
+   testing is justified by a specific transport or process hypothesis.
 3. If a transport or application race is identified, make a bounded correction
    and test that trigger specifically. Do not hide a failed wake by silently
    launching another worker: the approved action and workspace may already have

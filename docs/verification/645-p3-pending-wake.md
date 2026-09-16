@@ -1,7 +1,7 @@
 # ADR-021 P3: distinguish a pending wake from initial startup
 
-Date: 2026-09-16. The correction is deployed in coordinator version 4; live
-coordinator acceptance remains pending.
+Date: 2026-09-16. The pending-wake correction and startup follow-up are deployed
+in coordinator version 5. The exact direct pending-wake branch passed in AWS.
 
 ## Trigger
 
@@ -76,8 +76,12 @@ Python, CLI, lint, types, contracts, documentation and synthesis passed. The
 successful west-region synthesis was repeated after the same disk-space issue.
 
 Four real first-start `PENDING` polls in the private coordinator also retained
-the original startup clock. Production deployment of this follow-up is pending;
-it changes no IAM permission or agent hook.
+the original startup clock. The follow-up was deployed from `27521f85` and
+verified at 12:39:13 UTC: live coordinator version `5`, code SHA-256
+`Y8SVypD7E959O6rHOY64D2m96Schdw9gb9urhQl3YWg=`.
+Version 4 is retained. The environment, agent image 4.0, guardrail version 3
+and both disabled suspension switches are unchanged. This changes no IAM
+permission or agent hook.
 
 ## Validation and remaining scope
 
@@ -91,8 +95,8 @@ The full repository build passed in 488.56 seconds: 4,999 CDK tests passed with
 skipped; all 928 CLI tests passed. Compilation, lint, type checks, contract/drift
 checks, synthesis and the 77-page documentation build also passed.
 
-The narrow deployment completed at 11:48:07 UTC in `sphia-dev`, `us-west-2`.
-The live alias now selects coordinator version 4, with code SHA-256
+The first narrow deployment completed at 11:48:07 UTC in `sphia-dev`, `us-west-2`.
+It selected coordinator version 4, with code SHA-256
 `1aITI4Dx3HdUMuAn9DnVLphZTpX6s4jyn+Odoz/N1Rs=`. Version 3 remains retained.
 The reviewed change set modified only coordinator code/version/alias resources.
 Resolved environment values, guardrail version 3 and agent image 4.0 are unchanged.
@@ -103,7 +107,14 @@ the private persistent archive
 `/Users/sphias/.local/share/abca-verification/645-p3-20260916/listener-pending-evidence.tar.gz`
 (SHA-256 `221dffad6be148b296e95d89b501f6489db9038416d482cb0753c78465d59994`).
 
-A live check of the updated coordinator remains pending. This correction does
-not explain or resolve the four separate
+The [full-agent observer's final timing control](./645-p3-process-observer-20260916.md)
+passed on task `01M2N507M71T8F18ETT32Q51M2`. At 13:11:01.153Z, the production
+supervisor observed real `PENDING` with no previous recovery on a worker older
+than 300 seconds, and initialized wake recovery from the saved API request time.
+The same worker completed, preserving its original lifetime and approval clocks,
+then terminated with normal capacity/payload cleanup. Private scheduling controls
+made that interleaving observable; stored states and clocks were not fabricated.
+
+This correction does not explain or resolve the four separate
 [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
 Production automatic suspension remains off.
