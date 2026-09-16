@@ -89,10 +89,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       || record.status === TaskStatus.AWAITING_APPROVAL
       || record.status === TaskStatus.FINALIZING;
     const runtimeSessionId = record.session_id;
-    // Prefer the ARN recorded on the task record (agent container writes
-    // this when the session starts). Fall back to the stack's single
-    // runtime ARN for the pre-session window — the task was admitted but
-    // the container hasn't written its session info yet.
+    // Prefer the runtime ARN saved by the coordinator during session
+    // registration. Retain the stack-level fallback for older task records.
     const agentRuntimeArn = record.agent_runtime_arn ?? RUNTIME_ARN;
 
     // 6. Update task to CANCELLED with condition to prevent race
@@ -155,9 +153,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (computeType === 'lambda-microvm') {
         // ADR-021: `terminate-microvm` is the ACTIVE cleanup path — a cancelled
         // MicroVM must not be left to the 8-hour `maximumDurationInSeconds` cap
-        // (with `idlePolicy` omitted there is no tighter substrate bound), both
-        // for cost and because running/suspended VMs count against the account
-        // memory quota that gates admission of new tasks.
+        // (with `idlePolicy` omitted there is no tighter substrate bound).
+        // Stop it promptly rather than relying on the lifetime ceiling.
         //
         // This branch MUST come before the `agentRuntimeArn` branch below.
         // `agentRuntimeArn` falls back to the stack-level RUNTIME_ARN env var,

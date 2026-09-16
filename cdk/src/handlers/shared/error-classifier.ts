@@ -176,6 +176,22 @@ export function classifyMicrovmTerminalFailure(errorMessage?: string | null): Er
 
 const PATTERNS: readonly ErrorPattern[] = [
   {
+    // The supervisor persists this reason for a permanent read failure or after
+    // exhausting its bounded retry count. Neither outcome establishes whether
+    // the retained worker was healthy or whether cleanup has completed.
+    pattern: /^MicroVM supervisor: substrate-read-failed(?:-repeatedly)?$/,
+    classification: {
+      category: ErrorCategory.COMPUTE,
+      title: 'The MicroVM status could not be checked',
+      description: 'ABCA ended the task after its required worker-state checks failed.',
+      remedy:
+        'An ABCA admin should find microvm_supervisor_request_failed in the coordinator logs using the task ID and MicroVM ID. '
+        + 'Check stage, error_type and any AWS request ID. Confirm worker termination and review saved task progress before starting a replacement task.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
     pattern: /MICROVM_START_(?:OUTCOME_UNKNOWN|INPUT_CHANGED|STATE_INVALID|TASK_CLOSED|RECEIPT_SAVE_FAILED):/,
     classification: {
       category: ErrorCategory.COMPUTE,

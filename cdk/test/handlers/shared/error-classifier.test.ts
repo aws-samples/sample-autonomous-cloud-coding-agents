@@ -735,6 +735,35 @@ describe('classifyError', () => {
       expect(result.retryable).toBe(true);
     });
 
+    test.each(['substrate-read-failed', 'substrate-read-failed-repeatedly'])(
+      'gives operator guidance for supervisor %s without promising cleanup succeeded', (reason) => {
+        const result = classifyError(`MicroVM supervisor: ${reason}`)!;
+        expect(result).toMatchObject({
+          category: ErrorCategory.COMPUTE,
+          title: 'The MicroVM status could not be checked',
+          retryable: false,
+          errorClass: ErrorClass.SERVICE,
+        });
+        expect(result.remedy).toContain('microvm_supervisor_request_failed');
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('Confirm worker termination');
+      },
+    );
+
+    test.each([
+      'AgentCore supervisor: substrate-read-failed',
+      'Agent output mentions MicroVM supervisor: substrate-read-failed',
+      'MicroVM supervisor: substrate-read-failed-unrecognized',
+    ])('does not infer a supervisor failure from unrelated text: %s', (message) => {
+      expect(classifyError(message)!.category).toBe(ErrorCategory.UNKNOWN);
+    });
+
+    test('a persisted terminal code still takes precedence over supervisor wording', () => {
+      const result = classifyError('MICROVM_SUBSTRATE_TERMINATED: MicroVM supervisor: substrate-read-failed')!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.retryable).toBe(true);
+    });
+
     test('every new MicroVM classification carries a full, non-empty guidance shape', () => {
       const messages = [
         'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'',
@@ -742,6 +771,7 @@ describe('classifyError', () => {
         'MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded',
         'MicroVM RunMicrovm failed: ResourceNotFoundException: image not found',
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        'MicroVM supervisor: substrate-read-failed',
         reconciled(hookReason(400)),
       ];
       for (const msg of messages) {
