@@ -16,7 +16,7 @@ is the receipt that lets the service team find a particular call.
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
 | F05 | Medium | HTTP connection handling across suspend/resume | Contract question; no established cause of F01 |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
-| F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Replay observed through roughly five minutes; maximum retention and post-expiry behavior unknown |
+| F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Guest-log recovery verified; maximum retention, post-expiry behavior and recovery without identity logs unknown |
 
 ## F01 — Wake request accepted, then the hook connection is refused
 
@@ -230,9 +230,17 @@ does not establish the logging contract or exclude later delivery. Is Run a
 management or data event, and what audit configuration is required to retain
 the launch token-to-worker mapping?
 
+**Recovery follow-up:** the [September 16 durable check](./645-p3-registration-20260916.md)
+discarded both accepted Run responses without saving their worker IDs. After the
+task failed, the operator recovered the still-running worker from an exact
+task/worker pair in its accepted `/run` guest log, checked its service identity
+and terminated it. No Read result occurred and no replacement worker was
+launched. This is a verified operator path when identity logs exist; it is not
+a service token lookup or automatic recovery.
+
 **Limits:** five minutes of successful replay does not establish the maximum
 retention period. The 120-second limit is ABCA policy, not an AWS guarantee.
-Post-expiry behavior and recovery of a genuinely unknown worker ID remain
+Post-expiry behavior and recovery without unambiguous guest identity logs remain
 unverified. Service response: pending.
 
 ## Updating this tracker

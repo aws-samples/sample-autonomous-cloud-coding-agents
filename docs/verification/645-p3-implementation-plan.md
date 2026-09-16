@@ -123,7 +123,8 @@ is superseded by these records.
 - [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
 - [x] Verify production start/receipt/payload code against AWS with lost replies and local process death, saved-handle recovery, changed-input/cancellation refusal and actual receipt expiry.
 - [x] Verify real AWS durable replay after a saved worker receipt and process exit, including cancellation during recovery, in the isolated production-handler fixture.
-- [ ] Complete remaining durable registration races, AWS behavior after token retention expires, and operator cleanup of genuinely unknown worker IDs.
+- [x] Verify deployed durable recovery after a committed registration reply is lost, cancellation during registration, and operator recovery/termination of a worker whose ID was not saved.
+- [ ] Establish AWS behavior after token retention expires and recovery when guest identity logs are missing or ambiguous.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
 - [x] Verify normal deployed capacity repair while preserving a waiting worker; verify bounded 600-user AWS pagination, partial-scan safety and conservative legacy handling.
 - [ ] Complete the capacity protocol's old-writer upgrade/drain and rollback procedure; validate volume against the intended production workload.
@@ -281,15 +282,20 @@ handoff, use this order:
    failure guidance in coordinator version 7 and verified the normal task API;
    image 5.0 and disabled suspension settings remain in place.
    Complete the remaining live race/fault matrix:
-   timeout-winning decision races, durable registration races,
-   service token-retention expiry and recovery of a worker
-   whose ID was genuinely lost. Keep each injected failure distinct from an
+   timeout-winning decision races, service token-retention expiry and recovery
+   when guest identity evidence is unavailable. Keep each injected failure distinct from an
    unrelated service failure.
    The [adjustable-sleep follow-up](./645-p3-user-sleep-20260916.md) completed the
    late-approval winner and actual credential-refresh denial checks, plus default,
    off and custom delays. It deployed coordinator version 8 with both gates off.
    The timeout-winner case was interrupted by the fifth unexplained wake refusal
    and remains unaccepted.
+   The [durable registration follow-up](./645-p3-registration-20260916.md)
+   passed a lost reply after an actual registration commit, cancellation before
+   identity registration, and explicit operator recovery/termination of a live
+   worker whose ID never reached coordinator state. The latter required an
+   exact task/worker pair in the guest log; it does not establish post-retention
+   behavior or a recovery path when those logs are unavailable.
 3. Complete effective permissions and network checks for the other backends,
    plus runtime/remote-MCP connectivity. Verify a full cloned-repository P3
    workflow on the final image, including mutable workspace state and normal
