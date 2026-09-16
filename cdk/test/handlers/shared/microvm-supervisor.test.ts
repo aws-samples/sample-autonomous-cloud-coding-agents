@@ -145,6 +145,40 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
+test('logs changed observations once across durable replay without moving the wake deadline', async () => {
+  intent('resume', NOW - 10_000);
+  approve();
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const first = await run();
+  expect(mockLogger.info).toHaveBeenCalledWith('MicroVM supervisor observation changed', expect.objectContaining({
+    observed_state: 'PENDING',
+    task_id: 'task',
+    microvm_id: 'vm',
+    request_id: 'gate',
+    approval_state: 'APPROVED',
+    recovery_kind: 'wake',
+    recovery_since_ms: NOW - 10_000,
+    intent_requested_at_ms: NOW - 10_000,
+    image_version: '3.0',
+  }));
+  const signature = first.state.diagnosticSignature;
+  mockLogger.info.mockClear();
+  time += 1_000;
+  const second = await run(first.state);
+  expect(second.state.diagnosticSignature).toBe(signature);
+  expect(mockLogger.info).not.toHaveBeenCalledWith('MicroVM supervisor observation changed', expect.anything());
+  time += MICROVM_RECOVERY_TIMEOUT_MS;
+  const failed = await run(second.state);
+  expect(failed.kind).toBe('failure');
+  expect(failed.state.recovery?.sinceMs).toBe(NOW - 10_000);
+  expect(mockLogger.warn).toHaveBeenCalledWith('MicroVM supervisor observation changed', expect.objectContaining({
+    outcome: 'failure',
+    recovery_since_ms: NOW - 10_000,
+    observed_state: 'PENDING',
+    session_deadline_ms: first.state.sessionDeadlineMs,
+  }));
+});
+
 test('saves intent, rechecks the gate, requests suspend and rechecks the outcome', async () => {
   const result = await run();
   expect(result.kind).toBe('continue');

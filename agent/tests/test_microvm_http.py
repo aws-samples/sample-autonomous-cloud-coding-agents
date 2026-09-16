@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from dataclasses import dataclass
@@ -13,13 +14,23 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import Request
 
 import microvm_http
 import microvm_lifecycle as lifecycle
 import server
+from microvm_diagnostics import lifecycle_stage
 
 PREFIX = server.MICROVM_HOOK_PREFIX
+
+
+def diagnostic_records(capsys):
+    return [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("{") and '"event": "microvm_hook_' in line
+    ]
 
 
 @dataclass
@@ -68,6 +79,115 @@ async def park(context):
 
 @pytest.mark.anyio
 class TestLifecycleHttp:
+    async def test_hooks_have_distinct_correlated_timelines(
+        self, context, callbacks, client, capsys
+    ):
+        await park(context)
+        for action in ["suspend", "resume"]:
+            response = await client.post(PREFIX + "/" + action, json={})
+            assert response.status_code == 200
+        records = diagnostic_records(capsys)
+        starts = [row for row in records if row["event"] == "microvm_hook_started"]
+        ends = [row for row in records if row["event"] == "microvm_hook_finished"]
+        assert len(starts) == len(ends) == 2
+        assert starts[0]["hook_id"] != starts[1]["hook_id"]
+        for start, end in zip(starts, ends, strict=True):
+            assert start["hook_id"] == end["hook_id"]
+            assert end["task_id"] == "http-task"
+            assert end["microvm_id"] == "http-vm"
+            assert end["request_id"] == "gate"
+            assert end["pid"] > 0
+            assert end["elapsed_ms"] >= 0
+            assert end["http_status"] == 200
+            assert end["code"] == "acknowledged"
+            assert end["late"] is False
+        assert ends[0]["phase"] == "suspend-ready"
+        assert ends[1]["phase"] == "parked"
+
+    async def test_failed_refresh_logs_stage_and_aws_identity_without_secrets(
+        self, context, callbacks, client, capsys
+    ):
+        await park(context)
+        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
+        capsys.readouterr()
+
+        def fail_refresh(_park):
+            with lifecycle_stage("credential-refresh"):
+                raise ClientError(
+                    {
+                        "Error": {"Code": "AccessDenied", "Message": "secret-credential"},
+                        "ResponseMetadata": {
+                            "RequestId": "aws-request-123",
+                            "HTTPHeaders": {"Authorization": "secret-header"},
+                        },
+                    },
+                    "AssumeRole",
+                )
+
+        callbacks[1].side_effect = fail_refresh
+        response = await client.post(PREFIX + "/resume", json={"ignored": "secret-body"})
+        records = diagnostic_records(capsys)
+        serialized = json.dumps(records) + response.text
+        assert "secret-" not in serialized
+        failure = next(row for row in records if row["event"] == "microvm_hook_stage_failed")
+        assert failure["stage"] == "credential-refresh"
+        assert failure["error_type"] == "ClientError"
+        assert failure["aws_error_code"] == "AccessDenied"
+        assert failure["aws_request_id"] == "aws-request-123"
+        end = records[-1]
+        assert end["stage"] == "credential-refresh"
+        assert end["phase"] == "failed"
+        assert end["http_status"] == response.status_code == 503
+        assert all(row["hook_id"] == end["hook_id"] for row in records)
+        with pytest.raises(lifecycle.LifecycleUnavailable):
+            await context.wait_until_open()
+
+    async def test_logging_failure_does_not_change_hook_result(
+        self, context, callbacks, client, monkeypatch
+    ):
+        await park(context)
+        monkeypatch.setattr(
+            "microvm_diagnostics.print", MagicMock(side_effect=OSError("closed")), raising=False
+        )
+        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
+        assert (await client.post(PREFIX + "/resume", json={})).status_code == 200
+        await context.wait_until_open()
+
+    async def test_timeout_reports_blocked_stage_and_marks_late_thread(
+        self, context, callbacks, client, monkeypatch, capsys
+    ):
+        await park(context)
+        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
+        capsys.readouterr()
+        release, finished = threading.Event(), threading.Event()
+
+        def slow_refresh(_park):
+            try:
+                with lifecycle_stage("credential-refresh"):
+                    assert release.wait(2)
+            finally:
+                finished.set()
+
+        callbacks[1].side_effect = slow_refresh
+        monkeypatch.setattr(microvm_http, "LIFECYCLE_HANDLER_BUDGET_S", 0.05)
+        try:
+            response = await client.post(PREFIX + "/resume", json={})
+            assert response.status_code == 503
+            before = diagnostic_records(capsys)
+            end = before[-1]
+            assert end["stage"] == "credential-refresh"
+            assert end["code"] == "MICROVM_LIFECYCLE_TIMEOUT"
+            assert end["phase"] == "failed"
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 2)
+        after = diagnostic_records(capsys)
+        assert after
+        assert all(row["late"] and row["hook_id"] == end["hook_id"] for row in after)
+        assert all(row["event"] != "microvm_hook_finished" for row in after)
+        with pytest.raises(lifecycle.LifecycleUnavailable):
+            await context.wait_until_open()
+
     async def test_duplicate_hooks_acknowledge_without_repeating_work(
         self, context, callbacks, client
     ):
@@ -240,7 +360,7 @@ class TestLifecycleHttp:
             await context.wait_until_open()
 
     async def test_concurrent_resume_reports_busy_while_first_finishes(
-        self, context, callbacks, client
+        self, context, callbacks, client, capsys
     ):
         await park(context)
         assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
@@ -259,8 +379,18 @@ class TestLifecycleHttp:
             release.set()
         assert (await request).status_code == 200
         callbacks[1].assert_called_once()
+        records = [row for row in diagnostic_records(capsys) if row["action"] == "resume"]
+        ends = [row for row in records if row["event"] == "microvm_hook_finished"]
+        assert [row["http_status"] for row in ends] == [409, 200]
+        assert ends[0]["hook_id"] != ends[1]["hook_id"]
+        for end in ends:
+            matching = [row for row in records if row["hook_id"] == end["hook_id"]]
+            assert matching[0]["event"] == "microvm_hook_started"
+            assert matching[-1] == end
 
-    async def test_request_body_read_shares_the_total_budget(self, context, callbacks, monkeypatch):
+    async def test_request_body_read_shares_the_total_budget(
+        self, context, callbacks, monkeypatch, capsys
+    ):
         await park(context)
         monkeypatch.setattr(microvm_http, "LIFECYCLE_HANDLER_BUDGET_S", 0.02)
 
@@ -271,6 +401,32 @@ class TestLifecycleHttp:
         request = Request({"type": "http", "method": "POST", "headers": []}, slow_receive)
         response = await microvm_http.microvm_suspend(request)
         assert response.status_code == 503
+        for callback in callbacks:
+            callback.assert_not_called()
+        end = diagnostic_records(capsys)[-1]
+        assert end["stage"] == "body-read"
+        assert end["code"] == "MICROVM_LIFECYCLE_TIMEOUT"
+
+    async def test_cancelled_handler_logs_cancellation_and_still_propagates_it(
+        self, context, callbacks, capsys
+    ):
+        await park(context)
+        entered = asyncio.Event()
+
+        async def receive():
+            entered.set()
+            await asyncio.Event().wait()
+
+        request = Request({"type": "http", "method": "POST", "headers": []}, receive)
+        pending = asyncio.create_task(microvm_http.microvm_suspend(request))
+        await entered.wait()
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        end = diagnostic_records(capsys)[-1]
+        assert end["code"] == "MICROVM_LIFECYCLE_CANCELLED"
+        assert end["http_status"] is None
+        assert end["stage"] == "body-read"
         for callback in callbacks:
             callback.assert_not_called()
 

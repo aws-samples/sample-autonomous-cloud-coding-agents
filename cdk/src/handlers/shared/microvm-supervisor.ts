@@ -58,6 +58,8 @@ export interface MicrovmSupervisorState {
   readonly recovery?: Recovery;
   readonly anomalyReported: boolean;
   readonly nextPollInMs: number;
+  /** Persisted across replay so unchanged healthy polls do not repeat a log record. */
+  readonly diagnosticSignature?: string;
 }
 
 export interface MicrovmSupervisorInput {
@@ -139,6 +141,42 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       }
     }
     const deferHeartbeat = snapshot?.status === TaskStatus.AWAITING_APPROVAL || state.recovery !== undefined;
+    const diagnostic = {
+      observed_state: substrate?.microvmState ?? null,
+      task_status: snapshot?.status ?? null,
+      request_id: snapshot?.requestId ?? null,
+      approval_state: snapshot?.approval.kind === 'present' ? snapshot.approval.status : snapshot?.approval.kind ?? null,
+      intent_action: snapshot?.intent?.action ?? null,
+      generation: snapshot?.intent?.generation ?? null,
+      recovery_kind: state.recovery?.kind ?? null,
+      recovery_since_ms: state.recovery?.sinceMs ?? null,
+      outcome: outcome.kind,
+      reason: 'reason' in outcome ? outcome.reason : null,
+      consecutive_poll_failures: state.consecutivePollFailures,
+      consecutive_resume_failures: state.consecutiveResumeFailures,
+    };
+    const signature = JSON.stringify(diagnostic);
+    if (signature !== state.diagnosticSignature) {
+      const metadata = {
+        task_id: input.taskId,
+        microvm_id: input.handle.microvmId,
+        image_arn: input.handle.imageArn,
+        image_version: input.handle.imageVersion,
+        ...diagnostic,
+        intent_requested_at_ms: snapshot?.intent?.requested_at_ms,
+        approval_deadline_ms: snapshot?.approval.kind === 'present' ? snapshot.approval.deadlineMs : undefined,
+        session_deadline_ms: state.sessionDeadlineMs,
+        first_observed_at_ms: state.firstObservedAtMs,
+        startup_confirmed: state.startupConfirmed,
+        cycle_elapsed_ms: Date.now() - now,
+      };
+      if (outcome.kind === 'failure' || outcome.kind === 'ownership-lost' || outcome.kind === 'substrate-terminal') {
+        logger.warn('MicroVM supervisor observation changed', metadata);
+      } else {
+        logger.info('MicroVM supervisor observation changed', metadata);
+      }
+      state = { ...state, diagnosticSignature: signature };
+    }
     return {
       ...outcome,
       state,

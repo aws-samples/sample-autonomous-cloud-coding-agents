@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
+from microvm_diagnostics import lifecycle_stage
 from microvm_lifecycle import ApprovalPark, LifecycleUnavailable
 from progress_writer import _ProgressWriter
 
@@ -202,23 +203,25 @@ def _transaction_checks(
 def checkpoint_before_suspend(park: ApprovalPark) -> None:
     """Commit a marker only if the same task, sleep intent and pending gate hold."""
     record, _ = _record(park)
-    client, task_table, approvals_table, intent, deadline_ms = _read(park, "suspend")
+    with lifecycle_stage("checkpoint-identity-read"):
+        client, task_table, approvals_table, intent, deadline_ms = _read(park, "suspend")
     if park.deadline.remaining_s() <= 0:
         raise LifecycleUnavailable("Approval deadline elapsed before checkpoint")
     # Never reuse an old transaction client token across HTTP requests: cached
     # success must not bypass conditions after a concurrent approval/cancellation.
-    _ProgressWriter(
-        park.task_id, user_id=record.user_id, repo=record.repo
-    ).write_microvm_checkpoint(
-        client=client,
-        condition_checks=_transaction_checks(park, task_table, approvals_table, intent),
-        metadata={
-            "request_id": park.request_id,
-            "microvm_id": park.microvm_id,
-            "generation": intent["generation"],
-            "approval_deadline_ms": deadline_ms,
-        },
-    )
+    with lifecycle_stage("checkpoint-transaction"):
+        _ProgressWriter(
+            park.task_id, user_id=record.user_id, repo=record.repo
+        ).write_microvm_checkpoint(
+            client=client,
+            condition_checks=_transaction_checks(park, task_table, approvals_table, intent),
+            metadata={
+                "request_id": park.request_id,
+                "microvm_id": park.microvm_id,
+                "generation": intent["generation"],
+                "approval_deadline_ms": deadline_ms,
+            },
+        )
 
 
 def refresh_and_reconcile_after_resume(park: ApprovalPark) -> None:
@@ -226,17 +229,20 @@ def refresh_and_reconcile_after_resume(park: ApprovalPark) -> None:
     from aws_session import refresh_microvm_credentials
 
     _record(park)
-    refresh_microvm_credentials(park.task_id)
-    client, task_table, approvals_table, intent, _ = _read(park, "resume")
+    with lifecycle_stage("credential-refresh"):
+        refresh_microvm_credentials(park.task_id)
+    with lifecycle_stage("resume-identity-read"):
+        client, task_table, approvals_table, intent, _ = _read(park, "resume")
     # This transaction writes no task/approval state. It acknowledges that both
     # identities still hold, including cancellation or intent changes after reads.
     # A concurrent valid decision is allowed; the original loop observes it.
-    client.transact_write_items(
-        TransactItems=[
-            {"ConditionCheck": check}
-            for check in _transaction_checks(park, task_table, approvals_table, intent)
-        ]
-    )
+    with lifecycle_stage("resume-identity-transaction"):
+        client.transact_write_items(
+            TransactItems=[
+                {"ConditionCheck": check}
+                for check in _transaction_checks(park, task_table, approvals_table, intent)
+            ]
+        )
     # The existing approval loop checks its original stopwatch/UTC cap as soon
     # as the barrier opens. Expiry enters its timeout/late-decision path; a timely
     # approval already recorded must still win that conditional race.

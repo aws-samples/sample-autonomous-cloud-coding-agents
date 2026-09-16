@@ -97,6 +97,18 @@ interface ErrorPattern {
 
 /** Stable codes written by the orchestrator; diagnostic text cannot override them. */
 const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassification>> = {
+  MICROVM_RESUME_HOOK_FAILED: {
+    category: ErrorCategory.COMPUTE,
+    title: 'The MicroVM could not wake after being paused',
+    description:
+        'AWS could not complete the worker’s wake hook. An accepted wake request does not mean the worker resumed. The task may already have made changes before it paused.',
+    remedy:
+        'An ABCA admin should inspect the task ID and MicroVM ID in the coordinator and approval API logs, including the AWS request ID, '
+        + 'then check microvm_hook_started, microvm_hook_stage_failed and microvm_hook_finished in /aws/lambda-microvms/<image-name>. '
+        + 'A connection refusal can happen before the guest hook logs anything. Check saved task progress and cleanup before starting a replacement task; retrying alone is not a verified fix.',
+    retryable: false,
+    errorClass: ErrorClass.SERVICE,
+  },
   MICROVM_RUN_HOOK_REJECTED: {
     category: ErrorCategory.CONFIG,
     title: 'The MicroVM rejected its own run payload',
@@ -116,7 +128,7 @@ const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassificat
         'The MicroVM ended before the agent reported a task result. Any explanation supplied by AWS is preserved in the original error message for diagnosis.',
     remedy:
         'This is a compute-substrate fault, not a problem with your request — reply here to try again. '
-        + 'If the message names a lifecycle-hook HTTP status, the guest rejected the run: check the MicroVM log group for the agent\'s structured response body. '
+        + 'If the message names a lifecycle-hook HTTP status, check that named hook in the MicroVM log group for its structured diagnostic code. '
         + 'Otherwise check the MicroVM logs for the session and whether the task is exceeding the 8-hour session cap; '
         + 'a long-running repo may belong on --compute-type ecs.',
     retryable: true,
@@ -125,6 +137,13 @@ const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassificat
 };
 const MICROVM_TERMINAL_PREFIX = 'MicroVM substrate terminated before the agent wrote a terminal status: ';
 const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i;
+const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
+
+function microvmTerminalCode(stateReason?: string): string {
+  if (stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)) return 'MICROVM_RUN_HOOK_REJECTED';
+  if (stateReason && MICROVM_RESUME_HOOK_FAILURE.test(stateReason)) return 'MICROVM_RESUME_HOOK_FAILED';
+  return 'MICROVM_SUBSTRATE_TERMINATED';
+}
 
 /**
  * Preserve the service reason for diagnosis, independently of the persisted code.
@@ -133,9 +152,7 @@ const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:
  * The strategy itself continues to report state without applying health policy.
  */
 export function formatMicrovmTerminalFailure(detail: string, stateReason?: string): string {
-  const code = stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)
-    ? 'MICROVM_RUN_HOOK_REJECTED'
-    : 'MICROVM_SUBSTRATE_TERMINATED';
+  const code = microvmTerminalCode(stateReason);
   const reason = stateReason ? ` (${stateReason})` : '';
   return `${code}: ${MICROVM_TERMINAL_PREFIX}${detail}${reason}`;
 }
@@ -143,15 +160,16 @@ export function formatMicrovmTerminalFailure(detail: string, stateReason?: strin
 /** Classify persisted MicroVM terminal failures, including records without a code. */
 export function classifyMicrovmTerminalFailure(errorMessage?: string | null): ErrorClassification | null {
   if (!errorMessage) return null;
-  const code = /^(MICROVM_RUN_HOOK_REJECTED|MICROVM_SUBSTRATE_TERMINATED): /.exec(errorMessage)?.[1];
+  const code = /^(MICROVM_RUN_HOOK_REJECTED|MICROVM_RESUME_HOOK_FAILED|MICROVM_SUBSTRATE_TERMINATED): /.exec(errorMessage)?.[1];
   if (code) return MICROVM_TERMINAL_CLASSIFICATIONS[code];
   if (MICROVM_RUN_HOOK_4XX.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RUN_HOOK_REJECTED;
+  if (MICROVM_RESUME_HOOK_FAILURE.test(errorMessage)) return MICROVM_TERMINAL_CLASSIFICATIONS.MICROVM_RESUME_HOOK_FAILED;
 
   // Old records have only the descriptive prefix. Do not let other words in
   // their service reason override the known terminal failure.
   if (errorMessage.startsWith(MICROVM_TERMINAL_PREFIX)) {
-    const hookRejected = /\(Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i.test(errorMessage);
-    return MICROVM_TERMINAL_CLASSIFICATIONS[hookRejected ? 'MICROVM_RUN_HOOK_REJECTED' : 'MICROVM_SUBSTRATE_TERMINATED'];
+    const reason = errorMessage.slice(errorMessage.indexOf(' (') + 2).replace(/\)$/, '');
+    return MICROVM_TERMINAL_CLASSIFICATIONS[microvmTerminalCode(reason)];
   }
   return null;
 }

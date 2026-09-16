@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { classifyError, ErrorCategory, ErrorClass, formatMicrovmTerminalFailure, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
@@ -611,6 +611,34 @@ describe('classifyError', () => {
     const reconciled = (reason: string) =>
       'MicroVM substrate terminated before the agent wrote a terminal status: '
       + `substrate state completed (${reason})`;
+
+    test.each([
+      'Resume lifecycle hook connection was refused. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook returned HTTP status 503.',
+      'Resume lifecycle hook returned HTTP status 409.',
+    ])('gives actionable wake diagnostics for %s', reason => {
+      const persisted = formatMicrovmTerminalFailure('substrate state completed', reason);
+      expect(persisted).toMatch(/^MICROVM_RESUME_HOOK_FAILED: /);
+      expect(persisted).toContain(reason);
+      for (const message of [persisted, reconciled(reason), reason]) {
+        const result = classifyError(message)!;
+        expect(result.title).toBe('The MicroVM could not wake after being paused');
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('before starting a replacement');
+        expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+      }
+    });
+
+    test('keeps unknown wording generic and honors persisted codes ahead of diagnostic words', () => {
+      expect(formatMicrovmTerminalFailure('completed', 'diagnostic: Resume lifecycle hook connection was refused.'))
+        .toMatch(/^MICROVM_SUBSTRATE_TERMINATED: /);
+      expect(classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled('Resume lifecycle hook connection was refused.')}`)!.errorClass)
+        .toBe(ErrorClass.TRANSIENT);
+      expect(classifyError('MICROVM_RESUME_HOOK_FAILED: concurrency limit; missing_secret')!.errorClass)
+        .toBe(ErrorClass.SERVICE);
+    });
 
     test.each([
       'MicroVM host unavailable.',

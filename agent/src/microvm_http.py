@@ -14,6 +14,7 @@ from fastapi import Request  # noqa: TC002 — FastAPI resolves this annotation 
 from fastapi.responses import JSONResponse
 
 from microvm_checkpoint import checkpoint_before_suspend, refresh_and_reconcile_after_resume
+from microvm_diagnostics import hook_diagnostics, lifecycle_stage
 from microvm_lifecycle import LifecycleUnavailable, get_registered_context
 from shared_constants import SHARED_CONSTANTS
 
@@ -51,22 +52,43 @@ async def _microvm_id(request: Request) -> str:
 
 
 async def _transition(request: Request, action: Literal["suspend", "resume"]) -> JSONResponse:
+    lifecycle = get_registered_context()
+    with hook_diagnostics(
+        action, lifecycle.diagnostic_snapshot if lifecycle else dict
+    ) as diagnostics:
+        try:
+            response = await _handle_transition(request, action)
+        except asyncio.CancelledError as exc:
+            diagnostics.finish(None, "MICROVM_LIFECYCLE_CANCELLED", exc)
+            raise
+        diagnostics.finish(
+            response.status_code, json.loads(bytes(response.body)).get("code", "acknowledged")
+        )
+        return response
+
+
+async def _handle_transition(
+    request: Request, action: Literal["suspend", "resume"]
+) -> JSONResponse:
     try:
         end = time.monotonic() + LIFECYCLE_HANDLER_BUDGET_S
         async with asyncio.timeout(LIFECYCLE_HANDLER_BUDGET_S):
-            microvm_id = await _microvm_id(request)
-            lifecycle = get_registered_context()
-            if lifecycle is None or (microvm_id and microvm_id != lifecycle.microvm_id):
-                raise LifecycleUnavailable("No matching MicroVM task is registered")
+            with lifecycle_stage("body-read"):
+                microvm_id = await _microvm_id(request)
+            with lifecycle_stage("identity-check"):
+                lifecycle = get_registered_context()
+                if lifecycle is None or (microvm_id and microvm_id != lifecycle.microvm_id):
+                    raise LifecycleUnavailable("No matching MicroVM task is registered")
             remaining = end - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Lifecycle body consumed its budget")
-            if action == "suspend":
-                park = await lifecycle.suspend(checkpoint_before_suspend, budget_s=remaining)
-            else:
-                park = await lifecycle.resume(
-                    refresh_and_reconcile_after_resume, budget_s=remaining
-                )
+            with lifecycle_stage("controller"):
+                if action == "suspend":
+                    park = await lifecycle.suspend(checkpoint_before_suspend, budget_s=remaining)
+                else:
+                    park = await lifecycle.resume(
+                        refresh_and_reconcile_after_resume, budget_s=remaining
+                    )
             return JSONResponse(
                 content={
                     "status": "acknowledged",

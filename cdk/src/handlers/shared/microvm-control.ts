@@ -19,14 +19,20 @@
 
 // SPDX-License-Identifier: MIT-0
 
+/** Keep service correlation identifiers from successful replies, never the reply body. */
+export function microvmRequestIdentity(response: unknown): { aws_request_id?: string } {
+  const requestId = (response as { $metadata?: { requestId?: unknown } } | undefined)?.$metadata?.requestId;
+  return typeof requestId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(requestId)
+    ? { aws_request_id: requestId } : {};
+}
+
 /** Control-plane diagnostics must not copy SDK messages, payloads or credentials. */
 export function microvmErrorIdentity(error: unknown): { error_type: string; aws_request_id?: string } {
   const outer = error as { name?: unknown; cause?: unknown; $metadata?: { requestId?: unknown } } | undefined;
   const cause = outer?.cause as typeof outer;
   const name = cause?.name ?? outer?.name;
-  const requestId = cause?.$metadata?.requestId ?? outer?.$metadata?.requestId;
   return {
     error_type: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error',
-    ...(typeof requestId === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(requestId) && { aws_request_id: requestId }),
+    ...microvmRequestIdentity({ $metadata: { requestId: cause?.$metadata?.requestId ?? outer?.$metadata?.requestId } }),
   };
 }

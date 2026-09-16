@@ -91,6 +91,24 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
+test('ties the saved decision generation to the accepted AWS request without logging its body', async () => {
+  mockSend.mockResolvedValueOnce({ state: 'SUSPENDED' }).mockResolvedValueOnce({
+    $metadata: { requestId: 'aws-inline-123' }, private: 'secret-response',
+  });
+  await wake();
+  expect(mockLogger.info).toHaveBeenCalledWith('MicroVM wake requested after approval decision', expect.objectContaining({
+    task_id: 'task',
+    request_id: 'gate',
+    microvm_id: 'vm',
+    generation: 'wake-generation',
+    intent_requested_at_ms: NOW,
+    aws_request_id: 'aws-inline-123',
+    elapsed_ms: 0,
+  }));
+  expect(JSON.stringify(mockLogger.info.mock.calls)).not.toContain('secret-response');
+  expect(mockRead).toHaveBeenCalledTimes(3);
+});
+
 test.each(['APPROVED', 'DENIED'] as const)('%s saves wake before Get, rechecks ownership, then requests Resume and reads again', async decision => {
   if (row.approval.kind === 'present') row = { ...row, approval: { ...row.approval, status: decision } };
   await wake(decision);

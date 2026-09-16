@@ -34,7 +34,7 @@ import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus, SessionStopResult } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
-import { microvmErrorIdentity } from '../microvm-control';
+import { microvmErrorIdentity, microvmRequestIdentity } from '../microvm-control';
 import {
   MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
   readMicrovmImageMetadata, verifyMicrovmImageLifecycle,
@@ -737,12 +737,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     let state: string | undefined;
     let stateReason: string | undefined;
+    let requestIdentity: ReturnType<typeof microvmRequestIdentity> = {};
     let lifetime: Pick<SessionStatus, 'microvmStartedAtMs' | 'microvmMaximumDurationSeconds'> = {};
     try {
       const result = await getClient().send(new GetMicrovmCommand({
         microvmIdentifier: microvmId,
       }), { abortSignal: controlSignal(options) });
       state = result.state;
+      requestIdentity = microvmRequestIdentity(result);
       const startedAtMs = result.startedAt instanceof Date ? result.startedAt.getTime() : NaN;
       if (Number.isSafeInteger(startedAtMs) && startedAtMs >= 0
         && Number.isSafeInteger(result.maximumDurationInSeconds) && result.maximumDurationInSeconds! > 0) {
@@ -784,6 +786,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       if (err instanceof Error && err.name === 'ResourceNotFoundException') {
         logger.info('MicroVM not found on poll — treating as terminal', {
           microvm_id: microvmId,
+          ...microvmErrorIdentity(err),
         });
         return { status: 'completed', microvmState: 'NOT_FOUND' };
       }
@@ -806,6 +809,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
           // where the operator happens to be looking.
           logger.warn('MicroVM reached a terminal state with a substrate reason', {
             microvm_id: microvmId,
+            image_arn: handle.imageArn,
+            image_version: handle.imageVersion,
+            ...requestIdentity,
             state,
             state_reason: stateReason,
           });
@@ -814,6 +820,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       default:
         logger.warn('Unrecognized MicroVM state — reporting running', {
           microvm_id: microvmId,
+          ...requestIdentity,
           state,
           ...(stateReason && { state_reason: stateReason }),
         });
@@ -866,14 +873,29 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     }
     const suspend = operation === 'suspendSession';
     const request = { microvmIdentifier: handle.microvmId };
+    const startedAt = Date.now();
+    const diagnostic = {
+      operation: suspend ? 'SuspendMicrovm' : 'ResumeMicrovm',
+      microvm_id: handle.microvmId,
+      image_arn: handle.imageArn,
+      image_version: handle.imageVersion,
+    };
+    logger.info('MicroVM lifecycle request started', diagnostic);
     try {
-      await getClient().send(
+      const response = await getClient().send(
         suspend ? new SuspendMicrovmCommand(request) : new ResumeMicrovmCommand(request),
         { abortSignal: controlSignal(options) },
       );
+      // An accepted command is distinct from the observed transition/guest acknowledgment.
+      logger.info('MicroVM lifecycle request acknowledged', {
+        ...diagnostic, elapsed_ms: Date.now() - startedAt, ...microvmRequestIdentity(response),
+      });
     } catch (error) {
       // Includes Conflict/NotFound: neither proves the desired state was reached.
       // Even a timeout may have committed; the durable caller must observe again.
+      logger.warn('MicroVM lifecycle request failed', {
+        ...diagnostic, elapsed_ms: Date.now() - startedAt, ...microvmErrorIdentity(error),
+      });
       throw wrapMicrovmError(suspend ? 'SuspendMicrovm' : 'ResumeMicrovm', error);
     }
     return { supported: true };
@@ -894,11 +916,14 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *   the ordinary finalize path are worth telling apart in CloudWatch).
    */
   private async terminateBestEffort(microvmId: string, reason: string, options?: SessionControlOptions): Promise<SessionStopResult> {
+    const startedAt = Date.now();
     try {
-      await getClient().send(new TerminateMicrovmCommand({
+      const response = await getClient().send(new TerminateMicrovmCommand({
         microvmIdentifier: microvmId,
       }), { abortSignal: controlSignal(options) });
-      logger.info('Lambda MicroVM termination requested', { microvm_id: microvmId, reason });
+      logger.info('Lambda MicroVM termination requested', {
+        microvm_id: microvmId, reason, elapsed_ms: Date.now() - startedAt, ...microvmRequestIdentity(response),
+      });
       return { outcome: 'requested' };
     } catch (err) {
       const identity = microvmErrorIdentity(err);

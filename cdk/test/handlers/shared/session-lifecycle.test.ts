@@ -22,6 +22,8 @@ import { inspect } from 'node:util';
 const mockMicrovmSend = jest.fn();
 const mockEcsSend = jest.fn();
 const mockAgentcoreSend = jest.fn();
+const mockLifecycleLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+jest.mock('../../../src/handlers/shared/logger', () => ({ logger: mockLifecycleLogger }));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   ...jest.requireActual('@aws-sdk/client-lambda-microvms'),
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
@@ -137,6 +139,28 @@ describe('MicroVM lifetime observations', () => {
 });
 
 describe.each(['suspendSession', 'resumeSession'] as const)('%s contract', operation => {
+  test('records AWS acknowledgment identity without response or exception contents', async () => {
+    const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
+    mockMicrovmSend.mockResolvedValueOnce({
+      $metadata: { requestId: 'aws-control-123', headers: { Authorization: 'secret-response' } },
+      payload: 'secret-payload',
+    });
+    await expect(strategy[operation](microvm)).resolves.toEqual({ supported: true });
+    expect(mockLifecycleLogger.info).toHaveBeenCalledWith(
+      'MicroVM lifecycle request acknowledged',
+      expect.objectContaining({ microvm_id: 'mvm-one', aws_request_id: 'aws-control-123', elapsed_ms: expect.any(Number) }),
+    );
+    mockMicrovmSend.mockRejectedValueOnce(Object.assign(new Error('secret-exception'), {
+      name: 'ConflictException', $metadata: { requestId: 'aws-control-456' },
+    }));
+    await expect(strategy[operation](microvm)).rejects.toThrow();
+    expect(mockLifecycleLogger.warn).toHaveBeenCalledWith(
+      'MicroVM lifecycle request failed',
+      expect.objectContaining({ error_type: 'ConflictException', aws_request_id: 'aws-control-456' }),
+    );
+    expect(JSON.stringify([mockLifecycleLogger.info.mock.calls, mockLifecycleLogger.warn.mock.calls])).not.toContain('secret-');
+  });
+
   test.each(handles.filter(h => h.strategyType !== 'lambda-microvm'))(
     '$strategyType explicitly reports unsupported without calling AWS', async handle => {
       const strategy = resolveComputeStrategy({ compute_type: handle.strategyType, runtime_arn: 'arn:runtime' });

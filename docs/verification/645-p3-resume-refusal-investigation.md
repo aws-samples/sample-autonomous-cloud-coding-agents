@@ -20,6 +20,12 @@ The coordinator detects termination, marks the task failed and releases its
 capacity reservation. Successful failure cleanup does not make the requested
 approval workflow successful.
 
+The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) documents
+the new logging and wake-failure feedback. Three isolated AWS workflows verified
+the instrumentation with the original server running as PID 1, including actual
+API wake and coordinator recovery. None reproduced refusal. Normal-stack rollout
+remains pending; the historical failures below predate this instrumentation.
+
 ## Recorded failures
 
 All times are UTC, in `us-west-2`, on image `backgroundagent-dev-abca-agent`.

@@ -238,6 +238,11 @@ handoff, use this order:
    Its seven workers and temporary infrastructure were removed, and the exact
    evidence was privately archived. These timer results do not explain the
    separate connection refusals.
+   The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) describes
+   the new hook-stage, AWS request-ID and durable state-change logging.
+   Three isolated AWS workflows verified it, including actual API wake and
+   coordinator recovery; normal-stack rollout remains pending. The original
+   server remained PID 1. Logging and successful controls do not close the defect.
 2. Complete the remaining live race/fault matrix: cancellation during transitions,
    late decision races, repeated polling/credential-refresh failures, durable
    registration races, service token-retention expiry and recovery of a worker

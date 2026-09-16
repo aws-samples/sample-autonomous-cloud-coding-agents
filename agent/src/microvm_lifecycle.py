@@ -26,6 +26,8 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from microvm_diagnostics import lifecycle_stage
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -91,6 +93,22 @@ class MicrovmLifecycle:
         if self._phase in {"closed", "failed"}:
             raise LifecycleUnavailable("Lifecycle barrier is closed")
         return self._phase in {"active", "parked"}
+
+    def diagnostic_snapshot(self) -> dict:
+        """Read only local state; never include approval contents or tool inputs."""
+        with self._lock:
+            park = self._park or self._last_resume_park
+            return {
+                "task_id": self.task_id,
+                "microvm_id": self.microvm_id,
+                "request_id": park.request_id if park else None,
+                "phase": self._phase,
+                "local_generation": self._generation,
+                "active_tools": len(self._tools),
+                "active_activities": self._activities,
+                "progress_failed": self._progress_failed,
+                "suspend_ineligible": self._suspend_ineligible,
+            }
 
     async def wait_until_open(self) -> None:
         # A thread-safe local predicate works across the server and pipeline's
@@ -246,18 +264,20 @@ class MicrovmLifecycle:
             self._generation += 1
             generation = self._generation
         try:
-            while True:
-                with self._lock:
-                    self._assert_transition(generation, "suspending")
-                    if self._progress_failed:
-                        raise LifecycleUnavailable("Progress was not acknowledged")
-                    drained = self._activities == 0
-                if drained:
-                    break
-                if time.monotonic() >= end:
-                    raise TimeoutError("Progress did not drain within lifecycle budget")
-                await asyncio.sleep(min(0.02, max(0, end - time.monotonic())))
-            await self._run_bounded(checkpoint, park, end)
+            with lifecycle_stage("activity-drain"):
+                while True:
+                    with self._lock:
+                        self._assert_transition(generation, "suspending")
+                        if self._progress_failed:
+                            raise LifecycleUnavailable("Progress was not acknowledged")
+                        drained = self._activities == 0
+                    if drained:
+                        break
+                    if time.monotonic() >= end:
+                        raise TimeoutError("Progress did not drain within lifecycle budget")
+                    await asyncio.sleep(min(0.02, max(0, end - time.monotonic())))
+            with lifecycle_stage("checkpoint"):
+                await self._run_bounded(checkpoint, park, end)
             with self._lock:
                 self._assert_transition(generation, "suspending")
                 if self._progress_failed or park.deadline.remaining_s() <= 0:
@@ -297,7 +317,8 @@ class MicrovmLifecycle:
             self._generation += 1
             generation = self._generation
         try:
-            await self._run_bounded(refresh_and_reconcile, park, end)
+            with lifecycle_stage("refresh-and-reconcile"):
+                await self._run_bounded(refresh_and_reconcile, park, end)
             reseed_random()
             with self._lock:
                 self._assert_transition(generation, "resuming")

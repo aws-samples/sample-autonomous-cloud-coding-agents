@@ -73,7 +73,7 @@ export type SessionHandle =
  * ``"substrate state completed"``.
  *
  * It is OPTIONAL and OPAQUE to the strategy. The orchestrator retains it as
- * diagnostic detail and recognizes the service's documented run-hook 4xx shape
+ * diagnostic detail and recognizes known run-rejection and resume-hook failure shapes
  * to choose a stable failure code. Consumers classify that code, so arbitrary
  * words in the reason cannot change the category or user-facing retry advice.
  *

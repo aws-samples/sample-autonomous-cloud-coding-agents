@@ -23,7 +23,7 @@ import { GetMicrovmCommand, LambdaMicrovmsClient, ResumeMicrovmCommand } from '@
 import type { Context } from 'aws-lambda';
 import type { SessionControlOptions } from './compute-strategy';
 import { logger } from './logger';
-import { microvmErrorIdentity } from './microvm-control';
+import { microvmErrorIdentity, microvmRequestIdentity } from './microvm-control';
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot } from './microvm-lifecycle';
 import { makeClient } from './ua';
 import { TaskStatus } from '../../constructs/task-status';
@@ -117,6 +117,15 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
     client ??= makeClient(LambdaMicrovmsClient);
     const observed = await client.send(new GetMicrovmCommand({ microvmIdentifier: microvmId }), options);
     options.abortSignal?.throwIfAborted();
+    logger.info('MicroVM observed after approval decision', {
+      task_id: input.taskId,
+      request_id: input.requestId,
+      microvm_id: microvmId,
+      observed_state: observed.state,
+      generation: saved.intent.generation,
+      intent_requested_at_ms: saved.intent.requested_at_ms,
+      ...microvmRequestIdentity(observed),
+    });
     if (observed.state !== 'SUSPENDED') {
       if (observed.state !== 'RUNNING' && observed.state !== 'SUSPENDING') await report('state-not-resumable');
       return;
@@ -135,10 +144,21 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
     }
 
     stage = 'resume-request';
+    const startedAt = Date.now();
+    const diagnostic = {
+      task_id: input.taskId,
+      request_id: input.requestId,
+      microvm_id: microvmId,
+      generation: saved.intent.generation,
+      intent_requested_at_ms: saved.intent.requested_at_ms,
+      image_arn: snapshot.handle.imageArn,
+      image_version: snapshot.handle.imageVersion,
+    };
+    logger.info('MicroVM wake request started after approval decision', diagnostic);
     try {
-      await client.send(new ResumeMicrovmCommand({ microvmIdentifier: microvmId }), options);
+      const response = await client.send(new ResumeMicrovmCommand({ microvmIdentifier: microvmId }), options);
       logger.info('MicroVM wake requested after approval decision', {
-        task_id: input.taskId, request_id: input.requestId, microvm_id: microvmId,
+        ...diagnostic, elapsed_ms: Date.now() - startedAt, ...microvmRequestIdentity(response),
       });
     } catch (error) {
       await report('resume-request-failed', error);
