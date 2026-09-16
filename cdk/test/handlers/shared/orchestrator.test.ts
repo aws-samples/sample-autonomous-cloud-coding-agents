@@ -194,6 +194,7 @@ describe('MicroVM terminal finalization', () => {
     ["agent_status='success', build_ok=timeout [auto-retried]", 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
     ['Run lifecycle hook returned HTTP status 400.', 'MICROVM_RUN_HOOK_REJECTED', 'config', false],
     ['Run lifecycle hook returned HTTP status 500.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.', 'MICROVM_RESUME_HOOK_FAILED', 'compute', false],
   ])('persists stable classification and consistent user guidance for %s', async (reason, code, category, retryable) => {
     primeReread(TaskStatus.RUNNING);
     await finish({ status: 'completed', reason });

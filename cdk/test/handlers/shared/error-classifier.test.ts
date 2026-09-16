@@ -613,6 +613,7 @@ describe('classifyError', () => {
       + `substrate state completed (${reason})`;
 
     test.each([
+      'Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.',
       'Resume lifecycle hook connection was refused. Please check your hook endpoint and application logs for more details.',
       'Resume lifecycle hook returned HTTP status 503.',
       'Resume lifecycle hook returned HTTP status 409.',

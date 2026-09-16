@@ -308,22 +308,16 @@ export async function handler(
  *
  * Per §7.1, the cancellation reasons are per-item (index 0 is the
  * approvals-row Update, index 1 is the task-row Update). We read them
- * to distinguish:
- * - approvals item cancelled:
- *    - via `attribute_exists` failure → row missing → 404
- *    - via `user_id = :caller` failure → wrong owner → 404 (no oracle)
- *    - via `status = :pending` failure → already decided → 409
+ * to classify the failed item:
+ * - approvals item cancelled → 404 for missing, wrong-owner or already-decided rows
  * - task-row item cancelled only → task not in AWAITING_APPROVAL → 409
  *
  * DDB does not return which sub-clause of the `ConditionExpression`
- * failed, so we infer from whichever row was cancelled. If ONLY the
- * approvals Update tripped, it could be any of {missing, wrong owner,
- * wrong status}; we conservatively return 404 to prevent the existence
- * oracle. The more-specific 409 ALREADY_DECIDED path requires
- * additional information we do not have from the reason array alone;
- * implementations that want the stronger distinction need to do a
- * subsequent GetItem, which re-introduces the race the transaction
- * eliminates. v1 accepts the less-granular 404 on ownership drift.
+ * failed. This transaction does not request the old item on condition failure,
+ * so an approvals-row failure cannot distinguish those three cases. It takes
+ * precedence even when the task-row condition also fails. Returning 404 for all
+ * three avoids revealing another user's approval. In particular, a late decision
+ * after an approval timeout returns REQUEST_NOT_FOUND, not ALREADY_DECIDED.
  */
 function classifyCancel(
   err: TransactionCanceledException,

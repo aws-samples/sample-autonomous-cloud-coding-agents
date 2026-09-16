@@ -137,7 +137,7 @@ const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassificat
 };
 const MICROVM_TERMINAL_PREFIX = 'MicroVM substrate terminated before the agent wrote a terminal status: ';
 const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i;
-const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
+const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:failed|connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
 
 function microvmTerminalCode(stateReason?: string): string {
   if (stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)) return 'MICROVM_RUN_HOOK_REJECTED';
@@ -147,8 +147,8 @@ function microvmTerminalCode(stateReason?: string): string {
 
 /**
  * Preserve the service reason for diagnosis, independently of the persisted code.
- * GetMicrovm exposes hook status only in stateReason. Recognize that documented
- * response at this boundary; unknown wording stays a generic terminal failure.
+ * GetMicrovm exposes hook status only in stateReason. Recognize observed service
+ * message shapes at this boundary; unknown wording stays a generic terminal failure.
  * The strategy itself continues to report state without applying health policy.
  */
 export function formatMicrovmTerminalFailure(detail: string, stateReason?: string): string {
