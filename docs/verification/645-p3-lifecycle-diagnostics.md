@@ -1,7 +1,8 @@
 # ADR-021 P3: lifecycle diagnostics
 
 Updated 2026-09-16. The logging changes passed local checks and three isolated
-AWS workflows. Normal-stack rollout remains pending. They do not resolve the four
+AWS workflows. The [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
+now runs coordinator version 6 and image 5.0. They do not resolve the four
 [recorded wake refusals](./645-p3-resume-refusal-investigation.md).
 
 ## What the records tell us
@@ -113,7 +114,7 @@ and saved progress before starting a replacement. It does not promise that
 retrying repairs the fault. Persisted classification codes take priority over
 diagnostic words; unrecognized AWS wording keeps the generic terminal code.
 
-## Verification and next deployment
+## Verification and deployment
 
 Local regressions cover hook correlation, sensitive-text exclusion, safe AWS
 identifiers, logging-sink failure, callback timeout/late completion, durable
@@ -167,7 +168,6 @@ evidence. Cleanup verified removal of both private functions (all versions),
 the diagnostic image, three roles, the private SSM switch, three log groups,
 the artifact object and three owned zero-valued counters. Task/approval history
 and trace objects retain their normal retention.
-Normal tasks still use coordinator **5** and image **4.0**; they do not yet carry
-this new instrumentation. Roll out the checked code before relying on these
-records for normal-stack diagnosis. Automatic suspension remains disabled until
-the remaining P3 gates pass.
+The subsequent [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
+deployed coordinator **6** and image **5.0**, including this instrumentation.
+Automatic suspension remains disabled until the remaining P3 gates pass.

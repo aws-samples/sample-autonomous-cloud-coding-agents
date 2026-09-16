@@ -25,8 +25,9 @@ approval workflow successful.
 The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) documents
 the new logging and wake-failure feedback. Three isolated AWS workflows verified
 the instrumentation with the original server running as PID 1, including actual
-API wake and coordinator recovery. None reproduced refusal. Normal-stack rollout
-remains pending; the historical failures below predate this instrumentation.
+API wake and coordinator recovery. None reproduced refusal. The
+[normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md) now runs coordinator
+version 6 and image 5.0; the historical failures below predate this instrumentation.
 
 ## Recorded failures
 
@@ -122,6 +123,14 @@ reproduced a reset on an old connection after a six-second process pause, while
 all eight fresh-connection checks succeeded and the servers remained alive.
 This is not a reproduction of the AWS refusal. It supplies a specific comparison
 for the next cloud investigation without establishing a production fix.
+
+The [AWS connection comparison](./645-p3-diagnostics-rollout-20260916.md) has now
+tested normal image 5.0 against a private image with HTTP connection reuse
+disabled, keeping the original server as PID 1. Both quick and longer wakes
+passed, and both missing-approval controls produced the expected guest HTTP 409
+with a failed identity-read stage. The longer normal wake used a fresh client
+port; quick normal wakes reused one. No refusal was reproduced. These results
+do not identify F01's cause or justify a production connection-setting change.
 
 1. Use the recorded worker IDs, region, timestamps and Resume request IDs to
    inspect service-side lifecycle diagnostics. Determine the actual connection

@@ -244,8 +244,14 @@ handoff, use this order:
    The [lifecycle diagnostics guide](./645-p3-lifecycle-diagnostics.md) describes
    the new hook-stage, AWS request-ID and durable state-change logging.
    Three isolated AWS workflows verified it, including actual API wake and
-   coordinator recovery; normal-stack rollout remains pending. The original
+   coordinator recovery. The [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
+   now runs coordinator version 6 and image 5.0 with both suspension switches off. The original
    server remained PID 1. Logging and successful controls do not close the defect.
+   The same record covers a bounded AWS comparison with connection reuse disabled:
+   both quick/long wakes and both missing-approval HTTP 409 controls passed,
+   with specific guest-stage diagnostics and deployed task-API feedback.
+   Two mistitled long-hold attempts were excluded and replaced by fresh measured
+   cases. No unexpected refusal appeared; production connection handling is unchanged.
 2. Complete the remaining live race/fault matrix: cancellation during transitions,
    late decision races, repeated polling/credential-refresh failures, durable
    registration races, service token-retention expiry and recovery of a worker

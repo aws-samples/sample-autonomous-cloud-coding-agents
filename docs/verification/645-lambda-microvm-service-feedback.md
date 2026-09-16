@@ -98,7 +98,12 @@ reached cannot write its own application diagnostic.
 
 **Our improvement:** [correlated lifecycle diagnostics](./645-p3-lifecycle-diagnostics.md)
 now record hook entry/stage/result, PID, AWS receipts and coordinator state
-changes. These passed isolated AWS verification. Normal-stack rollout is pending.
+changes. These passed isolated AWS verification and are
+[deployed in coordinator 6 / image 5.0](./645-p3-diagnostics-rollout-20260916.md).
+Two subsequent controlled missing-approval failures reached the guest, logged
+the failed identity-read stage, returned HTTP 409 and surfaced specific failure
+guidance through the deployed task API. This distinguishes an application
+rejection from F01's missing hook-entry evidence.
 
 **Ask:** provide a service-side lifecycle attempt timeline or equivalent
 structured fields: originating API receipt, hook kind/attempt ID, start/end
@@ -140,6 +145,16 @@ failures followed suspension by less than five seconds.
 See the [transport control](./645-p3-transport-control-20260916.md) and
 [process-observer record](./645-p3-process-observer-20260916.md).
 
+The [September 16 AWS comparison](./645-p3-diagnostics-rollout-20260916.md)
+kept the original server as PID 1 and compared normal image 5.0 with a private
+image differing only by `--timeout-keep-alive 0`. Quick approval wakes and
+measured 10.205 / 8.697-second suspended holds passed on the respective images.
+Both missing-approval controls reached the expected HTTP 409. Normal quick
+cases reused the same client port; the longer normal wake and the connection-close
+cases used fresh ports. No unexpected refusal or reset appeared.
+Two original mistitled long-hold attempts are retained and excluded from that
+acceptance; fresh corrected cases supplied the stated durations.
+
 **Ask:** does the service reuse hook TCP connections across suspend/resume,
 honor `Connection: close`, and retry a failed reused connection on a fresh socket?
 How are reset, refused and timeout errors classified? What ordering is guaranteed
@@ -147,9 +162,10 @@ between guest unfreeze, network restoration and hook delivery? Which clock
 semantics should guest timeout/keep-alive timers expect across suspension?
 
 **Limits:** matching peer ports suggest reuse but do not establish all transport
-behavior. A paused Linux process is not an AWS MicroVM restore. Connection-close
-behavior is a proposed comparison, not an established fix. Service response:
-pending.
+behavior. A paused Linux process is not an AWS MicroVM restore. The bounded
+AWS comparison establishes working paths with both settings, not an explanation
+or fix for F01. Production connection handling remains unchanged. Service response:
+pending; retain the service contract questions above.
 
 ## F06 — Make the VPC connector role requirement obvious before deployment
 
