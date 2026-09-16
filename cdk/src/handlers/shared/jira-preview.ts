@@ -24,6 +24,7 @@ import {
 } from './jira-feedback';
 import { renderJiraFinalStatusComment } from './jira-status-comment';
 import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
 import { isAllowedScreenshotUrl } from './screenshot-url';
 import type { TaskRecord } from './types';
 import { TERMINAL_STATUSES } from '../../constructs/task-status';
@@ -45,23 +46,26 @@ export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown)
 
 function render(task: TaskRecord): Record<string, unknown> {
   const terminal = TERMINAL_STATUSES.includes(task.status);
-  const fallback = terminal
+  const saved = task.jira_iteration_status;
+  // Only build a fallback when no usable status was persisted. Runtime result
+  // metrics may be numeric strings, just as in the fan-out notification path.
+  const metric = (field: 'cost_usd' | 'turns_attempted' | 'max_turns' | 'duration_s') =>
+    coerceNumericOrNull(task[field], { field, task_id: task.task_id }, logger);
+  const body = saved && (!terminal || saved.terminal) ? saved.body : terminal
     ? buildAdfDocument(renderJiraFinalStatusComment({
       eventType: task.status === 'COMPLETED' && task.build_passed === false
         ? 'task_failed' : `task_${String(task.status).toLowerCase()}`,
       prUrl: task.pr_url ?? null,
-      costUsd: task.cost_usd ?? null,
-      turns: task.turns_attempted ?? null,
-      maxTurns: task.max_turns ?? null,
-      durationS: task.duration_s ?? null,
+      costUsd: metric('cost_usd'),
+      turns: metric('turns_attempted'),
+      maxTurns: metric('max_turns'),
+      durationS: metric('duration_s'),
       taskId: task.task_id,
       errorTitle: null,
     }))
     : buildAdfDocument([[{ text: '🔄 Working…' }]]);
   // Old tasks may have settled before this writer was deployed. A late preview
   // must still show their outcome, never reset their status to working.
-  const body = terminal && !task.jira_iteration_status?.terminal
-    ? fallback : task.jira_iteration_status?.body ?? fallback;
   const preview = jiraPreviewDocument(task.screenshot_url, task.screenshot_preview_url);
   return { ...body, content: [...((body.content ?? []) as unknown[]), ...(preview.content as unknown[])] };
 }

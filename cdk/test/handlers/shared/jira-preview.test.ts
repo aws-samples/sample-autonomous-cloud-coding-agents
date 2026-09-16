@@ -47,7 +47,7 @@ function fixture() {
   return {
     update: (value?: ReturnType<typeof status>) => updateJiraIterationComment(ddb, 'table', 'task', ctx, 'ENG-42', '123', value),
     screenshot: () => { task = { ...task, screenshot_url: shot, screenshot_preview_url: preview }; },
-    finish: () => { task = { ...task, status: 'COMPLETED' }; },
+    finish: (metrics: Record<string, unknown> = {}) => { task = { ...task, ...metrics, status: 'COMPLETED' } as TaskRecord; },
     send,
   };
 }
@@ -137,6 +137,42 @@ test('a preview on an older terminal task renders its outcome', async () => {
   f.screenshot();
   await f.update();
   expect(JSON.stringify(put.mock.calls.at(-1)![3])).toContain('Task completed');
+});
+
+test('completed runtime metrics stored as strings do not block the saved terminal status or preview', async () => {
+  const f = fixture();
+  f.finish({ cost_usd: '0.20663065', turns_attempted: '12', duration_s: '69.3' });
+  f.screenshot();
+  await expect(f.update(status('✅ Finished — result posted below.', true))).resolves.toEqual({ ok: true });
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('✅ Finished');
+  expect(body).toContain('Open screenshot');
+  expect(body).toContain('Open live preview');
+});
+
+test('fallback status normalizes runtime metrics stored as strings', async () => {
+  const f = fixture();
+  await f.update(status('Working', false));
+  f.finish({ cost_usd: '0.20663065', turns_attempted: '12', max_turns: '30', duration_s: '69.3' });
+  f.screenshot();
+  await expect(f.update()).resolves.toEqual({ ok: true });
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('Task completed');
+  expect(body).toContain('$0.21');
+  expect(body).toContain('12 / 30');
+  expect(body).toContain('1m 9s');
+  expect(body).toContain('Open screenshot');
+  expect(body).not.toContain('Working');
+});
+
+test('malformed optional metrics do not prevent terminal feedback', async () => {
+  const f = fixture();
+  f.finish({ cost_usd: 'invalid', duration_s: 'NaN' });
+  await expect(f.update()).resolves.toEqual({ ok: true });
+  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(body).toContain('Task completed');
+  expect(body).toContain('cost: —');
+  expect(body).toContain('duration: —');
 });
 
 test('Jira and persistence failures are best effort', async () => {
