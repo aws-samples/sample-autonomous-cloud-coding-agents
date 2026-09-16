@@ -31,6 +31,18 @@ verified absent. An earlier wrapper-invalidated attempt is explicitly excluded.
 ECS, the wider role/network matrix and the unexplained MicroVM wake failures
 remain separate gates.
 
+**Independent PID 1 follow-up (2026-09-16):** the
+[new diagnostic](./645-p3-pid1-observer-20260916.md) kept the original server as
+PID 1 and observed it from a child process. One corrected timeout-winner case
+passed with automatic cleanup. Another wake failed with the distinct generic
+message `Resume lifecycle hook failed.` The observer saw PID 1 owning its
+listener after restoration, 519 ms before AWS terminated the worker, but no
+resume hook entry appeared. A first attempt's incorrect HTTP 409 expectation
+is retained and excluded from automatic-finalization acceptance; the existing
+late-decision contract is HTTP 404. The final planned attempt was not started.
+The new failure is tracked separately as F08; neither it nor the five exact
+connection refusals is resolved.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
@@ -284,6 +296,10 @@ handoff, use this order:
    200, but no resume hook entry. The prepared service report now includes its
    API receipts and precise timeline; the new diagnostics have not established
    the cause.
+   The [independent PID 1 follow-up](./645-p3-pid1-observer-20260916.md) now
+   captures process/listener evidence during a separate generic wake-hook
+   failure. F08 records its service question. An observed listening socket does
+   not prove the event loop processed the hook or identify the failing connection.
 2. The [command-race checks](./645-p3-command-races-20260916.md) now pass cancellation
    before/after Suspend, during observed `SUSPENDING`, and during restore
    `PENDING`; approval during an accepted suspension and three consecutive
@@ -292,15 +308,19 @@ handoff, use this order:
    resources were removed. The same follow-up deployed clearer status-read
    failure guidance in coordinator version 7 and verified the normal task API;
    image 5.0 and disabled suspension settings remain in place.
-   Complete the remaining live race/fault matrix:
-   timeout-winning decision races, service token-retention expiry and recovery
+   Complete the remaining live fault matrix:
+   service token-retention expiry and recovery
    when guest identity evidence is unavailable. Keep each injected failure distinct from an
    unrelated service failure.
    The [adjustable-sleep follow-up](./645-p3-user-sleep-20260916.md) completed the
    late-approval winner and actual credential-refresh denial checks, plus default,
    off and custom delays. It deployed coordinator version 8 with both gates off.
    The timeout-winner case was interrupted by the fifth unexplained wake refusal
-   and remains unaccepted.
+   and remained unaccepted in that run. A corrected timeout-winning case now
+   passes on the private PID 1 diagnostic image with unchanged application code,
+   the original deadline, late HTTP 404 rejection and automatic cleanup.
+   The diagnostic also reproduced a distinct generic wake failure, so this
+   individual passing case does not complete final-image enablement.
    The [durable registration follow-up](./645-p3-registration-20260916.md)
    passed a lost reply after an actual registration commit, cancellation before
    identity registration, and explicit operator recovery/termination of a live

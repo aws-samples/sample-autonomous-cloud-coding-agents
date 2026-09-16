@@ -52,6 +52,16 @@ terminal reservation while preserving a real waiting worker. The bounded
 volume and role checks do not complete the old-writer drain/upgrade/rollback
 procedure or establish arbitrary production scale.
 
+A subsequent read-only deployment audit checked upload confirmation, coordinator
+version 8, counter reconciliation, queue pickup and stranded-task reconciliation.
+All five referenced the same code assets as the `a81c565d` assembly, and each
+downloaded S3 ZIP matched its deployed Lambda `CodeSha256`. At that observation,
+none of the normal coordinator's retained versions 2–8 had a running durable
+execution. This establishes artifact alignment and a point-in-time execution
+inventory; it does not prove admissions were paused or the upgrade/rollback
+sequence was rehearsed. Evidence is in
+`/tmp/abca-645-p2-clean-20260913/p3-capacity-writer-inventory-20260916`.
+
 Local tests prove the application requests and DynamoDB Local's transaction behavior. They do not establish deployed IAM, AWS scaling, successful rollout or MicroVM sleep/wake behavior. Terminal events may repeat or be lost independently of the atomic seat update.
 
 The reservation/start markers share the task row. Subsequent prerequisite work restricts agent updates to reporting/approval attributes and removes whole-row replacement/deletion plus direct worker access to the counter. Public-API omission alone was not protection. See [coordinator metadata verification](./645-coordinator-metadata.md) for the writer inventory, actual policy boundary, remaining status/tag trust limits and required AWS authorization checks. These local transaction tests do not prove that security boundary.

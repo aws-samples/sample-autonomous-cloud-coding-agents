@@ -17,6 +17,7 @@ is the receipt that lets the service team find a particular call.
 | F05 | Medium | HTTP connection handling across suspend/resume | Contract question; no established cause of F01 |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
 | F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Guest-log recovery verified; maximum retention, post-expiry behavior and recovery without identity logs unknown |
+| F08 | P3 blocker | Generic wake-hook failure with an observed listener | PID 1 owned its listener after restore, 519 ms before termination; no resume hook entry |
 
 ## F01 — Wake request accepted, then the hook connection is refused
 
@@ -62,6 +63,8 @@ defect fixed or establish a failure rate.
 
 **Next:** retain a fresh failure with independent process/listener evidence,
 or obtain the service-side evidence above. Service response: pending.
+F08 now supplies an independently observed failed wake with different service
+wording. Its relationship to these five connection refusals remains unknown.
 
 ## F02 — IAM conditions and errors make correct setup difficult
 
@@ -116,6 +119,11 @@ observed `SUSPENDING` / restore `PENDING`, and three consecutive status-read
 failures. The latter now has specific platform-error guidance deployed in
 coordinator 7 and verified through the normal task API. These controlled failures
 and passing race cases do not explain F01.
+
+F08 exposed another service message, `Resume lifecycle hook failed.`, without
+an HTTP status or underlying connection error. The local classifier correction
+recognizes that observed wording and prevents misleading retry advice. It does
+not establish why the service failed to complete the hook.
 
 **Ask:** provide a service-side lifecycle attempt timeline or equivalent
 structured fields: originating API receipt, hook kind/attempt ID, start/end
@@ -242,6 +250,39 @@ a service token lookup or automatic recovery.
 retention period. The 120-second limit is ABCA policy, not an AWS guarantee.
 Post-expiry behavior and recovery without unambiguous guest identity logs remain
 unverified. Service response: pending.
+
+## F08 — Generic wake-hook failure while PID 1 owns its listener
+
+**Observed:** September 16, 18:55:13–18:56:16 UTC, account `<account-id>`,
+region `us-west-2`. A diagnostic image kept the original server as PID 1 and
+added a separate observer child. Application code, connection keepalive,
+8,192 MiB and lifecycle hooks matched normal image 5.0.
+
+- Worker: `microvm-da3668f9-04a6-393c-939a-33c059e4b2a0`.
+- Image: `backgroundagent-dev-p3-pid1-observer-20260916:1.0`.
+- Task: `01M2NRA1BNVMXGD5YDVYD4XH4T`.
+- Suspend receipt: `802e1264-4569-49ef-aada-70be7c26e71b`; guest checkpoint
+  and suspend HTTP 200 completed at 18:55:14.013.
+- Resume receipt: `11bc8d9b-ada5-440e-aef3-034d8ac04848`, accepted at
+  18:56:13.121.
+- At 18:56:13.350, observer PID 7 saw PID 1 running and owning its port-8080
+  listening socket, inode `481`, which also existed before the freeze.
+- AWS terminated the worker at 18:56:13.869 with
+  `Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.`
+  The retained log contains no resume hook entry, stage or access line.
+
+**Ask:** what exact connection/HTTP error maps to this generic reason? For this
+receipt, was the hook attempted on a fresh or reused socket, what bytes/status
+were received, and was another connection attempted before termination?
+Does the service retain the hook-attempt timeline separately from the API
+receipt? Compare it with the five exact connection refusals in F01.
+
+**Limits:** the observed process and listener existed 519 ms before termination.
+This does not prove continuous health or event-loop responsiveness, and it does
+not establish whether this failure shares F01's cause. The diagnostic process
+can affect scheduling. The [full record](./645-p3-pid1-observer-20260916.md)
+retains the passing comparison, excluded fixture assertion, sampled state,
+timestamps and failure. Service response: pending.
 
 ## Updating this tracker
 

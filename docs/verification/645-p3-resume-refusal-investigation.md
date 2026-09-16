@@ -1,5 +1,15 @@
 # ADR-021 P3: intermittent resume-hook connection refusal
 
+**September 16 follow-up:** a
+[diagnostic retaining the original PID 1 server](./645-p3-pid1-observer-20260916.md)
+captured a separate wake failure with the generic reason
+`Resume lifecycle hook failed.` An independent child observed PID 1 owning its
+listening socket after restoration, approximately 519 ms before AWS terminated
+the worker. No resume hook entry appeared. This adds process/listener evidence
+for that new failure; it does not establish the cause of the five exact
+connection refusals below. The service question is tracked separately as
+[F08](./645-lambda-microvm-service-feedback.md#f08--generic-wake-hook-failure-while-pid-1-owns-its-listener).
+
 Updated 2026-09-16 UTC. This is an investigation record and a prepared report;
 it has not been submitted to AWS or published as an issue.
 The [service-team feedback tracker](./645-lambda-microvm-service-feedback.md)
