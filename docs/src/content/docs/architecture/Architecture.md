@@ -56,7 +56,7 @@ Different tasks and repos may benefit from different models. The `model_id` fiel
 | `coding/new-task-v1` | Claude Sonnet 4 | `anthropic.claude-sonnet-4-6` | Good balance of quality and cost |
 | `coding/pr-iteration-v1` | Claude Sonnet 4 | `anthropic.claude-sonnet-4-6` | Needs to understand review feedback and make code changes |
 | `coding/pr-review-v1` | Claude Haiku | `anthropic.claude-haiku-4-5-20251001-v1:0` | Fast and cheap - review is read-only analysis |
-| Complex/critical repos | Claude Opus 4 | `anthropic.claude-opus-4-20250514-v1:0` | Highest quality, opt-in per repo |
+| Complex/critical repos | Claude Opus 4.8 | `anthropic.claude-opus-4-8` | Highest quality, opt-in per repo |
 
 ## Cost model
 

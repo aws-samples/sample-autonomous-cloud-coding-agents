@@ -216,7 +216,12 @@ export interface BlueprintProps {
  * CDK construct that registers a repository with the platform by writing
  * a RepoConfig record to the shared RepoTable via a custom resource.
  *
- * Create/Update: PutItem with status='active' and all config fields.
+ * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
+ * which SETs the fields a Blueprint declares and REMOVEs only per-repo **asset
+ * refs** it no longer declares. Other dropped overrides are carried forward, not
+ * cleared: `onUpdate` runs on every deploy and `bgagent repo onboard --model` is a
+ * sanctioned second writer of the same row (ADR-017), so a blanket clear deleted an
+ * operator's CLI pin on unrelated redeploys.
  * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
  *
  * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,
@@ -492,13 +497,14 @@ export class Blueprint extends Construct {
   }
 
   private buildRemoveClause(): string {
-    const empty = this.emptyAssetFields();
-    return empty.length > 0 ? ` REMOVE ${empty.map(f => `#${f}`).join(', ')}` : '';
+    const fields = this.emptyAssetFields();
+    return fields.length > 0 ? ` REMOVE ${fields.map(f => `#${f}`).join(', ')}` : '';
   }
 
   private buildRemoveNames(): Record<string, string> {
     const names: Record<string, string> = {};
-    for (const f of this.emptyAssetFields()) names[`#${f}`] = f;
+    const fields = this.emptyAssetFields();
+    for (const f of fields) names[`#${f}`] = f;
     return names;
   }
 }
