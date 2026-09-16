@@ -6,6 +6,20 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Adjustable sleep deployed (2026-09-16):** source `a81c565d` adds
+`microvm_sleep_after_s` and CLI `--microvm-sleep-after <seconds|off>`, with a
+600-second default and zero to stay awake. The full build passed 7,939 tests;
+56 real DynamoDB Local transaction tests passed separately.
+The [settings and live record](./645-p3-user-sleep-20260916.md) verifies normal
+coordinator version 8, retained version 7, unchanged image 5.0 and 475 resources,
+both suspension gates off, and seven deployed API checks. Five of six worker
+cases passed: default/off/custom timing, late approval winning its decision
+race, and safe failure after actual credential-renewal denial. The timeout-wins
+case reproduced the fifth resume connection refusal. Its failure remains open;
+all six workers and temporary verification infrastructure were cleaned up.
+The normal deployed capacity reconciler also passed an owned overcount and
+terminal-reservation repair while preserving the real waiting worker.
+
 **Guest hook milestone (2026-09-14):** production
 [worker suspend/resume hooks](./645-p3-lifecycle-hooks.md) now connect the guest
 barrier to atomic checkpoint writes and retained-credential refresh followed by
@@ -111,7 +125,8 @@ is superseded by these records.
 - [x] Verify real AWS durable replay after a saved worker receipt and process exit, including cancellation during recovery, in the isolated production-handler fixture.
 - [ ] Complete remaining durable registration races, AWS behavior after token retention expires, and operator cleanup of genuinely unknown worker IDs.
 - [x] Make capacity acquisition/release atomic per task across crash replay; unify counter writers and repair.
-- [ ] Verify the capacity protocol's upgrade/drain procedure, deployed IAM and scan scale in AWS.
+- [x] Verify normal deployed capacity repair while preserving a waiting worker; verify bounded 600-user AWS pagination, partial-scan safety and conservative legacy handling.
+- [ ] Complete the capacity protocol's old-writer upgrade/drain and rollback procedure; validate volume against the intended production workload.
 - [x] Restrict agent task updates to reporting fields; remove replacement/deletion and worker counter grants.
 - [x] Verify metadata restrictions with real AWS task-tagged sessions and mixed transactions under the deployed MicroVM role; retain status/tag trust limits and the separate other-role gate.
 - [x] Replace unused logging-failure bookkeeping with structured stdout diagnostics (#810); document shared runtime networking and verify large registry payload delivery (#818).
@@ -134,7 +149,7 @@ is superseded by these records.
 - [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 - [x] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup. Image `4.0` passed these checks, including real renewal after credential expiry.
-- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the four failures across images 3.0 and 4.0. See the [investigation and request IDs](./645-p3-resume-refusal-investigation.md).
+- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the five failures across images 3.0, 4.0 and 5.0. See the [investigation and request IDs](./645-p3-resume-refusal-investigation.md).
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -228,7 +243,7 @@ absence of all temporary infrastructure.
 The detailed batches below preserve the implementation history. For the current
 handoff, use this order:
 
-1. Resolve the four [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
+1. Resolve the five [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
    Service-side connection diagnostics and guest/listener health are still
    missing. Passing retries, the callback-timeout fix and successful cleanup
    do not close this gate.
@@ -252,6 +267,11 @@ handoff, use this order:
    with specific guest-stage diagnostics and deployed task-API feedback.
    Two mistitled long-hold attempts were excluded and replaced by fresh measured
    cases. No unexpected refusal appeared; production connection handling is unchanged.
+   A subsequent image 5.0 timeout-race case reproduced the refusal after a normal
+   pre-deadline wake. The guest logged a successful checkpoint and suspend HTTP
+   200, but no resume hook entry. The prepared service report now includes its
+   API receipts and precise timeline; the new diagnostics have not established
+   the cause.
 2. The [command-race checks](./645-p3-command-races-20260916.md) now pass cancellation
    before/after Suspend, during observed `SUSPENDING`, and during restore
    `PENDING`; approval during an accepted suspension and three consecutive
@@ -261,10 +281,15 @@ handoff, use this order:
    failure guidance in coordinator version 7 and verified the normal task API;
    image 5.0 and disabled suspension settings remain in place.
    Complete the remaining live race/fault matrix:
-   late decision races, credential-refresh failures, durable registration races,
+   timeout-winning decision races, durable registration races,
    service token-retention expiry and recovery of a worker
    whose ID was genuinely lost. Keep each injected failure distinct from an
    unrelated service failure.
+   The [adjustable-sleep follow-up](./645-p3-user-sleep-20260916.md) completed the
+   late-approval winner and actual credential-refresh denial checks, plus default,
+   off and custom delays. It deployed coordinator version 8 with both gates off.
+   The timeout-winner case was interrupted by the fifth unexplained wake refusal
+   and remains unaccepted.
 3. Complete effective permissions and network checks for the other backends,
    plus runtime/remote-MCP connectivity. Verify a full cloned-repository P3
    workflow on the final image, including mutable workspace state and normal
@@ -273,6 +298,12 @@ handoff, use this order:
    deployed writer roles, including realistic scan volume. Retain the verified
    local transaction and isolated-live results as evidence for their narrower
    scope.
+   The [AWS scan follow-up](./645-p3-capacity-scan-20260916.md) now passes a
+   600-user fixture with real multi-page reads, exact normal Lambda artifact,
+   equivalent table permissions, zero writes after interrupted scans, and
+   conservative handling until an older task settles. Its temporary tables and
+   function were removed. This bounds the verified volume without claiming the
+   production migration or arbitrary retention scale.
 5. Perform the final compatible rollout, including shared runtime changes for
    ECS/AgentCore, pinned-version retention and rollback checks. Enable automatic
    suspension only after the remaining gates pass, then finish the ADR/runbook

@@ -43,6 +43,15 @@ docker stop abca645-capacity-ddb
 
 ## Limits of this evidence
 
+The [September 16 AWS follow-up](./645-p3-capacity-scan-20260916.md) now verifies
+600 users across real multi-page task/counter scans, an exact deployed reconciler
+artifact with equivalent permissions on isolated tables, interrupted scans with
+zero writes, and conservative handling of an older unmarked task. A separate
+[normal-role check](./645-p3-user-sleep-20260916.md) repaired an overcount and
+terminal reservation while preserving a real waiting worker. The bounded
+volume and role checks do not complete the old-writer drain/upgrade/rollback
+procedure or establish arbitrary production scale.
+
 Local tests prove the application requests and DynamoDB Local's transaction behavior. They do not establish deployed IAM, AWS scaling, successful rollout or MicroVM sleep/wake behavior. Terminal events may repeat or be lost independently of the atomic seat update.
 
 The reservation/start markers share the task row. Subsequent prerequisite work restricts agent updates to reporting/approval attributes and removes whole-row replacement/deletion plus direct worker access to the counter. Public-API omission alone was not protection. See [coordinator metadata verification](./645-coordinator-metadata.md) for the writer inventory, actual policy boundary, remaining status/tag trust limits and required AWS authorization checks. These local transaction tests do not prove that security boundary.

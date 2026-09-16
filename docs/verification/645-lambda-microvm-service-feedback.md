@@ -10,7 +10,7 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | P3 blocker | Accepted wake ends in connection refusal | Four recorded failures; responsible component unknown |
+| F01 | P3 blocker | Accepted wake ends in connection refusal | Five recorded failures, including instrumented image 5.0; responsible component unknown |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
@@ -24,7 +24,7 @@ is the receipt that lets the service team find a particular call.
 The coordinator releases capacity correctly; the requested coding workflow
 still fails. This prevents enabling automatic suspension for normal tasks.
 
-**Observed:** four failures on images `3.0` and `4.0` in `us-west-2`, September
+**Observed:** five failures on images `3.0`, `4.0` and `5.0` in `us-west-2`, September
 15–16. AWS accepted `ResumeMicrovm`, then reported:
 
 > Resume lifecycle hook connection was refused. Please check your hook endpoint
@@ -36,14 +36,18 @@ and coordinator Resume calls as a necessary cause.
 
 **Best starting evidence for the service team:**
 
-- Account `<account-id>`, region `us-west-2`, September 16, 00:25:01–00:25:12 UTC.
-- Worker `microvm-2da070a7-43cf-3bb3-9c5d-69bc106f2cb1`, image
-  `backgroundagent-dev-abca-agent:4.0`.
-- Suspend receipt `e2199854-5ad0-46c9-bc59-248ac68ead82`.
-- Resume receipt `0acb3fec-8b18-4bed-b457-0271a15ffdd6`, acknowledged
-  00:25:06.766 UTC; terminal refusal observed 00:25:07.524 UTC.
+- Account `<account-id>`, region `us-west-2`, September 16, 17:09:39–17:10:42 UTC.
+- Worker `microvm-6ff103ab-a41d-348b-8a56-721c9050b623`, image
+  `backgroundagent-dev-abca-agent:5.0`, original server PID 1.
+- Suspend receipt `98a53cab-7737-4675-944e-7a8202781149`; guest checkpoint
+  succeeded and `/suspend` returned HTTP 200 at 17:09:40.186 UTC.
+- Resume receipt `d32f9929-e7cb-4603-a6c1-0bd2a801f5b5`, acknowledged
+  17:10:39.404 UTC; service termination timestamp 17:10:40.415 UTC.
+- The instrumented guest logged no resume hook entry or subsequent callback
+  stage. This case used a single supervisor wake before the original deadline,
+  with no injected failure.
 - [Prepared investigation report](./645-p3-resume-refusal-investigation.md)
-  contains all four worker IDs, comparison runs and the complete example timeline.
+  contains all five worker IDs, comparison runs and the complete example timelines.
 
 **Ask:** inspect the service's restore and hook-transport records for these
 receipts. Was this a TCP refusal from the guest listener, a stale connection,
@@ -216,6 +220,15 @@ termination or image-version changes? After expiry, is the same token rejected
 or treated as a new launch? Which supported API, event or audit field maps the
 original token/API receipt to the worker ID when the client never received it?
 How long does that mapping remain available?
+
+**CloudTrail check:** at 17:36 UTC on September 16, event-history lookup for the
+known image 5.0 launch at 17:08:54 UTC found no `RunMicrovm` event. The complete
+17:08:45–17:09:05 window contained 74 events, including `GetMicrovm`,
+`ListMicrovms` and `GetMicrovmImageVersion` from `lambda.amazonaws.com`.
+Only event names, sources and window metadata were retained. This observation
+does not establish the logging contract or exclude later delivery. Is Run a
+management or data event, and what audit configuration is required to retain
+the launch token-to-worker mapping?
 
 **Limits:** five minutes of successful replay does not establish the maximum
 retention period. The 120-second limit is ABCA policy, not an AWS guarantee.

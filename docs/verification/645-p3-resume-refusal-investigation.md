@@ -27,7 +27,8 @@ the new logging and wake-failure feedback. Three isolated AWS workflows verified
 the instrumentation with the original server running as PID 1, including actual
 API wake and coordinator recovery. None reproduced refusal. The
 [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md) now runs coordinator
-version 6 and image 5.0; the historical failures below predate this instrumentation.
+version 7 and image 5.0 after the subsequent command-race follow-up. A fifth
+failure on image 5.0 now includes the new diagnostics, as recorded below.
 
 ## Recorded failures
 
@@ -41,6 +42,46 @@ The earlier cases are detailed in the
 | Approval after coordinator process-crash recovery | `3.0` | `microvm-9e6bdb3f-bc10-3921-9c50-287bbe20b574` | Sep 15, 21:56:56.279 |
 | Supervisor repair after an injected inline Resume failure | `3.0` | `microvm-dca019ee-7d19-389e-b90b-bde129f77329` | Sep 15, 22:54:45.753 |
 | Supervisor wake after an owned approval record was deleted | `4.0` | `microvm-2da070a7-43cf-3bb3-9c5d-69bc106f2cb1` | Sep 16, 00:25:07.524 |
+| Supervisor wake before the original approval deadline | `5.0` | `microvm-6ff103ab-a41d-348b-8a56-721c9050b623` | Sep 16, 17:10:40.415 |
+
+### Image 5.0 diagnostic timeline
+
+Task `01M2NHJ8YSRTRY3XPT06SHT9QD` used the normal image and original server
+as PID 1, with a 150-second approval window and a custom 30-second sleep delay.
+The private coordinator ran source `a81c565d`; this case did not inject a
+command or guest failure. The intended check was an approval timeout winning
+before a subsequent approval API call. The unexpected refusal prevented that
+check from reaching its decision race.
+
+| Time on Sep 16 | Evidence |
+|---|---|
+| 17:09:09 | Read approval created; original deadline 17:11:39 |
+| 17:09:39.879 | Supervisor sends Suspend |
+| 17:09:39.940 | AWS accepts; request `98a53cab-7737-4675-944e-7a8202781149` |
+| 17:09:39.971 | Guest logs suspend hook entry, PID 1 |
+| 17:09:40.185 | Checkpoint transaction and controller finish; hook acknowledges HTTP 200 after 214 ms |
+| 17:09:40.186 | HTTP access log records `/suspend` 200 |
+| 17:09:41.524 | Observer reads `SUSPENDED` |
+| 17:10:39.344 | Supervisor sends its sole Resume, about 60 seconds before the original deadline |
+| 17:10:39.404 | AWS accepts; request `d32f9929-e7cb-4603-a6c1-0bd2a801f5b5` |
+| 17:10:40.415 | Service records termination with the connection-refused reason |
+| 17:10:41.716 | Coordinator writes `FAILED` with `MICROVM_RESUME_HOOK_FAILED` |
+| 17:10:41.752 | Coordinator releases the task's reservation |
+
+The fully paginated guest log window contains no resume hook entry, callback
+stage, HTTP access record or later application output. Thus the newly
+instrumented credential-refresh and identity-reconciliation callbacks did not
+leave evidence of starting. This does not establish that the process or
+listener survived restoration. The failed harness subsequently called its
+idempotent cleanup helpers; the task's recorded failure and reservation release
+predate that fallback, but this case is excluded from successful lifecycle
+acceptance.
+
+Four preceding settings/decision cases completed: the default sleep request
+occurred after 600.385 seconds, an explicit off setting never requested sleep,
+a custom delay requested sleep after 30.395 seconds, and an approval committed
+after the deadline won its conditional decision race. These passing controls
+do not explain or discharge this fifth failure.
 
 ### Image 4.0 request timeline
 
@@ -85,8 +126,8 @@ The image `4.0` refusal above happened afterward. Therefore:
 - Overlapping API/supervisor Resume requests are not required. Both the
   process-crash case and the supervisor-only cases exclude that explanation.
 - The observed failure is separate from the old ten-minute Claude callback
-  cancellation: the latest failure happened less than a minute after its gate
-  was created, with minutes still remaining.
+  cancellation: the image 4.0 case failed less than a minute after its gate
+  was created; the image 5.0 case failed before its original deadline.
 - These runs do not establish a failure rate or identify the responsible
   component.
 
@@ -106,7 +147,7 @@ observer still ran in the guest. This calibrates the diagnostics; it does not
 establish why the full agent loses its listener or connection.
 
 That experiment also exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md)
-in the supervisor. Its correction does not account for these four failures,
+in the supervisor. Its correction does not account for these failures,
 whose worker termination reason was the service-reported connection refusal.
 
 The [full-agent observer experiment](./645-p3-process-observer-20260916.md)
@@ -115,7 +156,7 @@ fallback and direct API wakes retained a healthy child-owned listener, without
 reproducing the refusal. Short full-agent cases reused the same client port for
 `/suspend` and `/resume`, unlike the minimal listener's closed connections.
 That is an observed transport difference, not an established cause. None of
-the four original failures has independent process/listener evidence at restore,
+the five recorded failures has independent process/listener evidence at restore,
 and the guest does not expose the cgroup OOM counters sampled by the observer.
 
 The subsequent [local transport control](./645-p3-transport-control-20260916.md)
