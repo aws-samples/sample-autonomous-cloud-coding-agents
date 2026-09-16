@@ -235,6 +235,50 @@ test('unknown state has a fixed recovery window across serialized polls', async 
   expect(expired.state.recovery?.sinceMs).toBe(first.state.recovery?.sinceMs);
 });
 
+test('a newly RUNNING task retains the full startup allowance while its first worker observation is PENDING', async () => {
+  working(); // The coordinator marks the task RUNNING before AWS reports readiness.
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const first = await run();
+  expect(first).toMatchObject({
+    kind: 'continue', state: { recovery: { kind: 'starting', sinceMs: NOW } },
+  });
+  time += 120_000;
+  const later = await run(first.state);
+  expect(later.kind).toBe('continue');
+  expect(later.state.recovery).toEqual(first.state.recovery);
+  time = NOW + 300_000;
+  expect((await run(later.state)).kind).toBe('failure');
+});
+
+test('an initial read failure cannot shorten or restart the pending startup allowance', async () => {
+  working();
+  mockRead.mockRejectedValueOnce(new Error('temporary read failure'));
+  const failed = await run();
+  time += 60_000;
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const pending = await run(failed.state);
+  expect(pending).toMatchObject({
+    kind: 'continue', state: { recovery: { kind: 'starting', sinceMs: NOW } },
+  });
+  time = NOW + 300_000;
+  expect((await run(pending.state)).kind).toBe('failure');
+});
+
+test.each(['current', 'legacy'])('%s saved state does not restart startup after a confirmed running worker', async version => {
+  working();
+  const running = await run();
+  const previous = { ...running.state };
+  if (version === 'legacy') delete previous.startupConfirmed;
+  time += 60_000;
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const pending = await run(previous);
+  expect(pending).toMatchObject({
+    kind: 'continue', state: { recovery: { kind: 'unconfirmed', sinceMs: time } },
+  });
+  time += MICROVM_RECOVERY_TIMEOUT_MS;
+  expect((await run(pending.state)).kind).toBe('failure');
+});
+
 test('repeated Get errors retain their count even when task reads succeed', async () => {
   strategy.pollSession.mockRejectedValue(Object.assign(new Error('network'), { name: 'TimeoutError' }));
   const first = await run();

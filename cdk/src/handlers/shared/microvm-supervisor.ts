@@ -51,6 +51,8 @@ export interface MicrovmSupervisorState {
   readonly firstObservedAtMs: number;
   readonly sessionDeadlineMs: number;
   readonly lifetimeVerified: boolean;
+  /** False until AWS confirms a post-startup state; absent in older saved state. */
+  readonly startupConfirmed?: boolean;
   readonly consecutivePollFailures: number;
   readonly consecutiveResumeFailures: number;
   readonly recovery?: Recovery;
@@ -118,6 +120,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     firstObservedAtMs: now,
     sessionDeadlineMs: now + MICROVM_MAX_DURATION_SECONDS * 1000,
     lifetimeVerified: false,
+    startupConfirmed: false,
     consecutivePollFailures: 0,
     consecutiveResumeFailures: 0,
     anomalyReported: false,
@@ -209,6 +212,9 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       consecutivePollFailures: approvalFailure ? state.consecutivePollFailures + 1 : state.consecutivePollFailures,
     };
     const observed = substrate.microvmState ?? 'UNKNOWN';
+    if (observed === 'RUNNING' || observed === 'SUSPENDING' || observed === 'SUSPENDED') {
+      state = { ...state, startupConfirmed: true };
+    }
     const wakeRepairWanted = state.recovery?.kind === 'wake'
       && (!intentMatchesGate(snapshot!) || snapshot!.intent?.action !== 'resume');
     const awaitingDecisionConsumption = snapshot.status === TaskStatus.AWAITING_APPROVAL
@@ -232,7 +238,10 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
           // An API-triggered wake may arrive between supervisor polls; retain its
           // saved start time instead of reusing the worker's original boot clock.
           beginRecovery('wake', Math.min(Date.now(), snapshot.intent.requested_at_ms));
-        } else if (observed === 'PENDING' && snapshot.status === TaskStatus.HYDRATING) {
+        } else if (observed === 'PENDING'
+          && (state.startupConfirmed === false || snapshot.status === TaskStatus.HYDRATING)) {
+          // The coordinator marks the task RUNNING before AWS finishes startup.
+          // Retain first-observation age across failed initial reads and replay.
           beginRecovery('starting', state.firstObservedAtMs);
         } else {
           beginRecovery('unconfirmed');
