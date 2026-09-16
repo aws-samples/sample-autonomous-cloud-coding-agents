@@ -22,6 +22,7 @@ import {
   buildAdfDocument, updateIssueCommentAdf,
   type JiraFeedbackContext, type JiraUpdateResult,
 } from './jira-feedback';
+import type { JiraPreviewBudget } from './jira-preview-budget';
 import { renderJiraFinalStatusComment } from './jira-status-comment';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
@@ -32,9 +33,9 @@ import { TERMINAL_STATUSES } from '../../constructs/task-status';
 const MAX_CONVERGENCE_ATTEMPTS = 4;
 
 /** Jira supports explicit ADF links without requiring Atlassian media storage. */
-export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown): Record<string, unknown> {
+export function jiraPreviewDocument(screenshotUrl: unknown, previewUrl: unknown): Record<string, unknown> | null {
   if (typeof screenshotUrl !== 'string' || !isAllowedScreenshotUrl(screenshotUrl)) {
-    return buildAdfDocument([]);
+    return null;
   }
   return buildAdfDocument([
     [{ text: '🖼️ Preview screenshot', strong: true }],
@@ -67,14 +68,14 @@ function render(task: TaskRecord): Record<string, unknown> {
   // Old tasks may have settled before this writer was deployed. A late preview
   // must still show their outcome, never reset their status to working.
   const preview = jiraPreviewDocument(task.screenshot_url, task.screenshot_preview_url);
-  return { ...body, content: [...((body.content ?? []) as unknown[]), ...(preview.content as unknown[])] };
+  return { ...body, content: [...((body.content ?? []) as unknown[]), ...((preview?.content ?? []) as unknown[])] };
 }
 
 /**
  * All iteration comment writers converge from durable task state. Progress cannot
  * replace a terminal body. After each Jira PUT, a strongly consistent re-read
- * detects an overlapping preview/status write and repairs our stale PUT. Thus
- * even a slow heartbeat landing after the terminal PUT restores the latest body.
+ * detects an overlapping preview/status write and attempts to repair our stale
+ * PUT, bounded by four attempts and any supplied delivery deadline.
  * No Jira read/modify/write or external-image embedding is required.
  */
 export async function updateJiraIterationComment(
@@ -85,11 +86,14 @@ export async function updateJiraIterationComment(
   issueId: string,
   commentId: string,
   status?: { body: Record<string, unknown>; terminal: boolean },
+  budget?: JiraPreviewBudget,
 ): Promise<JiraUpdateResult> {
+  const run = <T>(operation: () => Promise<T>): Promise<T> => budget ? budget.run(operation) : operation();
+  let wrote = false;
   try {
     if (status) {
       try {
-        await ddb.send(new UpdateCommand({
+        await run(() => ddb.send(new UpdateCommand({
           TableName: tableName,
           Key: { task_id: taskId },
           UpdateExpression: 'SET jira_iteration_status = :value',
@@ -99,30 +103,35 @@ export async function updateJiraIterationComment(
             ':value': status,
             ...(!status.terminal && { ':false': false }),
           },
-        }));
+        }), { abortSignal: budget?.signal }));
       } catch (error) {
         if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') throw error;
       }
     }
-    const load = async (): Promise<TaskRecord | undefined> => (await ddb.send(new GetCommand({
+    const load = async (): Promise<TaskRecord | undefined> => (await run(() => ddb.send(new GetCommand({
       TableName: tableName, Key: { task_id: taskId }, ConsistentRead: true,
-    }))).Item as TaskRecord | undefined;
+    }), { abortSignal: budget?.signal }))).Item as TaskRecord | undefined;
     let task = await load();
+    if (!task) {
+      logger.warn('Jira iteration task no longer exists', { event: 'jira.preview.task_missing', task_id: taskId });
+      return { ok: false, retryable: false };
+    }
     for (let attempt = 0; task && attempt < MAX_CONVERGENCE_ATTEMPTS; attempt += 1) {
       const body = render(task);
-      const result = await updateIssueCommentAdf(ctx, issueId, commentId, body);
+      const result = await run(() => updateIssueCommentAdf(ctx, issueId, commentId, body));
       if (!result.ok) return result;
+      wrote = true;
       task = await load();
       if (!task || JSON.stringify(render(task)) === JSON.stringify(body)) return { ok: true };
     }
     logger.warn('Jira iteration comment did not converge', { event: 'jira.preview.convergence_failed', task_id: taskId });
-    return { ok: false, retryable: true };
+    return { ok: true };
   } catch (error) {
     logger.warn('Jira iteration comment update failed', {
       event: 'jira.preview.status_failed',
       task_id: taskId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return { ok: false, retryable: true };
+    return wrote ? { ok: true } : { ok: false, retryable: true };
   }
 }

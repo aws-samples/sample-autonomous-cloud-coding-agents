@@ -64,7 +64,7 @@ test('ADF uses explicit links, preserving the full URL without Markdown injectio
 });
 
 test.each(['javascript:alert(1)', 'https://localhost/a', 'https://127.0.0.1/a'])('rejects untrusted links: %s', (url) => {
-  expect(jiraPreviewDocument(url, preview).content).toEqual([]);
+  expect(jiraPreviewDocument(url, preview)).toBeNull();
   expect(JSON.stringify(jiraPreviewDocument(shot, url))).not.toContain('Open live preview');
 });
 
@@ -82,12 +82,18 @@ test('duplicate preview refreshes keep exactly one preview block', async () => {
 test.each([false, true])('a slow heartbeat repairs a terminal write with preview (preview first: %s)', async (previewFirst) => {
   const f = fixture();
   if (previewFirst) f.screenshot();
+  const settled: string[] = [];
+  put.mockImplementation(async (_ctx, _issue, _comment, body) => {
+    settled.push(JSON.stringify(body));
+    return { ok: true };
+  });
   let release!: () => void;
   let started!: () => void;
   const atPut = new Promise<void>((resolve) => { started = resolve; });
-  put.mockImplementationOnce(async () => {
+  put.mockImplementationOnce(async (_ctx, _issue, _comment, body) => {
     started();
     await new Promise<void>((resolve) => { release = resolve; });
+    settled.push(JSON.stringify(body));
     return { ok: true };
   });
   const heartbeat = f.update(status('Working', false));
@@ -96,7 +102,8 @@ test.each([false, true])('a slow heartbeat repairs a terminal write with preview
   await f.update(status('✅ Finished', true));
   release();
   await heartbeat;
-  const body = JSON.stringify(put.mock.calls.at(-1)![3]);
+  expect(put).toHaveBeenCalledTimes(3);
+  const body = settled.at(-1)!;
   expect(body).toContain('✅ Finished');
   expect(body).toContain('Open screenshot');
   expect(body).not.toContain('Working');
@@ -106,12 +113,18 @@ test('a slow preview writer repairs a later terminal write', async () => {
   const f = fixture();
   await f.update(status('Working', false));
   f.screenshot();
+  const settled: string[] = [];
+  put.mockImplementation(async (_ctx, _issue, _comment, body) => {
+    settled.push(JSON.stringify(body));
+    return { ok: true };
+  });
   let release!: () => void;
   let started!: () => void;
   const atPut = new Promise<void>((resolve) => { started = resolve; });
-  put.mockImplementationOnce(async () => {
+  put.mockImplementationOnce(async (_ctx, _issue, _comment, body) => {
     started();
     await new Promise<void>((resolve) => { release = resolve; });
+    settled.push(JSON.stringify(body));
     return { ok: true };
   });
   const delivering = f.update();
@@ -119,8 +132,9 @@ test('a slow preview writer repairs a later terminal write', async () => {
   await f.update(status('❌ Failed', true));
   release();
   await delivering;
-  expect(JSON.stringify(put.mock.calls.at(-1)![3])).toContain('❌ Failed');
-  expect(JSON.stringify(put.mock.calls.at(-1)![3])).toContain('Open live preview');
+  expect(put).toHaveBeenCalledTimes(4);
+  expect(settled.at(-1)).toContain('❌ Failed');
+  expect(settled.at(-1)).toContain('Open live preview');
 });
 
 test('late progress cannot replace a durable terminal body', async () => {
@@ -181,4 +195,43 @@ test('Jira and persistence failures are best effort', async () => {
   await expect(f.update()).resolves.toEqual({ ok: false, retryable: false });
   f.send.mockRejectedValueOnce(new Error('DDB unavailable'));
   await expect(f.update()).resolves.toEqual({ ok: false, retryable: true });
+});
+
+test('a missing task is non-retryable and never writes a comment', async () => {
+  const f = fixture();
+  f.send.mockResolvedValueOnce({} as never);
+  await expect(f.update()).resolves.toEqual({ ok: false, retryable: false });
+  expect(put).not.toHaveBeenCalled();
+});
+
+test('continuous concurrent changes do not turn successful PUTs into retryable failures', async () => {
+  const f = fixture();
+  let version = 0;
+  f.send.mockImplementation(async () => ({
+    Item: {
+      task_id: 'task', status: 'RUNNING', jira_iteration_status: status(`Working ${version++}`, false),
+    },
+  }));
+  await expect(f.update()).resolves.toEqual({ ok: true });
+  expect(put).toHaveBeenCalledTimes(4);
+});
+
+test('a failed verification read after a successful PUT does not retry terminal delivery', async () => {
+  const f = fixture();
+  put.mockImplementationOnce(async () => {
+    f.send.mockRejectedValueOnce(new Error('DDB unavailable'));
+    return { ok: true };
+  });
+  await expect(f.update()).resolves.toEqual({ ok: true });
+});
+
+test('progress persistence protects terminal state and reads are strongly consistent', async () => {
+  const f = fixture();
+  await f.update(status('Working', false));
+  const update = f.send.mock.calls[0][0].input;
+  expect(update.ConditionExpression).toBe('attribute_exists(task_id) AND (attribute_not_exists(jira_iteration_status) OR jira_iteration_status.terminal = :false)');
+  expect(update.ExpressionAttributeValues[':false']).toBe(false);
+  const reads = f.send.mock.calls.filter(([command]) => command instanceof GetCommand);
+  expect(reads).toHaveLength(2);
+  for (const [command] of reads) expect(command.input.ConsistentRead).toBe(true);
 });

@@ -81,11 +81,20 @@ const jiraBuildAdfDocumentMock = jest.fn(
   (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
 );
 const jiraTransitionIssueStateMock = jest.fn();
+const mockIterationStatus = jest.fn();
+afterEach(() => {
+  for (const [status] of mockIterationStatus.mock.calls) {
+    expect(status).toEqual(expect.objectContaining({ terminal: true }));
+  }
+  mockIterationStatus.mockClear();
+});
 // Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
 jest.mock('../../src/handlers/shared/jira-preview', () => ({
   updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
-    ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) =>
-    jiraUpdateIssueCommentAdfMock(ctx, issue, comment, status.body),
+    ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
+    mockIterationStatus(status);
+    return jiraUpdateIssueCommentAdfMock(ctx, issue, comment, status.body);
+  },
 }));
 
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
@@ -1392,7 +1401,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     expect(jiraPostIssueCommentAdfMock).not.toHaveBeenCalled();
   });
 
-  test('a terminal Jira result-post failure folds the full ADF outcome into the status comment', async () => {
+  test.each([false, true])('Jira result-post failure folds the outcome into the status comment (retry budget exhausted: %s)', async (exhausted) => {
     mockCascade(
       [{
         sub_issue_id: 'KAN-2',
@@ -1408,8 +1417,19 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     );
     jiraPostIssueCommentAdfMock.mockResolvedValue({
       ok: false,
-      retryable: false,
+      retryable: exhausted,
     });
+
+    if (exhausted) {
+      const base = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (command: { _type: string; input: Record<string, unknown> }) => {
+        if (String(command.input.UpdateExpression).includes('REMOVE ack_replied_at')) {
+          throw Object.assign(new Error('attempts exhausted'), { name: 'ConditionalCheckFailedException' });
+        }
+        if (command.input.ProjectionExpression === 'ack_reply_attempts') return { Item: { ack_reply_attempts: 3 } };
+        return base(command);
+      });
+    }
 
     await handler({
       Records: [taskRecord({
@@ -1442,7 +1462,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
         command._type === 'Update'
         && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
       );
-    expect(releases).toHaveLength(0);
+    expect(releases).toHaveLength(exhausted ? 1 : 0);
   });
 
   test('redelivered Jira iteration matures its status comment once', async () => {

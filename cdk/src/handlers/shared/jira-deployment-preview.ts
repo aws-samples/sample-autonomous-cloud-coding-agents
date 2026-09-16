@@ -20,6 +20,7 @@
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { postIssueCommentAdf, updateIssueCommentAdf } from './jira-feedback';
 import { jiraPreviewDocument, updateJiraIterationComment } from './jira-preview';
+import { JiraPreviewBudget } from './jira-preview-budget';
 import { jiraIssueIdentity } from './jira-task-by-issue';
 import { logger } from './logger';
 import { isIntegrationNode } from './orchestration-integration-node';
@@ -28,6 +29,7 @@ import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 const MAX_LOOKUP_PAGES = 10;
 const LOOKUP_PAGE_SIZE = 25;
+const MAX_CANDIDATE_READS = 25;
 
 /** Best-effort Jira delivery, routed exclusively by the authoritative task. */
 export async function deliverJiraDeploymentPreview(
@@ -39,9 +41,13 @@ export async function deliverJiraDeploymentPreview(
   sha: string,
   screenshotUrl: string,
   previewUrl: string,
+  remaining: () => number,
 ): Promise<void> {
   if (original.channel_source !== 'jira') return;
+  const budget = new JiraPreviewBudget(remaining);
   try {
+    const document = jiraPreviewDocument(screenshotUrl, previewUrl);
+    if (!document) throw new Error('Jira screenshot URL is not allowed');
     if (original.repo !== repo) throw new Error('Deployment repository does not match the task');
     const metadata = original.channel_metadata;
     const cloudId = metadata?.jira_cloud_id;
@@ -55,11 +61,15 @@ export async function deliverJiraDeploymentPreview(
     if (!metadata?.trigger_comment_id) {
       let cursor: Record<string, unknown> | undefined;
       let pages = 0;
+      let reads = 0;
       let matched = false;
       let sawIteration = false;
       do {
-        if (pages++ >= MAX_LOOKUP_PAGES) throw new Error('Jira preview task lookup exceeded page limit');
-        const page = await ddb.send(new QueryCommand({
+        if (pages++ >= MAX_LOOKUP_PAGES || reads >= MAX_CANDIDATE_READS) {
+          logger.warn('Jira preview task lookup reached its limit', { event: 'screenshot.jira_lookup_limited', task_id: original.task_id });
+          break;
+        }
+        const page = await budget.run(() => ddb.send(new QueryCommand({
           TableName: tableName,
           IndexName: JIRA_ISSUE_INDEX_NAME,
           KeyConditionExpression: 'jira_issue_identity = :identity',
@@ -67,13 +77,15 @@ export async function deliverJiraDeploymentPreview(
           ScanIndexForward: false,
           ExclusiveStartKey: cursor,
           Limit: LOOKUP_PAGE_SIZE,
-        }));
+        }), { abortSignal: budget.signal }));
         for (const candidate of page.Items ?? []) {
           if (!candidate.channel_metadata?.trigger_comment_id) continue;
           sawIteration = true;
-          const result = await ddb.send(new GetCommand({
+          if (reads >= MAX_CANDIDATE_READS) break;
+          reads += 1;
+          const result = await budget.run(() => ddb.send(new GetCommand({
             TableName: tableName, Key: { task_id: candidate.task_id }, ConsistentRead: true,
-          }));
+          }), { abortSignal: budget.signal }));
           const current = result.Item as TaskRecord | undefined;
           if (current?.head_sha !== sha || current.code_changed === false || current.channel_source !== 'jira'
             || current.repo !== repo || current.channel_metadata?.jira_cloud_id !== cloudId
@@ -89,22 +101,22 @@ export async function deliverJiraDeploymentPreview(
       if (!matched && (sawIteration || original.head_sha) && original.head_sha !== sha) {
         throw new Error('No Jira task matches the deployment SHA');
       }
-    } else if (task.head_sha && task.head_sha !== sha) {
+    } else if (task.head_sha !== sha) {
       throw new Error('Jira iteration SHA does not match the deployment');
     }
-    await ddb.send(new UpdateCommand({
+    await budget.run(() => ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { task_id: task.task_id },
       UpdateExpression: 'SET screenshot_url = :s, screenshot_preview_url = :p',
       ConditionExpression: 'attribute_exists(task_id)',
       ExpressionAttributeValues: { ':s': screenshotUrl, ':p': previewUrl },
-    }));
-    const ctx = { cloudId, registryTableName };
+    }), { abortSignal: budget.signal }));
+    const ctx = { cloudId, registryTableName, signal: budget.signal };
     if (task.channel_metadata?.trigger_comment_id) {
       const replyId = task.channel_metadata.iteration_reply_comment_id;
       const target = task.channel_metadata.trigger_comment_issue_id ?? issueKey;
       if (!replyId || isIntegrationNode(target)) throw new Error('Jira iteration has no addressable status comment');
-      const result = await updateJiraIterationComment(ddb, tableName, task.task_id, ctx, target, replyId);
+      const result = await updateJiraIterationComment(ddb, tableName, task.task_id, ctx, target, replyId, undefined, budget);
       if (!result.ok) throw new Error('Jira iteration preview update failed');
       return;
     }
@@ -112,21 +124,21 @@ export async function deliverJiraDeploymentPreview(
     // never create a second comment. Keep uncertain/failed POSTs claimed because
     // Jira may have committed before a transport timeout. Failures are observable.
     try {
-      await ddb.send(new UpdateCommand({
+      await budget.run(() => ddb.send(new UpdateCommand({
         TableName: tableName,
         Key: { task_id: task.task_id },
         UpdateExpression: 'SET jira_preview_claimed = :yes',
         ConditionExpression: 'attribute_exists(task_id) AND attribute_not_exists(jira_preview_claimed)',
         ExpressionAttributeValues: { ':yes': true },
-      }));
+      }), { abortSignal: budget.signal }));
     } catch (error) {
       if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') throw error;
-      const existing = await ddb.send(new GetCommand({
+      const existing = await budget.run(() => ddb.send(new GetCommand({
         TableName: tableName, Key: { task_id: task.task_id }, ConsistentRead: true,
-      }));
+      }), { abortSignal: budget.signal }));
       const commentId = existing.Item?.jira_preview_comment_id;
       if (typeof commentId === 'string') {
-        const result = await updateIssueCommentAdf(ctx, issueKey, commentId, jiraPreviewDocument(screenshotUrl, previewUrl));
+        const result = await budget.run(() => updateIssueCommentAdf(ctx, issueKey, commentId, document));
         if (!result.ok) throw new Error('Jira preview comment update failed');
       } else {
         logger.warn('Jira preview POST already claimed without a saved comment id', {
@@ -135,18 +147,18 @@ export async function deliverJiraDeploymentPreview(
       }
       return;
     }
-    const result = await postIssueCommentAdf(ctx, issueKey, jiraPreviewDocument(screenshotUrl, previewUrl));
+    const result = await budget.run(() => postIssueCommentAdf(ctx, issueKey, document));
     if (!result.ok) throw new Error('Jira preview comment creation failed');
-    await ddb.send(new UpdateCommand({
+    await budget.run(() => ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { task_id: task.task_id },
       UpdateExpression: 'SET jira_preview_comment_id = :id',
       ConditionExpression: 'attribute_exists(task_id)',
       ExpressionAttributeValues: { ':id': result.commentId },
-    }));
+    }), { abortSignal: budget.signal }));
   } catch (error) {
     logger.warn('Jira deployment preview feedback failed (non-fatal)', {
-      event: 'screenshot.jira_delivery_failed',
+      event: budget.signal.aborted ? 'screenshot.jira_budget_exhausted' : 'screenshot.jira_delivery_failed',
       task_id: original.task_id,
       error: error instanceof Error ? error.message : String(error),
     });

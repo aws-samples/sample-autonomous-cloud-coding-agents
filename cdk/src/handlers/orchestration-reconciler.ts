@@ -1224,8 +1224,8 @@ async function replyToIterationComment(
   const replyIssueId = evt.triggerCommentIssueId ?? changedSubIssueId;
   // EDIT the maturing reply posted at trigger time; fall back to a fresh
   // threaded reply for older tasks that captured no reply id.
-  // preservePreview: converge with the screenshot webhook's async `[preview]`
-  // append so this terminal re-render doesn't clobber it.
+  // Jira renders from durable preview state; Linear uses preservePreview below
+  // to retain the screenshot webhook's async `[preview]` append.
   const target = issueRef(replyIssueId, workspaceId);
   const existing = evt.iterationReplyId
     ? { commentId: evt.iterationReplyId }

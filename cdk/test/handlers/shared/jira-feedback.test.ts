@@ -30,6 +30,7 @@ import {
   reportIssueFailure,
   transitionIssueState,
   updateIssueComment,
+  updateIssueCommentAdf,
 } from '../../../src/handlers/shared/jira-feedback';
 
 const CTX = { cloudId: 'cloud-uuid-1', registryTableName: 'JiraWorkspaceRegistry' };
@@ -686,5 +687,45 @@ describe('preview Markdown to Jira ADF fallback links', () => {
     if (markdown.startsWith('[')) {
       expect(runs[2]).toEqual({ text: 'Open live preview', href: 'https://preview.example.com/a%29' });
     }
+  });
+});
+
+describe('preview deadline cancellation', () => {
+  test.each(['post', 'update'])('a deadline during auth prevents a later %s', async (operation) => {
+    const controller = new AbortController();
+    resolveJiraOauthTokenMock.mockImplementationOnce(async () => {
+      controller.abort();
+      return { accessToken: 'late-token' };
+    });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock;
+    const ctx = { ...CTX, signal: controller.signal };
+    const body = buildAdfDocument([[{ text: 'preview' }]]);
+    const result = operation === 'post'
+      ? await postIssueCommentAdf(ctx, 'ENG-42', body)
+      : await updateIssueCommentAdf(ctx, 'ENG-42', '123', body);
+    expect(result).toEqual({ ok: false, retryable: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test.each(['oauth', 'app'])('cancels an in-flight %s comment transport', async (kind) => {
+    if (kind === 'app') {
+      resolveJiraOauthTokenMock.mockResolvedValueOnce({
+        kind: 'app',
+        appActor: {
+          proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger-id',
+          sharedSecret: 's'.repeat(64),
+        },
+      });
+    }
+    const controller = new AbortController();
+    global.fetch = jest.fn(async (_url, options) => {
+      const signal = options!.signal!;
+      controller.abort();
+      expect(signal.aborted).toBe(true);
+      throw new Error('aborted');
+    }) as typeof fetch;
+    await expect(postIssueCommentAdf({ ...CTX, signal: controller.signal }, 'ENG-42', buildAdfDocument([])))
+      .resolves.toEqual({ ok: false, retryable: true });
   });
 });

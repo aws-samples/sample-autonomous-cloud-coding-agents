@@ -35,7 +35,7 @@ import {
   findLinearIssueByIdentifier,
 } from './shared/linear-issue-lookup';
 import { logger } from './shared/logger';
-import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
+import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr, isLookupFailure } from './shared/lookup-result';
 import { isIntegrationNode } from './shared/orchestration-integration-node';
 import { buildScreenshotKey, encodeMarkdownUrl, extractTaskIdFromBranch, isAllowedScreenshotUrl } from './shared/screenshot-url';
 import type { TaskRecord } from './shared/types';
@@ -46,8 +46,7 @@ const ddb = makeDocClient();
 // Optional — when set, the processor persists the screenshot's public URL onto
 // the deploy task's TaskRecord (keyed by the taskId in the deploy branch) so
 // the orchestration reconciler can embed the integration node's combined
-// preview in the parent epic panel. Unset → persistence is skipped (the PR +
-// Linear comments still post).
+// preview in the parent epic panel. Unset → persistence and channel delivery are skipped; the PR comment still posts.
 const TASK_TABLE = process.env.TASK_TABLE_NAME;
 
 const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
@@ -76,9 +75,10 @@ const TOTAL_BUDGET_MS = 110_000;
  * Reserve carved out of the remaining budget AFTER PR lookup, BEFORE
  * starting the screenshot capture. Covers S3 PUT (typically <2s) +
  * GitHub PR comment POST (typically <2s) + the 2s Page settle inside
- * the browser. Anything left over is the screenshot's actual budget.
+ * the browser, plus up to 20s for optional Jira delivery and 1.5s to exit.
+ * Anything left over is the screenshot's actual budget.
  */
-const POST_CAPTURE_RESERVE_MS = 8_000;
+const POST_CAPTURE_RESERVE_MS = 30_000;
 
 /**
  * Minimum budget we'll allow `captureScreenshot` to start with. If less
@@ -273,7 +273,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // skip it. The return tells us whether this is the synthetic integration
   // node — whose screenshot belongs in the panel only, never as a standalone
   // Linear comment on the parent epic.
-  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy, task } = await persistScreenshotUrl(
+  const persisted = await persistScreenshotUrl(
     pr.headRefName,
     publicUrl,
     previewUrl,
@@ -311,9 +311,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     });
   }
 
+  if (isLookupFailure(persisted)) return;
+  const { isIntegrationNode: isIntegrationDeploy, isIteration: isIterationDeploy, task } = lookupValueOr(
+    persisted, { isIntegrationNode: false, isIteration: false, task: undefined },
+  );
   const jiraRegistry = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
   if (task?.channel_source === 'jira' && TASK_TABLE && jiraRegistry) {
-    await deliverJiraDeploymentPreview(ddb, TASK_TABLE, jiraRegistry, task, repo, sha, publicUrl, previewUrl);
+    await deliverJiraDeploymentPreview(ddb, TASK_TABLE, jiraRegistry, task, repo, sha, publicUrl, previewUrl, remaining);
   } else if (task?.channel_source === 'jira') {
     logger.warn('Jira preview registry is not configured', {
       event: 'screenshot.jira_missing_registry', task_id: task.task_id,
@@ -665,19 +669,23 @@ async function findPullRequestForSha(
  * combined preview in the parent epic panel. Keyed by the taskId encoded in
  * the deploy branch (``bgagent/{taskId}/…``). Best-effort and never throws —
  * a non-ABCA branch (no taskId), an unset table, or a vanished record (TTL)
- * just skips persistence; the PR + Linear comments are the load-bearing
- * artifacts. Conditional on ``attribute_exists`` so we never resurrect a
+ * skips persistence. Lookup failures skip both channel deliveries; the PR
+ * comment still posts. The returned task is ALL_OLD: its screenshot is from
+ * the previous deploy. Conditional on ``attribute_exists`` so we never resurrect a
  * TTL-reaped row.
  */
 async function persistScreenshotUrl(
   branchName: string,
   publicUrl: string,
   previewUrl: string,
-): Promise<{ isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord }> {
+): Promise<LookupResult<{ isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord }>> {
   const result: { isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord } = { isIntegrationNode: false, isIteration: false };
-  if (!TASK_TABLE) return result;
+  if (!TASK_TABLE) {
+    logger.warn('Screenshot task table is not configured; skipping channel delivery', { event: 'screenshot.persist_failed' });
+    return lookupFailed(new Error('Screenshot task table is not configured'));
+  }
   const taskId = extractTaskIdFromBranch(branchName);
-  if (!taskId) return result;
+  if (!taskId) return LOOKUP_ABSENT;
   try {
     // Persist BOTH the captured image URL and the live preview-deploy URL so
     // the reconciler can render a clickable combined-preview deep-link in the
@@ -718,14 +726,15 @@ async function persistScreenshotUrl(
     });
   } catch (err) {
     // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
-    // transient DDB error. Either way the comments still posted — log + move on.
+    // transient DDB error. Preserve the PR comment, but skip channel routing.
     logger.warn('Failed to persist screenshot_url (non-fatal)', {
       event: 'screenshot.persist_failed',
       task_id: taskId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return lookupFailed(err);
   }
-  return result;
+  return lookupFound(result);
 }
 
 function renderCommentBody(publicUrl: string, previewUrl: string): string {

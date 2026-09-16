@@ -75,6 +75,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 
 import { handler } from '../../src/handlers/github-webhook-processor';
+import { logger } from '../../src/handlers/shared/logger';
 
 function payload(overrides: Record<string, unknown> = {}): { raw_body: string } {
   const body = {
@@ -100,6 +101,8 @@ function fetchOk(jsonValue: unknown, status = 200): jest.SpyInstance {
 
 describe('github-webhook-processor handler', () => {
   beforeEach(() => {
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
+    deliverJiraMock.mockReset();
     s3Send.mockReset();
     captureScreenshotMock.mockReset();
     resolveGitHubTokenMock.mockReset();
@@ -206,7 +209,8 @@ describe('github-webhook-processor handler', () => {
 
     await handler(payload());
 
-    // captureScreenshot receives a deadline-aware budget.
+    // Capture leaves 30s for post-capture work, including optional Jira delivery.
+    expect(captureScreenshotMock.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(80_000);
     expect(captureScreenshotMock).toHaveBeenCalledWith(
       'https://preview.example.com',
       expect.objectContaining({ timeoutMs: expect.any(Number) }),
@@ -456,10 +460,31 @@ describe('authoritative Jira deployment routing', () => {
     await handler(payload());
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     if (source === 'jira') {
-      expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', expect.objectContaining({ channel_source: 'jira' }), 'owner/repo', 'abc1234', expect.stringContaining('https://d1.cloudfront.net/'), 'https://preview.example.com');
+      expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', expect.objectContaining({ channel_source: 'jira' }), 'owner/repo', 'abc1234', expect.stringContaining('https://d1.cloudfront.net/'), 'https://preview.example.com', expect.any(Function));
       expect(findLinearIssueMock).not.toHaveBeenCalled();
     } else {
       expect(deliverJiraMock).not.toHaveBeenCalled();
     }
+  });
+
+  test('a failed task lookup cannot route a Jira-like branch to Linear', async () => {
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-42', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42' } }]);
+    ddbSend.mockRejectedValueOnce(new Error('DDB unavailable'));
+    await handler(payload());
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    expect(deliverJiraMock).not.toHaveBeenCalled();
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+
+  test('missing Jira registry is observable and never falls through to Linear', async () => {
+    const warn = jest.spyOn(logger, 'warn');
+    delete process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+    fetchOk([{ number: 17, state: 'open', head: { ref: 'bgagent/01JXABCDEF1234567890ABCDEF/eng-42' } }]);
+    ddbSend.mockResolvedValue({ Attributes: { channel_source: 'jira' } });
+    await handler(payload());
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ event: 'screenshot.jira_missing_registry' }));
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+    expect(deliverJiraMock).not.toHaveBeenCalled();
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
   });
 });

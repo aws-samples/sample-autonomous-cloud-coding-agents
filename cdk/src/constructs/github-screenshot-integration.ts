@@ -328,6 +328,9 @@ export class GitHubScreenshotIntegration extends Construct {
     }
 
     if (props.jiraWorkspaceRegistryTable) {
+      // The Jira OAuth resolver rotates refresh tokens and must persist the
+      // replacement token in the existing tenant-scoped secret. PutSecretValue
+      // enables that refresh path; it does not permit creating arbitrary secrets.
       props.jiraWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
@@ -472,7 +475,7 @@ export class GitHubScreenshotIntegration extends Construct {
       },
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'AgentCore Browser sessions are ephemeral and have no per-resource ARN; the data-plane API requires wildcards. S3 PutObject uses CDK grant helpers that expand to bucket/* wildcards.',
+        reason: 'AgentCore Browser sessions are ephemeral and have no per-resource ARN; the data-plane API requires wildcards. S3 PutObject uses CDK grant helpers that expand to bucket/* wildcards. Secrets Manager access is prefix-scoped to bgagent-linear-oauth-* and bgagent-jira-oauth-* for tenant token refresh.',
       },
     ], true);
 
