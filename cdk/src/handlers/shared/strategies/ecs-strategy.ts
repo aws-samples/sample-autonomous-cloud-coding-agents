@@ -147,7 +147,7 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     // The ECS container's default CMD starts the FastAPI server (uvicorn) which
     // waits for HTTP POST to /invocations — but in standalone ECS nobody sends
-    // that request. We override the container command to invoke run_task()
+    // that request. We override the container command to invoke run_task_from_payload()
     // directly with the full orchestrator payload (including hydrated_context).
     // This avoids the server entirely and runs the agent in batch mode.
     if (!ECS_PAYLOAD_BUCKET) {

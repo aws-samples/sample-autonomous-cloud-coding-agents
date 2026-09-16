@@ -144,8 +144,8 @@ const HTTPS_PORT = 443;
  *    ~3.1 GB of the 16 GB, because ``MISE_JOBS=1`` serialises the packages so peak
  *    is max-single-package rather than sum-of-all. Nearly 5x headroom.
  *
- *    Disk is the tighter constraint and is sized less aggressively for that
- *    reason: the same build peaked at ~14.7 GiB, so Fargate's 21 GiB floor leaves
+ *    Disk is the tighter constraint: the same build peaked at ~14.7 GiB, so
+ *    Fargate's 20 GiB default leaves
  *    only ~1.4x — a heavier dependency cache or a second build sharing the task
  *    would run it out of space and surface as a spurious build failure. 50 GiB
  *    restores real margin, and ephemeral storage is a small fraction of the
@@ -163,16 +163,9 @@ const HTTPS_PORT = 443;
  *    execution role, because splitting them is how a grant silently lands on one
  *    def and not the other. Do not read the name as a privilege boundary.
  */
-// A MODEST default: 4 vCPU / 16 GB, and Fargate's own 20 GiB disk.
-//
-// Deliberately not the Fargate ceiling. A default is what an adopter who changes
-// nothing gets, and at 16 vCPU / 120 GB that is roughly 5x the per-build cost of
-// this size in us-east-1 on-demand. Under-provisioning surfaces as a slow or
-// OOM-ing build, which is diagnosable and fixable with one prop; over-provisioning
-// surfaces as a bill, which is not. A large TypeScript + Python monorepo genuinely
-// needs more — raise it through {@link EcsTaskSizing}, up to Fargate's 16 vCPU /
-// 120 GB maximum, and raise ephemeral storage with it if concurrent builds run the
-// disk out of space.
+// Build defaults: 4 vCPU / 16 GiB RAM / 50 GiB disk.
+// Planning defaults: 2 vCPU / 8 GiB RAM / Fargate's 20 GiB default disk.
+// EcsTaskSizing overrides these values for the target repository's workload.
 const DEFAULT_BUILD_TASK_CPU = 4096;
 const DEFAULT_BUILD_TASK_MEMORY_MIB = 16384;
 const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 50;
@@ -182,7 +175,7 @@ const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
 /**
  * Per-task Fargate sizing overrides. Every field is optional; anything left
  * unset uses the default above. A consumer with a lighter repo should shrink the
- * build task (for example 4 vCPU / 16 GB) to cut cost; a heavy monorepo can keep
+ * build task to cut cost; a heavy monorepo can keep
  * or raise it up to the Fargate ceiling of 16 vCPU / 120 GB. Values are passed
  * straight to the Fargate task definition, so they must be a valid Fargate
  * cpu/memory combination (see the AWS Fargate docs) — an invalid pair fails at
@@ -456,51 +449,19 @@ export class EcsAgentCluster extends Construct {
     this.taskDefinition = makeTaskDef('TaskDef', buildCpu, buildMemory, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
-      // Pin the jest test fleet to an ABSOLUTE worker count on ECS. jest's
-      // `maxWorkers: 25%` is CORE-relative → 4 workers on this 16-vCPU box.
-      // Measured, the test suite at 4 workers peaks at only ~2.2 GB (whole process
-      // tree) — not tens of GB. Container OOMs were not driven by this test
-      // suite's worker count; they were driven by TOTAL concurrency — a
-      // full-parallel `mise run build` running every package's test/build legs
-      // plus the resident coding agent all at once. So the real memory driver is
-      // cross-package build parallelism, not jest's internal workers. 4 is
-      // comfortably safe on the 120 GB box even alongside the other packages +
-      // agent. Kept as an explicit env (not core-relative) so a future bigger box
-      // can't silently over-spawn. The test script reads JEST_MAX_WORKERS (default
-      // 25%), so this only pins the shared ECS box — CI (2–4 cores) and dev
-      // machines keep 25%, unaffected.
+      // Repositories that honor JEST_MAX_WORKERS use four Jest workers on build
+      // tasks. An absolute value keeps that limit stable when task CPU changes;
+      // it does not set worker counts for other test runners.
       JEST_MAX_WORKERS: '4',
-      // Serialize the mise task graph so the build steps' peak memory doesn't sum
-      // and OOM the task. `mise run build` fans out its `depends` (the per-package
-      // build/quality legs) up to MISE_JOBS in parallel (default 4); each package
-      // then spawns its OWN worker fleet (jest, pytest, esbuild, cdk synth). The
-      // measured memory driver of the OOMs was this CROSS-PACKAGE storm summing on
-      // top of the resident coding agent — not any single package. At 120 GB
-      // (Fargate's max at 16 vCPU) there is no more RAM to add, so the remedy is to
-      // cut peak parallelism. MISE_JOBS=1 runs the packages SEQUENTIALLY → peak ≈
-      // max(single package) instead of sum(all packages), while still building
-      // every package and keeping BOTH gates (baseline + post-agent).
-      // Within-package parallelism (JEST_MAX_WORKERS=4, pytest) is untouched, so a
-      // single package still uses the box's cores. Cost is wall-clock (~serial
-      // sum, still minutes) — trivial against BUILD_VERIFY_TIMEOUT_S=3600. Without
-      // this, the post-agent build OOM'd (exit 137) stacking on the still-resident
-      // agent; a gate that OOMs verified NOTHING — serializing lets it actually
-      // COMPLETE and gate. Only affects `mise run <task>` (the build legs); the
-      // agent's direct `uv run pytest` calls are unaffected.
+      // Run one mise task at a time to limit overlap between package builds.
+      // Individual tools can still run their own workers, and the coding agent
+      // remains resident. This trades build duration for lower peak memory;
+      // it does not cap direct pytest/Jest calls or guarantee a workload fits.
       MISE_JOBS: '1',
-      // Skip the target repo's pre-push TEST hook inside the agent container.
-      // `mise run install` installs prek git hooks, incl. a pre-push hook that
-      // re-runs the FULL cdk+cli+agent test suite on every `git push`. In this
-      // container that suite already ran TWICE (baseline + post-agent build gate)
-      // and GitHub CI runs it again — so the pre-push run is pure redundancy, AND
-      // it runs UNcapped (no JEST_MAX_WORKERS), stacking on the resident agent →
-      // OOM. The agent's only escape was `git push --no-verify`, which silently
-      // bypassed ALL hooks (incl. the security scan) and trained a
-      // skip-verification habit. SKIP is the pre-commit/prek standard env var
-      // (comma-separated hook ids); scoping it to the tests hook lets the push
-      // succeed WITHOUT --no-verify while KEEPING the pre-push security scan.
-      // Propagates to both the platform push (post_hooks.py) and the agent's own
-      // git-tool pushes via shell.py::_clean_env (blacklist — passes SKIP through).
+      // For repositories using this pre-commit/prek hook ID, skip that named
+      // pre-push test hook. Other hook IDs remain enabled. This does not establish
+      // that the repository's tests already ran; verification depends on its
+      // configured workflow. shell.py::_clean_env passes SKIP to git subprocesses.
       SKIP: 'monorepo-tests-pre-push',
       // Caller overrides win: the values above are tuned for one monorepo's
       // toolchain, so a deployment with a different build shape replaces them
