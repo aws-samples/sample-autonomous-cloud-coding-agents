@@ -10,11 +10,11 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | P3 blocker | Accepted wake ends in connection refusal | Five recorded failures, including instrumented image 5.0; responsible component unknown |
+| F01 | P3 blocker | Accepted wake ends in connection refusal | Six recorded failures; latest captures idle-timer closure and a live listener; three close-header cases verify closure before freeze |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
-| F05 | Medium | HTTP connection handling across suspend/resume | Contract question; no established cause of F01 |
+| F05 | Medium | HTTP connection handling across suspend/resume | Exact refusal now correlates with expired idle connection; service dispatch details still needed |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
 | F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Guest-log recovery verified; maximum retention, post-expiry behavior and recovery without identity logs unknown |
 | F08 | P3 blocker | Generic wake-hook failure with an observed listener | PID 1 owned its listener after restore, 519 ms before termination; no resume hook entry |
@@ -25,8 +25,10 @@ is the receipt that lets the service team find a particular call.
 The coordinator releases capacity correctly; the requested coding workflow
 still fails. This prevents enabling automatic suspension for normal tasks.
 
-**Observed:** five failures on images `3.0`, `4.0` and `5.0` in `us-west-2`, September
-15–16. AWS accepted `ResumeMicrovm`, then reported:
+**Observed:** five failures on normal images `3.0`, `4.0` and `5.0`, plus a sixth
+on a private image retaining 5.0's application and connection behavior with
+transport probes, in `us-west-2`, September 15–16. AWS accepted `ResumeMicrovm`,
+then reported:
 
 > Resume lifecycle hook connection was refused. Please check your hook endpoint
 > and application logs for more details.
@@ -36,6 +38,20 @@ subsequent `/resume` access entry. Single-issuer cases exclude overlapping API
 and coordinator Resume calls as a necessary cause.
 
 **Best starting evidence for the service team:**
+
+- Account `<account-id>`, region `us-west-2`, September 16, 21:14:27–21:15:30 UTC.
+- Worker `microvm-bb1bfd4b-9ce3-3691-a60b-88f263081d43`, private image
+  `backgroundagent-dev-p3-wake-transport-20260916:1.0`, original server PID 1.
+- Resume receipt `74943bd5-cfd1-4781-9f10-9946566089e8`, accepted
+  21:15:26.786 UTC. At 21:15:26.948, the restored event loop expired the old
+  suspend connection's five-second idle timer. At 21:15:26.950, an independent
+  observer saw PID 1 owning the original port-8080 listener. AWS terminated the
+  worker at 21:15:27.471 with the exact refusal wording.
+- No fresh HTTP connection or resume request appeared in the retained window.
+  The [transport investigation](./645-p3-wake-transport-20260916.md)
+  contains the full timeline and successful fresh-connection comparison.
+
+**Earlier unmodified image 5.0 evidence:**
 
 - Account `<account-id>`, region `us-west-2`, September 16, 17:09:39–17:10:42 UTC.
 - Worker `microvm-6ff103ab-a41d-348b-8a56-721c9050b623`, image
@@ -56,15 +72,17 @@ a process exit, or a networking/restore failure? At what point did the service
 consider the guest network and listener ready, and what underlying error did it
 map to this reason?
 
-**Limits:** no root cause is established. The Mac was the test controller; the
-failing connection was between AWS and the guest inside AWS. Later successful
-controls, including three with the original server as PID 1, do not prove this
-defect fixed or establish a failure rate.
+**Limits:** the latest guest trace supports an old-connection race but cannot
+show the service's actual dispatch error or socket choice. The Mac was the test
+controller; the failing connection was inside AWS. Passing controls do not
+establish a failure rate or discharge the earlier failures.
 
-**Next:** retain a fresh failure with independent process/listener evidence,
-or obtain the service-side evidence above. Service response: pending.
-F08 now supplies an independently observed failed wake with different service
-wording. Its relationship to these five connection refusals remains unknown.
+**Next:** complete normal-image rollout and acceptance of the explicit close
+header, retain the exact failure, and obtain service-side dispatch details.
+Two unchanged sleeps longer than 90 seconds and three candidate cases passed;
+the candidate trace verifies actual connection closure before freeze.
+Service response: pending. F08 records an independently observed failed wake
+with different wording; a shared cause remains unconfirmed.
 
 ## F02 — IAM conditions and errors make correct setup difficult
 
@@ -161,8 +179,10 @@ not reopening the corrected timer bug.
 **Evidence:** some successful full-agent suspend/resume access logs used the
 same peer port. An isolated Linux paused-process experiment reproduced a reset
 of an old HTTP connection after a six-second pause, while every fresh connection
-still succeeded. It did **not** reproduce an AWS connection refusal. Some F01
-failures followed suspension by less than five seconds.
+still succeeded. It did **not** reproduce an AWS connection refusal.
+The interval from an observer's `SUSPENDED` sample is not the server's idle
+connection age. The [timing correction](./645-p3-wake-transport-20260916.md#historical-timing-correction)
+removes the earlier inference that short observed sleeps ruled out idle expiry.
 
 See the [transport control](./645-p3-transport-control-20260916.md) and
 [process-observer record](./645-p3-process-observer-20260916.md).
@@ -177,17 +197,26 @@ cases used fresh ports. No unexpected refusal or reset appeared.
 Two original mistitled long-hold attempts are retained and excluded from that
 acceptance; fresh corrected cases supplied the stated durations.
 
+The later [instrumented transport investigation](./645-p3-wake-transport-20260916.md)
+captured a 59.451-second event-loop gap, closure of the old suspend connection
+by `timeout_keep_alive_handler`, a live PID 1 listener, and the exact F01 refusal
+without a new HTTP connection. Its passing control closed the old socket and
+accepted a fresh resume connection about two milliseconds later. The candidate
+uses an explicit response header, not the earlier timer flag. All three candidate
+cases verified response-driven closure before freeze, no armed idle timer on the
+suspend connection, and a fresh resume connection.
+
 **Ask:** does the service reuse hook TCP connections across suspend/resume,
 honor `Connection: close`, and retry a failed reused connection on a fresh socket?
 How are reset, refused and timeout errors classified? What ordering is guaranteed
 between guest unfreeze, network restoration and hook delivery? Which clock
 semantics should guest timeout/keep-alive timers expect across suspension?
 
-**Limits:** matching peer ports suggest reuse but do not establish all transport
-behavior. A paused Linux process is not an AWS MicroVM restore. The bounded
-AWS comparison establishes working paths with both settings, not an explanation
-or fix for F01. Production connection handling remains unchanged. Service response:
-pending; retain the service contract questions above.
+**Limits:** the guest now records exact connection identity and timer closure,
+but it cannot expose the service client's pool or failed dispatch. A paused
+Linux process is not an AWS MicroVM restore, and the earlier timer-flag comparison
+did not reproduce F01. Normal deployment connection handling remains unchanged.
+Service response: pending; retain the service contract questions above.
 
 ## F06 — Make the VPC connector role requirement obvious before deployment
 

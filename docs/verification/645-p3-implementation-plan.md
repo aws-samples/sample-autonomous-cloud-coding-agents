@@ -6,6 +6,18 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Wake transport correction (2026-09-16):** the
+[instrumented comparison](./645-p3-wake-transport-20260916.md) captured a sixth
+exact refusal: the restored event loop expired the old suspend connection while
+PID 1 still owned its listener, with no fresh resume connection. Two unchanged
+cases sleeping longer than 90 seconds passed. Three private candidate cases
+with explicit `Connection: close` passed, each proving socket closure before
+freeze, no idle timer on that socket, fresh resume connection, original timeout,
+late approval rejection and complete cleanup. This supplies a concrete
+application correction; service dispatch traces remain unavailable and normal
+deployment plus final-image acceptance remain separate steps. Wake-hook timeouts
+also now receive nonretryable service/admin feedback in source.
+
 **Adjustable sleep deployed (2026-09-16):** source `a81c565d` adds
 `microvm_sleep_after_s` and CLI `--microvm-sleep-after <seconds|off>`, with a
 600-second default and zero to stay awake. The full build passed 7,939 tests;
@@ -198,7 +210,7 @@ is superseded by these records.
 - [x] Deploy the supervisor and six-hook image with suspension disabled; verify six isolated guest cases, repair the discovered cancellation stop omission, and prove API termination before test cleanup.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 - [x] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup. Image `4.0` passed these checks, including real renewal after credential expiry.
-- [ ] Resolve the intermittent resume-hook connection refusal; successful retries do not discharge the five failures across images 3.0, 4.0 and 5.0. See the [investigation and request IDs](./645-p3-resume-refusal-investigation.md).
+- [ ] Complete normal-image rollout and acceptance of the explicit connection-close correction; retain all six exact refusals and the generic failure. The [transport comparison](./645-p3-wake-transport-20260916.md) verifies actual closure before freeze on the private candidate.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -292,11 +304,14 @@ absence of all temporary infrastructure.
 The detailed batches below preserve the implementation history. For the current
 handoff, use this order:
 
-1. Resolve the five [resume-hook connection refusals](./645-p3-resume-refusal-investigation.md).
-   Service-side connection diagnostics during those exact failures are still
-   missing. The later F08 observation supplies partial guest/listener evidence
-   for a distinct generic failure. Passing retries, the callback-timeout fix and successful cleanup
-   do not close this gate.
+1. Complete normal-image rollout and acceptance of the
+   [connection-close correction](./645-p3-wake-transport-20260916.md), retaining
+   the six [exact refusals](./645-p3-resume-refusal-investigation.md) and F08.
+   Service-side dispatch diagnostics remain missing, but the sixth refusal now
+   captures exact idle-timer closure and a live listener. The private candidate
+   proves the suspend socket closes before freeze and resume uses a new one.
+   Passing retries, the callback-timeout fix and cleanup alone do not close
+   this gate.
    The [minimal listener experiment](./645-p3-listener-probe-20260916.md) also
    exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md).
    Its correction and startup-confirmation follow-up are deployed in coordinator
@@ -310,8 +325,10 @@ handoff, use this order:
    the new hook-stage, AWS request-ID and durable state-change logging.
    Three isolated AWS workflows verified it, including actual API wake and
    coordinator recovery. The [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md)
-   now runs coordinator version 6 and image 5.0 with both suspension switches off. The original
-   server remained PID 1. Logging and successful controls do not close the defect.
+   first deployed coordinator version 6 and image 5.0 with both suspension
+   switches off; subsequent feedback updates advanced the coordinator to 9.
+   The original server remained PID 1. Logging and successful controls alone
+   do not close the defect.
    The same record covers a bounded AWS comparison with connection reuse disabled:
    both quick/long wakes and both missing-approval HTTP 409 controls passed,
    with specific guest-stage diagnostics and deployed task-API feedback.

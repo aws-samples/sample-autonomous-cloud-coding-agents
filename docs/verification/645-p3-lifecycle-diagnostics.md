@@ -108,11 +108,19 @@ continues independently for service diagnosis.
    refusal before hook entry, independent listener/process or service-side
    evidence is still required.
 
-Known Resume connection-refused and HTTP 4xx/5xx reasons now produce the stable
+Known Resume generic failures, connection-refused, timeout and HTTP 4xx/5xx
+reasons produce the stable
 `MICROVM_RESUME_HOOK_FAILED` task error. It asks an admin to inspect this evidence
 and saved progress before starting a replacement. It does not promise that
 retrying repairs the fault. Persisted classification codes take priority over
 diagnostic words; unrecognized AWS wording keeps the generic terminal code.
+
+The service's connection-refused wording alone does not establish that the
+listener was closed. The [instrumented transport failure](./645-p3-wake-transport-20260916.md#exact-refusal-with-connection-and-listener-evidence)
+recorded that wording while the original listener was still observed, after an
+expired idle timer closed the old HTTP connection. Preserve the raw reason and
+receipts; distinguish the guest observations from the service's unavailable
+dispatch details.
 
 ## Verification and deployment
 

@@ -1,6 +1,15 @@
 # ADR-021 P3: intermittent resume-hook connection refusal
 
-**September 16 follow-up:** a
+**Latest September 16 follow-up:** the
+[HTTP connection investigation](./645-p3-wake-transport-20260916.md#exact-refusal-with-connection-and-listener-evidence)
+captured a sixth exact refusal. The old connection's five-second idle timer
+expired at restoration; PID 1 still owned its listener, and no fresh HTTP
+connection or resume request appeared. Three explicit `Connection: close`
+candidate cases passed on a private image, proving closure before freeze and
+fresh resume connections. Normal-image rollout and acceptance remain separate
+steps; automatic suspension remains disabled.
+
+An earlier
 [diagnostic retaining the original PID 1 server](./645-p3-pid1-observer-20260916.md)
 captured a separate wake failure with the generic reason
 `Resume lifecycle hook failed.` An independent child observed PID 1 owning its
@@ -24,9 +33,10 @@ acknowledges `ResumeMicrovm`. Its final `stateReason` is:
 > and application logs for more details.
 
 The guest previously returned HTTP 200 from `/suspend`. Its retained application
-stream has no subsequent `/resume` access log. This does not prove the guest
-process stayed healthy: application logs alone cannot distinguish a listener,
-process, network-restoration or hook-transport failure.
+stream has no subsequent `/resume` access log. Application logs alone cannot
+distinguish a listener, process, network-restoration or hook-transport failure.
+The latest case adds an independent listener sample and exact idle-timer closure;
+the first five cases below did not capture those observations.
 
 The coordinator detects termination, marks the task failed and releases its
 capacity reservation. Successful failure cleanup does not make the requested
@@ -37,12 +47,14 @@ the new logging and wake-failure feedback. Three isolated AWS workflows verified
 the instrumentation with the original server running as PID 1, including actual
 API wake and coordinator recovery. None reproduced refusal. The
 [normal-stack rollout](./645-p3-diagnostics-rollout-20260916.md) now runs coordinator
-version 7 and image 5.0 after the subsequent command-race follow-up. A fifth
-failure on image 5.0 now includes the new diagnostics, as recorded below.
+version 9 and image 5.0 after subsequent coordinator fixes. The fifth failure
+on image 5.0 includes those application diagnostics, as recorded below.
 
 ## Recorded failures
 
-All times are UTC, in `us-west-2`, on image `backgroundagent-dev-abca-agent`.
+The first five failures below are on image `backgroundagent-dev-abca-agent`.
+All times are UTC, in `us-west-2`. The sixth, on an instrumented private image
+derived from 5.0, has its [own detailed timeline](./645-p3-wake-transport-20260916.md#exact-refusal-with-connection-and-listener-evidence).
 The earlier cases are detailed in the
 [durable verification record](./645-p3-durable-live-20260915.md).
 
@@ -95,7 +107,7 @@ do not explain or discharge this fifth failure.
 
 ### Image 4.0 request timeline
 
-The last case used source `58ed7bbf`'s image, including the explicit approval
+The image 4.0 case used source `58ed7bbf`'s image, including the explicit approval
 callback timeout. Task ID: `01M2KRWNPP4BQCJ80SVG6473Z8`.
 
 | Time on Sep 16 | Evidence |
@@ -165,9 +177,10 @@ adds the independent parent and listener sampling described below. Its completed
 fallback and direct API wakes retained a healthy child-owned listener, without
 reproducing the refusal. Short full-agent cases reused the same client port for
 `/suspend` and `/resume`, unlike the minimal listener's closed connections.
-That is an observed transport difference, not an established cause. None of
-the five recorded failures has independent process/listener evidence at restore,
-and the guest does not expose the cgroup OOM counters sampled by the observer.
+That experiment established a transport difference. None of the first five
+recorded failures has independent process/listener evidence at restore; the
+sixth now does. The guest does not expose the cgroup OOM counters sampled by
+the observer.
 
 The subsequent [local transport control](./645-p3-transport-control-20260916.md)
 reproduced a reset on an old connection after a six-second process pause, while
@@ -188,12 +201,11 @@ do not identify F01's cause or justify a production connection-setting change.
    error and whether the request reached the guest, including any transport retry.
 2. Correlate guest process/kernel health and the port-8080 listener at restoration.
    Application access logs do not provide that missing evidence.
-   The diagnostic parent now supplies these observations in successful controls;
-   a refusal must be captured with those observations to make the comparison.
-   Preserve the original image and use fixed, bounded owned cases if further
-   testing is justified by a specific transport or process hypothesis.
-3. If a transport or application race is identified, make a bounded correction
-   and test that trigger specifically. Do not hide a failed wake by silently
+   The latest failure now supplies these observations with the original PID 1.
+   Compare its expired connection against the successful fresh-connection wake.
+3. Verify the explicit close response on a private candidate image, including
+   its actual socket closure before freeze and fresh connection after restore.
+   Do not hide a failed wake by silently
    launching another worker: the approved action and workspace may already have
    changed.
 4. Repeat approval, denial, original/late deadline, multiple-gate persistence and

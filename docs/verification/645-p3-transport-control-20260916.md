@@ -1,13 +1,15 @@
 # ADR-021 P3: paused-server HTTP transport control
 
 Date: 2026-09-16. Local diagnostic completed; the original AWS resume refusal
-was **not reproduced**. No application code or AWS deployment changed.
+was **not reproduced** by this local experiment. It changed no application code
+or AWS deployment. Subsequent AWS transport instrumentation is recorded in the
+[wake transport investigation](./645-p3-wake-transport-20260916.md).
 
 ## Question
 
 The full-agent hooks sometimes reuse one HTTP connection across suspension.
 Could an old connection fail after a pause even though the server still accepts
-new connections? This is a narrower question than the four recorded
+new connections? This is a narrower question than the recorded
 [AWS resume refusals](./645-p3-resume-refusal-investigation.md).
 
 The earlier full-agent observer measured a 363.501-second wall-clock gap and
@@ -53,9 +55,13 @@ container exited successfully and its absence was verified.
 One reused connection reset after exceeding the server's five-second keep-alive
 timeout. That is different from a new connection being refused: the listener
 remained reachable in every case. This does not establish how AWS classifies
-its underlying transport errors. Some original failures followed suspension by
-less than five seconds, so simple keep-alive expiration does not explain all
-four recorded failures.
+its underlying transport errors. An earlier interpretation measured from the
+observer's `SUSPENDED` sample and used an interval shorter than five seconds to
+discount idle expiration. That uses the wrong starting point: the server arms
+its idle timer after finishing the preceding HTTP response, before that later
+state sample. The [historical timing correction](./645-p3-wake-transport-20260916.md#historical-timing-correction)
+retains the original timestamps and explains why they neither establish nor
+exclude this cause.
 
 The next bounded AWS comparison should:
 

@@ -61,6 +61,9 @@ async def _transition(request: Request, action: Literal["suspend", "resume"]) ->
         except asyncio.CancelledError as exc:
             diagnostics.finish(None, "MICROVM_LIFECYCLE_CANCELLED", exc)
             raise
+        # A frozen VM retains this connection and its idle timer. Close it with
+        # the response so the next hook uses a fresh connection after restoration.
+        response.headers["Connection"] = "close"
         diagnostics.finish(
             response.status_code, json.loads(bytes(response.body)).get("code", "acknowledged")
         )

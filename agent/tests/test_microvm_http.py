@@ -79,6 +79,30 @@ async def park(context):
 
 @pytest.mark.anyio
 class TestLifecycleHttp:
+    @pytest.mark.parametrize("action", ["suspend", "resume"])
+    @pytest.mark.parametrize(
+        ("outcome", "expected_status"),
+        [("acknowledged", 200), ("unavailable", 409), ("invalid", 400), ("failed", 503)],
+    )
+    async def test_lifecycle_responses_close_even_when_client_requests_keep_alive(
+        self, context, callbacks, client, action, outcome, expected_status
+    ):
+        await park(context)
+        if action == "resume":
+            assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
+        if outcome == "unavailable":
+            lifecycle.unregister_task(context)
+        elif outcome == "failed":
+            callback = callbacks[0] if action == "suspend" else callbacks[1]
+            callback.side_effect = RuntimeError("callback failed")
+        response = await client.post(
+            PREFIX + "/" + action,
+            content=b"{" if outcome == "invalid" else b"{}",
+            headers={"Connection": "keep-alive"},
+        )
+        assert response.status_code == expected_status
+        assert response.headers["connection"] == "close"
+
     async def test_hooks_have_distinct_correlated_timelines(
         self, context, callbacks, client, capsys
     ):

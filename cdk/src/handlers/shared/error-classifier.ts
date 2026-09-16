@@ -105,7 +105,8 @@ const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassificat
     remedy:
         'An ABCA admin should inspect the task ID and MicroVM ID in the coordinator and approval API logs, including the AWS request ID, '
         + 'then check microvm_hook_started, microvm_hook_stage_failed and microvm_hook_finished in /aws/lambda-microvms/<image-name>. '
-        + 'A connection refusal can happen before the guest hook logs anything. Check saved task progress and cleanup before starting a replacement task; retrying alone is not a verified fix.',
+        + 'A transport error can occur before any guest hook log. The service’s "connection was refused" wording alone does not establish that the listener was closed. '
+        + 'Check saved task progress and cleanup before starting a replacement task; retrying alone is not a verified fix.',
     retryable: false,
     errorClass: ErrorClass.SERVICE,
   },
@@ -137,7 +138,7 @@ const MICROVM_TERMINAL_CLASSIFICATIONS: Readonly<Record<string, ErrorClassificat
 };
 const MICROVM_TERMINAL_PREFIX = 'MicroVM substrate terminated before the agent wrote a terminal status: ';
 const MICROVM_RUN_HOOK_4XX = /^Run lifecycle hook returned HTTP status 4\d{2}(?:\.|$)/i;
-const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:failed|connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
+const MICROVM_RESUME_HOOK_FAILURE = /^Resume lifecycle hook (?:failed|timed out|connection was refused|returned HTTP status [45]\d{2})(?:\.|$)/i;
 
 function microvmTerminalCode(stateReason?: string): string {
   if (stateReason && MICROVM_RUN_HOOK_4XX.test(stateReason)) return 'MICROVM_RUN_HOOK_REJECTED';
