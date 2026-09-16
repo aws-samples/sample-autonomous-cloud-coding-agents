@@ -73,10 +73,13 @@ def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
 
     1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
        SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
-       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
-       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
-       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
-       is unset (local/dev) — the helper then fails open to ambient creds.
+       that ``bedrock_creds_helper.py`` reads on AgentCore/ECS. Claude Code's
+       managed-settings ``awsCredentialExport`` runs that helper and signs
+       Bedrock requests with the tagged assumed-role credentials. MicroVM
+       instead uses the parent's scoped container-credential provider; its
+       export helper returns no credentials and cannot supply a wake barrier.
+       File writing is skipped when ``AGENT_SESSION_ROLE_ARN`` is unset
+       (local/dev); the non-MicroVM helper can fall back to ambient credentials.
 
     2. **Per-call forensics (model-invocation logs).** Set
        ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the

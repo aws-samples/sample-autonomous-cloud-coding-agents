@@ -130,9 +130,10 @@ export interface AgentSessionRoleProps {
    * subprocess is then attributed per `{user_id, repo}` in CUR 2.0 / Cost
    * Explorer via the session tags this role already carries.
    *
-   * The compute role keeps its own Bedrock grant: attribution is a billing
-   * control that fails open (the credential helper falls back to compute-role
-   * creds if the assume-role fails), so model invocation never depends on this.
+   * The compute role keeps its own Bedrock grant. On AgentCore/ECS, the export
+   * helper can fall back to compute-role credentials if attribution fails.
+   * MicroVM workers instead use the retained task-scoped credential provider;
+   * failed renewal blocks wake rather than falling back to ambient credentials.
    * Omit (e.g. isolated construct tests) to skip the Bedrock grant.
    */
   readonly invokableModels?: bedrock.IBedrockInvokable[];
@@ -162,9 +163,10 @@ export interface AgentSessionRoleProps {
  * CloudWatch Logs remains on the compute role (shared access). The
  * compute role *also* keeps `InvokeModel`; this role adds a parallel, session-
  * tagged Bedrock grant (#215) used by the Claude Code subprocess for cost
- * attribution. Long-task safety on the 1-hour-capped chained session is handled
- * by Claude Code's `awsCredentialExport` refresh, and the helper falls back to
- * the compute role if assume fails — so model invocation never breaks.
+ * attribution. AgentCore/ECS use `awsCredentialExport` with expiry and an ambient
+ * fallback for attribution failures. MicroVM uses the parent's retained scoped
+ * provider with synchronous renewal; the export helper returns no credentials.
+ * The background export refresh is not a MicroVM wake barrier.
  */
 export class AgentSessionRole extends Construct {
   /** Actions sufficient for the agent's DynamoDB access. Excludes Scan. */
@@ -278,8 +280,8 @@ export class AgentSessionRole extends Construct {
     // Reuse grantInvoke so this role's Bedrock permissions exactly mirror the
     // compute role's (cross-region profiles fan out to the foundation model in
     // every routed region — replicating that by hand would risk an AccessDenied
-    // on a cross-region route). Claude Code assumes this role (via its
-    // awsCredentialExport helper) so InvokeModel rides the session's
+    // on a cross-region route). Claude Code uses this role through the export
+    // helper or MicroVM's scoped provider, so InvokeModel rides the session's
     // {user_id, repo, task_id} tags, surfacing per-user/repo Bedrock spend in
     // CUR 2.0 / Cost Explorer. No PrincipalTag condition: the tags are for
     // billing attribution, not access scoping, so a condition would add no
