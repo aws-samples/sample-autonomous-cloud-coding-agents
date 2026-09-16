@@ -89,11 +89,26 @@ does not exclude a process crash or a lower-level restore problem.
 
 ## Next investigation
 
+The [minimal listener experiment](./645-p3-listener-probe-20260916.md) completed
+four full normal cases and recorded 14 guest resume acknowledgments without an
+unexpected refusal. Request timeouts interrupted three cases. A fresh deliberate
+closed-listener control produced the exact refusal reason while an independent
+observer still ran in the guest. This calibrates the diagnostics; it does not
+establish why the full agent loses its listener or connection.
+
+That experiment also exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md)
+in the supervisor. Its correction does not account for these four failures,
+whose worker termination reason was the service-reported connection refusal.
+
 1. Use the recorded worker IDs, region, timestamps and Resume request IDs to
    inspect service-side lifecycle diagnostics. Determine the actual connection
    error and whether the request reached the guest, including any transport retry.
 2. Correlate guest process/kernel health and the port-8080 listener at restoration.
    Application access logs do not provide that missing evidence.
+   A diagnostic full-agent image can add an independent parent-process observer
+   to record child exit status and listener health without changing approval
+   decisions or granting public ingress. Preserve the original image and compare
+   a fixed, bounded set of owned tasks.
 3. If a transport or application race is identified, make a bounded correction
    and test that trigger specifically. Do not hide a failed wake by silently
    launching another worker: the approved action and workspace may already have

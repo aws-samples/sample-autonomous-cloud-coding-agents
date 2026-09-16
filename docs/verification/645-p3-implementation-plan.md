@@ -229,6 +229,9 @@ handoff, use this order:
    Service-side connection diagnostics and guest/listener health are still
    missing. Passing retries, the callback-timeout fix and successful cleanup
    do not close this gate.
+   The [minimal listener experiment](./645-p3-listener-probe-20260916.md) also
+   exposed a separate [pending-wake timer bug](./645-p3-pending-wake.md).
+   Its local correction passed the full build and needs a live coordinator check.
 2. Complete the remaining live race/fault matrix: cancellation during transitions,
    late decision races, repeated polling/credential-refresh failures, durable
    registration races, service token-retention expiry and recovery of a worker

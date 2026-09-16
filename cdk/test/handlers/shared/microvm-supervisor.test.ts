@@ -356,19 +356,80 @@ test('repeated resume failures escalate despite successful state reads', async (
   });
 });
 
-test('uncertain observations cannot reset a wake recovery clock', async () => {
+test.each(['PENDING', 'UNKNOWN'])('%s cannot reset a wake recovery clock', async observed => {
   approve();
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
   const first = await run();
   time += 60_000;
-  strategy.pollSession.mockResolvedValue(observation('UNKNOWN'));
+  strategy.pollSession.mockResolvedValue(observation(observed));
   const unknown = await run(first.state);
   expect(unknown.state.recovery).toEqual(first.state.recovery);
   time += 60_000;
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
   expect((await run(unknown.state)).kind).toBe('failure');
   expect(strategy.resumeSession).toHaveBeenCalledTimes(1);
+});
+
+test('PENDING after an API wake uses the wake intent instead of an expired startup clock', async () => {
+  intent('suspend');
+  strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
+  const asleep = await run();
+  expect(asleep.state.recovery).toBeUndefined();
+
+  time += 360_000;
+  approve();
+  intent('resume', time);
+  const wakeStartedAt = time;
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const pending = await run(asleep.state);
+  expect(pending).toMatchObject({
+    kind: 'continue',
+    deferHeartbeat: true,
+    state: { recovery: { kind: 'wake', sinceMs: wakeStartedAt } },
+  });
+  expect(pending.state.firstObservedAtMs).toBe(asleep.state.firstObservedAtMs);
+  expect(pending.state.sessionDeadlineMs).toBe(asleep.state.sessionDeadlineMs);
+  expect(strategy.resumeSession).not.toHaveBeenCalled();
+
+  time += 10_000;
+  const replayed = await run(pending.state);
+  expect(replayed.state.recovery).toEqual(pending.state.recovery);
+  strategy.pollSession.mockResolvedValue(observation('RUNNING'));
+  const consuming = await run(replayed.state);
+  expect(consuming.state.recovery).toEqual(pending.state.recovery);
+  working();
+  row = { ...row, heartbeatAtMs: time };
+  const rebound = await run(consuming.state);
+  expect(rebound.state.recovery).toEqual(pending.state.recovery);
+  expect(row.intent?.request_id).toBeNull();
+  expect((await run(rebound.state)).state.recovery).toBeUndefined();
+});
+
+test.each(['PENDING', 'UNKNOWN'])('%s does not extend an already-expired API wake intent', async observed => {
+  approve();
+  intent('resume', NOW - MICROVM_RECOVERY_TIMEOUT_MS);
+  strategy.pollSession.mockResolvedValue(observation(observed));
+  expect(await run()).toMatchObject({
+    kind: 'failure',
+    state: { recovery: { kind: 'wake', sinceMs: NOW - MICROVM_RECOVERY_TIMEOUT_MS } },
+  });
+  expect(strategy.resumeSession).not.toHaveBeenCalled();
+});
+
+test('unexpected PENDING after coding starts receives one bounded recovery window', async () => {
+  working();
+  row = { ...row, heartbeatAtMs: time };
+  const running = await run();
+  time += 360_000;
+  strategy.pollSession.mockResolvedValue(observation('PENDING'));
+  const pending = await run(running.state);
+  expect(pending).toMatchObject({
+    kind: 'continue',
+    state: { recovery: { kind: 'unconfirmed', sinceMs: time } },
+  });
+  time += MICROVM_RECOVERY_TIMEOUT_MS;
+  expect((await run(pending.state)).kind).toBe('failure');
 });
 
 test('durable wake recovery repairs a missing wake write even after a RUNNING observation', async () => {
@@ -456,9 +517,10 @@ test('a normal wake in progress is not reported as an unintended suspension', as
   expect(emitEvent).not.toHaveBeenCalled();
 });
 
-test('HYDRATING startup is bounded even when AWS reports RUNNING', async () => {
+test.each(['PENDING', 'RUNNING'])('HYDRATING startup is bounded when AWS reports %s', async observed => {
   working();
   row = { ...row, status: 'HYDRATING' };
+  strategy.pollSession.mockResolvedValue(observation(observed));
   const starting = await run();
   time += 300_000;
   expect(await run(starting.state)).toMatchObject({ kind: 'failure', reason: 'startup-deadline' });

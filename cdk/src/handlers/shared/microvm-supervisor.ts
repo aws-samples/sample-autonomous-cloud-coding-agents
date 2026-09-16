@@ -227,8 +227,16 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     } else if (observed === 'PENDING' || observed === 'UNKNOWN') {
       // An uncertain observation cannot reset an in-flight wake/suspend clock.
       if (!state.recovery) {
-        beginRecovery(observed === 'PENDING' ? 'starting' : 'unconfirmed',
-          observed === 'PENDING' ? state.firstObservedAtMs : Date.now());
+        if (intentMatchesGate(snapshot) && snapshot.intent?.action === 'resume') {
+          // AWS can report PENDING while restoring an already-running worker.
+          // An API-triggered wake may arrive between supervisor polls; retain its
+          // saved start time instead of reusing the worker's original boot clock.
+          beginRecovery('wake', Math.min(Date.now(), snapshot.intent.requested_at_ms));
+        } else if (observed === 'PENDING' && snapshot.status === TaskStatus.HYDRATING) {
+          beginRecovery('starting', state.firstObservedAtMs);
+        } else {
+          beginRecovery('unconfirmed');
+        }
       }
     }
 
