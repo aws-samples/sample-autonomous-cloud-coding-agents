@@ -252,9 +252,17 @@ handoff, use this order:
    with specific guest-stage diagnostics and deployed task-API feedback.
    Two mistitled long-hold attempts were excluded and replaced by fresh measured
    cases. No unexpected refusal appeared; production connection handling is unchanged.
-2. Complete the remaining live race/fault matrix: cancellation during transitions,
-   late decision races, repeated polling/credential-refresh failures, durable
-   registration races, service token-retention expiry and recovery of a worker
+2. The [command-race checks](./645-p3-command-races-20260916.md) now pass cancellation
+   before/after Suspend, during observed `SUSPENDING`, and during restore
+   `PENDING`; approval during an accepted suspension and three consecutive
+   polling failures also pass. Six required cases used nine workers, with three
+   harness-invalidated attempts explicitly excluded and replaced. All temporary
+   resources were removed. The same follow-up deployed clearer status-read
+   failure guidance in coordinator version 7 and verified the normal task API;
+   image 5.0 and disabled suspension settings remain in place.
+   Complete the remaining live race/fault matrix:
+   late decision races, credential-refresh failures, durable registration races,
+   service token-retention expiry and recovery of a worker
    whose ID was genuinely lost. Keep each injected failure distinct from an
    unrelated service failure.
 3. Complete effective permissions and network checks for the other backends,

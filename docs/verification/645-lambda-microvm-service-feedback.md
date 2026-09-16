@@ -16,6 +16,7 @@ is the receipt that lets the service team find a particular call.
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
 | F05 | Medium | HTTP connection handling across suspend/resume | Contract question; no established cause of F01 |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
+| F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Replay observed through roughly five minutes; maximum retention and post-expiry behavior unknown |
 
 ## F01 — Wake request accepted, then the hook connection is refused
 
@@ -105,6 +106,13 @@ the failed identity-read stage, returned HTTP 409 and surfaced specific failure
 guidance through the deployed task API. This distinguishes an application
 rejection from F01's missing hook-entry evidence.
 
+The [command-race follow-up](./645-p3-command-races-20260916.md) additionally
+records a checkpoint transaction rejected after cancellation, cancellation during
+observed `SUSPENDING` / restore `PENDING`, and three consecutive status-read
+failures. The latter now has specific platform-error guidance deployed in
+coordinator 7 and verified through the normal task API. These controlled failures
+and passing race cases do not explain F01.
+
 **Ask:** provide a service-side lifecycle attempt timeline or equivalent
 structured fields: originating API receipt, hook kind/attempt ID, start/end
 times, connection versus HTTP failure, HTTP status, underlying error code and
@@ -184,6 +192,35 @@ Clarify whether a service-linked role is ever an alternative for this connector.
 **Limits:** an optional property can be correct for other connector types. This
 is a request for clearer conditional validation and setup guidance, not a claim
 that every connector requires the same role. Service response: pending.
+
+## F07 — Specify Run token retention and recovery after a lost reply
+
+A client token is an order number: repeating the same launch request with that
+number should recover the original worker instead of ordering another one.
+
+**Evidence:** the [start/recovery probes](./645-p2-start-recovery-live-20260914.md)
+verified simultaneous identical calls, changed-request rejection and replay of a
+terminated worker through roughly five minutes. A replayed Run response could
+still report `PENDING`; a separate Get correctly reported the worker's current
+state. The installed SDK documents idempotency but gives no token-retention
+duration. ABCA therefore stops automatic recovery without a saved handle after
+its own conservative 120-second deadline.
+
+**Impact:** if AWS created a worker but its response was lost, an operator needs
+to find that exact worker. An undocumented retention boundary prevents proving
+that a late retry cannot create another one. ABCA must not invent a new token
+or automatically submit a replacement task to hide the uncertainty.
+
+**Ask:** what is the guaranteed token-retention period, including after worker
+termination or image-version changes? After expiry, is the same token rejected
+or treated as a new launch? Which supported API, event or audit field maps the
+original token/API receipt to the worker ID when the client never received it?
+How long does that mapping remain available?
+
+**Limits:** five minutes of successful replay does not establish the maximum
+retention period. The 120-second limit is ABCA policy, not an AWS guarantee.
+Post-expiry behavior and recovery of a genuinely unknown worker ID remain
+unverified. Service response: pending.
 
 ## Updating this tracker
 
