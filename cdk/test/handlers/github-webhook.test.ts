@@ -90,6 +90,25 @@ function deploymentStatusBody(overrides: {
   });
 }
 
+const amplifySha = '6a19dae554d1f33615a468a95c0035e05c41de3e';
+function amplifyBody(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    action: 'completed',
+    repository: { full_name: 'owner/repo' },
+    check_run: {
+      id: 104550173395,
+      name: 'AWS Amplify Console Web Preview',
+      status: 'completed',
+      conclusion: 'success',
+      head_sha: amplifySha,
+      details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com',
+      app: { slug: 'aws-amplify-us-east-1', owner: { login: 'aws-amplify-console' } },
+      pull_requests: [{ number: 41, head: { sha: amplifySha } }],
+      ...overrides,
+    },
+  });
+}
+
 describe('github-webhook receiver', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -217,5 +236,98 @@ describe('github-webhook receiver', () => {
     ddbSend.mockRejectedValueOnce(new Error('DDB unavailable'));
     const res = await handler(event(deploymentStatusBody()));
     expect(res.statusCode).toBe(500);
+  });
+
+  test('Amplify preview completion automatically invokes the existing capture pipeline', async () => {
+    const body = amplifyBody();
+    const res = await handler(event(body, { 'X-GitHub-Event': 'check_run' }));
+    expect(res.statusCode).toBe(200);
+    expect(verifyMock).toHaveBeenCalledWith(
+      process.env.GITHUB_WEBHOOK_SECRET_ARN, 'sha256=ignored', body,
+    );
+    const invoke = lambdaSend.mock.calls[0][0].input;
+    const forwarded = JSON.parse(new TextDecoder().decode(invoke.Payload));
+    expect(JSON.parse(forwarded.raw_body)).toEqual({
+      repository: { full_name: 'owner/repo' },
+      deployment: { id: 104550173395, sha: amplifySha, environment: 'Preview' },
+      deployment_status: {
+        id: 104550173395,
+        state: 'success',
+        environment_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com',
+      },
+    });
+    expect(ddbSend.mock.calls[0][0].input.Item.dedup_key)
+      .toBe('amplify#owner/repo#104550173395#104550173395');
+  });
+
+  test.each([
+    { status: 'in_progress' },
+    { conclusion: 'failure' },
+    { name: 'unrelated CI check' },
+    { app: { slug: 'aws-amplify-us-east-1', owner: { login: 'another-owner' } } },
+    { app: { slug: 'another-app', owner: { login: 'aws-amplify-console' } } },
+    { details_url: 'https://console.aws.amazon.com/amplify/home' },
+    { details_url: 'https://pr-41.example.com' },
+    { details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com.evil.example' },
+    { details_url: 'http://pr-41.d1prbufb0nhsx2.amplifyapp.com' },
+    { details_url: 'https://user:password@pr-41.d1prbufb0nhsx2.amplifyapp.com' },
+    { details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com:8080' },
+    { details_url: 'not-a-url' },
+    { details_url: null },
+    { pull_requests: [] },
+    { pull_requests: [{ number: 42, head: { sha: amplifySha } }] },
+    { pull_requests: [{ number: 41, head: { sha: 'b'.repeat(40) } }] },
+    { head_sha: '../invalid' },
+    { id: -1 },
+    { id: '104550173395' },
+  ])('ignores an ineligible Amplify check: %j', async (overrides) => {
+    const res = await handler(event(amplifyBody(overrides), { 'X-GitHub-Event': 'check_run' }));
+    expect(JSON.parse(res.body)).toEqual({ ok: true, skipped_check: true });
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test.each(['null', '[]', '{}', '{"action":"completed","check_run":null}'])(
+    'ignores malformed check envelopes: %s', async (body) => {
+      const res = await handler(event(body, { 'X-GitHub-Event': 'check_run' }));
+      expect(res.statusCode).toBe(200);
+      expect(lambdaSend).not.toHaveBeenCalled();
+    },
+  );
+
+  test('ignores a non-completed check action and an invalid repository', async () => {
+    const body = JSON.parse(amplifyBody());
+    body.action = 'rerequested';
+    await handler(event(JSON.stringify(body), { 'X-GitHub-Event': 'check_run' }));
+    body.action = 'completed';
+    body.repository.full_name = '../invalid/repo';
+    await handler(event(JSON.stringify(body), { 'X-GitHub-Event': 'check_run' }));
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('deduplicates redelivered Amplify completions', async () => {
+    ddbSend.mockRejectedValueOnce(new FakeConditionalCheckFailedException());
+    const res = await handler(event(amplifyBody(), { 'X-GitHub-Event': 'check_run' }));
+    expect(JSON.parse(res.body).deduped).toBe(true);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects an unsigned Amplify completion before normalization', async () => {
+    verifyMock.mockResolvedValueOnce(false);
+    const res = await handler(event(amplifyBody(), { 'X-GitHub-Event': 'check_run' }));
+    expect(res.statusCode).toBe(401);
+    expect(ddbSend).not.toHaveBeenCalled();
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('Amplify preview checks respect the configured environment filter', async () => {
+    process.env.SCREENSHOT_TARGET_ENVIRONMENT = 'Production';
+    try {
+      const res = await handler(event(amplifyBody(), { 'X-GitHub-Event': 'check_run' }));
+      expect(JSON.parse(res.body).skipped_environment).toBe('Preview');
+      expect(lambdaSend).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
+    }
   });
 });
