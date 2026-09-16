@@ -216,6 +216,9 @@ Second P3 foundation batch implemented locally (2026-09-13):
 
 ## Remaining work in execution order
 
+Keep service questions and evidence in the
+[Lambda MicroVM service-team feedback tracker](./645-lambda-microvm-service-feedback.md).
+
 The image `4.0` long-sleep acceptance and verification-infrastructure cleanup are
 complete. The original approval timed out correctly, real credentials renewed
 after expiry, and coordinator cleanup passed without watcher repair. The

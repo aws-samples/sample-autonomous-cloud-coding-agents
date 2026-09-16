@@ -2,6 +2,8 @@
 
 Updated 2026-09-16 UTC. This is an investigation record and a prepared report;
 it has not been submitted to AWS or published as an issue.
+The [service-team feedback tracker](./645-lambda-microvm-service-feedback.md)
+keeps this blocker alongside related service questions and earlier P2 findings.
 
 ## Observed problem
 
