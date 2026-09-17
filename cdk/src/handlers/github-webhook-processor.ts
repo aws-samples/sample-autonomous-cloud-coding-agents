@@ -101,15 +101,17 @@ const PR_LOOKUP_RETRY_DELAYS_MS = [
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /** Set only by the receiver after Amplify check URL/PR/SHA validation. */
+  readonly validated_pr_number?: number;
 }
 
 /**
- * Async processor for verified GitHub `deployment_status` webhooks.
+ * Async processor for verified deployment statuses and normalized Amplify checks.
  *
  * Flow:
  *  1. Parse the payload (already validated as deployment_status by the
  *     receiver, but we re-extract the fields we need).
- *  2. Find the open PR for the deploy SHA via the GitHub Commits API.
+ *  2. Fetch the validated Amplify PR, or find the deployment SHA's open PR.
  *  3. Capture a screenshot of `deployment.environment_url` via
  *     AgentCore Browser.
  *  4. PUT the PNG to the screenshot bucket.
@@ -139,6 +141,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   } catch (err) {
     logger.error('GitHub webhook processor could not parse raw_body', {
       error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  const validatedPrNumber = event.validated_pr_number;
+  if (validatedPrNumber !== undefined
+    && (!Number.isSafeInteger(validatedPrNumber) || validatedPrNumber <= 0)) {
+    logger.warn('Processor received invalid validated PR number', {
+      event: 'screenshot.amplify_pr_rejected', reason: 'invalid_pr_number',
     });
     return;
   }
@@ -192,7 +203,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Retry the PR lookup, but cap by remaining budget so the screenshot
   // half always gets at least MIN_CAPTURE_BUDGET_MS.
   const prLookupBudget = Math.max(0, remaining() - POST_CAPTURE_RESERVE_MS - MIN_CAPTURE_BUDGET_MS);
-  const pr = await findPullRequestForShaWithRetry(repo, sha, token, prLookupBudget);
+  const pr = await findPullRequestForShaWithRetry(repo, sha, token, prLookupBudget, validatedPrNumber);
   if (!pr) {
     // Promote to error: "no PR after the retry budget" is the shape of
     // a systematic break (deploy-without-PR, token regression, GitHub
@@ -541,6 +552,7 @@ async function findPullRequestForShaWithRetry(
   sha: string,
   token: string,
   budgetMs: number,
+  validatedPrNumber?: number,
 ): Promise<OpenPr | null> {
   const deadline = Date.now() + budgetMs;
   for (let i = 0; i < PR_LOOKUP_RETRY_DELAYS_MS.length; i++) {
@@ -552,7 +564,7 @@ async function findPullRequestForShaWithRetry(
       await new Promise((r) => setTimeout(r, Math.min(delay, remaining)));
     }
     if (Date.now() >= deadline) return null;
-    const pr = await findPullRequestForSha(repo, sha, token);
+    const pr = await findPullRequestForSha(repo, sha, token, validatedPrNumber);
     if (pr) return pr;
     const next = PR_LOOKUP_RETRY_DELAYS_MS[i + 1];
     if (next !== undefined) {
@@ -574,14 +586,20 @@ async function findPullRequestForShaWithRetry(
  *
  * Returns the OPEN PR that the deploy is *for* (head SHA == `sha`), or
  * the first open PR as a fallback, or null if none. Closed/merged PRs
- * are filtered out — v1 only screenshots active reviews.
+ * are filtered out. For Amplify, only the validated PR with a matching head
+ * is accepted; there is no fallback to another PR.
  */
 async function findPullRequestForSha(
   repo: string,
   sha: string,
   token: string,
+  validatedPrNumber?: number,
 ): Promise<OpenPr | null> {
-  const url = `https://api.github.com/repos/${repo}/commits/${sha}/pulls`;
+  // A commit can head multiple PRs. Amplify's validated PR is authoritative;
+  // fetch it directly so pagination or commit-pulls ordering cannot redirect it.
+  const url = validatedPrNumber === undefined
+    ? `https://api.github.com/repos/${repo}/commits/${sha}/pulls`
+    : `https://api.github.com/repos/${repo}/pulls/${validatedPrNumber}`;
   let res: Response;
   // 5s per-request timeout via AbortController. Mirrors the Linear
   // path, where unbounded fetches were previously blamed for budget
@@ -601,7 +619,7 @@ async function findPullRequestForSha(
       signal: ac.signal,
     });
   } catch (err) {
-    logger.warn('GitHub commit-pulls fetch failed', {
+    logger.warn('GitHub PR lookup fetch failed', {
       repo,
       sha,
       timed_out: ac.signal.aborted,
@@ -613,7 +631,7 @@ async function findPullRequestForSha(
   }
 
   if (!res.ok) {
-    logger.warn('GitHub commit-pulls returned non-2xx', {
+    logger.warn('GitHub PR lookup returned non-2xx', {
       repo,
       sha,
       status: res.status,
@@ -621,19 +639,37 @@ async function findPullRequestForSha(
     return null;
   }
 
-  // GitHub's contract is a JSON array, but a transient 2xx HTML body or
-  // a malformed payload would crash an unguarded `.find` and throw out
-  // of the (un-DLQ'd) processor. Treat anything non-array as no-PR.
+  // Parse defensively: both endpoints can return an unexpected response body.
+  // A validated Amplify PR must still be open and head this exact commit.
   let parsed: unknown;
   try {
     parsed = await res.json();
   } catch (err) {
-    logger.warn('GitHub commit-pulls returned non-JSON body', {
+    logger.warn('GitHub PR lookup returned non-JSON body', {
       repo,
       sha,
       error: err instanceof Error ? err.message : String(err),
     });
     return null; // nosemgrep: ts-silent-success-masking -- malformed GitHub body treated as no-PR; prevents processor crash on transient HTML/502
+  }
+  if (validatedPrNumber !== undefined) {
+    const pr = parsed as { number?: unknown; state?: unknown; title?: unknown; body?: unknown; head?: { sha?: unknown; ref?: unknown } } | null;
+    const reject = (reason: string): null => {
+      logger.warn('Validated Amplify PR no longer matches preview', {
+        event: 'screenshot.amplify_pr_rejected', reason, repo, pr_number: validatedPrNumber,
+      });
+      return null;
+    };
+    if (!pr || Array.isArray(pr) || pr.number !== validatedPrNumber) return reject('pr_number_mismatch');
+    if (pr.state !== 'open') return reject('pr_not_open');
+    if (pr.head?.sha !== sha) return reject('head_sha_mismatch');
+    if (typeof pr.head.ref !== 'string' || !pr.head.ref) return reject('missing_head_ref');
+    return {
+      number: validatedPrNumber,
+      title: typeof pr.title === 'string' ? pr.title : '',
+      body: typeof pr.body === 'string' ? pr.body : '',
+      headRefName: pr.head.ref,
+    };
   }
   if (!Array.isArray(parsed)) {
     logger.warn('GitHub commit-pulls did not return an array', { repo, sha });

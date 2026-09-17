@@ -75,6 +75,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 
 import { handler } from '../../src/handlers/github-webhook-processor';
+import { normalizeAmplifyPreviewCheck } from '../../src/handlers/shared/github-deployment-status';
 import { logger } from '../../src/handlers/shared/logger';
 
 function payload(overrides: Record<string, unknown> = {}): { raw_body: string } {
@@ -486,5 +487,110 @@ describe('authoritative Jira deployment routing', () => {
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     expect(deliverJiraMock).not.toHaveBeenCalled();
     expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('validated Amplify PR routing', () => {
+  const sha = 'a'.repeat(40);
+  const taskId = '01JXABCDEF1234567890ABCDEF';
+  const branch = `bgagent/${taskId}/eng-42`;
+  const pr41 = { number: 41, state: 'open', title: 'ENG-41', head: { ref: 'bgagent/wrong-task/eng-41', sha } };
+  const pr42 = { number: 42, state: 'open', title: 'ENG-42', head: { ref: branch, sha } };
+
+  function amplifyEvent() {
+    const result = normalizeAmplifyPreviewCheck({
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      check_run: {
+        id: 123,
+        name: 'AWS Amplify Console Web Preview',
+        status: 'completed',
+        conclusion: 'success',
+        head_sha: sha,
+        details_url: 'https://pr-42.app123.amplifyapp.com',
+        app: { slug: 'aws-amplify-us-east-1', owner: { login: 'aws-amplify-console' } },
+        pull_requests: [pr41, pr42],
+      },
+    });
+    if (!result.ok) throw new Error(result.reason);
+    return { raw_body: JSON.stringify(result.payload), validated_pr_number: result.prNumber };
+  }
+
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
+    deliverJiraMock.mockReset().mockResolvedValue(undefined);
+    resolveGitHubTokenMock.mockReset().mockResolvedValue('token');
+    captureScreenshotMock.mockReset().mockResolvedValue(Buffer.from('png'));
+    s3Send.mockReset().mockResolvedValue({});
+    ddbSend.mockReset();
+    upsertTaskCommentMock.mockReset().mockResolvedValue({ commentId: 12 });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+    findLinearIssueMock.mockReset().mockResolvedValue({ issueId: 'issue-42', linearWorkspaceId: 'ws' });
+    extractFromBranchMock.mockReset().mockImplementation((ref) => ref === branch ? 'ENG-42' : 'ENG-41');
+  });
+
+  test.each(['jira', 'linear'])('two PRs with one SHA route GitHub and %s feedback to the validated PR', async (source) => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (url) => ({
+      ok: true,
+      status: 200,
+      // The commit-pulls endpoint would pick PR 41. Only a lookup by number
+      // preserves the PR encoded in the preview URL through task persistence.
+      json: async () => String(url).endsWith('/pulls/42') ? pr42 : [pr41, pr42],
+    } as Response));
+    const task = { task_id: taskId, repo: 'owner/repo', head_sha: sha, channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'TG-42' } };
+    ddbSend.mockResolvedValue({ Attributes: task });
+
+    await handler(amplifyEvent());
+
+    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/repos/owner/repo/pulls/42', expect.anything());
+    expect(captureScreenshotMock).toHaveBeenCalledWith('https://pr-42.app123.amplifyapp.com', expect.anything());
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 42 }));
+    expect(ddbSend.mock.calls[0][0].input.Key).toEqual({ task_id: taskId });
+    if (source === 'jira') {
+      expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', task,
+        'owner/repo', sha, expect.stringContaining('https://d1.cloudfront.net/'),
+        'https://pr-42.app123.amplifyapp.com', expect.any(Function));
+      expect(findLinearIssueMock).not.toHaveBeenCalled();
+    } else {
+      expect(findLinearIssueMock).toHaveBeenCalledWith('ENG-42', 'LinearWorkspaceRegistry');
+      expect(postIssueCommentMock).toHaveBeenCalledWith(expect.anything(), 'issue-42', expect.stringContaining('https://pr-42.app123.amplifyapp.com'));
+      expect(deliverJiraMock).not.toHaveBeenCalled();
+    }
+  });
+
+  test.each([
+    [pr41, 'pr_number_mismatch'],
+    [{ ...pr42, state: 'closed' }, 'pr_not_open'],
+    [{ ...pr42, head: { ref: branch, sha: 'b'.repeat(40) } }, 'head_sha_mismatch'],
+    [{ ...pr42, head: { sha } }, 'missing_head_ref'],
+    [null, 'pr_number_mismatch'],
+    [[pr41, pr42], 'pr_number_mismatch'],
+  ])('rejects a changed or malformed PR without capturing or falling back: %j', async (pr, reason) => {
+    jest.useFakeTimers();
+    try {
+      const log = jest.spyOn(logger, 'warn');
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => pr } as Response);
+      const pending = handler(amplifyEvent());
+      await jest.runAllTimersAsync();
+      await pending;
+      expect(log).toHaveBeenCalledWith('Validated Amplify PR no longer matches preview', {
+        event: 'screenshot.amplify_pr_rejected', reason, repo: 'owner/repo', pr_number: 42,
+      });
+      expect(fetchMock.mock.calls.every(([url]) => String(url).endsWith('/pulls/42'))).toBe(true);
+      expect(captureScreenshotMock).not.toHaveBeenCalled();
+      expect(ddbSend).not.toHaveBeenCalled();
+      expect(upsertTaskCommentMock).not.toHaveBeenCalled();
+      expect(deliverJiraMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid forwarded PR number %s', async (number) => {
+    await handler({ ...amplifyEvent(), validated_pr_number: number });
+    expect(resolveGitHubTokenMock).not.toHaveBeenCalled();
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
   });
 });

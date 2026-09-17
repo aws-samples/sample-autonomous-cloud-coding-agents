@@ -11,7 +11,7 @@ The pipeline accepts GitHub `deployment_status` events and successful AWS Amplif
 | Provider | Out of the box? | Notes |
 |---|---|---|
 | **Vercel** (managed hosting + GitHub app) | ✅ | The worked example below uses this. Default `environment` is `Preview`. |
-| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Enable PR previews and subscribe the ABCA webhook to **Check runs**. Successful `AWS Amplify Console Web Preview` checks are normalized to environment `Preview`. |
+| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Enable PR previews and subscribe the ABCA webhook to **Check runs**. Successful `AWS Amplify Console Web Preview` checks bypass the deployment environment filter. |
 | **Netlify** (managed hosting + GitHub app) | ⚠ | `environment` is `Deploy Preview <PR#>`, which the current single-string `SCREENSHOT_TARGET_ENVIRONMENT` filter doesn't match across all PRs. Workable today only by picking one specific PR's environment string; broader pattern matching isn't shipped. |
 | **GitHub Actions** that calls `POST /repos/.../deployments` (typical for ECS/Fargate, Cloud Run, Fly.io, Railway, Cloudflare Pages, etc.) | ✅ | Your workflow controls the `environment` field; pass whatever you want and set `SCREENSHOT_TARGET_ENVIRONMENT` to match. |
 | **External CI** (CircleCI, GitLab, ArgoCD) that doesn't touch GitHub Deployments | ❌ | Add a final job that calls the GitHub Deployments API after the deploy succeeds — see [GitHub's example](https://docs.github.com/en/rest/deployments/deployments#create-a-deployment). |
@@ -23,11 +23,13 @@ For a deployment-status event, ABCA needs:
 
 If your provider gives you that, you're done. The example below is Vercel because that's what we smoke-tested on; the pipeline doesn't otherwise prefer one provider over another.
 
-For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed.
+For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed. The processor fetches that exact PR and confirms it is still open with the same head SHA before capture, so two PRs sharing a commit cannot redirect the screenshot or Jira/Linear feedback.
+
+**Existing Amplify operators:** redeploy ABCA to pick up this receiver and processor, then add **Check runs** to your existing webhook while keeping **Deployment statuses** selected. Keep any branch-name `SCREENSHOT_TARGET_ENVIRONMENT` value (for example, `main`): deployment statuses still use it, while validated Amplify PR checks bypass it. You do not need to change it to `Preview`. Subscriptions affect future events only; rebuild an existing PR preview to verify the change. If an earlier receiver already accepted and deduplicated a completion, replaying that same check within the one-hour dedup window will not capture again.
 
 ## What you get
 
-When you (or the agent) push to a branch that triggers a preview deploy, your provider deploys the preview, posts a `deployment_status` event back to GitHub, and ABCA's webhook receiver:
+When you (or the agent) push to a branch that triggers a preview deploy, your provider deploys the preview, posts a deployment status or Amplify preview check back to GitHub, and ABCA's webhook receiver:
 
 1. Captures a full-page screenshot of the preview URL via AgentCore Browser
 2. Uploads the PNG to a private S3 bucket served via CloudFront
@@ -39,13 +41,13 @@ End-to-end latency: typically 10–15 seconds after your provider reports the de
 ## How it works
 
 ```
-agent push → provider preview build → deployment_status webhook
+agent push → provider preview build → deployment_status / Amplify check_run
                                               ↓
                                     POST /v1/github/webhook
                                               ↓
                                   receiver Lambda (HMAC verify, dedup,
-                                                  state=success +
-                                                  environment filter)
+                                                  successful deploy/check +
+                                                  provider validation)
                                               ↓
                                     processor Lambda
                                               ↓
@@ -55,7 +57,7 @@ agent push → provider preview build → deployment_status webhook
                                               ↓
                               CloudFront-served public URL
                                               ↓
-                          GitHub PR comment (+ Linear issue comment if linked)
+                          GitHub PR comment (+ Jira/Linear feedback if linked)
 ```
 
 Architecture notes:
@@ -143,12 +145,13 @@ Open any PR on the configured repo (push a commit, open a PR however you normall
 
 ## Configuring for non-Vercel providers
 
-The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`, matches Vercel's per-PR environment label). To use a different value, pass `screenshotTargetEnvironment` to the `GitHubScreenshotIntegration` construct in your CDK app and redeploy.
+The pipeline filters `deployment_status` webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`, matches Vercel's per-PR environment label). To use a different value, pass `screenshotTargetEnvironment` to the `GitHubScreenshotIntegration` construct in your CDK app and redeploy.
 
 | Provider | Typical `environment` value | What to set |
 |---|---|---|
 | Vercel | `Preview` | leave default |
-| Amplify Hosting PR check | normalized to `Preview` | leave default; subscribe to Check runs |
+| Amplify Hosting PR check | not used for filtering | keep existing value; subscribe to Check runs |
+| Amplify branch deployment status | branch name | match the branch name exactly |
 | Netlify | `Deploy Preview <PR#>` | currently not directly matchable across all PRs (single fixed-string filter only) |
 | GitHub Actions custom | whatever your workflow passes | match it exactly |
 
@@ -162,7 +165,19 @@ The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (
 
 ### Webhook delivers 200 but no screenshot lands
 
-For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
+For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Its `reason` is also logged by the receiver as `screenshot.amplify_check_rejected`, without the raw payload or URL. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
+
+Inspect the receiver logs for rejected checks:
+
+| Reason | What to check |
+|---|---|
+| `action_not_completed`, `check_not_completed`, `check_not_successful` | Wait for a successful completed check. |
+| `unexpected_check_name`, `unexpected_app_owner`, `unexpected_app_slug` | The check must be `AWS Amplify Console Web Preview`, owned by `aws-amplify-console`, with an `aws-amplify-*` app slug. Other CI checks are ignored. |
+| `invalid_details_url`, `untrusted_preview_url`, `invalid_preview_pr_number` | The details link must be a trusted HTTPS `pr-N.<app-id>.amplifyapp.com` preview URL with a positive PR number, no credentials, and no non-default port. |
+| `invalid_pull_requests`, `preview_pr_not_found`, `head_sha_mismatch` | The check must list the preview PR with the same head SHA as the check. |
+| `invalid_payload`, `invalid_check_id`, `invalid_head_sha`, `invalid_repository` | The webhook payload is malformed; inspect the delivery in GitHub. |
+
+Malformed JSON returns 400 and logs `screenshot.webhook_rejected` with `reason: invalid_json`. Invalid signatures return 401 before normalization. Valid checks use a separate `amplify#` dedup namespace, so a deployment-status event with identical IDs does not suppress the check. Duplicate checks return `deduped` without dispatching another capture.
 
 Check the screenshot processor logs:
 
@@ -175,8 +190,9 @@ aws lambda list-functions --region us-east-1 \
 Then tail the function's CloudWatch log group. Common silent skips:
 
 - `skipped_state` — the delivery was for a non-`success` status (e.g. `pending`, `in_progress`); ignore.
-- `skipped_environment` — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
+- `skipped_environment` (deployment statuses only) — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
 - `skipped_no_url` — the `success` status didn't include `environment_url`. Some providers post URL-less success events; the next push usually carries the URL.
+- `screenshot.amplify_pr_rejected` — the validated PR is closed, its head SHA changed, or GitHub returned mismatched/malformed PR data. Capture stops without falling back to another PR. Rebuild the current PR preview after a new push.
 - `No open PR found for SHA after retries` — the deploy provider built and reported faster than the agent could `gh pr create` (race window > 35s). Rare; redeliver the webhook from GitHub's UI to retry.
 
 ### No screenshots at all: check the processor alarms and DLQ

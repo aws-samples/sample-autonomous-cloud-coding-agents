@@ -52,6 +52,7 @@ process.env.GITHUB_WEBHOOK_DEDUP_TABLE_NAME = 'GhWebhookDedup';
 process.env.GITHUB_WEBHOOK_PROCESSOR_FUNCTION_NAME = 'gh-webhook-processor';
 
 import { handler } from '../../src/handlers/github-webhook';
+import { logger } from '../../src/handlers/shared/logger';
 
 function event(body: string | null, headers: Record<string, string> = {}): APIGatewayProxyEvent {
   return {
@@ -111,6 +112,7 @@ function amplifyBody(overrides: Record<string, unknown> = {}): string {
 
 describe('github-webhook receiver', () => {
   beforeEach(() => {
+    jest.restoreAllMocks();
     ddbSend.mockReset();
     lambdaSend.mockReset();
     verifyMock.mockReset();
@@ -247,6 +249,7 @@ describe('github-webhook receiver', () => {
     );
     const invoke = lambdaSend.mock.calls[0][0].input;
     const forwarded = JSON.parse(new TextDecoder().decode(invoke.Payload));
+    expect(forwarded.validated_pr_number).toBe(41);
     expect(JSON.parse(forwarded.raw_body)).toEqual({
       repository: { full_name: 'owner/repo' },
       deployment: { id: 104550173395, sha: amplifySha, environment: 'Preview' },
@@ -261,28 +264,38 @@ describe('github-webhook receiver', () => {
   });
 
   test.each([
-    { status: 'in_progress' },
-    { conclusion: 'failure' },
-    { name: 'unrelated CI check' },
-    { app: { slug: 'aws-amplify-us-east-1', owner: { login: 'another-owner' } } },
-    { app: { slug: 'another-app', owner: { login: 'aws-amplify-console' } } },
-    { details_url: 'https://console.aws.amazon.com/amplify/home' },
-    { details_url: 'https://pr-41.example.com' },
-    { details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com.evil.example' },
-    { details_url: 'http://pr-41.d1prbufb0nhsx2.amplifyapp.com' },
-    { details_url: 'https://user:password@pr-41.d1prbufb0nhsx2.amplifyapp.com' },
-    { details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com:8080' },
-    { details_url: 'not-a-url' },
-    { details_url: null },
-    { pull_requests: [] },
-    { pull_requests: [{ number: 42, head: { sha: amplifySha } }] },
-    { pull_requests: [{ number: 41, head: { sha: 'b'.repeat(40) } }] },
-    { head_sha: '../invalid' },
-    { id: -1 },
-    { id: '104550173395' },
-  ])('ignores an ineligible Amplify check: %j', async (overrides) => {
+    [{ status: 'in_progress' }, 'check_not_completed'],
+    [{ conclusion: 'failure' }, 'check_not_successful'],
+    [{ name: 'unrelated CI check' }, 'unexpected_check_name'],
+    [{ app: { slug: 'aws-amplify-us-east-1', owner: { login: 'another-owner' } } }, 'unexpected_app_owner'],
+    [{ app: { slug: 'another-app', owner: { login: 'aws-amplify-console' } } }, 'unexpected_app_slug'],
+    [{ details_url: 'https://console.aws.amazon.com/amplify/home' }, 'untrusted_preview_url'],
+    [{ details_url: 'https://pr-41.example.com' }, 'untrusted_preview_url'],
+    [{ details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com.evil.example' }, 'untrusted_preview_url'],
+    [{ details_url: 'http://pr-41.d1prbufb0nhsx2.amplifyapp.com' }, 'untrusted_preview_url'],
+    [{ details_url: 'https://user:password@pr-41.d1prbufb0nhsx2.amplifyapp.com' }, 'untrusted_preview_url'],
+    [{ details_url: 'https://pr-41.d1prbufb0nhsx2.amplifyapp.com:8080' }, 'untrusted_preview_url'],
+    [{ details_url: 'not-a-url' }, 'invalid_details_url'],
+    [{ details_url: null }, 'invalid_details_url'],
+    [{ details_url: 'https://pr-0.app.amplifyapp.com' }, 'untrusted_preview_url'],
+    [{ details_url: 'https://pr-9007199254740992.app.amplifyapp.com' }, 'invalid_preview_pr_number'],
+    [{ pull_requests: null }, 'invalid_pull_requests'],
+    [{ pull_requests: [] }, 'preview_pr_not_found'],
+    [{ pull_requests: [null, {}, { number: 42, head: { sha: amplifySha } }] }, 'preview_pr_not_found'],
+    [{ pull_requests: [{ number: 41, head: { sha: 'b'.repeat(40) } }] }, 'head_sha_mismatch'],
+    [{ head_sha: '../invalid' }, 'invalid_head_sha'],
+    [{ id: -1 }, 'invalid_check_id'],
+    [{ id: 1.5 }, 'invalid_check_id'],
+    [{ id: Number.MAX_SAFE_INTEGER + 1 }, 'invalid_check_id'],
+    [{ id: '104550173395' }, 'invalid_check_id'],
+  ] as const)('rejects an ineligible Amplify check: %j (%s)', async (overrides, reason) => {
+    const log = jest.spyOn(logger, 'info');
     const res = await handler(event(amplifyBody(overrides), { 'X-GitHub-Event': 'check_run' }));
-    expect(JSON.parse(res.body)).toEqual({ ok: true, skipped_check: true });
+    expect(JSON.parse(res.body)).toEqual({ ok: true, skipped_check: true, reason });
+    // Only a static reason is logged, never the URL, credentials, or raw payload.
+    expect(log).toHaveBeenCalledWith('Amplify preview check rejected', {
+      event: 'screenshot.amplify_check_rejected', reason,
+    });
     expect(ddbSend).not.toHaveBeenCalled();
     expect(lambdaSend).not.toHaveBeenCalled();
   });
@@ -291,6 +304,7 @@ describe('github-webhook receiver', () => {
     'ignores malformed check envelopes: %s', async (body) => {
       const res = await handler(event(body, { 'X-GitHub-Event': 'check_run' }));
       expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body).reason).toBe('invalid_payload');
       expect(lambdaSend).not.toHaveBeenCalled();
     },
   );
@@ -320,14 +334,47 @@ describe('github-webhook receiver', () => {
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
-  test('Amplify preview checks respect the configured environment filter', async () => {
-    process.env.SCREENSHOT_TARGET_ENVIRONMENT = 'Production';
+  test('Amplify previews bypass a branch filter while deployment statuses still require it', async () => {
+    process.env.SCREENSHOT_TARGET_ENVIRONMENT = 'main';
     try {
       const res = await handler(event(amplifyBody(), { 'X-GitHub-Event': 'check_run' }));
-      expect(JSON.parse(res.body).skipped_environment).toBe('Preview');
-      expect(lambdaSend).not.toHaveBeenCalled();
+      expect(JSON.parse(res.body)).toEqual({ ok: true });
+      expect(lambdaSend).toHaveBeenCalledTimes(1);
+      await handler(event(deploymentStatusBody({ environment: 'main' })));
+      expect(lambdaSend).toHaveBeenCalledTimes(2);
+      const skipped = await handler(event(deploymentStatusBody()));
+      expect(JSON.parse(skipped.body).skipped_environment).toBe('Preview');
+      expect(lambdaSend).toHaveBeenCalledTimes(2);
     } finally {
       delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
     }
+  });
+  test('deployment statuses and Amplify checks with identical IDs deduplicate independently', async () => {
+    const keys = new Set<string>();
+    ddbSend.mockImplementation(async ({ input }) => {
+      expect(input.ConditionExpression).toBe('attribute_not_exists(dedup_key)');
+      const key = input.Item.dedup_key;
+      if (keys.has(key)) throw new FakeConditionalCheckFailedException();
+      keys.add(key);
+      return {};
+    });
+    const deployment = event(deploymentStatusBody({ deploymentId: 104550173395, statusId: 104550173395 }));
+    const check = event(amplifyBody(), { 'X-GitHub-Event': 'check_run' });
+    await handler(deployment);
+    await handler(check);
+    expect(lambdaSend).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((await handler(check)).body).deduped).toBe(true);
+    expect(JSON.parse((await handler(deployment)).body).deduped).toBe(true);
+    expect(lambdaSend).toHaveBeenCalledTimes(2);
+  });
+
+  test('invalid check JSON logs a static reason without including body fragments', async () => {
+    const log = jest.spyOn(logger, 'warn');
+    const res = await handler(event('secret-token-not-json', { 'X-GitHub-Event': 'check_run' }));
+    expect(res.statusCode).toBe(400);
+    expect(log).toHaveBeenCalledWith('GitHub webhook body is not valid JSON', {
+      event: 'screenshot.webhook_rejected', reason: 'invalid_json',
+    });
+    expect(lambdaSend).not.toHaveBeenCalled();
   });
 });

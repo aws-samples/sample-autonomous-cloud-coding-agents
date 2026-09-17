@@ -50,8 +50,9 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * Verifies `X-Hub-Signature-256` (per
  * https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
  * filters to successful `deployment_status` events and Amplify PR preview
- * `check_run` completions whose normalized environment
- * matches `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`), dedups
+ * `check_run` completions. Deployment statuses must match
+ * `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`); validated Amplify
+ * PR previews bypass that environment filter. Dedups
  * on `(repo, deployment_id, status_id)`, and async-invokes the
  * processor Lambda so we can ack within GitHub's 10s timeout. Other
  * event types (push, pull_request, ping, …) get an immediate 200 so
@@ -95,20 +96,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.body);
-    } catch (err) {
+    } catch {
       logger.warn('GitHub webhook body is not valid JSON', {
-        error: err instanceof Error ? err.message : String(err),
+        event: 'screenshot.webhook_rejected', reason: 'invalid_json',
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
     const normalized = eventType === 'check_run' ? normalizeAmplifyPreviewCheck(parsed) : null;
-    if (eventType === 'check_run' && !normalized) {
-      return jsonResponse(200, { ok: true, skipped_check: true });
+    if (normalized && !normalized.ok) {
+      logger.info('Amplify preview check rejected', {
+        event: 'screenshot.amplify_check_rejected', reason: normalized.reason,
+      });
+      return jsonResponse(200, { ok: true, skipped_check: true, reason: normalized.reason });
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return jsonResponse(400, { error: 'Invalid webhook payload' });
     }
-    const raw = normalized ?? parsed as GitHubDeploymentStatusPayload;
+    const raw = normalized?.payload ?? parsed as GitHubDeploymentStatusPayload;
 
     // Filter pre-validate so common skip-paths return early without
     // logging a "missing fields" warn for an in-progress event.
@@ -116,18 +120,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
-    // Filter to a configured environment name. Defaults to `Preview`
+    // Filter deployment statuses only. Amplify check identity + URL + PR/SHA
+    // validation already proves a PR preview, regardless of legacy branch filters.
+    // Defaults to `Preview`
     // because Vercel labels per-PR deploys that way, but every provider
     // uses different conventions:
     //   - Vercel preview:           `Preview`
-    //   - AWS Amplify PR check:     normalized to `Preview`
+    //   - AWS Amplify deployment:   branch name
     //   - GitHub Actions deploys:   whatever the workflow passes to
     //                               `actions/create-deployment`
     //   - Netlify deploy previews:  `Deploy Preview <PR#>`
     // Operators on non-Vercel backends override via
     // `SCREENSHOT_TARGET_ENVIRONMENT` (Lambda env var, redeploy required).
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
-    if (raw.deployment?.environment !== targetEnv) {
+    if (eventType === 'deployment_status' && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
         ok: true,
         skipped_environment: raw.deployment?.environment,
@@ -190,7 +196,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
         Payload: new TextEncoder().encode(JSON.stringify({
-          raw_body: normalized ? JSON.stringify(normalized) : event.body,
+          raw_body: normalized ? JSON.stringify(normalized.payload) : event.body,
+          ...(normalized && { validated_pr_number: normalized.prNumber }),
         })),
       }));
     } catch (invokeErr) {

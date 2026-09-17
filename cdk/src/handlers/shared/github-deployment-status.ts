@@ -59,47 +59,80 @@ export interface GitHubDeploymentStatusPayload {
   };
 }
 
+export type AmplifyPreviewRejectionReason =
+  | 'invalid_payload'
+  | 'action_not_completed'
+  | 'check_not_completed'
+  | 'check_not_successful'
+  | 'unexpected_check_name'
+  | 'unexpected_app_owner'
+  | 'unexpected_app_slug'
+  | 'invalid_check_id'
+  | 'invalid_head_sha'
+  | 'invalid_details_url'
+  | 'untrusted_preview_url'
+  | 'invalid_preview_pr_number'
+  | 'invalid_pull_requests'
+  | 'preview_pr_not_found'
+  | 'head_sha_mismatch'
+  | 'invalid_repository';
+
+export type AmplifyPreviewCheckResult =
+  | { readonly ok: true; readonly payload: GitHubDeploymentStatusPayload; readonly prNumber: number }
+  | { readonly ok: false; readonly reason: AmplifyPreviewRejectionReason };
+
 /**
- * Amplify Hosting publishes successful PR previews as check runs, not GitHub
- * deployments. Normalize its signed webhook into the existing capture contract.
- * Ignore other apps/checks and reject console links or non-preview destinations.
+ * Normalize a signed Amplify PR preview check for capture. Rejections carry
+ * static reason codes so the receiver can diagnose skips without logging input.
+ * Keep the validated PR identity separate from the deployment-shaped payload.
  */
-export function normalizeAmplifyPreviewCheck(value: unknown): GitHubDeploymentStatusPayload | null {
+export function normalizeAmplifyPreviewCheck(value: unknown): AmplifyPreviewCheckResult {
   const record = (input: unknown): Record<string, unknown> =>
     input !== null && typeof input === 'object' && !Array.isArray(input)
       ? input as Record<string, unknown>
       : {};
+  const reject = (reason: AmplifyPreviewRejectionReason): AmplifyPreviewCheckResult => ({ ok: false, reason });
   const raw = record(value);
   const check = record(raw.check_run);
   const app = record(check.app);
-  if (raw.action !== 'completed' || check.status !== 'completed' || check.conclusion !== 'success'
-    || check.name !== 'AWS Amplify Console Web Preview'
-    || record(app.owner).login !== 'aws-amplify-console'
-    || typeof app.slug !== 'string' || !/^aws-amplify-[a-z0-9-]+$/.test(app.slug)
-    || typeof check.id !== 'number' || !Number.isSafeInteger(check.id) || check.id <= 0
-    || typeof check.head_sha !== 'string' || !/^[0-9a-f]{40}$/i.test(check.head_sha)
-    || typeof check.details_url !== 'string') {
-    return null;
-  }
+  if (Object.keys(check).length === 0) return reject('invalid_payload');
+  if (raw.action !== 'completed') return reject('action_not_completed');
+  if (check.status !== 'completed') return reject('check_not_completed');
+  if (check.conclusion !== 'success') return reject('check_not_successful');
+  if (check.name !== 'AWS Amplify Console Web Preview') return reject('unexpected_check_name');
+  if (record(app.owner).login !== 'aws-amplify-console') return reject('unexpected_app_owner');
+  if (typeof app.slug !== 'string' || !/^aws-amplify-[a-z0-9-]+$/.test(app.slug)) return reject('unexpected_app_slug');
+  if (typeof check.id !== 'number' || !Number.isSafeInteger(check.id) || check.id <= 0) return reject('invalid_check_id');
+  if (typeof check.head_sha !== 'string' || !/^[0-9a-f]{40}$/i.test(check.head_sha)) return reject('invalid_head_sha');
+  if (typeof check.details_url !== 'string') return reject('invalid_details_url');
   let url: URL;
   try {
     url = new URL(check.details_url);
   } catch {
-    return null; // nosemgrep: ts-silent-success-masking -- Invalid URL means an ineligible check; the receiver returns skipped_check without starting capture.
+    return reject('invalid_details_url');
   }
-  const preview = /^pr-(\d+)\.[a-z0-9]+\.amplifyapp\.com$/.exec(url.hostname);
-  if (url.protocol !== 'https:' || url.username || url.password || url.port || !preview
-    || !Array.isArray(check.pull_requests)
-    || !check.pull_requests.some((pr: unknown) => record(pr).number === Number(preview[1])
-      && record(record(pr).head).sha === check.head_sha)) {
-    return null;
+  const preview = /^pr-([1-9]\d*)\.[a-z0-9]+\.amplifyapp\.com$/.exec(url.hostname);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !preview) {
+    return reject('untrusted_preview_url');
+  }
+  const prNumber = Number(preview[1]);
+  if (!Number.isSafeInteger(prNumber)) return reject('invalid_preview_pr_number');
+  if (!Array.isArray(check.pull_requests)) return reject('invalid_pull_requests');
+  const previewPrs = check.pull_requests.filter((pr: unknown) => record(pr).number === prNumber);
+  if (previewPrs.length === 0) return reject('preview_pr_not_found');
+  if (!previewPrs.some((pr: unknown) => record(record(pr).head).sha === check.head_sha)) {
+    return reject('head_sha_mismatch');
   }
   const repository = record(raw.repository);
-  if (typeof repository.full_name !== 'string' || !isValidRepo(repository.full_name)) return null;
+  if (typeof repository.full_name !== 'string' || !isValidRepo(repository.full_name)) return reject('invalid_repository');
   return {
-    repository: { full_name: repository.full_name },
-    deployment: { id: check.id, sha: check.head_sha, environment: 'Preview' },
-    deployment_status: { id: check.id, state: 'success', environment_url: check.details_url },
+    ok: true,
+    prNumber,
+    payload: {
+      repository: { full_name: repository.full_name },
+      deployment: { id: check.id, sha: check.head_sha, environment: 'Preview' },
+      deployment_status: { id: check.id, state: 'success', environment_url: check.details_url },
+    },
   };
 }
 
