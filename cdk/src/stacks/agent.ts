@@ -84,6 +84,7 @@ import { TaskTable } from '../constructs/task-table';
 import { ToolGateway } from '../constructs/tool-gateway';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
+import { parseGuardrailVersionBinding, VersionedGuardrail } from '../constructs/versioned-guardrail';
 import { WebhookTable } from '../constructs/webhook-table';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
@@ -449,7 +450,8 @@ export class AgentStack extends Stack {
 
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
-    const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
+    const inputGuardrail = new VersionedGuardrail(this, 'InputGuardrail', {
+      existingVersion: parseGuardrailVersionBinding(this.node.tryGetContext('guardrailVersionMigration')),
       guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [

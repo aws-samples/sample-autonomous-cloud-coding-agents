@@ -20,8 +20,10 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
+import { canonicalJson, Json } from '../utils/canonical-json';
 
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export { canonicalJson };
+
 type JsonObject = { [key: string]: Json };
 
 export interface TemplateCensus {
@@ -60,15 +62,6 @@ function object(value: Json | undefined, label: string): JsonObject {
 
 function readJson(file: string): JsonObject {
   return object(JSON.parse(readFileSync(file, 'utf8')) as Json, file);
-}
-
-/** Object key order is irrelevant; arrays, metadata, identities, and properties are not. */
-export function canonicalJson(value: Json): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function sha256(text: string): string {

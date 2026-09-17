@@ -81,6 +81,21 @@ A blueprint can declare its own `security.cedarPolicies` rules on top of the bui
 
 See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
 
+### Input guardrail versions
+
+The input guardrail publishes one version for each rendered configuration. Its logical ID hashes the final guardrail CloudFormation properties, excluding deployment tags, plus the publication description. Unrelated CDK tokens and GitHub run tags do not publish a new version. Policy changes, including changes made through CDK escape hatches, do; changing the publication description also requires a new version under CloudFormation's replacement rules. Published versions have `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain` so older executions can keep using them while the guardrail exists. Retained versions need explicit cleanup after consumers and rollback windows have expired, and count toward Bedrock version quotas. Retaining a version does not protect it if its parent guardrail is deleted.
+
+**Existing installations need an explicit binding before upgrading from the earlier alpha-CDK versioning scheme.** Without it, the new logical ID would remove the old version from the template, and that old resource may not yet have a retention policy. New installations need no binding.
+
+For an existing installation:
+
+1. Capture the deployed template and the input guardrail version's logical and physical IDs. Read the published Bedrock version's configuration too; the mutable `DRAFT` alone is not evidence of what that version contains.
+2. Synthesize the candidate using the installation's exact stack name, account, Region, configuration and build inputs. Read `abca:guardrail-configuration-sha256` from the candidate `AWS::Bedrock::GuardrailVersion` metadata. Compare the native guardrail configuration with both the deployed template and published version. Do not use a structural census fixture's hash for a real installation.
+3. Set the CDK context `guardrailVersionMigration` to `{"logicalId":"<deployed-version-logical-id>","configurationHash":"<candidate-64-character-sha256>"}`. CDK accepts this object in context or as a quoted JSON string passed through `-c`. Synthesize again and review the complete change set: the native guardrail, existing version identity/properties, and consumers must remain unchanged. Retention policies, metadata and an explicit dependency on the guardrail are the expected version changes.
+4. Rehearse the normalization before deploying it to a protected installation. Check all unrelated changes, active executions, rollback and quota headroom too. The binding checks the candidate hash locally; it does not query AWS or prove that the supplied logical ID and published configuration belong together.
+
+Keep the binding through unchanged releases. A configuration change while it is present fails synthesis. When intentionally releasing a new guardrail configuration, remove the binding in that release; this switches to configuration-derived identities and publishes a new version. First verify that the normalization successfully installed retention on the old version. Retain the binding with the old release inputs for rollback review; do not assume rolling back to the earlier alpha-CDK implementation reproduces its original token-derived identity.
+
 ### Other options
 
 - **Stack name** - The default is `backgroundagent-dev` (set in `cdk/src/main.ts`). If you rename it, update all `--stack-name` references.

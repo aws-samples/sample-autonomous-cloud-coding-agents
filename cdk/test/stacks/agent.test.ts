@@ -45,6 +45,34 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  test('binds every input guardrail consumer to the explicitly mapped version', () => {
+    const versions = Object.values(template.findResources('AWS::Bedrock::GuardrailVersion'));
+    expect(versions).toHaveLength(1);
+    const logicalId = 'ExistingInputGuardrailVersion';
+    const app = new App({
+      context: {
+        guardrailVersionMigration: {
+          logicalId,
+          configurationHash: versions[0].Metadata['abca:guardrail-configuration-sha256'],
+        },
+      },
+    });
+    const mapped = Template.fromStack(new AgentStack(app, 'TestAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(mapped.findResources('AWS::Bedrock::Guardrail'))
+      .toEqual(template.findResources('AWS::Bedrock::Guardrail'));
+    expect(Object.keys(mapped.findResources('AWS::Bedrock::GuardrailVersion'))).toEqual([logicalId]);
+    const consumers = Object.values(mapped.findResources('AWS::Lambda::Function'))
+      .filter(resource => resource.Properties.Environment?.Variables?.GUARDRAIL_VERSION);
+    // The webhook create-task Lambda shares TaskApi's createTaskEnv.
+    expect(consumers).toHaveLength(10);
+    for (const resource of consumers) {
+      expect(resource.Properties.Environment.Variables.GUARDRAIL_VERSION)
+        .toEqual({ 'Fn::GetAtt': [logicalId, 'Version'] });
+    }
+  });
+
   test('creates exactly 22 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
