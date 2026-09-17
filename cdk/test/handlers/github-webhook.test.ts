@@ -92,7 +92,7 @@ function deploymentStatusBody(overrides: {
 }
 
 const amplifySha = '6a19dae554d1f33615a468a95c0035e05c41de3e';
-function amplifyBody(overrides: Record<string, unknown> = {}): string {
+function amplifyBody(overrides: Record<string, unknown> = {}, envelope: Record<string, unknown> = {}): string {
   return JSON.stringify({
     action: 'completed',
     repository: { full_name: 'owner/repo' },
@@ -107,6 +107,7 @@ function amplifyBody(overrides: Record<string, unknown> = {}): string {
       pull_requests: [{ number: 41, head: { sha: amplifySha } }],
       ...overrides,
     },
+    ...envelope,
   });
 }
 
@@ -218,7 +219,7 @@ describe('github-webhook receiver', () => {
     // Forwarded payload preserves the raw body verbatim.
     const invokeArg = (lambdaSend.mock.calls[0][0] as { input: { Payload: Uint8Array } }).input;
     const decoded = JSON.parse(new TextDecoder().decode(invokeArg.Payload));
-    expect(decoded.raw_body).toBeDefined();
+    expect(decoded).toEqual({ raw_body: deploymentStatusBody() });
   });
 
   test('rolls back the dedup row when processor invoke fails', async () => {
@@ -278,7 +279,7 @@ describe('github-webhook receiver', () => {
     [{ details_url: 'not-a-url' }, 'invalid_details_url'],
     [{ details_url: null }, 'invalid_details_url'],
     [{ details_url: 'https://pr-0.app.amplifyapp.com' }, 'untrusted_preview_url'],
-    [{ details_url: 'https://pr-9007199254740992.app.amplifyapp.com' }, 'invalid_preview_pr_number'],
+    [{ details_url: 'https://pr-9007199254740992.app.amplifyapp.com' }, 'invalid_pr_number'],
     [{ pull_requests: null }, 'invalid_pull_requests'],
     [{ pull_requests: [] }, 'preview_pr_not_found'],
     [{ pull_requests: [null, {}, { number: 42, head: { sha: amplifySha } }] }, 'preview_pr_not_found'],
@@ -309,14 +310,39 @@ describe('github-webhook receiver', () => {
     },
   );
 
-  test('ignores a non-completed check action and an invalid repository', async () => {
-    const body = JSON.parse(amplifyBody());
-    body.action = 'rerequested';
-    await handler(event(JSON.stringify(body), { 'X-GitHub-Event': 'check_run' }));
-    body.action = 'completed';
-    body.repository.full_name = '../invalid/repo';
-    await handler(event(JSON.stringify(body), { 'X-GitHub-Event': 'check_run' }));
+  test.each([
+    [{ action: 'rerequested' }, 'action_not_completed'],
+    [{ repository: { full_name: '../invalid/repo' } }, 'invalid_repository'],
+    [{ repository: null }, 'invalid_repository'],
+  ])('returns a specific reason for rejected envelopes: %j', async (envelope, reason) => {
+    const response = await handler(event(amplifyBody({}, envelope), { 'X-GitHub-Event': 'check_run' }));
+    expect(JSON.parse(response.body)).toEqual({ ok: true, skipped_check: true, reason });
     expect(lambdaSend).not.toHaveBeenCalled();
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
+  test.each([amplifySha, amplifySha.toUpperCase()])('normalizes mixed-case check and PR SHAs: %s', async (prSha) => {
+    await handler(event(amplifyBody({ head_sha: amplifySha.toUpperCase(), pull_requests: [{ number: 41, head: { sha: prSha } }] }), { 'X-GitHub-Event': 'check_run' }));
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+    const forwarded = JSON.parse(new TextDecoder().decode(lambdaSend.mock.calls[0][0].input.Payload));
+    expect(JSON.parse(forwarded.raw_body).deployment.sha).toBe(amplifySha);
+  });
+
+  test.each(['X-GitHub-Delivery', 'x-github-delivery'])('correlates rejected checks with a validated %s', async (header) => {
+    const log = jest.spyOn(logger, 'info');
+    const delivery = '12345678-abcd-1234-abcd-123456789abc';
+    await handler(event(amplifyBody({ app: {} }), { 'X-GitHub-Event': 'check_run', [header]: delivery }));
+    expect(log).toHaveBeenCalledWith('Amplify preview check rejected', {
+      event: 'screenshot.amplify_check_rejected', reason: 'unexpected_app_owner', delivery_id: delivery,
+    });
+  });
+
+  test('does not log untrusted delivery header content', async () => {
+    const log = jest.spyOn(logger, 'info');
+    await handler(event(amplifyBody({ app: {} }), { 'X-GitHub-Event': 'check_run', 'X-GitHub-Delivery': 'secret-token' }));
+    expect(log).toHaveBeenCalledWith('Amplify preview check rejected', {
+      event: 'screenshot.amplify_check_rejected', reason: 'unexpected_app_owner',
+    });
   });
 
   test('deduplicates redelivered Amplify completions', async () => {
@@ -352,7 +378,6 @@ describe('github-webhook receiver', () => {
   test('deployment statuses and Amplify checks with identical IDs deduplicate independently', async () => {
     const keys = new Set<string>();
     ddbSend.mockImplementation(async ({ input }) => {
-      expect(input.ConditionExpression).toBe('attribute_not_exists(dedup_key)');
       const key = input.Item.dedup_key;
       if (keys.has(key)) throw new FakeConditionalCheckFailedException();
       keys.add(key);
@@ -366,6 +391,10 @@ describe('github-webhook receiver', () => {
     expect(JSON.parse((await handler(check)).body).deduped).toBe(true);
     expect(JSON.parse((await handler(deployment)).body).deduped).toBe(true);
     expect(lambdaSend).toHaveBeenCalledTimes(2);
+    expect(ddbSend).toHaveBeenCalledTimes(4);
+    for (const [command] of ddbSend.mock.calls) {
+      expect(command.input.ConditionExpression).toBe('attribute_not_exists(dedup_key)');
+    }
   });
 
   test('invalid check JSON logs a static reason without including body fragments', async () => {

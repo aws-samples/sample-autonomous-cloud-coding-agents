@@ -25,7 +25,7 @@ If your provider gives you that, you're done. The example below is Vercel becaus
 
 For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed. The processor fetches that exact PR and confirms it is still open with the same head SHA before capture, so two PRs sharing a commit cannot redirect the screenshot or Jira/Linear feedback.
 
-**Existing Amplify operators:** redeploy ABCA to pick up this receiver and processor, then add **Check runs** to your existing webhook while keeping **Deployment statuses** selected. Keep any branch-name `SCREENSHOT_TARGET_ENVIRONMENT` value (for example, `main`): deployment statuses still use it, while validated Amplify PR checks bypass it. You do not need to change it to `Preview`. Subscriptions affect future events only; rebuild an existing PR preview to verify the change. If an earlier receiver already accepted and deduplicated a completion, replaying that same check within the one-hour dedup window will not capture again.
+**Existing Amplify operators:** redeploy ABCA to pick up this receiver and processor, then add **Check runs** to your existing webhook while keeping **Deployment statuses** selected. Keep any branch-name `SCREENSHOT_TARGET_ENVIRONMENT` value (for example, `main`): deployment statuses still use it, while validated Amplify PR checks bypass it. After redeploy, a webhook already subscribed to **Check runs** will start capturing and publishing Amplify PR previews that a branch-name filter previously excluded, with no further configuration change; screenshots are publicly readable through CloudFront and may contain customer data rendered by the preview. To keep Amplify check-triggered capture disabled, deselect **Check runs** on the ABCA webhook. You do not need to change the environment filter to `Preview`. Subscriptions affect future events only; rebuild an existing PR preview to verify the change. If an earlier receiver already accepted and deduplicated a completion, replaying that same check within the one-hour dedup window will not capture again.
 
 ## What you get
 
@@ -165,7 +165,7 @@ The pipeline filters `deployment_status` webhooks against `SCREENSHOT_TARGET_ENV
 
 ### Webhook delivers 200 but no screenshot lands
 
-For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Its `reason` is also logged by the receiver as `screenshot.amplify_check_rejected`, without the raw payload or URL. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
+For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Its `reason` is also logged by the receiver as `screenshot.amplify_check_rejected`, without the raw payload or URL. A valid `X-GitHub-Delivery` UUID is logged as `delivery_id` so you can locate the event in GitHub. Expected incomplete or unrelated checks retain info-level reason logs because every rejected check must be diagnosable. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
 
 Inspect the receiver logs for rejected checks:
 
@@ -173,7 +173,7 @@ Inspect the receiver logs for rejected checks:
 |---|---|
 | `action_not_completed`, `check_not_completed`, `check_not_successful` | Wait for a successful completed check. |
 | `unexpected_check_name`, `unexpected_app_owner`, `unexpected_app_slug` | The check must be `AWS Amplify Console Web Preview`, owned by `aws-amplify-console`, with an `aws-amplify-*` app slug. Other CI checks are ignored. |
-| `invalid_details_url`, `untrusted_preview_url`, `invalid_preview_pr_number` | The details link must be a trusted HTTPS `pr-N.<app-id>.amplifyapp.com` preview URL with a positive PR number, no credentials, and no non-default port. |
+| `invalid_details_url`, `untrusted_preview_url`, `invalid_pr_number` | The details link must be a trusted HTTPS `pr-N.<app-id>.amplifyapp.com` preview URL with a positive PR number, no credentials, and no non-default port. |
 | `invalid_pull_requests`, `preview_pr_not_found`, `head_sha_mismatch` | The check must list the preview PR with the same head SHA as the check. |
 | `invalid_payload`, `invalid_check_id`, `invalid_head_sha`, `invalid_repository` | The webhook payload is malformed; inspect the delivery in GitHub. |
 
@@ -192,8 +192,23 @@ Then tail the function's CloudWatch log group. Common silent skips:
 - `skipped_state` — the delivery was for a non-`success` status (e.g. `pending`, `in_progress`); ignore.
 - `skipped_environment` (deployment statuses only) — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
 - `skipped_no_url` — the `success` status didn't include `environment_url`. Some providers post URL-less success events; the next push usually carries the URL.
-- `screenshot.amplify_pr_rejected` — the validated PR is closed, its head SHA changed, or GitHub returned mismatched/malformed PR data. Capture stops without falling back to another PR. Rebuild the current PR preview after a new push.
+- `screenshot.amplify_pr_rejected` — a terminal rejection of the validated PR, logged once at warn level. Capture stops immediately without retrying, falling back to another PR, or emitting `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. See the reasons below.
 - `No open PR found for SHA after retries` — the deploy provider built and reported faster than the agent could `gh pr create` (race window > 35s). Rare; redeliver the webhook from GitHub's UI to retry.
+
+Processor-side Amplify reasons:
+
+| Reason | What to check |
+|---|---|
+| `invalid_pr_number` | The forwarded PR number must be a positive safe integer. Deploy the receiver and processor together. |
+| `pr_not_found` | GitHub returned 404 for the validated PR. Confirm the PR exists and the GitHub token can access it; GitHub also uses 404 to conceal inaccessible resources. |
+| `pr_request_rejected` | GitHub rejected the PR lookup with a non-retryable 4xx response. Inspect the logged `status`, token permissions, and request. |
+| `pr_number_mismatch` | GitHub returned a different PR number than the validated preview. Inspect the PR lookup response. |
+| `pr_not_open` | The PR closed or merged while Amplify built the preview. No capture is needed. |
+| `live_pr_head_sha_mismatch` | The live PR head changed after the check started. Rebuild the current preview. Receiver code `head_sha_mismatch` instead compares the check's embedded PR head with its own SHA. |
+| `missing_head_ref` | GitHub returned the expected PR and SHA without a usable branch name. Inspect the PR response. |
+| `malformed_pr_response` | GitHub returned a null, array, or non-object PR body. Inspect the API response. |
+
+The processor also rechecks the Amplify URL's HTTPS origin, credentials, port, and PR number before requesting a token or capturing; rejection logs use `untrusted_preview_url` and only the hostname. Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and 403 responses carrying rate-limit headers retain bounded retries. Exhaustion logs `SCREENSHOT_PR_LOOKUP_EXHAUSTED` with the final failure reason. After resolving a transient failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
 
 ### No screenshots at all: check the processor alarms and DLQ
 

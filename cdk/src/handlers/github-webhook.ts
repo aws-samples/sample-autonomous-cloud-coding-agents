@@ -23,6 +23,7 @@ import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   type GitHubDeploymentStatusPayload,
+  type ProcessorEvent,
   normalizeAmplifyPreviewCheck,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
@@ -93,19 +94,23 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
+    // GitHub delivery IDs are UUIDs. Validate before logging header content.
+    const delivery = event.headers['X-GitHub-Delivery'] ?? event.headers['x-github-delivery'];
+    const correlation = delivery && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(delivery)
+      ? { delivery_id: delivery } : {};
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.body);
     } catch {
       logger.warn('GitHub webhook body is not valid JSON', {
-        event: 'screenshot.webhook_rejected', reason: 'invalid_json',
+        event: 'screenshot.webhook_rejected', reason: 'invalid_json', ...correlation,
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
     const normalized = eventType === 'check_run' ? normalizeAmplifyPreviewCheck(parsed) : null;
     if (normalized && !normalized.ok) {
       logger.info('Amplify preview check rejected', {
-        event: 'screenshot.amplify_check_rejected', reason: normalized.reason,
+        event: 'screenshot.amplify_check_rejected', reason: normalized.reason, ...correlation,
       });
       return jsonResponse(200, { ok: true, skipped_check: true, reason: normalized.reason });
     }
@@ -120,20 +125,14 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
-    // Filter deployment statuses only. Amplify check identity + URL + PR/SHA
-    // validation already proves a PR preview, regardless of legacy branch filters.
-    // Defaults to `Preview`
-    // because Vercel labels per-PR deploys that way, but every provider
-    // uses different conventions:
-    //   - Vercel preview:           `Preview`
-    //   - AWS Amplify deployment:   branch name
-    //   - GitHub Actions deploys:   whatever the workflow passes to
-    //                               `actions/create-deployment`
-    //   - Netlify deploy previews:  `Deploy Preview <PR#>`
-    // Operators on non-Vercel backends override via
-    // `SCREENSHOT_TARGET_ENVIRONMENT` (Lambda env var, redeploy required).
+    // Filter deployment statuses to SCREENSHOT_TARGET_ENVIRONMENT (default
+    // `Preview`, matching Vercel). Amplify deployment statuses use branch names;
+    // GitHub Actions uses the workflow's environment; Netlify uses `Deploy Preview
+    // <PR#>`. Operators can override the Lambda variable and redeploy.
+    // Validated Amplify checks already identify a PR preview and bypass this filter,
+    // including branch-name values that previously excluded those previews.
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
-    if (eventType === 'deployment_status' && raw.deployment?.environment !== targetEnv) {
+    if (!normalized && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
         ok: true,
         skipped_environment: raw.deployment?.environment,
@@ -191,14 +190,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
+    const processorEvent: ProcessorEvent = {
+      raw_body: normalized ? JSON.stringify(normalized.payload) : event.body,
+      ...(normalized && { validated_pr_number: normalized.prNumber }),
+    };
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify({
-          raw_body: normalized ? JSON.stringify(normalized.payload) : event.body,
-          ...(normalized && { validated_pr_number: normalized.prNumber }),
-        })),
+        Payload: new TextEncoder().encode(JSON.stringify(processorEvent)),
       }));
     } catch (invokeErr) {
       logger.error('Failed to invoke GitHub webhook processor', {
