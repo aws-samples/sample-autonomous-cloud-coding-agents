@@ -6,6 +6,13 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**AgentCore effective permissions (2026-09-17):** the
+[actual runtime probe](./645-p3-agentcore-permissions-20260917.md) passes 19
+ambient/scoped AWS permission checks on normal runtime version 5. The
+independent audit verifies the exact tool command and AWS receipts, and
+separately records a watcher snapshot race after normal finalization.
+Its session, private infrastructure and harmless probe objects were removed.
+
 **Normal repository path (2026-09-17):** the
 [repository acceptance record](./645-p3-repository-path-20260917.md) verifies
 normal clone/setup, one approval sleep/wake, passing post-build/lint and
@@ -206,7 +213,8 @@ is superseded by these records.
 - [x] Verify MicroVM manifest/download transport, malformed or mismatched inputs, URL expiry/revocation, a foreign private-bucket denial and >1 MiB transport in AWS; verify concurrent/repeated/conflicting S3 preparation with operator credentials.
 - [x] Verify deployed MicroVM-role metadata/S3 permissions, public-object denial and actual signer-credential expiry in AWS; see the [effective IAM evidence](./645-effective-iam-20260915.md) for scope.
 - [x] Fix ECS approval-table configuration and verify current-container approval/cancellation, v2 payload cleanup, ambient/scoped permissions and port 443/80 controls in a bounded deployment; remove its infrastructure.
-- [ ] Complete the remaining AgentCore permission checks, runtime ingress/remote-MCP paths and coordinated-rollout matrix in AWS.
+- [x] Verify 19 actual ambient/scoped permission requests from normal AgentCore runtime 5 and remove the private fixture.
+- [ ] Complete runtime ingress/remote-MCP paths and the coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
 - [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
@@ -382,8 +390,10 @@ handoff, use this order:
    worker whose ID never reached coordinator state. The latter required an
    exact task/worker pair in the guest log; it does not establish post-retention
    behavior or a recovery path when those logs are unavailable.
-3. Complete the remaining AgentCore permission and runtime/network negatives,
-   plus remote-MCP connectivity. The
+3. Complete the remaining runtime/network negatives and remote-MCP connectivity.
+   The [AgentCore permission probe](./645-p3-agentcore-permissions-20260917.md)
+   now passes 19 actual requests on normal runtime version 5, including ambient
+   denial, scoped task access and protected-field denials. The
    [ECS follow-up](./645-p3-final-image-and-ecs-20260917.md) now verifies real
    ambient/scoped permission requests, port 443 success versus port 80 denial,
    approval/cancellation, payload deletion and stopped workers on the current
