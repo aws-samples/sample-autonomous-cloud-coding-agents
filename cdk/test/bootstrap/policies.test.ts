@@ -556,6 +556,8 @@ describe('computeLambdaMicrovmPolicy', () => {
       expect(resources).toEqual([
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
       ]);
       // NOT the stack-wide role prefix the conditioned statement uses: an
       // unconditioned pass on `backgroundagent-dev-*` would drop the
@@ -599,6 +601,22 @@ describe('computeLambdaMicrovmPolicy', () => {
           return re.test(arn);
         });
         expect(matched).toBe(true);
+      }
+    });
+
+    it('limits nested PassRole to the two explicit build and operator names', () => {
+      const resources = passRoleStatement().Resource as string[];
+      const matches = (name: string) => resources.some(pattern =>
+        new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`)
+          .test(`arn:aws:iam::123456789012:role/${name}`));
+      expect(matches('backgroundagent-dev-MicrovmBuildRole')).toBe(true);
+      expect(matches('backgroundagent-dev-MicrovmConnectorRole')).toBe(true);
+      for (const name of [
+        'backgroundagent-dev-MicrovmExecutionRole',
+        'backgroundagent-dev-MicrovmBuildRoleOther',
+        'backgroundagent-dev-OtherBuildRole',
+      ]) {
+        expect(matches(name)).toBe(false);
       }
     });
   });

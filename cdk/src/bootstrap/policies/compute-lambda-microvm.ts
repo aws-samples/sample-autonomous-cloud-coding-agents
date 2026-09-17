@@ -134,7 +134,8 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
       //    shared statement would have dropped that constraint for ~30 roles to
       //    fix two.
       //
-      // SCOPE. Two name-prefix patterns, not `role/backgroundagent-dev-*`, and
+      // SCOPE. Build/operator prefixes for flat deployments and exact names for
+      // nested deployments, not `role/backgroundagent-dev-*`, and
       // deliberately NOT the execution role — CloudFormation never passes that one
       // (the orchestrator does, at `RunMicrovm`), so including it here would widen
       // the unconditioned pass to the role that runs untrusted repo code for no
@@ -155,6 +156,10 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
           // Passed as `operatorRole` on AWS::Lambda::NetworkConnector (required
           // for VPC_EGRESS connectors).
           'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+          // Nested deployments pin these two physical names to the parent name;
+          // no generated child-stack prefix or role-name wildcard is needed.
+          'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+          'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
         ],
       }),
       // A shared value is required because durable executions retain their

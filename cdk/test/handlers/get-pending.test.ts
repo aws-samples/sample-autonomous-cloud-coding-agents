@@ -27,6 +27,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
+  BatchGetCommand: jest.fn((input: unknown) => ({ _type: 'BatchGet', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
 
@@ -34,6 +35,7 @@ let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
 process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.PENDING_RATE_LIMIT_PER_MINUTE = '10';
 
 import { handler } from '../../src/handlers/get-pending';
@@ -76,21 +78,138 @@ beforeEach(() => {
 });
 
 /**
- * Two-mock chain used by every test that returns a non-empty pending
- * list: (1) rate-limit Update passes, (2) GSI Query returns ``items``.
- *
- * ``matching_rule_ids`` is projected onto the ``user_id-status-index``
- * GSI directly (see the construct), so the handler maps each field
- * from the Query result without a second read — keeping the mock
- * chain short.
+ * GSI metadata plus strongly consistent reads of the owning task states.
  */
-function setupPendingMocks(items: ReadonlyArray<Record<string, unknown>>): void {
+function setupPendingMocks(
+  items: ReadonlyArray<Record<string, unknown>>,
+  tasks = items.map(row => ({
+    task_id: row.task_id,
+    user_id: 'user-alice',
+    status: 'AWAITING_APPROVAL',
+    awaiting_approval_request_id: row.request_id,
+  })),
+): void {
   mockSend
     .mockResolvedValueOnce({}) // rate-limit
-    .mockResolvedValueOnce({ Items: items });
+    .mockResolvedValueOnce({ Items: items })
+    .mockResolvedValueOnce({ Responses: { Tasks: tasks } });
 }
 
 describe('get-pending', () => {
+  test('finds a current request after a full page of cancelled legacy requests', async () => {
+    const oldRows = Array.from({ length: 100 }, (_, i) => ({ task_id: `old-${i}`, request_id: 'r' }));
+    const lastKey = { task_id: 'old-99', request_id: 'r', user_id: 'user-alice', status: 'PENDING' };
+    mockSend.mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Items: oldRows, LastEvaluatedKey: lastKey })
+      .mockResolvedValueOnce({
+        Responses: {
+          Tasks: oldRows.map(row => ({
+            ...row, user_id: 'user-alice', status: 'CANCELLED',
+          })),
+        },
+      })
+      .mockResolvedValueOnce({ Items: [{ task_id: 'current', request_id: 'new' }] })
+      .mockResolvedValueOnce({
+        Responses: {
+          Tasks: [{
+            task_id: 'current',
+            user_id: 'user-alice',
+            status: 'AWAITING_APPROVAL',
+            awaiting_approval_request_id: 'new',
+          }],
+        },
+      });
+
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).data.pending).toEqual([
+      expect.objectContaining({ task_id: 'current', request_id: 'new' }),
+    ]);
+    const queries = mockSend.mock.calls.filter(([command]) => command._type === 'Query');
+    expect(queries).toHaveLength(2);
+    expect(queries[1][0].input.ExclusiveStartKey).toEqual(lastKey);
+    expect(queries[0][1].abortSignal).toBe(queries[1][1].abortSignal);
+  });
+
+  test('stops paging at the display limit even when the index has more rows', async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({ task_id: `live-${i}`, request_id: 'r' }));
+    mockSend.mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Items: rows, LastEvaluatedKey: { task_id: 'more' } })
+      .mockResolvedValueOnce({
+        Responses: {
+          Tasks: rows.map(row => ({
+            task_id: row.task_id,
+            user_id: 'user-alice',
+            status: 'AWAITING_APPROVAL',
+            awaiting_approval_request_id: 'r',
+          })),
+        },
+      });
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).data.pending).toHaveLength(100);
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'Query')).toHaveLength(1);
+  });
+
+  test('reports a later-page read failure instead of returning a misleading empty list', async () => {
+    mockSend.mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { task_id: 'more' } })
+      .mockRejectedValueOnce(new Error('Later page unavailable'));
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(500);
+  });
+
+  test.each(['CANCELLED', 'COMPLETED', 'FAILED', 'TIMED_OUT', 'RUNNING'])(
+    'omits a legacy pending approval when its task is %s',
+    async (status) => {
+      setupPendingMocks([{ task_id: 't', request_id: 'r' }], [{
+        task_id: 't', user_id: 'user-alice', status, awaiting_approval_request_id: 'r',
+      }]);
+      const response = await handler(makeEvent());
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body).data.pending).toEqual([]);
+      const batch = mockSend.mock.calls.find(([command]) => command._type === 'BatchGet')![0].input;
+      expect(batch.RequestItems.Tasks.ConsistentRead).toBe(true);
+    },
+  );
+
+  test('omits a replaced gate, missing task and mismatched owner', async () => {
+    setupPendingMocks([
+      { task_id: 'old', request_id: 'r' },
+      { task_id: 'missing', request_id: 'r' },
+      { task_id: 'foreign', request_id: 'r' },
+    ], [
+      { task_id: 'old', user_id: 'user-alice', status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'new' },
+      { task_id: 'foreign', user_id: 'someone-else', status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'r' },
+    ]);
+    const response = await handler(makeEvent());
+    expect(JSON.parse(response.body).data.pending).toEqual([]);
+  });
+
+  test('retries unprocessed task reads instead of dropping the request', async () => {
+    mockSend.mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Items: [{ task_id: 't', request_id: 'r' }] })
+      .mockResolvedValueOnce({ UnprocessedKeys: { Tasks: { Keys: [{ task_id: 't' }] } } })
+      .mockResolvedValueOnce({
+        Responses: {
+          Tasks: [{
+            task_id: 't', user_id: 'user-alice', status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'r',
+          }],
+        },
+      });
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body).data.pending).toHaveLength(1);
+  });
+
+  test('reports incomplete task reads as an error, not an empty pending list', async () => {
+    mockSend.mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Items: [{ task_id: 't', request_id: 'r' }] })
+      .mockResolvedValue({ UnprocessedKeys: { Tasks: { Keys: [{ task_id: 't' }] } } });
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(500);
+  });
+
   test('401 when no Cognito claims', async () => {
     const event = makeEvent();
     (event.requestContext.authorizer as { claims: Record<string, unknown> }).claims = {};

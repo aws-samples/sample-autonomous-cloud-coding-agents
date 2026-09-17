@@ -2,6 +2,13 @@
 
 Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read the [review](./645-p3-readiness-review.md) for evidence and the beginner introduction. This document tracks implementation and validation; local completion does not mark P3 live acceptance complete.
 
+**Approval UX scope decision:** leave assessment of whether an action is still
+relevant to the agent's ordinary reasoning. The user has excluded a separate
+approval rechecking system, including automatic context/staleness detection,
+from this plan. The platform continues to enforce authenticated ownership,
+the task/request identity, approval or denial, and task cancellation. This scope
+decision does not change the currently implemented approval deadlines.
+
 ## Implementation progress
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
@@ -329,7 +336,132 @@ Second P3 foundation batch implemented locally (2026-09-13):
 - CDK lint/compilation passed. The broad handler/session-role run passed **158 suites / 3,738 tests**, including **23 lifecycle** and **15 existing capacity** DynamoDB Local tests. Five relevant suites passed **218 overlapping tests** and exited normally. The broad run exited successfully after a delay (about 72 seconds total versus 17.5 seconds reported test execution), with no open-handle trace; its cause is not established. Documentation sync, the **77-page** build and link checks pass. No Python source changed. The temporary local database was removed.
 - At that foundation milestone, no production caller used this policy/store. No IAM grants, image hooks or automatic suspension were enabled. Durable poll failure/recovery tracking, guest barriers, supervisor/decision-handler wiring and live AWS gates remain unfinished.
 
-## Remaining work in execution order
+## Current completion checklist
+
+The implemented P3 sleep/wake backend has nine successful image 6.0 Durable
+workflows and two focused image 7.0 approval/cancellation workflows.
+Normal automatic sleep remains disabled.
+The recent approval UX discussion adds product work that those lifecycle tests
+do not cover:
+
+- [x] Implement the requested [nested MicroVM stack](./645-p3-nested-stack.md),
+  preserve parent execution-role identity and outputs, generate bootstrap 1.9.0,
+  and validate the bundled managed-image templates. The parent has 460 resources;
+  the MicroVM child has 19. AWS structural template validation passed.
+- [x] Deploy bootstrap 1.9.0 and verify its exact installed policy, bundle hash,
+  and allowed/denied role names under the CloudFormation execution role.
+- [x] Deploy an isolated fresh nested stack through that execution role, build
+  the managed image, verify hooks/roles/network rules and delete its resources.
+  The parent has three resources and the test child has 18; image 1.0 reached
+  `ACTIVE` / `SUCCESSFUL`. All 14 cleanup checks passed and normal resource
+  identities were preserved. This does not migrate the existing flat stack.
+- [ ] Rehearse and review the resource migration, then
+  migrate the existing flat deployment and verify its image build/task path.
+  The existing deployment remains flat; nesting is part of the requested scope.
+- [ ] Implement the agreed human waiting policy: keep unanswered
+  requests available, separate the human decision window from the configurable
+  600-second worker sleep delay, and retain an explicit timeout option. Today,
+  requests still default to 300 seconds with a maximum submission setting of
+  3,600 seconds. Waiting beyond a worker's lifetime needs a defined recovery
+  path; current same-worker suspend/resume does not provide that continuation.
+- [x] Implement [actionable Slack/Linear notifications and CLI response
+  instructions](./645-p3-approval-ux-20260917.md), including saved decisions and
+  closure reasons. Unwrap the actual agent approval milestones and keep approval
+  messages out of Linear's terminal-reply path. Verify retry and receipt behavior.
+- [x] Deploy the notification router, channel renderers and required table access.
+  Verify the deployed function packages against the reviewed S3 assets.
+- [ ] Verify live channel delivery/response. Native Slack buttons,
+  Linear approval replies and the proposed per-user notification throttle remain
+  separate unfinished pieces; the implemented response path uses the signed-in CLI.
+- [x] Atomically close pending approvals when REST/CLI or Slack cancels the task,
+  filter the pending list against owning task state, and stop the guest wait without
+  restoring `RUNNING`. Real DynamoDB transaction/race and notification-receipt checks
+  passed; all temporary tables were removed.
+- [x] Deploy the cancellation/API changes. Deployed handler checks confirm atomic
+  cancellation, closure events, pending-list filtering and late-approval rejection;
+  eight consistent reads verify removal of all owned verification records.
+- [x] Deploy the guest cancellation handling in image 7.0; preserve image 6.0,
+  all 475 physical resources, coordinator 10 and both disabled sleep switches.
+- [x] Complete the image 7.0 approval/cancellation acceptance and cleanup.
+  Both Durable executions finalized without repair. Approve resumed PID 1 and
+  allowed one Read; cancel closed the request and terminated the sleeping worker.
+- [x] Fix and deploy pending-list pagination so 100 cancelled legacy requests
+  cannot hide a live request on the next page. The real 101-request check passed;
+  all 202 temporary task/approval records were removed and verified absent.
+- [x] Correct and deploy stranded/timeout/terminal-task notification feedback
+  and the stream retry cursor. The actual legacy stranded event, sequence-number
+  response and missing-sequence failure passed against the deployed function.
+  No channel messages were sent; both owned fixture rows were removed.
+- [ ] Perform controlled activation on the normal deployment with the compatible
+  image/coordinator and the configurable 600-second sleep default. Verify an
+  ordinary submission through notification, decision, wake, continuation and
+  cleanup. For the current timeout-based implementation, use an explicitly
+  longer approval window: a default five-minute approval cannot reach a
+  ten-minute sleep delay.
+- [ ] Verify the normal deployment's live off switch prevents new suspensions
+  while existing sleeping workers can still wake and finish. Retain compatible
+  coordinator versions, image and permissions.
+- [ ] Finish the relevant comment/error-feedback cleanup, rollout documentation
+  and ADR/issue handoff, distinguishing shipped behavior from proposed approval
+  changes. The upload-dispatch feedback correction is now deployed and its
+  function package matches the reviewed S3 asset.
+
+The human waiting policy remains unimplemented; notification and cancellation
+API changes are deployed, with guest handling and channel acceptance tracked above.
+A separate approval relevance/staleness rechecking system is excluded by the
+user's scope decision at the top of this plan.
+
+### Unanswered approvals: implementation order
+
+The product direction is agreed: unanswered requests stay available; a short
+expiry is an explicit option; the worker's sleep delay defaults to 600 seconds.
+The following work is still required before changing the current deadline default:
+
+1. Prove recovery of a paused agent on a **replacement worker**. The current
+   MicroVM checkpoint records task/gate identity and lifecycle acknowledgements;
+   it does not export the workspace or the SDK conversation. `runner.py` records
+   the SDK session ID in its result but does not currently start a resumed SDK
+   session. First test the SDK's supported recovery behavior at a pending tool
+   hook and define how the saved decision reaches the agent's normal reasoning.
+2. Add a durable continuation checkpoint: workspace changes, conversation/session
+   state and exact pending request identity. Store it under task-scoped
+   permissions, exclude credentials, and confirm the write before releasing the
+   worker. A failed checkpoint must produce actionable feedback, never a claim
+   that the work was saved. Test restoration of uncommitted and untracked files.
+3. Separate the task from each worker attempt. Add an attempt generation to
+   launch tokens, saved handles, writes and reservations so a replaced worker
+   cannot overwrite its successor. Release capacity while the task waits and
+   reacquire it on continuation. Duplicate decisions, lost launch replies,
+   cancellation and coordinator replay must not launch two workers or release
+   another attempt's reservation.
+4. Let an open request have no decision deadline. Keep the explicit timeout
+   setting, retain existing finite deadlines for already-running tasks and remove
+   retention TTLs from unanswered requests. Start retention when a request
+   closes. Update validation, types, pending responses, CLI displays, notifications
+   and metrics together. The 600-second sleep setting remains independent.
+5. Replace worker-lifetime failure with checkpoint/release for this supported
+   waiting state. The eight-hour service limit still applies to each worker;
+   the task and unanswered request survive it. Update the stranded-task
+   reconciler's current two-hour approval backstop so it does not fail a
+   deliberately parked task. A reply starts continuation if the old worker is
+   gone; the existing worker resumes when it is still usable.
+6. Verify short sleep, a reply after the old five-minute deadline, reply after
+   worker replacement, explicit timeout, cancel while parked, simultaneous
+   replies, lost checkpoint/launch replies and permission failures. Confirm
+   single decision consumption, preserved files, bounded worker cost, accurate
+   feedback and cleanup. Then change the default and enable it through a
+   reviewed compatible rollout.
+
+These are recovery and resource-accounting requirements. They do not introduce a
+separate system to judge whether the proposed action is still relevant; the agent
+continues to make that judgment.
+
+Service token-retention/unknown-worker recovery and installation-specific legacy
+capacity migration remain broader backend follow-ups. They are not automatically
+prerequisites for enabling the existing sleep implementation on this clean,
+compatible installation. The user has separately requested nested infrastructure.
+
+## Verification evidence and broader follow-ups
 
 Keep service questions and evidence in the
 [Lambda MicroVM service-team feedback tracker](./645-lambda-microvm-service-feedback.md).
@@ -340,8 +472,8 @@ after expiry, and coordinator cleanup passed without watcher repair. The
 [live record](./645-p3-callback-live-20260915.md) records the evidence and verified
 absence of all temporary infrastructure.
 
-The detailed batches below preserve the implementation history. For the current
-handoff, use this order:
+The detailed batches below preserve the implementation history and the limits of
+the recorded evidence. Use the current checklist above for the next work.
 
 1. The wider final-image lifecycle matrix on image 6.0 is now complete for its
    recorded scope: a temporary repository clone with mutable files across two
@@ -442,13 +574,13 @@ handoff, use this order:
    setting their concurrency to zero could lose incoming work. A safe retained
    input/replay procedure remains necessary. Coordinator rollback also requires
    an explicit image plan because the managed runtime selects latest active.
-5. Perform the final compatible rollout, including shared runtime changes for
-   ECS/AgentCore, pinned-version retention and rollback checks. Enable automatic
-   suspension only after the remaining gates pass, then finish the ADR/runbook
-   and issue handoff with the actual results.
+5. Complete the compatible rollout and normal activation checks listed above,
+   retaining the required runtime versions and rollback options. Record shared
+   ECS/AgentCore changes for installations that use them. Keep the broader
+   service and legacy-migration follow-ups separately visible in the handoff.
 
-Nested CloudFormation stacks remain optional. The current root has 475
-resources; moving existing resources is a separate migration decision.
+Nested CloudFormation stacks are now requested. The last deployed flat root had
+475 resources; moving its existing resources requires a reviewed migration.
 
 ## The result we want
 
@@ -595,7 +727,7 @@ The writer inventory found no production callers of Python `write_submitted` or 
 
 **Remaining trust limits:** agent status/results remain reports from the agent. Compute roles choose their session tags; existing trust does not independently bind those choices to a task. This patch protects coordinator attributes from the resulting session permissions; it does not establish complete hostile-worker tenant isolation. The replay tests in 1D/1F also do not prove AWS authorization.
 
-## 2. Nest infrastructure if adopting the split
+## 2. Nest infrastructure (requested)
 
 1. Introduce `LambdaMicrovmStack` as a `NestedStack` wrapper and an explicit way to supply the MicroVM execution role from the parent. Keep shared session-role trust and runtime-role ownership in the parent. Preserve exact grant behavior.
 2. Pass a stable deployment name for image and both connector names. Never sanitize unresolved CDK tokens. Preserve name/ARN resolution for imported images as well as managed images.
@@ -606,11 +738,20 @@ The writer inventory found no production callers of Python `write_submitted` or 
 7. Remove or replace the #857 guard only when the supported combination actually passes the current matrix. Keep a size regression test; do not retain “505 resources” as a permanent error message.
 8. Review the CloudFormation change set for replacement/deletion. For the first experimental rollout, prefer a dedicated test deployment. For migration of an existing one, stop new admissions, drain/terminate existing tasks, preserve required artifacts/state and use a service-supported migration procedure. Define rollback before applying the change set. Do not let `autoDeleteObjects` silently erase an active payload/artifact bucket.
 
-**Done:** cycle-free bundled templates, least-privilege bootstrap coverage, preserved outputs, safe migration/change-set evidence and a clean deployed image build. The local prototype alone meets none of the live gates.
+**Implementation status:** the wrapper, parent execution role, stable names,
+preserved outputs, bootstrap 1.9.0 artifacts and child-template assertions are
+implemented. Production managed-image synthesis and AWS structural template
+validation passed. The unit budget matrix covers AgentCore, ECS and all three
+MicroVM image modes with gateway on/off. The #857 guard remains.
+
+**Completion requires:** the remaining bundled deployment combinations, safe
+migration/change-set evidence, installation of bootstrap 1.9.0, and a clean
+deployed image build. The normal deployment has not been migrated. See the
+[nested-stack verification record](./645-p3-nested-stack.md).
 
 ## 3. Re-prove P2 on the final infrastructure
 
-Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.8.0 for this source, including exact-self CloudFormation PassRole and the scoped live-suspension parameter permissions, or a newer required bundle). Compare effective policies as well as the displayed version. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
+Use a supported Region and an isolated development repository/account deployment. Record the actual deployed bootstrap bundle (at least 1.9.0 for the nested layout; 1.8.0 for the explicit flat compatibility layout). Compare effective policies as well as the displayed version, including exact-self CloudFormation PassRole, scoped live-suspension parameter permissions and the nested build/operator role names. Update bootstrap deliberately when required; a command that skips an already bootstrapped stack is not evidence of refresh.
 
 The [2026-09-13–14 clean deployment](./645-p2-clean-deployment-20260913.md)
 completed the infrastructure, managed-image creation and build-hook checks in

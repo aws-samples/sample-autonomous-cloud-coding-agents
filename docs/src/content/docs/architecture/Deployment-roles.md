@@ -849,6 +849,15 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 > **Operators must re-bootstrap for this.** The statement ships in bootstrap policy bundle **1.6.0**; a CDKToolkit stack bootstrapped at 1.5.0 or earlier will fail the CDK-managed MicroVM image deploy with a caller-side `iam:PassRole` AccessDenied on the build role. Check `CDKToolkit`'s `BootstrapPolicyVersion` output, and re-run `mise //cdk:bootstrap` (with `ComputeTypes` including `lambda-microvm`) if it is behind.
 
 P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
+
+The nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
+explicit parent-derived names `backgroundagent-dev-MicrovmBuildRole` and
+`backgroundagent-dev-MicrovmConnectorRole`; `MicrovmPassRoles` admits those two
+exact names in addition to the legacy flat-layout prefixes. The execution role
+stays in the parent and is still excluded. Re-bootstrap before deploying the
+child stack. Existing flat deployments must keep `microvm_nested_stack=false`
+until their resource migration is reviewed; changing ownership is not an ordinary
+in-place update. See the [nested-stack runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack).
 This statement lets CloudFormation manage and tag the live suspension setting
 at `/<backgroundagent-stack-name>/microvm-approval-suspend-enabled`. The
 coordinator gets only `GetParameter` on its exact parameter. Existing durable
@@ -889,7 +898,9 @@ suspension, so disable can reach executions already running.
       "Effect": "Allow",
       "Resource": [
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
-        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*",
+        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole",
+        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole"
       ],
       "Sid": "MicrovmPassRoles"
     },

@@ -79,3 +79,24 @@ test('the decision APIs keep their15s Lambda budget and read worker IDs from sav
     expect(resource.Properties.Environment.Variables.MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
   }
 });
+
+test('cancellation and pending listing receive their approval workflow permissions', () => {
+  const functions = configured.findResources('AWS::Lambda::Function');
+  const cancel = Object.entries(functions).find(([id]) => id.includes('CancelTaskFn'))![1];
+  expect(cancel.Properties.Environment.Variables.TASK_APPROVALS_TABLE_NAME).toBeDefined();
+  const policies = Object.entries(configured.findResources('AWS::IAM::Policy'));
+  const cancelPolicy = policies.find(([id]) => id.includes('CancelTaskFn'))![1];
+  expect(cancelPolicy.Properties.PolicyDocument.Statement).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      Resource: expect.arrayContaining([expect.objectContaining({ 'Fn::GetAtt': expect.arrayContaining([expect.stringContaining('Approvals')]) })]),
+    }),
+  ]));
+  const pendingPolicy = policies.find(([id]) => id.includes('GetPendingFn'))![1];
+  expect(pendingPolicy.Properties.PolicyDocument.Statement).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Action: 'dynamodb:BatchGetItem',
+      Resource: expect.arrayContaining([expect.objectContaining({ 'Fn::GetAtt': expect.arrayContaining([expect.stringContaining('Tasks')]) })]),
+    }),
+  ]));
+});

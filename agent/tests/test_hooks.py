@@ -1336,6 +1336,44 @@ class TestDeniedPath:
         assert "write_approval_denied" in progress.milestones()
 
 
+class TestCancelledPath:
+    @pytest.mark.parametrize("during_timeout", [False, True])
+    def test_cancellation_closes_wait_without_resuming_or_caching_a_human_denial(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, during_timeout
+    ):
+        _fast_poll(monkeypatch)
+        cancelled = {"status": "CANCELLED", "cancellation_reason": "Task cancelled by its owner"}
+        if during_timeout:
+            fake_task_state.best_effort_return = False
+            fake_task_state.reread_row = cancelled
+        else:
+            _prime_approval(fake_task_state, cancelled)
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "cancelled" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert not fake_task_state.resume_calls
+        if not during_timeout:
+            assert not fake_task_state.update_calls
+        assert not engine_with_soft_gate.drain_denial_injections()
+        follow_up = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
+        assert "Recent DENIED" not in follow_up.reason
+        assert "write_approval_denied" not in progress.milestones()
+        assert "write_approval_timed_out" not in progress.milestones()
+
+
 class TestPersistentGateCount:
     """Chunk 7 (§13.6): REQUIRE_APPROVAL path must bump BOTH the session
     counter and the TaskTable-persisted counter so a container restart

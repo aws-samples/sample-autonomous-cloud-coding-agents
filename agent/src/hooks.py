@@ -802,6 +802,11 @@ async def _handle_require_approval(
                 row_reread = None
             outcome = _reconcile_late_decision(outcome, row_reread, progress, request_id)
 
+    if outcome.get("status") == "CANCELLED":
+        # The platform closed the approval in the same transaction as task
+        # cancellation. Do not try to restore RUNNING or cache a human denial.
+        return _deny_response("Task was cancelled; this approval is closed.")
+
     # Step 11 — resume transition (RUNNING). The ``awaiting_approval_request_id``
     # condition prevents resuming a cancelled task or racing with another
     # approval.
@@ -953,6 +958,7 @@ def _reconcile_late_decision(
 
     - ``row["status"] == "APPROVED"`` → rebuild as APPROVED (allow flow).
     - ``row["status"] == "DENIED"`` → rebuild as DENIED (deny flow).
+    - ``row["status"] == "CANCELLED"`` → close the wait without resuming the task.
     - Anything else (row gone, still PENDING) → fall through with the
       original TIMED_OUT (the fail-closed branch).
 
@@ -977,6 +983,8 @@ def _reconcile_late_decision(
             "decided_at": row.get("decided_at"),
             "decided_by": row.get("user_id"),
         }
+    if status == "CANCELLED":
+        return {"status": "CANCELLED", "reason": row.get("cancellation_reason")}
     if status == "DENIED":
         if progress is not None:
             _try_progress(
@@ -1069,6 +1077,11 @@ async def _poll_for_decision(
                         "status": "DENIED",
                         "reason": row.get("deny_reason") or "denied",
                         "decided_at": row.get("decided_at"),
+                    }
+                if status == "CANCELLED":
+                    return {
+                        "status": "CANCELLED",
+                        "reason": row.get("cancellation_reason"),
                     }
 
         # Compute sleep interval based on elapsed since poll started.

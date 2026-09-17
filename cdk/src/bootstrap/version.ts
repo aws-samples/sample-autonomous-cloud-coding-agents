@@ -58,8 +58,11 @@ import { allPolicies } from './policies';
  *
  * 1.7.0 → 1.8.0 adds scoped SSM parameter lifecycle/tag permissions for the P3
  * MicroVM suspension switch. Re-bootstrap before deploying the live parameter.
+ *
+ * 1.8.0 → 1.9.0 admits the exact nested MicroVM build/operator role names to
+ * the backend-specific PassRole statement. Re-bootstrap before the nested split.
  */
-export const BOOTSTRAP_VERSION = '1.8.0';
+export const BOOTSTRAP_VERSION = '1.9.0';
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);

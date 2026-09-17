@@ -132,6 +132,8 @@ describe('Bootstrap template', () => {
       expect(passRole!.Resource).toEqual([
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
       ]);
     });
 

@@ -55,9 +55,11 @@ import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
 import {
   LambdaMicrovmCompute,
+  createMicrovmExecutionRole,
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
+import { LambdaMicrovmStack } from '../constructs/lambda-microvm-stack';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
@@ -346,6 +348,13 @@ export class AgentStack extends Stack {
     // MicroVM termination grant (ADR-021 sub-decision 4).
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
     const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+    const microvmNestedContext = this.node.tryGetContext('microvm_nested_stack');
+    if (microvmNestedContext !== undefined && ![true, false, 'true', 'false'].includes(microvmNestedContext)) {
+      throw new Error('microvm_nested_stack must be true or false');
+    }
+    // Existing flat deployments retain their resource paths with false until
+    // their reviewed resource-migration procedure is complete.
+    const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
     const suspendContext = this.node.tryGetContext('microvm_approval_suspend_enabled');
     if (suspendContext !== undefined && ![true, false, 'true', 'false'].includes(suspendContext)) {
       throw new Error('microvm_approval_suspend_enabled must be true or false');
@@ -1106,33 +1115,47 @@ export class AgentStack extends Stack {
     // agentcore-only. The construct itself enforces the ADR's Region gate, so a
     // deploy into a Region without Lambda MicroVMs fails at synth rather than on
     // the first task.
-    const lambdaMicrovm = lambdaMicrovmEnabled
-      ? new LambdaMicrovmCompute(this, 'LambdaMicrovmCompute', {
-        vpc: agentVpc.vpc,
-        // Per-session IAM scoping (#209): the MicroVM execution role is admitted
-        // to the same per-task SessionRole the AgentCore runtime and the Fargate
-        // task role use, so tenant-data access is tag-scoped on every substrate.
-        agentSessionRole,
-        // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
-        // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
-        // before the SessionRole is assumed, and MEMORY_ID (already delivered in
-        // agent_payload) makes the agent ATTEMPT a memory write that fails closed
-        // without the grant. The remaining parity grants (channel OAuth, Bedrock,
-        // AZ describe) need no stack input and are wired inside the construct.
-        githubTokenSecret,
-        agentMemory,
-        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
-        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
-        // delivered the name without the grant, so the agent's structured per-task
-        // lines and its METRICS_REPORT were AccessDenied on
-        // logs:CreateLogStream and the platform's canonical observability streams
-        // were empty on this backend. Passing the construct (not the name) keeps the
-        // grant and the delivered value derived from one object.
-        applicationLogGroup,
-        // Resolved above TaskApi — see `microvmImageInputs`.
-        ...microvmImageInputs,
-      })
-      : undefined;
+    const microvmProps = {
+      vpc: agentVpc.vpc,
+      // Per-session IAM scoping (#209): the MicroVM execution role is admitted
+      // to the same per-task SessionRole the AgentCore runtime and the Fargate
+      // task role use, so tenant-data access is tag-scoped on every substrate.
+      agentSessionRole,
+      // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
+      // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
+      // before the SessionRole is assumed, and MEMORY_ID (already delivered in
+      // agent_payload) makes the agent ATTEMPT a memory write that fails closed
+      // without the grant. The remaining parity grants (channel OAuth, Bedrock,
+      // AZ describe) need no stack input and are wired inside the construct.
+      githubTokenSecret,
+      agentMemory,
+      // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+      // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+      // delivered the name without the grant, so the agent's structured per-task
+      // lines and its METRICS_REPORT were AccessDenied on
+      // logs:CreateLogStream and the platform's canonical observability streams
+      // were empty on this backend. Passing the construct (not the name) keeps the
+      // grant and the delivered value derived from one object.
+      applicationLogGroup,
+      // Resolved above TaskApi — see `microvmImageInputs`.
+      ...microvmImageInputs,
+    };
+    let lambdaMicrovm: LambdaMicrovmCompute | undefined;
+    if (lambdaMicrovmEnabled) {
+      if (microvmNested) {
+        // Preserve the execution role's original parent path and therefore its
+        // logical ID. Moving it with the image creates a SessionRole trust cycle.
+        const roleScope = new Construct(this, 'LambdaMicrovmCompute');
+        const executionRole = createMicrovmExecutionRole(roleScope, 'ExecutionRole');
+        lambdaMicrovm = new LambdaMicrovmStack(this, 'Microvm', {
+          ...microvmProps,
+          deploymentName: this.stackName,
+          executionRole,
+        }).compute;
+      } else {
+        lambdaMicrovm = new LambdaMicrovmCompute(this, 'LambdaMicrovmCompute', microvmProps);
+      }
+    }
 
     // Resolve the image ARN used by TaskApi's cancel and wake grants. The invariant the
     // Lazy's `produce` guards: `microvmImageConfigured` (computed from the same
@@ -1384,6 +1407,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
@@ -1882,6 +1906,7 @@ export class AgentStack extends Stack {
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
       // Slack bot-token grant is guarded on this prop — pass the

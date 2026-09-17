@@ -42,12 +42,14 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
   PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
+  TransactWriteCommand: jest.fn((input: unknown) => ({ _type: 'TransactWrite', input })),
 }));
 
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_RETENTION_DAYS = '90';
 process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/default';
 process.env.ECS_CLUSTER_ARN = 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster';
@@ -127,6 +129,26 @@ beforeEach(() => {
 });
 
 describe('cancel-task handler', () => {
+  test('closes an unanswered approval atomically before stopping its worker', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({
+      Item: {
+        ...RUNNING_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'request-1',
+      },
+    })
+      .mockResolvedValueOnce({ Item: { status: 'PENDING', user_id: RUNNING_TASK.user_id } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(200);
+    const transaction = mockSend.mock.calls.find(([command]) => command._type === 'TransactWrite')![0].input;
+    expect(transaction.TransactItems[0].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
+    expect(transaction.TransactItems[1].Update.Key.request_id).toBe('request-1');
+    expect(transaction.TransactItems[1].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
+    expect(transaction.TransactItems[2].Put.Item.event_type).toBe('approval_cancelled');
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+  });
+
   test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('stops an AgentCore session when cancelling %s', async (status) => {
     mockSend.mockReset();
     mockSend
@@ -203,6 +225,7 @@ describe('cancel-task handler', () => {
     const condError = new Error('Condition not met');
     condError.name = 'ConditionalCheckFailedException';
     mockSend.mockRejectedValueOnce(condError);
+    mockSend.mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status: 'COMPLETED' } });
 
     const result = await handler(makeEvent());
 

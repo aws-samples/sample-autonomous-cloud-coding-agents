@@ -63,6 +63,9 @@ export interface FanOutConsumerProps {
    */
   readonly taskTable?: dynamodb.ITable;
 
+  /** Approval state and successful per-request notification receipts. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
   /**
    * RepoTable — GitHub dispatcher reads per-repo
    * `github_token_secret_arn` overrides. Optional: if omitted, falls
@@ -213,6 +216,10 @@ export class FanOutConsumer extends Construct {
     if (props.taskTable) {
       props.taskTable.grantReadWriteData(this.fn);
       this.fn.addEnvironment('TASK_TABLE_NAME', props.taskTable.tableName);
+    }
+    if (props.taskApprovalsTable) {
+      props.taskApprovalsTable.grant(this.fn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
+      this.fn.addEnvironment('TASK_APPROVALS_TABLE_NAME', props.taskApprovalsTable.tableName);
     }
     if (props.repoTable) {
       props.repoTable.grantReadData(this.fn);

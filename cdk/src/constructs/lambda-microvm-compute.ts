@@ -486,6 +486,20 @@ export function isLambdaMicrovmImageConfigured(inputs: LambdaMicrovmImageInputs)
  * Properties for {@link LambdaMicrovmCompute}.
  */
 export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
+  /** Stable parent deployment name for image/connector names when nested. */
+  readonly deploymentName?: string;
+
+  /**
+   * Parent-owned execution role. Keeping this beside AgentSessionRole avoids
+   * a parent/child cycle through the session role's trust and AssumeRole grant.
+   * Omitted by standalone constructs, which create their own execution role.
+   */
+  readonly executionRole?: iam.Role;
+
+  /** Explicit names used by nested deployments to preserve bootstrap PassRole scope. */
+  readonly buildRoleName?: string;
+  readonly connectorOperatorRoleName?: string;
+
   /**
    * Platform VPC. Egress leaves the MicroVM through a `AWS::Lambda::NetworkConnector`
    * bound to this VPC's private-with-egress subnets, so the DNS Firewall /
@@ -856,6 +870,10 @@ export class LambdaMicrovmCompute extends Construct {
     assertLambdaMicrovmRegionSupported(this);
 
     const stack = Stack.of(this);
+    const deploymentName = props.deploymentName ?? stack.stackName;
+    if (Token.isUnresolved(deploymentName)) {
+      throw new Error('Nested MicroVM resources require a concrete deploymentName from the parent stack');
+    }
     const managedImage = Boolean(props.baseImageArn && props.baseImageVersion);
     if ((managedImage || props.artifactSha256 !== undefined)
       && !/^[a-f0-9]{64}$/.test(props.artifactSha256 ?? '')) {
@@ -868,7 +886,7 @@ export class LambdaMicrovmCompute extends Construct {
     this.artifactObjectKey = props.artifactSha256
       ? `${this.artifactBaseObjectKey.replace(/\.zip$/, '')}-${props.artifactSha256}.zip`
       : this.artifactBaseObjectKey;
-    this.imageName = props.imageName ?? sanitizeImageName(`${stack.stackName}-abca-agent`);
+    this.imageName = props.imageName ?? sanitizeImageName(`${deploymentName}-abca-agent`);
 
     // Fail at SYNTH on an unsupported memory size. The service enumerates the
     // sizes a base image accepts and rejects anything else at create time, which
@@ -970,6 +988,7 @@ export class LambdaMicrovmCompute extends Construct {
     // ("NO source-key condition on any MicroVM-facing role trust").
     const microvmAssumedBy = new iam.ServicePrincipal('lambda.amazonaws.com');
     this.connectorOperatorRole = new iam.Role(this, 'ConnectorOperatorRole', {
+      roleName: props.connectorOperatorRoleName,
       assumedBy: microvmAssumedBy,
       description:
         'ABCA Lambda MicroVMs network-connector operator role: lets Lambda manage the connector '
@@ -1011,7 +1030,7 @@ export class LambdaMicrovmCompute extends Construct {
     }).subnetIds;
 
     this.egressConnector = new lambda.CfnNetworkConnector(this, 'EgressConnector', {
-      name: sanitizeImageName(`${stack.stackName}-microvm-egress`),
+      name: sanitizeImageName(`${deploymentName}-microvm-egress`),
       operatorRole: this.connectorOperatorRole.roleArn,
       configuration: {
         vpcEgressConfiguration: {
@@ -1028,7 +1047,7 @@ export class LambdaMicrovmCompute extends Construct {
     // (443 + 80). Referenced by the image resource / packaging script, never by
     // `RunMicrovm`, so a running agent still gets the 443-only posture.
     this.buildEgressConnector = new lambda.CfnNetworkConnector(this, 'BuildEgressConnector', {
-      name: sanitizeImageName(`${stack.stackName}-microvm-build-egress`),
+      name: sanitizeImageName(`${deploymentName}-microvm-build-egress`),
       operatorRole: this.connectorOperatorRole.roleArn,
       configuration: {
         vpcEgressConfiguration: {
@@ -1111,6 +1130,7 @@ export class LambdaMicrovmCompute extends Construct {
     // {@link grantTagSession} adds.
 
     this.buildRole = new iam.Role(this, 'BuildRole', {
+      roleName: props.buildRoleName,
       assumedBy: microvmAssumedBy,
       description:
         'ABCA Lambda MicroVMs image-build role: reads the zip+Dockerfile artifact from S3 '
@@ -1128,13 +1148,7 @@ export class LambdaMicrovmCompute extends Construct {
     // Build role: keeps `logs:CreateLogGroup` — see `grantMicrovmLogWrites`.
     this.grantMicrovmLogWrites(this.buildRole, { allowCreateLogGroup: true });
 
-    this.executionRole = new iam.Role(this, 'ExecutionRole', {
-      assumedBy: microvmAssumedBy,
-      description:
-        'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
-        + 'lifecycle hooks; writes logs and reads deployment bootstrap manifests.',
-    });
-    grantTagSession(this.executionRole, microvmAssumedBy);
+    this.executionRole = props.executionRole ?? createMicrovmExecutionRole(this, 'ExecutionRole');
     // Execution role: NO `logs:CreateLogGroup`. It runs untrusted repo code and
     // live evidence shows it only ever writes into the pre-created group — see
     // `grantMicrovmLogWrites` for the runbook citations and the re-verify note.
@@ -1291,7 +1305,7 @@ export class LambdaMicrovmCompute extends Construct {
       }
       this.image = new lambda.CfnMicrovmImage(this, 'Image', {
         name: this.imageName,
-        description: `ABCA agent snapshot for ${stack.stackName} (ADR-021 lambda-microvm backend)`,
+        description: `ABCA agent snapshot for ${deploymentName} (ADR-021 lambda-microvm backend)`,
         baseImageArn: props.baseImageArn,
         baseImageVersion: props.baseImageVersion,
         buildRoleArn: this.buildRole.roleArn,
@@ -1420,8 +1434,8 @@ export class LambdaMicrovmCompute extends Construct {
 
     if (this.imageIdentifier) {
       // Emitted on EVERY deploy that configures an image, in both image states.
-      // Clean coding runs exist; they do not cover the broader failure/security
-      // matrix. Keep the warning scoped to those remaining acceptance gates.
+      // Prior image acceptance does not verify a newly configured image or turn
+      // on automatic suspension. Keep the warning scoped to deployment gates.
       //
       // The id is deliberately UNCHANGED across P1→P2 (operators grep for it, and a
       // rename would read as "the old warning is gone, so it must be fine").
@@ -1430,11 +1444,13 @@ export class LambdaMicrovmCompute extends Construct {
         'A MicroVM image is configured. Clean P2 deployment with bootstrap bundle 1.7.0 and '
         + 'coding, iteration and cancellation runs passed on 2026-09-14 without manual IAM changes. '
         + 'The agent serves /ready, /validate, /run, /terminate, /suspend and /resume; managed images declare all six. '
-        + 'Heartbeat, logs, Memory writes and cleanup have live evidence. Full P2 acceptance '
-        + 'still needs the failure/recovery, effective IAM and networking matrix in '
-        + 'docs/verification/645-p3-implementation-plan.md. P3 checks the actual launched image version; '
+        + 'Image 6.0 has nine successful isolated P3 approval workflows, including expired-credential renewal '
+        + 'and repository/network checks after the Connection: close lifecycle fix. This does not verify '
+        + 'a different image. P3 checks the actual launched image version; '
         + 'P3 requires bootstrap bundle 1.8.0 and defaults new suspension off; supervisor integration is implemented. '
-        + 'Live sleep/wake acceptance remains open. The warning ID is retained '
+        + 'Nested deployments require bundle 1.9.0 and a reviewed migration from existing flat stacks. '
+        + 'Normal automatic-suspension activation remains open; follow docs/verification/645-p3-implementation-plan.md '
+        + 'and docs/verification/645-p3-nested-stack.md. The warning ID is retained '
         + 'across phases for existing operator filters.',
       );
     }
@@ -1561,6 +1577,20 @@ export class LambdaMicrovmCompute extends Construct {
       ],
     }));
   }
+}
+
+/** Create the runtime role in its owning stack, independently of image resources. */
+export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Role {
+  const principal = new iam.ServicePrincipal('lambda.amazonaws.com');
+  const role = new iam.Role(scope, id, {
+    assumedBy: principal,
+    description:
+      'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
+      + 'lifecycle hooks; writes logs and reads deployment bootstrap manifests.',
+  });
+  grantTagSession(role, principal);
+  Tags.of(role).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
+  return role;
 }
 
 /**

@@ -18,6 +18,10 @@
 # ---------------------------------------------------------------------------
 # BOOTSTRAP SEQUENCE (first time)
 # ---------------------------------------------------------------------------
+#   0. Use bootstrap policy bundle >= 1.9.0 for the default nested layout.
+#      Existing flat deployments must retain microvm_nested_stack=false until
+#      their resources are migrated; see docs/verification/645-p3-nested-stack.md.
+#
 #   1. Deploy the MicroVM substrate WITHOUT an image. Synth warns that no image
 #      is configured; that is expected — the artifact bucket must exist before
 #      you can upload to it.
@@ -342,26 +346,22 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   CDK-managed (recommended) — redeploy with the base image and artifact pinned.
   Keep this digest with the deployment's context; it identifies these exact ZIP bytes.
 
-  !! BOOTSTRAP POLICY BUNDLE >= 1.7.0 REQUIRED !!
-  This path took two live-verified fixes to work. The first (ADR-021 P2-F2: the L1
-  sent hook paths and \`arm64\` where CloudFormation wants ENABLED / ARM_64) is
-  DISCHARGED — change-set early validation now passes. The second (ADR-021
-  P2r2-F9) is a BOOTSTRAP change: CloudFormation could not pass the MicroVM build
-  role, because the deploy role's \`iam:PassRole\` carried an
-  \`iam:PassedToService\` condition the Lambda MicroVMs service does not satisfy.
-  The fix is the \`MicrovmPassRoles\` statement in the conditional
-  IaCRole-ABCA-Compute-LambdaMicrovms policy, which only reaches your account when
-  you re-bootstrap:
+  The default nested layout requires bootstrap policy bundle >= 1.9.0.
+  Flat P3 deployments require >= 1.8.0. Check the installed bundle:
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
       --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
-    # if that is below 1.7.0:
     MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
 
-  Without it the image resource fails with
-  "is not authorized to perform: iam:PassRole on resource:
-   ...LambdaMicrovmComputeBuildRole... (Service: LambdaMicrovms, Status Code: 403)".
-  Then:
+  An older bundle may deny iam:PassRole for the image's build role. Updating the
+  source bundle alone does not update the account's installed policies.
+
+  Existing flat stacks: keep --context microvm_nested_stack=false on deployment
+  commands until the resource migration is complete. Changing the layout directly
+  can replace resources or delete bucket contents. See:
+    docs/verification/645-p3-nested-stack.md
+
+  For a new nested deployment (or a completed migration):
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\

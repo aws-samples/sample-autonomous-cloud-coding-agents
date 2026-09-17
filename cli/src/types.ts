@@ -707,6 +707,7 @@ export type ApprovalStatus =
   | 'PENDING'
   | 'APPROVED'
   | 'DENIED'
+  | 'CANCELLED'
   | 'TIMED_OUT'
   | 'STRANDED';
 

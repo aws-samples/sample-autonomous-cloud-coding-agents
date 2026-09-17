@@ -19,7 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { App, AspectPriority, Aspects } from 'aws-cdk-lib';
+import { App, AspectPriority, Aspects, NestedStack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import {
   BEDROCK_GEO_REGION_CONTEXT_KEY,
@@ -27,6 +27,7 @@ import {
   DEFAULT_BEDROCK_MODEL_IDS,
 } from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
+import { LambdaMicrovmStack } from '../../src/constructs/lambda-microvm-stack';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
 
@@ -1097,6 +1098,28 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
   const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
 
   let template: Template;
+  let childTemplate: Template;
+
+  function assertChildReference(value: unknown, resourceType: string, attribute: string, prefix = ''): void {
+    const [stackId, outputPath] = (value as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'];
+    expect(stackId).toMatch(/^MicrovmNestedStack/);
+    expect(outputPath).toMatch(/^Outputs\./);
+    const childOutput = childTemplate.toJSON().Outputs[outputPath.slice('Outputs.'.length)];
+    const ids = Object.keys(childTemplate.findResources(resourceType)).filter(id => id.startsWith(prefix));
+    expect(ids.length).toBeGreaterThan(0);
+    expect(childOutput.Value).toEqual({ 'Fn::GetAtt': [expect.stringMatching(new RegExp(`^(${ids.join('|')})$`)), attribute] });
+  }
+
+  function orchestratorEnvironment(): Record<string, unknown> {
+    return Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))![1]
+      .Properties.Environment.Variables;
+  }
+
+  function imageResources(): unknown[] {
+    const arn = orchestratorEnvironment().MICROVM_IMAGE_IDENTIFIER;
+    return [arn, { 'Fn::Join': ['', [arn, ':*']] }];
+  }
 
   beforeAll(() => {
     // Gate ON *and* an image configured — the steady state. The intermediate
@@ -1115,13 +1138,16 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
   });
 
   test('provisions the MicroVM image + BOTH egress network connectors', () => {
-    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+    childTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
     // Runtime (443) + build-time (443 + 80, for apt-get) — see ADR-021's
     // build-time-egress security-table row.
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
   });
 
   test('does NOT provision the ECS substrate (the gates are mutually exclusive)', () => {
@@ -1154,7 +1180,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const key = `microvm-images/agent-artifact-${'a'.repeat(64)}.zip`;
     template.hasOutput('MicrovmArtifactObjectKey', { Value: key });
     template.hasOutput('MicrovmArtifactBaseObjectKey', { Value: 'microvm-images/agent-artifact.zip' });
-    const image = Object.values(template.findResources('AWS::Lambda::MicrovmImage'))[0]!;
+    const image = Object.values(childTemplate.findResources('AWS::Lambda::MicrovmImage'))[0]!;
     expect(JSON.stringify(image.Properties.CodeArtifact.Uri)).toContain(key);
   });
 
@@ -1197,8 +1223,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const [, orchestrator] = Object.entries(fns)
       .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
     const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
-    expect(JSON.stringify(env.MICROVM_IMAGE_IDENTIFIER))
-      .toMatch(/"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/);
+    assertChildReference(env.MICROVM_IMAGE_IDENTIFIER, 'AWS::Lambda::MicrovmImage', 'ImageArn');
   });
 
   test('grants the orchestrator its launch, state, cleanup and image-capability actions, image-scoped', () => {
@@ -1221,9 +1246,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     ]);
     // Every MicroVM lifecycle action authorizes against the *image* resource,
     // which is why "scoped to platform-created images" is achievable at all.
-    expect(JSON.stringify(lifecycle.Resource)).toMatch(
-      /"Fn::GetAtt":\["LambdaMicrovmComputeImage[^"]*","ImageArn"\]/,
-    );
+    expect(lifecycle.Resource).toEqual(imageResources());
 
     // PassNetworkConnector supports no resource-level permissions.
     const pass = statements.find(s => s.Sid === 'MicrovmPassNetworkConnector')!;
@@ -1252,7 +1275,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       Resource: unknown;
     }>);
     const payloadStatements = statements.filter(s =>
-      JSON.stringify(s.Resource).includes('LambdaMicrovmComputePayloadBucket'));
+      JSON.stringify(s.Resource).includes('ComputePayloadBucket'));
 
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
@@ -1260,9 +1283,12 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(actions).toContain('s3:GetObject');
     expect(actions).toContain('s3:ListBucket');
     const deletion = payloadStatements.find(s => Array.isArray(s.Action) && s.Action.includes('s3:DeleteObject'));
+    const resources = deletion!.Resource as Array<{ 'Fn::Join': [string, unknown[]] }>;
+    const payloadArn = resources[0]['Fn::Join'][1][0];
+    assertChildReference(payloadArn, 'AWS::S3::Bucket', 'Arn', 'ComputePayloadBucket');
     expect(deletion!.Resource).toEqual(['payload.json', 'launch.json'].map(filename => ({
       'Fn::Join': ['', [
-        { 'Fn::GetAtt': [expect.stringMatching(/^LambdaMicrovmComputePayloadBucket/), 'Arn'] },
+        payloadArn,
         `/*/${filename}`,
       ]],
     })));
@@ -1284,7 +1310,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // (TaskApi is built before the MicroVM construct), so the grant names ONE
     // image instead of an account/Region-wide `microvm-image:*`.
     const rendered = JSON.stringify(microvmStatements[0]!.Resource);
-    expect(rendered).toMatch(/LambdaMicrovmComputeImage[^"]*","ImageArn"/);
+    expect(microvmStatements[0]!.Resource).toEqual(imageResources());
     expect(rendered).not.toContain('microvm-image:*');
   });
 
@@ -1334,10 +1360,10 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
-    template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
+    childTemplate.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
-    template.hasResourceProperties('AWS::Lambda::NetworkConnector', {
+    childTemplate.hasResourceProperties('AWS::Lambda::NetworkConnector', {
       Tags: Match.arrayWith([{ Key: 'abca:compute-backend', Value: 'lambda-microvm' }]),
     });
   });
@@ -1360,9 +1386,11 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
           microvm_artifact_sha256: 'a'.repeat(64),
         },
       });
-      overriddenTemplate = Template.fromStack(new AgentStack(app, 'TestAgentStackMicrovmOverride', {
+      const stack = new AgentStack(app, 'TestAgentStackMicrovmOverride', {
         env: { account: '123456789012', region: 'eu-central-1' },
-      }));
+      });
+      Template.fromStack(stack);
+      overriddenTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
@@ -1414,6 +1442,7 @@ describe('AgentStack default (agentcore) deploy — MicroVM substrate absent', (
 
 describe('AgentStack with the MicroVM gate on but no image configured (first deploy)', () => {
   let template: Template;
+  let childTemplate: Template;
 
   beforeAll(() => {
     // The bootstrap state: substrate provisioned so the artifact bucket exists,
@@ -1425,10 +1454,13 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
   });
 
   test('provisions the substrate (buckets, roles, both connectors) but no image', () => {
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
+    childTemplate.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    childTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.hasOutput('MicrovmArtifactBucketName', {});
     // The build-time connector output is what the packaging script reads next, so
@@ -1451,6 +1483,38 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     const keys = fns.flatMap(fn =>
       Object.keys((fn.Properties.Environment?.Variables ?? {}) as Record<string, unknown>));
     expect(keys.filter(k => k.startsWith('MICROVM_'))).toEqual([]);
+  });
+});
+
+describe('AgentStack MicroVM flat-layout migration compatibility', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    const app = new App({
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_nested_stack: false,
+        microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
+        microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
+      },
+    });
+    template = Template.fromStack(new AgentStack(app, 'FlatMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+  });
+
+  test('retains original resource paths and unnamed IAM roles with nesting disabled', () => {
+    template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    expect(Object.keys(template.findResources('AWS::Lambda::MicrovmImage'))[0])
+      .toMatch(/^LambdaMicrovmComputeImage/);
+    expect(Object.keys(template.findResources('AWS::CloudFormation::Stack')))
+      .not.toEqual(expect.arrayContaining([expect.stringMatching(/^MicrovmNestedStack/)]));
+    const roles = Object.entries(template.findResources('AWS::IAM::Role'))
+      .filter(([id]) => id.startsWith('LambdaMicrovmCompute'));
+    expect(roles).toHaveLength(3);
+    for (const [, role] of roles) expect(role.Properties.RoleName).toBeUndefined();
   });
 });
 
@@ -1886,29 +1950,66 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
   // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
   const SYNTH_ONLY_RESOURCES = 1;
 
-  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
-  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
-    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
+  const CONFIGURATIONS = [
+    { name: 'agentcore', context: { compute_type: 'agentcore' } },
+    { name: 'ecs', context: { compute_type: 'ecs' } },
+    { name: 'microvm-bootstrap', context: { compute_type: 'lambda-microvm' } },
+    {
+      name: 'microvm-imported',
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:existing-agent',
+        microvm_image_version: '6.0',
+      },
+    },
+    {
+      name: 'microvm-managed',
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
+        microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
+      },
+    },
+  ];
+  const CELLS = CONFIGURATIONS.flatMap(configuration =>
+    [false, true].map(enableToolGateway => ({ ...configuration, enableToolGateway })),
   );
 
   describe.each(CELLS)(
-    'compute_type=$computeType enableToolGateway=$enableToolGateway',
-    ({ computeType, enableToolGateway }) => {
+    '$name enableToolGateway=$enableToolGateway',
+    ({ context, enableToolGateway }) => {
       let template: Template;
+      let templates: Template[];
 
       beforeAll(() => {
-        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
+        const app = new App({ context: { ...context, enableToolGateway } });
         const stack = new AgentStack(app, 'BudgetStack', {
           env: { account: '123456789012', region: 'us-east-1' },
         });
         // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
         // reaching the assertions below is itself part of the guard.
         template = Template.fromStack(stack);
+        templates = [
+          template,
+          ...stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child))
+            .map(child => Template.fromStack(child)),
+        ];
       });
 
       test('stays inside the resource budget', () => {
-        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
-        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
+        for (const item of templates) {
+          const rendered = item.toJSON();
+          const resourceCount = Object.keys(rendered.Resources ?? {}).length;
+          expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
+          expect(Buffer.byteLength(JSON.stringify(rendered))).toBeLessThanOrEqual(1024 * 1024);
+          expect(Object.keys(rendered.Parameters ?? {}).length).toBeLessThanOrEqual(200);
+          expect(Object.keys(rendered.Outputs ?? {}).length).toBeLessThanOrEqual(200);
+        }
+        // Even changing every resource must fit the nested-operation quota.
+        const total = templates.reduce((count, item) =>
+          count + Object.keys(item.toJSON().Resources ?? {}).length + SYNTH_ONLY_RESOURCES, 0);
+        expect(total).toBeLessThanOrEqual(2500);
       });
 
       test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {

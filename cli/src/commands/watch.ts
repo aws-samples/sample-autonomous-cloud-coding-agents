@@ -113,6 +113,8 @@ const PROGRESS_EVENT_TYPES = new Set([
   'agent_cost_update',
   'agent_error',
   'agent_blocked',
+  'approval_decision_recorded',
+  'approval_cancelled',
 ]);
 
 /** Format an event timestamp to a short local time string. */
@@ -154,7 +156,9 @@ function renderMilestoneSuffix(meta: Record<string, unknown>): string {
   if (meta.severity != null) parts.push(`[sev=${String(meta.severity)}]`);
   if (meta.request_id != null) parts.push(`request_id=${String(meta.request_id)}`);
   if (meta.scope != null) parts.push(`scope=${String(meta.scope)}`);
+  if (meta.status != null) parts.push(`status=${String(meta.status)}`);
   if (meta.timeout_s != null) parts.push(`timeout=${String(meta.timeout_s)}s`);
+  if (meta.reason != null) parts.push(`reason=${String(meta.reason)}`);
   const ruleIds = meta.matching_rule_ids;
   if (Array.isArray(ruleIds) && ruleIds.length > 0) {
     parts.push(`rules=${ruleIds.map(String).join(',')}`);
@@ -177,7 +181,7 @@ function renderMilestoneSuffix(meta: Record<string, unknown>): string {
 }
 
 /** Render a single progress event as a human-readable line. */
-export function renderEvent(event: TaskEvent): string {
+export function renderEvent(event: TaskEvent, taskId?: string): string {
   const time = formatTime(event.timestamp);
   const meta = event.metadata;
 
@@ -208,8 +212,21 @@ export function renderEvent(event: TaskEvent): string {
     }
     case 'agent_milestone': {
       const milestone = String(meta.milestone ?? '');
-      return `[${time}] ★ ${milestone}${renderMilestoneSuffix(meta)}`;
+      let line = `[${time}] ★ ${milestone}${renderMilestoneSuffix(meta)}`;
+      if (milestone === 'approval_requested') {
+        if (meta.input_preview) line += `\n         Action: ${String(meta.input_preview)}`;
+        const requestId = String(meta.request_id ?? '');
+        if (taskId && [taskId, requestId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+          line += `\n         bgagent approve ${taskId} ${requestId} --scope this_call`;
+          line += `\n         bgagent deny ${taskId} ${requestId}`;
+        }
+      }
+      return line;
     }
+    case 'approval_decision_recorded':
+      return `[${time}] Decision saved${renderMilestoneSuffix(meta)}`;
+    case 'approval_cancelled':
+      return `[${time}] Approval request closed${renderMilestoneSuffix(meta)}`;
     case 'agent_cost_update': {
       const cost = meta.cost_usd != null ? `$${Number(meta.cost_usd).toFixed(COST_USD_DECIMALS)}` : '$?';
       const input = meta.input_tokens ?? 0;
@@ -302,7 +319,7 @@ interface Formatter {
   emit(ev: TaskEvent): void;
 }
 
-export function makeFormatter(isJson: boolean): Formatter {
+export function makeFormatter(isJson: boolean, taskId?: string): Formatter {
   return {
     emit(ev: TaskEvent): void {
       if (isJson) {
@@ -310,7 +327,7 @@ export function makeFormatter(isJson: boolean): Formatter {
         return;
       }
       if (PROGRESS_EVENT_TYPES.has(ev.event_type)) {
-        console.log(renderEvent(ev));
+        console.log(renderEvent(ev, taskId));
       }
     },
   };
@@ -561,7 +578,7 @@ export function makeWatchCommand(): Command {
           throw e;
         }
 
-        const formatter = makeFormatter(isJson);
+        const formatter = makeFormatter(isJson, taskId);
 
         // Task already terminated — print the snapshot tail and exit.
         if ((TERMINAL_STATUSES as readonly string[]).includes(snapshot.taskStatus)) {

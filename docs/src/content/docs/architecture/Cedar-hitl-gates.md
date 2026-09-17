@@ -9,6 +9,13 @@ title: Cedar hitl gates
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
 > **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
+>
+> **Current behavior clarified (2026-09-17):** closed approval-row conditions return
+> `404 REQUEST_NOT_FOUND`; task-only conflicts return 409. Cancellation atomically
+> closes a pending request. The stranded-task reconciler currently fails the task
+> but leaves its approval row pending; the pending endpoint filters such rows.
+> CLI response instructions are implemented for Slack/Linear notifications;
+> native channel decisions and approvals without an expiry remain future work.
 
 ---
 
@@ -277,7 +284,7 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
       - ConditionalUpdate on `TaskApprovalsTable`: `#status = :pending AND user_id = :caller AND task_id = :task_id` → flip to APPROVED
       - ConditionalUpdate on `TaskTable`: `#status = :awaiting AND awaiting_approval_request_id = :rid` → (no-op update, pure state guard; keeps status AWAITING_APPROVAL until the agent's resume transaction flips it RUNNING)
       Both conditions must hold or the entire transaction is cancelled. No TOCTOU window, no "approved a cancelled task" 202 surprise.
-    - On `TransactionCanceledException` with per-item `CancellationReasons`: distinguishes between (a) approvals row missing (404 `REQUEST_NOT_FOUND`), (b) approvals row wrong user (404 `REQUEST_NOT_FOUND` — don't leak existence), (c) approvals row wrong status (409 `REQUEST_ALREADY_DECIDED`), (d) task no longer AWAITING_APPROVAL (409 `TASK_NOT_AWAITING_APPROVAL`).
+    - On `TransactionCanceledException` with per-item `CancellationReasons`: returns 404 `REQUEST_NOT_FOUND` for any approval-row condition failure (missing, foreign-owned or already closed), or 409 `TASK_NOT_AWAITING_APPROVAL` for a task-only condition failure.
     - Records audit event to TaskEventsTable directly (`approval_decision_recorded`) so the 90-day audit trail is owned by the Lambda, not dependent on agent milestones.
     - Returns 202 `{task_id, request_id, status: "APPROVED", scope, decided_at}` or error.
 24. Agent's poll reads the `APPROVED` row on next tick (within 2-5s).
@@ -954,8 +961,7 @@ Content-Type: application/json
 | 202 | — | Success | `{task_id, request_id, status: "APPROVED", scope, decided_at}` |
 | 400 | `VALIDATION_ERROR` | Bad scope format, missing fields | `{error, message, field}` |
 | 401 | `UNAUTHORIZED` | Missing/invalid JWT | — |
-| 404 | `REQUEST_NOT_FOUND` | Row missing OR wrong user (both surfaces 404 to prevent enumeration) | — |
-| 409 | `REQUEST_ALREADY_DECIDED` | Approvals row status != PENDING | `{error, message, current_status}` |
+| 404 | `REQUEST_NOT_FOUND` | Approval-row condition failed: missing, foreign-owned or already closed | — |
 | 409 | `TASK_NOT_AWAITING_APPROVAL` | Task's current status is not AWAITING_APPROVAL | `{error, message, current_status}` |
 | 429 | `RATE_LIMIT_EXCEEDED` | Per-user > 30 approve/min | — |
 | 503 | `SERVICE_UNAVAILABLE` | DDB throttled or upstream failure | — |
@@ -1004,11 +1010,12 @@ await ddb.transactWriteItems({
 });
 ```
 
-On `TransactionCanceledException`, `ApproveTaskFn` inspects the per-item `CancellationReasons` to distinguish cases:
-- ApprovalsTable condition failed with `OldImage` absent → 404 `REQUEST_NOT_FOUND`
-- ApprovalsTable condition failed with `OldImage.user_id != caller` → 404 (same code, prevent existence oracle)
-- ApprovalsTable condition failed with `OldImage.status != "PENDING"` → 409 `REQUEST_ALREADY_DECIDED`
-- TaskTable condition failed (status changed) → 409 `TASK_NOT_AWAITING_APPROVAL`
+On `TransactionCanceledException`, `ApproveTaskFn` inspects per-item
+`CancellationReasons`. It does not request or classify old item images:
+
+- Any approval-row condition failure → 404 `REQUEST_NOT_FOUND`, including
+  cancellation, timeout and an already-recorded decision.
+- A task-only condition failure → 409 `TASK_NOT_AWAITING_APPROVAL`.
 
 This is symmetric with the agent-side `TransactWriteItems` pattern (§4 step 25a) used for the resume transition — Lambdas and agent speak the same atomic-update contract.
 
@@ -1018,7 +1025,17 @@ After successful transaction, `ApproveTaskFn` writes an audit event to `TaskEven
 
 **Scenario (finding #6):** Three months from now, a platform engineer adds a multi-tenant mode where Cognito `sub` becomes `tenant-abc:01JXZ...`. They update the agent's row-write path to prefix-strip: `user_id = sub.split(":", 1)[1]`, storing `01JXZ...` on TaskApprovalsTable. They forget to update `ApproveTaskFn`. Now the Lambda reads `sub = "tenant-abc:01JXZ..."` from the JWT and compares it against the stored `01JXZ...` — condition fails, 404 on every approve, all tasks stranded. The fix as written: "the Cognito sub is compared verbatim; any transformation must happen at write time, not at compare time" — if the agent writes the full `sub`, the Lambda compares the full `sub`; if either side transforms, both sides must. The CI assertion is a unit test that extracts `user_id` from a sample row and asserts it matches the `sub` claim of a sample JWT byte-for-byte. This test would fail on the prefix-strip refactor above and force the engineer to update both sides. Without this hard rule, ownership-in-condition silently breaks under any future identity refactor.
 
-**Scenario (finding #7):** A user submits a risky task at 10:00 AM. At 10:05 AM the agent hits a soft-deny gate. At 10:05:30 AM the user on Terminal B runs `bgagent cancel 01KPW...`, which lands as CancelTaskFn writes `status=CANCELLING`. At 10:05:31 AM the user — forgetting they just cancelled, or running from a different terminal where they didn't see the cancel — runs `bgagent approve 01KPW... 01KPR...`. Without the cross-table transaction, the Lambda's GetItem on TaskTable (separate call) might read the stale RUNNING state, then UpdateItem on TaskApprovalsTable succeeds because the approvals row is still PENDING → 202 returned. The user sees "approved!" but the task is dying. With the TransactWriteItems pattern, both conditions must hold: the TaskTable guard `status = AWAITING_APPROVAL` fails (because it's now CANCELLING), the entire transaction rolls back, the Lambda returns 409 `TASK_NOT_AWAITING_APPROVAL` with `current_status: CANCELLING`. The user sees "cannot approve: task is already cancelling" and correctly understands state. The cost is one extra table in the transaction (two instead of one) — still within DDB's 100-item limit and nowhere near the 4 MB request size. Symmetric with the agent's resume transaction, which already does the cross-table guard.
+**Scenario (finding #7):** A user cancels a task and then approves its old request
+from another terminal. Cancellation writes `CANCELLED` directly; there is no
+`CANCELLING` task state. The approval transaction cannot commit because the task
+is no longer `AWAITING_APPROVAL`. The P3 cancellation update also atomically closes
+the linked `PENDING` approval as `CANCELLED` and writes an `approval_cancelled`
+event. A later decision is rejected: the existing API returns
+`404 REQUEST_NOT_FOUND` for missing, foreign or already-decided approval rows,
+including a cancelled row. If approval committed first, cancellation preserves
+the recorded decision while cancelling the task. See the
+[P3 approval verification record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-approval-ux-20260917)
+for source versus deployment status.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
 
@@ -1137,7 +1154,11 @@ Rate-limited 30/min/user; cached 5min per repo in-Lambda.
 
 ### 7.7 `GET /v1/pending` — list pending approvals across user's active tasks
 
-Returns all approvals with `status=PENDING` owned by the caller. Backing index: `user_id-status-index` GSI on `TaskApprovalsTable` (see §10.1).
+Returns up to 100 caller-owned pending approvals whose consistently read tasks
+are still awaiting that exact request. The `user_id-status-index` GSI supplies
+candidates; pagination continues past cancelled/orphaned rows within a shared
+five-second read budget. A read failure returns an error rather than a misleading
+partial list.
 
 **Request**: `GET /v1/pending` with Cognito auth.
 
@@ -1289,16 +1310,20 @@ stateDiagram-v2
     PENDING --> APPROVED: ApproveTaskFn<br/>(cross-table transaction)
     PENDING --> DENIED: DenyTaskFn<br/>(cross-table transaction)
     PENDING --> TIMED_OUT: Agent poll timeout<br/>(best-effort update)
-    PENDING --> STRANDED: Reconciler detects<br/>orphan (age > 2×timeout_s)
+    PENDING --> CANCELLED: Task owner cancels<br/>(cross-table transaction)
     APPROVED --> [*]: terminal
     DENIED --> [*]: terminal
     TIMED_OUT --> [*]: terminal
-    STRANDED --> [*]: terminal
+    CANCELLED --> [*]: terminal
     note right of APPROVED
         TTL = created_at + timeout_s + 120s
         DDB reaps row after TTL
     end note
 ```
+
+`STRANDED` remains a recognized row status in the type contract. The current
+reconciler does not write it: it fails the owning task and leaves the row
+`PENDING`, as described below.
 
 ### 9.3 Orchestrator impact
 
@@ -1332,14 +1357,21 @@ This has a concrete implication: the hook computes an `effective_timeout` bounde
 
 ### 9.6 Stranded-approval reconciliation
 
-`reconcile-stranded-tasks.ts` gains an AWAITING_APPROVAL-aware branch:
+`reconcile-stranded-tasks.ts` has an AWAITING_APPROVAL-aware branch:
 
-- Detects tasks in AWAITING_APPROVAL with `age > 2 * timeout_s`
-- Best-effort conditional-updates TaskApprovalsTable row → `STRANDED` status
-- Transitions TaskTable → `FAILED` with reason `"approval stranded (container eviction)"`
-- Emits `approval_stranded` event to TaskEventsTable
+- Uses `APPROVAL_STRANDED_TIMEOUT_SECONDS`, default 7,200 seconds, measured from
+  entry into the current status. It does not calculate twice each row's timeout.
+- Conditionally changes the task to `FAILED` if it is still awaiting approval,
+  recording the elapsed wait and a recovery suggestion.
+- Emits `task_stranded`, `task_failed` and a wrapped `approval_stranded` milestone.
+  The legacy milestone has no request ID.
+- Leaves the approval row unchanged. The pending endpoint hides it because its
+  owning task is terminal; late approval is rejected by the task-state guard.
 
-This closes the container-eviction gap. Without this, a container restart mid-approval would leave the task hanging until the user manually cancelled.
+The notification helper can recover that legacy milestone's request identity
+from the consistently read failed task and its saved stranded cause. It verifies
+approval ownership before rendering feedback and does not change the row.
+The timer is a backstop, not proof of a particular container failure.
 
 `reconcile-concurrency.ts` (scheduled every 5 min) already scans for orphaned concurrency counters; with `AWAITING_APPROVAL` added to `ACTIVE_STATUSES` it correctly counts awaiting tasks as active.
 
@@ -1405,9 +1437,9 @@ Attributes:
 | `reason` | S | Yes | Cedar matching rule description |
 | `severity` | S | Yes | "low" \| "medium" \| "high" |
 | `matching_rule_ids` | L | Yes | List (not Set — can be empty) of soft-deny rule IDs |
-| `status` | S | Yes | PENDING \| APPROVED \| DENIED \| TIMED_OUT \| STRANDED |
+| `status` | S | Yes | PENDING \| APPROVED \| DENIED \| TIMED_OUT \| STRANDED \| CANCELLED |
 | `created_at` | S | Yes | ISO8601 |
-| `decided_at` | S | No | Set when status != PENDING |
+| `decided_at` | S | No | Set by approve/deny/cancel; the current guest timeout writer can omit it |
 | `scope` | S | No | Set on APPROVED |
 | `deny_reason` | S | No | Set on DENIED; sanitized user text |
 | `timeout_s` | N | Yes | Resolved timeout for audit |
@@ -1485,16 +1517,28 @@ Emitted to both `ProgressWriter` (DDB, 90d) and `sse_adapter` (live stream). Plu
 
 ### 11.2 Fan-out plane interaction — Slack button → Cognito mapping
 
-Approval events flow to the fan-out Lambda via TaskEventsTable Streams (the existing Phase 1b path). They are dispatched to Slack / GitHub / Email stubs.
+Approval events flow to the fan-out Lambda via TaskEventsTable Streams. The P3
+implementation adds Slack and Linear notifications with the saved action,
+reason, decision deadline and exact CLI approve/deny commands. Recorded decisions,
+cancellations, timeouts and stranded waits also produce messages. The response
+path uses the CLI owner's authentication. Native Slack approval buttons and Linear
+approval replies are not implemented by this notification change; the OAuth/button
+design below remains proposed. Email remains a log-only stub and GitHub does not
+receive approval messages. Deployment status is recorded in the
+[P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-approval-ux-20260917).
 
 **TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled. (Retains the `stream` attribute commented out for future use if needed.)
 
-Fan-out dispatch rules (extending Phase 1b stubs):
-- Slack: on `approval_requested` OR `approval_stranded` — "Agent @task_id requests approval for Bash: `git push --force`"
-- Email: on `approval_requested` with `severity: high`
-- GitHub: none
+Slack and Linear route `approval_requested`, `approval_decision_recorded`,
+`approval_timed_out`, `approval_cancelled` and `approval_stranded`. The dispatcher
+reads the current approval row and owning task before displaying a pending request,
+and records successful delivery per request/channel. Delivery failure does not mark
+the message delivered. A post that succeeds just before receipt persistence fails
+can still produce a duplicate on retry.
 
-**Rate-limited per-user**: 10 approval-related fan-out messages per user per minute. Prevents notification-spam from malicious users driving up approval-gate count.
+**Proposed notification rate limit:** 10 approval-related messages per user per
+minute. This dispatcher limit is not implemented. Existing gate-creation caps and
+API rate limits remain, but they are not a substitute for notification throttling.
 
 **Notification plane is observability, not state (see §13.14).** Notification delivery failures do NOT pause the approval timer — coupling the two creates a bypass where an adversary who takes down the webhook gets an unbounded approval window. The timer runs on the agent's local clock keyed to `created_at`; `bgagent pending` is the recovery path for users who suspect notifications are broken (backed by `user_id-status-index` GSI, §7.7). For the off-hours / unattended trade-off that this posture implies, see §14.8.
 
@@ -1644,11 +1688,11 @@ Authorization + approvals-state + task-state transition all atomic. A compromise
 - User's CLI writes `APPROVED WHERE status = :pending` (via TransactWriteItems)
 - One wins atomically
 - The loser:
-  - If TIMED_OUT wins: user gets 409 `REQUEST_ALREADY_DECIDED`. User sees "approval expired".
+  - If TIMED_OUT wins: a later decision gets 404 `REQUEST_NOT_FOUND`; the saved row is already closed.
   - If APPROVED wins: agent's poll reads APPROVED on next tick. Agent proceeds.
 
 **Race 2 — double-approve**:
-- Two concurrent CLI invocations. Second gets 409 `REQUEST_ALREADY_DECIDED`. Idempotent.
+- Two concurrent CLI invocations. Only one decision commits; the second gets 404 `REQUEST_NOT_FOUND`.
 
 **Race 3 — cancel during AWAITING_APPROVAL**:
 - Agent writes `RUNNING WHERE status = :awaiting AND awaiting_approval_request_id = :rid`
@@ -2191,7 +2235,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
   - Cancel during AWAITING_APPROVAL (agent-side resume race)
   - Cancel during approve Lambda (cross-table transaction catches it — finding #7)
   - Cancel during deny with queued denial injection (between-turns hook pre-empted; `permissionDecisionReason` still delivered — finding #2)
-  - Late approval after TIMED_OUT (expect 409)
+  - Late approval after TIMED_OUT (expect 404 `REQUEST_NOT_FOUND`)
   - **VM-throttle + late-approve race (IMPL-24, §13.12)**: user's APPROVE lands in DDB before `_best_effort_update_status("TIMED_OUT")` can claim the row; agent must re-read with ConsistentRead and honor APPROVED (not return stale TIMED_OUT). Includes the DENIED variant and the "still PENDING" fall-through where neither side wins.
 - **Chaos tests**:
   - Container restart mid-approval (simulated via kill + reconciler)

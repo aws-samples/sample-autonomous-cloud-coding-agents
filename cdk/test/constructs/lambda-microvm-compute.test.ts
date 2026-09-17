@@ -990,8 +990,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   });
 
   test('distinguishes clean P2 smoke evidence from remaining acceptance and P3 hooks', () => {
-    // Coding, iteration and cancellation have live evidence. The warning must
-    // identify the remaining matrix and retain the served/undeclared hook list.
+    // Prior image evidence does not establish new-image or normal rollout acceptance.
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
@@ -1001,7 +1000,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       .not.toContain('abca:microvm-image-p1-not-runnable');
     expect(message).toContain('Clean P2 deployment');
     expect(message).toContain('2026-09-14 without manual IAM changes');
-    expect(message).toContain('failure/recovery, effective IAM and networking matrix');
+    expect(message).toContain('This does not verify a different image');
     expect(message).toContain('P2');
     // It must state what IS true now, or it reads as the old (wrong) claim — and
     // the hook list here is what an operator compares against a failed build or a
@@ -1011,7 +1010,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
     expect(message).toContain('supervisor integration is implemented');
     expect(message).toContain('P3 requires bootstrap bundle 1.8.0 and defaults new suspension off');
-    expect(message).toContain('Live sleep/wake acceptance remains open');
+    expect(message).toContain('Nested deployments require bundle 1.9.0');
+    expect(message).toContain('Normal automatic-suspension activation remains open');
   });
 
   test('enables every hook the agent serves, and only those (rendered form)', () => {

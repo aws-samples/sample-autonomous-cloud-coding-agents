@@ -652,6 +652,9 @@ export class TaskApi extends Construct {
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
+    if (props.taskApprovalsTable) {
+      cancelTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
+    }
     const stopSessionArn = props.agentCoreStopSessionRuntimeArn;
     if (stopSessionArn) {
       cancelTaskEnv.RUNTIME_ARN = stopSessionArn;
@@ -667,10 +670,8 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
-      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
-      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
-      // is not enough once cold-start TLS handshakes for bedrock-agentcore
-      // are added.  15s gives comfortable headroom.
+      // Cancel reads state, atomically closes an unanswered approval, stops
+      // compute and writes an event. The state operation has its own 5s bound.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });
@@ -709,6 +710,7 @@ export class TaskApi extends Construct {
     props.taskEventsTable.grantReadWriteData(createTaskFn);
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
+    props.taskApprovalsTable?.grant(cancelTaskFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
 
     if (stopSessionArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1046,6 +1048,7 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(10),
         memorySize: API_HANDLER_MEMORY_MB,
       });
+      props.taskTable.grant(getPendingFn, 'dynamodb:BatchGetItem');
       // Least-privilege: GetPendingFn only reads (Query on
       // user_id-status-index for the user's pending rows) and writes
       // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row

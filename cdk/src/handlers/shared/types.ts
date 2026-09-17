@@ -1307,14 +1307,14 @@ export type ApprovalStatus =
   | 'PENDING'
   | 'APPROVED'
   | 'DENIED'
+  | 'CANCELLED'
   | 'TIMED_OUT'
   | 'STRANDED';
 
 /**
- * Cedar HITL severity, surfaced in the CLI approval prompt and used
- * for severity-gated channel routing (§11.2: high-severity rules
- * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `ApprovalRecord`,
+ * Cedar HITL severity, surfaced in approval prompts and notifications.
+ * Native Slack approval buttons remain unimplemented. Shared alias so the
+ * same literal union is not redefined inline in `ApprovalRecord`,
  * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
  */
 export type Severity = 'low' | 'medium' | 'high';
@@ -1366,14 +1366,22 @@ export interface DeniedApprovalRecord extends ApprovalRecordBase {
   readonly deny_reason?: string;
 }
 
-/** TIMED_OUT approval row — decided_at required (server-set). */
-export interface TimedOutApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'TIMED_OUT';
+/** CANCELLED approval row — its owning task was explicitly cancelled. */
+export interface CancelledApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'CANCELLED';
   readonly decided_at: string;
+  readonly cancellation_reason: string;
 }
 
-/** STRANDED approval row — decided_at required (set by the
- *  stranded-task reconciler). No user decision was ever recorded. */
+/** TIMED_OUT approval row — the guest's older timeout writer omits decided_at. */
+export interface TimedOutApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'TIMED_OUT';
+  readonly decided_at?: string;
+  readonly deny_reason?: string;
+}
+
+/** STRANDED approval row, when explicitly recorded. The current stranded-task
+ *  reconciler closes the owning task and leaves its approval row PENDING. */
 export interface StrandedApprovalRecord extends ApprovalRecordBase {
   readonly status: 'STRANDED';
   readonly decided_at: string;
@@ -1392,6 +1400,7 @@ export type ApprovalRecord =
   | PendingApprovalRecord
   | ApprovedApprovalRecord
   | DeniedApprovalRecord
+  | CancelledApprovalRecord
   | TimedOutApprovalRecord
   | StrandedApprovalRecord;
 

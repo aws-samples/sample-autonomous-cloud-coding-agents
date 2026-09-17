@@ -77,7 +77,7 @@ export const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
 const ddb = makeDocClient();
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME!;
-const APPROVAL_STATUSES: readonly ApprovalStatus[] = ['PENDING', 'APPROVED', 'DENIED', 'TIMED_OUT', 'STRANDED'];
+const APPROVAL_STATUSES: readonly ApprovalStatus[] = ['PENDING', 'APPROVED', 'DENIED', 'CANCELLED', 'TIMED_OUT', 'STRANDED'];
 const LIVE_TASK_STATUSES: readonly TaskStatusType[] = [TaskStatus.HYDRATING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL];
 
 function storeSignal(options?: SessionControlOptions): AbortSignal {
