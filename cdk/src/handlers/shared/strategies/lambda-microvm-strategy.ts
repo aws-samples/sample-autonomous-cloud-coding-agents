@@ -504,8 +504,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
     // default to "no ingress" — omitting the field attaches the AWS-managed
-    // PUBLIC `HTTP_INGRESS` connector and mints a public
-    // `*.lambda-microvm.<region>.on.aws` endpoint. So the field is ALWAYS sent.
+    // PUBLIC `HTTP_INGRESS` connector. So the field is ALWAYS sent.
+    // A service endpoint URL is also returned with `NO_INGRESS`; the URL alone
+    // does not establish guest reachability. Requests require a MicroVM auth
+    // token, and an unauthenticated 403 proves only that authentication check.
     //
     // The env var is unconditional in every CDK-deployed stack (its prop is
     // required), so in practice this always takes the `configuredIngress` branch

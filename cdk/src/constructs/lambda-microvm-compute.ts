@@ -359,6 +359,11 @@ const CPU_ARCHITECTURE = 'ARM_64';
  * control**, not an omission: the strategy passes the `NO_INGRESS` connector on
  * every `RunMicrovm`. The ARN shape is taken verbatim from that observed
  * `HTTP_INGRESS` ARN, with the connector name swapped.
+ *
+ * A service endpoint URL is still returned with `NO_INGRESS` (verified
+ * 2026-09-17). Its existence does not prove that requests reach the guest:
+ * endpoint requests require a MicroVM auth token. An unauthenticated 403 tests
+ * that authentication boundary, not the connector's handling of valid tokens.
  */
 export const MICROVM_NO_INGRESS_CONNECTOR_RESOURCE = 'aws-network-connector:NO_INGRESS';
 

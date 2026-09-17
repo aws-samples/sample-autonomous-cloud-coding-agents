@@ -515,7 +515,7 @@ async function transitionToSubmitted(
       });
     } catch (orchErr) {
       orchestratorInvokeFailed = true;
-      logger.error('Failed to invoke orchestrator after confirm-uploads — task will be picked up by StrandedTaskReconciler', {
+      logger.error('Orchestrator dispatch could not be confirmed after confirm-uploads; stranded-task cleanup fails tasks that remain stuck', {
         error: orchErr instanceof Error ? orchErr.message : String(orchErr),
         task_id: taskId,
         request_id: requestId,
@@ -533,8 +533,8 @@ async function transitionToSubmitted(
   };
   const responseBody = toTaskDetail(updatedTask);
   if (orchestratorInvokeFailed) {
-    (responseBody as any).warning = 'Task was submitted successfully but orchestration dispatch failed. ' +
-      'The task will be picked up automatically within minutes by the background reconciler.';
+    (responseBody as any).warning = 'Task was submitted, but starting the worker could not be confirmed. ' +
+      'Check task status before retrying. Background cleanup marks tasks that remain stuck as failed.';
   }
   return successResponse(200, responseBody, requestId);
 }

@@ -73,6 +73,15 @@ permanent archive, which also contains this writer inventory. The subsequent
 [feedback-only rollout](./645-p3-wake-feedback-20260916.md) advanced the normal
 coordinator to version 9; it did not change the capacity protocol.
 
+The [September 17 normal-rollout review](./645-p3-normal-rollout-review-20260917.md)
+extends the inventory through coordinator version 10 and identifies all nine
+actual admission producers. The installation was idle at observation and already
+used task-owned reservations in its clean-deployment baseline. A live admission
+fence was not applied. Its asynchronous processors have no failure-retention
+destination; setting their reserved concurrency to zero can discard input
+instead of holding it for later. Follow the retained-input and image-rollback
+steps in that review before a normal rollout rehearsal.
+
 Local tests prove the application requests and DynamoDB Local's transaction behavior. They do not establish deployed IAM, AWS scaling, successful rollout or MicroVM sleep/wake behavior. Terminal events may repeat or be lost independently of the atomic seat update.
 
 The reservation/start markers share the task row. Subsequent prerequisite work restricts agent updates to reporting/approval attributes and removes whole-row replacement/deletion plus direct worker access to the counter. Public-API omission alone was not protection. See [coordinator metadata verification](./645-coordinator-metadata.md) for the writer inventory, actual policy boundary, remaining status/tag trust limits and required AWS authorization checks. These local transaction tests do not prove that security boundary.

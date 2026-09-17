@@ -214,7 +214,8 @@ is superseded by these records.
 - [x] Verify deployed MicroVM-role metadata/S3 permissions, public-object denial and actual signer-credential expiry in AWS; see the [effective IAM evidence](./645-effective-iam-20260915.md) for scope.
 - [x] Fix ECS approval-table configuration and verify current-container approval/cancellation, v2 payload cleanup, ambient/scoped permissions and port 443/80 controls in a bounded deployment; remove its infrastructure.
 - [x] Verify 19 actual ambient/scoped permission requests from normal AgentCore runtime 5 and remove the private fixture.
-- [ ] Complete runtime ingress/remote-MCP paths and the coordinated-rollout matrix in AWS.
+- [x] Verify actual remote MCP calls, runtime HTTPS/port-80 behavior and unauthenticated endpoint denial before/after sleep on image 6.0; retain observer limitations.
+- [ ] Complete the installation-specific coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
 - [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
@@ -390,7 +391,14 @@ handoff, use this order:
    worker whose ID never reached coordinator state. The latter required an
    exact task/worker pair in the guest log; it does not establish post-retention
    behavior or a recovery path when those logs are unavailable.
-3. Complete the remaining runtime/network negatives and remote-MCP connectivity.
+3. Runtime networking and remote-MCP connectivity now pass the
+   [September 17 independent audit](./645-p3-mcp-network-20260917.md):
+   real documentation-tool calls before/after a 60-second sleep, HTTPS success
+   versus port-80 timeout on the same IP, and unauthenticated endpoint 403s while
+   the worker was running. This adds the ninth successful image 6.0 Durable
+   workflow. The record retains the excluded discovery-policy attempt and
+   watcher bookkeeping failure; product finalization preceded its fallback.
+   Valid-token ingress and exact TCP socket reuse were not tested.
    The [AgentCore permission probe](./645-p3-agentcore-permissions-20260917.md)
    now passes 19 actual requests on normal runtime version 5, including ambient
    denial, scoped task access and protected-field denials. The
@@ -426,6 +434,14 @@ handoff, use this order:
    production migration or arbitrary retention scale. A subsequent measurement
    found 86 task rows and 36 counter rows in the normal development deployment,
    below the fixture's 600 rows per table.
+   The [September 17 normal-rollout review](./645-p3-normal-rollout-review-20260917.md)
+   now inventories all nine actual producers and retained coordinator versions
+   2–10. It found 112 terminal tasks, no held reservations and 36 zero counters.
+   The clean installation already used the current reservation protocol.
+   Admission was not fenced: its async processors lack failure retention, so
+   setting their concurrency to zero could lose incoming work. A safe retained
+   input/replay procedure remains necessary. Coordinator rollback also requires
+   an explicit image plan because the managed runtime selects latest active.
 5. Perform the final compatible rollout, including shared runtime changes for
    ECS/AgentCore, pinned-version retention and rollback checks. Enable automatic
    suspension only after the remaining gates pass, then finish the ADR/runbook
