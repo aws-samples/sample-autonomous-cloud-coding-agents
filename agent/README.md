@@ -228,7 +228,7 @@ Immediate response (acceptance):
 
 Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
 
-### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 + P2)
+### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1–P3)
 
 The same uvicorn process also serves the **Lambda MicroVMs** lifecycle hooks, on the same port (8080 — the port declared in the image's `hooks.port`). On that backend there is no `InvokeAgentRuntime` and no orchestrator→agent HTTP path at all: the task payload arrives as the `/run` hook body and nothing else dials in.
 
@@ -253,7 +253,7 @@ Baked secrets are **reported, not enforced**: `warnings` lists the names (never 
 
 `microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
 
-**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. Protocol v2 is implemented locally; real AWS permission/network/expiry verification remains pending (repository runbook: `docs/verification/645-payload-bootstrap.md`).
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. Protocol v2 is deployed for MicroVM; [11 live transport/failure cases](../docs/verification/645-p2-payload-live-20260914.md) verified worker downloads/rejections, URL expiry/revocation and immediate launch replay. The [runbook](../docs/verification/645-payload-bootstrap.md) tracks the broader authorization and recovery matrix separately.
 
 `runHookPayload` is a JSON **string** passed through by `RunMicrovm`, containing:
 
@@ -304,6 +304,50 @@ Values are **non-secret identifiers only** — secrets are still fetched at `/ru
 Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (manifest/payload read or stored bytes failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
 
 `/suspend` and `/resume` are served by `microvm_http.py` and declared in managed images with 30-second service timeouts and a shared non-secret protocol marker. Pause requires an active original approval gate, matching coordinator intent, drained activity and an acknowledged checkpoint; wake renews credentials and atomically rechecks the original task/gate before allowing coding. Each handler has a 20-second total budget. `/validate` rejects a supplied incompatible image marker without contacting AWS. The coordinator checks the actual launched image version and persists support on that worker; missing support disables new suspension. See [image capability verification](../docs/verification/645-p3-image-capability.md). Supervisor integration and live P3 acceptance remain open.
+
+#### Conversation continuation checkpoints (P3 prerequisite)
+
+`src/continuation_session.py` provides an SDK conversation store and versioned S3
+checkpoint adapter. It is **not yet connected to the production runner or worker
+release** and does not change approval deadlines. The existing MicroVM lifecycle
+checkpoint resumes the same frozen process; this new component supports future
+continuation after that process is gone.
+
+`CheckpointSessionStore` implements the pinned SDK's public `SessionStore`
+contract. A caller supplies it with `session_store_flush="eager"` and waits for
+`checkpoint_pending()` to acknowledge the exact assistant tool call. Enabling
+mirroring alone is insufficient because the SDK copies the transcript
+asynchronously. A missing or rejected transcript batch prevents acknowledgement.
+The envelope retains the session, full proposed action and task/attempt/request
+identity, with a 16 MiB / 50,000-entry limit.
+
+`S3ContinuationCheckpoints` saves under
+`continuations/<task_id>/<attempt_id>/<request_id>/<sha256>.json`, verifies a
+read-back, and returns a receipt pinned to the S3 object version and checksum.
+Its default client requires task-scoped credentials. A versioned bucket and
+task-prefix `s3:PutObject`, `s3:GetObject` and `s3:GetObjectVersion` permissions
+are required; the current production artifact grants do not supply these reads.
+The adapter neither lists nor deletes objects. Retention must be arranged by the
+future integration after the request closes.
+
+Before releasing a worker, that integration must also preserve the workspace,
+hold the lifecycle barrier and conditionally publish the verified checkpoint for
+the same task attempt. A failed save must leave the worker available and report
+the failure. Checkpoints are private task data: transcripts and proposed actions
+can contain sensitive content. The module does not read CLI authentication files
+or the process environment, but does not redact conversation contents.
+
+The opt-in test uses the actual pinned SDK/CLI with a deterministic loopback
+model. It kills the original process, deletes its configuration, restores from
+the new store, and verifies approve and deny through a fresh tool hook:
+
+```bash
+cd agent
+ABCA_TEST_SDK_CONTINUATION=1 uv run pytest tests/test_continuation_sdk_probe.py --no-cov
+```
+
+See the [session recovery and storage evidence](../docs/verification/645-p3-session-recovery-20260917.md)
+for the live S3 permission checks and remaining replacement-worker requirements.
 
 ### Testing Server Mode Locally
 

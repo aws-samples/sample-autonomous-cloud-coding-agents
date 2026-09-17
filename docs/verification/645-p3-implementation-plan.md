@@ -368,6 +368,12 @@ do not cover:
   requests still default to 300 seconds with a maximum submission setting of
   3,600 seconds. Waiting beyond a worker's lifetime needs a defined recovery
   path; current same-worker suspend/resume does not provide that continuation.
+- [x] Implement and verify the [conversation/action checkpoint prerequisite](./645-p3-session-recovery-20260917.md).
+  The public SDK store restores approve/deny in a new process after removing the
+  old configuration. Immutable S3 version reads and task-scoped access passed nine
+  live checks; all temporary resources were removed. Full agent quality passed
+  2,004 tests. Workspace preservation and production worker-replacement wiring
+  remain required before changing approval deadlines or releasing a waiting worker.
 - [x] Implement [actionable Slack/Linear notifications and CLI response
   instructions](./645-p3-approval-ux-20260917.md), including saved decisions and
   closure reasons. Unwrap the actual agent approval milestones and keep approval
@@ -428,15 +434,21 @@ The following work is still required before changing the current deadline defaul
    session. First test the SDK's supported recovery behavior at a pending tool
    hook and define how the saved decision reaches the agent's normal reasoning.
    The [local pinned-SDK recovery probe](./645-p3-session-recovery-20260917.md)
-   now verifies conversation recovery from a copied session after abrupt process
-   loss. The pending tool call is omitted from the restored model context; a
-   newly proposed call receives a new ID and hook. Cloud-worker recovery and the
-   explicit transfer of the saved action/decision remain required.
+   now verifies conversation recovery through the public `SessionStore` after
+   abrupt process loss and deletion of the old configuration. The pending call
+   is omitted from the restored model context; the checkpoint carries its full
+   action separately. A continuation prompt transfers that action and decision,
+   and the newly proposed call receives a new ID and hook. Local approve/deny
+   pass; replacement cloud-worker recovery remains required.
 2. Add a durable continuation checkpoint: workspace changes, conversation/session
    state and exact pending request identity. Store it under task-scoped
    permissions, exclude credentials, and confirm the write before releasing the
    worker. A failed checkpoint must produce actionable feedback, never a claim
    that the work was saved. Test restoration of uncommitted and untracked files.
+   `agent/src/continuation_session.py` now implements acknowledged conversation/
+   action storage with immutable S3 version receipts; nine live AWS permission
+   and persistence checks passed. Workspace preservation, production IAM/retention,
+   lifecycle-barrier integration and conditional receipt publication remain open.
 3. Separate the task from each worker attempt. Add an attempt generation to
    launch tokens, saved handles, writes and reservations so a replaced worker
    cannot overwrite its successor. Release capacity while the task waits and
