@@ -30,6 +30,7 @@ sys.path.insert(0, str(AGENT_ROOT))
 sys.path.insert(0, str(AGENT_ROOT / "src"))
 
 from continuation_session import CheckpointIdentity, CheckpointSessionStore, decode_checkpoint
+from continuation_workspace import capture_workspace, restore_workspace
 from scripts.verify_microvm_credentials import MODEL, event_frame, model_response
 
 IDENTITY = CheckpointIdentity("sdk-probe", "attempt-1", "request-1", "owner", "probe/owned")
@@ -200,6 +201,31 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
     workspace.mkdir()
     target = workspace / "owned.txt"
     target.write_text("OWNED_CONTINUATION_MARKER\n")
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    git_env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    for command in (
+        ["init", "--quiet", "--template=", "--initial-branch=work/probe"],
+        ["add", "owned.txt"],
+        [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "owned",
+        ],
+    ):
+        subprocess.run(
+            ["git", "-c", f"core.hooksPath={os.devnull}", *command],
+            cwd=workspace,
+            env=git_env,
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    (workspace / "untracked.txt").write_text("UNTRACKED_CONTINUATION_MARKER\n")
     for phase in ("original", "restored"):
         (tmp_path / f"{phase}-config").mkdir()
     auth_sentinel = "SYNTHETIC_AUTH_FILE_MUST_NOT_BE_COPIED"
@@ -274,14 +300,17 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
         body = (tmp_path / "checkpoint.json").read_bytes()
         saved = decode_checkpoint(body, IDENTITY)
         assert auth_sentinel.encode() not in body
+        workspace_archive = tmp_path / "workspace.tar"
+        workspace_receipt = capture_workspace(workspace, workspace_archive, IDENTITY)
         os.killpg(first.pid, signal.SIGKILL)
         assert first.wait(timeout=10) == -signal.SIGKILL
         original_audit = json.loads((tmp_path / "original-audit.json").read_text())
         assert not any(event["kind"] == "post" for event in original_audit)
         shutil.rmtree(tmp_path / "original-config")
-        shutil.copytree(workspace, tmp_path / "workspace-copy")
         shutil.rmtree(workspace)
-        shutil.copytree(tmp_path / "workspace-copy", workspace)
+        restore_workspace(
+            workspace_archive, workspace, IDENTITY, expected_sha256=workspace_receipt.sha256
+        )
         phase[0] = "restored"
         second = start("restored")
         assert second.wait(timeout=35) == 0, (tmp_path / "restored-process.log").read_text()
@@ -292,6 +321,7 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
         result = next(event for event in audit if event["kind"] == "result")
         assert not result["is_error"] and result["session_id"] == saved["session_id"]
         assert target.read_text() == "OWNED_CONTINUATION_MARKER\n"
+        assert (workspace / "untracked.txt").read_text() == "UNTRACKED_CONTINUATION_MARKER\n"
         restored_requests = [request for request in requests if request["phase"] == "restored"]
         assert any(
             saved["action"]["tool_use_id"] in json.dumps(r["body"]) for r in restored_requests
@@ -304,6 +334,10 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
             "original_config_deleted": True,
             "pending_action_acknowledged": True,
             "auth_file_excluded": True,
+            "workspace_archive_sha256": workspace_receipt.sha256,
+            "workspace_head": workspace_receipt.head,
+            "workspace_restored_from_archive": True,
+            "untracked_file_preserved": True,
             "restored_posts": posts,
             "only_synthetic_loopback": True,
         }

@@ -372,8 +372,16 @@ do not cover:
   The public SDK store restores approve/deny in a new process after removing the
   old configuration. Immutable S3 version reads and task-scoped access passed nine
   live checks; all temporary resources were removed. Full agent quality passed
-  2,004 tests. Workspace preservation and production worker-replacement wiring
-  remain required before changing approval deadlines or releasing a waiting worker.
+  2,004 tests at that milestone. Workspace storage and production
+  worker-replacement wiring remain required before changing approval deadlines
+  or releasing a waiting worker.
+- [x] Add the [local workspace archive](./645-p3-workspace-recovery-20260917.md):
+  preserve local commits, staged/unstaged edits and untracked/ignored files,
+  validate restoration without original Git config or hooks, and connect it to
+  the actual SDK approve/deny recovery test. Local Git ignore rules also survive.
+  Final agent quality passes 2,054 tests, including 50 workspace cases and both
+  SDK decisions. Durable workspace upload, saved
+  workflow context and replacement cloud-worker integration remain open.
 - [x] Implement [actionable Slack/Linear notifications and CLI response
   instructions](./645-p3-approval-ux-20260917.md), including saved decisions and
   closure reasons. Unwrap the actual agent approval milestones and keep approval
@@ -447,7 +455,9 @@ The following work is still required before changing the current deadline defaul
    that the work was saved. Test restoration of uncommitted and untracked files.
    `agent/src/continuation_session.py` now implements acknowledged conversation/
    action storage with immutable S3 version receipts; nine live AWS permission
-   and persistence checks passed. Workspace preservation, production IAM/retention,
+   and persistence checks passed. `continuation_workspace.py` now preserves the
+   complete supported working tree and Git state in a bounded local archive.
+   Its durable upload/read-back, saved workflow context, production IAM/retention,
    lifecycle-barrier integration and conditional receipt publication remain open.
 3. Separate the task from each worker attempt. Add an attempt generation to
    launch tokens, saved handles, writes and reservations so a replaced worker

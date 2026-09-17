@@ -330,16 +330,24 @@ are required; the current production artifact grants do not supply these reads.
 The adapter neither lists nor deletes objects. Retention must be arranged by the
 future integration after the request closes.
 
-Before releasing a worker, that integration must also preserve the workspace,
-hold the lifecycle barrier and conditionally publish the verified checkpoint for
-the same task attempt. A failed save must leave the worker available and report
+`src/continuation_workspace.py` now captures and restores the local workspace:
+Git history, staged/unstaged changes, and untracked/ignored files, with a 1 GiB /
+100,000-entry default limit. It rebuilds Git configuration and never replaces an
+existing destination. Unsupported Git/filesystem states or detected concurrent
+writes prevent capture. This archive still needs durable upload and integration;
+see the [workspace recovery boundaries](../docs/verification/645-p3-workspace-recovery-20260917.md).
+
+Before releasing a worker, the integration must hold the lifecycle barrier and
+conditionally publish verified conversation and workspace receipts for the same
+task attempt. A failed save must leave the worker available and report
 the failure. Checkpoints are private task data: transcripts and proposed actions
 can contain sensitive content. The module does not read CLI authentication files
 or the process environment, but does not redact conversation contents.
 
 The opt-in test uses the actual pinned SDK/CLI with a deterministic loopback
-model. It kills the original process, deletes its configuration, restores from
-the new store, and verifies approve and deny through a fresh tool hook:
+model. It kills the original process, deletes its configuration and workspace,
+restores from the conversation store and workspace archive, and verifies approve
+and deny through a fresh tool hook:
 
 ```bash
 cd agent

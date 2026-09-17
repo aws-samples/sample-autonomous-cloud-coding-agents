@@ -99,9 +99,11 @@ conversation is safe to log or publish.
    proposed action and writes that checkpoint.
 2. The test kills the entire original process group, verifies that its tool did
    not execute, and deletes the original configuration directory.
-3. It restores the owned workspace marker at the same path and starts a fresh
-   process with `resume`, the restored store and eager mirroring. This workspace
-   copy is a test fixture, not the production workspace checkpoint.
+3. The initial store test copied an owned marker as its workspace fixture. The
+   [workspace follow-up](./645-p3-workspace-recovery-20260917.md) now deletes the
+   original workspace and restores its Git history, tracked marker and untracked
+   file using the new archive component. A fresh process starts at the same
+   path with `resume`, the restored store and eager mirroring.
 4. The continuation prompt carries the full saved action and human decision.
    The model proposes `toolu_restored`; the fresh permission hook allows one
    `Read` for approval and denies it for denial. Both sessions complete with
@@ -109,7 +111,7 @@ conversation is safe to log or publish.
 5. A synthetic authentication-file sentinel is absent from the saved checkpoint.
    No original CLI configuration is used during restoration.
 
-The final full agent quality run enabled both tests:
+The initial conversation-component full agent quality run enabled both tests:
 
 ```bash
 ABCA_TEST_SDK_CONTINUATION=1 MISE_EXPERIMENTAL=1 mise run //agent:quality
@@ -159,9 +161,10 @@ task-scoped permissions. The deterministic model demonstrates transport and hook
 behavior; it does not prove how a real model will interpret the continuation
 prompt.
 
-Production `runner.py` does not yet install this store or resume from it. Still
-required: workspace preservation including uncommitted/untracked files; recovery
-on a replacement cloud worker; a stable workspace path; lifecycle barrier and
+Production `runner.py` does not yet install this store or resume from it. The
+workspace follow-up implements local file/Git preservation; its durable storage
+and integration remain required. Other remaining work includes recovery on a
+replacement cloud worker; enforcing the stable workspace path; lifecycle barrier and
 conditional publication of the acknowledged receipt; task-attempt fencing and
 reservation transfer; exactly-once decision consumption; cancellation while
 parked; lost launch replies; and request retention/deadline changes. A conversation
