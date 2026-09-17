@@ -41,6 +41,8 @@ export interface EcsAgentClusterProps {
   readonly agentImageAsset: ecr_assets.DockerImageAsset;
   readonly taskTable: dynamodb.ITable;
   readonly taskEventsTable: dynamodb.ITable;
+  /** Approval storage. Required for human approval gates; optional in isolated tests. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
@@ -233,6 +235,7 @@ export interface EcsTaskSizing {
 const RESERVED_BUILD_ENV_KEYS = new Set([
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
+  'TASK_APPROVALS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
@@ -297,12 +300,10 @@ export class EcsAgentCluster extends Construct {
   public readonly taskDefinition: ecs.FargateTaskDefinition;
   /**
    * The smaller read-only PLANNING task def (8 GB / 2 vCPU) — for any read-only
-   * workflow that clones + reads + emits an artifact but never builds. Same
-   * image/role/env/grants as the build def (shared task+execution role + a shared
-   * container spec, so a grant present on one def but missing on the other can't
-   * silently diverge); the ONLY difference is cpu/mem. The orchestrator selects
-   * this for read-only workflows on an ECS repo, so planning doesn't
-   * over-allocate the large build task.
+   * workflow that clones + reads + emits an artifact but never builds. Both
+   * definitions share their image, roles, grants and platform environment.
+   * Sizing, disk and build-tool settings differ. The orchestrator selects this
+   * definition for read-only workflows on an ECS repo.
    */
   public readonly planningTaskDefinition: ecs.FargateTaskDefinition;
   public readonly securityGroup: ec2.SecurityGroup;
@@ -375,6 +376,9 @@ export class EcsAgentCluster extends Construct {
       CLAUDE_CODE_USE_BEDROCK: '1',
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      ...(props.taskApprovalsTable && {
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
@@ -486,6 +490,12 @@ export class EcsAgentCluster extends Construct {
     } else {
       grantAgentTaskTableAccess(props.taskTable, taskRole, false);
       props.taskEventsTable.grantReadWriteData(taskRole);
+      props.taskApprovalsTable?.grant(
+        taskRole,
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+      );
     }
     // Capacity counters are coordinator-owned. The agent never accesses them.
 
