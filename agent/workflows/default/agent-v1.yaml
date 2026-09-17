@@ -6,7 +6,7 @@
 # hatch — so its behavior is auditable and overridable per-repo via the Blueprint.
 #
 # Deliberately conservative because it runs when *nothing* was specified:
-# requires_repo:false (repository optional), a read-leaning tool set (no Bash/Write/Edit),
+# requires_repo:false (repository optional), a read-leaning auto-approval list,
 # and delivery to S3 + a comment milestone. A caller who wants coding selects
 # (or maps to) a coding workflow. soft_deny is still mandatory (read_only:false)
 # so any future tool addition stays HITL-gated.
@@ -35,8 +35,8 @@ hydration:
   sources: [task_description, attachments, memory]
 agent_config:
   tier: standard
-  # Conservative: no Bash/Write/Edit by default. The default must not silently
-  # mutate a filesystem or push code on a submission that never asked for it.
+  # No Bash/Write/Edit in SDK auto-approval. This list does not hide those tools;
+  # applicable Cedar rules govern approval/denial when they are requested.
   allowed_tools: [Read, Glob, Grep, WebFetch]
   cedar_policy_modules: [builtin/hard_deny, builtin/soft_deny]
 repo_config:

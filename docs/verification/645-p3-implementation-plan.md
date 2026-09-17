@@ -6,6 +6,15 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Normal repository path (2026-09-17):** the
+[repository acceptance record](./645-p3-repository-path-20260917.md) verifies
+normal clone/setup, one approval sleep/wake, passing post-build/lint and
+resolve-only delivery for existing PR #584 on image 6.0. Private event storage
+and supported prompt configuration excluded publication; GitHub snapshots
+were unchanged. The worker finalized without repair and all private
+infrastructure was removed. The initial guardrail rejection is retained as
+an excluded attempt. This adds the eighth successful image 6.0 Durable workflow.
+
 **Final-image and ECS follow-up (2026-09-17):** the
 [new acceptance record](./645-p3-final-image-and-ecs-20260917.md) verifies
 repository marker persistence through two sleeps on image 6.0, unchanged
@@ -381,10 +390,12 @@ handoff, use this order:
    shared container. Its source fix supplies the missing approval-table name
    to both ECS task definitions. Trace and nudge environment parity are separate
    existing ECS gaps; they were not silently supplied by the fixture.
-   The final-image repository test proves mutable files across two sleeps,
-   but uses an explicit temporary clone inside an artifact task. Verify the
-   normal repository-bound clone/delivery path separately, respecting the
-   target repository's publication checks.
+   The final-image repository test proves mutable files across two sleeps
+   using an explicit temporary clone inside an artifact task. The subsequent
+   [normal repository check](./645-p3-repository-path-20260917.md) also passes
+   clone/setup, approval sleep/wake, build/lint and existing-PR resolution.
+   New-PR publication remains covered by the earlier P2 record for its stated
+   image/scope; this final-image fixture deliberately publishes nothing.
    The [AgentCore follow-up](./645-p3-agentcore-20260916.md) now verifies its
    current shared container, approval/cancellation, exclusion from MicroVM sleep,
    reservation release and owned-session cleanup. The normal stack has no ECS

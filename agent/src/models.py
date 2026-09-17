@@ -180,24 +180,21 @@ class TaskConfig(BaseModel):
     # scheme is unchanged; read-only enforcement no longer keys off this
     # principal — it keys off ``read_only`` below.
     policy_principal: str = "new_task"
-    # Whether the resolved workflow is read-only (may not mutate the working
-    # tree). Threaded into the Cedar request ``context.read_only`` so the
-    # hard-deny Write/Edit rules fire for *any* read-only workflow, and drives the
-    # runner's allowed_tools tightening.
+    # The workflow's read-only policy flag. Threaded into Cedar's
+    # ``context.read_only`` to hard-deny Write/Edit, and used by the runner to
+    # remove those tools from SDK auto-approval. Other tools still depend on
+    # their own policy rules; this flag does not remove Bash from the surface.
     read_only: bool = False
-    # The SDK tool surface for this task, from the resolved workflow's
-    # ``agent_config.allowed_tools``. This is the second enforcement layer
-    # alongside ``read_only``: ``run_agent`` passes it to
-    # ``ClaudeAgentOptions.allowed_tools`` verbatim, and drops ``Write``/``Edit``
-    # when ``read_only`` is true. Empty list means "fall back to the built-in
-    # full surface" so legacy/batch callers that never resolved a workflow keep
-    # working unchanged; a workflow that wants to restrict tools MUST declare a
-    # non-empty list (every shipped workflow does).
+    # SDK auto-approval list from ``agent_config.allowed_tools``. The runner
+    # drops Write/Edit when read_only is true; an empty list falls back to the
+    # built-in list for legacy/batch callers. This does not restrict available
+    # tools: unlisted tools fall through to the SDK permission mode. Actual
+    # restrictions require disallowed_tools or applicable Cedar forbid rules.
     allowed_tools: list[str] = Field(default_factory=list)
-    # Whether the resolved workflow requires a repo. False for repo-less
-    # knowledge workflows: the pipeline skips clone/build/PR and drives the agent
-    # + deliver_artifact steps through the workflow runner. Defaults True so
-    # coding tasks (and any caller that omits it) keep the repo-bound path.
+    # Whether the workflow requires a repo. False makes the repo optional:
+    # the pipeline skips repository setup only when no repo was supplied.
+    # A supplied repo still takes the repository-bound path. Defaults True for
+    # coding tasks and callers that omit the field.
     requires_repo: bool = True
     # True when the resolved workflow operates on an existing PR (pr_* coding
     # workflows) — gates the "resume existing branch / resolve PR" behavior that

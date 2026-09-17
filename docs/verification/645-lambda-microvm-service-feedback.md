@@ -10,7 +10,7 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and seven Durable workflows passed |
+| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and eight Durable workflows passed |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
@@ -33,6 +33,10 @@ old credentials expired, then renewed with identical identity tags and retained
 its original approval deadline. All three workflows finalized without repair.
 These are additional application acceptance results, not service-side traces
 or a measured failure rate.
+
+The [normal repository follow-up](./645-p3-repository-path-20260917.md) also
+passes clone/setup, approval sleep/wake, build/lint and existing-PR resolution
+on image 6.0, with unchanged GitHub content and verified private cleanup.
 
 **Observed:** five failures on normal images `3.0`, `4.0` and `5.0`, plus a sixth
 on a private image retaining 5.0's application and connection behavior with
@@ -283,6 +287,15 @@ identifier you provide to ensure the idempotency of the request,” with a
 1–128-character limit. It still gives no retention duration or post-expiry
 behavior. Its request schema has no per-worker tags field. This resolves the
 earlier documentation-access problem, not the missing service contract.
+
+The same recheck of [ListMicrovms](https://docs.aws.amazon.com/lambda/latest/microvm-api/API_ListMicrovms.html)
+and [GetMicrovm](https://docs.aws.amazon.com/lambda/latest/microvm-api/API_GetMicrovm.html)
+found no returned client token, task identity, environment or per-worker tags.
+List supports image/version filtering and returns the worker ID, image,
+start time and state. Get adds the endpoint, execution role, connectors,
+duration/idle settings and termination details. These fields can narrow an
+operator's search, but shared image/role/time matches do not uniquely identify
+the worker for a lost launch response.
 
 **Impact:** if AWS created a worker but its response was lost, an operator needs
 to find that exact worker. An undocumented retention boundary prevents proving
