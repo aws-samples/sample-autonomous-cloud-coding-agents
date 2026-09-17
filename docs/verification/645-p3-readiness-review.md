@@ -4,6 +4,17 @@ Reviewed 2026-09-13 against `main` commit `5e10038c7e28179b302ac4de78b709795aeba
 
 This review covers the existing MicroVM implementation, related P2 follow-ups, comment accuracy and nested-stack feasibility. It includes local experiments, not an AWS deployment or a new live smoke run. The associated [implementation plan](./645-p3-implementation-plan.md) turns the findings into ordered work.
 
+**Current status (2026-09-17):** subsequent
+[normal-image acceptance](./645-p3-connection-close-rollout-20260916.md) and the
+[final-image/ECS follow-up](./645-p3-final-image-and-ecs-20260917.md) verify seven
+real Durable workflows on image 6.0: approval, denial, timeout, cancellation,
+repository files across two sleeps, late approval winning, and wake after real
+credential expiry. The ECS follow-up fixes missing approval-table configuration
+and passes approval/cancellation plus 19 permission/port checks. Private
+verification infrastructure was removed. Normal automatic sleep remains off
+until the separately listed delivery, permission/network and deployment gates
+are complete. Earlier paragraphs below preserve their dated findings.
+
 **Live update (2026-09-14):** subsequent work completed a [clean deployment](./645-p2-clean-deployment-20260913.md) and [real coding, PR iteration and cancellation tests](./645-p2-live-task-20260914.md), including Memory writes and runtime logging. A normal [image rebuild](./645-microvm-image-rebuild-20260914.md) activated version `2.0`; [11 live payload cases](./645-p2-payload-live-20260914.md) then verified transport/rejection, URL expiry/revocation and immediate Run replay. Those records supersede the corresponding gaps in the historical notes below. Full P2 acceptance and integrated P3 sleep/wake remain open; the original review findings are retained as a dated baseline.
 
 **Implementation update (2026-09-13):** subsequent local batches fix thread isolation, deletion/error/byte/contract bugs, approval heartbeat, stable MicroVM start recovery, atomic capacity reservations and coordinator metadata permissions. The latest batch implements v2 authenticated deployment manifests and single-object payload links for both ECS and MicroVM (#817/#700), with no old unsigned fallback. See the [bootstrap runbook](./645-payload-bootstrap.md) and [implementation progress](./645-p3-implementation-plan.md#implementation-progress). A further local batch removes unused logging counters in favor of structured stdout failures and verifies large registry assets through v2 delivery and the local loader. At that batch's completion, effective AWS policies, expiry/networking, stdout ingestion, remote-tool connectivity, clean deployment and P3 sleep/wake were pending; the live update above records later evidence. Findings below preserve the original reviewed baseline, rather than describing all of them as current defects.
@@ -58,7 +69,7 @@ An **IAM role** is a permission badge. A **trust policy** says who may wear that
 |---|---|---|
 | P1 | Build the computer, start it, deliver a task, check it and stop it | Merged in [#689](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/689). Strategy, infrastructure, bootstrap permissions, packaging, types, `/ready` and `/run` exist. |
 | P2 | Make a real coding task work with configuration, permissions, logs and progress | Merged in [#733](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/733). `/validate`, `/terminate`, warm-up, runtime grants and heartbeat support exist. The September 14 clean rerun passed coding, iteration and cancellation without manual IAM workarounds, followed by image 2.0 payload/start checks. The broader deployed recovery, effective IAM and network matrix remains open. |
-| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Local foundations include intent/policy, guest pause control, scoped credential renewal, production HTTP checkpoint/wake hooks and per-worker image capability. Durable supervision and post-commit approval wake are now connected locally with bounded recovery and scoped IAM. Live acceptance remains open; automatic sleep defaults off. |
+| P3 | Sleep during a human approval wait, wake correctly, and keep deadlines/credentials safe | Implemented and deployed. Seven image 6.0 Durable workflows verify the core lifecycle, repository-file persistence and real expired-credential renewal. Broader delivery, permission/network and deployment gates remain open; automatic sleep stays off. |
 | P4 | — | ADR-021 defines no P4. Verification runbooks have their own numbered phases; those are not extra ADR milestones. |
 
 The old unchecked checklist and the word “proposed” do not erase the merged work. Conversely, merged code is not proof that the final deployment path works unattended.

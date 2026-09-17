@@ -6,6 +6,20 @@ Prepared 2026-09-13 from `main` `5e10038c7e28179b302ac4de78b709795aeba3ce`. Read
 
 Prerequisite work is tracked here on `fix/645-microvm-readiness`. “Completed” means implemented and checked locally; AWS deployment and live verification have separate completion gates below.
 
+**Final-image and ECS follow-up (2026-09-17):** the
+[new acceptance record](./645-p3-final-image-and-ecs-20260917.md) verifies
+repository marker persistence through two sleeps on image 6.0, unchanged
+repository commit and passing lint/tests before and after, and late approval
+winning with the original deadline. Both private Durable cases finalized
+without repair and their infrastructure was removed. The same follow-up found
+and fixed missing ECS approval-table configuration in source `c14d2ba0`.
+Two fresh ECS approval/cancellation cases and 19 real permission/port checks
+passed; the isolated ECS deployment was removed. The full CDK suite passed
+5,057 tests. The real image 6.0 credential-expiry case also passed: its worker
+was observed asleep after expiry, CloudTrail confirmed a new session preserving
+identity, and the original deadline and automatic finalization held. Normal
+sleep gates remain off.
+
 **Wake transport correction (2026-09-16):** the
 [instrumented comparison](./645-p3-wake-transport-20260916.md) captured a sixth
 exact refusal: the restored event loop expired the old suspend connection while
@@ -182,7 +196,8 @@ is superseded by these records.
 - [x] Bind configuration to IAM-authenticated deployment manifests and use single-object payload links for ECS/MicroVM (#817 / #700).
 - [x] Verify MicroVM manifest/download transport, malformed or mismatched inputs, URL expiry/revocation, a foreign private-bucket denial and >1 MiB transport in AWS; verify concurrent/repeated/conflicting S3 preparation with operator credentials.
 - [x] Verify deployed MicroVM-role metadata/S3 permissions, public-object denial and actual signer-credential expiry in AWS; see the [effective IAM evidence](./645-effective-iam-20260915.md) for scope.
-- [ ] Complete other-backend roles, runtime network paths and the ECS/coordinated-rollout matrix in AWS.
+- [x] Fix ECS approval-table configuration and verify current-container approval/cancellation, v2 payload cleanup, ambient/scoped permissions and port 443/80 controls in a bounded deployment; remove its infrastructure.
+- [ ] Complete the remaining AgentCore permission checks, runtime ingress/remote-MCP paths and coordinated-rollout matrix in AWS.
 - [x] Implement saved MicroVM start receipts, stable tokens, input fingerprints and handle recovery.
 - [x] Verify immediate identical `RunMicrovm` replay returns the same worker ID in the live payload probes.
 - [x] Verify simultaneous identical Run calls, changed-parameter rejection, and replay after termination through roughly five minutes against AWS; distinguish cached Run responses from fresh VM state.
@@ -216,7 +231,7 @@ is superseded by these records.
 - [ ] Deploy and verify the complete P3 sleep/wake lifecycle in AWS.
 - [x] Deploy the explicit SDK callback-timeout fix and repeat long sleep, late wake, approval, denial and cancellation; require final approval/tool evidence as well as cleanup. Image `4.0` passed these checks, including real renewal after credential expiry.
 - [x] Deploy the explicit connection-close correction and verify approve, deny, timeout and cancel-asleep on normal image 6.0 through real Durable execution; retain all six exact refusals and the generic failure. The [transport comparison](./645-p3-wake-transport-20260916.md) proves closure before freeze; the [rollout record](./645-p3-connection-close-rollout-20260916.md) records normal-image acceptance and cleanup.
-- [ ] Complete the wider final-image workspace, multiple-gate, late-decision-winner and expired-credential checks before enabling automatic suspension.
+- [x] Complete the wider image 6.0 workspace, multiple-gate, late-decision-winner and expired-credential checks, with actual CloudTrail renewal proof and private cleanup. The repository case uses a temporary clone/artifact workflow; normal repository-bound delivery remains separate.
 
 First prerequisite batch completed locally on 2026-09-13:
 
@@ -310,10 +325,12 @@ absence of all temporary infrastructure.
 The detailed batches below preserve the implementation history. For the current
 handoff, use this order:
 
-1. Complete the wider final-image lifecycle matrix on image 6.0: a cloned
-   repository with mutable files across multiple approval gates, the late-decision
-   winner, and wake after actual credential expiry. Earlier image 4.0/5.0 results
-   remain evidence for their recorded scope.
+1. The wider final-image lifecycle matrix on image 6.0 is now complete for its
+   recorded scope: a temporary repository clone with mutable files across two
+   approval gates, the late-decision winner, and wake after actual credential
+   expiry with CloudTrail renewal proof. See the
+   [final-image follow-up](./645-p3-final-image-and-ecs-20260917.md).
+   Earlier image 4.0/5.0 results remain evidence for their recorded scope.
    The [connection-close correction](./645-p3-wake-transport-20260916.md) and
    [normal rollout](./645-p3-connection-close-rollout-20260916.md) are complete.
    Three instrumented candidates proved socket closure before freeze and a new
@@ -348,21 +365,30 @@ handoff, use this order:
    The diagnostic also reproduced a distinct generic wake failure, so this
    individual passing case did not complete final-image enablement. The timeout
    winner now also passes on normal image 6.0 through real Durable execution,
-   with a late HTTP 404 and no unapproved Read; the wider gate in step 1 remains.
+   with a late HTTP 404 and no unapproved Read. The wider image 6.0 matrix in
+   step 1 has subsequently passed too.
    The [durable registration follow-up](./645-p3-registration-20260916.md)
    passed a lost reply after an actual registration commit, cancellation before
    identity registration, and explicit operator recovery/termination of a live
    worker whose ID never reached coordinator state. The latter required an
    exact task/worker pair in the guest log; it does not establish post-retention
    behavior or a recovery path when those logs are unavailable.
-3. Complete effective permissions and network checks for the other backends,
-   plus runtime/remote-MCP connectivity. Verify a full cloned-repository P3
-   workflow on the final image, including mutable workspace state and normal
-   P2 behavior. Respect the target repository's publication checks.
+3. Complete the remaining AgentCore permission and runtime/network negatives,
+   plus remote-MCP connectivity. The
+   [ECS follow-up](./645-p3-final-image-and-ecs-20260917.md) now verifies real
+   ambient/scoped permission requests, port 443 success versus port 80 denial,
+   approval/cancellation, payload deletion and stopped workers on the current
+   shared container. Its source fix supplies the missing approval-table name
+   to both ECS task definitions. Trace and nudge environment parity are separate
+   existing ECS gaps; they were not silently supplied by the fixture.
+   The final-image repository test proves mutable files across two sleeps,
+   but uses an explicit temporary clone inside an artifact task. Verify the
+   normal repository-bound clone/delivery path separately, respecting the
+   target repository's publication checks.
    The [AgentCore follow-up](./645-p3-agentcore-20260916.md) now verifies its
    current shared container, approval/cancellation, exclusion from MicroVM sleep,
-   reservation release and owned-session cleanup. The stack has no ECS resources;
-   those checks require a separate bounded deployment.
+   reservation release and owned-session cleanup. The normal stack has no ECS
+   resources; the separate bounded ECS deployment has now been tested and removed.
 4. Exercise the coordinated capacity upgrade/drain and rollback procedure under
    deployed writer roles, including realistic scan volume. Retain the verified
    local transaction and isolated-live results as evidence for their narrower

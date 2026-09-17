@@ -1,6 +1,6 @@
 # Lambda MicroVM service-team feedback tracker
 
-Updated 2026-09-16. Working notes for the ADR-021 takeover. **Not submitted to the
+Updated 2026-09-17. Working notes for the ADR-021 takeover. **Not submitted to the
 service team.** Keep each item's evidence, question, service response and next
 action here as verification continues.
 
@@ -10,7 +10,7 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and four Durable workflows passed |
+| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and seven Durable workflows passed |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
@@ -25,6 +25,14 @@ is the receipt that lets the service team find a particular call.
 The coordinator releases capacity correctly; the requested coding workflow
 failed in these recorded cases. The application correction below is deployed;
 automatic suspension remains disabled pending the remaining P3 acceptance gates.
+
+The [September 17 follow-up](./645-p3-final-image-and-ecs-20260917.md) adds two
+repository sleep/wake cycles, late approval winning, and wake after actual STS
+expiry on normal image 6.0. The long-sleep worker remained suspended after its
+old credentials expired, then renewed with identical identity tags and retained
+its original approval deadline. All three workflows finalized without repair.
+These are additional application acceptance results, not service-side traces
+or a measured failure rate.
 
 **Observed:** five failures on normal images `3.0`, `4.0` and `5.0`, plus a sixth
 on a private image retaining 5.0's application and connection behavior with
@@ -267,6 +275,14 @@ still report `PENDING`; a separate Get correctly reported the worker's current
 state. The installed SDK documents idempotency but gives no token-retention
 duration. ABCA therefore stops automatic recovery without a saved handle after
 its own conservative 120-second deadline.
+
+**Public documentation recheck (September 17):** the
+[RunMicrovm API reference](https://docs.aws.amazon.com/lambda/latest/microvm-api/API_RunMicrovm.html)
+is now reachable. It describes `clientToken` as “A unique, case-sensitive
+identifier you provide to ensure the idempotency of the request,” with a
+1–128-character limit. It still gives no retention duration or post-expiry
+behavior. Its request schema has no per-worker tags field. This resolves the
+earlier documentation-access problem, not the missing service contract.
 
 **Impact:** if AWS created a worker but its response was lost, an operator needs
 to find that exact worker. An undocumented retention boundary prevents proving
