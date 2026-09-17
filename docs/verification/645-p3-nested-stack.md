@@ -6,6 +6,12 @@ complete. The normal `backgroundagent-dev` deployment still uses the flat layout
 migration of those existing resources remains open. This infrastructure split
 does not nest virtual machines.
 
+An isolated image-ownership refactor was also exercised on September 17.
+CloudFormation accepted the preview but rejected execution because
+`AWS::Lambda::MicrovmImage` has an unsupported tag schema. Its automatic rollback
+preserved the original image and every resource identity. Native image refactoring
+is therefore not an available migration path with the provider tested here.
+
 ## Resource ownership
 
 `AgentStack` creates a `LambdaMicrovmStack` child named `Microvm`. The child owns
@@ -86,8 +92,24 @@ resource types as `FULLY_MUTABLE`, with `Name` their only create-only property.
 However, refactoring cannot simultaneously add/delete resources, change their
 configuration, or add/change parameters, conditions or mappings. The new explicit
 IAM role names and child parameters therefore need staged migration templates;
-the final application template is not itself a resource-transfer plan. A successful
-refactor preview and rehearsal are still required.
+the final application template is not itself a resource-transfer plan.
+
+Live resource-provider inspection also reports `AWS::IAM::Policy` as
+`NON_PROVISIONABLE`. CDK emits these separate inline-policy resources alongside
+the roles. They must not be assumed eligible for a refactor just because their
+roles are `FULLY_MUTABLE`. A full migration needs a separately reviewed procedure
+for inline policies and S3 auto-delete custom resources, preserving permissions
+and bucket contents throughout. Existing generated role names also differ from
+the new explicit names; moving ownership must not silently rename those roles.
+
+The execution failure below means the normal migration must now choose and
+rehearse another supported procedure. A retain/remove/import sequence is a
+candidate only after an actual import of this resource type succeeds in isolation;
+identifier discovery does not prove import support. An explicit replacement
+procedure must preserve artifacts, pending payloads and compatible images while
+using non-conflicting names. Neither alternative has been executed or accepted.
+Do not treat the failed native refactor as a reason to apply the final nested
+template directly to the existing stack.
 
 ## Verification
 
@@ -190,3 +212,80 @@ Both phases' exact templates, 36 evidence files and a SHA-256 manifest are archi
 This proves fresh nested deployment, image build and deletion. Existing P3 worker
 lifecycle evidence remains in its dated records. Moving the existing normal stack
 and testing its task path after migration are still required.
+
+## Image ownership refactor: execution rejected, rollback verified
+
+The separate stack `backgroundagent-dev-p3-refactor-20260917` used the same
+production construct, bootstrap 1.9.0 and artifact as the successful fresh build.
+Its image `abca-645-refactor-probe-20260917:1.0` reached `ACTIVE` / `SUCCESSFUL`.
+Baseline verification at `2026-09-17T13:47:15.644Z` checked all six hooks, roles,
+network rules and the three parent / 18 child resources; 1,450 image-log events
+were retained. No worker was launched.
+
+The planned transfer moved only child resource `ComputeImageC9058F98` to parent
+resource `MovedMicrovmImage`. Image settings resolved to the same values through
+existing child outputs. Every other resource remained in its original stack.
+Moving the image back was conditional on successful execution and verification.
+
+Two preview findings required staging:
+
+- Changing the parent's nested-stack `TemplateURL` produced
+  `Found an action type that is not permitted during refactor operations: Modify`.
+  Keeping that property unchanged and providing the child's revised template as
+  its own `StackDefinition` produced an accepted preview.
+- The preview removed source-stack tags and applied destination-stack tags. It
+  would have dropped `abca:compute-backend`, despite that tag also appearing on
+  the image resource. A separately reviewed tag-only update aligned this
+  MicroVM-only test parent's tags. Its two root changes had `Tags` scope,
+  identical before/after resource properties and no replacements. Image 1.0
+  remained the only version. This staging choice must not be copied blindly to
+  the mixed-backend normal parent stack.
+
+Final refactor `b439bca8-a95f-4716-970d-dfad7c5b30d7` reached `CREATE_COMPLETE` /
+`AVAILABLE`. Its only action was the expected image `MOVE`, described as
+`No configuration changes detected.` Both user tags were preserved by the
+proposed remove/reapply operations. Execution was accepted at
+`2026-09-17T13:52:48.582Z`, request ID
+`6f195c46-c1a5-4f40-912c-9fdc362eeac6`, then automatically rolled back:
+
+> Stack Refactor does not support AWS::Lambda::MicrovmImage because the resource type defines an unsupported tag schema.
+
+The refactor reached `ROLLBACK_COMPLETE`; both stacks reached
+`UPDATE_ROLLBACK_COMPLETE`. Verification at `2026-09-17T13:54:29.943Z` proved:
+
+- The image retained its ARN, settings, creation time, `ACTIVE` / `SUCCESSFUL`
+  state and only version **1.0**.
+- The original three parent and 18 child physical identities and all parent
+  outputs were preserved.
+- The image retained both user tags and its original child-stack ownership tags.
+
+No successful ownership transfer occurred, so the planned reverse move was not
+attempted. This is a reproduced provider limitation, not a passing migration
+rehearsal. It is tracked as
+[service feedback F09](./645-lambda-microvm-service-feedback.md#f09--image-refactor-preview-passes-but-execution-rejects-the-tag-schema).
+
+The live provider schema declares `FULLY_MUTABLE`, updatable tags and
+`ImageArn` as its identifier. Its tag object requires `Key` but makes `Value`
+optional. The connector has the same requirement; S3's tag object requires both.
+This comparison supplies a service-team diagnostic question, not proof of the
+internal validator's cause or of connector-refactor failure.
+
+Evidence includes all rejected previews, the accepted action list, execution
+receipts, schema snapshots and rollback checks. Cleanup verification at
+`2026-09-17T13:57:26.518Z` passed 14 independent absence checks for the owned image,
+roles, buckets, connectors, security groups, provider function and log groups.
+The three uploaded verification template versions were removed from their exact
+toolkit-bucket prefix, with no remaining versions or delete markers. Normal CDK
+assets were retained.
+
+The normal deployment still has all 475 original resource identities, image 7.0,
+coordinator alias 10, its disabled live sleep switch and the shared VPC. The
+rehearsal resources are fully deleted. Evidence and a SHA-256 manifest are
+archived at
+`/Users/sphias/.local/share/abca-verification/645-p3-20260916/nested-refactor`.
+
+One preparation guard also caught a CDK asset-key assumption: a published
+template's key matched the hash of compact JSON, while its stored bytes used
+formatted JSON. Their parsed contents were identical. The rehearsal therefore
+used its own prefix and hashes of the actual uploaded bytes, without replacing
+the existing CDK object.

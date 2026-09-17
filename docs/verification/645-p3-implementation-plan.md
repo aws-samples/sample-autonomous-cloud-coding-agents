@@ -358,6 +358,10 @@ do not cover:
 - [ ] Rehearse and review the resource migration, then
   migrate the existing flat deployment and verify its image build/task path.
   The existing deployment remains flat; nesting is part of the requested scope.
+  The isolated native image refactor passed preview but execution rejected the
+  resource's unsupported tag schema. Automatic rollback preserved the image and
+  all identities. A retain/import or explicit replacement procedure now needs
+  its own supported, reversible rehearsal; see the nested-stack record and F09.
 - [ ] Implement the agreed human waiting policy: keep unanswered
   requests available, separate the human decision window from the configurable
   600-second worker sleep delay, and retain an explicit timeout option. Today,
@@ -423,6 +427,11 @@ The following work is still required before changing the current deadline defaul
    the SDK session ID in its result but does not currently start a resumed SDK
    session. First test the SDK's supported recovery behavior at a pending tool
    hook and define how the saved decision reaches the agent's normal reasoning.
+   The [local pinned-SDK recovery probe](./645-p3-session-recovery-20260917.md)
+   now verifies conversation recovery from a copied session after abrupt process
+   loss. The pending tool call is omitted from the restored model context; a
+   newly proposed call receives a new ID and hook. Cloud-worker recovery and the
+   explicit transfer of the saved action/decision remain required.
 2. Add a durable continuation checkpoint: workspace changes, conversation/session
    state and exact pending request identity. Store it under task-scoped
    permissions, exclude credentials, and confirm the write before releasing the

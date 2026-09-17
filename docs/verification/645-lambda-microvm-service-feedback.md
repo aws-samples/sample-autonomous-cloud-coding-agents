@@ -10,14 +10,15 @@ is the receipt that lets the service team find a particular call.
 
 | ID | Priority | Topic | Evidence/status |
 |---|---|---|---|
-| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and eight Durable workflows passed |
+| F01 | High; service diagnosis open | Accepted wake ends in connection refusal | Six recorded failures; pre-freeze connection closure verified; image 6.0 correction deployed and nine Durable workflows passed |
 | F02 | High | Supported IAM conditions and misleading permission errors | Reproduced in earlier P2 work; current service behavior needs confirmation |
 | F03 | Medium | A service-side hook timeline and structured failure details | Diagnostic improvement request based on F01 |
 | F04 | Medium | `PENDING` also means restoring an existing worker | Observed live; our timer bug is fixed |
 | F05 | Medium | HTTP connection handling across suspend/resume | Exact refusal correlates with expired idle connection; explicit close header deployed; service dispatch details still needed |
 | F06 | Medium | Conditional operator-role requirement for VPC connectors | Earlier deployment failure; application setup fixed |
 | F07 | P2/P3 acceptance gap | Run token retention and recovery without a worker ID | Guest-log recovery verified; maximum retention, post-expiry behavior and recovery without identity logs unknown |
-| F08 | P3 blocker | Generic wake-hook failure with an observed listener | PID 1 owned its listener after restore, 519 ms before termination; no resume hook entry |
+| F08 | High; service diagnosis open | Generic wake-hook failure with an observed listener | Historical image 5.0 failure; PID 1 owned its listener after restore, with no resume hook entry; connection-close correction now deployed |
+| F09 | Blocks native image refactoring | Image move passes preview but execution rejects tag schema | Exact one-image move rolled back; original image, version, tags and resource identities preserved |
 
 ## F01 — Wake request accepted, then the hook connection is refused
 
@@ -362,6 +363,49 @@ not establish whether this failure shares F01's cause. The diagnostic process
 can affect scheduling. The [full record](./645-p3-pid1-observer-20260916.md)
 retains the passing comparison, excluded fixture assertion, sampled state,
 timestamps and failure. Service response: pending.
+
+## F09 — Image refactor preview passes but execution rejects the tag schema
+
+**Observed:** September 17, 13:52–13:54 UTC, account `<account-id>`,
+region `us-west-2`. A freshly built isolated nested deployment used the production
+MicroVM construct and image artifact. The test attempted to move only the image's
+CloudFormation ownership from child to parent; no worker was running.
+
+- Image: `abca-645-refactor-probe-20260917:1.0`.
+- Parent stack: `backgroundagent-dev-p3-refactor-20260917`, ID suffix
+  `434bf610-b29c-11f1-8640-0624a84210c3`.
+- Child stack ID suffix: `44ff4b60-b29c-11f1-8386-06d8ca482b91`.
+- Refactor: `b439bca8-a95f-4716-970d-dfad7c5b30d7`.
+- Create request: `12b4130e-07ec-4540-aa80-81be74899243`.
+- Execute request: `6f195c46-c1a5-4f40-912c-9fdc362eeac6`,
+  accepted at `2026-09-17T13:52:48.582Z`.
+- Preview: `CREATE_COMPLETE` / `AVAILABLE`, one `MOVE`, with
+  `No configuration changes detected.` Both user tags would be preserved.
+- Execution: `ROLLBACK_COMPLETE`, with:
+  `Stack Refactor does not support AWS::Lambda::MicrovmImage because the resource type defines an unsupported tag schema.`
+
+**Impact:** existing images cannot use this native stack-refactor path to move
+into the requested nested layout. The successful preview does not expose the
+failure before execution. The normal deployment was not modified. Independent
+rollback checks confirmed the image's original ARN, only version 1.0, settings,
+tags and all 21 resource identities.
+
+**Schema evidence:** `DescribeType` reports `FULLY_MUTABLE` and updatable tags.
+`Tags` is an array of objects whose `required` list contains only `Key`; `Value`
+is optional. `AWS::Lambda::NetworkConnector` has the same shape. By comparison,
+S3 requires both `Key` and `Value`. The exact internal rejection condition and
+connector behavior have not been established.
+
+**Ask:** can the MicroVM image provider support CloudFormation stack refactoring,
+or document a supported image-preserving retain/import procedure? Is the
+optional tag `Value` causing the schema rejection, and does the connector need
+the same correction? Can the preview perform this validation before making the
+operation executable? Please also confirm how refactoring preserves an explicit
+resource tag that overlaps a source-stack tag.
+
+The [nested-stack record](./645-p3-nested-stack.md#image-ownership-refactor-execution-rejected-rollback-verified)
+contains the preparation controls, exact receipts and rollback evidence.
+Service response: pending. This feedback has not been submitted.
 
 ## Updating this tracker
 
