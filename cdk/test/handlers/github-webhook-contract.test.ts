@@ -96,7 +96,16 @@ const sha = 'a'.repeat(40);
 const pr41 = { number: 41, state: 'open', title: 'other PR', head: { sha, ref: 'other' } };
 const pr42 = { number: 42, state: 'open', title: 'preview PR', head: { sha, ref: 'preview' } };
 
+const originalTargetEnvironment = process.env.SCREENSHOT_TARGET_ENVIRONMENT;
+afterEach(() => {
+  jest.useRealTimers();
+  jest.restoreAllMocks();
+  if (originalTargetEnvironment === undefined) delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
+  else process.env.SCREENSHOT_TARGET_ENVIRONMENT = originalTargetEnvironment;
+});
+
 beforeEach(() => {
+  delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
   jest.restoreAllMocks();
   jest.clearAllMocks();
   ddbSend.mockResolvedValue({});
@@ -140,7 +149,18 @@ test.each(['check_run', 'deployment_status'])('receiver %s payload drives the pr
   expect(lambdaSend).toHaveBeenCalledTimes(1);
   // Pass the actual bytes emitted by the receiver without rebuilding any fields.
   const forwarded = JSON.parse(new TextDecoder().decode(lambdaSend.mock.calls[0][0].input.Payload));
-  if (eventType === 'deployment_status') expect(forwarded).toEqual({ raw_body: JSON.stringify(body) });
+  if (eventType === 'deployment_status') {
+    expect(forwarded).toEqual({ raw_body: JSON.stringify(body) });
+  } else {
+    expect(forwarded).toEqual({
+      raw_body: JSON.stringify({
+        repository: { full_name: 'owner/repo' },
+        deployment: { id: 123, sha, environment: 'Preview' },
+        deployment_status: { id: 123, state: 'success', environment_url: 'https://pr-42.app123.amplifyapp.com' },
+      }),
+      validated_pr_number: 42,
+    });
+  }
   await processorHandler(forwarded);
 
   expect(fetchMock).toHaveBeenCalledTimes(1);

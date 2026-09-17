@@ -112,7 +112,14 @@ function amplifyBody(overrides: Record<string, unknown> = {}, envelope: Record<s
 }
 
 describe('github-webhook receiver', () => {
+  const originalTargetEnvironment = process.env.SCREENSHOT_TARGET_ENVIRONMENT;
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (originalTargetEnvironment === undefined) delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
+    else process.env.SCREENSHOT_TARGET_ENVIRONMENT = originalTargetEnvironment;
+  });
   beforeEach(() => {
+    delete process.env.SCREENSHOT_TARGET_ENVIRONMENT;
     jest.restoreAllMocks();
     ddbSend.mockReset();
     lambdaSend.mockReset();

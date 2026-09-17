@@ -192,14 +192,16 @@ Then tail the function's CloudWatch log group. Common silent skips:
 - `skipped_state` — the delivery was for a non-`success` status (e.g. `pending`, `in_progress`); ignore.
 - `skipped_environment` (deployment statuses only) — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
 - `skipped_no_url` — the `success` status didn't include `environment_url`. Some providers post URL-less success events; the next push usually carries the URL.
-- `screenshot.amplify_pr_rejected` — a terminal rejection of the validated PR, logged once at warn level. Capture stops immediately without retrying, falling back to another PR, or emitting `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. See the reasons below.
-- `No open PR found for SHA after retries` — the deploy provider built and reported faster than the agent could `gh pr create` (race window > 35s). Rare; redeliver the webhook from GitHub's UI to retry.
+- `screenshot.amplify_pr_rejected` — invalid forwarded PR metadata or a terminal rejection of the live PR response, logged once at warn level. Capture stops immediately without retrying, falling back to another PR, or emitting `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. See the reasons below.
+- `screenshot.pr_lookup_rejected` / `SCREENSHOT_PR_LOOKUP_REJECTED` — GitHub rejected the validated PR lookup with a permanent HTTP failure, logged once at ERROR with `status`. Check token access and permissions, including for 404 responses that can conceal inaccessible repositories. Capture stops without retrying.
+- `screenshot.pr_lookup_exhausted` / `SCREENSHOT_PR_LOOKUP_EXHAUSTED` — retries or the lookup budget ran out. Check GitHub availability, token permissions, rate limits, or whether a deployment completed before the PR was created.
+- `screenshot.preview_url_rejected` — URL validation stopped capture. `untrusted_preview_url` logs at WARN with `preview_host` and `url_parsed`; `preview_pr_number_mismatch` logs at ERROR with `SCREENSHOT_PREVIEW_PR_MISMATCH` when the preview hostname disagrees with the forwarded PR number.
 
 Processor-side Amplify reasons:
 
 | Reason | What to check |
 |---|---|
-| `invalid_pr_number` | The forwarded PR number must be a positive safe integer. Deploy the receiver and processor together. |
+| `invalid_forwarded_pr_number` | The forwarded PR number must be a positive safe integer. Deploy the receiver and processor together. |
 | `pr_not_found` | GitHub returned 404 for the validated PR. Confirm the PR exists and the GitHub token can access it; GitHub also uses 404 to conceal inaccessible resources. |
 | `pr_request_rejected` | GitHub rejected the PR lookup with a non-retryable 4xx response. Inspect the logged `status`, token permissions, and request. |
 | `pr_number_mismatch` | GitHub returned a different PR number than the validated preview. Inspect the PR lookup response. |
@@ -208,7 +210,20 @@ Processor-side Amplify reasons:
 | `missing_head_ref` | GitHub returned the expected PR and SHA without a usable branch name. Inspect the PR response. |
 | `malformed_pr_response` | GitHub returned a null, array, or non-object PR body. Inspect the API response. |
 
-The processor also rechecks the Amplify URL's HTTPS origin, credentials, port, and PR number before requesting a token or capturing; rejection logs use `untrusted_preview_url` and only the hostname. Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and 403 responses carrying rate-limit headers retain bounded retries. Exhaustion logs `SCREENSHOT_PR_LOOKUP_EXHAUSTED` with the final failure reason. After resolving a transient failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
+The processor rechecks the Amplify URL's HTTPS origin, credentials, port, and PR number before requesting a token or capturing. URL rejection logs include only the hostname, never credentials, paths, or queries. A hostname/forwarded-number mismatch indicates an inconsistent invocation; inspect the receiver and processor deployment versions.
+
+Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and all 403 responses retain bounded retries. Secondary rate limits can omit rate-limit headers, so even an ambiguous 403 retries; persistent permission failures then emit `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. Deployment-status commit-pulls HTTP failures, including 404, also remain retryable. Exhaustion records the final reason:
+
+| Reason | What to check |
+|---|---|
+| `fetch_failed` | GitHub network reachability or per-request timeout. |
+| `http_error` | GitHub returned non-2xx responses; inspect the preceding logged HTTP statuses, token permissions, and rate limits. |
+| `non_json_response` | GitHub's response could not be parsed as JSON. |
+| `malformed_pr_response` | The deployment-status commit-pulls endpoint returned a non-array body. |
+| `pr_not_linked` | No open PR is associated with the deployment SHA yet. |
+| `budget_exhausted` | Earlier processing consumed the PR lookup budget before the first request. |
+
+After resolving a failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
 
 ### No screenshots at all: check the processor alarms and DLQ
 

@@ -68,8 +68,8 @@ export interface ProcessorEvent {
   readonly validated_pr_number?: number;
 }
 
-/** Static diagnostic codes shared by Amplify normalization and live PR lookup. */
-export type AmplifyPreviewRejectionReason =
+/** Static diagnostic codes emitted by receiver normalization. */
+export type AmplifyCheckRejectionReason =
   | 'invalid_payload'
   | 'action_not_completed'
   | 'check_not_completed'
@@ -85,21 +85,35 @@ export type AmplifyPreviewRejectionReason =
   | 'invalid_pull_requests'
   | 'preview_pr_not_found'
   | 'head_sha_mismatch'
-  | 'invalid_repository'
+  | 'invalid_repository';
+
+/** Terminal live-PR response validation failures. */
+export type PrLookupRejectionReason =
   | 'pr_number_mismatch'
   | 'pr_not_open'
   | 'live_pr_head_sha_mismatch'
   | 'missing_head_ref'
-  | 'malformed_pr_response'
+  | 'malformed_pr_response';
+
+/** Terminal GitHub request failures requiring operator action. */
+export type PrLookupRequestRejectionReason =
   | 'pr_request_rejected'
   | 'pr_not_found';
+
+export type PrLookupRetryableReason =
+  | 'fetch_failed'
+  | 'http_error'
+  | 'non_json_response'
+  | 'malformed_pr_response'
+  | 'pr_not_linked'
+  | 'budget_exhausted';
 
 /** Shared by receiver normalization and the processor's second URL check. */
 export const AMPLIFY_PREVIEW_HOST = /^pr-([1-9]\d*)\.[a-z0-9]+\.amplifyapp\.com$/;
 
 export type AmplifyPreviewCheckResult =
   | { readonly ok: true; readonly payload: GitHubDeploymentStatusPayload; readonly prNumber: number }
-  | { readonly ok: false; readonly reason: AmplifyPreviewRejectionReason };
+  | { readonly ok: false; readonly reason: AmplifyCheckRejectionReason };
 
 /**
  * Normalize a signed Amplify PR preview check for capture. Rejections carry
@@ -111,7 +125,7 @@ export function normalizeAmplifyPreviewCheck(value: unknown): AmplifyPreviewChec
     input !== null && typeof input === 'object' && !Array.isArray(input)
       ? input as Record<string, unknown>
       : {};
-  const reject = (reason: AmplifyPreviewRejectionReason): AmplifyPreviewCheckResult => ({ ok: false, reason });
+  const reject = (reason: AmplifyCheckRejectionReason): AmplifyPreviewCheckResult => ({ ok: false, reason });
   const raw = record(value);
   const check = record(raw.check_run);
   const app = record(check.app);

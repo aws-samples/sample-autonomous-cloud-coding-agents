@@ -25,7 +25,9 @@ import { upsertTaskComment } from './shared/github-comment';
 import {
   type GitHubDeploymentStatusPayload,
   type ProcessorEvent,
-  type AmplifyPreviewRejectionReason,
+  type PrLookupRejectionReason,
+  type PrLookupRequestRejectionReason,
+  type PrLookupRetryableReason,
   AMPLIFY_PREVIEW_HOST,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
@@ -89,7 +91,6 @@ const POST_CAPTURE_RESERVE_MS = 30_000;
  * session that's already doomed.
  */
 const MIN_CAPTURE_BUDGET_MS = 15_000;
-const HTTP_REQUEST_TIMEOUT = 408;
 
 /** Backoff schedule (ms) while waiting for GitHub to link a PR to a deploy SHA. */
 const PR_LOOKUP_RETRY_DELAY_0_MS = 0;
@@ -145,7 +146,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (validatedPrNumber !== undefined
     && (!Number.isSafeInteger(validatedPrNumber) || validatedPrNumber <= 0)) {
     logger.warn('Processor received invalid validated PR number', {
-      event: 'screenshot.amplify_pr_rejected', reason: 'invalid_pr_number',
+      event: 'screenshot.amplify_pr_rejected', reason: 'invalid_forwarded_pr_number',
     });
     return;
   }
@@ -173,12 +174,26 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   } catch { /* Rejected below without logging untrusted URL content. */ }
   const amplifyHost = preview && AMPLIFY_PREVIEW_HOST.exec(preview.hostname);
   if (!isAllowedScreenshotUrl(previewUrl)
-    || (validatedPrNumber !== undefined && (!preview || preview.username || preview.password || preview.port
-      || !amplifyHost || Number(amplifyHost[1]) !== validatedPrNumber))) {
+    || (validatedPrNumber !== undefined && (preview?.username || preview?.password || preview?.port
+      || !amplifyHost))) {
     logger.warn('Rejected deployment_status preview URL on allowlist', {
       repo,
+      event: 'screenshot.preview_url_rejected',
       preview_host: preview?.hostname,
+      url_parsed: Boolean(preview),
       reason: 'untrusted_preview_url',
+    });
+    return;
+  }
+
+  if (validatedPrNumber !== undefined && amplifyHost && Number(amplifyHost[1]) !== validatedPrNumber) {
+    logger.error('Amplify preview URL does not match forwarded PR number', {
+      event: 'screenshot.preview_url_rejected',
+      error_id: 'SCREENSHOT_PREVIEW_PR_MISMATCH',
+      reason: 'preview_pr_number_mismatch',
+      repo,
+      preview_host: preview?.hostname,
+      pr_number: validatedPrNumber,
     });
     return;
   }
@@ -208,13 +223,23 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // half always gets at least MIN_CAPTURE_BUDGET_MS.
   const prLookupBudget = Math.max(0, remaining() - POST_CAPTURE_RESERVE_MS - MIN_CAPTURE_BUDGET_MS);
   const lookup = await findPullRequestForShaWithRetry(repo, sha, token, prLookupBudget, validatedPrNumber);
-  if (!lookup.ok && lookup.terminal) {
+  if (!lookup.ok && lookup.kind === 'request_rejected') {
+    logger.error('GitHub rejected the validated Amplify PR lookup', {
+      event: 'screenshot.pr_lookup_rejected',
+      error_id: 'SCREENSHOT_PR_LOOKUP_REJECTED',
+      reason: lookup.reason,
+      repo,
+      pr_number: validatedPrNumber,
+      status: lookup.status,
+    });
+    return;
+  }
+  if (!lookup.ok && lookup.kind === 'pr_rejected') {
     logger.warn('Validated Amplify PR no longer matches preview', {
       event: 'screenshot.amplify_pr_rejected',
       reason: lookup.reason,
       repo,
       pr_number: validatedPrNumber,
-      ...(lookup.status !== undefined && { status: lookup.status }),
     });
     return;
   }
@@ -554,8 +579,9 @@ interface OpenPr {
 
 type PrLookup =
   | { readonly ok: true; readonly pr: OpenPr }
-  | { readonly ok: false; readonly terminal: true; readonly reason: AmplifyPreviewRejectionReason; readonly status?: number }
-  | { readonly ok: false; readonly terminal: false; readonly reason: 'fetch_failed' | 'http_error' | 'non_json_response' | 'malformed_pr_response' | 'pr_not_linked' | 'budget_exhausted' };
+  | { readonly ok: false; readonly kind: 'pr_rejected'; readonly reason: PrLookupRejectionReason }
+  | { readonly ok: false; readonly kind: 'request_rejected'; readonly reason: PrLookupRequestRejectionReason; readonly status: number }
+  | { readonly ok: false; readonly kind: 'retryable'; readonly reason: PrLookupRetryableReason };
 
 /**
  * Wait for an open PR to exist for the given SHA, retrying with a
@@ -578,7 +604,7 @@ async function findPullRequestForShaWithRetry(
   validatedPrNumber?: number,
 ): Promise<PrLookup> {
   const deadline = Date.now() + budgetMs;
-  let result: PrLookup = { ok: false, terminal: false, reason: 'budget_exhausted' };
+  let result: PrLookup = { ok: false, kind: 'retryable', reason: 'budget_exhausted' };
   for (let i = 0; i < PR_LOOKUP_RETRY_DELAYS_MS.length; i++) {
     const delay = PR_LOOKUP_RETRY_DELAYS_MS[i];
     if (delay > 0) {
@@ -589,7 +615,7 @@ async function findPullRequestForShaWithRetry(
     }
     if (Date.now() >= deadline) return result;
     result = await findPullRequestForSha(repo, sha, token, validatedPrNumber);
-    if (result.ok || result.terminal) return result;
+    if (result.ok || result.kind !== 'retryable') return result;
     const next = PR_LOOKUP_RETRY_DELAYS_MS[i + 1];
     if (next !== undefined) {
       logger.info('Open PR not found yet for SHA — will retry', {
@@ -604,14 +630,13 @@ async function findPullRequestForShaWithRetry(
 }
 
 /**
- * Look up an open PR associated with `sha`. Uses the
- * "List pull requests associated with a commit" GitHub API
- * (https://docs.github.com/rest/commits/commits#list-pull-requests-associated-with-a-commit).
+ * With a validated Amplify PR number, fetch GET /repos/{repo}/pulls/{number}.
+ * Accept only that open PR with a matching head; body validation and permanent
+ * HTTP failures are terminal. Transient request failures remain retryable.
  *
- * Returns the OPEN PR that the deploy is *for* (head SHA == `sha`), or
- * the first open PR as a fallback, or a retryable failure if none. Closed/merged PRs
- * are filtered out. For Amplify, only the validated PR with a matching head
- * is accepted; there is no fallback to another PR.
+ * For deployment statuses, use GET /repos/{repo}/commits/{sha}/pulls. Prefer
+ * the open PR whose head matches the SHA, falling back to the first open PR.
+ * Missing PRs and request failures are retryable to cover the PR-creation race.
  */
 async function findPullRequestForSha(
   repo: string,
@@ -649,29 +674,29 @@ async function findPullRequestForSha(
       timed_out: ac.signal.aborted,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { ok: false, terminal: false, reason: 'fetch_failed' };
+    return { ok: false, kind: 'retryable', reason: 'fetch_failed' };
   } finally {
     clearTimeout(timer);
   }
 
   if (!res.ok) {
     if (validatedPrNumber !== undefined && res.status === 404) {
-      return { ok: false, terminal: true, reason: 'pr_not_found' };
+      return { ok: false, kind: 'request_rejected', reason: 'pr_not_found', status: res.status };
     }
-    // GitHub can report rate limiting as 403. Keep those and request timeouts
-    // retryable; authentication and invalid-request failures need operator action.
-    const rateLimited = res.status === 429 || (res.status === 403
-      && (res.headers?.get('x-ratelimit-remaining') === '0' || res.headers?.has('retry-after')));
+    // Secondary rate limits can return 403 without rate-limit headers. Retry
+    // all 403s conservatively; persistent permission failures exhaust into ERROR.
+    const HTTP_STATUS_REQUEST_TIMEOUT = 408;
+    const retryableStatus = [403, HTTP_STATUS_REQUEST_TIMEOUT, 429].includes(res.status);
     if (validatedPrNumber !== undefined && res.status >= 400 && res.status < 500
-      && res.status !== HTTP_REQUEST_TIMEOUT && !rateLimited) {
-      return { ok: false, terminal: true, reason: 'pr_request_rejected', status: res.status };
+      && !retryableStatus) {
+      return { ok: false, kind: 'request_rejected', reason: 'pr_request_rejected', status: res.status };
     }
     logger.warn('GitHub PR lookup returned non-2xx', {
       repo,
       sha,
       status: res.status,
     });
-    return { ok: false, terminal: false, reason: 'http_error' };
+    return { ok: false, kind: 'retryable', reason: 'http_error' };
   }
 
   // Parse defensively: both endpoints can return an unexpected response body.
@@ -681,11 +706,11 @@ async function findPullRequestForSha(
     parsed = await res.json();
   } catch {
     logger.warn('GitHub PR lookup returned non-JSON body', { repo, sha });
-    return { ok: false, terminal: false, reason: 'non_json_response' };
+    return { ok: false, kind: 'retryable', reason: 'non_json_response' };
   }
   if (validatedPrNumber !== undefined) {
     const pr = parsed as { number?: unknown; state?: unknown; title?: unknown; body?: unknown; head?: { sha?: unknown; ref?: unknown } } | null;
-    const reject = (reason: AmplifyPreviewRejectionReason): PrLookup => ({ ok: false, terminal: true, reason });
+    const reject = (reason: PrLookupRejectionReason): PrLookup => ({ ok: false, kind: 'pr_rejected', reason });
     if (!pr || typeof pr !== 'object' || Array.isArray(pr)) return reject('malformed_pr_response');
     if (pr.number !== validatedPrNumber) return reject('pr_number_mismatch');
     if (pr.state !== 'open') return reject('pr_not_open');
@@ -704,7 +729,7 @@ async function findPullRequestForSha(
   // A non-array body would crash array operations and fault the async processor.
   if (!Array.isArray(parsed)) {
     logger.warn('GitHub commit-pulls did not return an array', { repo, sha });
-    return { ok: false, terminal: false, reason: 'malformed_pr_response' };
+    return { ok: false, kind: 'retryable', reason: 'malformed_pr_response' };
   }
   const pulls = parsed as Array<{
     number?: number;
@@ -714,7 +739,7 @@ async function findPullRequestForSha(
     head?: { ref?: string; sha?: string } | null;
   }>;
   const openPulls = pulls.filter((p) => p.state === 'open' && typeof p.number === 'number');
-  if (openPulls.length === 0) return { ok: false, terminal: false, reason: 'pr_not_linked' };
+  if (openPulls.length === 0) return { ok: false, kind: 'retryable', reason: 'pr_not_linked' };
   // Prefer the PR whose own head is this SHA — the PR that introduced the
   // commit. For a stacked PR chain the commit-pulls API also lists every
   // PR stacked on top (their history contains the commit); routing reads

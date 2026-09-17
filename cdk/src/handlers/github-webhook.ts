@@ -54,7 +54,8 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * `check_run` completions. Deployment statuses must match
  * `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`); validated Amplify
  * PR previews bypass that environment filter. Dedups
- * on `(repo, deployment_id, status_id)`, and async-invokes the
+ * on `(repo, deployment_id, status_id)` with a separate `amplify#` namespace
+ * for check runs, and async-invokes the
  * processor Lambda so we can ack within GitHub's 10s timeout. Other
  * event types (push, pull_request, ping, …) get an immediate 200 so
  * GitHub doesn't retry them.
@@ -129,8 +130,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // `Preview`, matching Vercel). Amplify deployment statuses use branch names;
     // GitHub Actions uses the workflow's environment; Netlify uses `Deploy Preview
     // <PR#>`. Operators can override the Lambda variable and redeploy.
-    // Validated Amplify checks already identify a PR preview and bypass this filter,
-    // including branch-name values that previously excluded those previews.
+    // Validated Amplify checks already identify a PR preview and bypass this filter.
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
     if (!normalized && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
@@ -167,7 +167,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Dedup on (repo, deployment_id, status_id). A single deploy lifecycle
     // can emit multiple statuses; using the status id as the third leg
     // keeps reruns of the same status (GitHub retries on 5xx) collapsed
-    // while distinct status transitions stay distinct.
+    // while distinct status transitions stay distinct. The amplify# namespace
+    // keeps check-run IDs independent of deployment/status IDs.
     const dedupKey = `${eventType === 'check_run' ? 'amplify#' : ''}${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
