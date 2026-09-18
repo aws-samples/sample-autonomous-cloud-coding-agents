@@ -6,7 +6,7 @@
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
 > **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
 >
-> **Current source behavior (2026-09-17):** the task default is `approval_timeout_s=0`,
+> **Current source behavior (2026-09-18):** the task default is `approval_timeout_s=0`,
 > meaning no decision deadline. Explicit task settings are 30–3,600 seconds;
 > positive policy-rule deadlines still apply. Pending rows have no DynamoDB TTL,
 > and `expires_at` is nullable. Task closure cancels unanswered requests and adds
@@ -14,8 +14,9 @@
 > conditions return `404 REQUEST_NOT_FOUND`; task-only conflicts return 409.
 > MicroVM checkpoint/retirement/replacement separates human waiting from worker
 > lifetime and capacity; other backends retain their existing runtime limits.
-> CLI response instructions are implemented for Slack/Linear notifications;
-> native channel decisions remain separate work. See the current
+> Linear accepts an owner’s `approve` or `deny` reply to the approval comment;
+> the handler verifies the actual comment through Linear’s API. Slack uses CLI
+> response instructions. See the current
 > [user guide](../guides/USER_GUIDE.md#approval-gates-cedar-hitl) and
 > [continuation protocol](./ORCHESTRATOR.md#retained-microvm-approvals).
 > The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
@@ -232,7 +233,9 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
       "repo": "my-org/my-app"
     }
     ```
-15. **Atomic transition** — hook issues `TransactWriteItems` with two operations:
+15. **Atomic transition** — the hook sends an IAM-signed request to the approval
+    service, which issues `TransactWriteItems` with these operations (and a
+    worker-lease condition for MicroVM):
     - Put on `TaskApprovalsTable` (new row with status=PENDING)
     - ConditionalUpdate on `TaskTable`: `status = :awaiting, awaiting_approval_request_id = :rid WHERE status = :running`
     Both succeed or both fail. On `TransactionCanceledException` (most likely the TaskTable condition fails because another process moved the status), the hook emits `approval_write_failed` and returns DENY.
@@ -1311,18 +1314,18 @@ TaskApprovalsTable rows are **terminal on first decision** — a row never re-op
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING: Agent writes row<br/>(TransactWriteItems with<br/>TaskTable → AWAITING_APPROVAL)
+    [*] --> PENDING: Approval service creates row<br/>(transaction with<br/>TaskTable → AWAITING_APPROVAL)
     PENDING --> APPROVED: ApproveTaskFn<br/>(cross-table transaction)
     PENDING --> DENIED: DenyTaskFn<br/>(cross-table transaction)
-    PENDING --> TIMED_OUT: Agent poll timeout<br/>(best-effort update)
+    PENDING --> TIMED_OUT: Approval service records<br/>worker timeout
     PENDING --> CANCELLED: Task owner cancels<br/>(cross-table transaction)
     APPROVED --> [*]: terminal
     DENIED --> [*]: terminal
     TIMED_OUT --> [*]: terminal
     CANCELLED --> [*]: terminal
     note right of APPROVED
-        TTL = created_at + timeout_s + 120s
-        DDB reaps row after TTL
+        Terminal retention TTL
+        never expires a pending request
     end note
 ```
 
@@ -1683,11 +1686,25 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
 
 ### 12.1 Trust boundaries
 
-- **Agent container ↔ TaskApprovalsTable**: IAM role on the runtime has `GetItem` / `PutItem` / conditional `UpdateItem` on the table. Agent writes pending, reads decisions, writes TIMED_OUT on internal timeout.
+- **Agent container ↔ TaskApprovalsTable**: workers have task-scoped reads and
+  transaction condition checks, with no direct item writes or deletion.
+- **Agent container ↔ approval request service**: IAM restricts signed
+  `POST /v1/tasks/{task_id}` to the session's `task_id` tag. The service creates
+  `PENDING` rows or conditionally records a non-human `TIMED_OUT`; it rejects
+  human decisions, notification markers, retention TTL and other extra fields.
+  It checks current task ownership/state and, for MicroVM, the active worker
+  lease in the same transaction. Worker-provided action descriptions remain
+  untrusted. This protects approval records; it does not sandbox code running
+  inside the agent or bind ambient compute credentials to one task.
 - **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`). Cognito `sub` is the canonical caller identity, used **verbatim** in DDB `ConditionExpression` (§7.1, finding #6).
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
 - **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
-- **Slack → ApproveTaskFn**: mediated by the fan-out Lambda + `SlackUserMappingTable` (§11.2). Slack admin cannot forge mappings; Slack approvals capped at `severity: low|medium` (finding #4).
+- **Linear → decision handlers**: the mapped task owner must author the actual
+  reply returned by Linear's API. A webhook signature alone is insufficient.
+  The Slack button/proxy design in §11.2 remains future work.
+
+See [upgrading approval permissions](../guides/DEPLOYMENT_GUIDE.md#upgrading-approval-permissions)
+before updating an existing deployment.
 
 ### 12.2 Ownership encoded in ConditionExpression
 
@@ -1696,7 +1713,10 @@ No TOCTOU window. The `TransactWriteItems` (§7.1) encodes across two tables:
 - TaskApprovalsTable: `#status = :pending AND user_id = :caller`
 - TaskTable: `#status = :awaiting AND awaiting_approval_request_id = :rid`
 
-Authorization + approvals-state + task-state transition all atomic. A compromised internal caller (Lambda with raw DDB access) or a logic bug in a future refactor that forgets the ownership check still can't flip rows without matching the `user_id`. The task-state guard additionally prevents the "approve succeeds on a cancelled task" race (finding #7).
+The handlers check authorization, approval state and task state atomically.
+These conditions prevent races; they do not constrain a compromised Lambda with
+raw table-write permission, which could omit them. Only trusted control-plane
+handlers receive that permission.
 
 `user_id` comparison is against Cognito `sub` **verbatim** — byte-for-byte equality. Any future identity transformation (per-tenant prefixing, namespacing) must apply to BOTH the write path (agent-side row write) AND the compare path (Lambda ConditionExpression) simultaneously, or the comparison silently fails under the new format. A unit test (§15.3) enforces this: given a sample JWT, extract `sub`, write a row, then assert the stored `user_id` equals `sub` byte-for-byte.
 

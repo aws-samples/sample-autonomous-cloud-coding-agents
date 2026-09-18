@@ -242,6 +242,7 @@ export interface TaskOrchestratorProps {
      * fails closed with `approval_write_failed`.
      */
     readonly taskApprovalsTableName: string;
+    readonly approvalRequestsApiUrl?: string;
     /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
     readonly nudgesTableName: string;
     /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
@@ -526,6 +527,9 @@ export class TaskOrchestrator extends Construct {
         // backends. NO IAM grant accompanies any of these (see the prop docs).
         ...(props.agentPlatformConfig && {
           TASK_APPROVALS_TABLE_NAME: props.microvmConfig?.approvalsTable.tableName ?? props.agentPlatformConfig.taskApprovalsTableName,
+          ...(props.agentPlatformConfig.approvalRequestsApiUrl && {
+            APPROVAL_REQUESTS_API_URL: props.agentPlatformConfig.approvalRequestsApiUrl,
+          }),
           NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
           LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
           ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,

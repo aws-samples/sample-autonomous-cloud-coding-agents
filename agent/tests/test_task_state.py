@@ -1051,12 +1051,12 @@ class TestBestEffortUpdateApprovalStatus:
         client.update_item.return_value = {}
 
         task_state.best_effort_update_approval_status(
-            "01KTASK", "01KREQ", "DENIED", reason="no prod pushes", client=client
+            "01KTASK", "01KREQ", "TIMED_OUT", reason="polling failed", client=client
         )
 
         call = client.update_item.call_args
         assert "deny_reason = :reason" in call.kwargs["UpdateExpression"]
-        assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "no prod pushes"}
+        assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "polling failed"}
 
     def test_conditional_check_failed_returns_false(self, approval_tables_env):
         """IMPL-24 — this is the VM-throttle race signal the hook re-reads on."""

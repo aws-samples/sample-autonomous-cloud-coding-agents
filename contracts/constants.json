@@ -41,6 +41,7 @@
       "task_table_name": "TASK_TABLE_NAME",
       "task_events_table_name": "TASK_EVENTS_TABLE_NAME",
       "task_approvals_table_name": "TASK_APPROVALS_TABLE_NAME",
+      "approval_requests_api_url": "APPROVAL_REQUESTS_API_URL",
       "nudges_table_name": "NUDGES_TABLE_NAME",
       "log_group_name": "LOG_GROUP_NAME",
       "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",

@@ -243,6 +243,32 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### Upgrading approval permissions
+
+PR #904 moves worker approval creation and timeout writes into an IAM-authenticated
+service. Deploy the matching agent image and CDK together: old workers write
+directly to DynamoDB and cannot create new gates after those permissions are removed.
+
+1. Pause submissions from the CLI, integrations and schedules during the upgrade.
+   Let existing tasks finish, or have their owners cancel them. Include tasks
+   awaiting approval, suspended MicroVMs and retained continuations; an empty
+   running-container list does not prove the deployment has drained.
+2. Build the agent from the same revision as the CDK. For an externally managed
+   MicroVM image, publish that build and select its new version before resuming
+   submissions. A suspended VM keeps its old code.
+3. Deploy the stack. Check that the SessionRole has approval-table reads and
+   condition checks only, plus `execute-api:Invoke` restricted to its task tag.
+   CDK supplies `APPROVAL_REQUESTS_API_URL` to all three compute backends.
+4. Submit a test task that triggers a known approval rule on each enabled backend.
+   Verify that the request appears, an owner decision resumes it, and an explicit
+   deadline records `TIMED_OUT` without overwriting a human decision. Then resume
+   normal submissions.
+
+If an old worker survives the upgrade, its next approval write fails closed.
+Existing rows remain readable; do not restore direct writes to work around a stale
+image. Roll forward with the matching image. Rolling back IAM restores the original
+approval-record vulnerability and requires a deliberate operator decision.
+
 ### AgentCore unsupported Availability Zones
 
 **Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.

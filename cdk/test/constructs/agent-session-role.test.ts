@@ -53,9 +53,9 @@ function createStack() {
   const sessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
     assumingRoles: [computeRole],
     taskTable,
+    approvalsTable: taskApprovalsTable,
     taskScopedTables: [
       taskEventsTable,
-      taskApprovalsTable,
       taskNudgesTable,
     ],
     traceArtifactsBucket,
@@ -108,11 +108,12 @@ describe('AgentSessionRole construct', () => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.some((a: string) => a.startsWith('dynamodb:'));
     });
-    // Main task read/update grants plus three supporting tables.
+    // Main task read/update, approval read, and two supporting table grants.
     expect(ddbStatements).toHaveLength(5);
     for (const s of ddbStatements) {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
-      const readonlyTask = actions.includes('dynamodb:GetItem') && !actions.includes('dynamodb:PutItem');
+      const readonlyTask = JSON.stringify(s.Resource).includes('TaskTable')
+        && !JSON.stringify(s.Resource).includes('Approvals') && actions.includes('dynamodb:GetItem');
       expect(s.Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
         .toEqual(readonlyTask
           ? ['${aws:PrincipalTag/task_id}', 'worker-lease#${aws:PrincipalTag/task_id}']
@@ -141,6 +142,18 @@ describe('AgentSessionRole construct', () => {
       JSON.stringify(s.Resource).includes('/traces/${aws:PrincipalTag/user_id}/*'),
     );
     expect(tracePut).toBeDefined();
+  });
+
+  test('workers cannot forge decisions or notification flags through any approval-table write', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: { Resource: unknown }) => JSON.stringify(statement.Resource).includes('TaskApprovalsTable'));
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Action).toEqual([
+      'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem',
+    ]);
+    expect(statements[0].Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
+      .toEqual(['${aws:PrincipalTag/task_id}']);
   });
 
   test('task records cannot be replaced, deleted or updated without an attribute allowlist', () => {
@@ -181,10 +194,13 @@ describe('AgentSessionRole construct', () => {
     expect(() => new AgentSessionRole(stack, 'Session', {
       assumingRoles: [computeRole],
       taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
       taskScopedTables: [table],
       traceArtifactsBucket: new s3.Bucket(stack, 'Traces'),
       attachmentsBucket: new s3.Bucket(stack, 'Attachments'),
-    })).toThrow('taskTable must not appear in taskScopedTables');
+    })).toThrow('taskTable and approvalsTable must not appear in taskScopedTables');
   });
 
   test('S3 artifact writes are scoped to the per-task_id prefix (#248 Phase 3)', () => {
@@ -256,6 +272,9 @@ describe('AgentSessionRole construct', () => {
     new AgentSessionRole(stack, 'SR', {
       assumingRoles: [computeRole],
       taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
       taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
       attachmentsBucket: new s3.Bucket(stack, 'AB'),
@@ -302,6 +321,9 @@ describe('AgentSessionRole construct', () => {
     const sessionRole = new AgentSessionRole(stack, 'SR', {
       assumingRoles: [agentcoreRole],
       taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
       taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
       attachmentsBucket: new s3.Bucket(stack, 'AB'),

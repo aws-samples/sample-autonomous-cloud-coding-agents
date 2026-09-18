@@ -1764,7 +1764,7 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // is added without being attributed below.
     // 47 existing handlers (including concurrency repair) + 2 registry
     // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(53);
+    expect(abcaLambdas.length).toBe(54);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

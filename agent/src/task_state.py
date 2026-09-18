@@ -688,6 +688,23 @@ def transact_write_approval_request(
     DDB-layer exceptions propagate so the hook's outer try/except can
     fail-closed with a specific reason.
     """
+    import approval_requests
+
+    if approval_requests.configured():
+        try:
+            approval_requests.record_request(
+                "create", task_id, request_id, approval=dict(approval_row)
+            )
+            return
+        except Exception as exc:
+            if _extract_error_code(exc) == "TransactionCanceledException":
+                reasons = _extract_cancellation_reasons(exc)
+                raise ApprovalWriteError(
+                    f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
+                ) from exc
+            raise
+    # Compatibility with older deployments. New stacks grant no direct writes,
+    # so a missing service URL fails closed there rather than bypassing the broker.
     task_table, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 
@@ -1003,6 +1020,23 @@ def best_effort_update_approval_status(
     Returns ``True`` on successful write, ``False`` on
     ``ConditionalCheckFailedException``. All other errors propagate.
     """
+    import approval_requests
+
+    if new_status != "TIMED_OUT":
+        raise ValueError("Workers may record only non-human timeouts")
+    if approval_requests.configured():
+        try:
+            approval_requests.record_request("timeout", task_id, request_id, reason=reason)
+            return True
+        except Exception as exc:
+            reasons = _extract_cancellation_reasons(exc)
+            if _extract_error_code(exc) == "TransactionCanceledException" and (
+                reasons
+                and reasons[0].get("Code") == "ConditionalCheckFailed"
+                and all(reason.get("Code") == "None" for reason in reasons[1:])
+            ):
+                return False
+            raise
     _, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 
