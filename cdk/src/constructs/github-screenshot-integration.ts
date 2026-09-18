@@ -102,6 +102,7 @@ export interface GitHubScreenshotIntegrationProps {
    * (Amplify Hosting), `Deploy Preview <PR#>` (Netlify), or whatever
    * your GitHub Actions workflow passes. Set this when your provider
    * uses a different name and you want per-PR-only screenshots.
+   * Validated Amplify PR preview check runs bypass this filter.
    * @default 'Preview'
    */
   readonly screenshotTargetEnvironment?: string;
