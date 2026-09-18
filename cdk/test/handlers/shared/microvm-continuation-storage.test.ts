@@ -152,6 +152,29 @@ test('verifies both archive versions and checksums before permitting retirement'
   await expect(verifyContinuationCheckpoint(record)).rejects.toThrow('version, length or checksum');
 });
 
+test.each(['checksum', 'length', 'identity', 'version'])('rejects a manifest %s mismatch before checking archives', async mismatch => {
+  const identity = { task_id: 'task', user_id: 'user', repo: 'owner/repo', attempt_id: 'vm', request_id: 'request' };
+  const bytes = Buffer.from(JSON.stringify({
+    version: mismatch === 'version' ? 999 : 1,
+    identity: mismatch === 'identity' ? { ...identity, user_id: 'other' } : identity,
+  }));
+  const record: ContinuationRecord = {
+    version: 1,
+    state: 'READY',
+    identity,
+    manifest: {
+      kind: 'manifest',
+      key: 'manifest',
+      version_id: 'version-1',
+      sha256: mismatch === 'checksum' ? '0'.repeat(64) : digest(bytes),
+      size_bytes: bytes.length + (mismatch === 'length' ? 1 : 0),
+    },
+  };
+  mockS3.mockResolvedValueOnce(object(bytes));
+  await expect(verifyContinuationCheckpoint(record)).rejects.toThrow('MICROVM_CONTINUATION_STORAGE_INVALID');
+  expect(mockS3).toHaveBeenCalledTimes(1);
+});
+
 test('cleanup preserves pending data and removes every closed-task version before clearing its pointer', async () => {
   const options = { abortSignal: AbortSignal.timeout(1000) };
   mockDdb.mockResolvedValueOnce({ Item: { user_id: 'user', status: 'AWAITING_APPROVAL' } });

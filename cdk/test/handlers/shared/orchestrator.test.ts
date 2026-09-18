@@ -218,6 +218,7 @@ describe('MicroVM terminal finalization', () => {
       primeReread(status);
       await finish({ status: 'completed' });
       expect(commandsOfType('Get')[0].input.ConsistentRead).toBe(true);
+      expect(commandsOfType('Update')).toHaveLength(1);
       for (const command of commandsOfType('Update')) {
         expect(command.input.ConditionExpression).toBeUndefined(); // terminal TTL stamp only
       }
