@@ -50,6 +50,43 @@ def test_status_race_logging_preserves_worker_fence_failures(
     assert any(call.args[0] == "WARN" for call in log.call_args_list) is expected_warning
 
 
+@pytest.mark.parametrize(
+    ("codes", "can_heal"),
+    [
+        (["ConditionalCheckFailed", "None"], True),
+        (["None", "ConditionalCheckFailed"], False),
+        (["ConditionalCheckFailed", "ConditionalCheckFailed"], False),
+        (["TransactionConflict", "None"], False),
+        ([], False),
+    ],
+)
+def test_terminal_transaction_heals_trace_only_when_worker_lease_passed(
+    monkeypatch, codes, can_heal
+):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    monkeypatch.setattr(task_state, "_update_task", MagicMock(side_effect=error))
+    heal = MagicMock(return_value=True)
+    report = MagicMock()
+    monkeypatch.setattr(task_state, "write_trace_uri_conditional", heal)
+    monkeypatch.setattr(task_state, "log_error_cw", report)
+    task_state.write_terminal("task", "COMPLETED", {"trace_s3_uri": "s3://bucket/trace"})
+    assert heal.called is can_heal
+    if can_heal:
+        heal.assert_called_once_with("task", "s3://bucket/trace")
+    else:
+        assert "TransactionCanceledException" in report.call_args.args[0]
+        assert "CancellationReasons" in report.call_args.args[0]
+
+
 class TestAgentWriteContract:
     def test_current_task_writers_fit_the_deployed_attribute_allowlist(self, monkeypatch):
         """Exercise real writers; detect a new field before IAM rejects it live.
