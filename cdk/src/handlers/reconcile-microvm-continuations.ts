@@ -66,16 +66,41 @@ export async function reconcileMicrovmContinuation(task: ContinuableTask): Promi
       }
       if (Number.isFinite(started) && Date.now() < started + MICROVM_MAX_DURATION_SECONDS * 1000) return;
     }
+    let attempt = task.microvm_start?.clientToken;
+    const withoutStart = !task.microvm_start;
+    let leaseState: string | undefined;
+    if (withoutStart) {
+      // Replacement admission removes the old start receipt. Its new launch
+      // token lives on the coordinator-owned slot and lease, not the task id.
+      const lease = (await ddb.send(new GetCommand({
+        TableName: TABLE, Key: workerLeaseKey(task.task_id), ConsistentRead: true,
+      }), options)).Item;
+      if (lease) {
+        const notLaunched = lease.lease_state === 'ACTIVE' && !lease.lease_microvm_id
+          && task.concurrency_slot?.state === 'held'
+          && task.concurrency_slot.attempt_id === lease.lease_attempt_id;
+        if (lease.lease_user_id !== task.user_id
+          || (!['PARKED', 'CLOSED'].includes(lease.lease_state) && !notLaunched)
+          || typeof lease.lease_attempt_id !== 'string' || !lease.lease_attempt_id) {
+          throw new Error('MICROVM_CONTINUATION_LEASE_INVALID: missing start does not prove worker shutdown');
+        }
+        attempt = lease.lease_attempt_id;
+        leaseState = lease.lease_state;
+      }
+    }
     await ddb.send(new UpdateCommand({
       TableName: TABLE,
       Key: workerLeaseKey(task.task_id),
       UpdateExpression: 'SET #ttl = :ttl, lease_state = :closed, lease_user_id = :user, lease_attempt_id = :attempt',
-      ConditionExpression: 'attribute_not_exists(task_id) OR (lease_user_id = :user AND lease_attempt_id = :attempt)',
+      ConditionExpression: 'attribute_not_exists(task_id) OR (lease_user_id = :user AND lease_attempt_id = :attempt'
+        + (withoutStart ? ' AND lease_state = :observedState' : '')
+        + (leaseState === 'ACTIVE' ? ' AND attribute_not_exists(lease_microvm_id)' : '') + ')',
       ExpressionAttributeNames: { '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':user': task.user_id,
         ':closed': 'CLOSED',
-        ':attempt': task.microvm_start?.clientToken ?? task.task_id,
+        ':attempt': attempt ?? task.task_id,
+        ...(withoutStart ? { ':observedState': leaseState ?? 'CLOSED' } : {}),
         ':ttl': Math.floor(Date.now() / 1000) + Number(process.env.TASK_RETENTION_DAYS ?? '90') * 86400,
       },
     }), options);
