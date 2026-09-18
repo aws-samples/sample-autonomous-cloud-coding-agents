@@ -23,6 +23,7 @@ import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   type GitHubDeploymentStatusPayload,
+  type ProcessorEvent,
   normalizeAmplifyPreviewCheck,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
@@ -50,9 +51,11 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * Verifies `X-Hub-Signature-256` (per
  * https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
  * filters to successful `deployment_status` events and Amplify PR preview
- * `check_run` completions whose normalized environment
- * matches `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`), dedups
- * on `(repo, deployment_id, status_id)`, and async-invokes the
+ * `check_run` completions. Deployment statuses must match
+ * `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`); validated Amplify
+ * PR previews bypass that environment filter. Dedups
+ * on `(repo, deployment_id, status_id)` with a separate `amplify#` namespace
+ * for check runs, and async-invokes the
  * processor Lambda so we can ack within GitHub's 10s timeout. Other
  * event types (push, pull_request, ping, …) get an immediate 200 so
  * GitHub doesn't retry them.
@@ -92,23 +95,30 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true });
     }
 
+    // GitHub delivery IDs are UUIDs. Validate before logging header content.
+    const delivery = event.headers['X-GitHub-Delivery'] ?? event.headers['x-github-delivery'];
+    const correlation = delivery && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(delivery)
+      ? { delivery_id: delivery } : {};
     let parsed: unknown;
     try {
       parsed = JSON.parse(event.body);
-    } catch (err) {
+    } catch {
       logger.warn('GitHub webhook body is not valid JSON', {
-        error: err instanceof Error ? err.message : String(err),
+        event: 'screenshot.webhook_rejected', reason: 'invalid_json', ...correlation,
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
     const normalized = eventType === 'check_run' ? normalizeAmplifyPreviewCheck(parsed) : null;
-    if (eventType === 'check_run' && !normalized) {
-      return jsonResponse(200, { ok: true, skipped_check: true });
+    if (normalized && !normalized.ok) {
+      logger.info('Amplify preview check rejected', {
+        event: 'screenshot.amplify_check_rejected', reason: normalized.reason, ...correlation,
+      });
+      return jsonResponse(200, { ok: true, skipped_check: true, reason: normalized.reason });
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return jsonResponse(400, { error: 'Invalid webhook payload' });
     }
-    const raw = normalized ?? parsed as GitHubDeploymentStatusPayload;
+    const raw = normalized?.payload ?? parsed as GitHubDeploymentStatusPayload;
 
     // Filter pre-validate so common skip-paths return early without
     // logging a "missing fields" warn for an in-progress event.
@@ -116,18 +126,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true, skipped_state: raw.deployment_status?.state });
     }
 
-    // Filter to a configured environment name. Defaults to `Preview`
-    // because Vercel labels per-PR deploys that way, but every provider
-    // uses different conventions:
-    //   - Vercel preview:           `Preview`
-    //   - AWS Amplify PR check:     normalized to `Preview`
-    //   - GitHub Actions deploys:   whatever the workflow passes to
-    //                               `actions/create-deployment`
-    //   - Netlify deploy previews:  `Deploy Preview <PR#>`
-    // Operators on non-Vercel backends override via
-    // `SCREENSHOT_TARGET_ENVIRONMENT` (Lambda env var, redeploy required).
+    // Filter deployment statuses to SCREENSHOT_TARGET_ENVIRONMENT (default
+    // `Preview`, matching Vercel). Amplify deployment statuses use branch names;
+    // GitHub Actions uses the workflow's environment; Netlify uses `Deploy Preview
+    // <PR#>`. Operators can override the Lambda variable and redeploy.
+    // Validated Amplify checks already identify a PR preview and bypass this filter.
     const targetEnv = process.env.SCREENSHOT_TARGET_ENVIRONMENT ?? 'Preview';
-    if (raw.deployment?.environment !== targetEnv) {
+    if (!normalized && raw.deployment?.environment !== targetEnv) {
       return jsonResponse(200, {
         ok: true,
         skipped_environment: raw.deployment?.environment,
@@ -162,7 +167,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Dedup on (repo, deployment_id, status_id). A single deploy lifecycle
     // can emit multiple statuses; using the status id as the third leg
     // keeps reruns of the same status (GitHub retries on 5xx) collapsed
-    // while distinct status transitions stay distinct.
+    // while distinct status transitions stay distinct. The amplify# namespace
+    // keeps check-run IDs independent of deployment/status IDs.
     const dedupKey = `${eventType === 'check_run' ? 'amplify#' : ''}${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
@@ -185,13 +191,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
+    const processorEvent: ProcessorEvent = {
+      raw_body: normalized ? JSON.stringify(normalized.payload) : event.body,
+      ...(normalized && { validated_pr_number: normalized.prNumber }),
+    };
     try {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify({
-          raw_body: normalized ? JSON.stringify(normalized) : event.body,
-        })),
+        Payload: new TextEncoder().encode(JSON.stringify(processorEvent)),
       }));
     } catch (invokeErr) {
       logger.error('Failed to invoke GitHub webhook processor', {
