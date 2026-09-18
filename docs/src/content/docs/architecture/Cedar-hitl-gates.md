@@ -24,7 +24,7 @@ title: Cedar hitl gates
 > [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#retained-microvm-approvals).
 > The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
 > and sleep-off/rollback acceptance; see the
-> [deployment record](/sample-autonomous-cloud-coding-agents/architecture/readme).
+> [deployment record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md).
 
 ---
 
@@ -1043,7 +1043,7 @@ event. A later decision is rejected: the existing API returns
 `404 REQUEST_NOT_FOUND` for missing, foreign or already-decided approval rows,
 including a cancelled row. If approval committed first, cancellation preserves
 the recorded decision while cancelling the task. See the
-[P3 approval verification record](/sample-autonomous-cloud-coding-agents/architecture/readme)
+[P3 approval verification record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md)
 for source versus deployment status.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
@@ -1362,20 +1362,23 @@ t=45m:  Task #1 completes. count → 9. Bob can submit task #11.
 
 AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from session start. It does NOT pause during `AWAITING_APPROVAL`.
 
-This has a concrete implication: the hook computes an `effective_timeout` bounded by `maxLifetime - remaining - CLEANUP_MARGIN_120S`. If the task has been running 7h55m and hits a soft-deny gate, the effective timeout might be clamped to a much shorter value than the task default. Below the 30s floor → immediate DENY with reason `"insufficient lifetime"`.
+An explicitly timed approval is bounded by the remaining worker lifetime minus the 120-second cleanup margin. Below the 30-second floor, the hook denies the action with reason `"insufficient lifetime"`.
+
+The default approval timeout is `0`: no decision deadline. Worker lifetime does not turn silence into a human denial. ECS and AgentCore do not currently restore a waiting agent into a replacement worker; when their task execution limit is reached, the task closes and its pending approval is cancelled. MicroVM can retain a verified checkpoint and continue on a replacement worker. Setting its sleep delay to `0` disables early sleep/retirement, but the coordinator still attempts retirement before the service lifetime ends. This option trades idle cost for faster replies.
 
 ### 9.6 Stranded-approval reconciliation
 
 `reconcile-stranded-tasks.ts` has an AWAITING_APPROVAL-aware branch:
 
-- Uses `APPROVAL_STRANDED_TIMEOUT_SECONDS`, default 7,200 seconds, measured from
+- Uses `APPROVAL_STRANDED_TIMEOUT_SECONDS`, default 30,600 seconds (8.5 hours), measured from
   entry into the current status. It does not calculate twice each row's timeout.
 - Conditionally changes the task to `FAILED` if it is still awaiting approval,
   recording the elapsed wait and a recovery suggestion.
 - Emits `task_stranded`, `task_failed` and a wrapped `approval_stranded` milestone.
   The legacy milestone has no request ID.
-- Leaves the approval row unchanged. The pending endpoint hides it because its
-  owning task is terminal; late approval is rejected by the task-state guard.
+- Closes pending approval rows as `CANCELLED`. Late approval is also rejected by
+  the task-state guard. A saved MicroVM continuation is handled by its dedicated
+  coordinator instead of this timeout.
 
 The notification helper can recover that legacy milestone's request identity
 from the consistently read failed task and its saved stranded cause. It verifies
@@ -1533,7 +1536,7 @@ cancellations, timeouts and stranded waits also produce messages. The response
 path supports the CLI and native Linear thread replies. Slack approval buttons
 and the Slack OAuth/button design below remain proposed. Email remains a log-only stub and GitHub does not
 receive approval messages. Deployment status is recorded in the
-[P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/readme).
+[P3 verification record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md).
 
 **TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled. (Retains the `stream` attribute commented out for future use if needed.)
 

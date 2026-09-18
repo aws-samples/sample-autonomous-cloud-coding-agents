@@ -4,7 +4,7 @@ title: Adr 021 lambda microvms compute backend
 
 # ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend
 
-> **Implementation status (2026-09-18): P1 and P2 are merged; P3 is in draft review.** Approval sleep/wake, retained requests, conversation/workspace recovery and nested infrastructure have live acceptance evidence. Reusable migration and final integration checks remain open; see [verification status](/sample-autonomous-cloud-coding-agents/architecture/readme). This ADR defines P1–P3, not an official P4.
+> **Implementation status (2026-09-18): P1 and P2 are merged; P3 is in draft review.** Approval sleep/wake, retained requests, conversation/workspace recovery and nested infrastructure have live acceptance evidence. Reusable migration and final integration checks remain open; see [verification status](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md). This ADR defines P1–P3, not an official P4.
 
 **Status:** proposed
 **Date:** 2026-07-29
@@ -74,7 +74,7 @@ Unanswered approvals have no deadline by default (`approval_timeout_s=0`). Expli
 
 Automatic suspension also requires the deployment’s `microvm_approval_suspend_enabled` opt-in, which defaults false for new deployments. A live Parameter Store switch lets existing durable executions stop initiating new suspensions without changing their pinned Lambda environment. The verified normal deployment has this opt-in enabled. Turning it off does not abandon already-suspended workers.
 
-The coordinator observes the exact pending gate and waits for the sleep delay. It skips sleep when a timed gate has too little time left before its wake margin. The guest holds a coding barrier, drains acknowledged progress and commits a checkpoint before accepting `/suspend`. Lifecycle HTTP responses explicitly close their connections before freeze to avoid reuse of a stale pooled connection; see the [transport evidence summary](/sample-autonomous-cloud-coding-agents/architecture/readme#recorded-acceptance).
+The coordinator observes the exact pending gate and waits for the sleep delay. It skips sleep when a timed gate has too little time left before its wake margin. The guest holds a coding barrier, drains acknowledged progress and commits a checkpoint before accepting `/suspend`. Lifecycle HTTP responses explicitly close their connections before freeze to avoid reuse of a stale pooled connection; see the [transport evidence summary](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md#recorded-acceptance).
 
 Approval and denial handlers commit the decision first. They then read the current handle consistently, persist wake intent and request resume best-effort. A wake failure records diagnostics and does not undo the accepted decision. The durable supervisor retries and observes both service state and guest consumption of the decision; RUNNING alone does not prove the tool was released.
 
@@ -131,7 +131,7 @@ Normative requirements (EARS):
 - Signed URLs shall not appear in ordinary logs, agent-readable task rows or repository subprocess environments. Downloads shall use the exact regional S3 HTTPS object without redirects/proxies and with bounded response sizes.
 - Producers, images and IAM shall be upgraded together; incompatible workers must be drained before switching transport.
 
-The [payload contract](/sample-autonomous-cloud-coding-agents/architecture/645-payload-bootstrap) and [live checks](/sample-autonomous-cloud-coding-agents/architecture/readme) record the implementation and validation. This transport does not establish complete hostile-worker isolation: other platform grants remain, and a stolen signed URL is usable until expiry or revocation.
+The [payload contract](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/645-payload-bootstrap.md) and [live checks](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md) record the implementation and validation. This transport does not establish complete hostile-worker isolation: other platform grants remain, and a stolen signed URL is usable until expiry or revocation.
 
 No ABCA endpoint consumer exists in P1–P3. The platform grants no `CreateMicrovmAuthToken` permission and mints no JWE tokens. `NO_INGRESS` can still return an endpoint URL; an unauthenticated 403 verifies the authentication boundary, not valid-token reachability.
 
@@ -153,7 +153,7 @@ The backend adds build/runtime VPC connectors, build artifacts, launch payloads,
 
 `lambda:PassNetworkConnector` has no resource-level authorization support and therefore uses `Resource: *`. The operator role also has wildcard ENI permissions; some mutations can be scoped in IAM, so their current tested wildcard is not evidence that narrower permissions are impossible. DescribeAvailabilityZones needs a wildcard for fresh CDK repository lookups. These exceptions and namespace wildcards are documented in the construct’s cdk-nag suppressions.
 
-**Nested infrastructure.** `microvm_nested_stack=true` puts MicroVM resources in a nested stack. The shared execution role stays in the parent to avoid a role-trust dependency cycle. Bootstrap 1.9.0 covers nested deployment roles. Existing flat installations need the reviewed overlap/drain migration, explicit image/coordinator pins and rollback checks described in the [migration prerequisites](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack). Reusable migration commands are still being completed. Moving construct paths alone is not a safe migration. Preserve `microvm_resource_name_prefix` after a migrated deployment.
+**Nested infrastructure.** `microvm_nested_stack=true` puts MicroVM resources in a nested stack. The shared execution role stays in the parent to avoid a role-trust dependency cycle. Bootstrap 1.9.0 covers nested deployment roles. Existing flat installations need the reviewed overlap/drain migration, explicit image/coordinator pins and rollback checks described in the [migration prerequisites](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/645-p3-nested-stack.md). Reusable migration commands are still being completed. Moving construct paths alone is not a safe migration. Preserve `microvm_resource_name_prefix` after a migrated deployment.
 
 #### Security bar vs existing backends ([#645](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/645) acceptance criterion)
 
@@ -203,7 +203,7 @@ Changing the default backend, GPU support, native Slack approval buttons, approv
 
 ## Testing
 
-The [verification summary](/sample-autonomous-cloud-coding-agents/architecture/readme) distinguishes recorded live acceptance from open PR checks. Required coverage includes:
+The [verification summary](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md) distinguishes recorded live acceptance from open PR checks. Required coverage includes:
 
 - Strategy state mapping, explicit unsupported results, ARN/Region validation, NO_INGRESS, omitted idlePolicy and bounded uncertain-start recovery.
 - Hook readiness/warm-up, AWS-silent build hooks, authenticated payload installation, arbitrary terminate bodies and lifecycle connection closure.

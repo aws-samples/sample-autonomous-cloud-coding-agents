@@ -227,7 +227,7 @@ export async function markApprovalNotificationDelivered(
   }
 }
 
-/** Keep previews literal: repository text must not create mentions or Markdown links. */
+/** Escape preview Markdown, including backticks, so repository text cannot break out of its code fence. */
 export function approvalNotificationMarkdown(notification: ApprovalNotification): string {
   return `\`\`\`text\n${notification.text.replace(/`/g, 'ˋ')}\n\`\`\``;
 }
