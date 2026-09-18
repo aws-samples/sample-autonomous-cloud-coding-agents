@@ -18,7 +18,24 @@ When a rule marked `@tier("soft")` matches a tool call:
 4. The task waits for your decision without an automatic deadline by default. An explicit per-task or policy-rule timeout can limit that window.
 5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
 
-A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.
+A decision is recorded at most once per request. A repeated decision cannot change an already closed request.
+
+### Responding in Linear
+
+For a Linear task, the bot posts an **Approval needed** comment with the action
+and reason. Reply **approve** or **deny** in that comment's thread. You do not
+need a task ID, request ID, or bot mention. Your Linear account must be linked to
+the ABCA account that submitted the task.
+
+`approve` allows the displayed action once. The bot acknowledges the saved
+decision. An old thread cannot approve a newer request; replies to closed requests
+explain that no new decision was recorded. Use the CLI for broader approval scopes
+or a denial reason. Editing an existing comment does not submit a decision.
+
+This works on every compute backend. A sleeping MicroVM wakes to receive the
+decision; AgentCore and ECS receive it through their existing approval wait.
+Sleep does not set the approval deadline. Requests have no automatic deadline by
+default, and an explicitly configured deadline still applies.
 
 ### Listing pending approvals
 

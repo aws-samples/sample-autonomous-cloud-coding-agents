@@ -1530,9 +1530,8 @@ Approval events flow to the fan-out Lambda via TaskEventsTable Streams. The P3
 implementation adds Slack and Linear notifications with the saved action,
 reason, decision deadline and exact CLI approve/deny commands. Recorded decisions,
 cancellations, timeouts and stranded waits also produce messages. The response
-path uses the CLI owner's authentication. Native Slack approval buttons and Linear
-approval replies are not implemented by this notification change; the OAuth/button
-design below remains proposed. Email remains a log-only stub and GitHub does not
+path supports the CLI and native Linear thread replies. Slack approval buttons
+and the Slack OAuth/button design below remain proposed. Email remains a log-only stub and GitHub does not
 receive approval messages. Deployment status is recorded in the
 [P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/readme).
 
@@ -1543,7 +1542,19 @@ Slack and Linear route `approval_requested`, `approval_decision_recorded`,
 reads the current approval row and owning task before displaying a pending request,
 and records successful delivery per request/channel. Delivery failure does not mark
 the message delivered. A post that succeeds just before receipt persistence fails
-can still produce a duplicate on retry.
+can still produce a duplicate on retry, except for Linear approval prompts and
+reply acknowledgements, which use deterministic comment IDs.
+
+For Linear, the platform saves a thread binding to the exact workspace, issue,
+task, request and owner before posting the prompt. A verified Comment/create
+webhook containing only `approve` or `deny` in that thread resolves the commenter's
+linked platform identity. The owner then uses the same atomic decision function,
+rate limit, deadline and current-request guards as the API. Approval grants
+`this_call`. A trusted source comment ID saved in the decision transaction makes
+webhook retries recognize the original result. Top-level comments, edits and
+unbound threads never select a pending request. Pending bindings have no TTL;
+closure starts 90-day retention. MicroVM decisions use the existing wake or
+continuation path; other backends keep their existing polling behavior.
 
 **Proposed notification rate limit:** 10 approval-related messages per user per
 minute. This dispatcher limit is not implemented. Existing gate-creation caps and
