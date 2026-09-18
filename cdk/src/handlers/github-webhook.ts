@@ -23,6 +23,7 @@ import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
   type GitHubDeploymentStatusPayload,
+  normalizeAmplifyPreviewCheck,
   validateDeploymentStatusPayload,
 } from './shared/github-deployment-status';
 import { verifyGitHubRequest } from './shared/github-webhook-verify';
@@ -48,21 +49,17 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  *
  * Verifies `X-Hub-Signature-256` (per
  * https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries),
- * filters to successful `deployment_status` events whose environment
+ * filters to successful `deployment_status` events and Amplify PR preview
+ * `check_run` completions whose normalized environment
  * matches `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`), dedups
  * on `(repo, deployment_id, status_id)`, and async-invokes the
  * processor Lambda so we can ack within GitHub's 10s timeout. Other
  * event types (push, pull_request, ping, …) get an immediate 200 so
  * GitHub doesn't retry them.
  *
- * Why `deployment_status` and not `workflow_run`:
- * Most managed hosting providers (Vercel, Netlify, Amplify) don't run
- * a GitHub Action to deploy — they post directly to the GitHub
- * Deployments API. Self-hosted CI typically calls the same API at the
- * end of its workflow. `deployment_status` carries the deploy URL
- * (`deployment_status.environment_url`) and the SHA the deploy is
- * for, letting us route to the correct ABCA task and screenshot the
- * right URL without provider-specific extra API calls.
+ * Deployment statuses carry the deployed URL and SHA. Amplify Hosting instead
+ * supplies those in its successful preview check's details_url and head_sha.
+ * Both feed the same capture, persistence, and channel delivery pipeline.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
@@ -90,23 +87,28 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return jsonResponse(200, { ok: true, ping: true });
     }
 
-    // Anything other than deployment_status is silently 200'd. We'd rather
-    // drop unrelated events at the door than have them clutter the
-    // processor's invoke / log volume.
-    if (eventType !== 'deployment_status') {
-      logger.info('Ignoring non-deployment_status GitHub webhook', { event_type: eventType });
+    if (eventType !== 'deployment_status' && eventType !== 'check_run') {
+      logger.info('Ignoring unrelated GitHub webhook', { event_type: eventType });
       return jsonResponse(200, { ok: true });
     }
 
-    let raw: GitHubDeploymentStatusPayload;
+    let parsed: unknown;
     try {
-      raw = JSON.parse(event.body) as GitHubDeploymentStatusPayload;
+      parsed = JSON.parse(event.body);
     } catch (err) {
       logger.warn('GitHub webhook body is not valid JSON', {
         error: err instanceof Error ? err.message : String(err),
       });
       return jsonResponse(400, { error: 'Invalid JSON' });
     }
+    const normalized = eventType === 'check_run' ? normalizeAmplifyPreviewCheck(parsed) : null;
+    if (eventType === 'check_run' && !normalized) {
+      return jsonResponse(200, { ok: true, skipped_check: true });
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return jsonResponse(400, { error: 'Invalid webhook payload' });
+    }
+    const raw = normalized ?? parsed as GitHubDeploymentStatusPayload;
 
     // Filter pre-validate so common skip-paths return early without
     // logging a "missing fields" warn for an in-progress event.
@@ -118,7 +120,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // because Vercel labels per-PR deploys that way, but every provider
     // uses different conventions:
     //   - Vercel preview:           `Preview`
-    //   - AWS Amplify Hosting:      branch name (e.g. `main`, `feat/x`)
+    //   - AWS Amplify PR check:     normalized to `Preview`
     //   - GitHub Actions deploys:   whatever the workflow passes to
     //                               `actions/create-deployment`
     //   - Netlify deploy previews:  `Deploy Preview <PR#>`
@@ -161,7 +163,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // can emit multiple statuses; using the status id as the third leg
     // keeps reruns of the same status (GitHub retries on 5xx) collapsed
     // while distinct status transitions stay distinct.
-    const dedupKey = `${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
+    const dedupKey = `${eventType === 'check_run' ? 'amplify#' : ''}${payload.repoFullName}#${payload.deploymentId}#${payload.statusId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     try {
       await ddb.send(new PutCommand({
@@ -187,7 +189,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify({ raw_body: event.body })),
+        Payload: new TextEncoder().encode(JSON.stringify({
+          raw_body: normalized ? JSON.stringify(normalized) : event.body,
+        })),
       }));
     } catch (invokeErr) {
       logger.error('Failed to invoke GitHub webhook processor', {

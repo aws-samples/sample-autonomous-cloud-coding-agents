@@ -1,27 +1,29 @@
 # Deploy preview screenshots setup guide
 
-Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. If you also have Linear configured, the same screenshot is posted to the linked Linear issue as a bonus.
+Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. For Jira-origin tasks, the originating issue receives screenshot and live-preview links. Linked Linear issues also receive preview feedback when configured.
 
 > The pipeline only needs GitHub. Linear posting is opt-in: present iff `LinearWorkspaceRegistryTable` has at least one active row (configured via [Linear setup guide](./LINEAR_SETUP_GUIDE.md)). Without Linear, the GitHub-side screenshot still works; the Linear-side just no-ops silently.
 
-## Works with any provider that posts `deployment_status`
+## Supported preview events
 
-The pipeline doesn't care who built the deploy — it only listens for GitHub `deployment_status` events. Any provider that calls the [GitHub Deployments API](https://docs.github.com/en/rest/deployments/deployments) works:
+The pipeline accepts GitHub `deployment_status` events and successful AWS Amplify PR preview `check_run` events. Providers that call the [GitHub Deployments API](https://docs.github.com/en/rest/deployments/deployments) work through the deployment-status path:
 
 | Provider | Out of the box? | Notes |
 |---|---|---|
 | **Vercel** (managed hosting + GitHub app) | ✅ | The worked example below uses this. Default `environment` is `Preview`. |
-| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Posts deployment_status for each branch deploy. `environment` is the branch name — set `SCREENSHOT_TARGET_ENVIRONMENT` to your preview branch (or use the same value on every branch via the `BackgroundAgentStack` construct prop). |
+| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Enable PR previews and subscribe the ABCA webhook to **Check runs**. Successful `AWS Amplify Console Web Preview` checks are normalized to environment `Preview`. |
 | **Netlify** (managed hosting + GitHub app) | ⚠ | `environment` is `Deploy Preview <PR#>`, which the current single-string `SCREENSHOT_TARGET_ENVIRONMENT` filter doesn't match across all PRs. Workable today only by picking one specific PR's environment string; broader pattern matching isn't shipped. |
 | **GitHub Actions** that calls `POST /repos/.../deployments` (typical for ECS/Fargate, Cloud Run, Fly.io, Railway, Cloudflare Pages, etc.) | ✅ | Your workflow controls the `environment` field; pass whatever you want and set `SCREENSHOT_TARGET_ENVIRONMENT` to match. |
 | **External CI** (CircleCI, GitLab, ArgoCD) that doesn't touch GitHub Deployments | ❌ | Add a final job that calls the GitHub Deployments API after the deploy succeeds — see [GitHub's example](https://docs.github.com/en/rest/deployments/deployments#create-a-deployment). |
 
-ABCA needs only two things from a deploy:
+For a deployment-status event, ABCA needs:
 
 1. The `deployment_status` event has reached `state: success`.
 2. `deployment_status.environment_url` is populated with the live preview URL.
 
 If your provider gives you that, you're done. The example below is Vercel because that's what we smoke-tested on; the pipeline doesn't otherwise prefer one provider over another.
+
+For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed.
 
 ## What you get
 
@@ -30,7 +32,7 @@ When you (or the agent) push to a branch that triggers a preview deploy, your pr
 1. Captures a full-page screenshot of the preview URL via AgentCore Browser
 2. Uploads the PNG to a private S3 bucket served via CloudFront
 3. Posts a markdown image comment on the open GitHub PR
-4. **(Optional)** If Linear is wired: looks up the Linear issue by identifier in the PR title/body (e.g. `ABCA-42`) and posts the same screenshot as a Linear comment. Skipped silently if Linear isn't configured or no identifier is present.
+4. Posts explicit screenshot/live-preview links to the originating Jira issue, or delivers the preview to Linear when configured. Iterations preserve the preview in their existing status comment.
 
 End-to-end latency: typically 10–15 seconds after your provider reports the deploy.
 
@@ -98,7 +100,7 @@ Go to **your-project → Settings** in the Vercel dashboard.
 
 > **Production hardening.** Real deployments should keep Vercel Authentication on **Standard Protection** and use a [signed bypass token](https://vercel.com/docs/security/deployment-protection/methods-to-bypass-deployment-protection#protection-bypass-for-automation). The screenshot processor would need to inject the bypass token as a query parameter on the preview URL it navigates to — currently not implemented.
 
-> **Using a different provider?** Skip Steps 1–2 and follow your provider's instructions to publish `deployment_status` events to GitHub. For Amplify Hosting, that's automatic when the app is connected via GitHub. For self-hosted CI, add a `gh api repos/.../deployments` step at the end of your deploy job. Then continue with Step 3.
+> **Using Amplify?** Enable PR previews under **Hosting → Previews**, then follow Step 3 and include **Check runs** in the webhook events. For other providers, publish successful `deployment_status` events to GitHub. For self-hosted CI, add a GitHub Deployments API call at the end of your deploy job.
 
 ### Step 3 — Configure the GitHub webhook
 
@@ -121,7 +123,7 @@ The CLI prints the webhook URL and the values to paste into GitHub.
    - **Content type**: `application/json`
    - **Secret**: generate any random string — paste it both here AND into the next step
    - **SSL verification**: leave enabled
-   - **Which events?**: choose "Let me select individual events", uncheck Pushes, check **Deployment statuses** only
+   - **Which events?**: choose "Let me select individual events", uncheck Pushes, check **Deployment statuses**, and also check **Check runs** for AWS Amplify PR previews
    - **Active**: ✓
 4. **Add webhook**. GitHub fires a `ping` event right away — under "Recent Deliveries" you should see ✅ within seconds.
 
@@ -146,7 +148,7 @@ The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (
 | Provider | Typical `environment` value | What to set |
 |---|---|---|
 | Vercel | `Preview` | leave default |
-| Amplify Hosting | branch name (e.g. `main`, `staging`) | the branch you treat as preview |
+| Amplify Hosting PR check | normalized to `Preview` | leave default; subscribe to Check runs |
 | Netlify | `Deploy Preview <PR#>` | currently not directly matchable across all PRs (single fixed-string filter only) |
 | GitHub Actions custom | whatever your workflow passes | match it exactly |
 
@@ -159,6 +161,8 @@ The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (
 - **403 "Forbidden" with `X-Amzn-Errortype: ForbiddenException`**: WAF rejected the body. Should not happen on the `/v1/github/webhook` path because that path is exempted from the CommonRuleSet, but if you see it, check the `BlockedRequests` metric on the `TaskApiWebAcl` regional WebACL in CloudWatch.
 
 ### Webhook delivers 200 but no screenshot lands
+
+For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
 
 Check the screenshot processor logs:
 

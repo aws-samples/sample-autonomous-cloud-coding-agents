@@ -231,9 +231,10 @@ export async function upsertOauthSecret(
             ...(typeof value.app_actor_configured_at === 'string'
               && { app_actor_configured_at: value.app_actor_configured_at }),
           };
-        } catch { // nosemgrep: ts-silent-success-masking -- OAuth setup intentionally replaces malformed secret JSON
+        } catch {
           // OAuth setup is the recovery path for malformed secret JSON. It
-          // deliberately replaces the bad value instead of preserving it.
+          // deliberately replaces the bad value instead of preserving it (the
+          // catch is empty: no masked return, so no masking suppression needed).
         }
       }
       const put = await client.send(new PutSecretValueCommand({

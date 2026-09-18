@@ -56,8 +56,8 @@ import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './s
 import {
   buildAdfDocument,
   postIssueCommentAdf,
-  updateIssueCommentAdf,
 } from './shared/jira-feedback';
+import { updateJiraIterationComment } from './shared/jira-preview';
 import {
   renderJiraFinalStatusComment,
   renderJiraFinishedPointer,
@@ -1689,11 +1689,12 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     const pointerKind: JiraFinishedPointerKind = event.event_type !== 'task_completed'
       ? 'details'
       : (task.code_changed === false ? 'answer' : 'result');
-    const updateResult = await updateIssueCommentAdf(
+    const updateResult = await updateJiraIterationComment(
+      ddb, tableName, task.task_id,
       { cloudId, registryTableName },
       issueKey,
       iterationReplyId,
-      buildAdfDocument(renderJiraFinishedPointer(pointerKind)),
+      { body: buildAdfDocument(renderJiraFinishedPointer(pointerKind)), terminal: true },
     );
     if (!updateResult.ok) {
       const release = await releaseReplyClaim(
@@ -1735,11 +1736,12 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     }
 
     if (!finalResult.retryable) {
-      const fallback = await updateIssueCommentAdf(
+      const fallback = await updateJiraIterationComment(
+        ddb, tableName, task.task_id,
         { cloudId, registryTableName },
         issueKey,
         iterationReplyId,
-        buildAdfDocument(paragraphs),
+        { body: buildAdfDocument(paragraphs), terminal: true },
       );
       if (fallback.ok) {
         logger.warn('[fanout/jira] iteration result post failed terminally — folded outcome into status comment', {
@@ -1774,11 +1776,12 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       release,
     });
     if (release === 'exhausted') {
-      const fallback = await updateIssueCommentAdf(
+      const fallback = await updateJiraIterationComment(
+        ddb, tableName, task.task_id,
         { cloudId, registryTableName },
         issueKey,
         iterationReplyId,
-        buildAdfDocument(paragraphs),
+        { body: buildAdfDocument(paragraphs), terminal: true },
       );
       logger.warn('[fanout/jira] iteration result retries exhausted — folded outcome into status comment', {
         event: 'fanout.jira.iteration_result_exhausted',

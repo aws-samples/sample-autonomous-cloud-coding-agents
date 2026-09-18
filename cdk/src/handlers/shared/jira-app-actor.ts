@@ -110,6 +110,7 @@ export async function requestJiraAppActor(
   config: JiraAppActorConfig,
   request: JiraAppActorRequest,
   fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<JiraAppActorResult> {
   const proxyUrl = validateJiraAppActorProxyUrl(config.proxyUrl);
   if (!proxyUrl || config.sharedSecret.length < JIRA_APP_ACTOR_MIN_SECRET_LENGTH) {
@@ -134,7 +135,7 @@ export async function requestJiraAppActor(
         'X-Bgagent-Signature': signJiraAppActorRequest(config.sharedSecret, timestamp, body),
       },
       body,
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
     });
     const responseBody = await result.text();
     if (result.ok) {

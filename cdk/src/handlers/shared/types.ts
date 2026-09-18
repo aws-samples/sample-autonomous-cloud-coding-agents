@@ -335,6 +335,11 @@ export interface TaskRecord {
    * marker. Absent until the first successful ordinary-task post.
    */
   readonly jira_final_comment_event_id?: string;
+  /** Durable Jira iteration body, merged with preview metadata by every writer. */
+  readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
+  /** At-most-once claim for the standalone preview comment POST. */
+  readonly jira_preview_claimed?: boolean;
+  readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).

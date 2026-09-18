@@ -77,6 +77,9 @@ export interface GitHubScreenshotIntegrationProps {
    */
   readonly linearWorkspaceRegistryTable?: dynamodb.ITable;
 
+  /** Existing Jira registry for app-authored deployment preview feedback. */
+  readonly jiraWorkspaceRegistryTable?: dynamodb.ITable;
+
   /**
    * Optional — when provided, the processor persists the captured
    * screenshot's public URL onto the deploy task's TaskRecord (keyed by the
@@ -231,6 +234,9 @@ export class GitHubScreenshotIntegration extends Construct {
         ...(props.linearWorkspaceRegistryTable && {
           LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: props.linearWorkspaceRegistryTable.tableName,
         }),
+        ...(props.jiraWorkspaceRegistryTable && {
+          JIRA_WORKSPACE_REGISTRY_TABLE_NAME: props.jiraWorkspaceRegistryTable.tableName,
+        }),
         ...(props.taskTable && {
           TASK_TABLE_NAME: props.taskTable.tableName,
         }),
@@ -321,6 +327,22 @@ export class GitHubScreenshotIntegration extends Construct {
       }));
     }
 
+    if (props.jiraWorkspaceRegistryTable) {
+      // The Jira OAuth resolver rotates refresh tokens and must persist the
+      // replacement token in the existing tenant-scoped secret. PutSecretValue
+      // enables that refresh path; it does not permit creating arbitrary secrets.
+      props.jiraWorkspaceRegistryTable.grantReadData(this.webhookProcessorFn);
+      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+        resources: [Stack.of(this).formatArn({
+          service: 'secretsmanager',
+          resource: 'secret',
+          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          resourceName: 'bgagent-jira-oauth-*',
+        })],
+      }));
+    }
+
     // Write access so the processor can persist screenshot_url onto the
     // deploy task's TaskRecord (conditional UpdateItem). grantWriteData covers
     // the UpdateItem; the handler's update is guarded by attribute_exists.
@@ -349,6 +371,12 @@ export class GitHubScreenshotIntegration extends Construct {
             resourceName: `${props.taskTable.tableName}/index/LinearIssueIndex`,
             arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
           }),
+          ...(props.jiraWorkspaceRegistryTable ? [Stack.of(this).formatArn({
+            service: 'dynamodb',
+            resource: 'table',
+            resourceName: `${props.taskTable.tableName}/index/JiraIssueIndex`,
+            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+          })] : []),
         ],
       }));
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
@@ -447,7 +475,7 @@ export class GitHubScreenshotIntegration extends Construct {
       },
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'AgentCore Browser sessions are ephemeral and have no per-resource ARN; the data-plane API requires wildcards. S3 PutObject uses CDK grant helpers that expand to bucket/* wildcards.',
+        reason: 'AgentCore Browser sessions are ephemeral and have no per-resource ARN; the data-plane API requires wildcards. S3 PutObject uses CDK grant helpers that expand to bucket/* wildcards. Secrets Manager access is prefix-scoped to bgagent-linear-oauth-* and bgagent-jira-oauth-* for tenant token refresh.',
       },
     ], true);
 
