@@ -34,6 +34,7 @@ import {
   fetchRecentComments,
   postIssueComment,
   postIdentifiedComment,
+  readLinearApprovalComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -72,6 +73,41 @@ describe('linear-feedback', () => {
       oauthSecretArn: 'arn:secret:acme',
     });
     fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true } } }));
+  });
+
+  describe('readLinearApprovalComment', () => {
+    test('reads the workspace, human author, decision and exact thread from Linear', async () => {
+      const comment = {
+        id: 'reply',
+        body: 'approve',
+        user: { id: 'human' },
+        botActor: null,
+        issue: { id: ISSUE_ID },
+        parent: { id: 'root' },
+      };
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, comment } }));
+      expect(await readLinearApprovalComment(CTX, 'reply')).toEqual(comment);
+      const request = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(request.variables).toEqual({ id: 'reply' });
+      expect(request.query).toContain('user { id }');
+      expect(request.query).toContain('botActor { id }');
+    });
+    test('returns no consent for a deleted comment', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, comment: null } }));
+      expect(await readLinearApprovalComment(CTX, 'deleted')).toBeNull();
+    });
+    test.each([
+      { errors: [{ message: 'Unavailable' }] },
+      { data: { organization: { id: 'other-workspace' }, comment: {} } },
+    ])('fails closed on lookup errors or incorrect workspace: %j', async response => {
+      fetchMock.mockResolvedValue(jsonResponse(response));
+      await expect(readLinearApprovalComment(CTX, 'reply')).rejects.toThrow('verification');
+    });
+    test('fails closed without credentials', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValue(null);
+      await expect(readLinearApprovalComment(CTX, 'reply')).rejects.toThrow('token unavailable');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('postIdentifiedComment', () => {

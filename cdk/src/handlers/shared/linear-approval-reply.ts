@@ -21,7 +21,7 @@ import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   closeLinearApprovalThread, linearApprovalCommentId, parseLinearApprovalReply, readLinearApprovalThread,
 } from './linear-approval-thread';
-import { postIdentifiedComment } from './linear-feedback';
+import { postIdentifiedComment, readLinearApprovalComment } from './linear-feedback';
 import { logger } from './logger';
 
 interface ApprovalReplyEvent {
@@ -52,6 +52,15 @@ export async function handleLinearApprovalReply(
   const issueId = event.data.issueId ?? event.data.issue?.id;
   if (issueId !== thread.issueId) return true;
   const ctx = { linearWorkspaceId: workspaceId, registryTableName: deps.registryTable };
+  const comment = await readLinearApprovalComment(ctx, event.data.id);
+  if (!comment || comment.id !== event.data.id || comment.botActor || !comment.user?.id
+    || comment.issue?.id !== issueId || comment.parent?.id !== parentId
+    || parseLinearApprovalReply(comment.body) !== decision) {
+    logger.warn('Linear approval webhook does not match a human comment', {
+      task_id: thread.taskId, request_id: thread.requestId, comment_id: event.data.id,
+    });
+    return true;
+  }
   const respond = async (body: string): Promise<void> => {
     const posted = await postIdentifiedComment(ctx, {
       id: linearApprovalCommentId({ ...thread, requestId: `${thread.requestId}#reply#${event.data.id}` }),
@@ -66,7 +75,7 @@ export async function handleLinearApprovalReply(
       if (posted.retryable) throw new Error('Retryable Linear approval acknowledgement failure');
     }
   };
-  const userId = event.actor?.id ? await deps.lookupUser(workspaceId, event.actor.id) : null;
+  const userId = await deps.lookupUser(workspaceId, comment.user.id);
   if (!userId || userId !== thread.userId) {
     await respond('Only the task owner can decide this request. Link your Linear account to ABCA, then reply again.');
     return true;
