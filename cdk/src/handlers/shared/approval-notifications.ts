@@ -49,10 +49,57 @@ export interface ApprovalNotification {
 function text(value: unknown, max = 500): string {
   if (typeof value !== 'string') return '';
   // Redact before truncation so cutting a token cannot hide its recognizable shape.
-  return scanDenyReason(value)
+  const clean = scanDenyReason(value)
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
-    .slice(0, max);
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+  return clean.length > max ? `${clean.slice(0, max)}… [shortened]` : clean;
+}
+
+/** Describe only recorded arguments; tool names cannot establish intent or safety. */
+function describeAction(row: Record<string, unknown>, task: TaskRecord): string[] {
+  const tool = text(row.tool_name, 100);
+  const preview = typeof row.tool_input_preview === 'string' ? row.tool_input_preview : '';
+  let input: Record<string, unknown> | undefined;
+  try {
+    const parsed: unknown = JSON.parse(preview);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+  } catch {
+    // The guest stores a bounded preview, which may end partway through JSON.
+  }
+  const quote = (value: unknown) => JSON.stringify(text(value));
+  const path = typeof input?.file_path === 'string' ? input.file_path : '';
+  const workspace = `/workspace/${task.task_id}/`;
+  const target = quote(path.startsWith(workspace) ? path.slice(workspace.length) : path);
+  let action: string;
+  if (tool === 'Read' && path) {
+    action = `The agent wants to read the file ${target}.`;
+  } else if (tool === 'Write' && path) {
+    action = `The agent wants to write to ${target}, creating the file or replacing its contents.`;
+  } else if (tool === 'Edit' && path) {
+    action = `The agent wants to change text in ${target}.`;
+  } else if (tool === 'Bash') {
+    action = 'The agent wants to run a shell command.';
+  } else if (tool === 'WebFetch' && typeof input?.url === 'string') {
+    action = `The agent wants to fetch content from ${quote(input.url)}.`;
+  } else if (tool === 'Glob' || tool === 'Grep') {
+    action = `The agent wants to search ${tool === 'Glob' ? 'file names' : 'file contents'}.`;
+  } else {
+    action = `The agent wants to call the tool ${quote(tool)}.`;
+  }
+  const lines = [action];
+  if (task.repo) lines.push(`Repository: ${text(task.repo)}`);
+  if (typeof input?.description === 'string' && input.description.trim()) {
+    lines.push(`Agent's explanation: ${text(input.description)}`);
+  }
+  if (tool === 'Bash' && typeof input?.command === 'string') {
+    lines.push(`Command: ${quote(input.command)}`);
+  }
+  // Always retain the preview: summaries must not hide flags, ranges or edits.
+  lines.push(`Saved arguments: ${text(preview) || '(not available)'}`);
+  if (!input || preview.endsWith('...') || preview.length > 500) {
+    lines.push('The saved arguments are incomplete or could not be interpreted. They may not show the full action.');
+  }
+  return lines;
 }
 
 /** Read saved state instead of showing an old, delayed "please approve" event. */
@@ -104,18 +151,26 @@ export async function loadApprovalNotification(
       : status === 'DENIED' ? 'Denial recorded'
         : status === 'TIMED_OUT' ? 'Approval request timed out'
           : status === 'CANCELLED' ? 'Approval request cancelled' : 'Approval wait could not continue';
-  const lines = [title, `Task: ${task.task_id}`, `Request: ${requestId}`];
+  const lines = [title];
   if (status === 'PENDING') {
-    lines.push(`Tool: ${text(row.tool_name, 100)}`, `Severity: ${text(row.severity, SEVERITY_MAX_LENGTH)}`,
-      `Reason: ${text(row.reason)}`, `Action preview: ${text(row.tool_input_preview)}`);
+    lines.push('', ...describeAction(row, task), '');
+    const reason = text(row.reason);
+    lines.push(reason.startsWith('Soft-deny:')
+      ? 'Why approval is required: your configured policy requires a human decision for this action.'
+      : `Why approval is required: ${reason || 'No explanation was saved with this request.'}`);
+    lines.push('Approve: allow this action once.',
+      'Deny: block this action and return the decision to the agent.');
     const deadline = Date.parse(row.created_at) + Number(row.timeout_s) * 1000;
     if (Number.isFinite(deadline) && Number(row.timeout_s) > 0) {
       lines.push(`Decision deadline: ${new Date(deadline).toISOString()}`);
     }
     if (channel === 'linear') {
-      lines.push('Reply approve or deny to this comment while signed in as the task owner.',
-        'Approval allows this action once. You can also use the CLI below.');
+      lines.push('', 'Reply approve or deny to this comment while signed in as the task owner.');
     }
+    lines.push('', 'Technical details / CLI alternative',
+      `Task: ${task.task_id}`, `Request: ${requestId}`,
+      `Tool: ${text(row.tool_name, 100)}`, `Policy severity: ${text(row.severity, SEVERITY_MAX_LENGTH)}`,
+      `Policy detail: ${reason}`);
     // Never interpolate untrusted text into suggested shell commands.
     if ([task.task_id, requestId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
       lines.push('Respond using the CLI while signed in as the task owner:',
@@ -124,16 +179,19 @@ export async function loadApprovalNotification(
     }
     lines.push('Run bgagent pending to see currently open requests.');
   } else if (status === 'APPROVED') {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
     lines.push(`Scope: ${text(row.scope, SCOPE_MAX_LENGTH)}`);
     lines.push(TERMINAL_STATUSES.includes(task.status)
       ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
       : 'The decision is saved. The agent will continue when its worker is ready.');
   } else if (status === 'DENIED') {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
     lines.push(`Reason: ${text(row.deny_reason) || 'No reason supplied.'}`);
     lines.push(TERMINAL_STATUSES.includes(task.status)
       ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
       : 'The decision is saved. The agent will receive the denial when its worker is ready.');
   } else {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
     // reason is the original policy explanation, not the cause of closure.
     // The guest stores a polling failure in deny_reason on its timeout path.
     const reason = status === 'TIMED_OUT'

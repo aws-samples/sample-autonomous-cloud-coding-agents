@@ -55,6 +55,68 @@ test('shows the saved action and exact deadline, with one-call CLI approval', as
   expect(send.mock.calls[0][0].input.ConsistentRead).toBe(true);
 });
 
+test('explains the README decision before exposing internal policy and request IDs', async () => {
+  send.mockResolvedValue({
+    Item: {
+      ...row,
+      tool_name: 'Read',
+      reason: 'Soft-deny: legacy_extra_0',
+      tool_input_preview: JSON.stringify({ file_path: '/workspace/task/README.md' }),
+    },
+  });
+  const message = (await loadApprovalNotification(ddb, { ...task, repo: 'owner/repo' }, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).toContain('The agent wants to read the file "README.md".');
+  expect(message.text).toContain('Repository: owner/repo');
+  expect(message.text).toContain('your configured policy requires a human decision');
+  expect(message.text).toContain('Approve: allow this action once.');
+  expect(message.text).toContain('Deny: block this action and return the decision to the agent.');
+  const primary = message.text.split('Technical details / CLI alternative')[0];
+  expect(primary).toContain('Reply approve or deny to this comment');
+  expect(primary).not.toMatch(/legacy_extra|Task:|Request:|severity:/);
+  expect(message.text).toContain('Policy detail: Soft-deny: legacy_extra_0');
+});
+
+test.each([
+  ['Write', { file_path: '/etc/config', content: 'replacement' }, 'creating the file or replacing its contents.'],
+  ['Edit', { file_path: '/workspace/task/app.py', old_string: 'before', new_string: 'after' }, 'change text in "app.py".'],
+  ['Bash', { command: 'git push --force', description: 'Publish the branch' }, 'Command: "git push --force"'],
+  ['WebFetch', { url: 'https://example.com' }, 'fetch content from "https://example.com".'],
+  ['Grep', { pattern: 'password', path: '/etc' }, 'search file contents.'],
+  ['mcp__custom__publish', { target: 'production' }, 'call the tool "mcp__custom__publish".'],
+])('describes %s without hiding its saved arguments', async (tool, input, expected) => {
+  const preview = JSON.stringify(input);
+  send.mockResolvedValue({ Item: { ...row, tool_name: tool, tool_input_preview: preview } });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).toContain(expected);
+  expect(message.text).toContain(`Saved arguments: ${preview}`);
+  if (tool === 'Bash') expect(message.text).toContain("Agent's explanation: Publish the branch");
+  expect(message.text).not.toContain('incomplete');
+});
+
+test('does not invent a read target from truncated arguments', async () => {
+  send.mockResolvedValue({ Item: { ...row, tool_name: 'Read', tool_input_preview: '{"file_path": "/workspace/task/secret...' } });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).toContain('saved arguments are incomplete');
+  expect(message.text).not.toContain('wants to read the file');
+});
+
+test('redacts extracted command descriptions and makes display truncation explicit', async () => {
+  const token = `ghp_${'a'.repeat(36)}`;
+  send.mockResolvedValue({
+    Item: {
+      ...row,
+      tool_input_preview: JSON.stringify({
+        command: `echo ${token} ${'x'.repeat(600)}`, description: `Use ${token}`,
+      }),
+    },
+  });
+  const message = (await loadApprovalNotification(ddb, task, 'approval_requested', { request_id: 'gate' }, 'linear'))!;
+  expect(message.text).not.toContain(token);
+  expect(message.text).toContain('[REDACTED-GITHUB_TOKEN]');
+  expect(message.text).toContain('[shortened]');
+  expect(message.text).toContain('may not show the full action');
+});
+
 test.each([
   ['cancelled task', { ...task, status: TaskStatus.CANCELLED }, row],
   ['new gate', { ...task, awaiting_approval_request_id: 'new' }, row],
