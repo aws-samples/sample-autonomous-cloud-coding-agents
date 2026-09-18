@@ -27,6 +27,9 @@ import { CreateTableCommand, DeleteTableCommand, DynamoDBClient } from '@aws-sdk
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
 const endpoint = process.env.ABCA_DDB_LOCAL_ENDPOINT;
+if (process.env.CI === 'true' && !endpoint) {
+  throw new Error('CI requires ABCA_DDB_LOCAL_ENDPOINT; concurrency transaction tests must not skip');
+}
 if (endpoint && (new URL(endpoint).hostname !== '127.0.0.1' || new URL(endpoint).protocol !== 'http:')) {
   throw new Error('Capacity integration tests require an http://127.0.0.1 DynamoDB Local endpoint');
 }

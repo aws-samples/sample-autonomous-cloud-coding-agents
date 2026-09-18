@@ -23,6 +23,10 @@ const mockRead = jest.fn();
 const mockSave = jest.fn();
 const mockSend = jest.fn();
 const mockEmit = jest.fn();
+const mockDispatch = jest.fn();
+jest.mock('../../../src/handlers/shared/microvm-continuation-dispatch', () => ({
+  dispatchMicrovmContinuation: (...args: unknown[]) => mockDispatch(...args),
+}));
 const mockLogger = { warn: jest.fn(), info: jest.fn() };
 jest.mock('../../../src/handlers/shared/microvm-lifecycle', () => ({
   readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockRead(...args),
@@ -53,6 +57,7 @@ function wake(decision: 'APPROVED' | 'DENIED' = 'APPROVED') {
 }
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDispatch.mockReset().mockResolvedValue(false);
   jest.spyOn(Date, 'now').mockReturnValue(NOW);
   controller = new AbortController();
   row = {
@@ -90,6 +95,28 @@ beforeEach(() => {
   mockEmit.mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => jest.restoreAllMocks());
+
+test('dispatches a retired continuation without touching the fenced worker', async () => {
+  mockDispatch.mockResolvedValue(true);
+  await wake();
+  expect(mockDispatch).toHaveBeenCalledWith('task', 'user', 'gate', expect.objectContaining({
+    abortSignal: controller.signal,
+  }));
+  expect(mockRead).not.toHaveBeenCalled();
+  expect(mockSave).not.toHaveBeenCalled();
+  expect(mockSend).not.toHaveBeenCalled();
+});
+
+test('does not fall back to the old worker when continuation dispatch is uncertain', async () => {
+  mockDispatch.mockRejectedValue(new Error('dispatch response lost'));
+  await wake();
+  expect(mockRead).not.toHaveBeenCalled();
+  expect(mockSave).not.toHaveBeenCalled();
+  expect(mockSend).not.toHaveBeenCalled();
+  expect(mockEmit).toHaveBeenCalledWith('microvm_resume_orphan', expect.objectContaining({
+    reason: 'wake-reconciliation-failed',
+  }), expect.anything());
+});
 
 test('ties the saved decision generation to the accepted AWS request without logging its body', async () => {
   mockSend.mockResolvedValueOnce({ state: 'SUSPENDED' }).mockResolvedValueOnce({
