@@ -533,10 +533,9 @@ def get_task(task_id: str, *, consistent_read: bool = False) -> dict | None:
 #   - ``get_approval_row`` — strongly-consistent GetItem; default
 #     ``consistent_read=True`` because the race fix relies on it.
 #
-# Errors beyond the structural conditions (unreachable DDB, IAM drift,
-# missing env var) raise ``ApprovalTablesUnavailable`` so the hook can
-# fail CLOSED without guessing. The hook maps that to DENY so a deploy
-# without the approvals table cannot silently bypass gates.
+# New deployments route creation and timeout writes through the trusted approval
+# service. Missing table configuration raises ``ApprovalTablesUnavailable``;
+# transport/IAM errors propagate. The hook fails closed in either case.
 
 TASK_APPROVALS_TABLE_ENV = "TASK_APPROVALS_TABLE_NAME"
 TASK_TABLE_ENV = "TASK_TABLE_NAME"
@@ -671,6 +670,9 @@ def transact_write_approval_request(
     client=None,
 ) -> None:
     """Atomically record a pending approval + transition the task to AWAITING_APPROVAL.
+
+    The configured approval service performs the transaction. Direct DynamoDB
+    is retained only for older deployments with the legacy permission model.
 
     Two items:
       1. Put on ``TaskApprovalsTable`` with ``ConditionExpression:
