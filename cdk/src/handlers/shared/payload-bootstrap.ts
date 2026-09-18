@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { canonicalJson } from './canonical-json';
 import { logger } from './logger';
 import { makeClient } from './ua';
 import constants from '../../../../contracts/constants.json';
@@ -44,13 +45,6 @@ interface LaunchRecord {
 let client: S3Client | undefined;
 function s3(): S3Client {
   return client ??= makeClient(S3Client);
-}
-
-function canonical(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
-      : item);
 }
 
 function sha256(value: string): string {
@@ -111,11 +105,11 @@ export async function preparePayloadReference(input: {
     || payload.attempt_id !== input.attemptId
   )) throw new Error('PAYLOAD_BOOTSTRAP_INVALID: worker attempt does not match the payload');
   const objectPrefix = input.attemptId ? `${taskId}/${input.attemptId}` : taskId;
-  const manifest = canonical({
+  const manifest = canonicalJson({
     version: PAYLOAD_BOOTSTRAP.version, backend, platform_config: input.platformConfig ?? {},
   });
   const manifestKey = `${PAYLOAD_BOOTSTRAP.manifest_prefix}${sha256(manifest)}.json`;
-  const payloadBody = canonical({
+  const payloadBody = canonicalJson({
     version: PAYLOAD_BOOTSTRAP.version,
     task_id: taskId,
     agent_payload: payload,
@@ -125,7 +119,7 @@ export async function preparePayloadReference(input: {
     || Buffer.byteLength(payloadBody) > PAYLOAD_BOOTSTRAP.max_payload_bytes) {
     throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: bootstrap manifest or task payload exceeds its byte limit');
   }
-  const fingerprint = sha256(canonical({ bucket, backend, manifest, payloadBody }));
+  const fingerprint = sha256(canonicalJson({ bucket, backend, manifest, payloadBody }));
   const launchKey = `${objectPrefix}/${PAYLOAD_BOOTSTRAP.launch_filename}`;
   const accept = (saved: string): PayloadReference => {
     const record = JSON.parse(saved) as LaunchRecord;
@@ -174,7 +168,7 @@ export async function preparePayloadReference(input: {
     payload_url: url,
     expires_at: now + lifetime * 1000,
   };
-  const record = canonical({ fingerprint, reference });
+  const record = canonicalJson({ fingerprint, reference });
   return accept(await createOnce(bucket, launchKey, record));
 }
 
