@@ -19,7 +19,7 @@ Names derive from the concrete parent deployment name, not the child stack token
 
 | Setting | Behavior |
 |---|---|
-| `microvm_nested_stack` | Defaults to `true` for MicroVM compute. Set explicitly to `false` for an existing flat deployment until migration. |
+| `microvm_nested_stack` | Defaults to `false`, preserving flat resource identities. Set `true` for a new installation or after completing the reviewed migration. |
 | `microvm_resource_name_prefix` | Supplies distinct names for overlapping nested resources; preserve it after migration. It does not retain old resources or permissions by itself. |
 | `microvm_managed_image_version` | Pins new tasks to an explicitly verified image version. Without a pin, selection follows the latest active version. |
 | `microvm_approval_suspend_enabled` | Defaults to `false`; enable only after testing the deployed image/coordinator. Disabling new sleep preserves wake and cleanup. |
