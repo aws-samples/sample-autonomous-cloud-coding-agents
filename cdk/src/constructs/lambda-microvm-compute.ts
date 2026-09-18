@@ -379,7 +379,7 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
  *
  * Managed images enable all six served hooks. Automatic approval sleep requires
  * a compatible image and coordinator plus the deployment enable switch. P3 live
- * acceptance is recorded in docs/verification/645-p3-implementation-plan.md; new
+ * acceptance is recorded in docs/verification/README.md; new
  * installations must verify their own configuration before enabling sleep.
  */
 export class LambdaMicrovmCompute extends Construct {
@@ -893,7 +893,7 @@ export class LambdaMicrovmCompute extends Construct {
         + '/run, /terminate, /suspend and /resume; managed images declare all six. '
         + 'Nested deployments require bundle 1.9.0 and a reviewed migration from existing flat stacks. '
         + 'Preserve a compatible coordinator and explicit image version for rollback. Follow '
-        + 'docs/verification/645-p3-implementation-plan.md and docs/verification/645-p3-nested-stack.md.',
+        + 'docs/verification/README.md and docs/verification/645-p3-nested-stack.md.',
       );
     }
 
@@ -963,9 +963,8 @@ export class LambdaMicrovmCompute extends Construct {
 
   /**
    * Scope log writes to the MicroVM namespace. Only the build role can create log
-   * groups; runtime logs use the pre-created image group. See
-   * docs/verification/645-p3-callback-live-20260915.md for the verified policy and
-   * log inventory. Investigate a specific runtime denial before widening the grant.
+   * groups; runtime logs use the pre-created image group. Investigate a specific
+   * runtime denial before widening the grant.
    */
   private grantMicrovmLogWrites(
     role: iam.IRole,

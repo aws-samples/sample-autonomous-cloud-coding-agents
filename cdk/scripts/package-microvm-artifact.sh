@@ -84,11 +84,10 @@
 #   contracts/      <- cross-language constants the agent reads at runtime
 #
 # ---------------------------------------------------------------------------
-# P2 VERIFICATION STATUS
+# VERIFICATION
 # ---------------------------------------------------------------------------
-# The 2026-09-14 clean deployment and coding/iteration/cancellation runs passed
-# without the earlier manual IAM workaround. The wider failure/security matrix
-# remains open; see docs/verification/645-p2-live-task-20260914.md.
+# Test the selected image/coordinator together before enabling automatic sleep.
+# See docs/verification/README.md for acceptance criteria and remaining PR checks.
 #
 # ADR-021 sub-decision 3's hook-phasing table (corrected after the live P1
 # verification run, then completed in P2) is now:
@@ -265,16 +264,14 @@ echo "    log group       : ${LOG_GROUP}"
 print_p1_reminder() {
   cat <<'EOF'
 
-REMINDER (ADR-021 P2): clean deployment and coding, iteration and cancellation
-   passed on 2026-09-14 with bootstrap bundle 1.7.0, without manual IAM changes.
-   Ready/validate hooks, heartbeat, logging, Memory writes and cleanup have live
-   evidence. Full P2 acceptance still needs the failure/recovery, effective IAM
-   and networking matrix in docs/verification/645-p3-implementation-plan.md.
-   /suspend and /resume are declared; supervisor integration is implemented.
-   P3 requires bootstrap bundle 1.8.0 and defaults new suspension off.
-   Live P3 acceptance remains open.
-   CDK retains warning ID abca:microvm-image-p1-smoke-unverified for compatibility;
-   its text describes the current verification gaps.
+REMINDER (ADR-021): verify the deployed image and coordinator together before
+   enabling automatic suspension. Managed images declare all six hooks;
+   compatible coordinator, IAM and image configuration are required.
+   Nested deployments require bootstrap bundle 1.9.0 or later. Existing flat
+   deployments need the staged migration in docs/verification/645-p3-nested-stack.md.
+   Acceptance criteria and remaining PR checks: docs/verification/README.md.
+   Preserve a compatible published coordinator and explicit image pin for rollback.
+   CDK retains warning ID abca:microvm-image-p1-smoke-unverified for compatibility.
 EOF
 }
 

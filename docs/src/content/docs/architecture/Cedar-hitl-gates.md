@@ -21,10 +21,10 @@ title: Cedar hitl gates
 > CLI response instructions are implemented for Slack/Linear notifications;
 > native channel decisions remain separate work. See the current
 > [user guide](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl) and
-> [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/645-p3-continuation-protocol-20260917).
+> [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#retained-microvm-approvals).
 > The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
 > and sleep-off/rollback acceptance; see the
-> [deployment record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-normal-closure-20260918).
+> [deployment record](/sample-autonomous-cloud-coding-agents/architecture/readme).
 
 ---
 
@@ -1043,7 +1043,7 @@ event. A later decision is rejected: the existing API returns
 `404 REQUEST_NOT_FOUND` for missing, foreign or already-decided approval rows,
 including a cancelled row. If approval committed first, cancellation preserves
 the recorded decision while cancelling the task. See the
-[P3 approval verification record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-approval-ux-20260917)
+[P3 approval verification record](/sample-autonomous-cloud-coding-agents/architecture/readme)
 for source versus deployment status.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
@@ -1534,7 +1534,7 @@ path uses the CLI owner's authentication. Native Slack approval buttons and Line
 approval replies are not implemented by this notification change; the OAuth/button
 design below remains proposed. Email remains a log-only stub and GitHub does not
 receive approval messages. Deployment status is recorded in the
-[P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-approval-ux-20260917).
+[P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/readme).
 
 **TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled. (Retains the `stream` attribute commented out for future use if needed.)
 

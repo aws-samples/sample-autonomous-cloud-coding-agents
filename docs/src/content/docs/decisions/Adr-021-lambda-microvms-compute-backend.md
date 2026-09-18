@@ -4,7 +4,7 @@ title: Adr 021 lambda microvms compute backend
 
 # ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend
 
-> **Implementation status (2026-09-18): P1 and P2 are merged; P3 implementation and normal deployment acceptance are complete.** P3 adds approval sleep/wake, retained requests, conversation/workspace recovery, replacement workers and nested infrastructure. See the [completed plan](/sample-autonomous-cloud-coding-agents/architecture/645-p3-implementation-plan) and [normal acceptance record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-normal-closure-20260918). This ADR defines P1–P3; it does not define an official P4.
+> **Implementation status (2026-09-18): P1 and P2 are merged; P3 is in draft review.** Approval sleep/wake, retained requests, conversation/workspace recovery and nested infrastructure have live acceptance evidence. Reusable migration and final integration checks remain open; see [verification status](/sample-autonomous-cloud-coding-agents/architecture/readme). This ADR defines P1–P3, not an official P4.
 
 **Status:** proposed
 **Date:** 2026-07-29
@@ -28,7 +28,7 @@ Lambda MicroVMs are managed Firecracker virtual machines, separate from ordinary
 
 See [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for the full comparison and costs. Suspending stops compute charges, but snapshot storage and save/restore charges remain. A shorter sleep delay does not guarantee lower total cost.
 
-The [P1 probes](/sample-autonomous-cloud-coding-agents/architecture/645-p1-lambda-microvm-runbook) established a 4,096-byte `runHookPayload` limit, an image-ARN requirement and accepted baseline values of 512, 1,024, 2,048, 4,096 and 8,192 MiB. Those observations override conflicting generated SDK descriptions for the tested account/Region. They do not measure guest-visible launch memory, vertical-scaling latency or sustained workload fit. The service guide’s capacity figures and live observations must remain distinguishable.
+Recorded P1 probes established a 4,096-byte `runHookPayload` limit, an image-ARN requirement and accepted baseline values of 512, 1,024, 2,048, 4,096 and 8,192 MiB. Those observations override conflicting generated SDK descriptions for the tested account/Region. They do not measure guest-visible launch memory, vertical-scaling latency or sustained workload fit. The service guide’s capacity figures and live observations must remain distinguishable.
 
 ### Design tensions the strategy must resolve
 
@@ -74,11 +74,11 @@ Unanswered approvals have no deadline by default (`approval_timeout_s=0`). Expli
 
 Automatic suspension also requires the deployment’s `microvm_approval_suspend_enabled` opt-in, which defaults false for new deployments. A live Parameter Store switch lets existing durable executions stop initiating new suspensions without changing their pinned Lambda environment. The verified normal deployment has this opt-in enabled. Turning it off does not abandon already-suspended workers.
 
-The coordinator observes the exact pending gate and waits for the sleep delay. It skips sleep when a timed gate has too little time left before its wake margin. The guest holds a coding barrier, drains acknowledged progress and commits a checkpoint before accepting `/suspend`. Lifecycle HTTP responses explicitly close their connections before freeze to avoid reuse of a stale pooled connection; see the [transport experiment](/sample-autonomous-cloud-coding-agents/architecture/645-p3-wake-transport-20260916).
+The coordinator observes the exact pending gate and waits for the sleep delay. It skips sleep when a timed gate has too little time left before its wake margin. The guest holds a coding barrier, drains acknowledged progress and commits a checkpoint before accepting `/suspend`. Lifecycle HTTP responses explicitly close their connections before freeze to avoid reuse of a stale pooled connection; see the [transport evidence summary](/sample-autonomous-cloud-coding-agents/architecture/readme#recorded-acceptance).
 
 Approval and denial handlers commit the decision first. They then read the current handle consistently, persist wake intent and request resume best-effort. A wake failure records diagnostics and does not undo the accepted decision. The durable supervisor retries and observes both service state and guest consumption of the decision; RUNNING alone does not prove the tool was released.
 
-A sleeping worker retains its concurrency reservation. For a longer wait, ABCA verifies a complete, version-pinned conversation/workspace checkpoint, fences the attempt, confirms shutdown and releases the reservation. A later decision can admit one replacement through the original published coordinator. It restores Git state, required workspace files, the actual SDK conversation, exact pending tool inputs and cumulative usage with fresh scoped credentials. See the [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/645-p3-continuation-protocol-20260917).
+A sleeping worker retains its concurrency reservation. For a longer wait, ABCA verifies a complete, version-pinned conversation/workspace checkpoint, fences the attempt, confirms shutdown and releases the reservation. A later decision can admit one replacement through the original published coordinator. It restores Git state, required workspace files, the actual SDK conversation, exact pending tool inputs and cumulative usage with fresh scoped credentials. See the [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#retained-microvm-approvals).
 
 Normative requirements (EARS):
 
@@ -108,7 +108,7 @@ All six hooks share the FastAPI listener on port 8080. AWS hook properties accep
 | `/suspend` | Drain acknowledged progress and commit the current safe checkpoint within the hook budget |
 | `/resume` | Renew credentials and reconcile the original gate before releasing coding |
 
-Warm-up budgets come from `contracts/constants.json`; the total guest budget must remain below the image hook timeout. The [P2 runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p2-smoke-runbook) records the cold-binary failure and the enum/trust/logging fixes. Historical binary sizes and timings are observations of those images, not sizing guarantees for later builds.
+Warm-up budgets come from `contracts/constants.json`; the total guest budget must remain below the image hook timeout. Cold-binary startup exceeded the hook budget in an earlier image; warm-up moved this work into image preparation. Historical sizes and timings are not sizing guarantees for later builds.
 
 **Authenticated v2 payload transport.** Every ECS and MicroVM task uses S3. The coordinator publishes a deployment manifest, conditionally creates the task payload and sends a short-lived signed URL for that one object. The serialized MicroVM reference must fit 4,096 bytes; payloads are bounded at 8 MiB and manifests at 16 KiB.
 
@@ -131,7 +131,7 @@ Normative requirements (EARS):
 - Signed URLs shall not appear in ordinary logs, agent-readable task rows or repository subprocess environments. Downloads shall use the exact regional S3 HTTPS object without redirects/proxies and with bounded response sizes.
 - Producers, images and IAM shall be upgraded together; incompatible workers must be drained before switching transport.
 
-The [payload contract](/sample-autonomous-cloud-coding-agents/architecture/645-payload-bootstrap) and [live checks](/sample-autonomous-cloud-coding-agents/architecture/645-p2-payload-live-20260914) record the implementation and validation. This transport does not establish complete hostile-worker isolation: other platform grants remain, and a stolen signed URL is usable until expiry or revocation.
+The [payload contract](/sample-autonomous-cloud-coding-agents/architecture/645-payload-bootstrap) and [live checks](/sample-autonomous-cloud-coding-agents/architecture/readme) record the implementation and validation. This transport does not establish complete hostile-worker isolation: other platform grants remain, and a stolen signed URL is usable until expiry or revocation.
 
 No ABCA endpoint consumer exists in P1–P3. The platform grants no `CreateMicrovmAuthToken` permission and mints no JWE tokens. `NO_INGRESS` can still return an endpoint URL; an unauthenticated 403 verifies the authentication boundary, not valid-token reachability.
 
@@ -139,7 +139,7 @@ No ABCA endpoint consumer exists in P1–P3. The platform grants no `CreateMicro
 
 The backend adds build/runtime VPC connectors, build artifacts, launch payloads, logs, roles and a managed or external image. Its bootstrap policy is conditional on `ComputeTypes` including `lambda-microvm`. A VPC egress connector requires an operator role. Build egress permits ports 80/443 for package installation; runtime egress permits 443 through the platform VPC.
 
-**Trust and PassRole limitation.** Recorded live checks rejected `aws:SourceAccount`/`aws:SourceArn` conditions on the MicroVM-facing roles and `iam:PassedToService` on the MicroVM PassRole paths. The working roles trust `lambda.amazonaws.com` without those conditions; build/execution roles also allow `sts:TagSession`. IAM simulation with caller-supplied condition values did not prove that the service supplied those values. See the [P2 evidence](/sample-autonomous-cloud-coding-agents/architecture/645-p2-smoke-runbook), [clean deployment](/sample-autonomous-cloud-coding-agents/architecture/645-p2-clean-deployment-20260913) and [effective IAM checks](/sample-autonomous-cloud-coding-agents/architecture/645-effective-iam-20260915). Reintroduce a condition only after verifying service support.
+**Trust and PassRole limitation.** Recorded live checks rejected `aws:SourceAccount`/`aws:SourceArn` conditions on the MicroVM-facing roles and `iam:PassedToService` on the MicroVM PassRole paths. The working roles trust `lambda.amazonaws.com` without those conditions; build/execution roles also allow `sts:TagSession`. IAM simulation with caller-supplied condition values did not prove that the service supplied those values. See the [IAM service questions](/sample-autonomous-cloud-coding-agents/architecture/645-lambda-microvm-service-feedback#iam-setup-f02). Reintroduce a condition only after verifying service support.
 
 | Role/action | Scope and responsibility |
 |---|---|
@@ -153,7 +153,7 @@ The backend adds build/runtime VPC connectors, build artifacts, launch payloads,
 
 `lambda:PassNetworkConnector` has no resource-level authorization support and therefore uses `Resource: *`. The operator role also has wildcard ENI permissions; some mutations can be scoped in IAM, so their current tested wildcard is not evidence that narrower permissions are impossible. DescribeAvailabilityZones needs a wildcard for fresh CDK repository lookups. These exceptions and namespace wildcards are documented in the construct’s cdk-nag suppressions.
 
-**Nested infrastructure.** `microvm_nested_stack=true` puts MicroVM resources in a nested stack. The shared execution role stays in the parent to avoid a role-trust dependency cycle. Bootstrap 1.9.0 covers nested deployment roles. Existing flat installations need the reviewed overlap/drain migration, explicit image/coordinator pins and rollback checks in the [nested migration record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack). Moving construct paths alone is not a safe migration. Preserve `microvm_resource_name_prefix` after a migrated deployment.
+**Nested infrastructure.** `microvm_nested_stack=true` puts MicroVM resources in a nested stack. The shared execution role stays in the parent to avoid a role-trust dependency cycle. Bootstrap 1.9.0 covers nested deployment roles. Existing flat installations need the reviewed overlap/drain migration, explicit image/coordinator pins and rollback checks described in the [migration prerequisites](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack). Reusable migration commands are still being completed. Moving construct paths alone is not a safe migration. Preserve `microvm_resource_name_prefix` after a migrated deployment.
 
 #### Security bar vs existing backends ([#645](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/645) acceptance criterion)
 
@@ -203,7 +203,7 @@ Changing the default backend, GPU support, native Slack approval buttons, approv
 
 ## Testing
 
-The [completed plan](/sample-autonomous-cloud-coding-agents/architecture/645-p3-implementation-plan) indexes exact suite results and dated evidence. Required coverage includes:
+The [verification summary](/sample-autonomous-cloud-coding-agents/architecture/readme) distinguishes recorded live acceptance from open PR checks. Required coverage includes:
 
 - Strategy state mapping, explicit unsupported results, ARN/Region validation, NO_INGRESS, omitted idlePolicy and bounded uncertain-start recovery.
 - Hook readiness/warm-up, AWS-silent build hooks, authenticated payload installation, arbitrary terminate bodies and lifecycle connection closure.

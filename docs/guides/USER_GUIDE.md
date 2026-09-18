@@ -949,8 +949,9 @@ remaining open does not mean its old computer must stay alive. Sleeping saves
 compute charges but adds snapshot save/restore charges and wake-up time; short
 pauses can cost more than staying awake. The API equivalent is
 `microvm_sleep_after_s` (zero means off); task
-details return the saved setting. Automatic suspension remains disabled by
-default pending the [P3 acceptance checks](../verification/645-p3-implementation-plan.md).
+details return the saved setting. Automatic suspension is disabled by default for
+new deployments. An operator enables it after [verifying the deployed image and
+coordinator](../verification/README.md#live-acceptance-for-an-installation).
 
 ## Webhook integration
 

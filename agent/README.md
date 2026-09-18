@@ -145,8 +145,7 @@ sets `ABCA_MICROVM_CREDENTIAL_BROKER=1` **only in the Claude child**, points
 clears alternate credential sources in that child. Operators should not set this
 internal flag themselves. The endpoint serves the current task's scoped session;
 the parent's runtime credentials and other backends' attribution path remain
-separate. See [P3 credential verification](../docs/verification/645-p3-credentials.md)
-for implementation and live-verification limits.
+separate. See [recorded credential-renewal acceptance](../docs/verification/README.md#recorded-acceptance).
 
 ### Examples
 
@@ -253,7 +252,7 @@ Baked secrets are **reported, not enforced**: `warnings` lists the names (never 
 
 `microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
 
-**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. Protocol v2 is deployed for MicroVM; [11 live transport/failure cases](../docs/verification/645-p2-payload-live-20260914.md) verified worker downloads/rejections, URL expiry/revocation and immediate launch replay. The [runbook](../docs/verification/645-payload-bootstrap.md) tracks the broader authorization and recovery matrix separately.
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. See the [payload contract and upgrade checks](../docs/verification/645-payload-bootstrap.md) and [recorded live acceptance](../docs/verification/README.md#recorded-acceptance).
 
 `runHookPayload` is a JSON **string** passed through by `RunMicrovm`, containing:
 
@@ -307,7 +306,7 @@ Values are **non-secret configuration only**. Credentials are fetched at task st
 
 Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (manifest/payload read or stored bytes failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
 
-`/suspend` and `/resume` are served by `microvm_http.py` and declared in managed images with 30-second service timeouts and a shared non-secret protocol marker. Pause requires an active original approval gate, matching coordinator intent, drained activity and an acknowledged checkpoint; wake renews credentials and atomically rechecks the original task/gate before allowing coding. Each handler has a 20-second total budget. `/validate` rejects a supplied incompatible image marker without contacting AWS. The coordinator checks the actual launched image version and persists support on that worker; missing support disables new suspension. See [image capability verification](../docs/verification/645-p3-image-capability.md) and [completed P3 verification](../docs/verification/645-p3-nested-stack.md).
+`/suspend` and `/resume` are served by `microvm_http.py` and declared in managed images with 30-second service timeouts and a shared non-secret protocol marker. Pause requires an active original approval gate, matching coordinator intent, drained activity and an acknowledged checkpoint; wake renews credentials and atomically rechecks the original task/gate before allowing coding. Each handler has a 20-second total budget. `/validate` rejects a supplied incompatible image marker without contacting AWS. The coordinator checks the actual launched image version and persists support on that worker; missing support disables new suspension. See the [acceptance checklist](../docs/verification/README.md#live-acceptance-for-an-installation) and [nested deployment prerequisites](../docs/verification/645-p3-nested-stack.md).
 
 #### Conversation and workspace continuation
 

@@ -132,27 +132,9 @@ export const MICROVM_MAX_DURATION_SECONDS = sharedConstants.microvm_lifecycle.ma
 const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
 
 /**
- * The ``GetMicrovm`` ``stateReason`` value that means "nothing to report".
- *
- * Live-observed, not guessed: an orchestrator-initiated ``TerminateMicrovm`` on the
- * SUCCESS path leaves the MicroVM ``TERMINATED`` with exactly
- * ``stateReason: "Success."`` — trailing period included. Recorded three times in
- * ``docs/verification/645-p2-smoke-runbook.md``: **§5.1** ("Finalization called
- * `TerminateMicrovm`", the verbatim CLI output), **§6.2** (the suspend/resume
- * latency table) and **§2.9** ("Lifecycle — PASS", run 2). A healthy ``RUNNING``
- * MicroVM reports no reason at all (``None``, same §6.2 table).
- *
- * Normalized away in {@link LambdaMicrovmComputeStrategy.pollSession} so it never
- * reaches the reconcile ``detail`` string, where it would append noise to every
- * cleanly-finished task.
- *
- * A bare literal comparison is deliberate and the brittleness is bounded: this is
- * a service-owned display string, so an exact match can only fail OPEN — a future
- * ``"Success"`` without the period, or a different capitalisation, would leak one
- * benign phrase into an operator-facing string. It cannot suppress a real reason,
- * which is the direction that would matter. Left out of
- * ``contracts/constants.json`` for the same reason: nothing in the agent reads it,
- * so it is not a cross-language contract.
+ * The service reports "Success." after normal termination. Suppress only that
+ * exact benign display string; preserve other reasons for operator diagnosis.
+ * A future wording change may add harmless detail but cannot hide a failure.
  */
 const MICROVM_BENIGN_STATE_REASON = 'Success.';
 
@@ -733,17 +715,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * ``microvmState`` also reports the explicit observed state (or local UNKNOWN /
    * NOT_FOUND). P3 uses it to distinguish readiness from the coarse status.
    *
-   * ``stateReason`` is carried through on every mapped state as
-   * ``SessionStatus.reason``, VERBATIM and uninterpreted. It is the substrate's
-   * own account of WHY, and mapping it away is what made the dominant runtime
-   * failure unreadable: a ``/run`` hook 4xx self-terminates the VM within ~12 s
-   * (``docs/verification/645-p2-smoke-runbook.md`` §6.1) with
-   * ``stateReason = "Run lifecycle hook returned HTTP status 400. Please check
-   * your hook endpoint and application logs for more details."`` — and because
-   * ``TERMINATED → completed`` has no error slot, the orchestrator's reconcile
-   * detail read ``"substrate state completed"``, naming none of the three causes
-   * its remedy suggested. Reporting the reason keeps this method mechanical (no
-   * branch reads it) while giving the orchestrator something true to say.
+   * Service failure reasons are preserved in SessionStatus.reason so a failed
+   * hook is not reduced to "substrate completed". Suppress only the known benign
+   * success string; the orchestrator decides whether the task itself succeeded.
    */
   async pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
     if (handle.strategyType !== 'lambda-microvm') {

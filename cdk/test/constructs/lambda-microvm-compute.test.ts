@@ -674,29 +674,10 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   });
 
   test('NO source-key condition on any MicroVM-facing role trust (P2-F1/F3)', () => {
-    // The sharpest IAM assertion in this file, and the one most likely to be
-    // "fixed" back by a reviewer applying the standard service-principal
-    // confused-deputy pattern. It must not be.
-    //
-    // The Lambda MicroVMs service presents NO source condition key when it assumes
-    // these roles, so a trust policy carrying one is unassumable. Live 2026-08-06/07
-    // (evidence inlined in ADR-021 §4; `docs/verification/645-p2-smoke-runbook.md`
-    // is the raw session log, additional detail rather than the sole proof), one
-    // root cause, two symptoms:
-    // both network connectors CREATE_FAILED deterministically on a freshly deleted
-    // stack (P2-F1), and RunMicrovm reported a MISLEADING caller-side
-    // `iam:PassRole` AccessDenied on the orchestrator (P2-F3) — with the grant
-    // present, `simulate-principal-policy` returning `allowed`, no permissions
-    // boundary, and an unconditioned PassRole ALSO denied. Removing the execution
-    // role's trust conditions made the next submission reach RUNNING in 6 s.
-    //
-    // What compensates is asserted elsewhere in this file and in
-    // `test/constructs/task-orchestrator.test.ts`: the EXECUTION role is passable by
-    // the orchestrator only, scoped to its EXACT ARN — and with NO
-    // `iam:PassedToService` condition either, because the same missing-context-key
-    // root cause blocks that path too (P2r2-F10), which is why the exact ARN is the
-    // whole of the scoping. Every resource these roles reach is account-scoped by
-    // ARN apart from two justified `Resource: '*'` statements.
+    // Recorded service calls rejected source-conditioned role trust; removing
+    // those conditions restored connector creation and worker launch. Keep exact
+    // resource grants and verify service support before adding conditions again.
+    // See ADR-021 §4 and docs/verification/645-lambda-microvm-service-feedback.md.
     const roles = Object.entries(template.findResources('AWS::IAM::Role'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')
         || id.includes('LambdaMicrovmComputeExecutionRole')
