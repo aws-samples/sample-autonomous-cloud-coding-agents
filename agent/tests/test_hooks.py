@@ -1456,6 +1456,24 @@ class TestApprovedPath:
                     )
                 )
             assert phases == ["checkpointing", "checkpoint-ready", "checkpoint-ready"]
+            unavailable = [
+                data
+                for method, data in progress.calls
+                if method == "write_agent_milestone"
+                and data.get("milestone") == "continuation_unavailable"
+            ]
+            assert len(unavailable) == int(publish_failed)
+            if publish_failed:
+                # Use the real signature so an incorrectly named keyword cannot
+                # pass through the permissive recording double unnoticed.
+                from progress_writer import _ProgressWriter
+
+                writer = MagicMock(spec=_ProgressWriter)
+                import inspect
+
+                inspect.signature(_ProgressWriter.write_agent_milestone).bind(
+                    writer, **unavailable[0]
+                )
             expected = "deny" if transferred else "allow"
             assert result["hookSpecificOutput"]["permissionDecision"] == expected
             assert lifecycle.diagnostic_snapshot()["phase"] == (

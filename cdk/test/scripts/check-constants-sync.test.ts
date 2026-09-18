@@ -58,6 +58,7 @@ const SCRIPT_REL = 'scripts/check-constants-sync.ts';
 const FIXTURE_FILES = [
   SCRIPT_REL,
   'contracts/constants.json',
+  'agent/pyproject.toml',
   'agent/src/policy.py',
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
@@ -127,6 +128,14 @@ function patchContract(root: string, mutate: (json: Record<string, any>) => void
 }
 
 describe('check-constants-sync', () => {
+  test('rejects an SDK upgrade without checkpoint compatibility verification', () => {
+    const result = runInMutatedRepo(root => {
+      write(root, 'agent/pyproject.toml', read(root, 'agent/pyproject.toml')
+        .replace(/claude-agent-sdk==[0-9.]+/, 'claude-agent-sdk==99.0.0'));
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('claude-agent-sdk pin must match');
+  });
   // Node's type-stripping runs the script from source; the suite is a handful of
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
