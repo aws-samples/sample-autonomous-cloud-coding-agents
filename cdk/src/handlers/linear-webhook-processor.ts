@@ -673,9 +673,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // A Comment with an @bgagent mention on an orchestrated sub-issue
-  // re-iterates that sub-issue's PR (the reconciler then cascades the
-  // re-stack). Handled on a separate path from Issue → task creation.
+  // Comments route approval replies first, then @bgagent task/iteration
+  // requests. Issue events use the separate task-creation path below.
   if (payload.type === 'Comment') {
     await handleCommentTrigger(payload as LinearCommentEvent);
     return;
