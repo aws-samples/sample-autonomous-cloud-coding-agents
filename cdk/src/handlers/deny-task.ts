@@ -74,7 +74,7 @@ export async function handler(
 
 /** Shared decision path. Callers must authenticate and map the platform user first. */
 export async function recordDenialForUser(
-  input: { userId: string | null; taskId?: string; body?: string | null },
+  input: { userId: string | null; taskId?: string; body?: string | null; decisionSource?: string },
   context?: Pick<Context, 'getRemainingTimeInMillis'>,
 ): Promise<APIGatewayProxyResult> {
   const invocationStartedMs = Date.now();
@@ -164,7 +164,8 @@ export async function recordDenialForUser(
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :denied, decided_at = :now, deny_reason = :reason',
+                'SET #status = :denied, decided_at = :now, deny_reason = :reason'
+                  + (input.decisionSource ? ', decision_source = :source' : ''),
               ConditionExpression:
                 'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
                   + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
@@ -176,6 +177,7 @@ export async function recordDenialForUser(
                 ':reason': sanitizedReason,
                 ':caller': callerUserId,
                 ':epoch': nowEpoch,
+                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },
