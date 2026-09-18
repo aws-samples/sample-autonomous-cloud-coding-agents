@@ -240,6 +240,18 @@ export class LinearIntegration extends Construct {
     // the task-orchestrator. Used by the webhook processor's PDF attachment path.
     const attachmentScreeningBundling: lambda.BundlingOptions = {
       ...commonBundling,
+      // Approval replies need the current MicroVM client and durable Invoke
+      // fields, which cannot depend on the SDK version supplied by Lambda.
+      ...(props.taskApprovalsTable && {
+        externalModules: [
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/client-ecs',
+          '@aws-sdk/client-bedrock-runtime',
+          '@aws-sdk/client-secrets-manager',
+          '@aws-sdk/lib-dynamodb',
+          '@aws-sdk/util-dynamodb',
+        ],
+      }),
       nodeModules: ['pdf-parse'],
     };
 
