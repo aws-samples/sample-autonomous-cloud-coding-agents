@@ -33,6 +33,7 @@ import {
   deleteComment,
   fetchRecentComments,
   postIssueComment,
+  postIdentifiedComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -71,6 +72,44 @@ describe('linear-feedback', () => {
       oauthSecretArn: 'arn:secret:acme',
     });
     fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true } } }));
+  });
+
+  describe('postIdentifiedComment', () => {
+    const input = { id: 'stable', issueId: ISSUE_ID, body: 'Approval needed', parentId: 'root' };
+    test('passes the stable identity and exact thread to Linear', async () => {
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: true });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual({ input });
+    });
+    test('recovers a lost creation response by verifying saved content and destination', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('lost response'));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: {
+            body: input.body, issue: { id: ISSUE_ID }, parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: true });
+    });
+    test('does not accept an ID collision in another issue or thread', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: ['already exists'] }));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: {
+            body: input.body, issue: { id: 'other' }, parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: false });
+    });
+    test('does not treat success=false as delivery', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: false } } }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: false });
+    });
+    test('retries when creation and verification are both unavailable', async () => {
+      fetchMock.mockRejectedValue(new Error('outage'));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: true });
+    });
   });
 
   describe('postIssueComment', () => {

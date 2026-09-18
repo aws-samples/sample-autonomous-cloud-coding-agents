@@ -61,7 +61,7 @@ process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 process.env.APPROVE_RATE_LIMIT_PER_MINUTE = '30';
 
-import { handler } from '../../src/handlers/approve-task';
+import { handler, recordApprovalForUser } from '../../src/handlers/approve-task';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
@@ -293,5 +293,29 @@ describe('postcommit MicroVM wake', () => {
     mockSend.mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('audit failed'));
     expect((await handler(makeEvent())).statusCode).toBe(202);
     expect(mockWake).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('trusted channel decision source', () => {
+  test('stores the source inside the guarded decision transaction', async () => {
+    mockSend.mockResolvedValue({});
+    const result = await recordApprovalForUser({
+      userId: 'user-alice',
+      taskId: 'task-1',
+      body: JSON.stringify({ request_id: 'gate', decision: 'approve' }),
+      decisionSource: 'linear-source',
+    });
+    expect(result.statusCode).toBe(202);
+    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
+    expect(update.UpdateExpression).toContain('decision_source = :source');
+    expect(update.ExpressionAttributeValues[':source']).toBe('linear-source');
+    expect(update.ConditionExpression).toContain('#status = :pending');
+    expect(update.ConditionExpression).toContain('deadline_epoch > :epoch');
+  });
+  test('does not trust a source supplied in the HTTP body', async () => {
+    mockSend.mockResolvedValue({});
+    await handler(makeEvent({ body: JSON.stringify({ request_id: 'gate', decision: 'approve', decisionSource: 'forged' }) }));
+    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
+    expect(update.UpdateExpression).not.toContain('decision_source');
   });
 });

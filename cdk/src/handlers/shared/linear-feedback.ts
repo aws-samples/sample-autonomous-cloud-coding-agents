@@ -408,6 +408,35 @@ export async function postIssueComment(
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
 }
 
+/** Retry-safe posting for approval prompts and acknowledgements. */
+export async function postIdentifiedComment(
+  ctx: LinearFeedbackContext,
+  input: { id: string; issueId: string; body: string; parentId?: string },
+): Promise<LinearPostResult> {
+  const token = await resolveToken(ctx);
+  if (!token) return { ok: false, retryable: false };
+  const created = await graphqlData(token, `
+    mutation ApprovalComment($input: CommentCreateInput!) {
+      commentCreate(input: $input) { success comment { id } }
+    }`, { input });
+  if (created.ok && (created.value.commentCreate as { success?: boolean } | undefined)?.success) {
+    return { ok: true };
+  }
+  // A successful write can lose its response. A duplicate ID is acceptable only
+  // when the saved comment exactly matches this destination and content.
+  const existing = await graphqlData(token, `
+    query ApprovalComment($id: String!) {
+      comment(id: $id) { body issue { id } parent { id } }
+    }`, { id: input.id });
+  if (!existing.ok) return { ok: false, retryable: true };
+  const comment = existing.value.comment as {
+    body?: string; issue?: { id?: string }; parent?: { id?: string };
+  } | undefined;
+  return comment?.body === input.body && comment.issue?.id === input.issueId
+    && comment.parent?.id === input.parentId
+    ? { ok: true } : { ok: false, retryable: false };
+}
+
 /**
  * Upsert the orchestration's live status block — ONE comment on the parent epic
  * that is rewritten as the run progresses, rather than a new comment per

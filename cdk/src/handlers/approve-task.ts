@@ -76,7 +76,7 @@ export async function handler(
 
 /** Shared decision path. Callers must authenticate and map the platform user first. */
 export async function recordApprovalForUser(
-  input: { userId: string | null; taskId?: string; body?: string | null },
+  input: { userId: string | null; taskId?: string; body?: string | null; decisionSource?: string },
   context?: Pick<Context, 'getRemainingTimeInMillis'>,
 ): Promise<APIGatewayProxyResult> {
   const invocationStartedMs = Date.now();
@@ -183,7 +183,8 @@ export async function recordApprovalForUser(
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :approved, decided_at = :now, #scope = :scope',
+                'SET #status = :approved, decided_at = :now, #scope = :scope'
+                  + (input.decisionSource ? ', decision_source = :source' : ''),
               ConditionExpression:
                 'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
                   + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
@@ -198,6 +199,7 @@ export async function recordApprovalForUser(
                 ':scope': scope,
                 ':caller': callerUserId,
                 ':epoch': nowEpoch,
+                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },
