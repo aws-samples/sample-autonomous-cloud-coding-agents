@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { canonicalJson } from './canonical-json';
 import type { SessionControlOptions } from './compute-strategy';
 import { CONTINUATION_IO_TIMEOUT_MS } from './microvm-continuation-timing';
 import {
@@ -50,10 +51,7 @@ interface LaunchInputs {
 }
 
 function canonical(value: unknown): Buffer {
-  return Buffer.from(JSON.stringify(value, (_key, item: unknown) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
-      : item));
+  return Buffer.from(canonicalJson(value));
 }
 
 function hash(value: Buffer): string {

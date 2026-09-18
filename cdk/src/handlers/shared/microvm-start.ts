@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { canonicalJson } from './canonical-json';
 import type { SessionHandle } from './compute-strategy';
 import type { ContinuationRecord } from './microvm-continuation-types';
 import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
@@ -68,10 +69,7 @@ const ACTIVE = new Set<string>([TaskStatus.HYDRATING, TaskStatus.RUNNING, TaskSt
 
 /** Include the full S3 content, not just its URI; ignore object-key ordering. */
 export function microvmStartRequestHash(request: unknown, payload: unknown): string {
-  const canonical = JSON.stringify([request, payload], (_key, value: unknown) =>
-    value && typeof value === 'object' && !Array.isArray(value)
-      ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
-      : value);
+  const canonical = canonicalJson([request, payload]);
   return createHash('sha256').update(canonical).digest('hex');
 }
 

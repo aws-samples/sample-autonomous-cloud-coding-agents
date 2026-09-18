@@ -19,6 +19,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { canonicalJson } from './canonical-json';
 import type { ComputeStrategy, SessionControlOptions } from './compute-strategy';
 import { logger } from './logger';
 import { verifyContinuationCheckpoint } from './microvm-continuation-storage';
@@ -56,11 +57,7 @@ async function readTask(taskId: string, options: SessionControlOptions): Promise
 }
 
 function sameRecord(left: unknown, right: unknown): boolean {
-  const canonical = (value: unknown) => JSON.stringify(value, (_key, item: unknown) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
-      : item);
-  return canonical(left) === canonical(right);
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 async function leaseMatches(
