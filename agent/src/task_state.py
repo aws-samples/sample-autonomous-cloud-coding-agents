@@ -357,12 +357,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             ExpressionAttributeValues=expr_values,
         )
     except Exception as e:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(e, ClientError)
-            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
-        ):
+        if _task_status_conflict(e):
             log(
                 "INFO",
                 "[task_state] write_terminal skipped: "
@@ -406,7 +401,13 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                         f"(terminal-state race).",
                     )
             return
-        log("WARN", f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
+        # Include DynamoDB's cancellation reasons: losing worker ownership is
+        # not a benign status race and must never trigger trace self-healing.
+        log_error_cw(
+            f"[task_state] write_terminal failed (best-effort): {type(e).__name__}: {e}; "
+            f"CancellationReasons={_extract_cancellation_reasons(e)}",
+            task_id=task_id,
+        )
 
 
 def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
