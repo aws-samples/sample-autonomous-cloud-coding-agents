@@ -25,6 +25,7 @@ deployments. They do not certify a different image, account, Region or upgrade.
 | Credential renewal | A wait exceeding one hour was followed by successful AWS access with renewed task credentials. |
 | Continuation | Conversation and Git/workspace recovery, replacement admission, usage limits and capacity release passed. |
 | External integrations | Repository work and remote MCP access passed across sleep; an actual Linear submission exercised MicroVM compute with AgentCore Identity vault. |
+| Linear decisions | Native threaded `approve` and `deny` replies passed on MicroVM and AgentCore. Both MicroVMs were suspended before the replies; exact decisions, tool results, thread acknowledgements and eventual capacity release were verified. |
 | Infrastructure | Fresh nested deployment and a deployment-specific overlapping migration passed, including compatible rollback and old-resource cleanup. |
 | Other backends | ECS and AgentCore approval/cancellation and scoped-access checks passed in their tested deployments. |
 
@@ -40,12 +41,13 @@ is not established for every worker.
   upgrade from current `main` on the same deployment. The earlier bespoke
   migration is not a substitute for that acceptance.
 - Restore a green full build after integration with `main`. The latest recorded
-  full run passed 2,170 agent tests and 1,005 CLI tests; CDK had 5,417 passes,
+  full run passed 2,170 agent tests and 1,005 CLI tests; CDK had 5,545 passes,
   four failures and 56 skips. Three resource-budget cases reached 493 resources
   (ECS) or 492 (MicroVM), above the repository's 490-resource cushion. A separate
-  `github-tags` configuration-load failure passed its isolated rerun; its cause
-  is unresolved. These are historical run results, not a claim that the latest
-  commit has been fully revalidated.
+  VPC test failed while reading a temporary `tree.json`; its isolated rerun
+  passed all 18 tests without a code change. The earlier `github-tags` failure
+  did not recur. These are recorded run results, not a claim that the latest
+  commit has passed a full build.
 
 ## Reproduce local checks
 
@@ -80,6 +82,7 @@ only after verifying that image and coordinator together.
 |---|---|
 | Normal task | Repository tools run; terminal status, payload cleanup and capacity release agree. |
 | Approval after sleep | The saved decision reaches the exact pending tool; verify guest recovery and tool output, not only the Resume API receipt. |
+| Linear replies | Submit real issues on each backend. Reply `approve` or `deny` to the exact approval comment as its linked owner; verify the saved decision source, same-thread acknowledgement and allowed/blocked tool result. For MicroVM, observe suspension before replying. |
 | Deny, expiry, cancellation | No denied/cancelled tool runs; expiry uses the original deadline; compute and capacity are cleaned up. |
 | Default and disabled sleep | Omitted override uses 600 seconds; task-level off and deployment off prevent new suspension while wake/cleanup remain available. |
 | Credential expiry | Sleep past the original credential lifetime, then perform actual task-scoped AWS operations. |
