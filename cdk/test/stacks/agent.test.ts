@@ -1295,6 +1295,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
@@ -1548,6 +1549,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       const app = new App({
         context: {
           compute_type: 'lambda-microvm',
+          microvm_nested_stack: true,
           microvm_region_override: true,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
@@ -1562,7 +1564,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_type: 'lambda-microvm', microvm_nested_stack: true } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
@@ -1617,7 +1619,7 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     // but no image yet. Exercises the false branch of the shared
     // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
     // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
-    const app = new App({ context: { compute_type: 'lambda-microvm' } });
+    const app = new App({ context: { compute_type: 'lambda-microvm', microvm_nested_stack: true } });
     const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -1661,7 +1663,6 @@ describe('AgentStack MicroVM flat-layout migration compatibility', () => {
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
-        microvm_nested_stack: false,
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
@@ -1672,7 +1673,7 @@ describe('AgentStack MicroVM flat-layout migration compatibility', () => {
     }));
   });
 
-  test('retains original resource paths and unnamed IAM roles with nesting disabled', () => {
+  test('preserves flat resource identities when nesting is not configured', () => {
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
     template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
     expect(Object.keys(template.findResources('AWS::Lambda::MicrovmImage'))[0])
@@ -1696,7 +1697,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
     const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
       .mockReturnValue(true);
     try {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_type: 'lambda-microvm', microvm_nested_stack: true } });
       const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
         env: { account: '123456789012', region: 'us-east-1' },
       });
@@ -2047,6 +2048,7 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
         context: {
           enableLinearIdentityVault: true,
           compute_type: 'lambda-microvm',
+          microvm_nested_stack: true,
           microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
           microvm_base_image_version: '1',
           microvm_artifact_sha256: 'a'.repeat(64),
@@ -2212,11 +2214,12 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
   const CONFIGURATIONS = [
     { name: 'agentcore', context: { compute_type: 'agentcore' } },
     { name: 'ecs', context: { compute_type: 'ecs' } },
-    { name: 'microvm-bootstrap', context: { compute_type: 'lambda-microvm' } },
+    { name: 'microvm-bootstrap', context: { compute_type: 'lambda-microvm', microvm_nested_stack: true } },
     {
       name: 'microvm-imported',
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:existing-agent',
         microvm_image_version: '6.0',
       },
@@ -2225,6 +2228,7 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
       name: 'microvm-managed',
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),

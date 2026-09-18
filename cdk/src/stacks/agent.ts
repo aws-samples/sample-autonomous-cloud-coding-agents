@@ -356,9 +356,9 @@ export class AgentStack extends Stack {
     if (microvmNestedContext !== undefined && ![true, false, 'true', 'false'].includes(microvmNestedContext)) {
       throw new Error('microvm_nested_stack must be true or false');
     }
-    // Existing flat deployments retain their resource paths with false until
-    // their reviewed resource-migration procedure is complete.
-    const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
+    // Omission preserves existing flat resource identities. New installations
+    // may opt in; existing stacks must complete the reviewed migration first.
+    const microvmNested = microvmNestedContext === true || microvmNestedContext === 'true';
     const microvmResourceNamePrefix = this.node.tryGetContext('microvm_resource_name_prefix');
     if (microvmResourceNamePrefix !== undefined
       && (!microvmNested || typeof microvmResourceNamePrefix !== 'string')) {
