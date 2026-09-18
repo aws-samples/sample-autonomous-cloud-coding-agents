@@ -27,9 +27,9 @@ const send = jest.fn();
 const ddb = { send } as unknown as DynamoDBDocumentClient;
 beforeEach(() => send.mockReset().mockResolvedValue({}));
 
-test('stable UUID binds distinct workspace, issue, task and request identities', () => {
+test('Linear-compatible UUIDv4 binds distinct workspace, issue, task and request identities', () => {
   const id = linearApprovalCommentId(thread);
-  expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
   expect(linearApprovalCommentId({ ...thread })).toBe(id);
   for (const field of ['workspaceId', 'issueId', 'taskId', 'requestId']) {
     expect(linearApprovalCommentId({ ...thread, [field]: 'other' })).not.toBe(id);
