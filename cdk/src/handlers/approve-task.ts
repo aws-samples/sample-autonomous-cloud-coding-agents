@@ -175,7 +175,8 @@ export async function handler(
               UpdateExpression:
                 'SET #status = :approved, decided_at = :now, #scope = :scope',
               ConditionExpression:
-                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
+                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
+                  + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
               ExpressionAttributeNames: {
                 '#status': 'status',
                 '#scope': 'scope',
@@ -186,6 +187,7 @@ export async function handler(
                 ':now': nowIso,
                 ':scope': scope,
                 ':caller': callerUserId,
+                ':epoch': nowEpoch,
               },
             },
           },

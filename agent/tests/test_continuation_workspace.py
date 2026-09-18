@@ -231,9 +231,7 @@ class TestCaptureFailures:
         assert error.value.code == "git_timeout"
         assert time.monotonic() - started < 5
 
-    @pytest.mark.parametrize(
-        "repo_name", ["", "../repo", "owner/..", "https://github.com/owner/repo"]
-    )
+    @pytest.mark.parametrize("repo_name", ["../repo", "owner/..", "https://github.com/owner/repo"])
     def test_repository_identity_must_also_be_restorable(self, repo, repo_name):
         destination = repo.parent / "workspace.tar"
         with pytest.raises(workspace.WorkspaceCheckpointError) as error:

@@ -34,6 +34,7 @@ import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus, SessionStopResult } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
+import { validAttemptId } from '../microvm-continuation-types';
 import { microvmErrorIdentity, microvmRequestIdentity } from '../microvm-control';
 import {
   MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
@@ -384,9 +385,9 @@ function wrapMicrovmError(operation: string, err: unknown): Error {
 /** Remove task instructions and their saved download capability after finalization.
  * Best-effort; bucket lifecycle reaps leftovers. Deployment manifests are shared.
  */
-export async function deleteMicrovmPayload(taskId: string): Promise<void> {
+export async function deleteMicrovmPayload(taskId: string, attemptId?: string): Promise<void> {
   if (!MICROVM_PAYLOAD_BUCKET) return;
-  await deletePayloadReference(MICROVM_PAYLOAD_BUCKET, taskId);
+  await deletePayloadReference(MICROVM_PAYLOAD_BUCKET, taskId, attemptId);
 }
 
 /** Split a comma-separated env-var list into trimmed, non-empty entries. */
@@ -474,6 +475,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
+    microvmImage?: { readonly imageArn: string; readonly imageVersion: string };
   }): Promise<SessionHandle> {
     if (!MICROVM_IMAGE_IDENTIFIER || !MICROVM_EXECUTION_ROLE_ARN || !MICROVM_EGRESS_CONNECTOR_ARNS || !MICROVM_PAYLOAD_BUCKET) {
       // Config/deploy mismatch: this repo is compute_type=lambda-microvm but the
@@ -493,10 +495,17 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     }
 
     const { taskId, payload } = input;
+    const attemptId = payload.attempt_id ?? taskId;
+    if (!validAttemptId(attemptId)) throw new Error('MICROVM_START_STATE_INVALID: invalid worker attempt');
 
     // An identifier that is not an ARN cannot launch anything — check before the
     // payload upload so a misconfiguration never leaves an orphan S3 object.
     assertImageArn(MICROVM_IMAGE_IDENTIFIER);
+    if (input.microvmImage && (input.microvmImage.imageArn !== MICROVM_IMAGE_IDENTIFIER
+      || !/^\d+\.\d+$/.test(input.microvmImage.imageVersion))) {
+      throw new Error('MICROVM_CONTINUATION_IMAGE_INVALID: recovery must use a version of the configured image');
+    }
+    const imageVersion = input.microvmImage?.imageVersion ?? MICROVM_IMAGE_VERSION;
 
     // The manifest authenticates deployment settings through the worker's IAM
     // grant. Payload access uses a single-object URL, saved outside TaskTable.
@@ -521,7 +530,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     const request = {
       imageIdentifier: MICROVM_IMAGE_IDENTIFIER,
-      ...(MICROVM_IMAGE_VERSION && { imageVersion: MICROVM_IMAGE_VERSION }),
+      ...(imageVersion && { imageVersion }),
       executionRoleArn: MICROVM_EXECUTION_ROLE_ARN,
       // Egress rides the platform VPC through an egress network connector so the
       // DNS Firewall / security-group / flow-log stack applies unchanged
@@ -547,14 +556,19 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     const requestHash = microvmStartRequestHash(
       { ...request, payloadBucket: MICROVM_PAYLOAD_BUCKET }, { ...payload, platform_config: platformConfig },
     );
-    const claim = await claimMicrovmStart(taskId, input.userId, requestHash);
+    const claim = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
     if (claim.closed) {
       if (claim.handle) await this.stopSession(claim.handle);
       throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
     }
     if (claim.handle) return claim.handle;
     const reference = await preparePayloadReference({
-      bucket: MICROVM_PAYLOAD_BUCKET, taskId, backend: 'lambda-microvm', payload, platformConfig,
+      bucket: MICROVM_PAYLOAD_BUCKET,
+      taskId,
+      backend: 'lambda-microvm',
+      payload,
+      platformConfig,
+      ...(attemptId !== taskId && { attemptId }),
     }).catch((error: unknown) => { throw wrapMicrovmError('payload bootstrap', error); });
     const runHookPayload = JSON.stringify(reference);
     if (Buffer.byteLength(runHookPayload, 'utf8') > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
@@ -562,7 +576,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     }
     // Uploads can take time. Observe cancellation/another saved handle again
     // immediately before the service call, using the same immutable request.
-    const latest = await claimMicrovmStart(taskId, input.userId, requestHash);
+    const latest = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
     if (latest.closed) {
       if (latest.handle) await this.stopSession(latest.handle);
       throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
@@ -633,7 +647,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // The write may have committed before its response was lost. Recover that
       // receipt before destroying a computer whose handle is already durable.
       try {
-        const saved = await claimMicrovmStart(taskId, input.userId, requestHash);
+        const saved = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
         if (!saved.closed && saved.handle?.microvmId === microvmId) return saved.handle;
       } catch (readErr) {
         logger.warn('Could not reconcile the MicroVM start receipt', { task_id: taskId, error: String(readErr) });

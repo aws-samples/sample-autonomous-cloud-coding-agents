@@ -8,7 +8,7 @@ its allowed attributes are pinned by the CDK agent-task-write-attributes contrac
 
 import os
 import time
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from shell import log, log_error_cw
 
@@ -35,7 +35,8 @@ class ApprovalRow(TypedDict):
     status: str  # always 'PENDING' on initial write.
     created_at: str
     timeout_s: int
-    ttl: int
+    deadline_epoch: NotRequired[int]
+    ttl: NotRequired[int]
     user_id: str
     repo: str
 
@@ -65,6 +66,66 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _lease_check(task_id: str, *, low_level: bool, identity=None) -> dict | None:
+    """Read coordinator authority without granting workers permission to rewrite it."""
+    from microvm_lifecycle import get_context
+    from shared_constants import SHARED_CONSTANTS
+
+    lifecycle = get_context(task_id)
+    if lifecycle is None or not os.environ.get("CONTINUATION_BUCKET_NAME"):
+        return None
+    values = {":attempt": lifecycle.attempt_id, ":active": "ACTIVE"}
+    condition = "lease_attempt_id = :attempt AND lease_state = :active"
+    if identity is not None:
+        values.update(
+            {":user": identity.user_id, ":repo": identity.repo, ":vm": lifecycle.microvm_id}
+        )
+        condition += " AND lease_user_id = :user AND lease_repo = :repo AND lease_microvm_id = :vm"
+    task_table, _ = _require_tables()
+    key = {"task_id": SHARED_CONSTANTS["microvm_continuation"]["lease_key_prefix"] + task_id}
+    if low_level:
+        key = {k: _py_to_ddb_attr(v) for k, v in key.items()}
+        values = {k: _py_to_ddb_attr(v) for k, v in values.items()}
+    return {
+        "ConditionCheck": {
+            "TableName": task_table,
+            "Key": key,
+            "ConditionExpression": condition,
+            "ExpressionAttributeValues": values,
+        }
+    }
+
+
+def _transact_task(client, task_id: str, *, TransactItems: list, identity=None):
+    lease = _lease_check(task_id, low_level=True, identity=identity)
+    return client.transact_write_items(TransactItems=[*TransactItems, *([lease] if lease else [])])
+
+
+def _update_task(table, task_id: str, *, low_level: bool = False, **operation):
+    lease = _lease_check(task_id, low_level=low_level)
+    if lease is None:
+        return table.update_item(**operation)
+    if not low_level:
+        operation["TableName"] = table.name
+    client = table if low_level else table.meta.client
+    return client.transact_write_items(TransactItems=[{"Update": operation}, lease])
+
+
+def _task_status_conflict(error: Exception) -> bool:
+    """An expected status race is benign only if worker ownership still passed."""
+    from botocore.exceptions import ClientError
+
+    if not isinstance(error, ClientError):
+        return False
+    code = error.response.get("Error", {}).get("Code")
+    if code == "ConditionalCheckFailedException":
+        return True
+    reasons = error.response.get("CancellationReasons") or []
+    return code == "TransactionCanceledException" and [
+        reason.get("Code") for reason in reasons
+    ] == ["ConditionalCheckFailed", "None"]
+
+
 def _build_logs_url(task_id: str) -> str | None:
     """Build a CloudWatch Logs console URL filtered to this task_id."""
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
@@ -80,13 +141,43 @@ def _build_logs_url(task_id: str) -> str | None:
     )
 
 
+def verify_worker_lease(task_id: str, *, client=None) -> None:
+    """Reject a superseded launch before repository code or SDK tools can execute."""
+    from boto3.dynamodb.types import TypeDeserializer
+
+    from microvm_lifecycle import get_context
+    from shared_constants import SHARED_CONSTANTS
+
+    lifecycle = get_context(task_id)
+    if lifecycle is None or not os.environ.get("CONTINUATION_BUCKET_NAME"):
+        return
+    table, _ = _require_tables()
+    result = _get_ddb_client(client=client).get_item(
+        TableName=table,
+        Key={
+            "task_id": {"S": SHARED_CONSTANTS["microvm_continuation"]["lease_key_prefix"] + task_id}
+        },
+        ConsistentRead=True,
+    )
+    raw = result.get("Item") or {}
+    deserialize = TypeDeserializer().deserialize
+    lease = {key: deserialize(value) for key, value in raw.items()}
+    if (
+        lease.get("lease_state") != "ACTIVE"
+        or lease.get("lease_attempt_id") != lifecycle.attempt_id
+    ):
+        raise RuntimeError("MICROVM_LEASE_LOST: this launch no longer owns task execution")
+
+
 def write_heartbeat(task_id: str) -> None:
     """Update ``agent_heartbeat_at`` while the task is RUNNING (orchestrator crash detection)."""
     try:
         table = _get_table()
         if table is None:
             return
-        table.update_item(
+        _update_task(
+            table,
+            task_id,
             Key={"task_id": task_id},
             UpdateExpression="SET agent_heartbeat_at = :t",
             ConditionExpression="#s = :running",
@@ -94,12 +185,7 @@ def write_heartbeat(task_id: str) -> None:
             ExpressionAttributeValues={":t": _now_iso(), ":running": "RUNNING"},
         )
     except Exception as e:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(e, ClientError)
-            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
-        ):
+        if _task_status_conflict(e):
             return
         log("WARN", f"[task_state] write_heartbeat failed (best-effort): {type(e).__name__}: {e}")
 
@@ -134,7 +220,9 @@ def write_running(task_id: str) -> None:
             update_parts.append("logs_url = :logs")
             expr_values[":logs"] = logs_url
 
-        table.update_item(
+        _update_task(
+            table,
+            task_id,
             Key={"task_id": task_id},
             UpdateExpression="SET " + ", ".join(update_parts),
             ConditionExpression="#s IN (:submitted, :hydrating)",
@@ -142,12 +230,7 @@ def write_running(task_id: str) -> None:
             ExpressionAttributeValues=expr_values,
         )
     except Exception as e:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(e, ClientError)
-            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
-        ):
+        if _task_status_conflict(e):
             log("INFO", "[task_state] write_running skipped: status precondition not met")
             return
         log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
@@ -264,7 +347,9 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                 update_parts.append("artifact_uri = :au")
                 expr_values[":au"] = result["artifact_uri"]
 
-        table.update_item(
+        _update_task(
+            table,
+            task_id,
             Key={"task_id": task_id},
             UpdateExpression="SET " + ", ".join(update_parts),
             ConditionExpression="#s IN (:running, :hydrating, :finalizing, :awaiting_approval)",
@@ -341,7 +426,9 @@ def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
         table = _get_table()
         if table is None:
             return False
-        table.update_item(
+        _update_task(
+            table,
+            task_id,
             Key={"task_id": task_id},
             UpdateExpression="SET trace_s3_uri = :ts3",
             ConditionExpression=(
@@ -389,7 +476,7 @@ class TaskFetchError(Exception):
     """
 
 
-def get_task(task_id: str) -> dict | None:
+def get_task(task_id: str, *, consistent_read: bool = False) -> dict | None:
     """Fetch a task record by ID.
 
     Returns:
@@ -412,7 +499,9 @@ def get_task(task_id: str) -> dict | None:
     if table is None:
         return None
     try:
-        resp = table.get_item(Key={"task_id": task_id})
+        resp = table.get_item(
+            Key={"task_id": task_id}, **({"ConsistentRead": True} if consistent_read else {})
+        )
     except Exception as e:
         log("WARN", f"[task_state] get_task failed: {type(e).__name__}: {e}")
         raise TaskFetchError(f"{type(e).__name__}: {e}") from e
@@ -608,7 +697,9 @@ def transact_write_approval_request(
     approval_item.setdefault("status", {"S": "PENDING"})
 
     try:
-        ddb.transact_write_items(
+        _transact_task(
+            ddb,
+            task_id,
             TransactItems=[
                 {
                     "Put": {
@@ -633,7 +724,7 @@ def transact_write_approval_request(
                         },
                     }
                 },
-            ]
+            ],
         )
     except Exception as exc:
         # TransactionCanceledException carries per-item reasons. Keep the
@@ -675,7 +766,9 @@ def transact_resume_from_approval(
     ddb = _get_ddb_client(client=client)
 
     try:
-        ddb.transact_write_items(
+        _transact_task(
+            ddb,
+            task_id,
             TransactItems=[
                 {
                     "Update": {
@@ -683,7 +776,7 @@ def transact_resume_from_approval(
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
                             "SET #s = :running, agent_heartbeat_at = :heartbeat "
-                            "REMOVE awaiting_approval_request_id"
+                            "REMOVE awaiting_approval_request_id, continuation"
                         ),
                         "ConditionExpression": (
                             "#s = :awaiting AND awaiting_approval_request_id = :rid"
@@ -697,7 +790,7 @@ def transact_resume_from_approval(
                         },
                     }
                 }
-            ]
+            ],
         )
     except Exception as exc:
         reasons = _extract_cancellation_reasons(exc)
@@ -708,6 +801,187 @@ def transact_resume_from_approval(
                 cancellation_reasons=reasons,
             ) from exc
         raise
+
+
+def publish_continuation_checkpoint(
+    identity,
+    receipt,
+    *,
+    tool_input_sha256: str,
+    cost_usd: float | None = None,
+    turns_used: int | None = None,
+    client=None,
+) -> dict:
+    """Publish only the same worker's still-pending, fully saved approval checkpoint."""
+    from dataclasses import asdict
+    from decimal import Decimal
+
+    from boto3.dynamodb.types import TypeSerializer
+
+    from continuation_storage import StorageLimits
+    from continuation_usage import valid_cost
+    from shared_constants import SHARED_CONSTANTS
+
+    serialize = TypeSerializer().serialize
+    receipt.validate(identity, StorageLimits())
+    if receipt.kind != "manifest":
+        raise ValueError("Only a complete continuation manifest may be published")
+    task_table, approvals_table = _require_tables()
+    ddb = _get_ddb_client(client=client)
+    record = {
+        "version": SHARED_CONSTANTS["microvm_continuation"]["version"],
+        "state": "READY",
+        "identity": asdict(identity),
+        "manifest": asdict(receipt),
+    }
+    values = {
+        ":request": identity.request_id,
+        ":awaiting": _STATUS_AWAITING_APPROVAL,
+        ":record": record,
+        ":consumed": "CONSUMED",
+    }
+    update = "SET continuation = :record"
+    if cost_usd is not None:
+        if not valid_cost(cost_usd):
+            raise ValueError("Continuation cost must be finite and nonnegative")
+        values[":cost"] = Decimal(str(cost_usd))
+        update += ", cost_usd = :cost"
+    if turns_used is not None:
+        if type(turns_used) is not int or turns_used < 0:
+            raise ValueError("Continuation turns must be a nonnegative integer")
+        values[":turns"] = turns_used
+        update += ", turns = :turns"
+    _transact_task(
+        ddb,
+        identity.task_id,
+        identity=identity,
+        TransactItems=[
+            {
+                "Update": {
+                    "TableName": task_table,
+                    "Key": {"task_id": {"S": identity.task_id}},
+                    "UpdateExpression": update,
+                    "ConditionExpression": (
+                        "#status = :awaiting AND "
+                        "awaiting_approval_request_id = :request AND "
+                        "(attribute_not_exists(continuation) OR continuation = :record OR "
+                        "continuation.#state = :consumed)"
+                    ),
+                    "ExpressionAttributeNames": {"#status": "status", "#state": "state"},
+                    "ExpressionAttributeValues": {k: serialize(v) for k, v in values.items()},
+                }
+            },
+            {
+                "ConditionCheck": {
+                    "TableName": approvals_table,
+                    "Key": {
+                        "task_id": {"S": identity.task_id},
+                        "request_id": {"S": identity.request_id},
+                    },
+                    "ConditionExpression": (
+                        "user_id = :user AND repo = :repo AND #status = :pending "
+                        "AND tool_input_sha256 = :hash"
+                    ),
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {
+                        ":user": {"S": identity.user_id},
+                        ":repo": {"S": identity.repo},
+                        ":pending": {"S": "PENDING"},
+                        ":hash": {"S": tool_input_sha256},
+                    },
+                }
+            },
+        ],
+    )
+    return record
+
+
+def consume_restored_continuation(
+    task_id: str, worker_id: str, record: dict, *, client=None
+) -> None:
+    """Claim RUNNING after restoration, without deciding or revalidating the human action."""
+    from boto3.dynamodb.types import TypeSerializer
+
+    serialize = TypeSerializer().serialize
+    from continuation_session import CheckpointIdentity
+
+    task_table, approvals_table = _require_tables()
+    identity = record["identity"]
+    if record.get("state") != "RESTORING" or record.get("worker_id") != worker_id:
+        raise ValueError("Continuation is not owned by this replacement worker")
+    values = {
+        ":request": identity["request_id"],
+        ":record": record,
+        ":awaiting": _STATUS_AWAITING_APPROVAL,
+        ":running": _STATUS_RUNNING,
+        ":consumed": "CONSUMED",
+        ":heartbeat": _now_iso(),
+    }
+    ddb = _get_ddb_client(client=client)
+    items = [
+        {
+            "Update": {
+                "TableName": task_table,
+                "Key": {"task_id": {"S": task_id}},
+                "UpdateExpression": (
+                    "SET #status = :running, agent_heartbeat_at = :heartbeat, "
+                    "continuation.#state = :consumed REMOVE awaiting_approval_request_id"
+                ),
+                "ConditionExpression": (
+                    "continuation = :record "
+                    "AND #status = :awaiting AND awaiting_approval_request_id = :request"
+                ),
+                "ExpressionAttributeNames": {"#status": "status", "#state": "state"},
+                "ExpressionAttributeValues": {k: serialize(v) for k, v in values.items()},
+            }
+        },
+        {
+            "ConditionCheck": {
+                "TableName": approvals_table,
+                "Key": {
+                    "task_id": {"S": task_id},
+                    "request_id": {"S": identity["request_id"]},
+                },
+                "ConditionExpression": (
+                    "user_id = :user AND #status IN (:approved, :denied, :timedout)"
+                ),
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":user": {"S": identity["user_id"]},
+                    ":approved": {"S": "APPROVED"},
+                    ":denied": {"S": "DENIED"},
+                    ":timedout": {"S": "TIMED_OUT"},
+                },
+            }
+        },
+    ]
+    try:
+        _transact_task(ddb, task_id, identity=CheckpointIdentity(**identity), TransactItems=items)
+    except Exception:
+        # A transport error can lose the response after DynamoDB commits. Only
+        # acknowledge that exact assignment, still RUNNING under this lease.
+        # Cancellation or a newer assignment must never become a successful retry.
+        from boto3.dynamodb.types import TypeDeserializer
+
+        deserialize = TypeDeserializer().deserialize
+        try:
+            response = ddb.get_item(
+                TableName=task_table,
+                Key={"task_id": {"S": task_id}},
+                ConsistentRead=True,
+            )
+            task = {key: deserialize(value) for key, value in response.get("Item", {}).items()}
+            expected = {**record, "state": "CONSUMED"}
+            if (
+                task.get("status") != _STATUS_RUNNING
+                or task.get("session_id") != worker_id
+                or task.get("continuation") != expected
+                or task.get("awaiting_approval_request_id") is not None
+            ):
+                raise RuntimeError("Continuation claim was not acknowledged")
+            verify_worker_lease(task_id, client=ddb)
+        except Exception:
+            raise
 
 
 def best_effort_update_approval_status(
@@ -827,7 +1101,10 @@ def increment_approval_gate_count_in_ddb(
 
     try:
         ddb = _get_ddb_client(client=client)
-        ddb.update_item(
+        _update_task(
+            ddb,
+            task_id,
+            low_level=True,
             TableName=task_table,
             Key={"task_id": {"S": task_id}},
             UpdateExpression="ADD approval_gate_count :one",

@@ -30,6 +30,7 @@ sys.path.insert(0, str(AGENT_ROOT))
 sys.path.insert(0, str(AGENT_ROOT / "src"))
 
 from continuation_session import CheckpointIdentity, CheckpointSessionStore, decode_checkpoint
+from continuation_usage import read_usage
 from continuation_workspace import capture_workspace, restore_workspace
 from scripts.verify_microvm_credentials import MODEL, event_frame, model_response
 
@@ -107,6 +108,8 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
         assert data["tool_name"] == "Read"
         assert data["tool_input"] == {"file_path": str(target)}
         record("pre", session_id=data["session_id"], tool_id=tool_id)
+        usage = await read_usage(client)
+        record("usage", cost_usd=usage.cost_usd, tokens=usage.tokens)
         if original:
             body = await store.checkpoint_pending(
                 IDENTITY,
@@ -155,6 +158,16 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
     options = ClaudeAgentOptions(
         model=MODEL,
         max_turns=3,
+        max_budget_usd=0.00006
+        - (
+            next(
+                item["cost_usd"]
+                for item in json.loads((directory / "original-audit.json").read_text())
+                if item["kind"] == "usage"
+            )
+            if not original
+            else 0
+        ),
         cwd=str(workspace),
         tools=["Read"],
         permission_mode="bypassPermissions",
@@ -182,7 +195,12 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
         await client.query(prompt)
         async for message in client.receive_response():
             if isinstance(message, ResultMessage):
-                record("result", session_id=message.session_id, is_error=message.is_error)
+                record(
+                    "result",
+                    session_id=message.session_id,
+                    is_error=message.is_error,
+                    cost_usd=message.total_cost_usd,
+                )
 
 
 @pytest.mark.skipif(
@@ -320,6 +338,11 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
         assert posts == (["toolu_restored"] if decision == "approve" else [])
         result = next(event for event in audit if event["kind"] == "result")
         assert not result["is_error"] and result["session_id"] == saved["session_id"]
+        original_usage = next(event for event in original_audit if event["kind"] == "usage")
+        restored_usage = next(event for event in audit if event["kind"] == "usage")
+        assert original_usage["cost_usd"] == pytest.approx(0.000018)
+        assert restored_usage["cost_usd"] == pytest.approx(0.000018)
+        assert result["cost_usd"] + original_usage["cost_usd"] == pytest.approx(0.000054)
         assert target.read_text() == "OWNED_CONTINUATION_MARKER\n"
         assert (workspace / "untracked.txt").read_text() == "UNTRACKED_CONTINUATION_MARKER\n"
         restored_requests = [request for request in requests if request["phase"] == "restored"]
@@ -340,6 +363,9 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
             "untracked_file_preserved": True,
             "restored_posts": posts,
             "only_synthetic_loopback": True,
+            "prior_cost_usd": original_usage["cost_usd"],
+            "restored_budget_usd": 0.00006 - original_usage["cost_usd"],
+            "total_cost_usd": result["cost_usd"] + original_usage["cost_usd"],
         }
         (tmp_path / "verification.json").write_text(json.dumps(proof, indent=2))
     finally:

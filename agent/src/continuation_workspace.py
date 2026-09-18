@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Offline workspace archives for future worker continuation.
+"""Offline workspace archives for worker continuation.
 
 The caller must stop workspace writers with the lifecycle barrier. Capture is
 local only: durable upload/read-back and conditional publication alongside the
@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO, NoReturn
 
 from continuation_session import CheckpointIdentity, ContinuationCheckpointError
+from shared_constants import SHARED_CONSTANTS
 
 _OID = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -46,7 +47,7 @@ _MAX_EXCLUDE_BYTES = 1024 * 1024
 
 
 class WorkspaceCheckpointError(ContinuationCheckpointError):
-    """A content-free stage code suitable for future lifecycle feedback."""
+    """A content-free stage code for lifecycle feedback."""
 
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -55,7 +56,7 @@ class WorkspaceCheckpointError(ContinuationCheckpointError):
 
 @dataclass(frozen=True)
 class WorkspaceLimits:
-    max_bytes: int = 1024 * 1024 * 1024
+    max_bytes: int = SHARED_CONSTANTS["microvm_continuation"]["max_workspace_bytes"]
     max_entries: int = 100_000
     git_timeout_s: int = 60
 
@@ -342,6 +343,8 @@ def _file_digest(path: Path) -> str:
 
 
 def _repository_identity(identity: CheckpointIdentity) -> None:
+    if identity.repo == "":
+        return  # Repository-free tasks use a private Git baseline with no remote.
     if not _REPO.fullmatch(identity.repo) or any(
         part in {".", ".."} for part in identity.repo.split("/")
     ):
@@ -744,10 +747,17 @@ def _restore_workspace(
         index = _git(staging, ["ls-files", "--stage", "-z"], limits)
         if hashlib.sha256(index).hexdigest() != state["index_sha256"]:
             _fail("invalid_archive", "Workspace staged state was not restored exactly")
-        _git(
-            staging, ["remote", "add", "origin", f"https://github.com/{identity.repo}.git"], limits
-        )
-        _git(staging, ["config", "--local", "credential.helper", "!gh auth git-credential"], limits)
+        if identity.repo:
+            _git(
+                staging,
+                ["remote", "add", "origin", f"https://github.com/{identity.repo}.git"],
+                limits,
+            )
+            _git(
+                staging,
+                ["config", "--local", "credential.helper", "!gh auth git-credential"],
+                limits,
+            )
         if state["exclude_b64"] is not None:
             ignore_file = staging / ".git/info/exclude"
             ignore_file.parent.mkdir(exist_ok=True)

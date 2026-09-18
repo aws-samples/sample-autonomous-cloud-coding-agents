@@ -111,6 +111,31 @@ test('changed instructions cannot overwrite an existing payload or launch refere
   expect(objects.get('task-1/payload.json')).toBe(before);
 });
 
+test('replacement attempts have independent immutable objects and scoped cleanup', async () => {
+  await preparePayloadReference(input);
+  const original = objects.get('task-1/payload.json');
+  const replacement = {
+    ...input, attemptId: 'replacement-2', payload: { ...input.payload, attempt_id: 'replacement-2' },
+  };
+  const reference = await preparePayloadReference(replacement);
+  expect(reference.attempt_id).toBe('replacement-2');
+  expect(objects.has('task-1/replacement-2/launch.json')).toBe(true);
+  expect(await preparePayloadReference(replacement)).toEqual(reference);
+  await expect(preparePayloadReference({
+    ...replacement, payload: { ...replacement.payload, prompt: 'changed' },
+  })).rejects.toThrow('CONFLICT');
+  expect(objects.get('task-1/payload.json')).toBe(original);
+  await deletePayloadReference(input.bucket, input.taskId, replacement.attemptId);
+  expect(objects.has('task-1/replacement-2/payload.json')).toBe(false);
+  expect(objects.get('task-1/payload.json')).toBe(original);
+});
+
+test.each(['../other', 'different-attempt'])('rejects invalid or mismatched attempt %s before S3', async attemptId => {
+  await expect(preparePayloadReference({ ...input, attemptId, payload: { ...input.payload, attempt_id: 'replacement-2' } }))
+    .rejects.toThrow('worker attempt');
+  expect(mockSend).not.toHaveBeenCalled();
+});
+
 test('orphaned payload after a crash cannot be overwritten with changed instructions', async () => {
   await preparePayloadReference(input);
   objects.delete('task-1/launch.json');

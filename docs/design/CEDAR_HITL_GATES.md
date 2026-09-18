@@ -1,17 +1,26 @@
 # Cedar HITL Approval Gates
 
-> **Status:** Core implemented; this document remains the authoritative design reference.
+> **Status:** Core implemented. The September update below supersedes the original bounded-wait assumptions in the historical design and examples.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](./INTERACTIVE_AGENTS.md) §9.3 (pointing here), §7 (state machine).
 > **Design locked:** 2026-04-23 (Sam ↔ assistant discussion).
 > **Rev:** 5 (2026-05-06 — fold in parallel adversarial + advocate review of the timeout design: late-approval re-read on TIMED_OUT ConditionCheckFailed; user-visible timeout-cap milestones; ceiling-shrink milestone; Runtime JWT bound verified as auto-refreshed IAM; three new tuning metrics; explicit off-hours trade-off section; notification-delivery-failure boundary. IMPL-24 through IMPL-28 added.).
 > **Implementation:** Core shipped. The 3-outcome engine (`agent/src/policy.py`), default policy sets (`agent/policies/hard_deny.cedar`, `agent/policies/soft_deny.cedar`), approval Lambdas (`cdk/src/handlers/{approve-task,deny-task,get-pending,get-policies}.ts`) wired into `cdk/src/constructs/task-api.ts` (routes `/tasks/{id}/approve`, `/deny`, `/pending`, `/repos/{repo_id}/policies`), the cross-engine parity fixtures (`contracts/cedar-parity/`), and the exact engine pins are all on `main`. §15's task list is preserved as a historical implementation record; see the note at the top of §15 for what (if anything) remains unbuilt.
 >
-> **Current behavior clarified (2026-09-17):** closed approval-row conditions return
-> `404 REQUEST_NOT_FOUND`; task-only conflicts return 409. Cancellation atomically
-> closes a pending request. The stranded-task reconciler currently fails the task
-> but leaves its approval row pending; the pending endpoint filters such rows.
+> **Current source behavior (2026-09-17):** the task default is `approval_timeout_s=0`,
+> meaning no decision deadline. Explicit task settings are 30–3,600 seconds;
+> positive policy-rule deadlines still apply. Pending rows have no DynamoDB TTL,
+> and `expires_at` is nullable. Task closure cancels unanswered requests and adds
+> retention TTL without changing already-recorded decisions. Closed approval-row
+> conditions return `404 REQUEST_NOT_FOUND`; task-only conflicts return 409.
+> MicroVM checkpoint/retirement/replacement separates human waiting from worker
+> lifetime and capacity; other backends retain their existing runtime limits.
 > CLI response instructions are implemented for Slack/Linear notifications;
-> native channel decisions and approvals without an expiry remain future work.
+> native channel decisions remain separate work. See the current
+> [user guide](../guides/USER_GUIDE.md#approval-gates-cedar-hitl) and
+> [continuation protocol](../verification/645-p3-continuation-protocol-20260917.md).
+> The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
+> and sleep-off/rollback acceptance; see the
+> [deployment record](../verification/645-p3-normal-closure-20260918.md).
 
 ---
 
@@ -19,7 +28,7 @@
 
 1. [What we are building, in one paragraph](#1-what-we-are-building-in-one-paragraph)
 2. [The three-outcome model and why Cedar alone can't give it](#2-the-three-outcome-model)
-3. [Design decisions (locked)](#3-design-decisions-locked)
+3. [Design decisions](#3-design-decisions)
 4. [End-to-end request flow](#4-end-to-end-request-flow)
 5. [Cedar policy authoring guide](#5-cedar-policy-authoring-guide)
 6. [Engine implementation](#6-engine-implementation)
@@ -116,18 +125,18 @@ The winning property: **policy authors can put on their "security-review-approve
 
 ---
 
-## 3. Design decisions (locked)
+## 3. Design decisions
 
-Settled during the 2026-04-23 design discussion and extended after the 2026-04-24 and 2026-05-06 reviews. Each has detailed rationale in those conversations; summary here for implementers. **23 decisions**, all locked unless an adversarial review finding explicitly reopened a concern.
+Settled during the 2026-04-23 design discussion and extended after the 2026-04-24 and 2026-05-06 reviews. Each has detailed rationale in those conversations; summary here for implementers. The September retained-request update also amends deadline, recovery and capacity behavior.
 
 | # | Decision | Summary |
 |---|---|---|
 | 1 | **Cedar encoding: two policy sets** | Physical hard-deny vs soft-deny split, validated via `@tier(...)` annotation. |
 | 2 | **Hook point: extend `PreToolUse`, not `can_use_tool`** | PreToolUse is already async-compatible, already wired to Cedar, and already owns the tool-governance boundary. |
 | 3 | **Wait mechanism: DDB strongly-consistent polling, 2s → 5s backoff** | Initial 2s cadence for the first 30s, then 5s. `ConsistentRead=True` so the agent never misses an approval that already landed. |
-| 4 | **Scope allowlist: in-process, seeded from persisted `initial_approvals`** | Runtime escalation lives in the `PolicyEngine` instance. Submit-time `--pre-approve` flags persist on TaskTable and seed the allowlist at container startup. Lost on restart (rare; reconciler fails stranded tasks). |
+| 4 | **Scope allowlist: in-process, seeded from persisted `initial_approvals`** | Runtime grants live in the `PolicyEngine` instance. Submit-time grants seed it at startup; a verified MicroVM checkpoint also saves session grant scopes and denial-cache entries for replacement. |
 | 5 | **CLI UX: standalone `bgagent approve/deny` + `--pre-approve <scope>` + `bgagent policies list` + `bgagent pending`** | No inline interactive prompt in the streaming CLI for v1. Discovery + listing commands solve the request_id/rule_id copy problem. |
-| 6 | **Timeouts: per-task default + per-rule Cedar annotation override, min wins, bounded floor + ceiling, fail-closed** | Per-task default: **300s** (5 min), overridable via `--approval-timeout` on submit and bounded by `[30, min(3600, maxLifetime - 300)]`. Floor: 30s (engine-enforced on both task default and rule annotations). Ceiling: `min(1h, maxLifetime_remaining - cleanup_margin)` — sized so the TTL on the approval row always covers the decision window. On timeout → deny (never auto-approve). See §14.8 for the off-hours trade-off this posture deliberately accepts. |
+| 6 | **Timeouts: per-task default + per-rule Cedar annotation override, min wins, bounded floor + ceiling, fail-closed** | Per-task default: **0**, meaning no deadline. Explicit task deadlines are 30–3,600 seconds; positive matching rule deadlines can shorten them. Rule annotations still require at least 30 seconds. Workers without checkpoint/replacement support retain their existing lifetime limit. Pending rows have no storage TTL. Explicit timeout means deny, never auto-approve. |
 | 7 | **Concurrency slots: AWAITING_APPROVAL holds the slot** | Bounds unfinished sessions and their eventual resume demand, including a suspended MicroVM. This is an ABCA admission policy; suspended AWS memory-quota consumption remains unverified. |
 | 8 | **Hard-deny is absolute** | No `--pre-approve` scope, and no blueprint `disable:` directive, can bypass it. CreateTaskFn validates and rejects `rule:<hard_deny_rule_id>`; blueprint loader rejects `disable:` entries that name built-in hard-deny rules. |
 | 9 | **Submit-time scope cap: 20 entries, ≤128 chars each** | Keeps audit trail legible, bounds allowlist check cost, limits abuse-vector damage. |
@@ -428,7 +437,7 @@ Fail-on-error is the right posture for blueprint misconfiguration — silent-fal
 |---|---|---|---|
 | `@rule_id("...")` | **Yes on soft-deny**, recommended on hard-deny | Kebab-case or snake_case identifier, unique across both tiers | Stable ID for `--pre-approve rule:X`, for audit trail, and for the `bgagent policies` discovery endpoint. `PolicyEngine.__init__` raises on duplicates. |
 | `@tier("hard"\|"soft")` | **Yes** | Exactly one of "hard" or "soft" | Validates policy is in the correct file/section. Engine rejects mismatch at load time. |
-| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. If absent, uses the task default (**300s** by default, overridable via submit-time `--approval-timeout`; see decision #6). Has no effect on hard-deny rules. Values below the floor are rejected at load time. Values below **120s** emit a blueprint-load WARN but are accepted down to the 30s floor — almost no human responds to an approval request in under 2 minutes, so sub-120s is usually a policy-authoring mistake (see IMPL-25). Loader policy: STRICT at the floor (30s, reject) and ADVISORY below 120s (warn, accept). |
+| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. If absent, uses the task setting (**0/no deadline** by default, configurable via submit-time `--approval-timeout`; see decision #6). Has no effect on hard-deny rules. Values below the floor are rejected at load time. Values below **120s** emit a blueprint-load WARN but are accepted down to the 30s floor — almost no human responds to an approval request in under 2 minutes, so sub-120s is usually a policy-authoring mistake (see IMPL-25). Loader policy: STRICT at the floor (30s, reject) and ADVISORY below 120s (warn, accept). |
 | `@severity("low"\|"medium"\|"high")` | No | One of the three | Shown in CLI approval prompt, colored by severity. Default: "medium". |
 | `@category("...")` | No | "destructive", "network", "filesystem", "auth", or free-form | UX grouping. CLI could filter approvals by category. Not enforced. |
 
@@ -1077,7 +1086,7 @@ New field reference:
 
 | Field | Type | Required? | Default | Description |
 |---|---|---|---|---|
-| `approval_timeout_s` | integer seconds | No | **300** | Per-task default approval timeout. Bounded by `[30, min(3600, maxLifetime - 300)]`. Per-rule `@approval_timeout_s` annotations may clip this further (min-wins; see decision #6 and §6.3). Default matches the §10.2 `TaskTable.approval_timeout_s` default. |
+| `approval_timeout_s` | integer seconds | No | **0** | Zero retains unanswered requests without a deadline. Positive values must be 30–3,600. The shortest positive task/rule deadline wins. |
 | `initial_approvals` | list of scope strings | No | `[]` | Pre-approval allowlist scopes (≤20 entries, ≤128 chars each). Validated per §7.3 rules below. |
 
 `CreateTaskFn` validations:
@@ -1091,7 +1100,7 @@ New field reference:
    - `write_path:X` — same rules as bash_pattern
    - `rule:X` — X must exist in the (built-in + target repo's blueprint) soft-deny policy set per the shared policy-parsing library; hard-deny rule IDs rejected
    - `all_session` — rejected if `Blueprint.security.maxPreApprovalScope` forbids
-5. `approval_timeout_s` within `[30, min(3600, maxLifetime - 300)]` — cap at 1 hour OR (maxLifetime - 5min), whichever is smaller. Prevents multi-hour slot-exhaustion attacks and keeps approval windows within the TTL budget.
+5. `approval_timeout_s` is zero or an integer from 30 through 3,600. MicroVM worker lifetime and capacity are bounded separately through checkpointed retirement; requests are not deleted by a pending-row TTL.
 6. Combined `hard + soft + disable + custom` Cedar text size ≤ 64 KB (§12.4); reject on overflow.
 
 ### 7.4 Degenerate-pattern detection
@@ -1222,7 +1231,7 @@ bgagent submit --task "..." --pre-approve all_session --yes
 
 `--pre-approve-file` reads a YAML/JSON array of scope strings — supports the 20-entry cap without command-line bloat.
 
-`--approval-timeout` default (CLI and server): **300 seconds** (5 min), matching decision #6, §7.3, and the `TaskTable.approval_timeout_s` default in §10.2. Accepted range `[30, min(3600, maxLifetime - 300)]` — CLI validates client-side and the server re-validates. `bgagent submit --help` surfaces the default explicitly.
+`--approval-timeout` default (CLI and server): **0**, meaning no automatic decision deadline. A positive value must be 30–3,600 seconds. The CLI validates it and the server re-validates it. Matching positive rule deadlines still apply.
 
 ### 8.3 Streaming UX
 
@@ -1443,7 +1452,7 @@ Attributes:
 | `user_id` | S | Yes | Cognito `sub` **verbatim**; used in ownership check `ConditionExpression` (§7.1 finding #6) |
 | `repo` | S | Yes | Denormalized for fan-out |
 
-**TTL sizing**: the TTL is always `timeout_s + 120s`, so a 300s approval window has a 420s TTL, a 3600s window has a 3720s TTL. The row never expires during the decision window. After the decision + a short grace period, DDB's eventual-consistency TTL reaper cleans up.
+**TTL and decision deadlines are separate.** Pending approval rows have no TTL, including explicitly timed requests. Task closure cancels unanswered requests and assigns retention TTL to its approval records. Already-recorded decisions are preserved, and retries do not extend an existing retention deadline.
 
 **Why a list, not a StringSet, for `matching_rule_ids`**: DDB string sets cannot be empty. Pathological no-match soft-deny hits would fail to persist. Lists handle empty gracefully.
 
@@ -1455,7 +1464,7 @@ Five new attributes on the existing task row:
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `approval_timeout_s` | N | No | Default timeout for soft-deny gates. Default 300. |
+| `approval_timeout_s` | N | No | Task setting for soft-deny gates. Default 0/no deadline; positive values are 30–3,600 seconds. |
 | `initial_approvals` | L | No | List of scope strings from submit time |
 | `awaiting_approval_request_id` | S | No | Set when status = AWAITING_APPROVAL; cleared on transition back (via joint `UpdateExpression`) |
 | `approval_gate_count` | N | No | Running counter of approval gates fired on this task; used to enforce `approval_gate_cap` (decision #13) |
@@ -2119,16 +2128,20 @@ Setup: Bob submits with `--approval-timeout 600`. The blueprint has a `write_cre
 
 Bob sees both the pre-submit warning (`approval_timeout_capped_at_submit`) and the per-gate cap event (`approval_timeout_capped`) so he understands why his 600s didn't apply. Without these milestones, the user sees only `timeout: 300s` in the approval banner and may think the CLI dropped their setting. Both events are captured in the event stream and surface via `bgagent watch`. See §11.1, §11.3 (`ApprovalTimeoutClipRate`), and Fix 4 / IMPL-26 in §16.
 
-### 14.8 Off-hours and unattended tasks (known trade-off)
+### 14.8 Off-hours and unattended tasks
 
-**Known trade-off: off-hours failure.** Because timeouts are fail-closed (decision #6), a task running overnight with pending approvals will fail if no approver responds in time. This is deliberate — auto-approve on timeout would make "wait the reviewer out" the attacker's winning strategy; see decision #6 and §13.15 fail-closed summary.
+Unanswered requests now remain available by default. On MicroVMs, a verified
+checkpoint and worker retirement bound resource use while the person is away;
+their later answer can start a replacement worker. Other compute substrates keep
+their existing runtime limits. This does not approve any action automatically.
 
-**For overnight / unattended runs, choose one of:**
-- `--pre-approve all_session --yes` to bypass gates entirely for that task (accept the broader trust grant; see §7.3).
-- Configure escalation on the `approval_requested` event via the notification plane (see `docs/design/INTERACTIVE_AGENTS.md` for channel configuration). Route to whoever is on-call; escalation schedule is the tenant's responsibility, not the timeout engine's.
-- Schedule the task during business hours.
+For a time-sensitive request, set an explicit positive decision deadline. Its
+expiry remains fail-closed: the tool is denied, and the agent decides what to do
+next. Notification routing can still notify an on-call reviewer; scheduling that
+escalation belongs to the notification layer.
 
-The `approvalGateCap` (decision #13) will force-fail the task after approximately `cap × task_default_timeout_s` of unanswered gates — default worst case ~4h at cap=50 / timeout=300s. Plan accordingly.
+`approvalGateCap` limits the number of gates reached by a task, not elapsed human
+waiting time. It does not impose a deadline on one unanswered request.
 
 **Why the timer itself is timezone-unaware:** Business-hours logic belongs in the notification plane, not the authorization engine. Baking calendars or on-call rotations into the timer couples the security boundary to a scheduling system it doesn't own. Same rule evaluated at 9am and 3am because the security property (adversary cannot wait out review) is time-invariant. Delivery-availability-aware scheduling is the notification plane's job via subscribed-channel health and escalation policies.
 
@@ -2300,7 +2313,9 @@ Rollout steps:
 
 ### 15.5 Backward compatibility
 
-- Existing tasks without `initial_approvals` → empty list → no pre-approvals, default `approval_timeout_s = 300`
+- Tasks without `initial_approvals` receive an empty list and no pre-approvals.
+  New tasks default to `approval_timeout_s = 0`. An already-persisted approval
+  retains its original timeout; an upgrade or replacement does not extend it.
 - Existing policies without `@rule_id` / `@tier` → engine fails to start (fail-closed). Blueprint authors must add annotations explicitly during migration.
 - `PolicyDecision.allowed` property provides backward compat for existing `if not decision.allowed` callers
 - Hook return shape unchanged — Phase 1a/1b tests continue to pass

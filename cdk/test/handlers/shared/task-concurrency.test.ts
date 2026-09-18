@@ -40,6 +40,31 @@ function cancelled(index: number) {
 }
 beforeEach(() => mockSend.mockReset());
 
+test.each([undefined, 'ACTIVE', 'FENCED', 'PARKED'])(
+  'a terminal saved task keeps capacity until shutdown is confirmed (lease %s)', async leaseState => {
+    mockSend.mockResolvedValueOnce({
+      Item: { ...base, status: 'FAILED', concurrency_slot: held, continuation_launch: {}, microvm_start: { clientToken: 'attempt' } },
+    }).mockResolvedValueOnce({
+      Item: { lease_user_id: 'user', lease_attempt_id: 'attempt', lease_state: leaseState },
+    });
+    expect(await releaseTaskSlot('task', 'user')).toBe(false);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  },
+);
+
+test('confirmed shutdown is checked atomically when returning a saved task’s seat', async () => {
+  mockSend.mockResolvedValueOnce({
+    Item: { ...base, status: 'FAILED', concurrency_slot: held, continuation_launch: {}, microvm_start: { clientToken: 'attempt' } },
+  }).mockResolvedValueOnce({
+    Item: { lease_user_id: 'user', lease_attempt_id: 'attempt', lease_state: 'CLOSED' },
+  }).mockResolvedValueOnce({});
+  expect(await releaseTaskSlot('task', 'user')).toBe(true);
+  expect(mockSend.mock.calls[2][0].input.TransactItems[2].ConditionCheck).toMatchObject({
+    Key: { task_id: 'worker-lease#task' },
+    ExpressionAttributeValues: { ':user': 'user', ':attempt': 'attempt', ':closed': 'CLOSED' },
+  });
+});
+
 test('admission atomically ties a counter increment to an owned SUBMITTED task', async () => {
   mockSend.mockResolvedValueOnce({ Item: base }).mockResolvedValueOnce({});
   expect(await acquireTaskSlot('task', 'user', 3)).toBe(true);

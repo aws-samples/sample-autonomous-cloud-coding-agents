@@ -26,10 +26,10 @@ The actual tool sequence was:
 Both lint runs and both Vitest runs passed; the repository has one test.
 The marker hashes were:
 
-| Marker | SHA-256 |
+| Marker | SHA-256 prefix (16 hex characters) |
 |---|---|
-| First | `8437311a6e403b723febea0fbae6509e03b48c198b597aab9f04cd2cf7e30d5e` |
-| Second | `cb1e409f22270af5 (SHA-256 prefix)` |
+| First | `8437311a6e403b72` |
+| Second | `cb1e409f22270af5` |
 
 Worker `microvm-3a114559-4c86-34a0-af36-0a04e6232a5f` recorded two suspend and
 two resume HTTP 200 results from PID 1. Independent normal approval-handler

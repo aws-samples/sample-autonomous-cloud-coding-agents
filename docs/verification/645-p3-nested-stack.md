@@ -1,10 +1,13 @@
 # ADR-021 nested MicroVM stack
 
-The user requested this split after the P3 approval UX review. The implementation,
-local checks and an isolated fresh AWS deployment, image build and deletion are
-complete. The normal `backgroundagent-dev` deployment still uses the flat layout;
-migration of those existing resources remains open. This infrastructure split
-does not nest virtual machines.
+The user requested this split after the P3 approval UX review. Implementation,
+fresh deployment and an overlapping-resource migration rehearsal are complete.
+The normal `backgroundagent-dev` deployment now runs the nested image. Its old
+flat resources have been removed after the verified drain and rollback/restore
+acceptance. The parent has 471 resources and the MicroVM child has 18;
+all 459 original resources outside the removal set preserved their identities.
+See the [normal acceptance record](./645-p3-normal-closure-20260918.md).
+This infrastructure split does not nest virtual machines.
 
 An isolated image-ownership refactor was also exercised on September 17.
 CloudFormation accepted the preview but rejected execution because
@@ -37,6 +40,13 @@ For `compute_type=lambda-microvm`, nesting defaults to enabled.
 deployments that have not migrated. The setting accepts booleans or the strings
 `true` and `false`.
 
+`microvm_managed_image_version` optionally pins new workers to a verified version
+of the managed image, such as `7.0`. It changes the coordinator's runtime
+selection without removing, replacing or rebuilding the image resource. Omit it
+to keep the latest-active behavior. When pinned, building a newer image does not
+switch new tasks to it until the operator updates the pin. Record the image ARN
+and version alongside the coordinator version for rollback.
+
 Nested deployments require bootstrap bundle **1.9.0**. It adds only the two exact
 child build/operator names to the backend-specific, unconditioned `iam:PassRole`
 statement. Legacy role prefixes remain for flat deployments; the runtime
@@ -55,8 +65,8 @@ Installing this prerequisite does not move the normal stack's resources.
 
 Nesting does not change the 8,192 MiB memory baseline, hook configuration,
 runtime HTTPS-only egress, separate build HTTP/HTTPS egress, task-scoped
-permissions or sleep gates. The MicroVM/Linear-vault combination remains gated
-by #857 until its own deployment verification is complete.
+permissions or sleep gates. Linear vault configuration is covered separately in
+the [setup guide](../guides/LINEAR_SETUP_GUIDE.md#using-the-vault-with-lambda-microvms).
 
 ## Existing deployment migration
 
@@ -73,9 +83,11 @@ preparing a concrete migration:
 2. Rehearse the chosen resource-transfer or replacement procedure in an isolated
    deployment, including its rollback. Inspect each change set for deletions,
    replacements, custom-resource effects and named-resource conflicts.
-3. Stop new admissions through a procedure that preserves accepted inputs and
-   drain active work before switching resource ownership. An idle inventory alone
-   does not prevent new tasks from arriving.
+3. Either pause admission while preserving accepted inputs, or keep old and new
+   resources available during a compatible consumer switch. The latter requires
+   verified overlapping permissions and explicit image/coordinator pins. Drain
+   every old worker and retained execution before removing its resources; an idle
+   inventory alone is not an admission fence.
 4. Deploy bootstrap 1.9.0 and apply only the reviewed migration. Confirm outputs,
    permission boundaries, managed image build and normal task lifecycle.
 5. Keep both sleep gates off until the normal activation checks are complete;
@@ -102,14 +114,56 @@ for inline policies and S3 auto-delete custom resources, preserving permissions
 and bucket contents throughout. Existing generated role names also differ from
 the new explicit names; moving ownership must not silently rename those roles.
 
-The execution failure below means the normal migration must now choose and
-rehearse another supported procedure. A retain/remove/import sequence is a
-candidate only after an actual import of this resource type succeeds in isolation;
-identifier discovery does not prove import support. An explicit replacement
-procedure must preserve artifacts, pending payloads and compatible images while
-using non-conflicting names. Neither alternative has been executed or accepted.
-Do not treat the failed native refactor as a reason to apply the final nested
-template directly to the existing stack.
+The failed refactor led to the explicit replacement procedure below. Import was
+not assumed to work. The replacement preserves artifacts, payload access and
+compatible images during overlap, using non-conflicting resource names.
+
+## Overlapping replacement rehearsal and normal cutover
+
+The private `backgroundagent-dev-p3-migration-20260917` stack first deployed flat
+resources, then added a separately named nested image and its infrastructure.
+A Lambda using the exact shared MicroVM execution role verified that both old
+and new bootstrap markers were readable, and that `tasks/forbidden.txt` was denied
+in both payload buckets. Consumer outputs switched to the new image, rolled back
+to the old image, and switched forward again while both resource sets existed.
+The execution-role ARN and saved marker contents stayed unchanged.
+
+One permission detail matters: the payload policy has an explicit
+`Deny`/`NotResource`. During overlap, its single exception list must contain both
+bootstrap prefixes. Adding a second deny would make the two policies deny each
+other's allowed bucket. The rehearsal tested the effective permissions.
+
+After the old resources were removed, the rehearsal had three parent resources
+and 18 child resources. The whole private stack was then deleted. Its cleanup
+manifest tracks 43 old/new resource identities, verifies absence and reports no
+leaks; automatically created provider log groups were removed too.
+
+The normal cutover follows the same staged procedure:
+
+- Add the child without changing the original 475 physical resource identities.
+- Build `backgroundagent-dev-p3-abca-agent` under the new child.
+- Switch consumers with overlapping permissions and a compatible pinned image.
+  Deploy retained-request producers after the compatible coordinator alias.
+- Verify normal CLI decisions, worker recovery and capacity release.
+- Drain old executions/workers before deleting the 16 obsolete flat resources.
+  Preserve the old log group intentionally for historical diagnosis.
+
+The normal nested image is now version 2.0, with artifact SHA-256
+`924a1b51fe6b9aa62f61191a6bde9b10df01d65873181a9385489191492cadbe`.
+Compatible coordinator 13 pins that image with automatic sleep disabled;
+coordinator 14 pins the same image with sleep enabled. Final off-switch acceptance
+and old-resource removal passed, as recorded in the
+[normal acceptance record](./645-p3-normal-closure-20260918.md).
+Future updates must retain `microvm_resource_name_prefix=backgroundagent-dev-p3`;
+that migration prefix now identifies the installed service resources.
+
+No global admission pause or zero-concurrency setting was used. The
+[earlier rollout review](./645-p3-normal-rollout-review-20260917.md) explains why
+that shortcut could lose asynchronous inputs on this installation.
+
+Exact templates, change sets, probes and cleanup results are outside Git under
+`~/.local/share/abca-verification/645-p3-integration/nested-overlap-rehearsal`
+and `normal-nested-rollout`. The following sections preserve earlier milestones.
 
 ## Verification
 
@@ -145,7 +199,8 @@ Every template fits the 500-resource, 1 MiB and 200-parameter/output limits.
 The hierarchy totals 535 resources, below the 2,500-resource nested-operation
 limit even if every resource changed. Unit synthesis additionally covers
 AgentCore, ECS and all three MicroVM image modes, each with the tool gateway
-disabled and enabled. It preserves the separate #857 vault guard.
+disabled and enabled. At that point it preserved the separate #857 vault guard;
+the subsequent vault integration replaces that guard with parity and budget checks.
 
 The flat and nested templates retain the execution role logical ID
 `LambdaMicrovmComputeExecutionRoleAA0C4A0D`, the same trust document and the same
@@ -204,14 +259,13 @@ of both buckets, connectors, security groups, image/version, roles, provider
 function and log groups. The implicitly created provider log group was archived
 and removed separately.
 
-The normal deployment retains all 475 physical resource identities, image 7.0,
+At that milestone, the normal deployment retained all 475 physical resource identities, image 7.0,
 coordinator alias 10, its disabled live sleep switch and the shared VPC.
 Both phases' exact templates, 36 evidence files and a SHA-256 manifest are archived at
 `/Users/sphias/.local/share/abca-verification/645-p3-20260916/nested-live`.
 
-This proves fresh nested deployment, image build and deletion. Existing P3 worker
-lifecycle evidence remains in its dated records. Moving the existing normal stack
-and testing its task path after migration are still required.
+This established fresh nested deployment, image build and deletion. The later
+overlapping migration and normal task checks are recorded above.
 
 ## Image ownership refactor: execution rejected, rollback verified
 
@@ -278,7 +332,7 @@ The three uploaded verification template versions were removed from their exact
 toolkit-bucket prefix, with no remaining versions or delete markers. Normal CDK
 assets were retained.
 
-The normal deployment still has all 475 original resource identities, image 7.0,
+At that milestone, the normal deployment still had all 475 original resource identities, image 7.0,
 coordinator alias 10, its disabled live sleep switch and the shared VPC. The
 rehearsal resources are fully deleted. Evidence and a SHA-256 manifest are
 archived at

@@ -11,7 +11,7 @@ Set up the ABCA Linear integration so that applying a label to a Linear issue tr
 
 ## How it works
 
-You create a Linear OAuth app and authorize it on your workspace. When someone adds the trigger label to an issue in a mapped project, Linear fires a webhook at ABCA; the receiver verifies the HMAC signature, looks up the workspace, resolves a Linear API token, and creates a task. The agent clones the repo, makes the change, opens a PR, and comments back on the issue.
+You create a Linear OAuth app and authorize it on your workspace. When someone adds the trigger label to an issue in a mapped project, Linear sends a webhook to ABCA. The receiver verifies its signature and invokes a processor, which resolves the workspace token and creates a task. The agent clones the repo, makes the change, opens a PR, and reports back on the issue.
 
 The app is installed with `actor=app`, so everything ABCA writes is attributed to the app rather than to whoever clicked Authorize.
 
@@ -21,10 +21,10 @@ One of two places, chosen automatically at setup time:
 
 | | When it's used | What's stored |
 |---|---|---|
-| **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
+| **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | AgentCore manages the OAuth grant and token refresh. ABCA retains the OAuth client credentials and workspace/webhook metadata in Secrets Manager. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
+The vault can be enabled with AgentCore, ECS or Lambda MicroVM compute.
 
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
@@ -34,11 +34,16 @@ AgentCore Identity not available in us-east-1 — using Secrets Manager.
 
 A workspace that started on Secrets Manager and later moves to the vault **keeps** its Secrets Manager token as a fallback. A workspace onboarded straight onto the vault has no such token by design — it needs the vault to be reachable.
 
-When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
+When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. A new topic starts without subscribers; configure `alertEmail` or subscribe another destination to receive those alerts. A revoked legacy Secrets Manager fallback does not by itself mean the active vault grant is revoked.
 
-#### Not available with `compute_type=lambda-microvm`
+#### Using the vault with Lambda MicroVMs
 
-The vault and the Lambda MicroVMs substrate remain gated from being enabled together ([#857](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/857)). The original 505-resource measurement predates stack-size reductions; the [current offline review](../verification/645-p3-readiness-review.md) finds room in its tested configurations, but bundled feature-matrix and deployment verification are still required before removing the guard. Use the vault on `agentcore` or `ecs`; MicroVM deployments use Secrets Manager while this gate remains.
+Deploy with both `compute_type=lambda-microvm` and `enableLinearIdentityVault=true`. The coordinator sends the workload identity name through authenticated `platform_config`; the guest uses its compute execution role to obtain a Linear token. Credentials are not baked into the MicroVM image.
+
+When upgrading an existing MicroVM deployment, rebuild the guest image too:
+the coordinator and guest must both support the vault configuration fields.
+
+The runtime resolves the vault in its AWS Region. A grant in another Region or under another workload identity does not automatically carry over. The old resource-count guard ([#857](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/857)) has been replaced with configuration, permission and deployment-budget checks.
 
 #### One workload identity per stack
 

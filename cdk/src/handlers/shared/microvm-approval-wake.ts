@@ -23,6 +23,7 @@ import { GetMicrovmCommand, LambdaMicrovmsClient, ResumeMicrovmCommand } from '@
 import type { Context } from 'aws-lambda';
 import type { SessionControlOptions } from './compute-strategy';
 import { logger } from './logger';
+import { dispatchMicrovmContinuation } from './microvm-continuation-dispatch';
 import { microvmErrorIdentity, microvmRequestIdentity } from './microvm-control';
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot } from './microvm-lifecycle';
 import { makeClient } from './ua';
@@ -69,7 +70,8 @@ function relevant(snapshot: MicrovmLifecycleSnapshot, input: ApprovalWakeInput):
 /**
  * Optional latency improvement after the approval transaction commits. The
  * durable supervisor remains responsible for retries and observed RUNNING.
- * This path cannot suspend, terminate, alter task status or rewrite a decision.
+ * A retired checkpoint is dispatched to its original coordinator version.
+ * This path cannot suspend, terminate or rewrite the human decision.
  */
 export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promise<void> {
   const options = { abortSignal: input.options.abortSignal ?? AbortSignal.timeout(APPROVAL_POST_COMMIT_TIMEOUT_MS) };
@@ -95,6 +97,7 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
   };
   try {
     options.abortSignal?.throwIfAborted();
+    if (await dispatchMicrovmContinuation(input.taskId, input.userId, input.requestId, options)) return;
     const snapshot = await readMicrovmLifecycleSnapshot(input.taskId, input.userId, options);
     options.abortSignal.throwIfAborted();
     if (!snapshot) return;

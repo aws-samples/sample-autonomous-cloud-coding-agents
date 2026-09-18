@@ -152,7 +152,7 @@ export interface LinearIntegrationProps {
  *   provider name; Phase 2.0b OAuth migration). Webhook processor and
  *   orchestrator use this to look up which credential provider holds the
  *   workspace's OAuth token.
- * - LinearWebhookDedupTable (60s TTL dedup for webhook retries)
+ * - LinearWebhookDedupTable (8-hour TTL dedup for webhook retries)
  * - Lambda handlers for the webhook receiver, async processor, and account linking
  * - API Gateway routes under /linear/*
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
@@ -171,7 +171,7 @@ export class LinearIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — (issue_id, action) keys with 60s TTL. */
+  /** Webhook dedup table — data.id/action/webhookTimestamp keys with 8-hour TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
@@ -199,8 +199,7 @@ export class LinearIntegration extends Construct {
     this.userMappingTable = userMapping.table;
     this.workspaceRegistryTable = workspaceRegistry.table;
 
-    // Dedup table: linear webhook retries collapse to a single processor invoke
-    // within the 60s TTL window. Keyed on `{issue_id}#{action}`.
+    // The receiver deduplicates data.id/action/webhookTimestamp for 8 hours.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,

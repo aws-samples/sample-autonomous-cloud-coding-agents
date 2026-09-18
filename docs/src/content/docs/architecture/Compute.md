@@ -85,20 +85,23 @@ Lambda MicroVMs are an opt-in third backend, selected per repository with `compu
 
 For managed images, run `cdk/scripts/package-microvm-artifact.sh --stack-name <stack>` after each agent change. It packages the Dockerfile's local inputs into a deterministic ZIP and uploads it under `microvm-images/agent-artifact-<sha256>.zip`. The checksum is a fingerprint of the uploaded bytes: identical inputs reuse the same verified object, and changed inputs produce a new filename. Deploy with the printed `--context microvm_artifact_sha256=<digest>` alongside `microvm_base_image_arn` and `microvm_base_image_version`, and retain these inputs for later deployments. The changed S3 URI tells CloudFormation to update the existing image; overwriting the old fixed filename alone does not. Missing or malformed digests fail synthesis. An initial deployment without an image must create the bucket first. The script's explicit `--create-image` alternative retains the fixed base key and calls the image API directly.
 
-Because a snapshot freezes its build-time environment, current deployment identifiers arrive through the v2 payload bootstrap. The coordinator publishes a non-secret deployment manifest and sends a single-object signed download URL for the task. The worker reads only its deployment's `bootstrap/*` with ambient credentials; other object reads and payload-bucket listing are explicitly denied. The downloaded task identity and configuration must match the authenticated manifest before configuration installation. The serialized reference fits the verified 4,096-byte hook limit; all payload sizes use S3. ECS shares this transport through `AGENT_PAYLOAD_REF`. [ADR-021 §3](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend#3-packaging-same-agent-image-source-new-build-path) defines the wire format, compatibility change and pending live gates.
+Because a snapshot freezes its build-time environment, current deployment identifiers arrive through the v2 payload bootstrap. The coordinator publishes a non-secret deployment manifest and sends a single-object signed download URL for the task. The worker reads only its deployment's `bootstrap/*` with ambient credentials; other object reads and payload-bucket listing are explicitly denied. The downloaded task identity and configuration must match the authenticated manifest before configuration installation. The serialized reference fits the verified 4,096-byte hook limit; all payload sizes use S3. ECS shares this transport through `AGENT_PAYLOAD_REF`. [ADR-021 §3](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend#3-packaging-same-agent-image-source-new-build-path) defines the wire format and compatibility requirements; [live payload checks](/sample-autonomous-cloud-coding-agents/architecture/645-p2-payload-live-20260914) record validation.
 
-Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. The P2 image declares and serves `/ready` and `/validate` at build time and `/run` and `/terminate` at runtime. Local P3 images also declare the implemented `/suspend` and `/resume` hooks; automatic suspension separately defaults off pending live acceptance. Registry HTTP/SSE tools therefore need reachable HTTPS/443 endpoints; remote non-443 tools are unsupported under the default policies of AgentCore and ECS as well. Local `stdio` tools can run, with their outbound traffic subject to the same restriction. Asset resolution/loading does not probe connectivity; see [registry network support](/sample-autonomous-cloud-coding-agents/architecture/registry#2-asset-kinds-for-mvp).
+Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. Images declare and serve `/ready` and `/validate` at build time and `/run`, `/terminate`, `/suspend` and `/resume` at runtime. Automatic suspension is a separate deployment opt-in. Registry HTTP/SSE tools therefore need reachable HTTPS/443 endpoints; remote non-443 tools are unsupported under the default policies of AgentCore and ECS as well. Local `stdio` tools can run, with their outbound traffic subject to the same restriction. Asset resolution/loading does not probe connectivity; see [registry network support](/sample-autonomous-cloud-coding-agents/architecture/registry#2-asset-kinds-for-mvp).
 
-Local P3 now connects the guest checkpoint/credential hooks, actual image-version capability, durable supervisor and post-commit approval wake. The `microvm_approval_suspend_enabled` deployment context defaults false and controls both a static opt-in and a live Parameter Store switch. Existing durable executions reread the live switch before new suspension because their original Lambda environment is pinned. Recovery and the original service lifetime survive supervisor replay; the API preserves accepted decisions when optional wake fails. AgentCore/ECS retain explicit unsupported pause/wake results. Approval expiry still uses the original UTC/monotonic deadline. See the [supervisor runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-supervisor) for budgets, scoped permissions and remaining live gates.
+P3 connects the guest checkpoint/credential hooks, actual image-version capability, durable supervisor and post-commit approval wake. The `microvm_approval_suspend_enabled` deployment context defaults false and controls both a static opt-in and a live Parameter Store switch. Existing durable executions reread the live switch before new suspension because their original Lambda environment is pinned. Recovery and the original service lifetime survive supervisor replay; the API preserves accepted decisions when optional wake fails. AgentCore/ECS retain explicit unsupported pause/wake results. Explicit approval deadlines use the original UTC/monotonic deadline. See the [supervisor runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-supervisor) for budgets and scoped permissions, and the [completion record](/sample-autonomous-cloud-coding-agents/architecture/645-p3-implementation-plan) for deployment evidence.
 
 Tasks can set `microvm_sleep_after_s` (CLI: `--microvm-sleep-after <seconds|off>`).
 The default is 600 seconds of waiting for each approval; zero disables sleep.
 Creation persists the resolved preference, while legacy rows use the default.
-The global suspension switch still takes precedence. The five-minute default
-approval window therefore stays awake; only longer windows can reach the
-ten-minute sleep delay. Neither this setting nor suspension extends a gate's
-original deadline. Snapshot storage and save/restore fees mean the delay is a
-user preference, not a guarantee of savings for every pause.
+The global suspension switch still takes precedence. Unanswered approvals have
+no deadline by default (`approval_timeout_s=0`); an explicit finite deadline
+remains available. A short timed request stays awake when there is too little
+useful sleep time before its wake margin. Neither suspension nor replacement
+extends that original deadline. For a longer wait, a verified conversation and
+workspace checkpoint lets ABCA retire the worker, release capacity and start a
+replacement after the answer. Snapshot storage and save/restore fees mean the
+sleep delay is a user preference, not a guarantee of savings for every pause.
 
 ## ECS Fargate task sizing (build vs. planning)
 
@@ -121,7 +124,7 @@ The agent harness is the layer around the LLM that manages the execution loop: c
 
 The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) as the harness. It provides the agent loop, built-in tools (filesystem, shell), and streaming message reception for per-turn trajectory capture (token usage, cost, tool calls).
 
-**Execution model:** Tasks are fully unattended and one-shot. The agent loop runs in a background thread so the FastAPI `/ping` endpoint stays responsive on the main thread. The agent thread uses `asyncio.run()` with the stdlib event loop (uvicorn is configured with `--loop asyncio` to avoid uvloop conflicts with subprocess SIGCHLD handling).
+**Execution model:** The agent runs automatically until it completes, needs a human decision or is stopped. The HTTP entrypoint runs its loop in a background thread so FastAPI `/ping` stays responsive; ECS uses the batch entrypoint. The agent thread uses `asyncio.run()` with the stdlib event loop (uvicorn is configured with `--loop asyncio` to avoid uvloop conflicts with subprocess SIGCHLD handling).
 
 **System prompt:** Selected by workflow from a shared base template (`agent/src/prompts/base.py`) with per-workflow sections (`coding/new-task-v1`, `coding/pr-iteration-v1`, `coding/pr-review-v1`). The platform defines what the agent should do; the harness executes it.
 
@@ -136,7 +139,7 @@ The platform uses the [Claude Agent SDK](https://github.com/anthropics/claude-ag
 | GitHub | AgentCore Gateway + Identity | Clone, push, PR, issues |
 | Web search | AgentCore Gateway | Documentation lookups |
 
-Plugins, skills, and MCP servers are out of scope for MVP. Additional tools can be added via Gateway integration.
+Agents can use configured skills and MCP tools through the [registry](/sample-autonomous-cloud-coding-agents/architecture/registry). Their runtime network access remains subject to the compute backend’s egress rules.
 
 ### Policy enforcement
 

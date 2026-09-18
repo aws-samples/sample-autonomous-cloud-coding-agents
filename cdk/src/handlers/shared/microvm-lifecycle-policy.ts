@@ -89,7 +89,7 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
     return sleeping ? wake('wake-intent') : { action: 'wait', reason: 'wake-intent', nextPollInMs: transitionPoll };
   }
   if (approval.createdAtMs > nowMs) return wake('approval-time-invalid');
-  const wakeAt = Math.min(approval.deadlineMs, sessionDeadlineMs) - MICROVM_WAKE_MARGIN_MS;
+  const wakeAt = Math.min(approval.deadlineMs ?? sessionDeadlineMs, sessionDeadlineMs) - MICROVM_WAKE_MARGIN_MS;
   if (nowMs >= wakeAt) return wake('wake-deadline');
 
   const sleepAfterSeconds = snapshot.sleepAfterSeconds === undefined

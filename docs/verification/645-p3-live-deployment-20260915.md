@@ -4,7 +4,7 @@ Date: 2026-09-15. The development stack is deployed with the P3 supervisor and
 six-hook image. Automatic suspension remains disabled. Six isolated guest
 cases pass; suspended cancellation exposed a stop-path bug that was repaired,
 deployed and verified with a stronger probe below.
-The full [P3 acceptance matrix](./645-p3-implementation-plan.md#7-acceptance-matrix-and-completion-gates)
+The full [P3 acceptance matrix](./645-p3-implementation-plan.md#acceptance-matrix-and-completion-gates)
 is not complete.
 
 ## Deployed configuration

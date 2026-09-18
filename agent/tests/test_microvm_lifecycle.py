@@ -354,6 +354,102 @@ async def test_real_progress_writer_failure_cannot_acknowledge_suspend(monkeypat
 
 
 @pytest.mark.anyio
+async def test_progress_during_continuation_capture_is_acknowledged_before_suspend(monkeypatch):
+    from progress_writer import _ProgressWriter
+
+    context = register_task("capture-progress-task", "microvm")
+    try:
+        _, park = await parked(context)
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events")
+        writer = _ProgressWriter(context.task_id)
+        writer._table = Mock()
+        async with context.continuation_checkpoint(park):
+            # SDK progress can arrive while the workspace upload awaits a thread.
+            writer._put_event("agent_turn", {"message": "waiting for approval"})
+            writer._table.put_item.assert_called_once()
+            assert not context.diagnostic_snapshot()["progress_failed"]
+            with pytest.raises(LifecycleUnavailable), context.activity():
+                pytest.fail("General activity must remain paused during capture")
+        await context.suspend(Mock(), budget_s=1)
+        # The progress exception is limited to capture, never actual suspension.
+        writer._put_event("agent_turn", {"message": "cannot write while suspended"})
+        writer._table.put_item.assert_called_once()
+        assert context.diagnostic_snapshot()["progress_failed"]
+    finally:
+        unregister_task(context)
+
+
+@pytest.mark.anyio
+async def test_capture_waits_for_progress_started_during_upload(monkeypatch):
+    from progress_writer import _ProgressWriter
+
+    context = register_task("capture-progress-drain-task", "microvm")
+    entered = threading.Event()
+    release = threading.Event()
+    write_task = None
+    capture_task = None
+    try:
+        _, park = await parked(context)
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events")
+        writer = _ProgressWriter(context.task_id)
+        writer._table = Mock()
+
+        def slow_write(**_):
+            entered.set()
+            assert release.wait(2)
+
+        writer._table.put_item.side_effect = slow_write
+
+        async def capture():
+            nonlocal write_task
+            async with context.continuation_checkpoint(park, drain_budget_s=1):
+                write_task = asyncio.create_task(
+                    asyncio.to_thread(writer._put_event, "agent_turn", {"message": "in flight"})
+                )
+                assert await asyncio.to_thread(entered.wait, 1)
+
+        capture_task = asyncio.create_task(capture())
+        assert await asyncio.to_thread(entered.wait, 1)
+        await asyncio.sleep(0.04)
+        assert not capture_task.done()
+        assert context.diagnostic_snapshot()["phase"] == "checkpointing"
+        release.set()
+        await asyncio.wait_for(capture_task, 1)
+        assert write_task is not None
+        await write_task
+        assert context.diagnostic_snapshot()["phase"] == "checkpoint-ready"
+        await context.suspend(Mock(), budget_s=1)
+    finally:
+        release.set()
+        if capture_task:
+            await asyncio.gather(capture_task, return_exceptions=True)
+        if write_task:
+            await asyncio.gather(write_task, return_exceptions=True)
+        unregister_task(context)
+
+
+@pytest.mark.anyio
+async def test_progress_failure_during_capture_prevents_checkpoint_publication(monkeypatch):
+    from progress_writer import _ProgressWriter
+
+    context = register_task("capture-progress-error-task", "microvm")
+    try:
+        _, park = await parked(context)
+        monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", "events")
+        writer = _ProgressWriter(context.task_id)
+        writer._table = Mock()
+        writer._table.put_item.side_effect = OSError("write reply lost")
+        with pytest.raises(LifecycleUnavailable, match="Progress was not acknowledged"):
+            async with context.continuation_checkpoint(park):
+                writer._put_event("agent_turn", {"message": "uncertain"})
+        assert context.diagnostic_snapshot()["phase"] == "parked"
+        with pytest.raises(LifecycleUnavailable):
+            await context.suspend(Mock(), budget_s=1)
+    finally:
+        unregister_task(context)
+
+
+@pytest.mark.anyio
 async def test_resume_reseeds_from_fresh_os_entropy_after_refresh(monkeypatch):
     from microvm_lifecycle import reseed_random
 

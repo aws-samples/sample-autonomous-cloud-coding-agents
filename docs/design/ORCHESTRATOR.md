@@ -293,10 +293,18 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
 - Intentional suspension requires the matching pending gate and saved suspend intent. Unexpected suspension emits one anomaly per episode and starts bounded wake recovery, preserving recoverable work.
-- A terminal substrate report paired with a non-terminal task is a failure, but finalization first strongly re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
+- A terminal substrate report paired with a non-terminal task first checks for a complete, acknowledged approval checkpoint. Such a checkpoint can retire the old attempt and retain the task for a replacement. Without one, finalization strongly re-reads the task row before classifying a substrate failure.
 - Substrate state detects a dead VM; heartbeat staleness detects loss of the heartbeat writer inside a VM that still reports `RUNNING`. The independent heartbeat thread can continue during a pipeline hang, so a fresh timestamp is not proof of progress.
 
 The P3 supervisor saves intent before control calls and rechecks the gate before and after them. Its durable state retains an absolute service lifetime, consecutive failures, recovery start time and next delay. Three failed cycles or 120 seconds of unconfirmed wake cannot become an indefinite wait. AWS RUNNING does not end recovery while the guest remains stuck on a decided/expired approval; fresh guest liveness is required. API approve/deny commit first, then attempt a bounded wake without changing the decision response. Automatic suspension defaults off via `microvm_approval_suspend_enabled`; disabling new sleep preserves wake and cleanup. See the [supervisor runbook](../verification/645-p3-supervisor.md).
+
+Unanswered approvals have no deadline by default. A checkpointed MicroVM wait can
+retire after an hour, or before that worker's lifetime ends. The coordinator
+verifies immutable storage, fences the old attempt, confirms shutdown and then
+releases capacity. A saved decision admits one replacement and invokes the
+original published coordinator version. A scheduled manager retries lost signals
+and performs terminal cleanup. See the [continuation protocol](../verification/645-p3-continuation-protocol-20260917.md)
+for ownership, capacity, expiry and failure behavior.
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 

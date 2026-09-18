@@ -47,6 +47,10 @@ abca-worktrees/
 # Test/coverage output
 coverage/
 **/coverage/
+.jest-cache/
+**/.jest-cache/
+test-reports/
+**/test-reports/
 .pytest_cache/
 **/.pytest_cache/
 # Coverage data FILES, not just the directories above. pytest-cov writes

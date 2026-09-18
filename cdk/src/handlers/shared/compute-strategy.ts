@@ -147,6 +147,8 @@ export interface ComputeStrategy {
      * the build def (never worse than today).
      */
     readOnly?: boolean;
+    /** Coordinator-owned checkpoint recovery pins the original worker image. */
+    microvmImage?: { readonly imageArn: string; readonly imageVersion: string };
   }): Promise<SessionHandle>;
   pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus>;
   stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult | void>;

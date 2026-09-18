@@ -15,7 +15,7 @@ When a rule marked `@tier("soft")` matches a tool call:
 1. The agent stops before invoking the tool.
 2. A row is atomically written to the approvals table and the task status flips to `AWAITING_APPROVAL`.
 3. A progress event (`approval_requested`) is emitted so `bgagent watch` shows the gate in real time.
-4. The task waits for your decision up to the rule's timeout (default 300 s, configurable per-rule and per-task).
+4. The task waits for your decision without an automatic deadline by default. An explicit per-task or policy-rule timeout can limit that window.
 5. On approval, the agent proceeds; on denial, the deny reason is best-effort injected back into the agent's context so it can adapt; on timeout, the gate is treated as a denial with `timed_out` as the reason.
 
 A decision is recorded at most once per request. Replaying approve/deny on the same `(task_id, request_id)` is idempotent.
@@ -26,7 +26,7 @@ A decision is recorded at most once per request. Replaying approve/deny on the s
 node lib/bin/bgagent.js pending
 ```
 
-Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the expiry time, and ready-to-run `approve` / `deny` command lines. Pipe through `--output json` for scripting.
+Lists every approval across your tasks that is currently awaiting your decision. The default text output gives you the `request_id`, tool, severity, the reason the rule matched, the tool-input preview, the deadline or “no automatic expiry,” and ready-to-run `approve` / `deny` command lines. The JSON `expires_at` is `null` when there is no deadline. Cancelled or completed tasks no longer have answerable requests.
 
 ```text
 1 pending approval(s):
@@ -38,7 +38,7 @@ Lists every approval across your tasks that is currently awaiting your decision.
   rules:      force_push_any
   preview:    git push --force origin feature/xyz
   created:    2026-05-13T12:04:12Z
-  expires:    2026-05-13T12:09:12Z (timeout_s=300)
+  expires:    no automatic expiry
   approve:    bgagent approve 01KN37PZ77P1W19D71DTZ15X6X 01R...
   deny:       bgagent deny 01KN37PZ77P1W19D71DTZ15X6X 01R... --reason "..."
 ```
@@ -98,13 +98,16 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
   --pre-approve write_path:tests/**
 
-# Per-task timeout override (platform default is 300s)
+# Optional ten-minute decision deadline (the default has no deadline)
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
 `--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
-`--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+`--approval-timeout 0` keeps unanswered requests available. A positive setting
+limits the decision window; the shortest positive deadline from the task and
+matching policy rules wins. Zero does not disable a policy rule's explicit
+deadline. Cancelling the task closes its requests.
 
 For Lambda MicroVM tasks, `--microvm-sleep-after 600` selects the default
 10-minute delay; `--microvm-sleep-after 120` selects two minutes and
@@ -112,10 +115,12 @@ For Lambda MicroVM tasks, `--microvm-sleep-after 600` selects the default
 approval request is created. Waking for approval, denial, or an approaching
 deadline remains automatic. Sleep never starts a new approval timer.
 
-The default approval timeout is five minutes, so those requests stay awake
-with the ten-minute sleep delay. A longer task timeout does not override a
-shorter policy-rule timeout. Sleeping saves compute charges but adds snapshot
-save/restore charges and wake-up time; short pauses can cost more than staying
-awake. The API equivalent is `microvm_sleep_after_s` (zero means off); task
+An unanswered request can outlive its MicroVM. After a longer wait, ABCA saves
+the workspace and conversation, stops the worker, and releases its capacity.
+Your answer can then start a replacement when capacity is available. A request
+remaining open does not mean its old computer must stay alive. Sleeping saves
+compute charges but adds snapshot save/restore charges and wake-up time; short
+pauses can cost more than staying awake. The API equivalent is
+`microvm_sleep_after_s` (zero means off); task
 details return the saved setting. Automatic suspension remains disabled by
 default pending the [P3 acceptance checks](/sample-autonomous-cloud-coding-agents/architecture/645-p3-implementation-plan).

@@ -25,6 +25,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import agentTaskWriteAttributes from './agent-task-write-attributes.json';
+import constants from '../../../contracts/constants.json';
 
 /**
  * Task reporting may update only the attributes written by task_state.py.
@@ -44,12 +45,19 @@ export function grantAgentTaskTableAccess(
   const leadingKeys = taskScoped
     ? { 'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'] }
     : {};
+  const readLeadingKeys = taskScoped
+    ? {
+      'dynamodb:LeadingKeys': [
+        '${aws:PrincipalTag/task_id}', `${constants.microvm_continuation.lease_key_prefix}\${aws:PrincipalTag/task_id}`,
+      ],
+    }
+    : {};
   grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
     resources: [table.tableArn],
     ...(taskScoped ? {
       conditions: {
-        'ForAllValues:StringEquals': leadingKeys,
+        'ForAllValues:StringEquals': readLeadingKeys,
         'Null': { 'dynamodb:LeadingKeys': 'false' },
       },
     } : {}),
@@ -302,6 +310,7 @@ export class AgentSessionRole extends Construct {
             'Resource wildcards are the per-object suffix under a tenant-scoped '
             + 'prefix (traces/${aws:PrincipalTag/user_id}/*, '
             + 'attachments/${aws:PrincipalTag/user_id}/*, '
+            + 'continuations/${aws:PrincipalTag/task_id}/*, '
             + 'artifacts/${aws:PrincipalTag/task_id}/*) and the DynamoDB item '
             + 'set gated by a dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id} '
             + 'condition — narrower than the compute role this replaces. Bedrock '

@@ -46,6 +46,7 @@ import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
+import { ContinuationBucket } from '../constructs/continuation-bucket';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
@@ -63,6 +64,7 @@ import { LambdaMicrovmStack } from '../constructs/lambda-microvm-stack';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
+import { MicrovmContinuationManager } from '../constructs/microvm-continuation-manager';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -355,6 +357,11 @@ export class AgentStack extends Stack {
     // Existing flat deployments retain their resource paths with false until
     // their reviewed resource-migration procedure is complete.
     const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
+    const microvmResourceNamePrefix = this.node.tryGetContext('microvm_resource_name_prefix');
+    if (microvmResourceNamePrefix !== undefined
+      && (!microvmNested || typeof microvmResourceNamePrefix !== 'string')) {
+      throw new Error('microvm_resource_name_prefix requires a string and microvm_nested_stack=true');
+    }
     const suspendContext = this.node.tryGetContext('microvm_approval_suspend_enabled');
     if (suspendContext !== undefined && ![true, false, 'true', 'false'].includes(suspendContext)) {
       throw new Error('microvm_approval_suspend_enabled must be true or false');
@@ -383,20 +390,6 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
-    // Keep the combination gated pending the bundled feature-matrix/deployment
-    // verification tracked in #857. The original 505-resource measurement predates
-    // #854 and later stack changes; the current offline measurements are recorded
-    // in docs/verification/645-p3-readiness-review.md. Do not treat that historical
-    // count as a current limit check.
-    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
-      throw new Error(
-        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: this '
-        + 'combination remains gated pending deployment verification (#857). Deploy the '
-        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
-        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
-      );
-    }
-
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -415,6 +408,7 @@ export class AgentStack extends Stack {
       baseImageArn: this.node.tryGetContext('microvm_base_image_arn'),
       baseImageVersion: this.node.tryGetContext('microvm_base_image_version'),
       artifactSha256: this.node.tryGetContext('microvm_artifact_sha256'),
+      managedImageVersion: this.node.tryGetContext('microvm_managed_image_version'),
       externalImageIdentifier: this.node.tryGetContext('microvm_image_identifier'),
       externalImageVersion: this.node.tryGetContext('microvm_image_version'),
     };
@@ -860,14 +854,30 @@ export class AgentStack extends Stack {
           'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
       },
       {
-        // Image lifecycle grants can push the existing Jira secret grant into
-        // an overflow policy. Exempt only that resource pattern; other wildcard
+        // Image lifecycle grants can push existing channel secret grants into
+        // an overflow policy. Exempt only those resource patterns; other wildcard
         // grants in this role's future overflow documents still require review.
         pathFragment: '/TaskOrchestrator/OrchestratorFn/ServiceRole/OverflowPolicy',
         reason:
-          'The orchestrator reads and refreshes per-tenant Jira OAuth secrets created by bgagent jira setup. Their cloudId-based names are unknown at synth, so GetSecretValue/PutSecretValue use the account- and Region-scoped bgagent-jira-oauth-* prefix.',
+          'Channel setup creates workspace-specific OAuth secrets and Linear vault providers after deployment. These grants retain the configured account and Region and match only the Linear/Jira secret prefixes and Linear vault provider/client-secret prefixes.',
         appliesTo: [{
           regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bgagent-jira-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-\\*$/',
+        }],
+      },
+      {
+        pathFragment: '/OrchestrationReconciler/ReconcilerFn/ServiceRole/OverflowPolicy',
+        reason:
+          'The reconciler mints Linear feedback tokens for workspace providers created during channel setup. The grant matches only Linear vault provider/client-secret prefixes in this account and Region.',
+        appliesTo: [{
+          regex: '/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-\\*$/',
         }],
       },
     ];
@@ -1150,6 +1160,7 @@ export class AgentStack extends Stack {
         lambdaMicrovm = new LambdaMicrovmStack(this, 'Microvm', {
           ...microvmProps,
           deploymentName: this.stackName,
+          resourceNamePrefix: microvmResourceNamePrefix,
           executionRole,
         }).compute;
       } else {
@@ -1163,6 +1174,8 @@ export class AgentStack extends Stack {
     // `imageArn`, so a configured deployment always has an ARN to resolve and an
     // unconfigured one never asks for it.
     microvmImageArnHolder = lambdaMicrovm?.imageArn;
+    const continuationBucket = lambdaMicrovm ? new ContinuationBucket(this, 'ContinuationBucket') : undefined;
+    continuationBucket?.grantWorker(agentSessionRole.role);
 
     // Advertise which compute substrate this deploy actually provisioned, so the
     // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
@@ -1276,19 +1289,9 @@ export class AgentStack extends Stack {
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
         anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
-        // Substrate parity for the Identity vault: the AgentCore runtime gets these
-        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
-        // receive them too or its agent skips vault minting and falls back to a
-        // Secrets-Manager token a vault-managed workspace does not have — losing
-        // reactions and state transitions on work that otherwise succeeds. Forwarded
-        // as platform_config because a snapshot must not bake configuration in.
-        ...(linearIdentityVault
-          ? {
-            linearVaultEnabled: 'true',
-            linearWorkloadIdentityName: linearVaultWorkload,
-          }
-          : {}),
       },
+      ...(continuationBucket && { continuationBucket }),
+      taskApprovalsTable: taskApprovalsTable.table,
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
@@ -1337,6 +1340,19 @@ export class AgentStack extends Stack {
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
     orchestratorArnHolder = orchestrator.alias.functionArn;
+    if (continuationBucket && lambdaMicrovm?.imageArn) {
+      taskApi.enableMicrovmContinuations(
+        continuationBucket.bucket.bucketName, orchestrator.fn.functionArn, userConcurrencyTable.table,
+      );
+      new MicrovmContinuationManager(this, 'MicrovmContinuationManager', {
+        taskTable: taskTable.table,
+        approvalsTable: taskApprovalsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        continuationBucket,
+        orchestratorFunctionArn: orchestrator.fn.functionArn,
+        imageArn: lambdaMicrovm.imageArn,
+      });
+    }
 
     // Grant the orchestrator Lambda read+write access to memory
     // (reads during context hydration, writes for fallback episodes)
@@ -1368,6 +1384,7 @@ export class AgentStack extends Stack {
     new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
@@ -1968,24 +1985,12 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
     });
 
-    // --- Vault parity for every Lambda that talks to Linear -----------------
-    // The webhook processor was granted vault access when the vault landed and
-    // nothing else was, on the assumption that widening could wait. It could not:
-    // these three post the PR-opened comment, the terminal comment, the epic
-    // rollup, and the GitHub-side issue updates. Without the grant each falls back
-    // to a Secrets-Manager token that a vault-onboarded workspace does not
-    // maintain, so the task succeeds and the Linear issue shows nothing after the
-    // opening comment — no reaction, no state change, no PR link. Live-caught as
-    // 401s in the fan-out log while the task itself completed and opened its PR.
+    // Every Linear writer needs the vault grant; otherwise its feedback may fail
+    // while the coding task succeeds. The webhook processor is wired by
+    // LinearIntegration. The coordinator also forwards these identifiers to
+    // MicroVM guests in authenticated platform_config.
     if (linearIdentityVault) {
-      // The full set, derived from the transitive import graph rather than from the
-      // handlers that import a Linear module DIRECTLY — which is how the reconciler
-      // and the heartbeat were missed: both reach a minting resolver through
-      // orchestration-channel-factory, two hops away. A source-level test now
-      // recomputes this set and fails if a handler joins it without being wired.
-      //
-      // Deliberately NOT here: the webhook RECEIVER (verifies signatures, never
-      // mints) and the stranded reconciler (reaches no channel that mints).
+      // A source-graph test includes indirect callers and guards this inventory.
       for (const linearWriter of [
         fanOutConsumer.fn,
         orchestrator.fn,

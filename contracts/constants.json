@@ -7,7 +7,7 @@
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 0
   },
   "microvm_sleep_after_s": {
     "min": 0,
@@ -45,8 +45,11 @@
       "log_group_name": "LOG_GROUP_NAME",
       "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
       "trace_artifacts_bucket_name": "TRACE_ARTIFACTS_BUCKET_NAME",
+      "continuation_bucket_name": "CONTINUATION_BUCKET_NAME",
       "github_token_secret_arn": "GITHUB_TOKEN_SECRET_ARN",
       "linear_oauth_secret_arn": "LINEAR_OAUTH_SECRET_ARN",
+      "linear_vault_enabled": "LINEAR_VAULT_ENABLED",
+      "linear_workload_identity_name": "LINEAR_WORKLOAD_IDENTITY_NAME",
       "jira_oauth_secret_arn": "JIRA_OAUTH_SECRET_ARN",
       "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
       "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
@@ -87,6 +90,17 @@
     "image_protocol_env": "ABCA_MICROVM_LIFECYCLE_PROTOCOL",
     "hook_port": 8080,
     "maximum_duration_seconds": 28800
+  },
+  "microvm_continuation": {
+    "version": 1,
+    "lease_key_prefix": "worker-lease#",
+    "object_key_prefix": "continuations/",
+    "max_manifest_bytes": 2097152,
+    "max_workspace_bytes": 1073741824,
+    "max_conversation_bytes": 16777216,
+    "park_after_seconds": 3600,
+    "retirement_margin_seconds": 300,
+    "verified_sdk_version": "0.2.110"
   },
   "linear_vault": {
     "_why": "The vault caches a grant keyed by the WHOLE token request, customParameters included. A one-token divergence between any two of these copies makes every resolve a cache miss, which post-#812 is reported as consent-required and can latch a healthy workspace revoked.",

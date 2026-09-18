@@ -91,7 +91,7 @@ def _manifest(uri: str, backend: str) -> tuple[str, dict]:
     return parsed.netloc, manifest["platform_config"]
 
 
-def _payload_url(url: str, bucket: str, task_id: str) -> None:
+def _payload_url(url: str, bucket: str, task_id: str, attempt_id: str | None = None) -> None:
     """Permit only the exact object's regional S3 HTTPS endpoint, without redirects."""
     try:
         parsed = urlsplit(url)
@@ -116,9 +116,10 @@ def _payload_url(url: str, bucket: str, task_id: str) -> None:
             raise ValueError
         suffix = "amazonaws.com.cn" if region.startswith("cn-") else "amazonaws.com"
         host = f"s3.{region}.{suffix}"
+        prefix = f"{task_id}/{attempt_id}" if attempt_id is not None else task_id
         valid = (
-            parsed.netloc == f"{bucket}.{host}" and parsed.path == f"/{task_id}/payload.json"
-        ) or (parsed.netloc == host and parsed.path == f"/{bucket}/{task_id}/payload.json")
+            parsed.netloc == f"{bucket}.{host}" and parsed.path == f"/{prefix}/payload.json"
+        ) or (parsed.netloc == host and parsed.path == f"/{bucket}/{prefix}/payload.json")
         if not valid:
             raise ValueError
     except (KeyError, IndexError, TypeError, ValueError):
@@ -152,6 +153,7 @@ def resolve_payload_reference(reference: Any, backend: str) -> tuple[dict, dict]
             "payload bootstrap v2 is required; deploy a matching coordinator and image"
         )
     task_id = reference.get("task_id")
+    attempt_id = reference.get("attempt_id")
     uri = reference.get("bootstrap_s3_uri")
     url = reference.get("payload_url")
     if (
@@ -159,10 +161,18 @@ def resolve_payload_reference(reference: Any, backend: str) -> tuple[dict, dict]
         or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id)
         or not isinstance(uri, str)
         or not isinstance(url, str)
+        or (
+            attempt_id is not None
+            and (
+                backend != "lambda-microvm"
+                or not isinstance(attempt_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt_id)
+            )
+        )
     ):
         raise ValueError("payload reference is missing task identity or download coordinates")
     bucket, config = _manifest(uri, backend)
-    _payload_url(url, bucket, task_id)
+    _payload_url(url, bucket, task_id, attempt_id)
     document = _download(url)
     payload = document.get("agent_payload")
     if (
@@ -170,6 +180,7 @@ def resolve_payload_reference(reference: Any, backend: str) -> tuple[dict, dict]
         or document.get("task_id") != task_id
         or not isinstance(payload, dict)
         or payload.get("task_id") != task_id
+        or (attempt_id is not None and payload.get("attempt_id") != attempt_id)
     ):
         raise ValueError("downloaded payload does not belong to the referenced task")
     if document.get("platform_config") != config:

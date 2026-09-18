@@ -854,6 +854,15 @@ stays in the parent and is still excluded. Re-bootstrap before deploying the
 child stack. Existing flat deployments must keep `microvm_nested_stack=false`
 until their resource migration is reviewed; changing ownership is not an ordinary
 in-place update. See the [nested-stack runbook](../verification/645-p3-nested-stack.md).
+
+For a reviewed migration that keeps old and new resources side by side,
+`microvm_resource_name_prefix` gives the nested image, network connectors and log
+group distinct names. It requires nested mode and a concrete 1–40 character
+letter/digit/hyphen prefix. Build/operator IAM role names remain derived from the
+parent deployment so the bootstrap's existing `PassRole` scope still applies.
+Keep the selected prefix stable in later deployments. This option alone does
+not preserve the old resources or their runtime permissions; those remain part
+of the migration procedure.
 This statement lets CloudFormation manage and tag the live suspension setting
 at `/<backgroundagent-stack-name>/microvm-approval-suspend-enabled`. The
 coordinator gets only `GetParameter` on its exact parameter. Existing durable

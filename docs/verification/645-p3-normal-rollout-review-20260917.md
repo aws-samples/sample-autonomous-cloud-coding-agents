@@ -1,5 +1,11 @@
 # P3 normal deployment rollout review — September 17, 2026
 
+Historical review. The later [overlapping nested cutover](./645-p3-nested-stack.md#overlapping-replacement-rehearsal-and-normal-cutover)
+keeps both resource sets available, uses explicit compatible image/coordinator
+pins, and drains old work before removal. That procedure supersedes the proposed
+global pause below. The [completion plan](./645-p3-implementation-plan.md) tracks
+current deployment status.
+
 This was a read-only review of `backgroundagent-dev` in account `<account-id>`,
 Region `us-west-2`. No admission settings, aliases, roles or task records were
 changed. It identifies the remaining operational work; it is not a completed
@@ -83,7 +89,13 @@ older MicroVM image. Once a worker starts, its saved handle records the actual
 returned image version, but that does not select the version for future starts.
 
 Before rehearsing rollback, make image selection explicit in the reviewed
-rollout procedure. The existing external-image path supports a version pin,
+rollout procedure. The new `microvm_managed_image_version` context option pins
+runtime selection while keeping the managed image under CloudFormation. Use a
+version verified through `GetMicrovmImageVersion`, and preserve that coordinator
+version together with its image ARN/version. This option is implemented locally;
+normal deployment and rollback verification remain open.
+
+The external-image path also supports a version pin,
 but switching an existing managed image resource to that path is an
 infrastructure migration and must be reviewed for deletion/replacement.
 Do not remove a managed image merely to obtain a pin.

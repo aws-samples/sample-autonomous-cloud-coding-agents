@@ -18,13 +18,17 @@
  */
 
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
+import { CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_TRANSITION_POLL_SECONDS } from './shared/microvm-continuation-timing';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy } from './shared/compute-strategy';
-import { formatMicrovmTerminalFailure, MicrovmStartUncertainError } from './shared/error-classifier';
+import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
-import { stopMicrovmWithDiagnostics, superviseMicrovm } from './shared/microvm-supervisor';
+import { runMicrovmContinuation } from './shared/microvm-continuation-runner';
+import { saveContinuationLaunch } from './shared/microvm-continuation-storage';
+import { stopMicrovmWithDiagnostics } from './shared/microvm-supervisor';
+import { pollMicrovmTask } from './shared/microvm-task-poll';
 import {
   admissionControl,
   buildComputeMetadata,
@@ -58,6 +62,8 @@ interface OrchestrateTaskEvent {
    * durable-execution idempotency) can mistake it for a replay.
    */
   readonly queue_pickup_id?: string;
+  readonly continuation_request_id?: string;
+  readonly continuation_attempt_id?: string;
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
@@ -68,6 +74,13 @@ const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 const DEFAULT_POLL_INTERVAL_SECONDS = 30;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
+  if (event.continuation_request_id !== undefined || event.continuation_attempt_id !== undefined) {
+    return runMicrovmContinuation({
+      task_id: event.task_id,
+      continuation_request_id: event.continuation_request_id ?? '',
+      continuation_attempt_id: event.continuation_attempt_id ?? '',
+    }, context);
+  }
   const { task_id: taskId } = event;
 
   // Step 1: Load task record
@@ -194,6 +207,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
+      if (blueprintConfig.compute_type === 'lambda-microvm') {
+        await saveContinuationLaunch(taskId, task.user_id, payload, blueprintConfig);
+      }
       strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
         taskId,
@@ -392,29 +408,15 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     'await-agent-completion',
     async (state) => {
       if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
-        const supervised = await superviseMicrovm({
+        return pollMicrovmTask({
           taskId,
           userId: task.user_id,
           handle: sessionHandle,
           strategy: microvmStrategy,
-          previous: state.microvmSupervisor,
           pollIntervalMs: blueprintConfig.poll_interval_ms ?? DEFAULT_POLL_INTERVAL_SECONDS * 1000,
           suspendEnabled: process.env.MICROVM_APPROVAL_SUSPEND_ENABLED === 'true',
           emitEvent: (type, metadata, options) => emitTaskEvent(taskId, type, metadata, correlation, options),
-        });
-        const failure = supervised.kind === 'failure' ? supervised.reason
-          : supervised.kind === 'substrate-terminal' ? 'substrate-terminal' : undefined;
-        return {
-          attempts: state.attempts + 1,
-          lastStatus: supervised.snapshot?.status ?? state.lastStatus,
-          sessionUnhealthy: supervised.heartbeatUnhealthy,
-          microvmSupervisor: supervised.state,
-          microvmFailureReason: failure,
-          microvmFailureMessage: supervised.kind === 'substrate-terminal' ? formatMicrovmTerminalFailure(
-            `substrate state ${supervised.substrate!.status}`, supervised.substrate!.reason,
-          ) : undefined,
-          microvmOwnershipLost: supervised.kind === 'ownership-lost',
-        };
+        }, state);
       }
       const ddbState = await pollTaskStatus(taskId, state, blueprintConfig.compute_type);
       let consecutiveEcsPollFailures = 0;
@@ -472,6 +474,13 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     {
       initialState: { attempts: 0 },
       waitStrategy: (state: PollState) => {
+        if (state.microvmParked || state.microvmOwnershipLost) return { shouldContinue: false };
+        if (state.microvmRetiring) {
+          return {
+            shouldContinue: true,
+            delay: { seconds: state.microvmRetirementError ? CONTINUATION_RETRY_POLL_SECONDS : CONTINUATION_TRANSITION_POLL_SECONDS },
+          };
+        }
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
           return { shouldContinue: false };
         }
@@ -504,6 +513,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
+    if (finalPollState.microvmParked) {
+      await emitTaskEvent(taskId, 'continuation_parked', {
+        microvm_id: sessionHandle.sessionId,
+        detail: 'Your approval request is still available. The saved task will continue on another worker after your answer.',
+      }, correlation);
+      await deleteMicrovmPayload(taskId);
+      return;
+    }
     let finalized = false;
     try {
       if (!finalPollState.microvmOwnershipLost) {

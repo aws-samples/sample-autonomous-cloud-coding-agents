@@ -10,7 +10,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -1350,6 +1350,34 @@ class TestMicrovmRunHookVerifiedPayload:
     authentication and transport checks have their own regression suite.
     """
 
+    @pytest.mark.parametrize("attempt", ["replacement-2", "../other", "", 123])
+    def test_attempt_identity_is_validated_before_starting(
+        self, client, monkeypatch, cached_github_token, attempt
+    ):
+        spawn = MagicMock()
+        monkeypatch.setattr(server, "_spawn_background", spawn)
+        response = client.post(
+            RUN_HOOK,
+            json=_run_hook_body(
+                {
+                    "agent_payload": {
+                        "task_id": "task-attempt",
+                        "repo_url": "org/repo",
+                        "prompt": "Continue",
+                        "github_token": "ghp_x",
+                        "attempt_id": attempt,
+                    },
+                }
+            ),
+        )
+        if attempt == "replacement-2":
+            assert response.status_code == 200
+            assert spawn.call_args.args[0]["attempt_id"] == "replacement-2"
+        else:
+            assert response.status_code == 400
+            assert response.json()["code"] == "MICROVM_ATTEMPT_ID_INVALID"
+            spawn.assert_not_called()
+
     def test_accepts_the_payload_and_starts_the_pipeline_asynchronously(
         self, client, monkeypatch, cached_github_token
     ):
@@ -1752,8 +1780,11 @@ class TestPlatformConfigContract:
             "log_group_name": "LOG_GROUP_NAME",
             "artifacts_bucket_name": "ARTIFACTS_BUCKET_NAME",
             "trace_artifacts_bucket_name": "TRACE_ARTIFACTS_BUCKET_NAME",
+            "continuation_bucket_name": "CONTINUATION_BUCKET_NAME",
             "github_token_secret_arn": "GITHUB_TOKEN_SECRET_ARN",
             "linear_oauth_secret_arn": "LINEAR_OAUTH_SECRET_ARN",
+            "linear_vault_enabled": "LINEAR_VAULT_ENABLED",
+            "linear_workload_identity_name": "LINEAR_WORKLOAD_IDENTITY_NAME",
             "jira_oauth_secret_arn": "JIRA_OAUTH_SECRET_ARN",
             "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
             "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
@@ -1942,6 +1973,44 @@ class TestInstallPlatformConfig:
         assert installed == sorted(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
         for key, env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
             assert os.environ[env_name] == _platform_config_value(key)
+
+    def test_installed_vault_config_resolves_token_without_fallback(self, env_guard):
+        from config import resolve_linear_api_token
+
+        os.environ.pop("LINEAR_API_TOKEN", None)
+        os.environ.pop("LINEAR_VAULT_ENABLED", None)
+        os.environ.pop("LINEAR_WORKLOAD_IDENTITY_NAME", None)
+        os.environ["AWS_REGION"] = "us-east-1"
+        server._install_platform_config(
+            _platform_config(
+                linear_vault_enabled="true",
+                linear_workload_identity_name="abca_linear_oauth",
+            )
+        )
+        client = MagicMock()
+        client.get_workload_access_token_for_user_id.return_value = {
+            "workloadAccessToken": "workload-token",
+        }
+        client.get_resource_oauth2_token.return_value = {"accessToken": "linear-vault-token"}
+        with patch("aws_session.platform_client", return_value=client) as make_client:
+            assert (
+                resolve_linear_api_token(
+                    {
+                        "linear_provider_name": "bgagent-linear-oauth-acme",
+                        "linear_workspace_id": "workspace-id",
+                        "linear_vault_user_id": "linear-ws-acme",
+                        "linear_oauth_secret_arn": _platform_config_value(
+                            "linear_oauth_secret_arn"
+                        ),
+                    }
+                )
+                == "linear-vault-token"
+            )
+        make_client.assert_called_once_with("bedrock-agentcore", region_name="us-east-1")
+        client.get_workload_access_token_for_user_id.assert_called_once_with(
+            workloadName="abca_linear_oauth", userId="linear-ws-acme"
+        )
+        client.get_secret_value.assert_not_called()
 
     def test_payload_wins_over_a_pre_existing_image_env_value(self, env_guard):
         # The load-bearing precedence rule: image env is frozen at snapshot time,
@@ -2957,7 +3026,10 @@ class TestParseTerminateMicrovmId:
 
 
 @pytest.mark.parametrize("crash", [False, True])
-def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(monkeypatch, crash):
+@pytest.mark.parametrize("attempt", ["", "replacement-2"])
+def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(
+    monkeypatch, crash, attempt
+):
     from microvm_lifecycle import get_context
 
     observed = []
@@ -2966,6 +3038,7 @@ def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(monkey
         context = get_context("lifecycle-server-task")
         assert context is not None
         assert context.microvm_id == "microvm-server"
+        assert context.attempt_id == (attempt or "lifecycle-server-task")
         assert "microvm_id" not in kwargs
         observed.append(context)
         if crash:
@@ -2985,6 +3058,7 @@ def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(monkey
         aws_region="us-west-2",
         task_id="lifecycle-server-task",
         microvm_id="microvm-server",
+        attempt_id=attempt,
     )
     assert len(observed) == 1
     assert get_context("lifecycle-server-task") is None

@@ -32,6 +32,8 @@ export interface LambdaMicrovmStackProps extends Omit<
 > {
   readonly deploymentName: string;
   readonly executionRole: iam.Role;
+  /** Distinct image/connector/log names for an overlapping flat-to-nested migration. */
+  readonly resourceNamePrefix?: string;
 }
 
 /** Child deployment for MicroVM resources; shared runtime trust stays in the parent. */
@@ -44,6 +46,11 @@ export class LambdaMicrovmStack extends NestedStack {
     });
     if (Stack.of(props.executionRole) !== this.nestedStackParent) {
       throw new Error('LambdaMicrovmStack executionRole must be owned by its parent stack');
+    }
+    if (props.resourceNamePrefix !== undefined
+      && (Token.isUnresolved(props.resourceNamePrefix)
+        || !/^[A-Za-z0-9][A-Za-z0-9-]{0,39}$/.test(props.resourceNamePrefix))) {
+      throw new Error('microvm_resource_name_prefix must be 1–40 letters, digits or hyphens and start with a letter or digit');
     }
     // CDK creates bucket-cleanup providers at stack scope, outside Compute.
     // Those providers are also MicroVM-specific in this child.
@@ -60,6 +67,10 @@ export class LambdaMicrovmStack extends NestedStack {
     };
     this.compute = new LambdaMicrovmCompute(this, 'Compute', {
       ...props,
+      // Keep bootstrap-authorized IAM role names tied to the parent deployment.
+      // Only service names change; the old and new image may coexist during a
+      // reviewed migration without moving the shared execution role.
+      deploymentName: props.resourceNamePrefix ?? props.deploymentName,
       buildRoleName: roleName('MicrovmBuildRole'),
       connectorOperatorRoleName: roleName('MicrovmConnectorRole'),
     });

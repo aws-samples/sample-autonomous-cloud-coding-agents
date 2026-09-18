@@ -75,8 +75,9 @@ export interface TaskApprovalsTableProps {
  * streams wired into the fan-out Lambda. Enabling streams here would
  * create duplicate fan-out paths.
  *
- * TTL is sized by the agent as `created_at_epoch + timeout_s + 120s`
- * so rows never expire during the decision window (§10.1).
+ * Pending rows have no TTL, including requests with an explicit deadline.
+ * Task closure applies retention cleanup; capacity delays must never erase
+ * the recorded decision before a replacement worker consumes it.
  */
 export class TaskApprovalsTable extends Construct {
   /**

@@ -30,8 +30,8 @@ import { Construct } from 'constructs';
 /** Default stranded-timeout (seconds; 20 minutes). */
 const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 
-/** Default approval-stranded timeout (seconds; 2 hours). */
-const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
+/** Backstop for approval waits without a checkpoint (eight hours plus 30 minutes). */
+const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 30600;
 
 /** Default task-record retention used for event TTL (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -54,6 +54,8 @@ export interface StrandedTaskReconcilerProps {
 
   /** TaskEventsTable (handler writes task_stranded + task_failed events). */
   readonly taskEventsTable: dynamodb.ITable;
+  /** Close unanswered requests when the owning task is declared stranded. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
 
   /** UserConcurrencyTable (handler atomically releases held task reservations). */
   readonly userConcurrencyTable: dynamodb.ITable;
@@ -77,13 +79,12 @@ export interface StrandedTaskReconcilerProps {
   readonly strandedTimeoutSeconds?: number;
 
   /**
-   * Cedar HITL approval-stranded timeout (seconds). Tasks in
-   * AWAITING_APPROVAL older than this are transitioned to FAILED.
-   * Longer than the stranded-timeout because approvals legitimately
-   * sit for up to an hour (§7.3). Set via
+   * Backstop for AWAITING_APPROVAL tasks without a saved continuation.
+   * Allows the worker's full service lifetime and coordinator cleanup.
+   * Saved MicroVM requests are handled by the continuation manager. Set via
    * ``APPROVAL_STRANDED_TIMEOUT_SECONDS``.
    *
-   * @default 7200 (2 hours — double §7.3's 1-hour ceiling + an hour grace)
+   * @default 30600 (8.5 hours)
    */
   readonly approvalStrandedTimeoutSeconds?: number;
 
@@ -126,6 +127,7 @@ export class StrandedTaskReconciler extends Construct {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
+        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         STRANDED_TIMEOUT_SECONDS: String(strandedTimeout),
@@ -140,6 +142,7 @@ export class StrandedTaskReconciler extends Construct {
     // TaskTable: read (query by StatusIndex) + conditional UpdateItem to
     // transition stranded rows to FAILED.
     props.taskTable.grantReadWriteData(this.fn);
+    props.taskApprovalsTable?.grantReadWriteData(this.fn);
     // TaskEvents: write task_stranded + task_failed events.
     props.taskEventsTable.grantWriteData(this.fn);
     // Concurrency: read/release a task-owned reservation transactionally.

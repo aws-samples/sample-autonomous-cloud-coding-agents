@@ -228,6 +228,17 @@ function main(): number {
       hook_port: number;
       maximum_duration_seconds: number;
     };
+    microvm_continuation?: {
+      version: number;
+      lease_key_prefix: string;
+      object_key_prefix: string;
+      max_manifest_bytes: number;
+      max_workspace_bytes: number;
+      max_conversation_bytes: number;
+      park_after_seconds: number;
+      retirement_margin_seconds: number;
+      verified_sdk_version: string;
+    };
     payload_bootstrap?: {
       version: number;
       manifest_prefix: string;
@@ -275,7 +286,7 @@ function main(): number {
   if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');
   if (agc.max < agc.default) invariantErrors.push('approval_gate_cap.max must be >= default');
   if (ats.min <= 0) invariantErrors.push('approval_timeout_s.min must be > 0');
-  if (ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be >= min');
+  if (ats.default !== 0 && ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be 0 or >= min');
   if (ats.max < ats.default) invariantErrors.push('approval_timeout_s.max must be >= default');
   if (jiraAppActor.min_secret_length < 32) {
     invariantErrors.push('jira_app_actor.min_secret_length must be >= 32');
@@ -393,6 +404,18 @@ function main(): number {
     || lifecycle.maximum_duration_seconds <= 0 || lifecycle.maximum_duration_seconds > 28_800
     || typeof lifecycle.image_protocol_env !== 'string' || !/^ABCA_MICROVM_[A-Z0-9_]+$/.test(lifecycle.image_protocol_env)) {
     invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port, duration within 1–28800 seconds and ABCA_MICROVM_ marker name');
+  }
+  const continuation = json.microvm_continuation;
+  if (!continuation || !Number.isSafeInteger(continuation.version) || continuation.version <= 0
+    || continuation.lease_key_prefix !== 'worker-lease#' || continuation.object_key_prefix !== 'continuations/'
+    || !Number.isSafeInteger(continuation.max_manifest_bytes) || continuation.max_manifest_bytes <= 0
+    || !Number.isSafeInteger(continuation.max_workspace_bytes) || continuation.max_workspace_bytes <= 0
+    || !Number.isSafeInteger(continuation.max_conversation_bytes) || continuation.max_conversation_bytes <= 0
+    || !Number.isInteger(continuation.park_after_seconds) || continuation.park_after_seconds <= 0
+    || !Number.isInteger(continuation.retirement_margin_seconds) || continuation.retirement_margin_seconds <= 0
+    || !lifecycle || continuation.park_after_seconds + continuation.retirement_margin_seconds >= lifecycle.maximum_duration_seconds
+    || !/^\d+\.\d+\.\d+$/.test(continuation.verified_sdk_version)) {
+    invariantErrors.push('microvm_continuation requires stable prefixes, a positive version/size, verified SDK version and retirement within the worker lifetime');
   }
   const BUDGET_FIELDS = [
     'ready_hook_timeout_seconds',

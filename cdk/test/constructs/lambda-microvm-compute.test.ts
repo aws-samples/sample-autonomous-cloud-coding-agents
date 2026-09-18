@@ -70,6 +70,7 @@ interface BuildOptions {
   readonly withImage?: boolean;
   readonly imageEnvironmentVariables?: Record<string, string>;
   readonly artifactSha256?: string | null;
+  readonly managedImageVersion?: string;
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
   readonly withSessionRole?: boolean;
@@ -147,6 +148,7 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     }),
     externalImageIdentifier: options.externalImageIdentifier,
     externalImageVersion: options.externalImageVersion,
+    managedImageVersion: options.managedImageVersion,
     imageEnvironmentVariables: options.imageEnvironmentVariables,
     minimumMemoryInMiB: options.minimumMemoryInMiB,
   });
@@ -167,6 +169,33 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   beforeAll(() => {
     built = build({ withImage: true, withSessionRole: true, withRuntimeParity: true });
     template = built.template;
+  });
+
+  describe('explicit managed runtime version', () => {
+    let pinned: Built;
+
+    beforeAll(() => {
+      pinned = build({
+        withImage: true, withSessionRole: true, withRuntimeParity: true, managedImageVersion: '7.0',
+      });
+    });
+
+    test('pins new workers without changing the managed image build or ownership', () => {
+      expect(pinned.construct.imageVersion).toBe('7.0');
+      expect(pinned.template.findResources('AWS::Lambda::MicrovmImage'))
+        .toEqual(template.findResources('AWS::Lambda::MicrovmImage'));
+    });
+
+    // Constructor-validation cases deliberately have no successful template to cache.
+    test.each(['', 'latest', '0', '1.a'])('rejects invalid runtime version %p', managedImageVersion => {
+      expect(() => build({ withImage: true, managedImageVersion }))
+        .toThrow('microvm_managed_image_version');
+    });
+
+    test('requires managed image inputs', () => {
+      expect(() => build({ managedImageVersion: '7.0' }))
+        .toThrow('microvm_managed_image_version');
+    });
   });
 
   test('synthesizes exactly one MicroVM image from the artifact bucket object', () => {
@@ -207,18 +236,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   );
 
   test('builds an ARM64 image at the largest ACCEPTED BASELINE (8 GiB)', () => {
-    // 32768 was rejected live: "The requested memory size of 32768 MiB is not
-    // supported by base MicroVM image …al2023-1. Supported memory sizes in MiB
-    // are: [512, 1024, 2048, 4096, 8192]." Note this configures the BASELINE —
-    // the service scales vertically to a 32 GiB / 16 vCPU peak on its own, which
-    // is why nothing here asks for the peak.
-    //
-    // `ARM_64`, not `arm64`: the CDK L1 types Architecture as a plain string and
-    // documents no allowed values, and CloudFormation rejected the lowercase
-    // spelling at change-set early validation — "arm64 is not a valid enum value.
-    // Supported values: [ARM_64]" (ADR-021 P2-F2). The literal is spelled out here
-    // rather than imported from the construct so the test fails if the constant is
-    // "corrected" back to Docker's spelling.
+    // Assert the accepted baseline and API enum spelling independently of source
+    // constants; this test does not measure runtime memory or scaling.
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       CpuConfigurations: [{ Architecture: 'ARM_64' }],
       Resources: [{ MinimumMemoryInMiB: 8192 }],
@@ -989,8 +1008,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(template.toJSON())).not.toContain('CreateMicrovmAuthToken');
   });
 
-  test('distinguishes clean P2 smoke evidence from remaining acceptance and P3 hooks', () => {
-    // Prior image evidence does not establish new-image or normal rollout acceptance.
+  test('describes configured-image verification and rollback without installation-specific history', () => {
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
@@ -998,20 +1016,14 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // The superseded id must be gone, not merely reworded — operators grep for it.
     expect(JSON.stringify(built.construct.node.metadata))
       .not.toContain('abca:microvm-image-p1-not-runnable');
-    expect(message).toContain('Clean P2 deployment');
-    expect(message).toContain('2026-09-14 without manual IAM changes');
-    expect(message).toContain('This does not verify a different image');
-    expect(message).toContain('P2');
-    // It must state what IS true now, or it reads as the old (wrong) claim — and
-    // the hook list here is what an operator compares against a failed build or a
-    // failed lifecycle transition, so all six have to be named.
+    expect(message).toContain('verify the configured image and coordinator together');
     for (const hook of ['/ready', '/validate', '/run', '/terminate', '/suspend', '/resume']) {
       expect(message).toContain(hook);
     }
-    expect(message).toContain('supervisor integration is implemented');
-    expect(message).toContain('P3 requires bootstrap bundle 1.8.0 and defaults new suspension off');
+    expect(message).toContain('actual launched image version before allowing sleep');
     expect(message).toContain('Nested deployments require bundle 1.9.0');
-    expect(message).toContain('Normal automatic-suspension activation remains open');
+    expect(message).toContain('explicit image version for rollback');
+    expect(message).not.toContain('Image 6.0');
   });
 
   test('enables every hook the agent serves, and only those (rendered form)', () => {
@@ -1223,12 +1235,8 @@ describe('LambdaMicrovmCompute — memory sizing', () => {
     expect(error).toBeDefined();
     expect(error!.message).toContain('32768');
     expect(error!.message).toContain('512, 1024, 2048, 4096, 8192');
-    // The message must say BASELINE, or an operator reads the rejection as "this
-    // backend caps at 8 GiB" and moves a repo to ECS it did not need to.
+    // Distinguish baseline validation from runtime capacity.
     expect(error!.message).toContain('BASELINE');
-    expect(error!.message).toContain('32 GiB');
-    // ...and points at the backend that DOES have the SUSTAINED capacity.
-    expect(error!.message).toContain('compute_type=ecs');
   });
 
   test.each([0, 256, 6144, 16384, 8193])('rejects the unsupported baseline %i MiB', (mib) => {

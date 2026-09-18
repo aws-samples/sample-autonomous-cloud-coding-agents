@@ -12,6 +12,44 @@ import task_state
 from task_state import TaskFetchError, _build_logs_url, _now_iso
 
 
+@pytest.mark.parametrize("writer", [task_state.write_running, task_state.write_heartbeat])
+@pytest.mark.parametrize(
+    ("reasons", "expected_warning"),
+    [
+        ([{"Code": "ConditionalCheckFailed"}, {"Code": "None"}], False),
+        ([{"Code": "None"}, {"Code": "ConditionalCheckFailed"}], True),
+        ([{"Code": "ConditionalCheckFailed"}, {"Code": "ConditionalCheckFailed"}], True),
+        ([], True),
+    ],
+)
+def test_status_race_logging_preserves_worker_fence_failures(
+    monkeypatch, writer, reasons, expected_warning
+):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(
+        task_state,
+        "_update_task",
+        MagicMock(
+            side_effect=ClientError(
+                {
+                    "Error": {
+                        "Code": "TransactionCanceledException",
+                        "Message": "transaction failed",
+                    },
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        ),
+    )
+    log = MagicMock()
+    monkeypatch.setattr(task_state, "log", log)
+    writer("owned-task")
+    assert any(call.args[0] == "WARN" for call in log.call_args_list) is expected_warning
+
+
 class TestAgentWriteContract:
     def test_current_task_writers_fit_the_deployed_attribute_allowlist(self, monkeypatch):
         """Exercise real writers; detect a new field before IAM rejects it live.
@@ -118,19 +156,29 @@ class TestAgentWriteContract:
             if isinstance(node, ast.FunctionDef)
             and any(
                 isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Attribute)
-                and child.func.attr
-                in {
-                    "update_item",
-                    "put_item",
-                    "delete_item",
-                    "transact_write_items",
-                    "batch_writer",
-                }
+                and (
+                    (
+                        isinstance(child.func, ast.Attribute)
+                        and child.func.attr
+                        in {
+                            "update_item",
+                            "put_item",
+                            "delete_item",
+                            "transact_write_items",
+                            "batch_writer",
+                        }
+                    )
+                    or (
+                        isinstance(child.func, ast.Name)
+                        and child.func.id in {"_update_task", "_transact_task"}
+                    )
+                )
                 for child in ast.walk(node)
             )
         }
         assert writers == {
+            "_update_task",
+            "_transact_task",
             "write_running",
             "write_heartbeat",
             "write_terminal",
@@ -138,6 +186,8 @@ class TestAgentWriteContract:
             "transact_write_approval_request",
             "transact_resume_from_approval",
             "increment_approval_gate_count_in_ddb",
+            "publish_continuation_checkpoint",
+            "consume_restored_continuation",
             "best_effort_update_approval_status",  # Writes only the supporting approvals table.
         }
 
@@ -1125,3 +1175,52 @@ class TestCancellationHelpers:
 
     def test_extract_cancellation_reasons_none_on_plain_exception(self):
         assert task_state._extract_cancellation_reasons(RuntimeError()) == []
+
+
+class TestContinuationClaimReadback:
+    @pytest.mark.parametrize(
+        "changed", ["none", "cancelled", "worker", "record", "request", "lease"]
+    )
+    def test_lost_response_requires_exact_consumed_assignment(
+        self, approval_tables_env, monkeypatch, changed
+    ):
+        from boto3.dynamodb.types import TypeSerializer
+
+        record = {
+            "version": 1,
+            "state": "RESTORING",
+            "worker_id": "microvm-new",
+            "identity": {
+                "task_id": "task",
+                "attempt_id": "microvm-old",
+                "request_id": "request",
+                "user_id": "user",
+                "repo": "owner/repo",
+            },
+            "manifest": {"key": "exact-saved-key"},
+        }
+        consumed = {**record, "state": "CONSUMED"}
+        task = {"status": "RUNNING", "session_id": "microvm-new", "continuation": consumed}
+        if changed == "cancelled":
+            task["status"] = "CANCELLED"
+        elif changed == "worker":
+            task["session_id"] = "microvm-other"
+        elif changed == "record":
+            task["continuation"] = {**consumed, "manifest": {"key": "different"}}
+        elif changed == "request":
+            task["awaiting_approval_request_id"] = "another-request"
+        client = MagicMock()
+        client.transact_write_items.side_effect = TimeoutError("response lost after commit")
+        serialize = TypeSerializer().serialize
+        client.get_item.return_value = {"Item": {k: serialize(v) for k, v in task.items()}}
+        lease = MagicMock(side_effect=RuntimeError("lease lost") if changed == "lease" else None)
+        monkeypatch.setattr(task_state, "verify_worker_lease", lease)
+        if changed == "none":
+            task_state.consume_restored_continuation("task", "microvm-new", record, client=client)
+            lease.assert_called_once_with("task", client=client)
+        else:
+            with pytest.raises(RuntimeError):
+                task_state.consume_restored_continuation(
+                    "task", "microvm-new", record, client=client
+                )
+        assert client.get_item.call_args.kwargs["ConsistentRead"] is True

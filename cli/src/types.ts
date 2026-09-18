@@ -475,7 +475,8 @@ export interface CreateTaskRequest {
    */
   readonly trace?: boolean;
   /** Cedar HITL per-task default approval timeout (design §7.3 step 5).
-   *  Valid range ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
+   *  Zero retains unanswered requests; positive values use
+   *  ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
   readonly approval_timeout_s?: number;
   /** Cedar HITL pre-approval allowlist seeded at task start (§7.3 step 4).
    *  Each entry must be a valid ``ApprovalScope``. */
@@ -759,7 +760,7 @@ export interface PendingApprovalSummary {
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
-  readonly expires_at: string;
+  readonly expires_at: string | null;
   /** Cedar rule ids that matched this request — shown by
    *  ``bgagent pending`` so users can see which rule fired without
    *  spelunking TaskEventsTable. */
@@ -805,7 +806,7 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
+export const APPROVAL_TIMEOUT_S_DEFAULT = 0;
 
 /** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
 export const MICROVM_SLEEP_AFTER_S_MIN = 0;

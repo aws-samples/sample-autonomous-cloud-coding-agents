@@ -149,12 +149,12 @@ class TestPollForDecisionConsecutiveFails:
         ts.get_approval_row.return_value = {"status": "PENDING"}
 
         progress = MagicMock()
-        # 0 timeout → loop returns immediately at the deadline check.
+        # An already elapsed explicit deadline returns immediately.
         outcome = _run(
             hooks._poll_for_decision(
                 task_id="01KTASK",
                 request_id="01KREQ",
-                deadline=hooks._ApprovalDeadline.from_recorded(hooks._iso_now(), 0),
+                deadline=hooks._ApprovalDeadline(0, 0),
                 progress=progress,
                 ts=ts,
             )

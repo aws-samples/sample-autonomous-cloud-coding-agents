@@ -224,7 +224,8 @@ function coerceStringList(value: unknown): readonly string[] {
   return value.filter((v): v is string => typeof v === 'string');
 }
 
-function computeExpiresAt(createdAt: string, timeoutS: number): string {
+function computeExpiresAt(createdAt: string, timeoutS: number): string | null {
+  if (timeoutS === 0) return null;
   if (!createdAt || !Number.isFinite(timeoutS) || timeoutS <= 0) {
     return createdAt;
   }

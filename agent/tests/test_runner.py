@@ -121,6 +121,73 @@ class TestClaudeSessionOwnership:
                 microvm_lifecycle.unregister_task(context)
 
 
+@pytest.mark.parametrize("exhausted", [None, "dollars", "turns"])
+def test_replacement_runner_preserves_total_limits_and_reports_cumulative_usage(
+    monkeypatch, exhausted
+):
+    from types import SimpleNamespace
+
+    import claude_agent_sdk
+
+    from continuation_runtime import bind_runtime
+
+    config = _config(max_turns=10, max_budget_usd=1.0)
+    runtime: Any = SimpleNamespace(
+        store=MagicMock(),
+        restored={"session_id": "saved-session"},
+        context=SimpleNamespace(turns_used=10 if exhausted == "turns" else 4),
+        prior_cost_usd=1.0 if exhausted == "dollars" else 0.25,
+        prior_token_usage={"input_tokens": 100, "output_tokens": 10},
+        client=None,
+    )
+    client = MagicMock()
+    client.connect = AsyncMock()
+    client.query = AsyncMock()
+    client.disconnect = AsyncMock()
+
+    async def messages():
+        yield claude_agent_sdk.ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=2,
+            session_id="saved-session",
+            total_cost_usd=0.1,
+            usage={"input_tokens": 50, "output_tokens": 5},
+        )
+
+    client.receive_response = messages
+    make_client = MagicMock(return_value=client)
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", make_client)
+    monkeypatch.setattr(runner, "_setup_agent_env", lambda _: None)
+    monkeypatch.setattr(runner, "_log_claude_cli_version", lambda: None)
+    monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_: (None, {}))
+    monkeypatch.setattr(runner, "_register_gateway_server", lambda _: None)
+    monkeypatch.setattr(runner, "build_clarification_server", lambda: None)
+    monkeypatch.setattr(runner, "_ProgressWriter", MagicMock())
+    with bind_runtime(runtime):
+        if exhausted:
+            with pytest.raises(RuntimeError, match="before the saved continuation"):
+                asyncio.run(
+                    runner.run_agent("continue", "saved system", config, trajectory=MagicMock())
+                )
+            make_client.assert_not_called()
+            return
+        result = asyncio.run(
+            runner.run_agent("continue", "saved system", config, trajectory=MagicMock())
+        )
+    options = make_client.call_args.kwargs["options"]
+    assert options.resume == "saved-session"
+    assert options.max_turns == 6
+    assert options.max_budget_usd == pytest.approx(0.75)
+    assert result.cost_usd == pytest.approx(0.35)
+    assert result.num_turns == 6
+    assert result.usage is not None
+    assert result.usage.input_tokens == 150
+    assert result.usage.output_tokens == 15
+
+
 class TestInitializePolicyEngineAndHooks:
     """Bootstrap the per-task PolicyEngine + hooks without the SDK loop.
 

@@ -1132,6 +1132,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
+        microvm_managed_image_version: '7.0',
       },
     });
     const stack = new AgentStack(app, 'TestAgentStackMicrovm', {
@@ -1202,11 +1203,12 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       'MICROVM_EGRESS_CONNECTOR_ARNS',
       'MICROVM_EXECUTION_ROLE_ARN',
       'MICROVM_IMAGE_IDENTIFIER',
+      'MICROVM_IMAGE_VERSION',
       'MICROVM_INGRESS_CONNECTOR_ARNS',
       'MICROVM_PAYLOAD_BUCKET',
     ]);
-    // Image version is deliberately unpinned.
-    expect(env.MICROVM_IMAGE_VERSION).toBeUndefined();
+    // A runtime pin leaves the child-owned managed image in place.
+    expect(env.MICROVM_IMAGE_VERSION).toBe('7.0');
     expect(env.MICROVM_APPROVAL_SUSPEND_ENABLED).toBe('false');
     // Ingress is NOT empty and NOT omitted: RunMicrovm attaches a PUBLIC
     // HTTP_INGRESS connector (with a public endpoint) when the field is absent,
@@ -1862,20 +1864,104 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Preserve the current #857 gate until bundled feature-matrix and deployment
-    // verification support removing it. The original 505-resource count is stale;
-    // current measurements and a cycle-free nested-stack prototype are documented
-    // in docs/verification/645-p3-readiness-review.md. Once the combination is
-    // supported, replace this refusal assertion with real parity/size assertions.
-    const app = new App({
-      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
-    });
-    expect(() => Template.fromStack(
-      new AgentStack(app, 'LinearVaultMicrovmStack', {
+  describe('MicroVM vault configuration and execution-role grants (#857)', () => {
+    let template: Template;
+    let childTemplates: Template[];
+    const workloadName = 'abca_linear_oauth_LinearVaultMicrovmStack';
+
+    beforeAll(() => {
+      const app = new App({
+        context: {
+          enableLinearIdentityVault: true,
+          compute_type: 'lambda-microvm',
+          microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
+          microvm_base_image_version: '1',
+          microvm_artifact_sha256: 'a'.repeat(64),
+        },
+      });
+      const stack = new AgentStack(app, 'LinearVaultMicrovmStack', {
         env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+      });
+      template = Template.fromStack(stack);
+      childTemplates = stack.node.findAll()
+        .filter((child): child is NestedStack => NestedStack.isNestedStack(child))
+        .map(child => Template.fromStack(child));
+    });
+
+    test('delivers the same workload identity through the coordinator and runtime configuration', () => {
+      template.hasResourceProperties('Custom::LinearWorkloadIdentity', {
+        WorkloadName: workloadName,
+      });
+      template.hasOutput('LinearVaultWorkloadName', { Value: workloadName });
+      const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
+        .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
+      expect(orchestrator[1].Properties.Environment.Variables).toMatchObject({
+        LINEAR_VAULT_ENABLED: 'true',
+        LINEAR_WORKLOAD_IDENTITY_NAME: workloadName,
+      });
+      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
+        EnvironmentVariables: Match.objectLike({
+          LINEAR_VAULT_ENABLED: 'true',
+          LINEAR_WORKLOAD_IDENTITY_NAME: workloadName,
+        }),
+      });
+    });
+
+    test('grants the MicroVM role both token operations on the Linear vault resources', () => {
+      const roles = template.findResources('AWS::IAM::Role');
+      const executionRole = Object.keys(roles)
+        .find(id => id.startsWith('LambdaMicrovmComputeExecutionRole'))!;
+      expect(executionRole).toBeDefined();
+      const policies = Object.values(template.findResources('AWS::IAM::Policy'))
+        .filter(policy => policy.Properties.Roles?.some(
+          (role: { Ref?: string }) => role.Ref === executionRole,
+        ));
+      const statements = policies.flatMap(policy => policy.Properties.PolicyDocument.Statement);
+      const arn = (suffix: string) => ({
+        'Fn::Join': ['', [
+          'arn:', { Ref: 'AWS::Partition' }, `:bedrock-agentcore:us-east-1:123456789012:${suffix}`,
+        ]],
+      });
+      const directory = arn('workload-identity-directory/default');
+      const identity = arn(`workload-identity-directory/default/workload-identity/${workloadName}`);
+      for (const action of [
+        'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
+        'bedrock-agentcore:GetResourceOauth2Token',
+      ]) {
+        const grants = statements.filter(statement =>
+          [statement.Action].flat().includes(action));
+        expect(grants).toHaveLength(1);
+        expect(grants[0].Effect).toBe('Allow');
+        expect(grants[0].Resource).toEqual(expect.arrayContaining([directory, identity]));
+        expect([grants[0].Resource].flat()).not.toContain('*');
+      }
+      const oauthGrant = statements.find(statement =>
+        [statement.Action].flat().includes('bedrock-agentcore:GetResourceOauth2Token'));
+      expect(oauthGrant.Resource).toEqual(expect.arrayContaining([
+        arn('token-vault/default'),
+        arn('token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*'),
+      ]));
+      const policyJson = JSON.stringify(policies);
+      expect(policyJson).toContain('bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*');
+      expect(policyJson).not.toContain('bedrock-agentcore:CreateWorkloadIdentity');
+      expect(policyJson).not.toContain('bedrock-agentcore:DeleteWorkloadIdentity');
+    });
+
+    test('keeps task vault configuration and credentials out of the reusable image', () => {
+      const images = childTemplates.flatMap(child =>
+        Object.values(child.findResources('AWS::Lambda::MicrovmImage')));
+      expect(images).toHaveLength(1);
+      const imageJson = JSON.stringify(images);
+      for (const field of [
+        'LINEAR_VAULT_ENABLED',
+        'LINEAR_WORKLOAD_IDENTITY_NAME',
+        'access_token',
+        'refresh_token',
+        workloadName,
+      ]) {
+        expect(imageJson).not.toContain(field);
+      }
+    });
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {
@@ -1973,17 +2059,19 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
     },
   ];
   const CELLS = CONFIGURATIONS.flatMap(configuration =>
-    [false, true].map(enableToolGateway => ({ ...configuration, enableToolGateway })),
-  );
+    [false, true].flatMap(enableToolGateway =>
+      [false, true].map(enableLinearIdentityVault => ({
+        ...configuration, enableToolGateway, enableLinearIdentityVault,
+      }))));
 
   describe.each(CELLS)(
-    '$name enableToolGateway=$enableToolGateway',
-    ({ context, enableToolGateway }) => {
+    '$name enableToolGateway=$enableToolGateway enableLinearIdentityVault=$enableLinearIdentityVault',
+    ({ context, enableToolGateway, enableLinearIdentityVault }) => {
       let template: Template;
       let templates: Template[];
 
       beforeAll(() => {
-        const app = new App({ context: { ...context, enableToolGateway } });
+        const app = new App({ context: { ...context, enableToolGateway, enableLinearIdentityVault } });
         const stack = new AgentStack(app, 'BudgetStack', {
           env: { account: '123456789012', region: 'us-east-1' },
         });

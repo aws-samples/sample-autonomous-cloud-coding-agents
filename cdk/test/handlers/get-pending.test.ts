@@ -293,7 +293,7 @@ describe('get-pending', () => {
     expect(body.data.pending[0].severity).toBe('medium');
   });
 
-  test('expires_at falls back to created_at when timeout is missing', async () => {
+  test('expires_at is null when no timeout is configured', async () => {
     setupPendingMocks([
       {
         task_id: 't',
@@ -308,7 +308,7 @@ describe('get-pending', () => {
     ]);
     const res = await handler(makeEvent());
     const body = JSON.parse(res.body);
-    expect(body.data.pending[0].expires_at).toBe('2026-05-07T00:00:00Z');
+    expect(body.data.pending[0].expires_at).toBeNull();
   });
 
   test('500 on DDB error after rate-limit passes', async () => {

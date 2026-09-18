@@ -30,6 +30,7 @@ type Backend = 'ecs' | 'lambda-microvm';
 export interface PayloadReference {
   version: number;
   task_id: string;
+  attempt_id?: string;
   bootstrap_s3_uri: string;
   payload_url: string;
   expires_at: number;
@@ -96,6 +97,7 @@ async function createOnce(bucket: string, key: string, body: string): Promise<st
 export async function preparePayloadReference(input: {
   bucket: string;
   taskId: string;
+  attemptId?: string;
   backend: Backend;
   payload: Record<string, unknown>;
   platformConfig?: Record<string, string>;
@@ -104,6 +106,11 @@ export async function preparePayloadReference(input: {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId) || payload.task_id !== taskId) {
     throw new Error('PAYLOAD_BOOTSTRAP_INVALID: task identity does not match the payload');
   }
+  if (input.attemptId !== undefined && (
+    backend !== 'lambda-microvm' || !/^[A-Za-z0-9_-]{1,128}$/.test(input.attemptId)
+    || payload.attempt_id !== input.attemptId
+  )) throw new Error('PAYLOAD_BOOTSTRAP_INVALID: worker attempt does not match the payload');
+  const objectPrefix = input.attemptId ? `${taskId}/${input.attemptId}` : taskId;
   const manifest = canonical({
     version: PAYLOAD_BOOTSTRAP.version, backend, platform_config: input.platformConfig ?? {},
   });
@@ -119,10 +126,11 @@ export async function preparePayloadReference(input: {
     throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: bootstrap manifest or task payload exceeds its byte limit');
   }
   const fingerprint = sha256(canonical({ bucket, backend, manifest, payloadBody }));
-  const launchKey = `${taskId}/${PAYLOAD_BOOTSTRAP.launch_filename}`;
+  const launchKey = `${objectPrefix}/${PAYLOAD_BOOTSTRAP.launch_filename}`;
   const accept = (saved: string): PayloadReference => {
     const record = JSON.parse(saved) as LaunchRecord;
-    if (record.fingerprint !== fingerprint || record.reference?.task_id !== taskId) {
+    if (record.fingerprint !== fingerprint || record.reference?.task_id !== taskId
+      || record.reference.attempt_id !== input.attemptId) {
       throw new Error('PAYLOAD_BOOTSTRAP_CONFLICT: task already has different launch instructions');
     }
     if (record.reference.expires_at <= Date.now()) {
@@ -139,7 +147,7 @@ export async function preparePayloadReference(input: {
   const existing = await readObject(bucket, launchKey);
   if (existing !== undefined) return accept(existing);
 
-  const payloadKey = `${taskId}/payload.json`;
+  const payloadKey = `${objectPrefix}/payload.json`;
   const savedPayload = await createOnce(bucket, payloadKey, payloadBody);
   if (savedPayload !== payloadBody) {
     throw new Error('PAYLOAD_BOOTSTRAP_CONFLICT: task already has different stored instructions');
@@ -161,6 +169,7 @@ export async function preparePayloadReference(input: {
   const reference: PayloadReference = {
     version: PAYLOAD_BOOTSTRAP.version,
     task_id: taskId,
+    ...(input.attemptId && { attempt_id: input.attemptId }),
     bootstrap_s3_uri: `s3://${bucket}/${manifestKey}`,
     payload_url: url,
     expires_at: now + lifetime * 1000,
@@ -170,10 +179,15 @@ export async function preparePayloadReference(input: {
 }
 
 /** Delete both task instructions and their saved capability; shared manifests expire by lifecycle. */
-export async function deletePayloadReference(bucket: string, taskId: string): Promise<void> {
+export async function deletePayloadReference(bucket: string, taskId: string, attemptId?: string): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId)
+    || (attemptId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(attemptId))) {
+    throw new Error('PAYLOAD_BOOTSTRAP_INVALID: cleanup identity is invalid');
+  }
+  const objectPrefix = attemptId ? `${taskId}/${attemptId}` : taskId;
   for (const filename of ['payload.json', PAYLOAD_BOOTSTRAP.launch_filename]) {
     try {
-      await s3().send(new DeleteObjectCommand({ Bucket: bucket, Key: `${taskId}/${filename}` }));
+      await s3().send(new DeleteObjectCommand({ Bucket: bucket, Key: `${objectPrefix}/${filename}` }));
     } catch (error) {
       logger.warn('Payload bootstrap cleanup failed (non-fatal)', {
         task_id: taskId, filename, error: (error as { name?: string }).name ?? 'UnknownError',

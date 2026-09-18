@@ -662,7 +662,11 @@ describe('LambdaMicrovmComputeStrategy', () => {
   describe('deleteMicrovmPayload', () => {
     test('delegates cleanup of payload and private launch record', async () => {
       await deleteMicrovmPayload('TASK001');
-      expect(mockDelete).toHaveBeenCalledWith(PAYLOAD_BUCKET, 'TASK001');
+      expect(mockDelete).toHaveBeenCalledWith(PAYLOAD_BUCKET, 'TASK001', undefined);
+    });
+    test('scopes replacement cleanup to its own attempt', async () => {
+      await deleteMicrovmPayload('TASK001', 'attempt-two');
+      expect(mockDelete).toHaveBeenCalledWith(PAYLOAD_BUCKET, 'TASK001', 'attempt-two');
     });
   });
 
@@ -1106,7 +1110,7 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
 });
 
 describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-time env block', () => {
-  /** A fully-populated orchestrator environment: all thirteen keys present. */
+  /** A fully-populated orchestrator environment. */
   const FULL_ENV: NodeJS.ProcessEnv = {
     TASK_TABLE_NAME: 'tasks',
     TASK_EVENTS_TABLE_NAME: 'events',
@@ -1115,8 +1119,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     LOG_GROUP_NAME: '/aws/abca/application',
     ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
     TRACE_ARTIFACTS_BUCKET_NAME: 'trace-bucket',
+    CONTINUATION_BUCKET_NAME: 'continuation-bucket',
     GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-AbCdEf',
     LINEAR_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-acme-XyZ',
+    LINEAR_VAULT_ENABLED: 'true',
+    LINEAR_WORKLOAD_IDENTITY_NAME: 'abca_linear_oauth',
     JIRA_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:bgagent-jira-oauth-cloud1-XyZ',
     AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
     AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
@@ -1156,14 +1163,17 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'log_group_name',
       'artifacts_bucket_name',
       'trace_artifacts_bucket_name',
+      'continuation_bucket_name',
       'github_token_secret_arn',
       'linear_oauth_secret_arn',
+      'linear_vault_enabled',
+      'linear_workload_identity_name',
       'jira_oauth_secret_arn',
       'agent_session_role_arn',
       'aws_sdk_ua_app_id',
       'anthropic_default_haiku_model',
     ]);
-    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(13);
+    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(16);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
@@ -1184,11 +1194,14 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     }
   });
 
-  test('emits all thirteen keys, in declaration order, from a full environment', () => {
+  test('emits every configured key in declaration order from a full environment', () => {
     const config = buildMicrovmPlatformConfig(FULL_ENV);
     expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
     expect(config.task_table_name).toBe('tasks');
     expect(config.nudges_table_name).toBe('nudges');
+    expect(config.continuation_bucket_name).toBe('continuation-bucket');
+    expect(config.linear_vault_enabled).toBe('true');
+    expect(config.linear_workload_identity_name).toBe('abca_linear_oauth');
     expect(config.agent_session_role_arn).toBe('arn:aws:iam::123456789012:role/SessionRole');
     expect(config.anthropic_default_haiku_model).toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
   });
@@ -1324,6 +1337,8 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     for (const optional of [
       'TASK_APPROVALS_TABLE_NAME', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
+      'LINEAR_VAULT_ENABLED', 'LINEAR_WORKLOAD_IDENTITY_NAME',
+      'CONTINUATION_BUCKET_NAME',
       'JIRA_OAUTH_SECRET_ARN', 'AWS_SDK_UA_APP_ID', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
     ]) {
       delete env[optional];

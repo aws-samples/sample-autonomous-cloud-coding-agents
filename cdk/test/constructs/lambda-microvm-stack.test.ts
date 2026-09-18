@@ -168,3 +168,36 @@ test('rejects a deployment name that would exceed IAM role-name limits', () => {
     executionRole: createMicrovmExecutionRole(parent, 'ExecutionRole'),
   })).toThrow(/at most 64 characters/);
 });
+
+test('allows overlapping service names while preserving parent role identity and bootstrap role names', () => {
+  const parent = new Stack(new App(), 'backgroundagent-dev', { env: ENV });
+  const executionRole = createMicrovmExecutionRole(
+    new Construct(parent, 'LambdaMicrovmCompute'), 'ExecutionRole',
+  );
+  const nested = new LambdaMicrovmStack(parent, 'Microvm', {
+    ...IMAGE_INPUTS[2][1],
+    vpc: new ec2.Vpc(parent, 'Vpc', { maxAzs: 2 }),
+    deploymentName: parent.stackName,
+    resourceNamePrefix: 'backgroundagent-dev-p3',
+    executionRole,
+  });
+  const child = Template.fromStack(nested);
+  child.hasResourceProperties('AWS::Lambda::MicrovmImage', { Name: 'backgroundagent-dev-p3-abca-agent' });
+  child.hasResourceProperties('AWS::Lambda::NetworkConnector', { Name: 'backgroundagent-dev-p3-microvm-egress' });
+  child.hasResourceProperties('AWS::Lambda::NetworkConnector', { Name: 'backgroundagent-dev-p3-microvm-build-egress' });
+  child.hasResourceProperties('AWS::Logs::LogGroup', { LogGroupName: '/aws/lambda-microvms/backgroundagent-dev-p3-abca-agent' });
+  child.hasResourceProperties('AWS::IAM::Role', { RoleName: 'backgroundagent-dev-MicrovmBuildRole' });
+  child.hasResourceProperties('AWS::IAM::Role', { RoleName: 'backgroundagent-dev-MicrovmConnectorRole' });
+  expect(Object.keys(Template.fromStack(parent).findResources('AWS::IAM::Role')))
+    .toContain('LambdaMicrovmComputeExecutionRoleAA0C4A0D');
+});
+
+test.each(['', '-invalid', 'has/slash', 'a'.repeat(41)])('rejects an unsafe migration name prefix %p', resourceNamePrefix => {
+  const parent = new Stack(new App(), 'backgroundagent-dev', { env: ENV });
+  expect(() => new LambdaMicrovmStack(parent, 'Microvm', {
+    vpc: new ec2.Vpc(parent, 'Vpc', { maxAzs: 2 }),
+    deploymentName: parent.stackName,
+    resourceNamePrefix,
+    executionRole: createMicrovmExecutionRole(parent, 'ExecutionRole'),
+  })).toThrow(/microvm_resource_name_prefix/);
+});

@@ -18,9 +18,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionHandle } from './compute-strategy';
+import type { ContinuationRecord } from './microvm-continuation-types';
 import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
+import { continuationEnabled, ensureWorkerLease, leaseHandleUpdate } from './microvm-worker-lease';
 import { makeDocClient } from './ua';
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
@@ -28,8 +30,8 @@ type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 
 /**
  * Internal TaskTable attribute, deliberately not part of the task API.
- * One task owns one logical start. Retrying a failed task creates a new task ID;
- * neither an application retry nor durable replay may mint a replacement token.
+ * Each authorized worker attempt owns one logical start. Only a coordinator
+ * continuation assignment may replace it; retries reuse the existing token.
  */
 interface StartReceipt {
   readonly clientToken: string;
@@ -46,6 +48,8 @@ interface StartRecord {
   readonly compute_type?: string;
   readonly compute_metadata?: Record<string, string>;
   readonly microvm_start?: StartReceipt;
+  readonly repo?: string;
+  readonly continuation?: ContinuationRecord;
 }
 
 export interface MicrovmStartClaim {
@@ -111,20 +115,27 @@ export async function claimMicrovmStart(
   taskId: string,
   userId: string,
   requestHash: string,
+  attemptId: string = taskId,
 ): Promise<MicrovmStartClaim> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const record = await readStartRecord(taskId, userId);
     const handle = recordedHandle(record);
     if (TERMINAL_STATUSES.some(status => status === record.status)) {
-      return { clientToken: taskId, handle, closed: true };
+      return { clientToken: attemptId, handle, closed: true };
     }
     if (!ACTIVE.has(record.status)) {
       throw new Error(`MICROVM_START_STATE_INVALID: cannot start a task in ${record.status}`);
     }
-    if (handle) return { clientToken: taskId, handle, closed: false };
+    if (attemptId !== taskId && record.continuation?.attempt_id !== attemptId) {
+      throw new Error('MICROVM_START_STATE_INVALID: replacement has no coordinator assignment');
+    }
+    if (record.microvm_start && record.microvm_start.clientToken !== attemptId) {
+      throw new Error('MICROVM_START_STATE_INVALID: start belongs to another worker attempt');
+    }
+    if (handle) return { clientToken: attemptId, handle, closed: false };
     const receipt = record.microvm_start;
     if (receipt) {
-      if (receipt.clientToken !== taskId || !Number.isFinite(receipt.expiresAt)) {
+      if (receipt.clientToken !== attemptId || !Number.isFinite(receipt.expiresAt)) {
         throw new Error('MICROVM_START_STATE_INVALID: invalid saved start receipt');
       }
       if (receipt.requestHash !== requestHash) {
@@ -133,14 +144,17 @@ export async function claimMicrovmStart(
       if (Date.now() >= receipt.expiresAt) {
         throw new Error('MICROVM_START_OUTCOME_UNKNOWN: replay window expired; inspect the original start before retrying');
       }
+      await ensureWorkerLease({ taskId, userId, repo: record.repo ?? '', attemptId, requestHash });
       return { clientToken: receipt.clientToken, closed: false };
     }
-    if (record.status !== TaskStatus.HYDRATING) {
+    const replacement = attemptId !== taskId
+      && record.status === TaskStatus.AWAITING_APPROVAL && record.continuation?.state === 'STARTING';
+    if (record.status !== TaskStatus.HYDRATING && !replacement) {
       throw new Error('MICROVM_START_STATE_INVALID: active task has no recoverable start receipt or handle');
     }
     const now = Date.now();
     const receiptToSave: StartReceipt = {
-      clientToken: taskId,
+      clientToken: attemptId,
       requestHash,
       createdAt: new Date(now).toISOString(),
       expiresAt: now + MICROVM_START_REPLAY_WINDOW_MS,
@@ -150,15 +164,18 @@ export async function claimMicrovmStart(
         TableName: TABLE_NAME,
         Key: { task_id: taskId },
         UpdateExpression: 'SET microvm_start = :receipt',
-        ConditionExpression: '#status = :hydrating AND user_id = :user AND attribute_not_exists(microvm_start)',
-        ExpressionAttributeNames: { '#status': 'status' },
+        ConditionExpression: '#status = :startingStatus AND user_id = :user AND attribute_not_exists(microvm_start)'
+          + (replacement ? ' AND continuation.#state = :starting AND continuation.attempt_id = :attempt' : ''),
+        ExpressionAttributeNames: { '#status': 'status', ...(replacement && { '#state': 'state' }) },
         ExpressionAttributeValues: {
           ':receipt': receiptToSave,
-          ':hydrating': TaskStatus.HYDRATING,
+          ':startingStatus': replacement ? TaskStatus.AWAITING_APPROVAL : TaskStatus.HYDRATING,
           ':user': userId,
+          ...(replacement && { ':starting': 'STARTING', ':attempt': attemptId }),
         },
       }));
-      return { clientToken: taskId, closed: false };
+      await ensureWorkerLease({ taskId, userId, repo: record.repo ?? '', attemptId, requestHash });
+      return { clientToken: attemptId, closed: false };
     } catch (err) {
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
       // Re-read the winner, or observe cancellation, before any side effect.
@@ -173,15 +190,18 @@ export async function saveMicrovmStartHandle(
   clientToken: string,
   handle: MicrovmHandle,
 ): Promise<void> {
-  await ddb.send(new UpdateCommand({
+  const replacement = clientToken !== taskId;
+  const update = {
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
     UpdateExpression: 'SET microvm_start.#handle = :handle, session_id = :id, '
-      + 'compute_type = :type, compute_metadata = :metadata',
+      + 'compute_type = :type, compute_metadata = :metadata'
+      + (replacement ? ', continuation.worker_id = :id, continuation.#state = :restoring' : ''),
     ConditionExpression: 'microvm_start.clientToken = :token AND '
       + '(attribute_not_exists(microvm_start.#handle) OR microvm_start.#handle.microvmId = :id) AND '
-      + '(attribute_not_exists(session_id) OR session_id = :id)',
-    ExpressionAttributeNames: { '#handle': 'handle' },
+      + '(attribute_not_exists(session_id) OR session_id = :id)'
+      + (replacement ? ' AND continuation.attempt_id = :token' : ''),
+    ExpressionAttributeNames: { '#handle': 'handle', ...(replacement && { '#state': 'state' }) },
     ExpressionAttributeValues: {
       ':token': clientToken,
       ':id': handle.microvmId,
@@ -190,8 +210,18 @@ export async function saveMicrovmStartHandle(
       ':metadata': {
         microvmId: handle.microvmId, endpoint: handle.endpoint, ...readMicrovmImageMetadata(handle),
       },
+      ...(replacement && { ':restoring': 'RESTORING' }),
     },
-  }));
+  };
+  if (continuationEnabled()) {
+    await ddb.send(new TransactWriteCommand({
+      TransactItems: [
+        { Update: update }, leaseHandleUpdate(taskId, clientToken, handle.microvmId),
+      ],
+    }));
+  } else {
+    await ddb.send(new UpdateCommand(update));
+  }
 }
 
 /** Enrich only the same durably saved launch; never replace its identity or task state. */

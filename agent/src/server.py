@@ -428,6 +428,7 @@ def _run_task_background(
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
     microvm_id: str = "",
+    attempt_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -467,7 +468,9 @@ def _run_task_background(
         task_id=task_id,
     )
 
-    lifecycle = register_task(task_id, microvm_id) if microvm_id else None
+    lifecycle = (
+        register_task(task_id, microvm_id, attempt_id=attempt_id or task_id) if microvm_id else None
+    )
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
     try:
@@ -844,29 +847,11 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # --------------------------------------------------------------------------
 # AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 through P3)
 # --------------------------------------------------------------------------
-# The MicroVM backend has NO orchestrator→agent HTTP path: the task payload
-# arrives as the ``/run`` hook's request body and nothing else dials in. The
-# service calls these routes on the port declared in the image's ``hooks.port``
-# (8080 — the same uvicorn process that serves /invocations and /ping), so the
-# hooks live here rather than in a sidecar.
-#
-# Six hooks are served and declared in managed images. The supervisor checks the
-# launched version's capability and rollout settings before requesting suspension:
-#   * ``/ready`` (build, P1) is MANDATORY. ``CreateMicrovmImage`` refuses an image
-#     that enables ANY lifecycle hook without it ("The ready (/ready) MicroVM
-#     image hook must be enabled when any MicroVM lifecycle hook … is enabled"),
-#     and an image with no hooks at all cannot receive a ``runHookPayload``. So
-#     ADR-021's original "declare /run in P1, serve it in P2" split was not a
-#     reachable service state.
-#   * ``/run`` (runtime, P1) is the payload-delivery channel — and, since P2, the
-#     platform-configuration channel (see ``platform_config`` below).
-#   * ``/validate`` (build, P2) is the snapshot self-check. It runs under the
-#     BUILD role and makes ZERO AWS calls — see ``microvm_validate``.
-#   * ``/terminate`` (runtime, P2) is a best-effort final flush. It never writes
-#     terminal task status — the orchestrator owns terminal state.
-# ``/suspend`` and ``/resume`` use a drained, acknowledged checkpoint and mandatory
-# credential/gate reconciliation. The image must declare them with the shared
-# service budget before it can advertise lifecycle capability.
+# The service calls six hooks on the image listener. Build hooks warm/check the
+# snapshot without AWS access; /run authenticates configuration and starts work.
+# /terminate closes the coding barrier and acknowledges teardown. /suspend and
+# /resume checkpoint and reconcile credentials/gates. Automatic suspension also
+# requires coordinator approval of the launched image version and live settings.
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 
 app.add_api_route(f"{MICROVM_HOOK_PREFIX}/suspend", microvm_suspend, methods=["POST"])
@@ -1791,35 +1776,13 @@ _TERMINATE_BODY_BUDGET_SECONDS = 1.0
 
 @app.post(f"{MICROVM_HOOK_PREFIX}/terminate")
 async def microvm_terminate(request: Request):
-    """MicroVM ``/terminate`` runtime hook — best-effort flush, always 200.
+    """Close the coding barrier, log teardown and acknowledge any request body.
 
-    Called as the MicroVM is torn down. Three hard constraints:
-
-    * **It must not write terminal task status.** The orchestrator owns terminal
-      state: it finalizes the task and THEN calls ``TerminateMicrovm``, so a
-      terminate hook that wrote ``FAILED``/``COMPLETED`` would race the
-      finalization it follows and could clobber the real outcome with a
-      substrate-shutdown artifact. The pipeline thread's own crash path
-      (``_run_task_background``) remains the only in-guest terminal writer.
-    * **It must return 200 inside the hook budget, even with nothing running.**
-      So it never joins the pipeline thread (a drain could take minutes — that is
-      ``lifespan``'s job on a graceful shutdown) and every best-effort step is
-      wrapped: a failure here must not turn a clean teardown into a hook failure.
-    * **It must return 200 for any BODY too.** That is why this handler takes the
-      raw ``Request`` instead of a Pydantic body model: FastAPI validates a typed
-      body BEFORE the handler runs, so malformed JSON, a wrong content-type, or a
-      missing body would produce a 422 this function never gets a chance to
-      prevent — a reported hook failure on a successful teardown. Parsing is
-      deferred to ``_parse_terminate_microvm_id``, which degrades to ``""``.
-
-    ``async def`` (unlike ``/ready`` and ``/run``) because reading the raw body
-    requires awaiting it. Safe on the event loop: the work is a JSON parse, a
-    thread-count read and a fire-and-forget log — no blocking AWS call.
-
-    There is no progress queue to drain. ``ProgressWriter`` writes synchronously
-    but catches and drops failures; a return from its event method is not proof
-    of durability. This hook closes the coding barrier, logs and acknowledges
-    teardown. ``/suspend`` uses a separate acknowledged checkpoint transaction.
+    This hook never joins the pipeline or writes terminal task status. Termination
+    can interrupt active work, so it cannot assume finalization already finished.
+    Raw Request parsing avoids FastAPI rejecting malformed bodies before entry.
+    Each best-effort step is guarded; acknowledged checkpointing belongs to
+    /suspend, not this hook.
     """
     # Close the local barrier before reading the body or emitting diagnostics.
     # A slow checkpoint/refresh thread must not release coding during teardown.
@@ -2005,9 +1968,17 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             },
         )
 
-    reseed_random()
-    _spawn_background({**params, "microvm_id": body.microvmId})
+    # The attempt token comes only from the authenticated bootstrap payload.
+    # It identifies coordinator authority before RunMicrovm returns a VM ID.
     task_id = params["task_id"]
+    attempt_id = payload.get("attempt_id", task_id)
+    if not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt_id):
+        return JSONResponse(
+            status_code=400,
+            content={"code": "MICROVM_ATTEMPT_ID_INVALID", "message": "Invalid worker attempt"},
+        )
+    reseed_random()
+    _spawn_background({**params, "microvm_id": body.microvmId, "attempt_id": attempt_id})
     # Carries microvm_id as well as task_id: the "/run hook received" line that
     # used to correlate the two is stdout-only now (pre-install), so this is the
     # first line that reaches the task's log group and it has to join the CloudWatch

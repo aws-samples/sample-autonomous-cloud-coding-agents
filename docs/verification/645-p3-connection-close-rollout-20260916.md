@@ -184,7 +184,7 @@ instrumented comparison have their separate archive in the transport report.
 ## Remaining completion gates
 
 The application correction and these four normal-image workflows are complete.
-The broader [P3 plan](./645-p3-implementation-plan.md#remaining-work-in-execution-order)
+The broader [P3 plan](./645-p3-implementation-plan.md#implementation-progress)
 still requires the wider final-image workspace/credential/decision matrix,
 other-backend permission and network checks, and the normal deployment's
 coordinated capacity upgrade/drain and rollback validation. Service token

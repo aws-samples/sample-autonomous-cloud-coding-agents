@@ -20,6 +20,7 @@
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
+import { workerLeaseKey } from './microvm-continuation-types';
 import { makeDocClient } from './ua';
 import { ACTIVE_STATUSES, TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
@@ -28,6 +29,8 @@ export interface ReservationTask {
   readonly task_id: string;
   readonly user_id: string;
   readonly status: string;
+  readonly continuation_launch?: unknown;
+  readonly microvm_start?: { readonly clientToken: string };
   readonly concurrency_slot?: {
     readonly state: 'held' | 'released';
     readonly acquired_at: string;
@@ -123,6 +126,17 @@ export async function releaseTaskSlot(taskId: string, userId: string): Promise<b
   const current = await readTask(taskId, userId);
   if (!current || !terminal(current.status) || current.concurrency_slot?.state !== 'held') return false;
 
+  // A failed RunMicrovm response may still have created a worker. The coordinator
+  // confirms shutdown in its readonly lease before returning that worker's seat.
+  const workerAttempt = current.continuation_launch && current.microvm_start?.clientToken;
+  if (workerAttempt) {
+    const lease = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE, Key: workerLeaseKey(taskId), ConsistentRead: true,
+    }));
+    if (lease.Item?.lease_user_id !== userId || lease.Item.lease_attempt_id !== workerAttempt
+      || lease.Item.lease_state !== 'CLOSED') return false;
+  }
+
   let emptyCounter = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     const now = new Date().toISOString();
@@ -166,6 +180,14 @@ export async function releaseTaskSlot(taskId: string, userId: string): Promise<b
               },
             },
           },
+          ...(workerAttempt ? [{
+            ConditionCheck: {
+              TableName: TASK_TABLE,
+              Key: workerLeaseKey(taskId),
+              ConditionExpression: 'lease_user_id = :user AND lease_attempt_id = :attempt AND lease_state = :closed',
+              ExpressionAttributeValues: { ':user': userId, ':attempt': workerAttempt, ':closed': 'CLOSED' },
+            },
+          }] : []),
         ],
       }));
       if (emptyCounter) {

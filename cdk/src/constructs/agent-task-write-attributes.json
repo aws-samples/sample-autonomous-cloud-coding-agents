@@ -8,6 +8,7 @@
   "agent_heartbeat_at",
   "awaiting_approval_request_id",
   "approval_gate_count",
+  "continuation",
   "pr_url",
   "error_message",
   "cost_usd",

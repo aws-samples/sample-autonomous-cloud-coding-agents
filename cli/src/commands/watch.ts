@@ -157,7 +157,7 @@ function renderMilestoneSuffix(meta: Record<string, unknown>): string {
   if (meta.request_id != null) parts.push(`request_id=${String(meta.request_id)}`);
   if (meta.scope != null) parts.push(`scope=${String(meta.scope)}`);
   if (meta.status != null) parts.push(`status=${String(meta.status)}`);
-  if (meta.timeout_s != null) parts.push(`timeout=${String(meta.timeout_s)}s`);
+  if (meta.timeout_s != null) parts.push(meta.timeout_s === 0 ? 'no automatic expiry' : `timeout=${String(meta.timeout_s)}s`);
   if (meta.reason != null) parts.push(`reason=${String(meta.reason)}`);
   const ruleIds = meta.matching_rule_ids;
   if (Array.isArray(ruleIds) && ruleIds.length > 0) {

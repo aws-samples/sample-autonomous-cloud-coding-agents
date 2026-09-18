@@ -88,7 +88,7 @@ export function makeSubmitCommand(): Command {
     .option(
       '--approval-timeout <seconds>',
       `Cedar HITL per-task default approval timeout (${APPROVAL_TIMEOUT_S_MIN}-${APPROVAL_TIMEOUT_S_MAX}s). `
-        + 'Overrides the platform default of 300s. Per-rule @approval_timeout_s still min-wins at gate-firing.',
+        + 'Default: no automatic expiry (0). Explicit per-rule timeouts still apply.',
       parseInt,
     )
     .option(
@@ -149,11 +149,11 @@ export function makeSubmitCommand(): Command {
         if (
           isNaN(opts.approvalTimeout)
           || !Number.isInteger(opts.approvalTimeout)
-          || opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN
+          || (opts.approvalTimeout !== 0 && opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN)
           || opts.approvalTimeout > APPROVAL_TIMEOUT_S_MAX
         ) {
           throw new CliError(
-            `--approval-timeout must be an integer between ${APPROVAL_TIMEOUT_S_MIN} `
+            `--approval-timeout must be 0 (no expiry), or an integer between ${APPROVAL_TIMEOUT_S_MIN} `
               + `and ${APPROVAL_TIMEOUT_S_MAX} seconds.`,
           );
         }

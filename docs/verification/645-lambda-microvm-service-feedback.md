@@ -1,8 +1,13 @@
 # Lambda MicroVM service-team feedback tracker
 
-Updated 2026-09-17. Working notes for the ADR-021 takeover. **Not submitted to the
+Updated 2026-09-18. Working notes for the ADR-021 takeover. **Not submitted to the
 service team.** Keep each item's evidence, question, service response and next
 action here as verification continues.
+
+P3 application acceptance is complete and automatic approval suspension is
+enabled in the [normal deployment](./645-p3-normal-closure-20260918.md).
+The dated investigations below preserve earlier deployment settings; the
+service questions remain open. Account IDs are redacted from this public copy.
 
 In plain language: a MicroVM is the worker's little computer. A lifecycle hook
 is the doorbell AWS rings to tell it to start, pause or wake. An AWS request ID
@@ -24,8 +29,8 @@ is the receipt that lets the service team find a particular call.
 
 **Impact:** the user approves an action, but the worker stops before continuing.
 The coordinator releases capacity correctly; the requested coding workflow
-failed in these recorded cases. The application correction below is deployed;
-automatic suspension remains disabled pending the remaining P3 acceptance gates.
+failed in these recorded cases. The application correction below passed P3
+acceptance before automatic suspension was enabled.
 
 The [September 17 follow-up](./645-p3-final-image-and-ecs-20260917.md) adds two
 repository sleep/wake cycles, late approval winning, and wake after actual STS

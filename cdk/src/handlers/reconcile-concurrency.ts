@@ -18,9 +18,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { ScanCommand, type ScanCommandOutput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, ScanCommand, type ScanCommandOutput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from '../constructs/task-status';
 import { logger } from './shared/logger';
+import { workerLeaseKey } from './shared/microvm-continuation-types';
 import { releaseTaskSlot, type ReservationTask } from './shared/task-concurrency';
 import { makeDocClient } from './shared/ua';
 
@@ -68,7 +69,7 @@ export async function handler(): Promise<void> {
     const page: ScanCommandOutput = await ddb.send(new ScanCommand({
       TableName: TASK_TABLE,
       ConsistentRead: true,
-      ProjectionExpression: 'task_id, user_id, #status, concurrency_slot',
+      ProjectionExpression: 'task_id, user_id, #status, concurrency_slot, continuation, microvm_start, session_id, repo',
       ExpressionAttributeNames: { '#status': 'status' },
       ExclusiveStartKey: lastKey,
     }));
@@ -78,13 +79,24 @@ export async function handler(): Promise<void> {
       const active = ACTIVE_STATUSES.some(status => status === task.status);
       if (!task.concurrency_slot && !active) continue;
       const owned = reservations.get(task.user_id) ?? { held: 0, ambiguous: false, terminal: [] };
+      let parked = false;
+      if (task.status === 'AWAITING_APPROVAL' && task.concurrency_slot?.state === 'released'
+        && row.continuation?.state === 'PARKED') {
+        const saved = await ddb.send(new GetCommand({
+          TableName: TASK_TABLE, Key: workerLeaseKey(task.task_id), ConsistentRead: true,
+        }));
+        parked = saved.Item?.lease_state === 'PARKED'
+          && saved.Item.lease_attempt_id === row.microvm_start?.clientToken
+          && saved.Item.lease_user_id === task.user_id && saved.Item.lease_repo === (row.repo ?? '')
+          && saved.Item.lease_microvm_id === row.session_id;
+      }
       if (task.concurrency_slot?.state === 'held') {
         // Terminal tasks still own their seat until release commits. Repair
         // that total first, then release terminal reservations through the
         // same transaction used by the orchestrator and stranded-task cleaner.
         owned.held++;
         if (TERMINAL_STATUSES.some(status => status === task.status)) owned.terminal.push(task.task_id);
-      } else if (active || (task.concurrency_slot && task.concurrency_slot.state !== 'released')) {
+      } else if ((active && !parked) || (task.concurrency_slot && task.concurrency_slot.state !== 'released')) {
         // Older active tasks and not-yet-admitted SUBMITTED tasks cannot be
         // distinguished by status. Wait for them to settle; never guess a count.
         owned.ambiguous = true;

@@ -50,7 +50,7 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 0
   },
   "max_budget_usd": {
     "min": 0.01,
@@ -116,14 +116,20 @@ JSON at TypeScript compile time via `resolveJsonModule`.
 - **`approval_gate_cap.default`** — value applied when a blueprint omits
   the field. 50 is the design-decision default (see
   `docs/design/CEDAR_HITL_GATES.md` decision #13).
-- **`approval_timeout_s.min`** — floor for `approval_timeout_s` (§6
-  decision #6). 30 seconds — below this, humans cannot realistically
-  respond to an approval prompt.
-- **`approval_timeout_s.max`** — absolute ceiling for `approval_timeout_s`
-  before the `maxLifetime - 300` clip is applied (§7.3). 3600 seconds
-  (1 hour).
+- **`approval_timeout_s.min`** — minimum positive explicit timeout: 30 seconds.
+  Zero is separately accepted and means no automatic deadline.
+- **`approval_timeout_s.max`** — maximum positive explicit timeout: 3600 seconds
+  (1 hour). MicroVM continuation keeps this human deadline separate from a
+  worker's service lifetime.
 - **`approval_timeout_s.default`** — value applied when the submit payload
-  omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
+  omits `approval_timeout_s`: zero, or no automatic expiry. Pending rows have
+  no DynamoDB TTL; task closure starts retention cleanup. Positive rule
+  annotations still apply, with the shortest positive deadline winning.
+- **`microvm_continuation`** — the versioned checkpoint contract. It pins object
+  prefixes, maximum archive sizes and the SDK version verified for conversation
+  and exact budget recovery. A saved approval can release its worker after one
+  hour when sleep is enabled, or five minutes before the worker's eight-hour
+  limit when sleep is disabled. The request remains open in both cases.
 - **`microvm_sleep_after_s`** — per-task delay before sleeping during a
   pending human approval: whole seconds from 0 to 3600, default 600
   (10 minutes). Zero disables sleep. Task creation persists the resolved
@@ -151,8 +157,8 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   platform env arrives through an authenticated v2 manifest and task payload instead; the values land in
   `os.environ`, which makes an unrecognised key an env-injection attempt. The
   consumer (`agent/src/server.py`) therefore **rejects** any `platform_config`
-  carrying a key that is not in this map. Values are non-secret identifiers
-  (table/bucket names, secret ARNs, role ARNs) only.
+  carrying a key that is not in this map. Values are non-secret configuration:
+  resource identifiers and the Linear vault enabled flag/workload name.
 - **`microvm_platform_config.required`** — the subset without which a task cannot
   run (task + event tables, GitHub secret ARN, session role ARN). A `/run` hook
   whose `platform_config` misses or blanks any of these is rejected with HTTP 400.

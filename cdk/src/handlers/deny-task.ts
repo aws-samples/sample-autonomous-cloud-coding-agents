@@ -156,7 +156,8 @@ export async function handler(
               UpdateExpression:
                 'SET #status = :denied, decided_at = :now, deny_reason = :reason',
               ConditionExpression:
-                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
+                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
+                  + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
               ExpressionAttributeNames: { '#status': 'status' },
               ExpressionAttributeValues: {
                 ':denied': 'DENIED',
@@ -164,6 +165,7 @@ export async function handler(
                 ':now': nowIso,
                 ':reason': sanitizedReason,
                 ':caller': callerUserId,
+                ':epoch': nowEpoch,
               },
             },
           },

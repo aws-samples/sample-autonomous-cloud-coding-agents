@@ -46,7 +46,7 @@ export type LifecycleApproval =
     readonly created_at: string;
     readonly timeout_s: number;
     readonly createdAtMs: number;
-    readonly deadlineMs: number;
+    readonly deadlineMs: number | null;
   }
   | { readonly kind: 'none' | 'missing' | 'invalid' }
   | { readonly kind: 'unavailable'; readonly errorType: string };
@@ -100,7 +100,7 @@ function validIntent(value: unknown): value is MicrovmLifecycleIntent {
     && (item.request_id === null || nonblank(item.request_id))
     && (item.action === 'suspend' || item.action === 'resume')
     && timestamp(item.requested_at_ms) && (item.deadline_ms === null || timestamp(item.deadline_ms))
-    && (item.action !== 'suspend' || (item.request_id !== null && item.deadline_ms !== null));
+    && (item.action !== 'suspend' || item.request_id !== null);
 }
 
 function parseApproval(row: Record<string, unknown> | undefined, taskId: string, userId: string, requestId: string): LifecycleApproval {
@@ -108,11 +108,12 @@ function parseApproval(row: Record<string, unknown> | undefined, taskId: string,
   if (row.task_id !== taskId || row.user_id !== userId || row.request_id !== requestId
     || !APPROVAL_STATUSES.includes(row.status as ApprovalStatus)
     || typeof row.created_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(row.created_at)
-    || !timestamp(row.timeout_s) || row.timeout_s === 0) return { kind: 'invalid' };
+    || !timestamp(row.timeout_s)) return { kind: 'invalid' };
   const createdAtMs = Date.parse(row.created_at);
   const canonical = row.created_at.includes('.') ? row.created_at : row.created_at.replace('Z', '.000Z');
-  const deadlineMs = createdAtMs + row.timeout_s * 1000;
-  if (!timestamp(createdAtMs) || new Date(createdAtMs).toISOString() !== canonical || !timestamp(deadlineMs)) return { kind: 'invalid' };
+  const deadlineMs = row.timeout_s === 0 ? null : createdAtMs + row.timeout_s * 1000;
+  if (!timestamp(createdAtMs) || new Date(createdAtMs).toISOString() !== canonical
+    || (deadlineMs !== null && !timestamp(deadlineMs))) return { kind: 'invalid' };
   return {
     kind: 'present',
     status: row.status as ApprovalStatus,
@@ -197,7 +198,8 @@ function eligible(snapshot: MicrovmLifecycleSnapshot, action: LifecycleAction, n
   return supportsMicrovmLifecycle(snapshot.handle)
     && snapshot.status === TaskStatus.AWAITING_APPROVAL && snapshot.requestId !== null
     && snapshot.approval.kind === 'present' && snapshot.approval.status === 'PENDING'
-    && nowMs >= snapshot.approval.createdAtMs && nowMs < snapshot.approval.deadlineMs
+    && nowMs >= snapshot.approval.createdAtMs
+    && (snapshot.approval.deadlineMs === null || nowMs < snapshot.approval.deadlineMs)
     && !(intentMatchesGate(snapshot) && (snapshot.intent?.action === 'resume'
       || snapshot.intent?.deadline_ms !== snapshot.approval.deadlineMs));
 }

@@ -20,6 +20,10 @@
 // --- Mocks ---
 const mockDdbSend = jest.fn();
 const mockRelease = jest.fn();
+const mockCloseApprovals = jest.fn();
+jest.mock('../../src/handlers/shared/close-task-approvals', () => ({
+  closeTaskApprovals: (...args: unknown[]) => mockCloseApprovals(...args),
+}));
 jest.mock('../../src/handlers/shared/task-concurrency', () => ({
   releaseTaskSlot: (...args: unknown[]) => mockRelease(...args),
 }));
@@ -263,7 +267,7 @@ describe('reconcile-stranded-tasks', () => {
     // (``event_type`` == their own names) never reach it. This test
     // pins the extra ``agent_milestone`` / ``approval_stranded`` emit
     // that makes the stranded case visible on §11.3 widgets.
-    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    const ancient = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
     primeResponses([
       { Items: [] }, // SUBMITTED
       { Items: [] }, // HYDRATING

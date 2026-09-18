@@ -259,6 +259,8 @@ export interface TaskApiProps {
  * - DELETE /api-keys/{key_id}    → deleteApiKey (Cognito)
  */
 export class TaskApi extends Construct {
+  private readonly approvalDecisionFunctions: lambda.NodejsFunction[] = [];
+
   /**
    * The API Gateway REST API.
    */
@@ -998,6 +1000,10 @@ export class TaskApi extends Construct {
         ...commonEnv,
         TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
       };
+      const decisionBundling = {
+        ...commonBundling,
+        externalModules: commonBundling.externalModules?.filter(name => name !== '@aws-sdk/client-lambda'),
+      };
 
       // ApproveTaskFn — POST /tasks/{task_id}/approve
       const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
@@ -1006,7 +1012,7 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: commonBundling,
+        bundling: decisionBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
@@ -1021,13 +1027,14 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: commonBundling,
+        bundling: decisionBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
+      this.approvalDecisionFunctions.push(approveTaskFn, denyTaskFn);
       if (props.lambdaMicrovmImageArn) {
         for (const decisionFn of [approveTaskFn, denyTaskFn]) {
           decisionFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1447,5 +1454,19 @@ export class TaskApi extends Construct {
         reason: 'AmazonAPIGatewayPushToCloudWatchLogs is the AWS-recommended managed policy for API Gateway CloudWatch logging',
       },
     ], true);
+  }
+
+  /** Wire after the coordinator and bucket exist, avoiding a construction-order cycle. */
+  public enableMicrovmContinuations(
+    bucketName: string, coordinatorArn: string, concurrencyTable: dynamodb.ITable,
+  ): void {
+    for (const fn of this.approvalDecisionFunctions) {
+      fn.addEnvironment('CONTINUATION_BUCKET_NAME', bucketName);
+      fn.addEnvironment('ORCHESTRATOR_FUNCTION_ARN', coordinatorArn);
+      concurrencyTable.grantReadWriteData(fn);
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
+      }));
+    }
   }
 }

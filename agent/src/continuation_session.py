@@ -1,7 +1,7 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
 
-"""Acknowledged SDK conversation checkpoints for future worker continuation.
+"""Acknowledged SDK conversation checkpoints for worker continuation.
 
 This module does not release workers or change approval deadlines. A caller must
 hold the lifecycle barrier, checkpoint the workspace, and conditionally publish
@@ -24,11 +24,13 @@ from uuid import UUID
 
 from claude_agent_sdk import SessionStore
 
+from shared_constants import SHARED_CONSTANTS
+
 if TYPE_CHECKING:
     from claude_agent_sdk import SessionKey, SessionStoreEntry
 
 CHECKPOINT_VERSION = 1
-MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024
+MAX_CHECKPOINT_BYTES = SHARED_CONSTANTS["microvm_continuation"]["max_conversation_bytes"]
 MAX_CHECKPOINT_ENTRIES = 50_000
 MAX_ID_LENGTH = 128
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
@@ -92,7 +94,8 @@ class CheckpointIdentity:
 
     @property
     def prefix(self) -> str:
-        return f"continuations/{self.task_id}/{self.attempt_id}/{self.request_id}/"
+        prefix = SHARED_CONSTANTS["microvm_continuation"]["object_key_prefix"]
+        return f"{prefix}{self.task_id}/{self.attempt_id}/{self.request_id}/"
 
 
 @dataclass(frozen=True)

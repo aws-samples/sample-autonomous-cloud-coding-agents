@@ -502,7 +502,7 @@ class _ProgressWriter:
             self._put_event_best_effort(event_type, metadata)
             return
         try:
-            with lifecycle.activity():
+            with lifecycle.activity(checkpoint_safe=True):
                 acknowledged = False
                 try:
                     acknowledged = self._put_event_best_effort(event_type, metadata)
@@ -511,7 +511,12 @@ class _ProgressWriter:
                         lifecycle.progress_write_failed()
         except LifecycleUnavailable:
             lifecycle.progress_write_failed()
-            print("[progress] lifecycle barrier closed — event not acknowledged", flush=True)
+            print(
+                f"[progress] lifecycle barrier closed — event not acknowledged "
+                f"task_id={self._task_id} event_type={event_type} "
+                f"phase={lifecycle.diagnostic_snapshot()['phase']}",
+                flush=True,
+            )
 
     def _put_event_best_effort(self, event_type: str, metadata: dict) -> bool:
         """Write a single progress event item to DynamoDB.

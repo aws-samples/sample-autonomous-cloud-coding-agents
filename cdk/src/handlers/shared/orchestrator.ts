@@ -21,6 +21,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { evaluateAgentHeartbeat } from './agent-heartbeat';
+import { closeTaskApprovals } from './close-task-approvals';
 import type { SessionControlOptions, SessionHandle } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
@@ -70,6 +71,10 @@ export interface PollState {
   readonly microvmFailureMessage?: string;
   /** A stale execution must clean up only its own handle, leaving the replacement alone. */
   readonly microvmOwnershipLost?: boolean;
+  /** The worker is stopped and its reservation released; the approval remains open. */
+  readonly microvmParked?: boolean;
+  readonly microvmRetiring?: boolean;
+  readonly microvmRetirementError?: string;
 }
 
 /**
@@ -962,6 +967,7 @@ export async function finalizeTask(
     // The marker makes this safe after a crash, an event failure, or a competing
     // cleaner. A still-active task keeps its reservation.
     await releaseTaskSlot(taskId, userId);
+    await closeTaskApprovals(taskId, userId);
   }
 }
 

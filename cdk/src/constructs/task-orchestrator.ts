@@ -52,12 +52,17 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
+import type { ContinuationBucket } from './continuation-bucket';
 import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
 
 /**
  * Properties for TaskOrchestrator construct.
  */
 export interface TaskOrchestratorProps {
+  /** Close outstanding requests and apply retention after task completion. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+  /** Versioned durable checkpoints and launch inputs for MicroVM worker replacement. */
+  readonly continuationBucket?: ContinuationBucket;
   /**
    * The DynamoDB task table.
    */
@@ -224,8 +229,8 @@ export interface TaskOrchestratorProps {
    * only ever fire for a hand-edited Lambda environment — never because a
    * deploy-time gate and a per-repo `compute_type` disagreed.
    *
-   * Optional as a prop only so isolated construct tests can omit it. Four of the
-   * thirteen `platform_config` keys come from env vars the orchestrator already
+   * Optional as a prop only so isolated construct tests can omit it. Some
+   * `platform_config` keys come from env vars the orchestrator already
    * carries for its own work (`TASK_TABLE_NAME`, `TASK_EVENTS_TABLE_NAME`,
    * `GITHUB_TOKEN_SECRET_ARN`) or from the stack-wide `SolutionUaAspect`
    * (`AWS_SDK_UA_APP_ID`), so they are deliberately NOT repeated here.
@@ -444,6 +449,7 @@ export class TaskOrchestrator extends Construct {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
+        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         RUNTIME_ARN: props.runtimeArn,
@@ -488,6 +494,9 @@ export class TaskOrchestrator extends Construct {
           // unconditional; there is no "no ingress configured" state to express.
           MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
           MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
+          ...(props.continuationBucket && {
+            CONTINUATION_BUCKET_NAME: props.continuationBucket.bucket.bucketName,
+          }),
           TASK_APPROVALS_TABLE_NAME: props.microvmConfig.approvalsTable.tableName,
           MICROVM_APPROVAL_SUSPEND_ENABLED: String(props.microvmConfig.approvalSuspendEnabled ?? false),
           MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME: suspendParameter!.parameterName,
@@ -518,6 +527,7 @@ export class TaskOrchestrator extends Construct {
 
     // DynamoDB grants
     props.taskTable.grantReadWriteData(this.fn);
+    props.taskApprovalsTable?.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
@@ -533,6 +543,7 @@ export class TaskOrchestrator extends Construct {
     // launch references for replay. Workers cannot read the launch records.
     if (props.ecsPayloadBucket) grantCoordinatorPayloads(props.ecsPayloadBucket, this.fn);
     if (props.microvmConfig) grantCoordinatorPayloads(props.microvmConfig.payloadBucket, this.fn);
+    props.continuationBucket?.grantCoordinator(this.fn);
 
     // Durable execution managed policy
     this.fn.role!.addManagedPolicy(
@@ -686,14 +697,8 @@ export class TaskOrchestrator extends Construct {
         resources: [suspendParameter!.parameterArn],
       }));
 
-      // `lambda:PassNetworkConnector` supports NO resource-level permissions
-      // (the Service Authorization Reference lists no resource type for it), so
-      // `Resource: '*'` is mandatory — a narrowed ARN would simply never match
-      // and RunMicrovm would fail with AccessDenied. It is also why the ADR
-      // notes the action is needed "even for the default connectors": the
-      // AWS-managed connectors live in the `aws` account, outside any ARN we
-      // could enumerate. The action only permits *passing* a connector to a
-      // service, not creating or reading one.
+      // PassNetworkConnector has no resource-level authorization support. Its
+      // wildcard permits attaching connectors, not creating or inspecting them.
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'MicrovmPassNetworkConnector',
         actions: ['lambda:PassNetworkConnector'],

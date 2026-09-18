@@ -30,14 +30,10 @@
  * in `orchestrator.ts` via the `agent_heartbeat_at` timeout path — this
  * reconciler targets `SUBMITTED`, `HYDRATING`, and `AWAITING_APPROVAL`.
  *
- * AWAITING_APPROVAL reconciliation (§13.6):
- *   If the agent container evicts mid-approval, neither the poll loop
- *   nor the resume transaction ever fires; the task sits in
- *   AWAITING_APPROVAL indefinitely while its approval row's TTL
- *   eventually reaps the row. This reconciler sweeps any
- *   AWAITING_APPROVAL task whose age exceeds the stranded timeout and
- *   transitions it to FAILED with a specific reason so the user sees
- *   a clear failure rather than a silent hang.
+ * AWAITING_APPROVAL tasks with a saved MicroVM checkpoint belong to the
+ * continuation manager and can remain open across workers. For other tasks,
+ * the backstop allows the full eight-hour worker lifetime plus cleanup grace;
+ * it detects a lost worker/coordinator, not an unanswered human deadline.
  */
 
 import {
@@ -47,6 +43,7 @@ import {
   PutItemCommand,
 } from '@aws-sdk/client-dynamodb';
 import { ulid } from 'ulid';
+import { closeTaskApprovals } from './shared/close-task-approvals';
 import { logger } from './shared/logger';
 import { releaseTaskSlot } from './shared/task-concurrency';
 import { makeClient } from './shared/ua';
@@ -65,17 +62,12 @@ const STRANDED_TIMEOUT_SECONDS = Number(
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 
 /**
- * Separate (longer) timeout for AWAITING_APPROVAL tasks — approvals
- * legitimately sit for an hour (the §7.3 ceiling for per-task approval
- * timeout). A task's approval row carries its own per-row TTL; this
- * sweep is the backstop for the case where the row gets reaped by DDB
- * TTL but the TaskTable row never gets unstuck.
- *
- * Default: 7200s (2 hours) — double the §7.3 1-hour ceiling + an hour
- * grace so this reconciler never races the happy-path timer.
+ * Backstop for approval waits without a recoverable checkpoint: the worker's
+ * eight-hour lifetime plus 30 minutes for its coordinator to close the task.
+ * Approval records do not expire merely because their worker stopped.
  */
 const APPROVAL_STRANDED_TIMEOUT_SECONDS = Number(
-  process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS ?? '7200',
+  process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS ?? '30600',
 );
 
 interface StrandedCandidate {
@@ -123,6 +115,9 @@ async function findStrandedCandidates(
       const userId = item.user_id?.S;
       const createdAt = item.created_at?.S;
       if (!taskId || !userId || !createdAt) continue;
+      const continuationState = item.continuation?.M?.state?.S;
+      if (status === 'AWAITING_APPROVAL'
+        && ['READY', 'FENCED', 'PARKED', 'STARTING', 'RESTORING'].includes(continuationState ?? '')) continue;
 
       // Age by time-in-CURRENT-status, not creation time (#441). A task
       // that waited in the admission queue longer than the stranded
@@ -180,14 +175,23 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
       UpdateExpression:
         'SET #s = :failed, updated_at = :now, completed_at = :now, '
         + 'error_message = :err, status_created_at = :sca',
-      ConditionExpression: '#s = :expected',
-      ExpressionAttributeNames: { '#s': 'status' },
+      ConditionExpression: '#s = :expected' + (task.status === 'AWAITING_APPROVAL'
+        ? ' AND (attribute_not_exists(continuation.#state) OR NOT (continuation.#state IN (:ready, :fenced, :parked, :starting, :restoring)))'
+        : ''),
+      ExpressionAttributeNames: { '#s': 'status', ...(task.status === 'AWAITING_APPROVAL' && { '#state': 'state' }) },
       ExpressionAttributeValues: {
         ':failed': { S: 'FAILED' },
         ':expected': { S: task.status },
         ':now': { S: now },
         ':err': { S: errorMessage },
         ':sca': { S: `FAILED#${now}` },
+        ...(task.status === 'AWAITING_APPROVAL' && {
+          ':ready': { S: 'READY' },
+          ':fenced': { S: 'FENCED' },
+          ':parked': { S: 'PARKED' },
+          ':starting': { S: 'STARTING' },
+          ':restoring': { S: 'RESTORING' },
+        }),
       },
     }));
   } catch (err: unknown) {
@@ -290,6 +294,7 @@ async function failStrandedTask(task: StrandedCandidate): Promise<boolean> {
   // If this fails after the terminal write, the capacity reconciler retries
   // release for terminal held reservations on its next sweep.
   await releaseTaskSlot(task.task_id, task.user_id);
+  await closeTaskApprovals(task.task_id, task.user_id);
 
   return true;
 }

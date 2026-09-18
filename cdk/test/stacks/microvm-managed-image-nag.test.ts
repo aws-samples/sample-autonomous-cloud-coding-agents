@@ -19,10 +19,14 @@
 
 import { ManagedPolicy, PolicyStatement, Role } from 'aws-cdk-lib/aws-iam';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../../src/constructs/agentcore-azs';
+import { OrchestrationReconciler } from '../../src/constructs/orchestration-reconciler';
 import { TaskOrchestrator } from '../../src/constructs/task-orchestrator';
 import { buildApp } from '../../src/main';
 
-describe.each([false, true])('managed MicroVM image security checks (extra wildcard: %s)', extraWildcard => {
+const configurations = [false, true].flatMap(enableLinearIdentityVault =>
+  [false, true].map(extraWildcard => ({ enableLinearIdentityVault, extraWildcard })));
+
+describe.each(configurations)('managed MicroVM security checks (vault=$enableLinearIdentityVault, extra wildcard=$extraWildcard)', ({ enableLinearIdentityVault, extraWildcard }) => {
   let errors: string[];
 
   beforeAll(async () => {
@@ -32,6 +36,8 @@ describe.each([false, true])('managed MicroVM image security checks (extra wildc
       appProps: {
         context: {
           compute_type: 'lambda-microvm',
+          enableLinearIdentityVault,
+          enableToolGateway: true,
           microvm_base_image_arn: 'arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1',
           microvm_base_image_version: '1',
           microvm_artifact_sha256: 'a'.repeat(64),
@@ -40,8 +46,27 @@ describe.each([false, true])('managed MicroVM image security checks (extra wildc
       },
     });
     const stack = app.node.findChild('backgroundagent-dev');
+    const orchestrator = stack.node.findChild('TaskOrchestrator') as TaskOrchestrator;
+    if (enableLinearIdentityVault) {
+      const reconciler = stack.node.findChild('OrchestrationReconciler') as OrchestrationReconciler;
+      // Bundled policies can overflow at different boundaries from unit-test
+      // policies. Exercise the documented exceptions on both owning roles.
+      for (const role of [orchestrator.fn.role, reconciler.fn.role]) {
+        new ManagedPolicy(role as Role, 'OverflowPolicyVaultProbe', {
+          statements: [
+            new PolicyStatement({
+              actions: ['bedrock-agentcore:GetResourceOauth2Token'],
+              resources: ['arn:aws:bedrock-agentcore:us-west-2:123456789012:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*'],
+            }),
+            new PolicyStatement({
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: ['arn:aws:secretsmanager:us-west-2:123456789012:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*'],
+            }),
+          ],
+        });
+      }
+    }
     if (extraWildcard) {
-      const orchestrator = stack.node.findChild('TaskOrchestrator') as TaskOrchestrator;
       // Model a future overflow document without relying on the policy
       // splitter placing an extra statement in a particular document.
       new ManagedPolicy(orchestrator.fn.role as Role, 'OverflowPolicy999', {

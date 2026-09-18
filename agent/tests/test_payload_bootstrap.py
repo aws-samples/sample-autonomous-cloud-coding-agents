@@ -122,6 +122,26 @@ def test_authenticates_manifest_before_downloading_and_preserves_cross_region_se
     assert transport["build"].call_args.args[0].proxies == {}
 
 
+@pytest.mark.parametrize("mutation", ["none", "url", "payload", "traversal"])
+def test_replacement_reference_binds_task_attempt_and_exact_object(transport, mutation):
+    reference = transport["reference"]
+    reference["attempt_id"] = "replacement-2"
+    reference["payload_url"] = signed_url("task-1/replacement-2")
+    transport["payload"]["attempt_id"] = "replacement-2"
+    if mutation == "url":
+        reference["payload_url"] = signed_url("task-1/replacement-other")
+    elif mutation == "payload":
+        transport["payload"]["attempt_id"] = "replacement-other"
+    elif mutation == "traversal":
+        reference["attempt_id"] = "../replacement-other"
+    if mutation == "none":
+        payload, _ = bootstrap.resolve_payload_reference(reference, "lambda-microvm")
+        assert payload["attempt_id"] == "replacement-2"
+    else:
+        with pytest.raises(ValueError):
+            bootstrap.resolve_payload_reference(reference, "lambda-microvm")
+
+
 def test_large_registry_bundle_reaches_run_mapper_and_mcp_loader(transport, monkeypatch, tmp_path):
     """Resolve real v2 bytes and carry the bundle from /run into the real local loader."""
     from registry.loader import apply_resolved_assets

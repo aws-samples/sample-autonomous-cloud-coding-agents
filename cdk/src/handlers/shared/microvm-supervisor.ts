@@ -71,6 +71,8 @@ export interface MicrovmSupervisorInput {
   readonly previous?: MicrovmSupervisorState;
   readonly pollIntervalMs: number;
   readonly suspendEnabled: boolean;
+  /** Optional shared cycle deadline when retirement precedes ordinary supervision. */
+  readonly abortSignal?: AbortSignal;
   /** Implementations must respect the supplied signal; event failure is best-effort. */
   readonly emitEvent?: (eventType: string, metadata: Record<string, unknown>, options: SessionControlOptions) => Promise<void>;
 }
@@ -129,7 +131,10 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     anomalyReported: false,
     nextPollInMs: input.pollIntervalMs,
   };
-  const options: SessionControlOptions = { abortSignal: AbortSignal.timeout(MICROVM_SUPERVISOR_CYCLE_MS) };
+  const cycleTimeout = AbortSignal.timeout(MICROVM_SUPERVISOR_CYCLE_MS);
+  const options: SessionControlOptions = {
+    abortSignal: input.abortSignal ? AbortSignal.any([input.abortSignal, cycleTimeout]) : cycleTimeout,
+  };
   let snapshot: MicrovmLifecycleSnapshot | undefined;
   let substrate: SessionStatus | undefined;
   let stage = 'task-read';
@@ -263,7 +268,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
       && (!intentMatchesGate(snapshot!) || snapshot!.intent?.action !== 'resume');
     const awaitingDecisionConsumption = snapshot.status === TaskStatus.AWAITING_APPROVAL
       && (snapshot.approval.kind !== 'present' || snapshot.approval.status !== 'PENDING'
-        || Date.now() >= snapshot.approval.deadlineMs);
+        || (snapshot.approval.deadlineMs !== null && Date.now() >= snapshot.approval.deadlineMs));
     if (observed === 'RUNNING') {
       // AWS RUNNING does not prove the guest consumed a decided/expired gate.
       // Recovery ends after fresh guest liveness, or an intentional early wake

@@ -111,10 +111,14 @@ describe('AgentSessionRole construct', () => {
     // Main task read/update grants plus three supporting tables.
     expect(ddbStatements).toHaveLength(5);
     for (const s of ddbStatements) {
-      expect(s.Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
-        .toEqual(['${aws:PrincipalTag/task_id}']);
-      expect(s.Condition.Null['dynamodb:LeadingKeys']).toBe('false');
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      const readonlyTask = actions.includes('dynamodb:GetItem') && !actions.includes('dynamodb:PutItem');
+      expect(s.Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
+        .toEqual(readonlyTask
+          ? ['${aws:PrincipalTag/task_id}', 'worker-lease#${aws:PrincipalTag/task_id}']
+          : ['${aws:PrincipalTag/task_id}']);
+      expect(s.Condition.Null['dynamodb:LeadingKeys']).toBe('false');
+      if (readonlyTask) expect(actions).not.toContain('dynamodb:UpdateItem');
       // Scan must NOT be granted — it ignores leading-keys.
       expect(actions).not.toContain('dynamodb:Scan');
     }

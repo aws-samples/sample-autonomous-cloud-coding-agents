@@ -27,14 +27,13 @@ def _integer(value: Any) -> bool:
     )
 
 
-def _record(park: ApprovalPark) -> tuple[ApprovalRecord, int]:
+def _record(park: ApprovalPark) -> tuple[ApprovalRecord, int | None]:
     record = park.record
     if (
         record is None
         or not record.user_id
         or not isinstance(record.repo, str)
         or not _integer(record.timeout_s)
-        or record.timeout_s <= 0
     ):
         raise LifecycleUnavailable("Original approval identity is unavailable")
     try:
@@ -43,12 +42,15 @@ def _record(park: ApprovalPark) -> tuple[ApprovalRecord, int]:
         raise LifecycleUnavailable("Original approval timestamp is invalid") from exc
     if created.strftime("%Y-%m-%dT%H:%M:%SZ") != record.created_at:
         raise LifecycleUnavailable("Original approval timestamp is not canonical")
-    return record, int(created.timestamp() * 1000) + record.timeout_s * 1000
+    deadline_ms = (
+        int(created.timestamp() * 1000) + record.timeout_s * 1000 if record.timeout_s > 0 else None
+    )
+    return record, deadline_ms
 
 
 def _read(
     park: ApprovalPark, action: Literal["suspend", "resume"]
-) -> tuple[Any, str, str, dict, int]:
+) -> tuple[Any, str, str, dict, int | None]:
     """Read current task/gate identity strongly; absence and mismatch fail closed."""
     from boto3.dynamodb.types import TypeDeserializer
     from botocore.config import Config
@@ -98,7 +100,8 @@ def _read(
         or intent.get("request_id") != park.request_id
         or intent.get("action") != action
         or not _integer(intent.get("requested_at_ms"))
-        or not _integer(intent.get("deadline_ms"))
+        or "deadline_ms" not in intent
+        or (intent["deadline_ms"] is not None and not _integer(intent["deadline_ms"]))
         or intent["deadline_ms"] != deadline_ms
     ):
         raise LifecycleUnavailable("Coordinator lifecycle intent does not match this approval")
