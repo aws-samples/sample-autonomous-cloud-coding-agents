@@ -63,7 +63,8 @@ import {
   renderJiraFinishedPointer,
   type JiraFinishedPointerKind,
 } from './shared/jira-status-comment';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
+import { closeLinearApprovalThread, saveLinearApprovalThread } from './shared/linear-approval-thread';
+import { postIdentifiedComment, EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -1158,11 +1159,20 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   if (isApprovalNotification(effectiveType)) {
     const notification = await loadApprovalNotification(ddb, task, effectiveType, event.metadata ?? {}, 'linear');
     if (!notification) return;
-    const result = await postIssueComment(
-      { linearWorkspaceId: workspaceId, registryTableName },
+    const thread = {
+      workspaceId,
       issueId,
-      approvalNotificationMarkdown(notification),
-    );
+      taskId: task.task_id,
+      requestId: notification.requestId,
+      userId: notification.userId,
+    };
+    const ctx = { linearWorkspaceId: workspaceId, registryTableName };
+    const body = approvalNotificationMarkdown(notification);
+    const result = effectiveType === 'approval_requested'
+      ? await postIdentifiedComment(ctx, {
+        id: await saveLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread), issueId, body,
+      })
+      : await postIssueComment(ctx, issueId, body);
     if (!result.ok) {
       logger.warn('Linear approval notification failed', {
         event: 'fanout.linear.approval_post_failed',
@@ -1172,6 +1182,9 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       });
       if (result.retryable) throw new Error('Retryable Linear approval notification failure');
       return;
+    }
+    if (effectiveType !== 'approval_requested') {
+      await closeLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread);
     }
     await markApprovalNotificationDelivered(ddb, notification);
     logger.info('Linear approval notification delivered', {

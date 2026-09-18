@@ -100,6 +100,7 @@ jest.mock('../../src/handlers/slack-notify', () => {
 // + GraphQL path. Default ``{ ok: true }`` so a test that forgets to
 // script the mock still drives the happy path (postIssueComment returns
 // a LinearPostResult, not a bare boolean).
+const mockPostIdentifiedComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 // Standalone comment-triggered iterations get a threaded reply to
 // the human's @bgagent comment, on top of the metrics comment. replyToComment
@@ -110,6 +111,7 @@ const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 // rather than posting a fresh replyToComment.
 const mockUpsertThreadedReply: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIdentifiedComment: (...args: unknown[]) => mockPostIdentifiedComment(...args),
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
@@ -780,6 +782,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // task short-circuits inside the dispatcher (channel_source ===
     // 'api' / 'github'). Pre-existing tests don't assert on it.
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
   });
 
   test('first terminal event POSTs a new comment and persists the comment_id to TaskTable', async () => {
@@ -1474,6 +1477,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
     mockReplyToComment.mockReset().mockResolvedValue('reply-id');
     mockUpsertThreadedReply.mockReset().mockResolvedValue('reply-id');
     // Slack/GitHub mocks aren't asserted here but leaving them
@@ -1525,7 +1529,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
         },
       };
     });
-    if (fails) mockPostIssueComment.mockResolvedValueOnce({ ok: false, retryable: true });
+    if (fails) mockPostIdentifiedComment.mockResolvedValueOnce({ ok: false, retryable: true });
     const outcome = await routeEvent({
       task_id: 't-lin',
       event_id: 'approval-event',
@@ -1533,17 +1537,17 @@ describe('fanout-task-events: Linear dispatcher', () => {
       timestamp: '2026-09-16T12:00:00Z',
       metadata: { milestone: 'approval_requested', request_id: 'g1' },
     });
-    expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
-    expect(mockPostIssueComment.mock.calls[0][2]).toContain('bgagent approve t-lin g1 --scope this_call');
+    expect(mockPostIdentifiedComment).toHaveBeenCalledTimes(1);
+    expect(mockPostIdentifiedComment.mock.calls[0][1].body).toContain('bgagent approve t-lin g1 --scope this_call');
     expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
     const updates = mockDdbSend.mock.calls.filter(([c]) => c._type === 'Update');
     if (fails) {
       expect(outcome.infraRejections).toHaveLength(1);
-      expect(updates).toHaveLength(0);
+      expect(updates).toHaveLength(1);
     } else {
       expect(outcome.infraRejections).toHaveLength(0);
-      expect(updates).toHaveLength(1);
-      expect(updates[0][0].input.ExpressionAttributeNames).toEqual({ '#marker': 'notified_linear_approval_requested' });
+      expect(updates).toHaveLength(2);
+      expect(updates[1][0].input.ExpressionAttributeNames).toEqual({ '#marker': 'notified_linear_approval_requested' });
     }
   });
 
@@ -2296,6 +2300,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     mockLoadRepoConfig.mockReset().mockResolvedValue(null);
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
   });
 
   const mockGet = (item: unknown) => {

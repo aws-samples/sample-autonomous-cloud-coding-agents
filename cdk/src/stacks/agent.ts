@@ -1575,6 +1575,9 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      lambdaMicrovmImageArn: lambdaMicrovm?.imageArn,
+      continuationBucketName: continuationBucket?.bucket.bucketName,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
