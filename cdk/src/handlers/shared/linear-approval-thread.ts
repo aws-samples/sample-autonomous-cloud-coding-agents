@@ -31,13 +31,13 @@ export interface LinearApprovalThread {
   readonly userId: string;
 }
 
-/** Stable UUID makes a retry after a lost Linear response target the same comment. */
+/** Linear requires UUIDv4; stable hash-derived bits make comment retries address the same ID. */
 export function linearApprovalCommentId(thread: LinearApprovalThread): string {
   const hash = createHash('sha256').update(JSON.stringify([
     'abca-linear-approval-v1', thread.workspaceId, thread.issueId, thread.taskId, thread.requestId,
   ])).digest('hex');
   const groups = hash.match(/^(.{8})(.{4}).(.{3}).(.{3})(.{12})/)!;
-  return `${groups[1]}-${groups[2]}-5${groups[3]}-a${groups[4]}-${groups[5]}`;
+  return `${groups[1]}-${groups[2]}-4${groups[3]}-a${groups[4]}-${groups[5]}`;
 }
 
 function threadKey(workspaceId: string, commentId: string): { task_id: string; request_id: string } {
