@@ -294,7 +294,9 @@ class TestCheckpoint:
 
 LOCAL_ENDPOINT = os.environ.get("ABCA_DDB_LOCAL_ENDPOINT", "")
 if os.environ.get("CI") == "true" and not LOCAL_ENDPOINT:
-    raise RuntimeError("CI requires ABCA_DDB_LOCAL_ENDPOINT; checkpoint transaction tests must not skip")
+    raise RuntimeError(
+        "CI requires ABCA_DDB_LOCAL_ENDPOINT; checkpoint transaction tests must not skip"
+    )
 
 
 @pytest.fixture

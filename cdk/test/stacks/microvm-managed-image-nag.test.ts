@@ -36,6 +36,7 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
       appProps: {
         context: {
           compute_type: 'lambda-microvm',
+          microvm_nested_stack: true,
           enableLinearIdentityVault,
           enableToolGateway: true,
           microvm_base_image_arn: 'arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1',

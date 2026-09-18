@@ -345,6 +345,30 @@ class TestCaptureFailures:
 
 
 class TestRestoreBoundaries:
+    def test_partial_publish_is_removed_after_a_move_failure(self, repo, monkeypatch):
+        archive, receipt = saved(repo)
+        remove_original(repo)
+        real_rename = os.rename
+        moved = []
+
+        def fail_second_move(source, target):
+            if Path(target).parent == repo:
+                if moved:
+                    raise OSError("injected publish failure")
+                moved.append(Path(target))
+            return real_rename(source, target)
+
+        monkeypatch.setattr(workspace.os, "rename", fail_second_move)
+        with pytest.raises(workspace.WorkspaceCheckpointError) as error:
+            workspace.restore_workspace(archive, repo, IDENTITY, expected_sha256=receipt.sha256)
+        assert error.value.code == "restore_failed"
+        assert isinstance(error.value.__cause__, OSError)
+        assert "injected publish failure" in str(error.value.__cause__)
+        assert len(moved) == 1
+        assert not repo.exists()
+        assert not list(repo.parent.glob(".workspace-restore-*"))
+        assert archive.exists()
+
     def test_existing_workspace_is_never_cleared(self, repo):
         archive, receipt = saved(repo)
         before = inventory(repo)
