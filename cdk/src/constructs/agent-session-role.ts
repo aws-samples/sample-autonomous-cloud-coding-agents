@@ -31,7 +31,7 @@ import constants from '../../../contracts/constants.json';
  * Task reporting may update only the attributes written by task_state.py.
  * Keep whole-row replacement/deletion and coordinator metadata out of this
  * grant. DynamoDB evaluates each transaction item using its item action, so
- * approval UpdateItem operations receive the same restriction.
+ * approval-related TaskTable updates receive the same restriction.
  *
  * This protects writes, not reads: agents may read their complete task record.
  * The JSON list is also checked against actual Python writer requests in tests.
@@ -80,6 +80,22 @@ export function grantAgentTaskTableAccess(
   }));
 }
 
+/** Workers observe decisions; only the control plane writes approval records. */
+export function grantAgentApprovalReadAccess(
+  table: dynamodb.ITable, grantee: iam.IGrantable, taskScoped: boolean,
+): void {
+  grantee.grantPrincipal.addToPrincipalPolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
+    resources: [table.tableArn],
+    ...(taskScoped ? {
+      conditions: {
+        'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'] },
+        'Null': { 'dynamodb:LeadingKeys': 'false' },
+      },
+    } : {}),
+  }));
+}
+
 /** S3 key prefixes the agent writes/reads, scoped per tenant. */
 const TRACE_KEY_PREFIX = 'traces';
 const ATTACHMENT_KEY_PREFIX = 'attachments';
@@ -104,11 +120,13 @@ export interface AgentSessionRoleProps {
    * capacity reservations belong to the coordinator.
    */
   readonly taskTable: dynamodb.ITable;
+  /** Decisions and notification markers are control-plane-owned. */
+  readonly approvalsTable: dynamodb.ITable;
 
   /**
-   * Supporting task-scoped tables (events, approvals, nudges), all partitioned
-   * by `task_id`. Do not include taskTable here: that would bypass its write
-   * restriction. The SessionRole receives item-level access constrained by a
+   * Supporting task-scoped tables (events, nudges), all partitioned
+   * by `task_id`. Do not include taskTable or approvalsTable here: that would
+   * bypass their write restrictions. The SessionRole receives access constrained by a
    * `dynamodb:LeadingKeys` condition on `aws:PrincipalTag/task_id`, so a
    * session can only touch its own task's rows. Order is irrelevant.
    */
@@ -202,8 +220,9 @@ export class AgentSessionRole extends Construct {
         'AgentSessionRole requires at least one assuming role (the compute role[s] that mint scoped credentials)',
       );
     }
-    if (props.taskScopedTables.some((table) => table.tableArn === props.taskTable.tableArn)) {
-      throw new Error('taskTable must not appear in taskScopedTables; it requires restricted writes');
+    if (props.taskScopedTables.some((table) =>
+      [props.taskTable.tableArn, props.approvalsTable.tableArn].includes(table.tableArn))) {
+      throw new Error('taskTable and approvalsTable must not appear in taskScopedTables; they require restricted writes');
     }
 
     const [firstAssumingRole] = props.assumingRoles;
@@ -223,6 +242,7 @@ export class AgentSessionRole extends Construct {
     });
 
     grantAgentTaskTableAccess(props.taskTable, this.role, true);
+    grantAgentApprovalReadAccess(props.approvalsTable, this.role, true);
 
     // --- Supporting tables: item access gated by task_id leading-key ---
     // One statement per table keeps the resource ARNs explicit. The condition

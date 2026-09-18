@@ -756,7 +756,8 @@ describe('EcsAgentCluster construct', () => {
           }),
         ],
         taskTable,
-        taskScopedTables: [taskEventsTable, taskApprovalsTable],
+        approvalsTable: taskApprovalsTable,
+        taskScopedTables: [taskEventsTable],
         traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
         attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
       });
@@ -848,7 +849,7 @@ describe('EcsAgentCluster approval wiring without a SessionRole', () => {
   let template: Template;
   beforeAll(() => { template = createStack({ withApprovals: true }).template; });
 
-  test('grants only the approval item operations used by the agent', () => {
+  test('grants approval reads even without a SessionRole, never direct writes', () => {
     const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
       .find(id => id.startsWith('TaskApprovalsTable'));
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
@@ -858,7 +859,7 @@ describe('EcsAgentCluster approval wiring without a SessionRole', () => {
     );
     expect(grants).toEqual([expect.objectContaining({
       Effect: 'Allow',
-      Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      Action: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
     })]);
   });
 
@@ -867,6 +868,13 @@ describe('EcsAgentCluster approval wiring without a SessionRole', () => {
       context: { ecsExtraBuildEnv: { TASK_APPROVALS_TABLE_NAME: '' } },
     }), 'S').node;
     expect(() => resolveEcsTaskSizing(node)).toThrow('TASK_APPROVALS_TABLE_NAME');
+  });
+
+  test('rejects a build setting that would replace the approval service', () => {
+    const node = new Stack(new App({
+      context: { ecsExtraBuildEnv: { APPROVAL_REQUESTS_API_URL: 'https://other.example' } },
+    }), 'S').node;
+    expect(() => resolveEcsTaskSizing(node)).toThrow('APPROVAL_REQUESTS_API_URL');
   });
 });
 

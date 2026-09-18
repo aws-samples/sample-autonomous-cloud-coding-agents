@@ -29,7 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
-import { AgentSessionRole, grantAgentTaskTableAccess } from './agent-session-role';
+import { AgentSessionRole, grantAgentTaskTableAccess, grantAgentApprovalReadAccess } from './agent-session-role';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
@@ -99,6 +99,7 @@ export interface EcsAgentClusterProps {
    * retains the direct grants.
    */
   readonly agentSessionRole?: AgentSessionRole;
+  readonly approvalRequestsApiUrl?: string;
 
   /**
    * AgentCore Memory for cross-task learning. When provided, the ECS task role
@@ -239,6 +240,7 @@ export interface EcsTaskSizing {
  * override key should fail synth, not disable an isolation control.
  */
 const RESERVED_BUILD_ENV_KEYS = new Set([
+  'APPROVAL_REQUESTS_API_URL',
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
   'TASK_APPROVALS_TABLE_NAME',
@@ -399,6 +401,7 @@ export class EcsAgentCluster extends Construct {
       ...(props.taskApprovalsTable && {
         TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
       }),
+      ...(props.approvalRequestsApiUrl && { APPROVAL_REQUESTS_API_URL: props.approvalRequestsApiUrl }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
@@ -510,12 +513,7 @@ export class EcsAgentCluster extends Construct {
     } else {
       grantAgentTaskTableAccess(props.taskTable, taskRole, false);
       props.taskEventsTable.grantReadWriteData(taskRole);
-      props.taskApprovalsTable?.grant(
-        taskRole,
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-      );
+      if (props.taskApprovalsTable) grantAgentApprovalReadAccess(props.taskApprovalsTable, taskRole, false);
     }
     // Capacity counters are coordinator-owned. The agent never accesses them.
 

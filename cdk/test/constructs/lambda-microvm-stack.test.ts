@@ -61,6 +61,9 @@ describe.each(IMAGE_INPUTS)('LambdaMicrovmStack %s', (mode, imageInputs) => {
       taskTable: new dynamodb.Table(stack, 'Tasks', {
         partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
       }),
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
       taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
       attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
