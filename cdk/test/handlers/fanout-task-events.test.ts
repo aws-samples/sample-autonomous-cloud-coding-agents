@@ -1551,6 +1551,29 @@ describe('fanout-task-events: Linear dispatcher', () => {
     }
   });
 
+  test('starts binding retention when a closed-request notice cannot be delivered', async () => {
+    mockDdbSend.mockImplementation(async command => {
+      if (command._type !== 'Get') return {};
+      return {
+        Item: command.input.TableName === 'Approvals'
+          ? { user_id: 'u-1', status: 'CANCELLED', cancellation_reason: 'Cancelled by owner' }
+          : { ...TASK_RECORD_LINEAR, status: 'CANCELLED', awaiting_approval_request_id: 'g1' },
+      };
+    });
+    mockPostIssueComment.mockResolvedValueOnce({ ok: false, retryable: false });
+    await routeEvent({
+      task_id: 't-lin',
+      event_id: 'closed',
+      event_type: 'approval_cancelled',
+      timestamp: '2026-09-18T12:00:00Z',
+      metadata: { request_id: 'g1' },
+    });
+    const updates = mockDdbSend.mock.calls.filter(([c]) => c._type === 'Update');
+    expect(updates).toHaveLength(1);
+    expect(updates[0][0].input.Key.task_id).toContain('LINEAR_COMMENT#');
+    expect(updates[0][0].input.UpdateExpression).toContain('if_not_exists(#ttl');
+  });
+
   test('task_completed posts ✅ comment with cost / turns / duration on linked Linear issue', async () => {
     mockGet(TASK_RECORD_LINEAR);
 

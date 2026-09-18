@@ -1168,6 +1168,10 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     };
     const ctx = { linearWorkspaceId: workspaceId, registryTableName };
     const body = approvalNotificationMarkdown(notification);
+    if (effectiveType !== 'approval_requested') {
+      // Retention follows the saved closure even if Linear cannot receive its notice.
+      await closeLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread);
+    }
     const result = effectiveType === 'approval_requested'
       ? await postIdentifiedComment(ctx, {
         id: await saveLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread), issueId, body,
@@ -1182,9 +1186,6 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       });
       if (result.retryable) throw new Error('Retryable Linear approval notification failure');
       return;
-    }
-    if (effectiveType !== 'approval_requested') {
-      await closeLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread);
     }
     await markApprovalNotificationDelivered(ddb, notification);
     logger.info('Linear approval notification delivered', {
