@@ -408,6 +408,36 @@ export async function postIssueComment(
   return graphqlRequest(token, COMMENT_CREATE_MUTATION, { issueId, body });
 }
 
+/**
+ * Read consent from Linear itself. Webhook authentication alone is insufficient:
+ * legacy worker credentials can read the OAuth bundle containing the HMAC key.
+ * Lookup failures must retry, never become permission to use webhook fields.
+ */
+export async function readLinearApprovalComment(
+  ctx: LinearFeedbackContext,
+  id: string,
+): Promise<{
+  id: string;
+  body: string;
+  user?: { id: string } | null;
+  botActor?: { id: string } | null;
+  issue: { id: string };
+  parent?: { id: string } | null;
+} | null> {
+  const token = await resolveToken(ctx);
+  if (!token) throw new Error('Linear approval verification token unavailable');
+  const result = await graphqlData(token, `
+    query VerifyApprovalComment($id: String!) {
+      organization { id }
+      comment(id: $id) { id body user { id } botActor { id } issue { id } parent { id } }
+    }`, { id });
+  if (!result.ok) throw new Error('Linear approval comment verification unavailable');
+  if ((result.value.organization as { id?: string } | undefined)?.id !== ctx.linearWorkspaceId) {
+    throw new Error('Linear approval verification workspace mismatch');
+  }
+  return result.value.comment as Awaited<ReturnType<typeof readLinearApprovalComment>> ?? null;
+}
+
 /** Retry-safe posting for approval prompts and acknowledgements. */
 export async function postIdentifiedComment(
   ctx: LinearFeedbackContext,

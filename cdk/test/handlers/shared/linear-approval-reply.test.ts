@@ -24,10 +24,12 @@ import { linearApprovalCommentId } from '../../../src/handlers/shared/linear-app
 const mockApprove = jest.fn();
 const mockDeny = jest.fn();
 const mockPost = jest.fn();
+const mockReadComment = jest.fn();
 jest.mock('../../../src/handlers/approve-task.js', () => ({ recordApprovalForUser: mockApprove }), { virtual: true });
 jest.mock('../../../src/handlers/deny-task.js', () => ({ recordDenialForUser: mockDeny }), { virtual: true });
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   postIdentifiedComment: (...args: unknown[]) => mockPost(...args),
+  readLinearApprovalComment: (...args: unknown[]) => mockReadComment(...args),
 }));
 const thread = { workspaceId: 'ws', issueId: 'issue', taskId: 'task', requestId: 'gate', userId: 'owner' };
 const root = linearApprovalCommentId(thread);
@@ -61,6 +63,13 @@ beforeEach(() => {
   };
   lookupUser.mockResolvedValue('owner');
   mockPost.mockResolvedValue({ ok: true });
+  mockReadComment.mockResolvedValue({
+    id: 'reply',
+    body: 'approve',
+    user: { id: 'real-author' },
+    issue: { id: 'issue' },
+    parent: { id: root },
+  });
   mockApprove.mockResolvedValue({ statusCode: 202 });
   mockDeny.mockResolvedValue({ statusCode: 202 });
   send.mockImplementation(async command => {
@@ -73,6 +82,9 @@ beforeEach(() => {
 });
 
 test.each(['approve', 'deny'])('records %s for the bound request and mapped owner', async body => {
+  mockReadComment.mockResolvedValue({
+    id: 'reply', body, user: { id: 'real-author' }, issue: { id: 'issue' }, parent: { id: root },
+  });
   expect(await handleLinearApprovalReply({ ...event, data: { ...event.data, body } }, deps)).toBe(true);
   const record = body === 'approve' ? mockApprove : mockDeny;
   expect(record).toHaveBeenCalledWith({
@@ -82,6 +94,31 @@ test.each(['approve', 'deny'])('records %s for the bound request and mapped owne
     body: JSON.stringify({ request_id: 'gate', decision: body }),
   });
   expect(mockPost).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ issueId: 'issue', parentId: root }));
+  expect(lookupUser).toHaveBeenCalledWith('ws', 'real-author');
+});
+
+test.each([
+  null,
+  { body: 'deny' },
+  { user: null },
+  { botActor: { id: 'app' } },
+  { issue: { id: 'elsewhere' } },
+  { parent: { id: 'other-gate' } },
+  { id: 'other-reply' },
+])('rejects forged, edited, deleted or bot consent: %j', async change => {
+  const original = await mockReadComment();
+  mockReadComment.mockResolvedValue(change === null ? null : { ...original, ...change });
+  expect(await handleLinearApprovalReply(event, deps)).toBe(true);
+  expect(mockApprove).not.toHaveBeenCalled();
+  expect(mockDeny).not.toHaveBeenCalled();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+test('retries unavailable verification without trusting the webhook actor', async () => {
+  mockReadComment.mockRejectedValue(new Error('Linear unavailable'));
+  await expect(handleLinearApprovalReply(event, deps)).rejects.toThrow('Linear unavailable');
+  expect(lookupUser).not.toHaveBeenCalled();
+  expect(mockApprove).not.toHaveBeenCalled();
 });
 
 test.each(['update', 'remove'])('ignores %s events', async action => {
