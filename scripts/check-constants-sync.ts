@@ -406,6 +406,11 @@ function main(): number {
     invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port, duration within 1–28800 seconds and ABCA_MICROVM_ marker name');
   }
   const continuation = json.microvm_continuation;
+  const sdkPins = [...fs.readFileSync(path.join(REPO_ROOT, 'agent/pyproject.toml'), 'utf8')
+    .matchAll(/^\s*"claude-agent-sdk==([^"]+)"/gm)];
+  if (sdkPins.length !== 1 || sdkPins[0][1] !== continuation?.verified_sdk_version) {
+    invariantErrors.push('claude-agent-sdk pin must match microvm_continuation.verified_sdk_version; verify checkpoint compatibility before upgrading both');
+  }
   if (!continuation || !Number.isSafeInteger(continuation.version) || continuation.version <= 0
     || continuation.lease_key_prefix !== 'worker-lease#' || continuation.object_key_prefix !== 'continuations/'
     || !Number.isSafeInteger(continuation.max_manifest_bytes) || continuation.max_manifest_bytes <= 0

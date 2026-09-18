@@ -825,6 +825,13 @@ async def _handle_require_approval(
                 f"Continuation checkpoint unavailable task_id={task_id} request_id={request_id} "
                 f"code={getattr(exc, 'code', 'checkpoint_failed')} error_type={type(exc).__name__}",
             )
+            _try_progress(
+                progress,
+                "write_agent_milestone",
+                milestone="continuation_unavailable",
+                details="Could not save recovery state. This worker must remain available "
+                f"until the decision is received. code={getattr(exc, 'code', 'checkpoint_failed')}",
+            )
     try:
         outcome = await _poll_for_decision(
             task_id=task_id,
