@@ -24,6 +24,13 @@ describe('structural synthesis profiles', () => {
   const profiles = synthesisProfiles();
   const matrix = profiles.filter(p => /-(none|managed|external)$/.test(p.name));
 
+  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)('measures the complete matrix in %s provisioning mode', mode => {
+    const selected = synthesisProfiles(mode);
+    expect(selected.map(profile => profile.name)).toEqual(profiles.map(profile => profile.name));
+    expect(selected.every(profile => profile.context.blueprintProvisioning === mode)).toBe(true);
+    expect(selected.map(profile => profile.expectedError)).toEqual(profiles.map(profile => profile.expectedError));
+  });
+
   test('enumerates the real 40-cell product without duplicate names', () => {
     expect(matrix).toHaveLength(40);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);

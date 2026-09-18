@@ -71,6 +71,37 @@ The command defaults to **`mise run build`** / **`mise run lint`**. A repo that 
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
+### Blueprint controller handoff
+
+`blueprintProvisioning` selects the repository-provisioning lifecycle. Its default is `legacy`, so upgrading source alone does not switch an existing installation to a different custom-resource provider.
+
+| Context value | Behavior |
+|---|---|
+| `legacy` | Existing `AwsCustomResource` writes, including synthesis-time timestamps. |
+| `prepare` | Preserve the legacy resource identity, retain it on removal/replacement, and replace Create/Update with read-only `DescribeTable` calls. Delete has no callback. Repository configuration is frozen during this stage. |
+| `adopt` | Replace the retained legacy resource with the new controller. Reconcile declared settings while preserving onboarding time and undeclared overrides. Retain the new resource and disable deletion, including during rollback. |
+| `managed` | Keep the new provider and resource identity; enable normal configuration updates and soft deletion with a TTL 30 days after the delete callback executes. |
+
+For **existing deployments**, use separate, verified deployments of `prepare`, then `adopt`, then `managed`. Pass the selected value through the normal CDK context mechanism, for example `-c blueprintProvisioning=prepare`. Keep the same stack identity, complete Blueprint set, repository names, table and configuration throughout the handoff. Inventory the deployed resource IDs and repository rows, establish backups/recovery, and rehearse on a populated disposable deployment first. Review the complete change set, including image/version changes and unrelated resources.
+
+After `prepare`, verify the deployed legacy resource has both retention policies, read-only Create/Update calls and no Delete property. After `adopt`, verify each row remains active, its original onboarding time and CLI overrides survive, stale TTLs are absent, and its new ownership record is present. Only then enable `managed`. Going directly to `managed` cannot adopt an existing unowned row; the transaction fails instead of overwriting it.
+
+Adoption disables deletion so a failed cutover can return to the prepared template without tombstoning repository rows. Recovery must use the **prepared** template, whose Create callback is also inert; returning to the original legacy template can run its unconditional `PutItem`. Once managed deletion is enabled, first deploy `adopt` again before any recovery that removes the new resource. Do not roll an existing managed deployment directly back to an old legacy checkout. Reconcile retained resources explicitly after a failed operation.
+
+For **new installations with no existing repository rows**, `managed` can be selected directly. Existing CLI-onboarded rows require adoption too. A different active Blueprint cannot claim the same row; repository/table changes get a new physical identity, and deletion of the old identity is scoped to its old row. Supported backend selection and transition rules still apply separately.
+
+The provider and its private DynamoDB ownership ledger live in one shared nested stack. Transactions update repository configuration, ownership and a request receipt together. A duplicate request, even after later updates, returns its original result without replaying a configuration write. An older owner's Delete cannot remove a row claimed by a newer owner. Coordination metadata is separate from RepoTable because older CLI versions rewrite repository rows. The ledger has PITR; normal group teardown deletes it only after dependent custom resources finish. Do not manually delete or restore it independently of those resources. A failed Create can leave external state if the CloudFormation response is lost; inspect the ledger and repository before retrying or retiring that stack identity.
+
+Managed writes preserve `onboarded_at`, timestamp actual operations, clear stale TTLs on activation, and set only declared overrides. Empty asset lists explicitly remove `mcp_servers`, `cedar_policy_modules`, and `skills`; other omitted overrides remain available to the CLI. An unchanged template no longer writes repository configuration on every deployment.
+
+To measure a lifecycle stage across the structural profiles without deploying, first let build and test tasks finish. The current repository-root image context includes generated test artifacts; concurrent writes can change image hashes even when the Git source fingerprint is unchanged.
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
+```
+
+This verifies template structure and repeatability. Live transactions, rollback and deployed-state reconciliation still need a rehearsal before production migration.
+
 ### Customizing the agent image
 
 The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.

@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import { parseArgs } from 'node:util';
 import bedrockPackage from '@aws-cdk/aws-bedrock-alpha/package.json';
 import cdkPackage from 'aws-cdk-lib/package.json';
+import { blueprintProvisioningMode } from '../blueprints/configuration';
 import { buildApp } from '../main';
 import { inspectAssembly } from './assembly';
 import { auditProfile, ProfileAudit, WorkerResult } from './audit';
@@ -40,6 +41,7 @@ const HELP = `Usage: mise //cdk:census -- [options]
   --profile NAME                 Select a profile (repeatable; default: all)
   --output DIRECTORY             New output directory (default: a temporary directory)
   --check-stability              Synthesize twice in independent processes; fail on differences
+  --blueprint-provisioning MODE  Select legacy, prepare, adopt, or managed for every profile
   --max-resources NUMBER          Per-template ceiling (default: 500; may only tighten)
   --max-template-bytes NUMBER     Per-template ceiling (default: 800000)
   --help                         Show this help
@@ -89,6 +91,8 @@ function runWorker(profile: SynthesisProfile, directory: string): WorkerResult {
   const child = spawnSync(process.execPath, [
     '-r', require.resolve('ts-node/register/transpile-only'), __filename,
     '--worker', '--profile', profile.name, '--output', directory,
+    ...(typeof profile.context.blueprintProvisioning === 'string'
+      ? ['--blueprint-provisioning', profile.context.blueprintProvisioning] : []),
   ], {
     cwd: path.resolve(__dirname, '../..'),
     env: synthesisEnvironment(process.env),
@@ -117,13 +121,15 @@ async function main(): Promise<void> {
       'profile': { type: 'string', multiple: true },
       'output': { type: 'string' },
       'check-stability': { type: 'boolean' },
+      'blueprint-provisioning': { type: 'string' },
       'max-resources': { type: 'string' },
       'max-template-bytes': { type: 'string' },
       'worker': { type: 'boolean' },
     },
   });
   if (values.help) { process.stdout.write(HELP); return; }
-  const all = synthesisProfiles();
+  const all = synthesisProfiles(values['blueprint-provisioning'] === undefined
+    ? undefined : blueprintProvisioningMode(values['blueprint-provisioning']));
   if (values.list) {
     for (const profile of all) process.stdout.write(`${profile.name}${profile.expectedError ? ' [expected rejection]' : ''}\n`);
     return;

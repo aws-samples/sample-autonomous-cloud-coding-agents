@@ -45,6 +45,17 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  test('managed blueprints allow the shared AWS provider to be created later by logging', () => {
+    const app = new App({ context: { blueprintProvisioning: 'managed' } });
+    const managed = Template.fromStack(new AgentStack(app, 'ManagedBlueprintStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    managed.resourceCountIs('Custom::BlueprintRepoConfig', 1);
+    expect(Object.keys(managed.findResources('Custom::AWS'))).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('BlueprintRepoConfig'),
+    ]));
+  });
+
   test('binds every input guardrail consumer to the explicitly mapped version', () => {
     const versions = Object.values(template.findResources('AWS::Bedrock::GuardrailVersion'));
     expect(versions).toHaveLength(1);

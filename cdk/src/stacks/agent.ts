@@ -299,21 +299,6 @@ export class AgentStack extends Stack {
       }));
     }
 
-    // The AwsCustomResource singleton Lambda used by Blueprint constructs
-    NagSuppressions.addResourceSuppressionsByPath(this, [
-      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
-      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,
-    ], [
-      {
-        id: 'AwsSolutions-IAM4',
-        reason: 'AwsCustomResource singleton Lambda uses AWS managed AWSLambdaBasicExecutionRole — required by CDK custom-resources framework',
-      },
-      {
-        id: 'AwsSolutions-L1',
-        reason: 'AwsCustomResource singleton Lambda runtime is managed by the CDK custom-resources framework',
-      },
-    ]);
-
     // Log groups (created before runtime so we can reference the name in env vars)
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
       logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
@@ -2182,6 +2167,23 @@ export class AgentStack extends Stack {
         }),
       ]),
     });
+
+    // The shared AwsCustomResource provider may first be created by DNS/model
+    // logging when Blueprints use their own provider. Apply suppressions after
+    // those consumers exist, independent of the Blueprint provisioning mode.
+    NagSuppressions.addResourceSuppressionsByPath(this, [
+      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
+      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,
+    ], [
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'AwsCustomResource singleton Lambda uses AWS managed AWSLambdaBasicExecutionRole — required by CDK custom-resources framework',
+      },
+      {
+        id: 'AwsSolutions-L1',
+        reason: 'AwsCustomResource singleton Lambda runtime is managed by the CDK custom-resources framework',
+      },
+    ]);
 
     NagSuppressions.addResourceSuppressions(invocationLogging, [
       {

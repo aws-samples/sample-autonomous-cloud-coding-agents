@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import type { BlueprintProvisioningMode } from '../blueprints/configuration';
+
 export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
 export type Image = 'none' | 'managed' | 'external';
 export type Context = Readonly<Record<string, string | boolean | readonly string[]>>;
@@ -74,7 +76,7 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
 }
 
 /** One profile product shared by the CLI and its coverage assertions. */
-export function synthesisProfiles(): readonly SynthesisProfile[] {
+export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode): readonly SynthesisProfile[] {
   const profiles: SynthesisProfile[] = [];
   for (const compute of ['agentcore', 'ecs', 'lambda-microvm'] as const) {
     for (const gateway of [false, true]) {
@@ -102,7 +104,9 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  return profiles;
+  return provisioningMode === undefined ? profiles : profiles.map(candidate => ({
+    ...candidate, context: { ...candidate.context, blueprintProvisioning: provisioningMode },
+  }));
 }
 
 /** Never inherit deploy context, credentials, NODE_OPTIONS, or blueprint overrides. */
