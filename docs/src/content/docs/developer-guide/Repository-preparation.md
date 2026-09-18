@@ -94,7 +94,7 @@ The provider and its private DynamoDB ownership ledger live in one shared nested
 
 Managed writes preserve `onboarded_at`, timestamp actual operations, clear stale TTLs on activation, and set only declared overrides. Empty asset lists explicitly remove `mcp_servers`, `cedar_policy_modules`, and `skills`; other omitted overrides remain available to the CLI. An unchanged template no longer writes repository configuration on every deployment.
 
-To measure a lifecycle stage across the structural profiles without deploying, first let build and test tasks finish. The current repository-root image context includes generated test artifacts; concurrent writes can change image hashes even when the Git source fingerprint is unchanged.
+To measure a lifecycle stage across the structural profiles without deploying:
 
 ```bash
 MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
@@ -105,6 +105,10 @@ This verifies template structure and repeatability. Live transactions, rollback 
 ### Customizing the agent image
 
 The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
+
+AgentCore and ECS use the repository root as their build context. The root `.dockerignore` admits the Dockerfile, its runtime `COPY` inputs and the ignore file itself. When adding a new runtime input, update both the Dockerfile and this allowlist; the CDK image-context tests check that copied files remain included and that generated files cannot change the image hash. Runtime code, prompts, policies, workflows, contracts, dependency locks and managed settings still invalidate the image when edited.
+
+The first deployment after narrowing the context publishes a new image asset hash. Treat that as an ordinary image release and verify it separately before moving resource ownership.
 
 ### Writing Cedar policies for the repo
 
