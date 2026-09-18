@@ -13,6 +13,24 @@ import approval_requests as broker
 import task_state
 
 
+def pending_request() -> task_state.ApprovalRow:
+    return {
+        "task_id": "task",
+        "request_id": "request",
+        "tool_name": "Bash",
+        "tool_input_preview": '{"command":"git push"}',
+        "tool_input_sha256": "a" * 64,
+        "reason": "Protected operation",
+        "severity": "high",
+        "matching_rule_ids": ["protected"],
+        "status": "PENDING",
+        "created_at": "2026-09-18T00:00:00Z",
+        "timeout_s": 0,
+        "user_id": "owner",
+        "repo": "owner/repo",
+    }
+
+
 @pytest.fixture
 def transport(monkeypatch):
     monkeypatch.setenv(broker.API_ENV, "https://fixture.execute-api.us-east-1.amazonaws.com/v1/")
@@ -57,7 +75,7 @@ def test_rejects_untrusted_endpoints_before_signing(transport, monkeypatch, url)
 def test_new_writers_use_service_instead_of_direct_dynamodb(transport, monkeypatch):
     direct = MagicMock()
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
-    task_state.transact_write_approval_request("task", "request", {"status": "PENDING"})
+    task_state.transact_write_approval_request("task", "request", pending_request())
     assert task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
     assert transport.call_count == 2
     direct.assert_not_called()
@@ -75,7 +93,7 @@ def test_uncertain_service_write_does_not_fall_back_to_direct_dynamodb(transport
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
     transport.side_effect = TimeoutError("reply lost")
     with pytest.raises(TimeoutError):
-        task_state.transact_write_approval_request("task", "request", {"status": "PENDING"})
+        task_state.transact_write_approval_request("task", "request", pending_request())
     direct.assert_not_called()
 
 
