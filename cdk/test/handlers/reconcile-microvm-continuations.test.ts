@@ -109,6 +109,60 @@ test('terminal scan rows cannot stop a task whose current record is active', asy
   expect(mockClose).not.toHaveBeenCalled();
 });
 
+test('closes a retired source using its preserved lease token after microvm_start was removed', async () => {
+  task.status = 'CANCELLED';
+  delete task.microvm_start;
+  mockSend.mockImplementation(async command => {
+    if (command.constructor.name === 'UpdateCommand') return {};
+    return {
+      Item: command.input.Key.task_id === 'task' ? task : {
+        lease_user_id: 'user', lease_attempt_id: 'retired-launch-token', lease_state: 'PARKED',
+      },
+    };
+  });
+  await reconcileMicrovmContinuation(task);
+  const closed = mockSend.mock.calls.find(([command]) => command.constructor.name === 'UpdateCommand')![0].input;
+  expect(closed.ExpressionAttributeValues[':attempt']).toBe('retired-launch-token');
+  expect(closed.ExpressionAttributeValues[':observedState']).toBe('PARKED');
+  expect(mockRelease).toHaveBeenCalledWith('task', 'user');
+  expect(mockDelete).toHaveBeenCalled();
+});
+
+test('releases a cancelled replacement admitted before any start receipt or AWS call', async () => {
+  task.status = 'CANCELLED';
+  delete task.microvm_start;
+  task.continuation = { state: 'STARTING', attempt_id: 'new-token' };
+  task.concurrency_slot = { state: 'held', attempt_id: 'new-token' };
+  mockSend.mockImplementation(async command => {
+    if (command.constructor.name === 'UpdateCommand') return {};
+    return {
+      Item: command.input.Key.task_id === 'task' ? task : {
+        lease_user_id: 'user', lease_attempt_id: 'new-token', lease_state: 'ACTIVE',
+      },
+    };
+  });
+  await reconcileMicrovmContinuation(task);
+  const closed = mockSend.mock.calls.find(([command]) => command.constructor.name === 'UpdateCommand')![0].input;
+  expect(closed.ExpressionAttributeValues[':attempt']).toBe('new-token');
+  expect(closed.ExpressionAttributeValues[':observedState']).toBe('ACTIVE');
+  expect(closed.ConditionExpression).toContain('attribute_not_exists(lease_microvm_id)');
+  expect(mockRelease).toHaveBeenCalledWith('task', 'user');
+  expect(mockDelete).toHaveBeenCalled();
+});
+
+test('does not release a live lease just because the start record is absent', async () => {
+  task.status = 'CANCELLED';
+  delete task.microvm_start;
+  mockSend.mockImplementation(async command => ({
+    Item: command.input.Key.task_id === 'task' ? task : {
+      lease_user_id: 'user', lease_attempt_id: 'live-token', lease_state: 'ACTIVE',
+    },
+  }));
+  await expect(reconcileMicrovmContinuation(task)).rejects.toThrow('LEASE_INVALID');
+  expect(mockRelease).not.toHaveBeenCalled();
+  expect(mockDelete).not.toHaveBeenCalled();
+});
+
 test('invalid unknown-start timestamp cannot be treated as proof of shutdown', async () => {
   task.status = 'FAILED';
   task.microvm_start.createdAt = 'invalid';
