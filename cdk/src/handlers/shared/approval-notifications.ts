@@ -112,6 +112,10 @@ export async function loadApprovalNotification(
     if (Number.isFinite(deadline) && Number(row.timeout_s) > 0) {
       lines.push(`Decision deadline: ${new Date(deadline).toISOString()}`);
     }
+    if (channel === 'linear') {
+      lines.push('Reply approve or deny to this comment while signed in as the task owner.',
+        'Approval allows this action once. You can also use the CLI below.');
+    }
     // Never interpolate untrusted text into suggested shell commands.
     if ([task.task_id, requestId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
       lines.push('Respond using the CLI while signed in as the task owner:',

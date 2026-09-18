@@ -26,6 +26,7 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { handleLinearApprovalReply } from './shared/linear-approval-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import {
   deleteComment,
@@ -1817,6 +1818,15 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
  * a clean no-op (no failure comment — comments are conversational).
  */
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
+  if (process.env.TASK_APPROVALS_TABLE_NAME && WORKSPACE_REGISTRY_TABLE
+    && await handleLinearApprovalReply(payload, {
+      ddb,
+      approvalsTable: process.env.TASK_APPROVALS_TABLE_NAME,
+      taskTable: process.env.TASK_TABLE_NAME!,
+      registryTable: WORKSPACE_REGISTRY_TABLE,
+      lookupUser: lookupPlatformUser,
+    })) return;
+
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
     return;
@@ -3271,6 +3281,7 @@ async function lookupPlatformUser(workspaceId: string, userId: string): Promise<
   const result = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { linear_identity: key },
+    ConsistentRead: true,
   }));
   if (!result.Item || result.Item.status === 'pending') return null;
   return (result.Item.platform_user_id as string) ?? null;

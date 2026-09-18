@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -77,6 +77,11 @@ export interface LinearIntegrationProps {
 
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
+
+  /** Enables task-owner decisions from replies to Linear approval comments. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+  readonly lambdaMicrovmImageArn?: string;
+  readonly continuationBucketName?: string;
 
   /** Monthly user/team budget configuration and spend table. */
   readonly budgetTable?: dynamodb.ITable;
@@ -244,6 +249,12 @@ export class LinearIntegration extends Construct {
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
+    if (props.taskApprovalsTable) {
+      createTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
+    }
+    if (props.continuationBucketName) {
+      createTaskEnv.CONTINUATION_BUCKET_NAME = props.continuationBucketName;
+    }
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
     }
@@ -303,7 +314,7 @@ export class LinearIntegration extends Construct {
         }),
         // Throttle the seed-time root release to the free concurrency
         // budget (see prop doc). Only wired when both tables are present.
-        ...(props.orchestrationTable && props.userConcurrencyTable && {
+        ...((props.orchestrationTable || props.continuationBucketName) && props.userConcurrencyTable && {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
@@ -388,6 +399,20 @@ export class LinearIntegration extends Construct {
     }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    props.taskApprovalsTable?.grantReadWriteData(webhookProcessorFn);
+    if (props.taskApprovalsTable && props.lambdaMicrovmImageArn) {
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+        resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+      }));
+    }
+    if (props.continuationBucketName && props.orchestratorFunctionArn) {
+      props.userConcurrencyTable?.grantReadWriteData(webhookProcessorFn);
+      const coordinatorArn = Fn.join(':', Array.from({ length: 7 }, (_, i) => Fn.select(i, Fn.split(':', props.orchestratorFunctionArn!))));
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
+      }));
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }
