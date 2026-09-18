@@ -69,25 +69,35 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
 export async function handler(
   event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
 ): Promise<APIGatewayProxyResult> {
+  return recordApprovalForUser({
+    userId: extractUserId(event), taskId: event.pathParameters?.task_id, body: event.body,
+  }, context);
+}
+
+/** Shared decision path. Callers must authenticate and map the platform user first. */
+export async function recordApprovalForUser(
+  input: { userId: string | null; taskId?: string; body?: string | null },
+  context?: Pick<Context, 'getRemainingTimeInMillis'>,
+): Promise<APIGatewayProxyResult> {
   const invocationStartedMs = Date.now();
   const requestId = ulid();
 
   try {
     // 1. Auth
-    const callerUserId = extractUserId(event);
+    const callerUserId = input.userId;
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
     // 2. Path + body
-    const taskId = event.pathParameters?.task_id;
+    const taskId = input.taskId;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
     let parsed: ApprovalRequest | null = null;
     try {
-      parsed = event.body ? JSON.parse(event.body) as ApprovalRequest : null;
+      parsed = input.body ? JSON.parse(input.body) as ApprovalRequest : null;
     } catch {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
