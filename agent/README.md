@@ -309,57 +309,47 @@ Rejections are structured so they are readable in the MicroVM log group: `400 MI
 
 `/suspend` and `/resume` are served by `microvm_http.py` and declared in managed images with 30-second service timeouts and a shared non-secret protocol marker. Pause requires an active original approval gate, matching coordinator intent, drained activity and an acknowledged checkpoint; wake renews credentials and atomically rechecks the original task/gate before allowing coding. Each handler has a 20-second total budget. `/validate` rejects a supplied incompatible image marker without contacting AWS. The coordinator checks the actual launched image version and persists support on that worker; missing support disables new suspension. See [image capability verification](../docs/verification/645-p3-image-capability.md) and [completed P3 verification](../docs/verification/645-p3-nested-stack.md).
 
-#### Conversation continuation checkpoints (P3 prerequisite)
+#### Conversation and workspace continuation
 
-`src/continuation_session.py` provides an SDK conversation store and versioned S3
-checkpoint adapter. It is **not yet connected to the production runner or worker
-release** and does not change approval deadlines. The existing MicroVM lifecycle
-checkpoint resumes the same frozen process; this new component supports future
-continuation after that process is gone.
+`src/continuation_runtime.py` connects the SDK conversation store, workspace
+archive, approval hooks and production runner. Before retiring a worker, it
+saves the exact pending tool call, conversation, workflow state, cumulative usage
+and workspace in the versioned continuation bucket. A replacement restores those
+objects using the coordinator-owned assignment; task payloads cannot choose
+arbitrary checkpoint keys.
 
 `CheckpointSessionStore` implements the pinned SDK's public `SessionStore`
-contract. A caller supplies it with `session_store_flush="eager"` and waits for
-`checkpoint_pending()` to acknowledge the exact assistant tool call. Enabling
-mirroring alone is insufficient because the SDK copies the transcript
-asynchronously. A missing or rejected transcript batch prevents acknowledgement.
-The envelope retains the session, full proposed action and task/attempt/request
-identity, with a 16 MiB / 50,000-entry limit.
+contract with `session_store_flush="eager"`. `checkpoint_pending()` must
+acknowledge the exact assistant tool call: enabling transcript mirroring alone
+is insufficient because SDK writes are asynchronous. The conversation envelope
+has a 16 MiB / 50,000-entry limit.
 
-`S3ContinuationCheckpoints` saves under
-`continuations/<task_id>/<attempt_id>/<request_id>/<sha256>.json`, verifies a
-read-back, and returns a receipt pinned to the S3 object version and checksum.
-Its default client requires task-scoped credentials. A versioned bucket and
-task-prefix `s3:PutObject`, `s3:GetObject` and `s3:GetObjectVersion` permissions
-are required; the current production artifact grants do not supply these reads.
-The adapter neither lists nor deletes objects. Retention must be arranged by the
-future integration after the request closes.
+`src/continuation_workspace.py` preserves Git history, staged/unstaged changes,
+and untracked/ignored files, with a 1 GiB / 100,000-entry default limit. Restore
+rebuilds Git configuration and refuses to replace an existing destination.
+Unsupported filesystem/Git states or detected concurrent writes prevent capture.
+Repository-free tasks use a private workspace with a local Git baseline.
 
-`src/continuation_workspace.py` now captures and restores the local workspace:
-Git history, staged/unstaged changes, and untracked/ignored files, with a 1 GiB /
-100,000-entry default limit. It rebuilds Git configuration and never replaces an
-existing destination. Unsupported Git/filesystem states or detected concurrent
-writes prevent capture. This archive still needs durable upload and integration;
-see the [workspace recovery boundaries](../docs/verification/645-p3-workspace-recovery-20260917.md).
+`S3ContinuationStorage` uploads and verifies version-pinned, checksummed objects
+using task-scoped credentials. The continuation bucket and SessionRole grants
+are provisioned by CDK. A failed or incomplete save prevents planned retirement;
+capacity is released only after the coordinator confirms the old worker stopped.
+Checkpoints contain private task data, including unredacted conversation and
+workspace contents. They must not be published as diagnostic attachments.
 
-Before releasing a worker, the integration must hold the lifecycle barrier and
-conditionally publish verified conversation and workspace receipts for the same
-task attempt. A failed save must leave the worker available and report
-the failure. Checkpoints are private task data: transcripts and proposed actions
-can contain sensitive content. The module does not read CLI authentication files
-or the process environment, but does not redact conversation contents.
+The replacement consumes the recorded decision and keeps the original cost/turn
+allowance minus accumulated usage. See the [retained approval protocol](../docs/design/ORCHESTRATOR.md#retained-microvm-approvals)
+for ownership, admission and cleanup.
 
 The opt-in test uses the actual pinned SDK/CLI with a deterministic loopback
 model. It kills the original process, deletes its configuration and workspace,
-restores from the conversation store and workspace archive, and verifies approve
-and deny through a fresh tool hook:
+restores the conversation and files, and verifies approve and deny through a
+fresh tool hook:
 
 ```bash
 cd agent
 ABCA_TEST_SDK_CONTINUATION=1 uv run pytest tests/test_continuation_sdk_probe.py --no-cov
 ```
-
-See the [session recovery and storage evidence](../docs/verification/645-p3-session-recovery-20260917.md)
-for the live S3 permission checks and remaining replacement-worker requirements.
 
 ### Testing Server Mode Locally
 

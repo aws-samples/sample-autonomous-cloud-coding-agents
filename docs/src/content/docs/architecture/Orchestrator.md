@@ -303,16 +303,42 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 The P3 supervisor saves intent before control calls and rechecks the gate before and after them. Its durable state retains an absolute service lifetime, consecutive failures, recovery start time and next delay. Three failed cycles or 120 seconds of unconfirmed wake cannot become an indefinite wait. AWS RUNNING does not end recovery while the guest remains stuck on a decided/expired approval; fresh guest liveness is required. API approve/deny commit first, then attempt a bounded wake without changing the decision response. Automatic suspension defaults off via `microvm_approval_suspend_enabled`; disabling new sleep preserves wake and cleanup. See the [supervisor runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-supervisor).
 
 Unanswered approvals have no deadline by default. A checkpointed MicroVM wait can
-retire after an hour, or before that worker's lifetime ends. The coordinator
-verifies immutable storage, fences the old attempt, confirms shutdown and then
-releases capacity. A saved decision admits one replacement and invokes the
-original published coordinator version. A scheduled manager retries lost signals
-and performs terminal cleanup. See the [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/645-p3-continuation-protocol-20260917)
-for ownership, capacity, expiry and failure behavior.
+retire after an hour, or before that worker's lifetime ends. Retirement and
+replacement follow the [retained approval protocol](#retained-microvm-approvals).
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
+
+### Retained MicroVM approvals
+
+A pending approval has no deletion timer by default. Closing its task cancels
+unanswered requests and retains the decision history for 90 days. An explicit
+positive approval deadline still applies; waking or replacing a worker does not
+restart it. The agent decides whether the approved action remains relevant.
+
+At the approval barrier, the worker saves the conversation, exact pending tool
+inputs, workflow context, cumulative usage and Git/workspace archive. The
+coordinator verifies the checksummed S3 object versions before fencing the old
+attempt through its coordinator-owned `worker-lease#<task>` record. Workers may
+read and condition-check that lease but cannot modify it. Only confirmed shutdown
+allows the task to become `PARKED` and release its concurrency reservation.
+
+An answer admits one replacement when capacity permits. Admission, the new lease
+and capacity reservation are one DynamoDB transaction; a deterministic Durable
+execution name deduplicates invocation. The replacement uses the original
+published coordinator and exact image version, restores the files/conversation,
+and consumes the recorded answer. Remaining cost and turns are the original
+allowance minus accumulated usage. Repository-free tasks preserve scratch files
+using a private directory and local Git baseline.
+
+The scheduled continuation manager retries unfinished retirement, missed
+dispatches and terminal cleanup, saving its scan cursor between invocations.
+It cannot launch, suspend or resume workers; launching stays with the pinned
+coordinator. A failed start response does not prove no worker exists. Capacity
+remains reserved until shutdown is confirmed, or the full service lifetime has
+elapsed for an unknown handle. The exact-attempt lease becomes `CLOSED` before
+atomic release; `TERMINATING` alone is insufficient.
 
 ### The idle timeout problem
 
