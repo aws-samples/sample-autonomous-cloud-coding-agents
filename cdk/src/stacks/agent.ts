@@ -19,7 +19,7 @@
 
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -1416,7 +1416,10 @@ export class AgentStack extends Stack {
     agentMemory.grantReadWrite(orchestrator.fn);
 
     // --- Concurrency counter reconciler (drift correction) ---
-    new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
+    // Keep this stateless repair job out of the parent resource budget.
+    // Existing deployments recreate its function/schedule; the tables stay put.
+    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
+    new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });

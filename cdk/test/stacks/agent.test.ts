@@ -33,6 +33,7 @@ import { AgentStack } from '../../src/stacks/agent';
 
 describe('AgentStack', () => {
   let template: Template;
+  let concurrencyMaintenance: Template;
 
   beforeAll(() => {
     const app = new App();
@@ -40,10 +41,29 @@ describe('AgentStack', () => {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    concurrencyMaintenance = Template.fromStack(stack.node.findChild('ConcurrencyMaintenance') as NestedStack);
   });
 
   test('synthesizes without errors', () => {
     expect(template).toBeDefined();
+  });
+
+  test('nests the concurrency repair job while retaining its tables in the parent', () => {
+    const parentFunctions = Object.keys(template.findResources('AWS::Lambda::Function'));
+    expect(parentFunctions.some(id => id.startsWith('ConcurrencyReconciler'))).toBe(false);
+    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 1);
+    concurrencyMaintenance.resourceCountIs('AWS::DynamoDB::Table', 0);
+    concurrencyMaintenance.hasResourceProperties('AWS::Events::Rule', {
+      ScheduleExpression: 'rate(15 minutes)',
+    });
+    const fn = Object.values(concurrencyMaintenance.findResources('AWS::Lambda::Function'))[0];
+    const variables = fn.Properties.Environment.Variables;
+    const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
+      .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
+    expect(nested.Properties.Parameters[variables.TASK_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^TaskTable/) });
+    expect(nested.Properties.Parameters[variables.USER_CONCURRENCY_TABLE_NAME.Ref])
+      .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
   });
 
   test('retains the guardrail version referenced by pinned durable environments', () => {
@@ -1698,7 +1718,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
 });
 
 describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-level aspect', () => {
-  let template: Template;
+  let templates: Template[];
 
   beforeAll(() => {
     const app = new App();
@@ -1712,7 +1732,11 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     Aspects.of(stack).add(new SolutionUaAspect(buildAppId('UaAgentStack')), {
       priority: AspectPriority.MUTATING,
     });
-    template = Template.fromStack(stack);
+    templates = [
+      Template.fromStack(stack),
+      ...stack.node.findAll().filter((child): child is NestedStack => NestedStack.isNestedStack(child))
+        .map(child => Template.fromStack(child)),
+    ];
   });
 
   // CDK synthesizes its own framework-owned Lambdas that are NOT part of the
@@ -1722,22 +1746,24 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
   // `AWS679f53fac002430cb0da5b7982bd2287…` `cr.AwsCustomResource` singleton
   // (which CDK happens to give the env var today, but whose attribution we do
   // not want to depend on across CDK upgrades). Every framework-owned id is
-  // enumerated explicitly so the coverage assertion below cannot silently
+  // enumerated explicitly, including the registry Provider's framework handlers,
+  // so the coverage assertion below cannot silently
   // stop covering an ABCA Lambda by relabelling it as "framework".
   const FRAMEWORK_LAMBDA_ID =
-    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287)/;
+    /^(CustomResourceProviderHandler|CustomS3AutoDeleteObjects|CustomVpcRestrictDefaultSG|AWS679f53fac002430cb0da5b7982bd2287|AgentRegistryProviderframework)/;
 
   test('every solution Lambda carries AWS_SDK_UA_APP_ID (traverses nested scope)', () => {
-    const functions = template.findResources('AWS::Lambda::Function');
-    const abcaLambdas = Object.entries(functions).filter(
+    const functions = templates.flatMap(template => Object.entries(template.findResources('AWS::Lambda::Function')));
+    const abcaLambdas = functions.filter(
       ([id]) => !FRAMEWORK_LAMBDA_ID.test(id),
     );
     // exact count — update when adding/removing a Lambda construct (#319).
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 47 = 46 on main + RemoveWorkspaceFn (DELETE /v1/linear/workspaces/{slug}).
-    expect(abcaLambdas.length).toBe(47);
+    // 47 existing handlers (including concurrency repair) + 2 registry
+    // provisioning handlers + 4 registry API handlers in nested stacks.
+    expect(abcaLambdas.length).toBe(53);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -1754,8 +1780,8 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // The trap: these functions live inside integration constructs several
     // scopes below the stack. The env-var still resolves the canonical `#`
     // form (not the mangled `-` variant).
-    const functions = template.findResources('AWS::Lambda::Function');
-    const nested = Object.entries(functions).filter(([id]) =>
+    const functions = templates.flatMap(template => Object.entries(template.findResources('AWS::Lambda::Function')));
+    const nested = functions.filter(([id]) =>
       /Jira|Slack|Linear/.test(id),
     );
     expect(nested.length).toBeGreaterThan(0);
