@@ -1,14 +1,15 @@
 # Lambda MicroVM verification
 
-This directory keeps the acceptance criteria and operator notes for
-[ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
+For maintainers reviewing/testing the MicroVM backend and operators deploying,
+migrating or diagnosing it. [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md)
+explains the design; the [user guide](../guides/USER_GUIDE.md#approval-gates-cedar-hitl)
+explains approval and sleep options for people submitting tasks.
 Detailed deployment transcripts, temporary worker identifiers and investigation
 diaries are archived outside the repository. These documents are not test runners.
 
 - [Task payload delivery](./645-payload-bootstrap.md): authorization, retries and coordinated upgrades.
 - [Nested infrastructure](./645-p3-nested-stack.md): configuration and migration prerequisites.
 - [Lifecycle diagnostics](./645-p3-lifecycle-diagnostics.md): locating and interpreting failed wakes.
-- [Service-team feedback](./645-lambda-microvm-service-feedback.md): remaining service questions.
 - [Continuation design](../design/ORCHESTRATOR.md#retained-microvm-approvals): checkpoint ownership, retirement and replacement.
 
 ## Recorded acceptance

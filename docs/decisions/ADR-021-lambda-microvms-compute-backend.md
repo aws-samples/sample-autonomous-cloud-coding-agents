@@ -135,7 +135,7 @@ No ABCA endpoint consumer exists in P1–P3. The platform grants no `CreateMicro
 
 The backend adds build/runtime VPC connectors, build artifacts, launch payloads, logs, roles and a managed or external image. Its bootstrap policy is conditional on `ComputeTypes` including `lambda-microvm`. A VPC egress connector requires an operator role. Build egress permits ports 80/443 for package installation; runtime egress permits 443 through the platform VPC.
 
-**Trust and PassRole limitation.** Recorded live checks rejected `aws:SourceAccount`/`aws:SourceArn` conditions on the MicroVM-facing roles and `iam:PassedToService` on the MicroVM PassRole paths. The working roles trust `lambda.amazonaws.com` without those conditions; build/execution roles also allow `sts:TagSession`. IAM simulation with caller-supplied condition values did not prove that the service supplied those values. See the [IAM service questions](../verification/645-lambda-microvm-service-feedback.md#iam-setup-f02). Reintroduce a condition only after verifying service support.
+**Trust and PassRole limitation.** Recorded live checks rejected `aws:SourceAccount`/`aws:SourceArn` conditions on the MicroVM-facing roles and `iam:PassedToService` on the MicroVM PassRole paths. The working roles trust `lambda.amazonaws.com` without those conditions; build/execution roles also allow `sts:TagSession`. IAM simulation with caller-supplied condition values did not prove that the service supplied those values. Reintroduce a condition only after verifying service support.
 
 | Role/action | Scope and responsibility |
 |---|---|
@@ -195,7 +195,7 @@ Changing the default backend, GPU support, native Slack approval buttons, approv
 - Suspended workers retain ABCA capacity until confirmed retirement. The service’s account-quota treatment of suspended memory was not established by the recorded probes.
 - Memory baseline validation and published peak capacity are not workload benchmarks. Sustained heavy builds require measured sizing and may fit ECS better.
 - A healthy heartbeat does not prove coding progress. Hook failures may cause service termination, but successful hook acceptance does not remove ABCA’s cleanup responsibility.
-- Service error wording can hide transport errors. The pooled-hook mitigation has local and live evidence; historical internal dispatch traces remain unavailable. Open questions are tracked in the [service feedback record](../verification/645-lambda-microvm-service-feedback.md).
+- Service error wording can hide transport errors. The pooled-hook mitigation has local and live evidence; historical internal dispatch traces remain unavailable.
 
 ## Testing
 

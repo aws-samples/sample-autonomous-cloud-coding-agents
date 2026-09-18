@@ -67,7 +67,6 @@ Preserve the raw service reason for diagnosis. The wording “connection was
 refused” alone does not prove a closed listener: historical guest observations
 support a stale pooled-connection race, while service-side dispatch traces remain
 unavailable. Lifecycle responses explicitly close connections before freeze.
-See the [service questions](./645-lambda-microvm-service-feedback.md).
 
 Diagnostics omit hook bodies, tool arguments, approval contents, credentials,
 raw exception messages and SDK response bodies. Do not attach signed payload

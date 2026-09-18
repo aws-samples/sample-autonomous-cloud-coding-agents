@@ -677,7 +677,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // Recorded service calls rejected source-conditioned role trust; removing
     // those conditions restored connector creation and worker launch. Keep exact
     // resource grants and verify service support before adding conditions again.
-    // See ADR-021 §4 and docs/verification/645-lambda-microvm-service-feedback.md.
+    // See ADR-021 §4 for the tested trust-policy limitations.
     const roles = Object.entries(template.findResources('AWS::IAM::Role'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')
         || id.includes('LambdaMicrovmComputeExecutionRole')
