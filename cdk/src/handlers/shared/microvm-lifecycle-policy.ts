@@ -24,7 +24,6 @@ import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from './type
 import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
 // Initial policy values, not service limits. Live timings must validate them.
-export const MICROVM_SUSPEND_GRACE_MS = MICROVM_SLEEP_AFTER_S_DEFAULT * 1000;
 export const MICROVM_WAKE_MARGIN_MS = 60_000;
 export const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
 export const MICROVM_TRANSITION_POLL_MS = 5_000;

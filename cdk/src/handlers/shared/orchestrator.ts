@@ -1118,7 +1118,8 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
 
   // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
   // window closes, terminate the task through an allowed transition. Approval
-  // waits permit FAILED, not TIMED_OUT; their approval row remains agent-owned.
+  // waits permit FAILED, not TIMED_OUT. Task closure cancels pending approvals;
+  // reaching the execution limit is not a human denial.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -1129,7 +1130,8 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       await transitionTask(taskId, currentStatus, terminalStatus, {
         completed_at: new Date().toISOString(),
         error_message: currentStatus === TaskStatus.AWAITING_APPROVAL
-          ? 'Orchestrator poll timeout exceeded while awaiting approval'
+          ? 'Task execution limit reached while waiting for approval. '
+            + 'The task has closed; submit a new task to continue.'
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
