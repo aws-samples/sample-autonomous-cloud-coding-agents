@@ -35,19 +35,19 @@ long-sleep controls and the corrected live flows passed. Service-side traces
 for the historical failures remain unavailable, so their exact transport error
 is not established for every worker.
 
+The full local build after the resource-budget fix passed: 5,560 CDK tests,
+2,170 agent tests and 1,005 CLI tests, plus compile, lint, contracts, docs and
+synthesis. The widest parent stacks use 489 resources for ECS and 488 for
+MicroVM, including synth metadata, within the unchanged 490-resource budget.
+Concurrency maintenance now has its own nested stack. Upgrading recreates that
+stateless repair function and schedule; task and concurrency tables stay in the
+parent stack.
+
 ## Open PR checks
 
 - Finish reusable flat-to-nested migration commands and independently test an
   upgrade from current `main` on the same deployment. The earlier bespoke
   migration is not a substitute for that acceptance.
-- Restore a green full build after integration with `main`. The latest recorded
-  full run passed 2,170 agent tests and 1,005 CLI tests; CDK had 5,545 passes,
-  four failures and 56 skips. Three resource-budget cases reached 493 resources
-  (ECS) or 492 (MicroVM), above the repository's 490-resource cushion. A separate
-  VPC test failed while reading a temporary `tree.json`; its isolated rerun
-  passed all 18 tests without a code change. The earlier `github-tags` failure
-  did not recur. These are recorded run results, not a claim that the latest
-  commit has passed a full build.
 
 ## Reproduce local checks
 
