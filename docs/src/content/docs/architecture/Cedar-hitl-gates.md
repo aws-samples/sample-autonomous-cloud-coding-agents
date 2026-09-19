@@ -321,6 +321,7 @@ sequenceDiagram
     participant Engine as PolicyEngine
     participant Events as TaskEventsTable
     participant Approvals as TaskApprovalsTable
+    participant Requests as Approval request service
     participant CLI
     participant User
     participant Lambda as ApproveTaskFn
@@ -329,8 +330,9 @@ sequenceDiagram
     Agent->>Hook: tool call (Bash git push --force)
     Hook->>Engine: evaluate_tool_use
     Engine-->>Hook: REQUIRE_APPROVAL (soft-deny force_push_any)
-    Hook->>Approvals: TransactWriteItems
-    Note right of Hook: Put approval row PENDING<br/>plus TaskTable status<br/>to AWAITING_APPROVAL
+    Hook->>Requests: IAM-signed create for this task
+    Requests->>Approvals: TransactWriteItems
+    Note right of Requests: Put approval row PENDING<br/>plus TaskTable status<br/>to AWAITING_APPROVAL
     Hook->>Events: approval_requested milestone
     Events-->>CLI: live stream with approval_requested
     CLI-->>User: bgagent approve TASK REQ
