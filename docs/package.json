@@ -12,17 +12,17 @@
     "link-check": "bash scripts/link-check.sh"
   },
   "devDependencies": {
-    "jest": "^30.4.2",
+    "jest": "^30.5.1",
     "jest-junit": "^17",
-    "markdown-link-check": "^3.13.6",
-    "retire": "^5.4.3"
+    "markdown-link-check": "^3.15.0",
+    "retire": "^5.7.0"
   },
   "dependencies": {
-    "@astrojs/check": "^0.9.9",
-    "@astrojs/starlight": "^0.41.2",
-    "astro": "7.2.8",
+    "@astrojs/check": "^0.9.10",
+    "@astrojs/starlight": "^0.42.0",
+    "astro": "7.3.2",
     "remark-gfm": "^4.0.1",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "main": "lib/index.js",
   "engines": {
