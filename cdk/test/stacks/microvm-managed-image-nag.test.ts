@@ -33,6 +33,12 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
     const app = await buildApp({
       account: '123456789012',
       region: 'us-west-2',
+      // A concrete region verifies even explicit AZ overrides. Keep this
+      // template-security test independent of credentials and live EC2.
+      describeAzs: async () => [
+        { zoneName: 'us-west-2a', zoneId: 'usw2-az1' },
+        { zoneName: 'us-west-2b', zoneId: 'usw2-az2' },
+      ],
       appProps: {
         context: {
           compute_type: 'lambda-microvm',
