@@ -1116,6 +1116,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     TASK_TABLE_NAME: 'tasks',
     TASK_EVENTS_TABLE_NAME: 'events',
     TASK_APPROVALS_TABLE_NAME: 'approvals',
+    APPROVAL_REQUESTS_API_URL: 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/',
     NUDGES_TABLE_NAME: 'nudges',
     LOG_GROUP_NAME: '/aws/abca/application',
     ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
@@ -1161,6 +1162,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'task_table_name',
       'task_events_table_name',
       'task_approvals_table_name',
+      'approval_requests_api_url',
       'nudges_table_name',
       'log_group_name',
       'artifacts_bucket_name',
@@ -1182,7 +1184,6 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       // `global`, and wrong in a way that surfaces only as AccessDenied at turn 0.
       'anthropic_model',
     ]);
-    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(17);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
@@ -1207,6 +1208,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     const config = buildMicrovmPlatformConfig(FULL_ENV);
     expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
     expect(config.task_table_name).toBe('tasks');
+    expect(config.approval_requests_api_url).toBe(FULL_ENV.APPROVAL_REQUESTS_API_URL);
     expect(config.nudges_table_name).toBe('nudges');
     expect(config.continuation_bucket_name).toBe('continuation-bucket');
     expect(config.linear_vault_enabled).toBe('true');
@@ -1349,7 +1351,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   test('does NOT throw for a missing OPTIONAL key', () => {
     const env = { ...FULL_ENV };
     for (const optional of [
-      'TASK_APPROVALS_TABLE_NAME', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
+      'TASK_APPROVALS_TABLE_NAME', 'APPROVAL_REQUESTS_API_URL', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
       'LINEAR_VAULT_ENABLED', 'LINEAR_WORKLOAD_IDENTITY_NAME',
       'CONTINUATION_BUCKET_NAME',
