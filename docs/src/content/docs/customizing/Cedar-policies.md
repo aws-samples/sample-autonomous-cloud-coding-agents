@@ -67,11 +67,14 @@ Every tool call the agent makes is evaluated as a Cedar `(principal, action, res
 |---|---|---|---|
 | `@rule_id("...")` | **Yes on soft-deny** (recommended on hard-deny) | Unique kebab/snake-case identifier | Stable ID for `--pre-approve rule:X`, for audit events, and for `bgagent policies show --rule X`. Engine rejects duplicates at task start. |
 | `@tier("hard"\|"soft")` | **Yes** | Exactly one of `"hard"` or `"soft"` | Must match the file section. Mismatches fail task start. |
-| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Per-rule timeout. Defaults to 300 s (overridable per-task via `--approval-timeout`). When multiple soft rules match, the engine picks the minimum. Values < 120 s emit a load-time warning; values < 30 s are rejected. Ignored on hard-deny. |
+| `@approval_timeout_s("N")` | No | Integer seconds ≥ 30 | Optional per-rule decision deadline. If absent, uses the task setting, whose default `0` means no deadline. The shortest positive task/rule deadline wins. Values < 120 s emit a load-time warning; values < 30 s are rejected. Ignored on hard-deny. |
 | `@severity("low"\|"medium"\|"high")` | No | One of three | Displayed in the approval prompt. Default: `medium`. |
 | `@category("...")` | No | `destructive`, `network`, `filesystem`, `auth`, or free-form | Optional UX grouping. Not enforced. |
 
-**Rule of thumb:** every soft-deny rule must have `@rule_id` and should set `@severity` + `@approval_timeout_s` explicitly. Users scanning `bgagent pending` lean on these fields to triage quickly.
+**Rule of thumb:** every soft-deny rule must have `@rule_id` and should set
+`@severity`. Add `@approval_timeout_s` only when the workflow needs a decision
+deadline. Omit the annotation to let the task choose; unlike the task's `0`
+setting, a zero-valued rule annotation is invalid.
 
 ## Common patterns
 

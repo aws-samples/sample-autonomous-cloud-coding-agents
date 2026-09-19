@@ -24,6 +24,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
+import taskWriteAttributes from '../../src/constructs/agent-task-write-attributes.json';
 
 function createStack() {
   const app = new App();
@@ -51,10 +52,10 @@ function createStack() {
 
   const sessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
     assumingRoles: [computeRole],
+    taskTable,
+    approvalsTable: taskApprovalsTable,
     taskScopedTables: [
-      taskTable,
       taskEventsTable,
-      taskApprovalsTable,
       taskNudgesTable,
     ],
     traceArtifactsBucket,
@@ -107,15 +108,18 @@ describe('AgentSessionRole construct', () => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.some((a: string) => a.startsWith('dynamodb:'));
     });
-    // Four task-scoped tables → four conditioned statements.
-    expect(ddbStatements).toHaveLength(4);
+    // Main task read/update, approval read, and two supporting table grants.
+    expect(ddbStatements).toHaveLength(5);
     for (const s of ddbStatements) {
-      expect(s.Condition).toEqual({
-        'ForAllValues:StringEquals': {
-          'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'],
-        },
-      });
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      const readonlyTask = JSON.stringify(s.Resource).includes('TaskTable')
+        && !JSON.stringify(s.Resource).includes('Approvals') && actions.includes('dynamodb:GetItem');
+      expect(s.Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
+        .toEqual(readonlyTask
+          ? ['${aws:PrincipalTag/task_id}', 'worker-lease#${aws:PrincipalTag/task_id}']
+          : ['${aws:PrincipalTag/task_id}']);
+      expect(s.Condition.Null['dynamodb:LeadingKeys']).toBe('false');
+      if (readonlyTask) expect(actions).not.toContain('dynamodb:UpdateItem');
       // Scan must NOT be granted — it ignores leading-keys.
       expect(actions).not.toContain('dynamodb:Scan');
     }
@@ -138,6 +142,65 @@ describe('AgentSessionRole construct', () => {
       JSON.stringify(s.Resource).includes('/traces/${aws:PrincipalTag/user_id}/*'),
     );
     expect(tracePut).toBeDefined();
+  });
+
+  test('workers cannot forge decisions or notification flags through any approval-table write', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement)
+      .filter((statement: { Resource: unknown }) => JSON.stringify(statement.Resource).includes('TaskApprovalsTable'));
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Action).toEqual([
+      'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem',
+    ]);
+    expect(statements[0].Condition['ForAllValues:StringEquals']['dynamodb:LeadingKeys'])
+      .toEqual(['${aws:PrincipalTag/task_id}']);
+  });
+
+  test('task records cannot be replaced, deleted or updated without an attribute allowlist', () => {
+    const policy = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .find(([id]) => id.includes('AgentSessionRole'))![1];
+    const statements = policy.Properties.PolicyDocument.Statement.filter(
+      (s: { Resource: unknown }) => JSON.stringify(s.Resource).includes('TaskTable'),
+    );
+    expect(statements).toHaveLength(2);
+    for (const s of statements) {
+      const actions: string[] = Array.isArray(s.Action) ? s.Action : [s.Action];
+      expect(actions.every((action) => [
+        'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query',
+        'dynamodb:ConditionCheckItem', 'dynamodb:UpdateItem',
+      ].includes(action))).toBe(true);
+      if (actions.includes('dynamodb:UpdateItem')) {
+        const attrs = s.Condition?.['ForAllValues:StringEquals']?.['dynamodb:Attributes'];
+        expect(attrs).toEqual(taskWriteAttributes);
+        expect(s.Condition.Null['dynamodb:Attributes']).toBe('false');
+        for (const protectedAttribute of [
+          'microvm_start', 'microvm_lifecycle', 'microvm_sleep_after_s', 'concurrency_slot', 'user_id', 'created_at',
+          'session_id', 'compute_type', 'compute_metadata', 'agent_runtime_arn',
+        ]) {
+          expect(attrs).not.toContain(protectedAttribute);
+        }
+      }
+    }
+  });
+
+  test('rejects granting unrestricted supporting-table access to the main task table', () => {
+    const stack = new Stack(new App(), 'DuplicateTable');
+    const table = new dynamodb.Table(stack, 'Tasks', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const computeRole = new iam.Role(stack, 'Compute', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+    });
+    expect(() => new AgentSessionRole(stack, 'Session', {
+      assumingRoles: [computeRole],
+      taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      taskScopedTables: [table],
+      traceArtifactsBucket: new s3.Bucket(stack, 'Traces'),
+      attachmentsBucket: new s3.Bucket(stack, 'Attachments'),
+    })).toThrow('taskTable and approvalsTable must not appear in taskScopedTables');
   });
 
   test('S3 artifact writes are scoped to the per-task_id prefix (#248 Phase 3)', () => {
@@ -208,7 +271,11 @@ describe('AgentSessionRole construct', () => {
     });
     new AgentSessionRole(stack, 'SR', {
       assumingRoles: [computeRole],
-      taskScopedTables: [table],
+      taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
       attachmentsBucket: new s3.Bucket(stack, 'AB'),
       invokableModels: [model],
@@ -231,8 +298,7 @@ describe('AgentSessionRole construct', () => {
   });
 
   test('omitting invokableModels grants no bedrock action (isolated tests)', () => {
-    const { template: t } = createStack();
-    const policies = t.findResources('AWS::IAM::Policy');
+    const policies = template.findResources('AWS::IAM::Policy');
     const sessionPolicy = Object.entries(policies).find(([id]) =>
       id.includes('AgentSessionRole'),
     )![1];
@@ -254,7 +320,11 @@ describe('AgentSessionRole construct', () => {
     });
     const sessionRole = new AgentSessionRole(stack, 'SR', {
       assumingRoles: [agentcoreRole],
-      taskScopedTables: [table],
+      taskTable: table,
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TB'),
       attachmentsBucket: new s3.Bucket(stack, 'AB'),
     });

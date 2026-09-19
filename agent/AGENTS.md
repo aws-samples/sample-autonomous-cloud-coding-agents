@@ -27,6 +27,8 @@ Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`.
 | `progress_writer.py` | `agent/tests/test_progress_writer.py` |
 | `hooks.py`, `policy.py` | `agent/tests/test_hooks.py`, `test_policy.py` |
 | `pipeline.py`, `runner.py` | `agent/tests/test_pipeline.py`, etc. |
+| `microvm_lifecycle.py`, `microvm_checkpoint.py` | `test_microvm_lifecycle.py`, `test_microvm_checkpoint.py`; checkpoint transaction tests require `ABCA_DDB_LOCAL_ENDPOINT` in CI |
+| `continuation_*.py` | Matching `test_continuation_*.py`: capture, storage, safe restore, SDK session and usage recovery |
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
 
@@ -91,4 +93,5 @@ def test_a():
 - **Cedar parity** — `cedarpy==4.8.4` (agent) and `@cedar-policy/cedar-wasm` 4.8.2 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
 - **Forgotten consumer** — Progress event schema changes need `cli/src/commands/watch.ts` and `test_progress_writer.py` updates.
 - **Image bundle** — CDK deploys this tree; root `mise run build` always runs agent quality.
+- **Continuation compatibility** — the SDK pin must match `contracts/constants.json` → `microvm_continuation.verified_sdk_version`. Verify real SDK session recovery before updating both. Persisted checkpoint identities are versioned wire data; renaming a Python field can invalidate existing checkpoints.
 - **Un-attributed AWS SDK client (#319)** — build clients via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed); a naked `boto3.client(...)` silently drops solution attribution.

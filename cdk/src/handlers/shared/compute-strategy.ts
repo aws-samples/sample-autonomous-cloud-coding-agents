@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
+import type { MicrovmImageMetadata } from './microvm-image-capability';
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
@@ -36,16 +38,15 @@ import { LambdaMicrovmComputeStrategy } from './strategies/lambda-microvm-strate
  * ADR-021 sub-decision 1: the MicroVM variant carries ``microvmId`` (every
  * lifecycle API — suspend/resume/terminate/get — takes only that identifier)
  * and ``endpoint`` (minted per session by ``RunMicrovm``, required for any
- * future orchestrator→agent HTTP interaction). The image ARN/version is
- * deliberately NOT in the handle: like the ECS task-definition ARN it is
- * deployment-time configuration consumed by ``startSession`` from the
- * construct-injected environment and recorded in the session-start log entry
- * for diagnostics, not per-session lifecycle state.
+ * future orchestrator→agent HTTP interaction). P3 additionally retains the actual
+ * image ARN/version and verified lifecycle protocol. These describe the snapshot
+ * that launched this worker; current deployment settings cannot substitute for it.
+ * Legacy handles remain usable for cleanup, with new suspension disabled.
  */
 export type SessionHandle =
   | { readonly sessionId: string; readonly strategyType: 'agentcore'; readonly runtimeArn: string }
   | { readonly sessionId: string; readonly strategyType: 'ecs'; readonly clusterArn: string; readonly taskArn: string }
-  | { readonly sessionId: string; readonly strategyType: 'lambda-microvm'; readonly microvmId: string; readonly endpoint: string };
+  | ({ readonly sessionId: string; readonly strategyType: 'lambda-microvm'; readonly microvmId: string; readonly endpoint: string } & MicrovmImageMetadata);
 
 /**
  * Substrate-observed session state. Deliberately mechanical: the strategy
@@ -71,26 +72,52 @@ export type SessionHandle =
  * ~12 s — reached the operator as the bare, and therefore fabricated,
  * ``"substrate state completed"``.
  *
- * It is OPTIONAL and OPAQUE: no control flow may branch on its content (that would
- * put substrate interpretation back in the strategy), and it is for the reconcile
- * ``detail`` string and logs only.
+ * It is OPTIONAL and OPAQUE to the strategy. The orchestrator retains it as
+ * diagnostic detail and recognizes known run-rejection and resume-hook failure shapes
+ * to choose a stable failure code. Consumers classify that code, so arbitrary
+ * words in the reason cannot change the category or user-facing retry advice.
  *
- * Declared on all four variants for UNIFORMITY, though only ``completed`` and
- * ``failed`` are read today (``reconcileMicrovmSubstrateState`` returns early for
- * the other two). The wide union is deliberate rather than dead weight:
- * ``suspended.reason`` has a named future consumer — P3's suspend/resume policy
- * (ADR-021 sub-decision 2) has to distinguish an orchestrator-intended suspend
- * during an approval wait from a substrate-side one, and ``stateReason`` is the
- * only evidence the substrate offers for that. Narrowing the union now would mean
- * widening it again there, and a per-variant union would invite call sites to
- * branch on which variant carries a reason — the opposite of the opacity rule
- * above.
+ * Declared on all four variants for uniform diagnostics. Terminal failure
+ * formatting consumes ``completed`` and ``failed``; ``suspended.reason`` can
+ * explain an observation without deciding whether it is healthy. The policy
+ * must distinguish intended suspension through durable orchestrator intent and
+ * task/approval state, not by parsing this service-provided text. Keeping the
+ * field on every variant preserves the same diagnostic shape.
  */
-export type SessionStatus =
+/** UNKNOWN/NOT_FOUND are local observations, not AWS service states. */
+export type MicrovmObservedState = MicrovmState | 'UNKNOWN' | 'NOT_FOUND';
+
+export type SessionStatus = (
   | { readonly status: 'running'; readonly reason?: string }
   | { readonly status: 'suspended'; readonly reason?: string }
   | { readonly status: 'completed'; readonly reason?: string }
-  | { readonly status: 'failed'; readonly error: string; readonly reason?: string };
+  | { readonly status: 'failed'; readonly error: string; readonly reason?: string }
+) & {
+  /** Explicit MicroVM observation; coarse `running` also covers pending/unknown. */
+  readonly microvmState?: MicrovmObservedState;
+  /** Service observations used to retain the original lifetime across durable replay. */
+  readonly microvmStartedAtMs?: number;
+  readonly microvmMaximumDurationSeconds?: number;
+};
+
+/** A caller may impose a shorter total budget across several control operations. */
+export interface SessionControlOptions {
+  readonly abortSignal?: AbortSignal;
+}
+
+/**
+ * `supported: true` means the lifecycle command was acknowledged, not that the
+ * target state has been reached. Callers must observe/reconcile the session.
+ * Failures throw; they must never be disguised as an unsupported capability.
+ */
+export type SessionLifecycleResult =
+  | { readonly supported: false }
+  | { readonly supported: true };
+
+/** Optional evidence from best-effort cleanup. A request is not confirmed teardown. */
+export type SessionStopResult =
+  | { readonly outcome: 'requested' | 'not-found' }
+  | { readonly outcome: 'unconfirmed'; readonly error_type: string; readonly aws_request_id?: string };
 
 export interface ComputeStrategy {
   readonly type: ComputeType;
@@ -120,9 +147,13 @@ export interface ComputeStrategy {
      * the build def (never worse than today).
      */
     readOnly?: boolean;
+    /** Coordinator-owned checkpoint recovery pins the original worker image. */
+    microvmImage?: { readonly imageArn: string; readonly imageVersion: string };
   }): Promise<SessionHandle>;
-  pollSession(handle: SessionHandle): Promise<SessionStatus>;
-  stopSession(handle: SessionHandle): Promise<void>;
+  pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus>;
+  stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult | void>;
+  suspendSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult>;
+  resumeSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult>;
 }
 
 export function resolveComputeStrategy(blueprintConfig: BlueprintConfig): ComputeStrategy {

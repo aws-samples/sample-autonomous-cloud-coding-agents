@@ -30,23 +30,19 @@ from pydantic import BaseModel
 
 import task_state
 from config import resolve_github_token
+from microvm_http import microvm_resume, microvm_suspend
+from microvm_lifecycle import (
+    LifecycleUnavailable,
+    get_context,
+    get_registered_context,
+    register_task,
+    reseed_random,
+    unregister_task,
+)
 from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
-
-# --- _debug_cw / _warn_cw failure counter -------------------------------
-# Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
-# doesn't forward container stdout to APPLICATION_LOGS, so a broken writer
-# is invisible except for this metric. Single counter = single alarm
-# surface — the trade-off is that the alarm can't distinguish which writer
-# is broken (see Chunk 7c review notes). Defined BEFORE any function that
-# references it (including ``_debug_cw`` / ``_warn_cw``) so the ordering is
-# import-time safe: a daemon thread spawned from a write-blocking function
-# can never race with module-level globals still being assigned.
-_debug_cw_failures = 0
-_debug_cw_failures_lock = threading.Lock()
-_DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
 # Only redact secrets at least this long — replacing very short strings
 # would mangle unrelated text that happens to contain them.
@@ -84,6 +80,25 @@ def _emit_stdout_line(stamped: str) -> None:
             line = line[n:]
     except OSError:
         pass
+
+
+def _report_cloudwatch_failure(writer: str, task_id: str | None, exc: Exception) -> None:
+    """Emit a stdout fallback without another AWS call or the failed message.
+
+    This is a structured log, not a metric or configured alarm. Its availability
+    depends on the backend collecting guest stdout; AgentCore APPLICATION_LOGS
+    does not automatically forward it.
+    """
+    _emit_stdout_line(
+        json.dumps(
+            {
+                "event": "cloudwatch_write_failed",
+                "writer": writer,
+                "task_id": task_id,
+                "error_type": type(exc).__name__,
+            }
+        )
+    )
 
 
 def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
@@ -141,9 +156,9 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
 
     The stdout emission is preserved so local ``docker-compose`` runs
     and the ``capfd``-based unit tests still observe the line.
-    CloudWatch delivery is fire-and-forget — failures bump the
-    shared ``_debug_cw_failures`` counter via ``_warn_cw_write_blocking``
-    so a silently broken writer still surfaces via that single metric.
+    CloudWatch delivery is fire-and-forget. Failures emit a structured
+    ``cloudwatch_write_failed`` stdout record without retrying through the
+    failed logging path. No metric or alarm is installed by this helper.
     """
     # Redact cached credentials and emit via the same os.write path as
     # ``_debug_cw``: warn messages can embed payload fragments, so they
@@ -172,9 +187,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
 
     Mirrors ``_debug_cw_write_blocking`` but writes to the
     ``server_warn/<task_id>`` stream so warn-level traffic is easy to
-    alarm on independently of debug breadcrumbs. Failures bump the
-    shared ``_debug_cw_failures`` counter — a single alarm surface
-    covers both writers.
+    filter independently of debug breadcrumbs. Failures emit the shared
+    structured stdout fallback without another AWS call.
     """
     try:
         from aws_session import platform_client
@@ -191,14 +205,8 @@ def _warn_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -
             logStreamName=stream,
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
-    except Exception as _exc:
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
-        print(
-            f"[server/warn/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
-            flush=True,
-        )
+    except Exception as exc:
+        _report_cloudwatch_failure("warn", task_id, exc)
 
 
 def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) -> None:
@@ -218,16 +226,9 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             logStreamName=stream,
             logEvents=[{"timestamp": int(_time_for_debug.time() * 1000), "message": stamped}],
         )
-    except Exception as _exc:
-        # Never let debug logging break the request path. Bump the failure
-        # counter so operators can alarm on a blind debug path.
-        global _debug_cw_failures
-        with _debug_cw_failures_lock:
-            _debug_cw_failures += 1
-        print(
-            f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
-            flush=True,
-        )
+    except Exception as exc:
+        # Logging failures must not break the request or recursively log to AWS.
+        _report_cloudwatch_failure("debug", task_id, exc)
 
 
 # Log the active event loop policy at import time.
@@ -264,8 +265,8 @@ _background_pipeline_failed: bool = False
 _last_ping_status: str = ""
 
 # Heartbeat cadence for the TaskTable ``agent_heartbeat_at`` writer thread.
-# Each live pipeline bumps the heartbeat every N seconds so operators can
-# distinguish a stuck pipeline from a healthy long-running one.
+# The independent worker reports process/writer liveness. A stuck pipeline can
+# leave this thread running, so a fresh heartbeat does not prove work is progressing.
 _HEARTBEAT_INTERVAL_SECONDS = 45
 
 
@@ -273,7 +274,16 @@ def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
     while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
-            task_state.write_heartbeat(task_id)
+            lifecycle = get_context(task_id)
+            if lifecycle:
+                with lifecycle.activity():
+                    task_state.write_heartbeat(task_id)
+            else:
+                task_state.write_heartbeat(task_id)
+        except LifecycleUnavailable:
+            # An approval waiter has no liveness obligation while frozen.
+            # Resume must refresh credentials before another heartbeat writes.
+            continue
         except Exception as e:
             print(
                 f"[heartbeat] write_heartbeat error (will retry): {type(e).__name__}: {e}",
@@ -417,6 +427,8 @@ def _run_task_background(
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    microvm_id: str = "",
+    attempt_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -456,18 +468,20 @@ def _run_task_background(
         task_id=task_id,
     )
 
+    lifecycle = (
+        register_task(task_id, microvm_id, attempt_id=attempt_id or task_id) if microvm_id else None
+    )
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
-    if task_id:
-        hb_thread = threading.Thread(
-            target=_heartbeat_worker,
-            args=(task_id, stop_heartbeat),
-            name=f"heartbeat-{task_id}",
-            daemon=True,
-        )
-        hb_thread.start()
-
     try:
+        if task_id:
+            hb_thread = threading.Thread(
+                target=_heartbeat_worker,
+                args=(task_id, stop_heartbeat),
+                name=f"heartbeat-{task_id}",
+                daemon=True,
+            )
+            hb_thread.start()
         # Propagate the correlation envelope into this thread's OTEL context
         # so spans are correlated with the AgentCore session and the platform
         # identity in CloudWatch (#245). Runs whenever any field is present —
@@ -521,6 +535,8 @@ def _run_task_background(
             )
             task_state.write_terminal(task_id, "FAILED", backup.model_dump())
     finally:
+        if lifecycle:
+            unregister_task(lifecycle)
         stop_heartbeat.set()
         if hb_thread is not None and hb_thread.is_alive():
             hb_thread.join(timeout=3)
@@ -829,35 +845,17 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 
 
 # --------------------------------------------------------------------------
-# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 + P2)
+# AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 through P3)
 # --------------------------------------------------------------------------
-# The MicroVM backend has NO orchestrator→agent HTTP path: the task payload
-# arrives as the ``/run`` hook's request body and nothing else dials in. The
-# service calls these routes on the port declared in the image's ``hooks.port``
-# (8080 — the same uvicorn process that serves /invocations and /ping), so the
-# hooks live here rather than in a sidecar.
-#
-# Four hooks are served; ``/suspend`` + ``/resume`` are still P3:
-#   * ``/ready`` (build, P1) is MANDATORY. ``CreateMicrovmImage`` refuses an image
-#     that enables ANY lifecycle hook without it ("The ready (/ready) MicroVM
-#     image hook must be enabled when any MicroVM lifecycle hook … is enabled"),
-#     and an image with no hooks at all cannot receive a ``runHookPayload``. So
-#     ADR-021's original "declare /run in P1, serve it in P2" split was not a
-#     reachable service state.
-#   * ``/run`` (runtime, P1) is the payload-delivery channel — and, since P2, the
-#     platform-configuration channel (see ``platform_config`` below).
-#   * ``/validate`` (build, P2) is the snapshot self-check. It runs under the
-#     BUILD role and makes ZERO AWS calls — see ``microvm_validate``.
-#   * ``/terminate`` (runtime, P2) is a best-effort final flush. It never writes
-#     terminal task status — the orchestrator owns terminal state.
-# ``/suspend`` and ``/resume`` are P3 (they need the ComputeStrategy interface
-# widening). Declaring a hook the agent does not answer fails the corresponding
-# build or lifecycle transition, which is why the construct declares exactly the
-# hooks served here.
+# The service calls six hooks on the image listener. Build hooks warm/check the
+# snapshot without AWS access; /run authenticates configuration and starts work.
+# /terminate closes the coding barrier and acknowledges teardown. /suspend and
+# /resume checkpoint and reconcile credentials/gates. Automatic suspension also
+# requires coordinator approval of the launched image version and live settings.
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
 
-#: ``s3://`` scheme prefix for the out-of-band payload pointer.
-_S3_URI_SCHEME = "s3://"
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/suspend", microvm_suspend, methods=["POST"])
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/resume", microvm_resume, methods=["POST"])
 
 # --- platform_config allowlist (ADR-021 P2) --------------------------------
 # WHY the agent's platform env arrives in the ``/run`` payload at all, instead of
@@ -909,70 +907,15 @@ MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS: frozenset[str] = frozenset(
 #: WHAT THIS BUYS, STATED PRECISELY — because the honest answer is narrower than
 #: "stops secret exfiltration", and overstating it would hide the residual gap.
 #:
-#: The key allowlist above stops a payload setting ``LD_PRELOAD``; it does not stop
-#: a payload pointing an *allowlisted* key at a different resource. The value that
-#: matters most is ``github_token_secret_arn``: ``config.resolve_github_token``
-#: fetches whatever ARN it names using the UNSCOPED execution role and caches the
-#: raw ``SecretString`` into ``os.environ["GITHUB_TOKEN"]``, from which ``shell.py``
-#: hands the environment to every repo subprocess — i.e. into the model's tool
-#: surface. So the value is worth validating.
-#:
-#: This check is DEFENCE IN DEPTH AND FAIL-FAST, not the primary control:
-#:
-#: * What actually stops a cross-account read today is IAM. Every grant on the
-#:   execution role is account-scoped by construction — ``grantRead`` on the GitHub
-#:   PAT secret, and the ``bgagent-linear-oauth-*`` / ``bgagent-jira-oauth-*``
-#:   prefix grants built with ``stack.formatArn`` (``lambda-microvm-compute.ts``).
-#:   A foreign-account ARN therefore AccessDenies with or without this check. What
-#:   this adds is a structured 400 at the door instead of an opaque
-#:   ``AccessDeniedException`` mid-startup, and a guard that still holds if a
-#:   future grant is ever widened.
-#: * What this check does NOT stop is an IN-ACCOUNT redirect. The channel-OAuth
-#:   grants are prefix grants (unavoidable: the CLI mints ``bgagent-*-oauth-<id>``
-#:   at setup, so the names are unknown at synth), so a block whose anchor and
-#:   whose ``github_token_secret_arn`` name the SAME account but a DIFFERENT
-#:   workspace's OAuth secret is accepted here. Partition + account is the only
-#:   boundary this check enforces; it is not a per-workspace authorization check.
-#: * That residual gap is currently unreachable from the guest, which is why it is
-#:   left open. ``platform_config`` is produced by the orchestrator Lambda and the
-#:   MicroVM execution role holds ``grantRead`` ONLY on the payload bucket
-#:   (``payloadBucket.grantRead``), so a running MicroVM can read another task's
-#:   payload but cannot write one. Reaching the in-account case requires already
-#:   controlling the orchestrator's environment or the bucket's write path.
-#:
-#: ESCALATION: if the payload path ever becomes less trusted — a third-party
-#: producer, an operator-editable envelope, or any grant that lets the guest write
-#: the payload bucket — this must grow into a name-shape check that ties
-#: ``github_token_secret_arn`` to the task's own channel/workspace, because
-#: partition+account pinning provably does not cover that case.
-#:
-#: The prefix grant itself is at ECS parity. The ASYMMETRY that makes value
-#: validation worth doing here at all is new to this backend: on ECS these ARNs
-#: arrive as deploy-time container env; here they arrive in a network payload.
+#: The allowlist restricts environment-variable names; ARN shape/account checks
+#: below are defense in depth. Startup settings come from an IAM-authenticated
+#: bootstrap manifest read before the task payload. That independent manifest
+#: pins the exact GitHub secret and other deployment identifiers, including valid
+#: cross-region secrets. A same-payload account anchor alone cannot do that.
 MICROVM_PLATFORM_CONFIG_ARN_KEYS: frozenset[str] = frozenset(_PLATFORM_CONFIG_CONTRACT["arn_keys"])
 
-#: The key whose ARN supplies the partition/account every other ARN is checked
-#: against.
-#:
-#: Deliberately a payload key rather than ``os.environ`` or an STS call.
-#: ``os.environ`` is empty here by construction (nothing is baked into the
-#: snapshot — see ``imageEnvironmentVariables``), so anchoring on the environment
-#: would silently degrade this whole check to shape-only in the intended
-#: deployment. An ``sts:GetCallerIdentity`` is not available either: this runs
-#: BEFORE ``platform_config`` is installed, on the path that must make zero AWS
-#: calls beyond the S3 payload fetch.
-#:
-#: CONSEQUENCE, stated plainly: because the anchor travels in the same block as the
-#: values it validates, this check enforces INTERNAL CONSISTENCY of the block, not
-#: agreement with the account the guest is actually running in. A block that names
-#: one foreign account throughout is self-consistent and passes here — it then
-#: fails at IAM, which is the control that really holds (see
-#: :data:`MICROVM_PLATFORM_CONFIG_ARN_KEYS`). ``agent_session_role_arn`` is still
-#: the best available anchor: it is REQUIRED (so always present when this check
-#: runs, which is what stops disarm-by-omission) and it is the one value whose
-#: misdirection costs the attacker the run rather than gaining them anything — a
-#: foreign session role fails closed at ``sts:AssumeRole``
-#: (``SessionScopingError``).
+#: Consistency anchor after manifest authentication, not deployment identity.
+#: Required membership is enforced by the shared contract.
 MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY: str = _PLATFORM_CONFIG_CONTRACT["account_anchor_key"]
 
 _PLATFORM_CONFIG_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1056,6 +999,11 @@ def _validate_platform_config_contract() -> None:
     unknown_arn = sorted(MICROVM_PLATFORM_CONFIG_ARN_KEYS - set(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY))
     if unknown_arn:
         raise ValueError(f"{where}.arn_keys names key(s) absent from env_by_key: {unknown_arn}")
+    for key, env_name in MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
+        if (
+            key.endswith("_arn") or env_name.endswith("_ARN")
+        ) and key not in MICROVM_PLATFORM_CONFIG_ARN_KEYS:
+            raise ValueError(f"{where}: ARN-shaped key {key!r} is missing from arn_keys")
     anchor = MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY
     if anchor not in MICROVM_PLATFORM_CONFIG_ARN_KEYS:
         raise ValueError(f"{where}.account_anchor_key {anchor!r} must be one of arn_keys")
@@ -1135,25 +1083,6 @@ class _PlatformConfigError(Exception):
         self.code = code
 
 
-def _absent_required_platform_env() -> list[str]:
-    """Required ``platform_config`` env vars that are unset in the LIVE environment.
-
-    The no-``platform_config`` path's audit. Checks the ENV VAR names rather than
-    the contract keys, because on that path the only possible source is whatever
-    the image snapshot baked — so the effective environment is the thing to
-    interrogate, and a value that arrived by any route counts.
-
-    Blank/whitespace-only counts as absent, matching
-    :func:`_install_platform_config`'s own rule: CloudFormation renders an
-    unresolved value as ``""``, and an empty table name is not a table name.
-    """
-    return sorted(
-        MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key]
-        for key in MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS
-        if not os.environ.get(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY[key], "").strip()
-    )
-
-
 def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     """Require every ARN-shaped value to agree with the anchor's partition + account.
 
@@ -1172,9 +1101,10 @@ def _reject_foreign_arns(resolved: dict[str, str]) -> None:
     Region is deliberately NOT compared. Secrets Manager and IAM ARNs legitimately
     differ on that axis in this system — IAM is global (empty region field), and a
     cross-Region secret is a supported deployment shape — so requiring agreement
-    would reject valid configurations while adding nothing: the execution role's
-    grants are account-scoped, so an in-account cross-Region ARN reaches nothing
-    the in-Region one does not. Partition + account is the boundary this checks.
+    would reject valid configurations. IAM grants separately constrain accessible
+    resources. Partition + account consistency does not bind these identifiers
+    to this deployment or prevent selecting another workspace's same-account
+    secret where IAM permits it (#817).
     """
     anchor_value = resolved.get(MICROVM_PLATFORM_CONFIG_ACCOUNT_ANCHOR_KEY, "")
     # The anchor is contract-guaranteed REQUIRED (asserted at import), so by the
@@ -1227,10 +1157,10 @@ def _install_platform_config(raw: Any) -> list[str]:
 
     Returns the sorted env var names actually installed. Rules, all deliberate:
 
-    * ``None`` / absent → install nothing and return ``[]``. This is the P1
-      envelope (no ``platform_config`` sibling), where the snapshot's own env is
-      all there is; a MicroVM image can be launched by an orchestrator that
-      predates Stage B, and the two deploy on independent cadences.
+    * ``None`` → install nothing and return ``[]`` for direct helper callers.
+      The v2 ``/run`` path requires a dictionary from the authenticated manifest
+      before calling this helper. This no-op does not accept legacy unsigned
+      envelopes or permit an independent coordinator/image contract rollout.
     * present but not an object, or carrying ANY key outside the allowlist, or
       carrying a non-string value, or carrying a control character in a value →
       reject the run (``…_INVALID``). Unknown keys are an env-injection attempt,
@@ -1238,13 +1168,12 @@ def _install_platform_config(raw: Any) -> list[str]:
       block is refused rather than filtered. Control characters are refused for
       the reason in ``_PLATFORM_CONFIG_FORBIDDEN_VALUE_CHARS``.
     * ``None`` / blank / whitespace-only values are treated as ABSENT, not as an
-      instruction to clear the variable: the natural TypeScript producer
-      (``process.env.X ?? ''``) emits an empty string for a resource the
-      deployment does not have, and clobbering an image value with ``""`` would
-      turn "not configured over there" into "unconfigured here".
+      instruction to clear the variable. The current TypeScript producer omits
+      unconfigured values; this helper also filters explicit empty values
+      instead of installing them into the environment.
     * every required key must survive that filter, else reject
-      (``…_INCOMPLETE``). An explicitly-sent-but-empty ``{}`` therefore fails —
-      a producer with nothing to say must omit the key entirely.
+      (``…_INCOMPLETE``). An explicitly-sent-but-empty ``{}`` therefore fails;
+      the live v2 boot path always requires the complete required subset.
     * every ARN-shaped value must agree with the anchor ARN's partition + account,
       else reject (``…_INVALID``) — see :func:`_reject_foreign_arns`, which is
       explicit that this is internal consistency plus fail-fast, not an
@@ -1368,9 +1297,8 @@ def _build_hook_log(msg: str) -> None:
     1. The build role's Logs grant is scoped to the service's own
        ``/aws/lambda-microvms/*`` namespace, so a write to any OTHER
        ``LOG_GROUP_NAME`` — e.g. an APPLICATION_LOGS group baked into a legacy or
-       hand-built image — can only FAIL. That failure bumps the shared
-       ``_debug_cw_failures`` counter, i.e. such an image build would poison the
-       "debug path is blind" signal with a false positive.
+       hand-built image — can fail. The counter incremented by such a failure
+       is currently unexported (#810), so it provides no alarm signal.
     2. ``boto3.DEFAULT_SESSION`` created during ``/ready`` freezes the BUILD role's
        CREDENTIALS into the snapshot, where every launched MicroVM would inherit
        them (region is re-resolved per client; credentials are not — see
@@ -1389,11 +1317,11 @@ def _pre_config_log(msg: str) -> None:
     ``_install_platform_config`` has run, ``LOG_GROUP_NAME`` is whatever the
     snapshot happens to carry — normally nothing, but a legacy or hand-built image
     could bake it, and then a ``_debug_cw`` on this path would resolve credentials
-    and pin ``boto3.DEFAULT_SESSION`` *before* ``AGENT_SESSION_ROLE_ARN`` is in the
-    environment — memoizing the UNSCOPED compute-role credentials for the life of
-    the process, where the whole point of that variable is that every later client
-    is tenant-scoped. (Region and ``AWS_SDK_UA_APP_ID`` are re-resolved per client
-    and so are NOT at risk here; the credentials are the exposure.) The one AWS
+    and create ``boto3.DEFAULT_SESSION`` before configuration is installed.
+    Tenant-data clients use the separate, tag-scoped session in ``aws_session``;
+    setting ``AGENT_SESSION_ROLE_ARN`` does not scope boto3's default session.
+    Platform clients intentionally retain compute-role credentials. Region and
+    ``AWS_SDK_UA_APP_ID`` are re-resolved per client. The one AWS
     call this phase is allowed to make is the S3 payload fetch, because
     ``platform_config`` is inside the object it fetches.
 
@@ -1456,176 +1384,27 @@ def _parse_terminate_microvm_id(raw: bytes) -> str:
 
 
 class MicrovmRunHookRequest(BaseModel):
-    """Body the MicroVM service POSTs to the ``/run`` hook.
+    """Service request containing a serialized v2 payload reference.
 
-    ``runHookPayload`` is the opaque STRING the orchestrator passed to
-    ``RunMicrovm`` — the service does not parse it. ABCA's contract for that
-    string (``lambda-microvm-strategy.ts``) is one of two shapes, mirroring the
-    ECS container env contract (``AGENT_PAYLOAD`` / ``AGENT_PAYLOAD_S3_URI``):
-
-    * ``{"agent_payload": {...}, "platform_config": {...}}`` — inline.
-    * ``{"agent_payload_s3_uri": "s3://bucket/key", "platform_config": {...}}`` —
-      a pointer; the object at the URI carries the task payload (and a
-      ``platform_config`` copy, so either end of the fetch yields it).
-
-    The pointer form is the DOMINANT one: the service caps ``runHookPayload`` at
-    4 096 bytes and a hydrated payload is essentially always larger.
-
-    ``platform_config`` (ADR-021 P2) is a SIBLING of ``agent_payload``, not a
-    field inside it: it configures the agent's *process*, whereas
-    ``agent_payload`` describes the *task* (``memory_id`` and friends stay
-    inside ``agent_payload``, unchanged). See ``_install_platform_config``.
-
-    Both fields default to empty so a malformed call produces this module's
-    structured 400 rather than FastAPI's 422 — the service surfaces a 4xx as a
-    generic "client error" hook failure either way, and our own body is what ends
-    up in the MicroVM log group.
+    The reference identifies an IAM-authenticated deployment manifest and one
+    task's signed download URL. Unsigned inline and legacy S3 envelopes are
+    refused: this protocol requires a matching coordinator and agent image.
+    Missing fields reach our structured 400 instead of FastAPI's 422.
     """
 
     microvmId: str = ""  # service field name; camelCase on the wire
     runHookPayload: str = ""  # service field name; camelCase on the wire
 
 
-class _PayloadFetchError(Exception):
-    """A ``/run`` payload the agent could not READ, as opposed to could not PARSE.
-
-    Exists purely to be *not* a ``ValueError``, because the ``/run`` handler
-    discriminates its 400 from its 500 on exactly that type and the two answers
-    make opposite promises to the operator:
-
-    * 400 ``MICROVM_RUN_PAYLOAD_INVALID`` — "the orchestrator built a bad
-      envelope; retrying an identical body cannot help."
-    * 500 ``MICROVM_RUN_PAYLOAD_UNREADABLE`` — "the payload could not be read;
-      retrying CAN help."
-
-    A truncated, racing, or half-written S3 object is the SECOND kind, but its
-    natural exception is ``json.JSONDecodeError`` — a ``ValueError`` subclass — so
-    it landed in the 400 branch and told the operator the orchestrator was at
-    fault when the orchestrator was fine and the object was bad. Only the
-    *pre-fetch* URI-shape check legitimately raises ``ValueError`` on this path,
-    which is why a blanket ``except ValueError`` is the wrong discriminator and
-    this type exists.
-    """
-
-
-def _fetch_microvm_payload_from_s3(uri: str) -> dict:
-    """Read and parse the out-of-band ``/run`` payload from S3.
-
-    Same fetch the ECS boot command performs for ``AGENT_PAYLOAD_S3_URI``; the
-    MicroVM **execution role** holds the read grant, scoped to the platform
-    payload bucket. Errors propagate to the caller, which turns them into a
-    structured 400/500 — silently starting a pipeline with no payload would
-    produce a task that runs with an empty prompt.
-
-    The URI-SHAPE check raises ``ValueError`` (the orchestrator's envelope is
-    wrong → 400). Everything AFTER the fetch raises :class:`_PayloadFetchError`
-    (the object is wrong → 500, retryable). See that class.
-
-    Built through ``aws_session.platform_client`` so the call carries the ABCA
-    ``md/`` solution-attribution segment (#319). Platform, not tenant: the bucket
-    is platform-owned and — decisively — this is the ONE call that must happen
-    BEFORE ``platform_config`` is installed (the config is inside the object
-    being fetched), so ``AGENT_SESSION_ROLE_ARN`` may not be set yet and a
-    tenant-scoped client could not be built. ``platform_client`` does not touch
-    the cached session, so this call also cannot pin an unscoped session for the
-    rest of the task. The ``app/`` UA segment (native, from ``AWS_SDK_UA_APP_ID``)
-    is the one attribution field this single call can miss for the same
-    chicken-and-egg reason.
-    """
-    remainder = uri[len(_S3_URI_SCHEME) :]
-    bucket, _, key = remainder.partition("/")
-    if not bucket or not key:
-        raise ValueError(f"agent_payload_s3_uri is not a bucket/key URI: {uri!r}")
-
-    from aws_session import platform_client
-
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    client = platform_client("s3", region_name=region)
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    try:
-        payload = json.loads(body)
-    except ValueError as exc:
-        # ``JSONDecodeError`` IS a ``ValueError``, so without this re-raise a
-        # truncated or half-written object would be reported as an orchestrator
-        # envelope bug and marked non-retryable. Re-raised as the type the handler
-        # routes to its retryable 500.
-        raise _PayloadFetchError(
-            f"S3 payload at {uri!r} is not valid JSON ({exc}); the object may be "
-            "truncated or still being written"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise _PayloadFetchError(
-            f"S3 payload at {uri!r} is {type(payload).__name__}, expected an object"
-        )
-    return payload
-
-
-def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, Any]:
-    """Split the ``runHookPayload`` string into (agent payload, platform config).
-
-    The second element is returned RAW (unvalidated) — ``_install_platform_config``
-    owns its allowlist checks so the two failure classes get distinct wire codes.
-    ``None`` means the envelope carried no ``platform_config`` at all.
-
-    Raises ``ValueError`` for every ENVELOPE shape the agent cannot act on — the
-    caller maps that onto its 400 ("the orchestrator built this; a retry cannot
-    help"). Problems with the CONTENT of a fetched S3 object raise
-    :class:`_PayloadFetchError` instead, which the caller maps onto its retryable
-    500: the orchestrator's envelope was fine and the object was not.
-    """
-    if not run_hook_payload.strip():
-        raise ValueError("runHookPayload is empty")
+def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, dict]:
+    """Authenticate deployment settings and resolve the v2 task reference."""
+    from payload_bootstrap import resolve_payload_reference
 
     try:
-        envelope = json.loads(run_hook_payload)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"runHookPayload is not valid JSON: {exc}") from exc
-
-    if not isinstance(envelope, dict):
-        raise ValueError(f"runHookPayload must be a JSON object, got {type(envelope).__name__}")
-
-    inline = envelope.get("agent_payload")
-    if inline is not None:
-        if not isinstance(inline, dict):
-            raise ValueError(f"agent_payload must be an object, got {type(inline).__name__}")
-        return inline, envelope.get("platform_config")
-
-    uri = envelope.get("agent_payload_s3_uri")
-    if isinstance(uri, str) and uri.startswith(_S3_URI_SCHEME):
-        fetched = _fetch_microvm_payload_from_s3(uri)
-        # ``platform_config`` may sit beside the pointer (outer envelope) or
-        # inside the fetched object — the producer writes it in BOTH places on
-        # this path deliberately, so the agent gets it whichever end it reads.
-        # Inner first, outer as the fallback.
-        platform_config = fetched.get("platform_config")
-        if platform_config is None:
-            platform_config = envelope.get("platform_config")
-        # The fetched object is EITHER the same envelope shape as the inline form
-        # ({"agent_payload": …}) or the task payload itself with ``platform_config``
-        # merged in at the top level (what the strategy writes today, and what P1
-        # wrote without the config). Both are accepted because the image snapshot
-        # and the orchestrator Lambda deploy on independent cadences — a new image
-        # must not require a same-instant orchestrator. Discriminating on the
-        # ``agent_payload`` key is unambiguous: no orchestrator task payload has a
-        # field by that name. A stray ``platform_config`` key left in the bare
-        # form is inert — ``_extract_invocation_params`` reads named fields only.
-        nested = fetched.get("agent_payload")
-        if nested is None:
-            return fetched, platform_config
-        if not isinstance(nested, dict):
-            # Content of the FETCHED OBJECT, not of the envelope — so this is the
-            # retryable class, same as a truncated body. See ``_PayloadFetchError``.
-            raise _PayloadFetchError(
-                f"agent_payload in the S3 payload must be an object, got {type(nested).__name__}"
-            )
-        return nested, platform_config
-    if uri is not None:
-        raise ValueError(f"agent_payload_s3_uri must be an s3:// URI, got {uri!r}")
-
-    raise ValueError(
-        "runHookPayload envelope has neither agent_payload nor agent_payload_s3_uri "
-        f"(keys: {sorted(envelope)})"
-    )
+        reference = json.loads(run_hook_payload)
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("runHookPayload is not valid JSON") from exc
+    return resolve_payload_reference(reference, "lambda-microvm")
 
 
 #: The ONE executable whose warm-up gates the snapshot, exec'd FIRST.
@@ -1895,8 +1674,8 @@ def microvm_validate():
 
     It must also not touch credential resolution: ``platform_config`` has not
     arrived yet (it comes with ``/run``), and any client built here would leave a
-    resolved boto3 session — with the build role's credentials and the build
-    region — frozen in the snapshot for every MicroVM launched from it. Hence
+    resolved boto3 session with cached build-role credentials in the snapshot
+    for every MicroVM launched from it (region is re-resolved per client). Hence
     ``_build_hook_log`` instead of ``_debug_cw``, and no import of
     ``aws_session``.
 
@@ -1929,7 +1708,8 @@ def microvm_validate():
     would fail every build. Names only — never values.
     """
     expected_routes = {
-        f"{MICROVM_HOOK_PREFIX}/{hook}" for hook in ("ready", "validate", "run", "terminate")
+        f"{MICROVM_HOOK_PREFIX}/{hook}"
+        for hook in ("ready", "validate", "run", "terminate", "suspend", "resume")
     }
     registered = {getattr(route, "path", None) for route in app.routes}
     missing_routes = sorted(expected_routes - registered)
@@ -1939,6 +1719,12 @@ def microvm_validate():
         "hook_routes_registered": not missing_routes,
         "python_version_supported": sys.version_info[:2] >= _MIN_PYTHON_VERSION,
         "platform_config_contract_loaded": bool(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY),
+        # Absent markers support ordinary/legacy images. A marked image must
+        # actually contain the protocol it advertises, before AWS snapshots it.
+        "image_lifecycle_protocol_supported": os.environ.get(
+            SHARED_CONSTANTS["microvm_lifecycle"]["image_protocol_env"]
+        )
+        in (None, str(SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"])),
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
 
@@ -1983,44 +1769,33 @@ def microvm_validate():
     return body
 
 
+# The terminate body is only optional correlation data. Leave ample headroom
+# inside the image's 15-second hook timeout if the service stream stalls.
+_TERMINATE_BODY_BUDGET_SECONDS = 1.0
+
+
 @app.post(f"{MICROVM_HOOK_PREFIX}/terminate")
 async def microvm_terminate(request: Request):
-    """MicroVM ``/terminate`` runtime hook — best-effort flush, always 200.
+    """Close the coding barrier, log teardown and acknowledge any request body.
 
-    Called as the MicroVM is torn down. Three hard constraints:
-
-    * **It must not write terminal task status.** The orchestrator owns terminal
-      state: it finalizes the task and THEN calls ``TerminateMicrovm``, so a
-      terminate hook that wrote ``FAILED``/``COMPLETED`` would race the
-      finalization it follows and could clobber the real outcome with a
-      substrate-shutdown artifact. The pipeline thread's own crash path
-      (``_run_task_background``) remains the only in-guest terminal writer.
-    * **It must return 200 inside the hook budget, even with nothing running.**
-      So it never joins the pipeline thread (a drain could take minutes — that is
-      ``lifespan``'s job on a graceful shutdown) and every best-effort step is
-      wrapped: a failure here must not turn a clean teardown into a hook failure.
-    * **It must return 200 for any BODY too.** That is why this handler takes the
-      raw ``Request`` instead of a Pydantic body model: FastAPI validates a typed
-      body BEFORE the handler runs, so malformed JSON, a wrong content-type, or a
-      missing body would produce a 422 this function never gets a chance to
-      prevent — a reported hook failure on a successful teardown. Parsing is
-      deferred to ``_parse_terminate_microvm_id``, which degrades to ``""``.
-
-    ``async def`` (unlike ``/ready`` and ``/run``) because reading the raw body
-    requires awaiting it. Safe on the event loop: the work is a JSON parse, a
-    thread-count read and a fire-and-forget log — no blocking AWS call.
-
-    On flushing: there is nothing buffered to flush. ``_ProgressWriter`` performs
-    a synchronous DynamoDB ``put_item`` per event, and ``task_state`` writes
-    inline, so every progress/status write is already durable at call time — this
-    hook has no queue to drain, which is why it is a log-and-acknowledge rather
-    than a flush loop. (ADR-021 sub-decision 2's "flush progress events before
-    returning 200" applies to ``/suspend`` in P3 for the same reason: durability
-    is per-write, so the hook only has to observe it.)
+    This hook never joins the pipeline or writes terminal task status. Termination
+    can interrupt active work, so it cannot assume finalization already finished.
+    Raw Request parsing avoids FastAPI rejecting malformed bodies before entry.
+    Each best-effort step is guarded; acknowledged checkpointing belongs to
+    /suspend, not this hook.
     """
+    # Close the local barrier before reading the body or emitting diagnostics.
+    # A slow checkpoint/refresh thread must not release coding during teardown.
+    try:
+        lifecycle = get_registered_context()
+        if lifecycle is not None:
+            lifecycle.close()
+    except Exception as exc:
+        _emit_stdout_line(f"[server/warn] /terminate barrier close failed: {type(exc).__name__}")
     raw = b""
     try:
-        raw = await request.body()
+        async with asyncio.timeout(_TERMINATE_BODY_BUDGET_SECONDS):
+            raw = await request.body()
     except Exception as exc:
         # A truncated/aborted body must not become a 5xx: the VM is going away and
         # the id is only a correlation string. Logged, not swallowed.
@@ -2079,7 +1854,7 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     mechanism ``/invocations`` uses — ``_extract_invocation_params`` →
     ``_validate_required_params`` → ``_spawn_background`` — rather than a second,
     drifting payload mapper. The orchestrator payload is byte-identical across
-    substrates (AgentCore receives it as ``input``, ECS as ``AGENT_PAYLOAD``,
+    substrates (AgentCore receives it as ``input``, ECS through the authenticated payload reference,
     MicroVMs inside this envelope), which is what makes that reuse correct.
 
     ``platform_config`` (P2) is installed into ``os.environ`` FIRST — before
@@ -2096,15 +1871,15 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     has, per ADR-021 sub-decision 3's identity delta.
 
     Sync ``def`` for the same reason as ``/ready``, and additionally because the
-    S3 payload fetch is a blocking boto3 call: in a threadpool it cannot stall
+    manifest read and signed download are blocking calls: in a threadpool it cannot stall
     the event loop.
 
     **Every log line before the install goes through ``_pre_config_log``** (stdout
     only). Until ``platform_config`` is in the environment, a ``_debug_cw`` here
     would resolve AWS credentials and pin ``boto3.DEFAULT_SESSION`` off whatever
     the snapshot happens to carry — the same defect the build hooks avoid, one
-    phase later. The single AWS call this phase is allowed to make is the S3
-    payload fetch, because the config is inside the object being fetched.
+    phase later. Pre-install operations are the IAM-authenticated manifest read
+    and the single-object HTTPS download. Build hooks remain AWS-silent.
     """
     _pre_config_log(
         f"/run hook received: microvm_id={body.microvmId!r} bytes={len(body.runHookPayload)}"
@@ -2125,16 +1900,14 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
         )
     except Exception as exc:
         # Payload could not be READ: S3 AccessDenied / NoSuchKey / transient, or a
-        # `_PayloadFetchError` for an object that fetched but was truncated,
+        # `PayloadFetchError` for an object that fetched but was truncated,
         # non-JSON, or not an object. 500 so the failure is distinguishable from a
-        # malformed ENVELOPE (the 400 above) and is correctly reported as
-        # retryable, and loud enough to find in the MicroVM log group — via the
-        # response body, since the CloudWatch writer is off-limits until the config
-        # is installed.
-        _pre_config_log(
-            f"/run hook payload fetch FAILED [{type(exc).__name__}: {exc}]\n"
-            f"{traceback.format_exc()}"
-        )
+        # malformed reference (the 400 above). The response body preserves the
+        # distinction while CloudWatch is off-limits before config installation.
+        # Corrupt stored bytes require repair, not an assumption that retry helps.
+        # A chained HTTP error may contain the bearer URL. Log only the
+        # bootstrap reader's sanitized message, never its exception chain.
+        _pre_config_log(f"/run hook payload fetch FAILED [{type(exc).__name__}: {exc}]")
         return JSONResponse(
             status_code=500,
             content={
@@ -2146,6 +1919,11 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
     task_id_log = str(payload.get("task_id", ""))
 
     try:
+        if platform_config is None:
+            raise _PlatformConfigError(
+                "MICROVM_RUN_PLATFORM_CONFIG_INVALID",
+                "Authenticated platform configuration is required",
+            )
         installed_env = _install_platform_config(platform_config)
     except _PlatformConfigError as exc:
         _pre_config_log(f"/run hook rejected: {exc}")
@@ -2162,55 +1940,6 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
         _debug_cw(
             f"/run hook installed platform_config env: {installed_env}",
             task_id=task_id_log or None,
-        )
-    else:
-        # No `platform_config` — the legacy P1 envelope. This branch must NOT simply
-        # shrug: the required keys exist because without them the agent cannot write
-        # status/progress, resolve the GitHub token, or (decisively)
-        # tenant-scope its credentials — `aws_session.get_session` falls back to the
-        # ambient compute role with scoping silently OFF when
-        # `AGENT_SESSION_ROLE_ARN` is unset. So the check is re-run against the
-        # EFFECTIVE environment: a legacy or hand-built image that bakes those
-        # values still runs (that is the compatibility this branch is for), while
-        # version skew — a pre-Stage-B orchestrator launching a P2 image, which
-        # bakes nothing — is REJECTED instead of running unscoped.
-        #
-        # STILL pre-install, so the line is stdout only. A `_warn_cw` here would
-        # spawn the CloudWatch writer thread and pin `boto3.DEFAULT_SESSION` off the
-        # snapshot's baked env, which is the very defect this branch is reporting.
-        # Nothing is lost: on the intended deployment (no baked `LOG_GROUP_NAME`)
-        # `_warn_cw` would have degraded to this same stdout line, on a legacy image
-        # the log group would be the wrong one anyway, and the rejection reason also
-        # travels in the structured response body the service surfaces.
-        absent = _absent_required_platform_env()
-        if absent:
-            _pre_config_log(
-                f"/run hook REJECTED: no platform_config and the image snapshot does "
-                f"not supply required value(s) either: {absent}"
-                + (f" task_id={task_id_log!r}" if task_id_log else "")
-            )
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "code": "MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE",
-                    "message": (
-                        "The /run envelope carried no platform_config and the image "
-                        "snapshot does not carry the required values either, so this "
-                        f"MicroVM cannot run a task: {absent} are unset. This is a "
-                        "version skew — an orchestrator predating ADR-021 P2 launching "
-                        "a P2 image, which bakes no environment by design. Refusing "
-                        "rather than running with tenant scoping disabled. Redeploy the "
-                        "orchestrator so it sends platform_config."
-                    ),
-                    "missing_env": absent,
-                },
-            )
-        _pre_config_log(
-            "/run hook received no platform_config; running on the image snapshot's "
-            "own environment, which is frozen at build time and which DOES supply "
-            "every required value. Expected only from an orchestrator that predates "
-            "ADR-021 P2 paired with an image that bakes its own configuration."
-            + (f" task_id={task_id_log!r}" if task_id_log else "")
         )
 
     try:
@@ -2239,8 +1968,17 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             },
         )
 
-    _spawn_background(params)
+    # The attempt token comes only from the authenticated bootstrap payload.
+    # It identifies coordinator authority before RunMicrovm returns a VM ID.
     task_id = params["task_id"]
+    attempt_id = payload.get("attempt_id", task_id)
+    if not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt_id):
+        return JSONResponse(
+            status_code=400,
+            content={"code": "MICROVM_ATTEMPT_ID_INVALID", "message": "Invalid worker attempt"},
+        )
+    reseed_random()
+    _spawn_background({**params, "microvm_id": body.microvmId, "attempt_id": attempt_id})
     # Carries microvm_id as well as task_id: the "/run hook received" line that
     # used to correlate the two is stdout-only now (pre-install), so this is the
     # first line that reaches the task's log group and it has to join the CloudWatch

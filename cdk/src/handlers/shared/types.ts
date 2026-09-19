@@ -19,6 +19,7 @@
 
 import { classifyError, type ErrorClassification } from './error-classifier';
 import { logger } from './logger';
+import type { ContinuationLaunchReceipt, ContinuationRecord } from './microvm-continuation-types';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
@@ -162,6 +163,9 @@ export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
+  /** Internal immutable input pointer and current durable worker handoff. */
+  readonly continuation_launch?: ContinuationLaunchReceipt;
+  readonly continuation?: ContinuationRecord;
   /** Cognito group names captured at admission for team-budget rollups. */
   readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
@@ -285,6 +289,8 @@ export interface TaskRecord {
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
+  /** Approval-wait seconds before MicroVM sleep; 0 keeps it awake. Captured at submission. */
+  readonly microvm_sleep_after_s?: number;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
@@ -337,10 +343,9 @@ export interface TaskRecord {
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
-   * Default 300s when absent. The engine clamps to
-   * ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]`` at task
-   * start; min-wins against per-rule ``@approval_timeout_s`` at
-   * gate-firing time.
+   * Zero (the default) means no automatic expiry. Positive explicit values use
+   * ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``; the shortest positive
+   * task/rule deadline applies when a gate fires.
    */
   readonly approval_timeout_s?: number;
   /**
@@ -446,6 +451,8 @@ export interface TaskNotificationsConfig {
  * Strips internal fields not exposed in the API.
  */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -739,6 +746,8 @@ export interface GetTaskEventsQuery {
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = 600). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
@@ -970,6 +979,9 @@ export function toTaskDetail(
 ): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
+    ...(typeof record.microvm_sleep_after_s === 'number' && Number.isInteger(record.microvm_sleep_after_s)
+      && record.microvm_sleep_after_s >= MICROVM_SLEEP_AFTER_S_MIN && record.microvm_sleep_after_s <= MICROVM_SLEEP_AFTER_S_MAX
+      && { microvm_sleep_after_s: record.microvm_sleep_after_s }),
     task_id: record.task_id,
     status: record.status,
     repo: record.repo ?? null,
@@ -1303,14 +1315,14 @@ export type ApprovalStatus =
   | 'PENDING'
   | 'APPROVED'
   | 'DENIED'
+  | 'CANCELLED'
   | 'TIMED_OUT'
   | 'STRANDED';
 
 /**
- * Cedar HITL severity, surfaced in the CLI approval prompt and used
- * for severity-gated channel routing (§11.2: high-severity rules
- * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `ApprovalRecord`,
+ * Cedar HITL severity, surfaced in approval prompts and notifications.
+ * Native Slack approval buttons remain unimplemented. Shared alias so the
+ * same literal union is not redefined inline in `ApprovalRecord`,
  * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
  */
 export type Severity = 'low' | 'medium' | 'high';
@@ -1338,7 +1350,10 @@ interface ApprovalRecordBase {
   readonly matching_rule_ids: readonly string[];
   readonly created_at: string;
   readonly timeout_s: number;
-  readonly ttl: number;
+  /** Optional explicit deadline. Zero timeout has no automatic deadline. */
+  readonly deadline_epoch?: number;
+  /** Retention cleanup is stamped after the owning task closes. */
+  readonly ttl?: number;
   readonly user_id: string;
   readonly repo: string;
 }
@@ -1362,14 +1377,22 @@ export interface DeniedApprovalRecord extends ApprovalRecordBase {
   readonly deny_reason?: string;
 }
 
-/** TIMED_OUT approval row — decided_at required (server-set). */
-export interface TimedOutApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'TIMED_OUT';
+/** CANCELLED approval row — its owning task was cancelled or otherwise closed. */
+export interface CancelledApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'CANCELLED';
   readonly decided_at: string;
+  readonly cancellation_reason: string;
 }
 
-/** STRANDED approval row — decided_at required (set by the
- *  stranded-task reconciler). No user decision was ever recorded. */
+/** TIMED_OUT approval row — the guest's older timeout writer omits decided_at. */
+export interface TimedOutApprovalRecord extends ApprovalRecordBase {
+  readonly status: 'TIMED_OUT';
+  readonly decided_at?: string;
+  readonly deny_reason?: string;
+}
+
+/** STRANDED approval row, when explicitly recorded. The current stranded-task
+ *  reconciler closes the owning task and leaves its approval row PENDING. */
 export interface StrandedApprovalRecord extends ApprovalRecordBase {
   readonly status: 'STRANDED';
   readonly decided_at: string;
@@ -1388,6 +1411,7 @@ export type ApprovalRecord =
   | PendingApprovalRecord
   | ApprovedApprovalRecord
   | DeniedApprovalRecord
+  | CancelledApprovalRecord
   | TimedOutApprovalRecord
   | StrandedApprovalRecord;
 
@@ -1406,8 +1430,8 @@ export interface PendingApprovalSummary {
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
-  /** Derived: `created_at + timeout_s` in ISO 8601 UTC. */
-  readonly expires_at: string;
+  /** Null when the request has no automatic deadline. */
+  readonly expires_at: string | null;
   /** Cedar rule ids that matched this request (design §10.1). Surfaced
    *  so `bgagent pending` can show _why_ a gate fired without the user
    *  spelunking TaskEventsTable. Empty array on pre-Cedar-HITL rows. */
@@ -1521,8 +1545,8 @@ export interface ApprovalDecisionRecordedEvent {
  * Old callers continue to work — every field is optional. New callers
  * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
  * status*`) to avoid hitting gates for trusted operations, and can
- * raise the per-task default approval timeout above the 300s default
- * within the `[30, min(3600, maxLifetime - 300)]` bound.
+ * choose an explicit approval deadline of 30–3600 seconds. The default, zero,
+ * leaves unanswered requests available while their owning task remains open.
  *
  * Keep in sync with ``cli/src/types.ts``.
  */
@@ -1541,14 +1565,18 @@ export const INITIAL_APPROVALS_MAX_ENTRY_LENGTH = 128;
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
 
-/** Absolute ceiling for `approval_timeout_s` before the
- *  `maxLifetime - 300` clip is applied (§7.3).
+/** Maximum positive explicit approval timeout.
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
 /** Default `approval_timeout_s` when the submit payload omits it.
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
+
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
+export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap

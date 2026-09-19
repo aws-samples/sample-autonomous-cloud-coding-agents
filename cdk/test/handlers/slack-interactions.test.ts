@@ -26,6 +26,7 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
+  TransactWriteCommand: jest.fn((input: unknown) => ({ _type: 'TransactWrite', input })),
 }));
 
 const smSend = jest.fn();
@@ -39,6 +40,8 @@ const fetchMock = jest.fn();
 
 process.env.SLACK_SIGNING_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent/slack/signing-I';
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 process.env.SLACK_USER_MAPPING_TABLE_NAME = 'SlackMap';
 
 import { invalidateSlackSecretCache } from '../../src/handlers/shared/slack-verify';
@@ -127,7 +130,7 @@ describe('slack-interactions handler', () => {
     // 1. user mapping lookup → platform user id
     ddbSend.mockResolvedValueOnce({ Item: { platform_user_id: 'user-42' } });
     // 2. task lookup → same owner
-    ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42', channel_metadata: {} } });
+    ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42', status: 'RUNNING', channel_metadata: {} } });
     // 3. update → success
     ddbSend.mockResolvedValueOnce({});
 
@@ -159,20 +162,35 @@ describe('slack-interactions handler', () => {
 
   test('cancel_task on already-terminal task warns the user', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { platform_user_id: 'user-42' } });
-    ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42' } });
-    // ConditionalCheckFailedException => already in terminal state
-    const err = new Error('conditional failed');
-    err.name = 'ConditionalCheckFailedException';
-    ddbSend.mockRejectedValueOnce(err);
+    ddbSend.mockResolvedValueOnce({ Item: { task_id: 'task-42', user_id: 'user-42', status: 'COMPLETED' } });
 
     const event = makeInteractionEvent(interactionPayload('cancel_task:task-42'));
     const result = await handler(event);
     expect(result.statusCode).toBe(200);
     const posted = fetchMock.mock.calls.find(
       ([url, opts]) =>
-        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('terminal state'),
+        isSlackHooksRequestUrl(url) && String((opts as { body: string }).body).includes('no longer available'),
     );
     expect(posted).toBeTruthy();
+  });
+
+  test('cancel_task closes the linked approval in the same transaction', async () => {
+    ddbSend.mockResolvedValueOnce({ Item: { platform_user_id: 'user-42' } })
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 'task-42',
+          user_id: 'user-42',
+          status: 'AWAITING_APPROVAL',
+          awaiting_approval_request_id: 'request-42',
+        },
+      })
+      .mockResolvedValueOnce({ Item: { user_id: 'user-42', status: 'PENDING' } })
+      .mockResolvedValueOnce({});
+    const response = await handler(makeInteractionEvent(interactionPayload('cancel_task:task-42')));
+    expect(response.statusCode).toBe(200);
+    const transaction = ddbSend.mock.calls.find(([command]) => command._type === 'TransactWrite')![0].input;
+    expect(transaction.TransactItems[1].Update.Key.request_id).toBe('request-42');
+    expect(transaction.TransactItems[2].Put.Item.event_type).toBe('approval_cancelled');
   });
 
   test('unknown action_id is ignored silently', async () => {

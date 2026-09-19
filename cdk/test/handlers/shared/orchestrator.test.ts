@@ -42,8 +42,10 @@ import { TaskStatus } from '../../../src/constructs/task-status';
 import type { SessionHandle, SessionStatus } from '../../../src/handlers/shared/compute-strategy';
 // The real classifier: the reason-append must not break the anchor the substrate
 // -failure classification keys on.
-import { classifyError } from '../../../src/handlers/shared/error-classifier';
-import { buildComputeMetadata, reconcileMicrovmSubstrateState } from '../../../src/handlers/shared/orchestrator';
+import { classifyError, formatMicrovmTerminalFailure } from '../../../src/handlers/shared/error-classifier';
+import { renderFailureReply, renderPanelFailureReason } from '../../../src/handlers/shared/failure-reply';
+import { buildComputeMetadata, finalizeTask } from '../../../src/handlers/shared/orchestrator';
+import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
 const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
@@ -57,40 +59,51 @@ function commandsOfType(type: string): Array<{ _type: string; input: Record<stri
   return sentCommands().filter(c => c._type === type);
 }
 
-/**
- * Prime the mocked doc client: the FIRST Get returns a task row with
- * ``rereadStatus``; every Put/Update resolves empty. Mirrors the single re-read
- * `reconcileMicrovmSubstrateState` performs before failing a task.
- */
-function primeReread(rereadStatus: string): void {
-  mockDdbSend.mockImplementation((cmd: { _type: string }) => {
-    if (cmd._type === 'Get') {
-      return Promise.resolve({
-        Item: { task_id: 'TASK001', user_id: 'user-1', repo: 'org/repo', status: rereadStatus },
-      });
-    }
-    return Promise.resolve({});
-  });
+/** Strong finalization observes this committed task before choosing an outcome. */
+function primeReread(status: string): void {
+  mockDdbSend.mockImplementation((cmd: { _type: string }) => Promise.resolve(cmd._type === 'Get' ? {
+    Item: {
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status,
+      memory_written: true,
+      compute_type: 'lambda-microvm',
+      session_id: MICROVM_ID,
+      compute_metadata: { microvmId: MICROVM_ID, endpoint: ENDPOINT },
+    },
+  } : {}));
 }
-
-const CORRELATION = { user_id: 'user-1', repo: 'org/repo' };
-
-function reconcile(substrate: SessionStatus, ddbStatus: string, suspendAnomalyReported?: boolean) {
-  return reconcileMicrovmSubstrateState({
-    taskId: 'TASK001',
-    ddbStatus: ddbStatus as never,
-    substrate,
-    microvmId: MICROVM_ID,
-    userId: 'user-1',
-    correlation: CORRELATION,
-    log: mockLogger,
-    repo: 'org/repo',
-    ...(suspendAnomalyReported !== undefined && { suspendAnomalyReported }),
-  });
+const mockRelease = jest.fn();
+jest.mock('../../../src/handlers/shared/task-concurrency', () => ({
+  acquireTaskSlot: jest.fn(), releaseTaskSlot: (...args: unknown[]) => mockRelease(...args),
+}));
+function finish(substrate: SessionStatus, polledStatus = TaskStatus.RUNNING) {
+  return finalizeTask('TASK001', {
+    attempts: 1,
+    lastStatus: polledStatus,
+    microvmFailureReason: 'substrate-terminal',
+    microvmFailureMessage: formatMicrovmTerminalFailure(
+      substrate.status === 'failed' ? substrate.error : `substrate state ${substrate.status}`, substrate.reason,
+    ),
+    microvmSupervisor: {
+      version: 1,
+      microvmId: MICROVM_ID,
+      firstObservedAtMs: 1,
+      sessionDeadlineMs: 28_800_001,
+      lifetimeVerified: true,
+      consecutivePollFailures: 0,
+      consecutiveResumeFailures: 0,
+      anomalyReported: false,
+      nextPollInMs: 5_000,
+    },
+  }, 'user-1');
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockLogger.child.mockReturnValue(mockLogger);
+  mockRelease.mockResolvedValue(false);
   mockDdbSend.mockReset();
   mockDdbSend.mockResolvedValue({});
 });
@@ -132,14 +145,23 @@ describe('buildComputeMetadata', () => {
     expect(buildComputeMetadata(handle)).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
   });
 
-  test('never carries the MicroVM image ARN (deployment config, not session state)', () => {
+  test('preserves actual image identity and verified capability for later policy decisions', () => {
     const metadata = buildComputeMetadata({
       sessionId: MICROVM_ID,
       strategyType: 'lambda-microvm',
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+      lifecycleProtocol: '1',
     });
-    expect(Object.keys(metadata).sort()).toEqual(['endpoint', 'microvmId']);
+    expect(metadata).toEqual({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      imageVersion: '3.0',
+      lifecycleProtocol: '1',
+    });
   });
 
   test('produces only string values (compute_metadata is Record<string, string> in DDB)', () => {
@@ -161,329 +183,60 @@ describe('buildComputeMetadata', () => {
   });
 });
 
-describe('reconcileMicrovmSubstrateState', () => {
-  describe('running substrate', () => {
-    test('is a no-op: no DDB reads, no events, task not failed', async () => {
-      const result = await reconcile({ status: 'running' }, TaskStatus.RUNNING);
-
-      // `suspendAnomalyReported: false` RE-ARMS the once-per-episode event: a VM
-      // that resumed and is later suspended again earns a fresh anomaly event.
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
-      expect(mockDdbSend).not.toHaveBeenCalled();
-    });
+describe('MicroVM terminal finalization', () => {
+  test.each([
+    ['MicroVM host unavailable.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['capacity unavailable in this Availability Zone.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['MicroVM unavailable in this region.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['INSUFFICIENT_GITHUB_REPO_PERMISSIONS', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['BLOCKED[missing_secret]: diagnostic text', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ["agent_status='success', build_ok=False", 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ["agent_status='success', build_ok=timeout [auto-retried]", 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['Run lifecycle hook returned HTTP status 400.', 'MICROVM_RUN_HOOK_REJECTED', 'config', false],
+    ['Run lifecycle hook returned HTTP status 500.', 'MICROVM_SUBSTRATE_TERMINATED', 'compute', true],
+    ['Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.', 'MICROVM_RESUME_HOOK_FAILED', 'compute', false],
+  ])('persists stable classification and consistent user guidance for %s', async (reason, code, category, retryable) => {
+    primeReread(TaskStatus.RUNNING);
+    await finish({ status: 'completed', reason });
+    const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+    const errorMessage = String(values[':attr_error_message']);
+    expect(errorMessage).toMatch(new RegExp(`^${code}: `));
+    expect(errorMessage).toContain(reason);
+    expect(toTaskDetail({
+      task_id: 'TASK001', status: TaskStatus.FAILED, error_message: errorMessage,
+    } as TaskRecord).error_classification).toMatchObject({ category, retryable });
+    const input = { status: TaskStatus.FAILED, errorMessage, taskId: 'TASK001' };
+    for (const reply of [renderFailureReply(input), renderPanelFailureReason(input)]) {
+      expect(reply).toMatch(retryable ? /reply here to try again/i : /needs your ABCA admin/i);
+      expect(reply).not.toContain('Lambda MicroVMs is not available in this Region');
+      expect(reply).not.toContain('I automatically tried again');
+    }
   });
 
-  describe('suspended substrate', () => {
-    test('is healthy while the task is AWAITING_APPROVAL — no event, no failure', async () => {
-      const result = await reconcile({ status: 'suspended' }, TaskStatus.AWAITING_APPROVAL);
-
-      // The orchestrator-intended suspend during an approval wait is the whole
-      // economic point of the backend: it must be silent — and it re-arms the
-      // anomaly event, because leaving AWAITING_APPROVAL while still suspended
-      // would be a new, genuinely reportable episode.
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
-      expect(mockDdbSend).not.toHaveBeenCalled();
-      expect(mockLogger.warn).not.toHaveBeenCalled();
-    });
-
-    test('writes an anomaly event and does NOT fail the task when the status is RUNNING', async () => {
-      const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING);
-
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: true });
-
-      const puts = commandsOfType('Put');
-      expect(puts).toHaveLength(1);
-      expect(puts[0].input.TableName).toBe('TaskEvents');
-      const item = puts[0].input.Item as Record<string, unknown>;
-      expect(item.event_type).toBe('microvm_suspend_anomaly');
-      expect(item.task_id).toBe('TASK001');
-      // Correlation envelope (#245) stamped as top-level fields.
-      expect(item.user_id).toBe('user-1');
-      expect(item.repo).toBe('org/repo');
-      expect(item.metadata).toEqual({
-        microvm_id: MICROVM_ID,
-        task_status: TaskStatus.RUNNING,
-        reason: 'suspended_outside_approval_wait',
-      });
-
-      // Crucially: no status transition — a suspended VM is resumable, so
-      // failing the task would destroy recoverable work.
-      expect(commandsOfType('Update')).toHaveLength(0);
-      expect(mockLogger.warn).toHaveBeenCalled();
-    });
-
-    test.each([
-      TaskStatus.HYDRATING,
-      TaskStatus.RUNNING,
-      TaskStatus.FINALIZING,
-    ])('treats suspended + %s as an anomaly rather than a failure', async (status) => {
-      const result = await reconcile({ status: 'suspended' }, status);
-
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: true });
-      expect(commandsOfType('Put')[0].input.Item).toMatchObject({
-        event_type: 'microvm_suspend_anomaly',
-        metadata: { task_status: status },
-      });
-    });
-
-    test('emits the anomaly event ONCE across repeated polls of the same episode', async () => {
-      // The poll runs every ~30 s for up to 8.5 h; without the flag an
-      // out-of-band suspend would write ~960 identical TaskEvents, burying the
-      // first informative one. The caller threads the returned flag back in.
-      let reported: boolean | undefined;
-      for (let poll = 0; poll < 5; poll += 1) {
-        const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, reported);
-        reported = result.suspendAnomalyReported;
-        // The no-fail-fast behaviour is unchanged on EVERY poll — that is the
-        // property the suppression must not break.
-        expect(result.taskFailed).toBe(false);
-        expect(result.suspendAnomalyReported).toBe(true);
-      }
-
-      expect(commandsOfType('Put')).toHaveLength(1);
-      expect((commandsOfType('Put')[0].input.Item as Record<string, unknown>).event_type)
-        .toBe('microvm_suspend_anomaly');
-      // The WARN log is deliberately NOT suppressed: per-poll evidence is what a
-      // timeline investigation needs, and CloudWatch is not a user-facing surface.
-      expect(mockLogger.warn).toHaveBeenCalledTimes(5);
-    });
-
-    test('the repeat-suppressed polls record that the event was already reported', async () => {
-      await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, true);
-
-      expect(commandsOfType('Put')).toHaveLength(0);
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('suspended while the task is not awaiting approval'),
-        expect.objectContaining({ anomaly_already_reported: true }),
-      );
-    });
-
-    test('RE-ARMS after the VM resumes, so a second episode emits again', async () => {
-      // Recovery genuinely re-arms (documented decision): a flapping suspend loop
-      // is the pathology an operator most needs to see, and latching forever
-      // would hide it after the first occurrence.
-      const first = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, false);
-      expect(first.suspendAnomalyReported).toBe(true);
-
-      const recovered = await reconcile({ status: 'running' }, TaskStatus.RUNNING, first.suspendAnomalyReported);
-      expect(recovered.suspendAnomalyReported).toBe(false);
-
-      const second = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, recovered.suspendAnomalyReported);
-      expect(second.suspendAnomalyReported).toBe(true);
-
-      // Two episodes → two events.
-      expect(commandsOfType('Put')).toHaveLength(2);
-    });
-
-    test('RE-ARMS when the task enters AWAITING_APPROVAL, so a later out-of-band suspend reports', async () => {
-      const first = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING, false);
-      expect(first.suspendAnomalyReported).toBe(true);
-
-      // The gate opened: this suspend is now the intended one.
-      const intended = await reconcile(
-        { status: 'suspended' }, TaskStatus.AWAITING_APPROVAL, first.suspendAnomalyReported);
-      expect(intended.suspendAnomalyReported).toBe(false);
-      expect(commandsOfType('Put')).toHaveLength(1);
-
-      // The gate closed but the VM is still suspended — a new anomaly.
-      const third = await reconcile(
-        { status: 'suspended' }, TaskStatus.RUNNING, intended.suspendAnomalyReported);
-      expect(third.suspendAnomalyReported).toBe(true);
-      expect(commandsOfType('Put')).toHaveLength(2);
-    });
-
-    test('defaults to NOT-yet-reported when the caller omits the flag', async () => {
-      // Back-compat for any caller (and the first poll of every task) that has no
-      // prior state: the event must fire, not be suppressed by an undefined flag.
-      const result = await reconcile({ status: 'suspended' }, TaskStatus.RUNNING);
-      expect(result.suspendAnomalyReported).toBe(true);
-      expect(commandsOfType('Put')).toHaveLength(1);
-    });
-  });
-
-  describe('terminal substrate', () => {
-    test('fails the task when the re-read status is still non-terminal', async () => {
-      primeReread(TaskStatus.RUNNING);
-
-      const result = await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
-
-      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
-
-      // Re-read before acting (guards the "agent wrote terminal, VM torn down"
-      // race), then the FAILED transition.
-      expect(commandsOfType('Get')).toHaveLength(1);
-      const updates = commandsOfType('Update');
-      expect(updates).toHaveLength(1);
-      expect(updates[0].input.TableName).toBe('Tasks');
-      const values = updates[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':toStatus']).toBe(TaskStatus.FAILED);
-      expect(values[':fromStatus']).toBe(TaskStatus.RUNNING);
-      // The reason string is what error-classifier keys the substrate-failure
-      // classification on — keep the two in lockstep.
-      expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
-      );
-
-      // Plus the task_failed audit event.
-      const puts = commandsOfType('Put');
-      expect(puts).toHaveLength(1);
-      expect((puts[0].input.Item as Record<string, unknown>).event_type).toBe('task_failed');
-    });
-
-    test('does NOT fail the task when the re-read shows the agent already wrote a terminal status', async () => {
-      primeReread(TaskStatus.COMPLETED);
-
-      const result = await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
-
-      // Normal shutdown ordering: agent writes COMPLETED, exits, VM terminates.
-      // Without the re-read this would have failed a successful task.
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
-      expect(commandsOfType('Update')).toHaveLength(0);
-      expect(commandsOfType('Put')).toHaveLength(0);
-    });
-
-    test.each([
-      TaskStatus.COMPLETED,
-      TaskStatus.FAILED,
-      TaskStatus.CANCELLED,
-      TaskStatus.TIMED_OUT,
-    ])('accepts a re-read terminal status of %s without failing the task', async (status) => {
+  test.each([TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.TIMED_OUT])(
+    'preserves a committed %s winner after a stale active poll', async status => {
       primeReread(status);
+      await finish({ status: 'completed' });
+      expect(commandsOfType('Get')[0].input.ConsistentRead).toBe(true);
+      expect(commandsOfType('Update')).toHaveLength(1);
+      for (const command of commandsOfType('Update')) {
+        expect(command.input.ConditionExpression).toBeUndefined(); // terminal TTL stamp only
+      }
+      expect((commandsOfType('Put')[0].input.Item as Record<string, unknown>).event_type).toBe(`task_${status.toLowerCase()}`);
+      expect(mockRelease).toHaveBeenCalledTimes(1);
+    },
+  );
 
-      const result = await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
-
-      expect(result).toEqual({ taskFailed: false, suspendAnomalyReported: false });
-      expect(commandsOfType('Update')).toHaveLength(0);
-    });
-
-    test('carries the substrate error detail into the failure reason', async () => {
-      primeReread(TaskStatus.RUNNING);
-
-      const result = await reconcile({ status: 'failed', error: 'host fault' }, TaskStatus.RUNNING);
-
-      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: host fault',
-      );
-    });
-
-    // --- stateReason in the detail (review B1) ---
-
-    test('appends the substrate reason so the DOMINANT failure names its real cause', async () => {
-      // The exact live shape: a /run hook 4xx self-terminates the VM in ~12 s
-      // (645-p2-smoke-runbook.md §6.1). Without the reason this read "substrate
-      // state completed" and the classifier's remedy named a session duration cap, a
-      // host fault, or an external terminate — none of which happened.
-      primeReread(TaskStatus.RUNNING);
-      const reason = 'Run lifecycle hook returned HTTP status 400. Please check your hook endpoint '
-        + 'and application logs for more details.';
-
-      await reconcile({ status: 'completed', reason }, TaskStatus.RUNNING);
-
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: '
-        + `substrate state completed (${reason})`,
-      );
-    });
-
-    test('appends the reason to a failed substrate report too, without losing the error', async () => {
-      primeReread(TaskStatus.RUNNING);
-
-      await reconcile(
-        { status: 'failed', error: 'host fault', reason: 'hypervisor evicted the guest' },
-        TaskStatus.RUNNING,
-      );
-
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: '
-        + 'host fault (hypervisor evicted the guest)',
-      );
-    });
-
-    test('renders unchanged when the substrate supplies no reason', async () => {
-      // A live-verified hung MicroVM reports no `stateReason` at all, so the
-      // reason-less string stays the baseline — and stays the one the classifier's
-      // `MicroVM substrate terminated…` pattern is anchored on.
-      primeReread(TaskStatus.RUNNING);
-
-      await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
-
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':attr_error_message']).toBe(
-        'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
-      );
-    });
-
-    test('a reason-carrying message still classifies, and a hook 4xx outranks the generic entry', async () => {
-      // The append must not break classification — that would trade a misleading
-      // remedy for no remedy. It now does BETTER than preserve the generic anchor:
-      // a hook-4xx reason reaches a dedicated NON-retryable entry, because every
-      // 4xx the guest can answer is a wiring fault an identical retry cannot fix.
-      // Both strings live in one `error_message`, so this is really an assertion
-      // about classifier ORDER.
-      primeReread(TaskStatus.RUNNING);
-      await reconcile({ status: 'completed', reason: 'Run lifecycle hook returned HTTP status 400.' }, TaskStatus.RUNNING);
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-
-      const classification = classifyError(String(values[':attr_error_message']));
-
-      expect(classification!.title).toBe('The MicroVM rejected its own run payload');
-      expect(classification!.retryable).toBe(false);
-    });
-
-    test('a NON-hook reason keeps the generic retryable substrate-failure entry', async () => {
-      // The other half: the `MicroVM substrate terminated…` anchor must still be
-      // the answer for the reasons it was written for (duration cap, host fault,
-      // external terminate), so the entry above must not have swallowed them.
-      primeReread(TaskStatus.RUNNING);
-      await reconcile(
-        { status: 'completed', reason: 'host fault (hypervisor evicted the guest)' },
-        TaskStatus.RUNNING,
-      );
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-
-      const classification = classifyError(String(values[':attr_error_message']));
-
-      expect(classification!.title).toBe('The MicroVM stopped before the agent reported a result');
-      expect(classification!.retryable).toBe(true);
-    });
-
-    test('fails from AWAITING_APPROVAL too — a terminated VM cannot resume the gate', async () => {
-      primeReread(TaskStatus.AWAITING_APPROVAL);
-
-      const result = await reconcile({ status: 'completed' }, TaskStatus.AWAITING_APPROVAL);
-
-      expect(result).toEqual({ taskFailed: true, suspendAnomalyReported: false });
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':fromStatus']).toBe(TaskStatus.AWAITING_APPROVAL);
-      expect(values[':toStatus']).toBe(TaskStatus.FAILED);
-    });
-
-    test('transitions from the RE-READ status, not the stale polled status', async () => {
-      // Task moved HYDRATING → RUNNING between the poll read and the re-read; the
-      // conditional transition must use the fresh value or it fails its own
-      // ConditionExpression and the task is left stuck.
-      primeReread(TaskStatus.RUNNING);
-
-      await reconcile({ status: 'completed' }, TaskStatus.HYDRATING);
-
-      const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[':fromStatus']).toBe(TaskStatus.RUNNING);
-    });
-
-    test('does not decrement concurrency — the finalize step owns the release', async () => {
-      primeReread(TaskStatus.RUNNING);
-
-      await reconcile({ status: 'completed' }, TaskStatus.RUNNING);
-
-      // Matches the ECS substrate-failure branch: failTask(..., releaseConcurrency=false).
-      const concurrencyWrites = commandsOfType('Update').filter(
-        c => c.input.TableName === 'Concurrency',
-      );
-      expect(concurrencyWrites).toHaveLength(0);
-    });
+  test('transitions from the strong current status, retaining the original service error', async () => {
+    primeReread(TaskStatus.AWAITING_APPROVAL);
+    await finish({ status: 'failed', error: 'host fault', reason: 'hypervisor evicted the guest' });
+    const values = commandsOfType('Update')[0].input.ExpressionAttributeValues as Record<string, unknown>;
+    expect(values[':fromStatus']).toBe(TaskStatus.AWAITING_APPROVAL);
+    expect(values[':toStatus']).toBe(TaskStatus.FAILED);
+    expect(values[':attr_error_message']).toBe(
+      'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: host fault (hypervisor evicted the guest)',
+    );
+    expect(classifyError(String(values[':attr_error_message']))?.retryable).toBe(true);
+    expect(mockRelease).toHaveBeenCalledWith('TASK001', 'user-1');
   });
 });

@@ -93,10 +93,8 @@ def _resolve_linear_token_via_vault(
     applicable / unavailable for any reason — the caller then falls back to the
     Secrets-Manager token, so a vault hiccup must never raise.
 
-    Self-mints through boto3 (``get_workload_access_token_for_user_id`` then
-    ``get_resource_oauth2_token``) rather than reading the AgentCore-injected
-    ``WorkloadAccessToken`` header, so it behaves identically on the AgentCore
-    and ECS substrates (both authorize against the agent session role's IAM).
+    Uses the compute execution role through ``platform_client`` on AgentCore,
+    ECS and MicroVM. The task-scoped SessionRole does not mint vault tokens.
     The grant must already be consented (done at ``bgagent linear setup`` time);
     if the vault returns an ``authorizationUrl`` instead of a token, that means
     consent is required and we fall back rather than block on a browser.
@@ -186,43 +184,21 @@ def _resolve_linear_token_via_vault(
 
 
 def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
-    """Resolve the Linear OAuth access token from Secrets Manager.
+    """Resolve the Linear token for direct GraphQL reactions and state updates.
 
-    Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
-    into the task record's ``channel_metadata`` at task-creation time.
-    Pass that dict in via ``channel_metadata`` (the pipeline does this
-    automatically). We fetch the per-workspace secret, parse the token
-    JSON, refresh if expiring, and cache the access_token in
-    ``LINEAR_API_TOKEN`` so the one remaining consumer —
-    ``linear_reactions.py``'s direct-GraphQL Authorization header (reactions +
-    state transitions) — keeps working. (ADR-016: there is no Linear MCP; this
-    token no longer feeds an ``.mcp.json`` placeholder.)
+    Reuses ``LINEAR_API_TOKEN`` when set, otherwise tries the configured vault
+    grant before the workspace's Secrets Manager fallback. Task channel metadata
+    supplies the provider, vault user and fallback secret identifiers.
 
-    For local development, a pre-set ``LINEAR_API_TOKEN`` env var
-    short-circuits the lookup so the agent can run outside the runtime.
-
-    Returns an empty string when the credential is absent — ``linear_reactions``
-    then skips its reactions/state calls (best-effort, logged). This function is
-    only called when ``channel_source == 'linear'``.
-
-    RFC #249 Phase 1 re-introduces AgentCore Identity as the PREFERRED path
-    (``_resolve_linear_token_via_vault``, tried first above) for workspaces
-    onboarded through the vault; Secrets Manager remains the fallback and the
-    only path for SM-only installs. The Phase-0 spike confirmed the
-    USER_FEDERATION service-side issue that parked Phase 2.0a no longer
-    reproduces and that the flow forwards the ``actor=app`` agent install.
+    Successful resolution caches the token in ``LINEAR_API_TOKEN``. Missing or
+    unavailable credentials return an empty string; reactions then skip their
+    calls without stopping the coding task.
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
     if cached:
         return cached
 
-    # RFC #249 Phase 1: when the vault is enabled AND this task carries a
-    # provider name (vault-onboarded workspace), mint the token through the
-    # AgentCore Identity Token Vault first. Any failure returns "" here, so we
-    # fall through to the Secrets-Manager path below — the vault never blocks a
-    # task. The Phase-0 spike proved USER_FEDERATION forwards the actor=app
-    # install and re-enables the path that was parked in 2.0a (the service-side
-    # USER_FEDERATION bug it cited no longer reproduces).
+    # Vault-managed workspaces may no longer have a usable fallback secret.
     vault_token = _resolve_linear_token_via_vault(channel_metadata)
     if vault_token:
         os.environ["LINEAR_API_TOKEN"] = vault_token
@@ -250,7 +226,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
         # boto3 is imported here (not just via platform_client, which imports it
         # lazily at call time) so a missing SDK still degrades gracefully — skip
-        # Linear MCP — instead of raising an uncaught ImportError. (#319)
+        # Linear reactions — instead of raising an uncaught ImportError. (#319)
         import boto3  # noqa: F401  -- availability probe for the graceful skip below
         from botocore.exceptions import BotoCoreError, ClientError
 
@@ -273,7 +249,10 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         """
         resp = sm.get_secret_value(SecretId=secret_arn)
         try:
-            return json.loads(resp["SecretString"])
+            payload = json.loads(resp["SecretString"])
+            if not isinstance(payload, dict):
+                raise TypeError("expected a JSON object")
+            return payload
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             log(
                 "ERROR",
@@ -314,6 +293,19 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         except ImportError:
             return ("failure", None)
 
+        missing = [
+            key
+            for key in ("refresh_token", "client_id", "client_secret")
+            if not isinstance(current.get(key), str) or not current[key].strip()
+        ]
+        if missing:
+            log(
+                "WARN",
+                "linear_oauth_refresh_unavailable: fallback secret lacks "
+                f"{', '.join(missing)}; skipping refresh",
+            )
+            return ("failure", None)
+
         body = urllib.parse.urlencode(
             {
                 "grant_type": "refresh_token",
@@ -349,10 +341,6 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
                 return ("invalid_grant", None)
             return ("failure", None)
         except (urllib.error.URLError, OSError) as e:
-            # Genuine network failures (DNS, timeout, TCP reset). Other
-            # exceptions (KeyError on missing field, TypeError on bad
-            # JSON shape) are programmer errors and should propagate
-            # with a clear stack trace rather than being swallowed.
             log("WARN", f"resolve_linear_api_token refresh failed: {type(e).__name__}: {e}")
             return ("failure", None)
 
@@ -373,7 +361,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
             "access_token": payload["access_token"],
             "refresh_token": payload.get("refresh_token", current["refresh_token"]),
             "expires_at": expires_at_iso,
-            "scope": payload.get("scope", current["scope"]),
+            "scope": payload.get("scope", current.get("scope", "")),
             "updated_at": now.isoformat().replace("+00:00", "Z"),
         }
 

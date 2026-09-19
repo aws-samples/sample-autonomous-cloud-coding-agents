@@ -48,6 +48,9 @@ import {
   type CreateTaskRequest,
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
+  MICROVM_SLEEP_AFTER_S_DEFAULT,
+  MICROVM_SLEEP_AFTER_S_MAX,
+  MICROVM_SLEEP_AFTER_S_MIN,
   type InlineAttachment,
   type PresignedAttachment,
   type TaskRecord,
@@ -309,9 +312,8 @@ export async function createTaskCore(
   }
 
   // Cedar HITL — validate approval_timeout_s if supplied (§7.3 step 5).
-  // maxLifetime-based ceiling clip is applied at orchestrator
-  // invocation time; at submit time we only enforce the `[floor, cap]`
-  // envelope.
+  // Zero retains unanswered requests. Positive explicit deadlines use the
+  // supported range; the worker's resource lifetime is managed separately.
   let approvalTimeoutS: number | undefined;
   if (body.approval_timeout_s !== undefined) {
     if (typeof body.approval_timeout_s !== 'number'
@@ -323,17 +325,26 @@ export async function createTaskCore(
         requestId,
       );
     }
-    if (body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN
+    if ((body.approval_timeout_s !== 0 && body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN)
         || body.approval_timeout_s > APPROVAL_TIMEOUT_S_MAX) {
       return errorResponse(
         400,
         ErrorCode.VALIDATION_ERROR,
-        `Invalid approval_timeout_s. Must be between ${APPROVAL_TIMEOUT_S_MIN}s `
+        `Invalid approval_timeout_s. Must be 0 (no automatic expiry), or between ${APPROVAL_TIMEOUT_S_MIN}s `
           + `and ${APPROVAL_TIMEOUT_S_MAX}s.`,
         requestId,
       );
     }
     approvalTimeoutS = body.approval_timeout_s;
+  }
+
+  const microvmSleepAfterS = body.microvm_sleep_after_s === undefined
+    ? MICROVM_SLEEP_AFTER_S_DEFAULT : body.microvm_sleep_after_s;
+  if (typeof microvmSleepAfterS !== 'number' || !Number.isInteger(microvmSleepAfterS)
+    || microvmSleepAfterS < MICROVM_SLEEP_AFTER_S_MIN || microvmSleepAfterS > MICROVM_SLEEP_AFTER_S_MAX) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR,
+      `Invalid microvm_sleep_after_s. Must be an integer between ${MICROVM_SLEEP_AFTER_S_MIN} `
+        + `and ${MICROVM_SLEEP_AFTER_S_MAX} seconds (0 disables sleep).`, requestId);
   }
 
   // Cedar HITL — validate initial_approvals if supplied (§7.3 step 4).
@@ -811,6 +822,8 @@ export async function createTaskCore(
     // payload supplied them; ``approval_timeout_s`` defaults to the
     // engine default at agent runtime when absent here.
     ...(approvalTimeoutS !== undefined && { approval_timeout_s: approvalTimeoutS }),
+    // Capture the default so future deployments cannot change this task's preference.
+    microvm_sleep_after_s: microvmSleepAfterS,
     ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
     // Persisted counter the stranded-approval reconciler + agent
     // counter both read (§13.6). Seeded to 0 at task-create time.

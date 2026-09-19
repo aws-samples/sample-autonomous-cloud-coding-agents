@@ -19,7 +19,7 @@ The orchestrator sits between the API layer and the agent runtime. Changes to ta
 
 ## Responsibilities
 
-The orchestrator is deliberately scoped. It handles coordination and bookkeeping but never touches agent logic, compute infrastructure, or memory storage. This clear boundary means a crashed agent does not leave orphaned state, and platform invariants (concurrency limits, event audit, cancellation) cannot be bypassed by agent code.
+The orchestrator handles coordination, compute lifecycle calls and finalization bookkeeping. The agent runs the coding workflow. Recovery still needs explicit guards around external effects, including saved start receipts and task-owned capacity reservations.
 
 ### What the orchestrator owns
 
@@ -32,7 +32,7 @@ The orchestrator is deliberately scoped. It handles coordination and bookkeeping
 | Result inference | Determine success or failure from agent response, DynamoDB record, and GitHub state |
 | Finalization | Update status, emit events, release concurrency, persist audit records |
 | Cancellation | Stop the session and drive the task to CANCELLED at any point |
-| Concurrency | Track per-user and system-wide running task counts with atomic counters |
+| Concurrency | Track per-user capacity with task-owned reservations and an atomic counter |
 
 ### What the orchestrator does NOT own
 
@@ -96,7 +96,7 @@ stateDiagram-v2
 
     AWAITING_APPROVAL --> RUNNING : Approved or denied (resume)
     AWAITING_APPROVAL --> CANCELLED : User cancels mid-approval
-    AWAITING_APPROVAL --> FAILED : Stranded-approval reconciler
+    AWAITING_APPROVAL --> FAILED : Infrastructure loss or stranded wait
 
     FINALIZING --> COMPLETED : PR or commits found
     FINALIZING --> FAILED : No useful work
@@ -121,11 +121,11 @@ stateDiagram-v2
 | `HYDRATING` | `FAILED` | Hydration error | GitHub API failure, guardrail blocks content, Bedrock unavailable |
 | `RUNNING` | `AWAITING_APPROVAL` | Cedar soft-deny gate fires | Tool call triggers a soft-deny policy rule during execution |
 | `RUNNING` | `FINALIZING` | Session ends | Response received or session terminated |
-| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; the orchestrator's own safety-net poll window is `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h, after which a still-`RUNNING` task is driven to `TIMED_OUT` |
+| `RUNNING` | `TIMED_OUT` | Max duration exceeded | AgentCore and Lambda MicroVMs have an 8h substrate cap; MicroVM supervision retains the original service deadline across replay; other backends retain the 1,020-attempt safety window (about 8.5h at 30s) |
 | `RUNNING` | `FAILED` | Session crash | Heartbeat or substrate liveness lost (see Liveness monitoring) |
 | `AWAITING_APPROVAL` | `RUNNING` | Approved or denied | Human decision received; agent resumes |
 | `AWAITING_APPROVAL` | `CANCELLED` | User cancels | Explicit cancel while awaiting approval |
-| `AWAITING_APPROVAL` | `FAILED` | Stranded reconciler | Approval request orphaned (agent died mid-wait) |
+| `AWAITING_APPROVAL` | `FAILED` | Infrastructure failure or stranded wait | Lost compute, exhausted supervisor recovery/window, or an orphaned approval; the approval decision is not rewritten |
 | `FINALIZING` | `COMPLETED` | Success inferred | PR exists or commits on branch |
 | `FINALIZING` | `FAILED` | Failure inferred | No commits, no PR, or agent reported error |
 
@@ -152,7 +152,7 @@ Multiple timeout mechanisms work together to prevent runaway tasks. Substrate ti
 
 | Type | Default | Effect |
 |---|---|---|
-| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. The orchestrator's safety-net poll loop runs up to `MAX_POLL_ATTEMPTS` (1020) × 30s ≈ 8.5h; a task still `RUNNING` when that window is exhausted is driven to `TIMED_OUT`. |
+| Max session duration | 8 hours | AgentCore caps a session at 8h; Lambda MicroVMs use `maximumDurationInSeconds: 28,800`, including suspended time. MicroVM uses the saved absolute service deadline, so fast transition polling cannot shorten the session. Other backends retain the 1,020-attempt safety window. An exhausted approval wait uses FAILED, its allowed infrastructure-failure transition. |
 | Idle timeout | Backend-specific | AgentCore has an idle timeout. Lambda MicroVMs omit `idlePolicy` because inbound-traffic idleness would suspend an outbound-only agent while it is working. See Liveness monitoring. |
 | Max turns | 100 (range 1-500) | Agent stops after N model invocations. Configurable per task or per repo. |
 | Max cost budget | $0.01-$100 | Agent stops when budget is reached. Per-task or per-repo via Blueprint. |
@@ -178,8 +178,8 @@ The orchestrator (`orchestrate-task.ts`) runs these as distinct durable-executio
 Validates the task before any compute is consumed. Checks run in order:
 
 1. **Repo onboarding** - `GetItem` on `RepoTable`. If not found or inactive, reject with `REPO_NOT_ONBOARDED`. This runs at the API handler level (`createTaskCore`) for fast rejection.
-2. **User concurrency** - Atomic check-and-increment on `UserConcurrency` counter. If at limit (default 10), the task is **queued, not failed** (#441): it transitions `SUBMITTED → QUEUED` and a scheduled admission-queue pickup Lambda re-attempts admission in FIFO order (by `created_at`) as slots free up, flipping `QUEUED → SUBMITTED` and re-invoking the orchestrator. The pickup Lambda does a read-only capacity pre-check; the orchestrator's atomic increment remains the single writer of the counter, so a pickup that loses the race harmlessly re-queues without losing FIFO position. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
-3. **System concurrency** - Compare total running + hydrating tasks to the configured system limit and selected-backend quotas.
+2. **User concurrency** - One transaction creates an internal `concurrency_slot` reservation on the task and increments `UserConcurrency.active_count`, subject to the configured cap (default 3). A retry reuses a held reservation. At the cap, the task transitions `SUBMITTED → QUEUED` and a scheduled pickup retries in FIFO order by `created_at`. Pickup and upload confirmation only inspect capacity; the orchestrator owns reservation acquisition. A task that acquired a reservation concurrently cannot be put back in the queue. `GET /tasks/{id}` surfaces `queue_position` and `estimated_wait_s` while queued.
+3. **Backend capacity** - AWS also enforces the selected backend's service quotas when compute starts.
 4. **Rate limiting** - Sliding window counter (10 tasks/hour per user). Rate-limit rejections happen at submit time and are rejected, not queued (unlike the concurrency cap, which queues).
 5. **Idempotency** - If the request includes an idempotency key and a task with that key exists, return the existing task.
 
@@ -205,7 +205,13 @@ The orchestrator resolves the repository's `ComputeStrategy` and calls `startSes
 
 AgentCore's session ID is pre-generated and reused on retry. ECS and Lambda MicroVMs use their substrate identifiers as session IDs.
 
-If `RunMicrovm` succeeds but persisting the session handle or emitting the start event fails, the start step terminates the MicroVM best-effort using its in-memory handle before propagating the original error. This orphan reap is required because no later poll or finalization step can recover an unpersisted handle.
+MicroVM starts first save an internal `microvm_start` receipt on the task: its stable client token (the task ID), a fingerprint of the request and full payload, creation time, and a local replay deadline. This happens before payload upload or `RunMicrovm`. Retries must match the saved fingerprint; a changed request cannot overwrite the earlier task's input. A returned handle is saved in the receipt and the normal task metadata before registration finishes. A replay can recover that handle without another start call. Registration uses strongly consistent reads to observe cancellation and already-committed writes.
+
+If a handle-save or registration response is lost, the code checks the committed task before terminating a known computer. If registration failed, cleanup remains best-effort and the receipt retains any saved handle for diagnosis. Failure to emit `session_started` alone does not terminate a registered MicroVM. MicroVM start failures persist the task outcome and reach `finalize-before-session`; they do not also release concurrency in the start step. Finalization begins with a strongly consistent read so a recently saved failure or cancellation is not reported using an older active state.
+
+An unanswered service request may already have created a MicroVM. Recovery reuses the same token and request within a **120-second local window**; after the window, it refuses another `RunMicrovm` call. This window is an application guard, not a verified AWS token-retention promise. An unrecovered request is reported as `MICROVM_START_OUTCOME_UNKNOWN` and requires inspection before submitting another task. Cancellation after an unanswered request records a `microvm_start_outcome_unknown` event. Without an ID, immediate termination cannot be guaranteed; the eight-hour service lifetime bound still applies.
+
+The MicroVM `start-session` step disables automatic durable **error** retries after its own recovery attempt. Crash replay is still possible and uses the saved receipt. Live AWS token-retention, changed-request and concurrent-conflict behavior remain verification gates.
 
 ### Step 5: Await completion
 
@@ -217,7 +223,7 @@ The orchestrator polls for completion using `waitForCondition` from the Durable 
 | ECS | `DescribeTasks`, including container exit status and exit code |
 | Lambda MicroVMs | `GetMicrovm` state plus agent heartbeat |
 
-While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization using GitHub-based result inference as fallback.
+While waiting between polls, the durable orchestrator suspends without compute charges. If the session is terminated externally (crash, timeout, cancellation), the poll detects it and the orchestrator proceeds to finalization after a strongly consistent task read; it preserves an already committed terminal result.
 
 ### Step 6: Finalization
 
@@ -246,9 +252,9 @@ After the session ends, the orchestrator determines the outcome from multiple si
 
 ### Step execution contract
 
-Every step in the pipeline satisfies these properties:
+Configured workflow steps target the following contract. The top-level durable orchestrator still needs explicit guards around external effects, as described under recovery below.
 
-- **Idempotent** - Safe to retry after crashes. Context hydration produces the same prompt for the same inputs; session-start retry semantics are implemented by each backend strategy.
+- **Replay-aware** - A retry must preserve task intent and avoid repeating external effects. Session-start recovery is implemented by each backend strategy; a checkpoint alone is not an idempotency guarantee.
 - **Timeout-bounded** - Each step has a configurable timeout to prevent blocking the pipeline.
 - **Failure-aware** - Returns `success` or `failed`. Infrastructure failures (throttle, transient errors) trigger exponential backoff retries (default: 2 retries, base 1s, max 10s). Explicit failures transition to `FAILED` without retry.
 - **Least-privilege input** - Each step receives only the `blueprintConfig` fields it needs. Custom Lambda steps get credential ARNs stripped.
@@ -276,7 +282,9 @@ Liveness detection varies by compute backend. AgentCore sessions use DynamoDB he
 
 - **Grace period** (120s) - After entering `RUNNING`, the orchestrator waits before expecting heartbeats (covers container startup).
 - **Stale threshold** (240s) - If the heartbeat exists but is older than this, the session is treated as lost.
-- **Early crash** - If no heartbeat is ever set after the combined window (360s), the agent died before the pipeline started.
+- **Early crash** - If no heartbeat is ever set after the combined window (360s), the session is treated as lost; a process failure or failed DynamoDB writes can cause this.
+
+Approval waits suppress heartbeat writes. When the agent consumes a decision and restores `RUNNING`, its conditional transaction also refreshes `agent_heartbeat_at`, so the first poll after a long wait does not mistake the old timestamp for a crash.
 
 When the session is unhealthy, the task transitions to `FAILED` with "Agent session lost: no recent heartbeat."
 
@@ -284,13 +292,49 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
-- `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
-- A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
-- Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
+- Intentional suspension requires the matching pending gate and saved suspend intent. Unexpected suspension emits one anomaly per episode and starts bounded wake recovery, preserving recoverable work.
+- A terminal substrate report paired with a non-terminal task first checks for a complete, acknowledged approval checkpoint. Such a checkpoint can retire the old attempt and retain the task for a replacement. Without one, finalization strongly re-reads the task row before classifying a substrate failure.
+- Substrate state detects a dead VM; heartbeat staleness detects loss of the heartbeat writer inside a VM that still reports `RUNNING`. The independent heartbeat thread can continue during a pipeline hang, so a fresh timestamp is not proof of progress.
+
+The P3 supervisor saves intent before control calls and rechecks the gate before and after them. Its durable state retains an absolute service lifetime, consecutive failures, recovery start time and next delay. Three failed cycles or 120 seconds of unconfirmed wake cannot become an indefinite wait. AWS RUNNING does not end recovery while the guest remains stuck on a decided/expired approval; fresh guest liveness is required. API approve/deny commit first, then attempt a bounded wake without changing the decision response. Automatic suspension defaults off via `microvm_approval_suspend_enabled`; disabling new sleep preserves wake and cleanup. See the [lifecycle diagnostics](../verification/645-p3-lifecycle-diagnostics.md).
+
+Unanswered approvals have no deadline by default. A checkpointed MicroVM wait can
+retire after an hour, or before that worker's lifetime ends. Retirement and
+replacement follow the [retained approval protocol](#retained-microvm-approvals).
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
+
+### Retained MicroVM approvals
+
+A pending approval has no deletion timer by default. Closing its task cancels
+unanswered requests and retains the decision history for 90 days. An explicit
+positive approval deadline still applies; waking or replacing a worker does not
+restart it. The agent decides whether the approved action remains relevant.
+
+At the approval barrier, the worker saves the conversation, exact pending tool
+inputs, workflow context, cumulative usage and Git/workspace archive. The
+coordinator verifies the checksummed S3 object versions before fencing the old
+attempt through its coordinator-owned `worker-lease#<task>` record. Workers may
+read and condition-check that lease but cannot modify it. Only confirmed shutdown
+allows the task to become `PARKED` and release its concurrency reservation.
+
+An answer admits one replacement when capacity permits. Admission, the new lease
+and capacity reservation are one DynamoDB transaction; a deterministic Durable
+execution name deduplicates invocation. The replacement uses the original
+published coordinator and exact image version, restores the files/conversation,
+and consumes the recorded answer. Remaining cost and turns are the original
+allowance minus accumulated usage. Repository-free tasks preserve scratch files
+using a private directory and local Git baseline.
+
+The scheduled continuation manager retries unfinished retirement, missed
+dispatches and terminal cleanup, saving its scan cursor between invocations.
+It cannot launch, suspend or resume workers; launching stays with the pinned
+coordinator. A failed start response does not prove no worker exists. Capacity
+remains reserved until shutdown is confirmed, or the full service lifetime has
+elapsed for an unknown handle. The exact-attempt lease becomes `CLOSED` before
+atomic release; `TERMINATING` alone is insufficient.
 
 ### The idle timeout problem
 
@@ -314,7 +358,7 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 | Hydration | Guardrail API unavailable | Fail the task (fail-closed: unscreened content never reaches agent) |
 | Session start | Selected compute service throttled | Exponential backoff. Fail after retries exhausted. |
 | Session start | Session crashes immediately | AgentCore: heartbeat never set, detected after 360s grace window. ECS: `DescribeTasks` reports failure. Lambda MicroVMs: `GetMicrovm` reports terminal state or the heartbeat never appears. |
-| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects an in-guest hang. Finalization inspects GitHub for partial work. |
+| Running | Agent crashes mid-task | AgentCore: heartbeat goes stale. ECS: `DescribeTasks` reports stopped task. Lambda MicroVMs: `GetMicrovm` detects VM death and heartbeat staleness detects loss of the in-guest writer. Finalization preserves committed task results and records a specific failure for an active lost session. |
 | Running | Agent hits turn or budget limit | Session ends normally. Finalize based on what was produced. |
 | Running | Idle for 15 min | AgentCore kills session. Task transitions to `TIMED_OUT`. |
 | Finalization | GitHub API down | Retry 3x. If still failing, mark `FAILED` with infrastructure reason. |
@@ -323,14 +367,14 @@ Long-running distributed systems fail. The orchestrator is designed so that ever
 ### Recovery mechanisms
 
 1. **Durable execution** - Lambda Durable Functions checkpoints at each state transition and replays after crashes.
-2. **Idempotent operations** - All steps are safe to retry.
+2. **Replay guards** - Operations need their own idempotency controls; checkpointing alone does not make external effects exactly-once. MicroVM starts use saved receipts. Capacity acquisition and release use task-owned markers updated atomically with the user counter. This guards the seat count; terminal audit events are still allowed to repeat on replay.
 3. **Stuck-task scanner** - Periodic Lambda detects tasks stuck beyond expected durations and either resumes or fails them.
-4. **Counter reconciliation** - Lambda runs every 15 minutes, compares counters to actual running task counts, corrects drift. Emits `counter_drift_corrected` CloudWatch metric.
+4. **Counter reconciliation** - Every 15 minutes, the Lambda strongly scans counter records followed by task reservations. It repairs a count only if the saved counter revision is unchanged, then releases terminal held reservations. Structured logs record repairs, failures, empty counters and ambiguous legacy ownership; this handler does not publish a `counter_drift_corrected` metric.
 5. **Dead-letter queue** - Tasks that exhaust retries go to DLQ for investigation.
 
 ## Concurrency and scaling
 
-Each task runs in its own isolated compute session with no shared mutable state at the compute layer. The orchestrator manages concurrency purely at the coordination layer: atomic counters track how many tasks are active per user and system-wide, and admission control enforces limits before resources are consumed.
+Each task runs in an isolated compute session. The orchestrator reserves capacity per user before starting compute; AWS separately enforces backend quotas. Approval waits keep their reservation, including when P3 suspends the MicroVM. This bounds unfinished sessions and their eventual resume demand; AWS memory-quota use while suspended remains unverified.
 
 ### Capacity limits
 
@@ -338,15 +382,24 @@ Each task runs in its own isolated compute session with no shared mutable state 
 |---|---|---|
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
-| Per-user concurrency | Configurable (default 3-5) | Platform config |
-| System-wide max tasks | Configurable | Bounded by selected-backend quotas |
+| Per-user concurrency | Configurable (default 3) | `MAX_CONCURRENT_TASKS_PER_USER` |
 
 ### Counter management
 
-- **UserConcurrency** - DynamoDB item per user with `active_count`. Incremented atomically (`active_count < max`) at admission, decremented at finalization.
-- **SystemConcurrency** - Single DynamoDB item, same pattern.
+A reservation is a saved seat for one task. `task-concurrency.ts` owns both operations:
 
-Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing — `finalizeTask` handles the single decrement after re-reading the task state. The heartbeat-detected crash path also guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
+- **Acquire:** require a matching owner, `SUBMITTED` status and no prior reservation; set `concurrency_slot.state = held` and increment the counter in the same transaction. A held reservation is reused on replay. A released task cannot reserve again; a new attempt gets a new task ID.
+- **Release:** require a terminal task and a held reservation; mark it `released` and decrement the counter in the same transaction. Normal finalization, early failure and stranded cleanup use this helper. A missing or already-released marker does not decrement. An active task keeps its seat.
+
+Finalization attempts release even if an audit event fails. A failed status write that leaves the task active is propagated for retry. Cancellation before admission/pre-flight completion also checks for a held terminal reservation. If a crash separates the terminal write from release, the scheduled counter reconciler completes release later.
+
+Every reservation change writes a fresh `reservation_version` on the counter. Reconciliation uses strongly consistent **base-table** scans, once for counters and once for tasks, then compares the saved revision before repairing a count. A count-only comparison cannot detect an increment followed by a decrement. Held terminal reservations are included until their release commits. A partial scan never installs a partial count. These scans consume read capacity across retained rows; check scan duration and capacity at deployment scale.
+
+If a release discovers an empty/missing counter, it closes the marker without subtracting from seats reserved meanwhile. A concurrent repair can leave a conservative overcount until the next sweep. `CONCURRENCY_EMPTY_COUNTER` records that condition.
+
+Older active records without reservation markers are ambiguous: status alone does not prove admission. The helper never guesses that they own a seat; reconciliation skips count repair for that user and logs `CONCURRENCY_RESERVATION_UNKNOWN`. Pause new submissions and drain old executions before deploying this protocol across all counter writers. After old tasks settle, reconcile and resume admissions. Rollback also requires draining tasks using the newer protocol; mixing old direct decrements with new markers does not provide this guarantee.
+
+This protocol protects against replay and competing **cooperative** writers. The agent role can currently update/replace its own task row, so internal fields are not yet protected against a compromised agent. Coordinator-only metadata storage or constrained agent writes remain a separate security prerequisite.
 
 ## Implementation
 
@@ -398,7 +451,7 @@ At 500 concurrent tasks, peak TPS is ~16.7 - well within the 25 TPS AgentCore qu
 
 ## Data model
 
-Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task; the orchestrator reads and writes it at every state transition. TaskEvents is append-only and powers the `GET /v1/tasks/{id}/events` API. UserConcurrency is a lightweight counter table used only during admission and finalization.
+Three DynamoDB tables back the orchestrator: one for task state, one for the audit log, and one for concurrency counters. The Tasks table is the source of truth for every task; the orchestrator reads and writes it at every state transition. TaskEvents is append-only and powers the `GET /v1/tasks/{id}/events` API. UserConcurrency stores reservation counts and revision tokens used by admission, cleanup and reconciliation.
 
 ### Tasks table (DynamoDB)
 
@@ -416,7 +469,8 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `branch_name` | String | `bgagent/{task_id}/{slug}` for new tasks; PR's `head_ref` for PR tasks |
 | `session_id` | String? | Backend session identifier (AgentCore session ID, ECS task ARN, or MicroVM ID) |
 | `compute_type` | String? | Selected backend: `agentcore`, `ecs`, or `lambda-microvm` |
-| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId` and `endpoint` |
+| `compute_metadata` | Map? | Backend lifecycle handle; Lambda MicroVMs persist `microvmId`, `endpoint`, actual image identity and verified lifecycle protocol when available |
+| `concurrency_slot` | Map? | Internal reservation `{state, acquired_at, released_at?}`; excluded from public task responses |
 | `execution_id` | String? | Durable execution ID |
 | `pr_url` | String? | PR URL (set during finalization) |
 | `error_message` | String? | Error reason if FAILED |
@@ -452,7 +506,7 @@ Append-only audit log. See [OBSERVABILITY.md](./OBSERVABILITY.md).
 | Field | Type | Description |
 |---|---|---|
 | `user_id` (PK) | String | User ID |
-| `active_count` | Number | Running task count |
+| `active_count` | Number | Held reservation count, including approval waits and pending terminal cleanup |
+| `reservation_version` | String? | Fresh revision token on every reservation mutation or count repair |
 
-Increment: `SET active_count = active_count + 1` with `ConditionExpression: active_count < :max`.
-Decrement: `SET active_count = active_count - 1` with `ConditionExpression: active_count > 0`.
+Counter changes belong to the reservation transactions described above. Do not add a standalone increment or decrement: it bypasses per-task replay protection.

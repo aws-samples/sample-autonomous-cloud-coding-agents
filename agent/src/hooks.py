@@ -24,15 +24,19 @@ import os
 import re
 import time
 from collections.abc import Callable
-from datetime import UTC
+from contextlib import nullcontext
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
 import task_state
+from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
 from progress_writer import _generate_ulid
+from shared_constants import SHARED_CONSTANTS
 from shell import log, log_error_cw
 from stuck_guard import StuckGuard
 
@@ -56,6 +60,38 @@ POLL_DEGRADED_FAILS: int = 3  # emit approval_poll_degraded at this many consecu
 POLL_MAX_CONSECUTIVE_FAILS: int = 10  # treat as TIMED_OUT at this many consecutive failures
 TOOL_INPUT_PREVIEW_MAX: int = 256  # cap for the strip-ANSI, truncated input preview
 ELLIPSIS_LEN: int = 3  # chars reserved for the "..." truncation marker
+
+
+@dataclass(frozen=True)
+class _ApprovalDeadline:
+    """One gate's deadline, retained across polling and a possible VM sleep.
+
+    UTC counts elapsed time even if the guest's monotonic clock freezes. The monotonic
+    cap prevents a backward UTC correction from extending the original window.
+    Create this with the approval row, before database writes or notifications;
+    never recreate it on resume.
+    """
+
+    wall_deadline: float
+    monotonic_deadline: float
+
+    @classmethod
+    def from_recorded(cls, created_at: str, timeout_s: int) -> _ApprovalDeadline:
+        if timeout_s == 0:
+            return cls(float("inf"), float("inf"))
+        created_epoch = (
+            datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
+        )
+        wall_deadline = created_epoch + timeout_s
+        remaining = max(0.0, min(timeout_s, wall_deadline - time.time()))
+        return cls(wall_deadline, time.monotonic() + remaining)
+
+    def remaining_s(self) -> float:
+        return max(
+            0.0,
+            min(self.monotonic_deadline - time.monotonic(), self.wall_deadline - time.time()),
+        )
+
 
 # ANSI CSI / OSC escape sequence stripper for ``tool_input_preview`` +
 # ``permissionDecisionReason`` fields, so persisted/logged reasons can't carry
@@ -498,6 +534,25 @@ async def pre_tool_use_hook(
         return _deny_response(decision.reason)
 
     # -- REQUIRE_APPROVAL path ----------------------------------------------
+    from continuation_runtime import current_runtime
+
+    continuation = current_runtime()
+    saved_decision = (
+        continuation.consume_approved_action(tool_name, _sha256_tool_input_for_row(tool_input))
+        if continuation is not None
+        else None
+    )
+    if saved_decision is not None:
+        if progress is not None:
+            _try_progress(
+                progress,
+                "write_approval_granted",
+                request_id=saved_decision["request_id"],
+                scope=saved_decision.get("scope") or "this_call",
+                decided_at=saved_decision.get("decided_at"),
+                created_at=saved_decision.get("created_at"),
+            )
+        return _allow_response("User approved this saved action before worker continuation")
     return await _handle_require_approval(
         decision=decision,
         tool_name=tool_name,
@@ -507,6 +562,8 @@ async def pre_tool_use_hook(
         user_id=user_id,
         progress=progress,
         ts=ts_module,
+        tool_use_id=tool_use_id,
+        session_id=hook_input.get("session_id", ""),
     )
 
 
@@ -520,6 +577,8 @@ async def _handle_require_approval(
     user_id: str | None,
     progress: Any,
     ts: Any,
+    tool_use_id: str | None = None,
+    session_id: str = "",
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
@@ -565,7 +624,11 @@ async def _handle_require_approval(
     # Step 3 — effective timeout with floor/ceiling math. Emit
     # ``approval_timeout_capped`` when the caller's ask is clipped so the
     # user can see why.
-    remaining_lifetime = _remaining_maxlifetime_s()
+    # A durable checkpoint can move to a replacement worker. Its request's
+    # deadline is independent of this process's remaining service lifetime.
+    from continuation_runtime import current_runtime
+
+    remaining_lifetime = None if current_runtime() is not None else _remaining_maxlifetime_s()
     effective_timeout, clip_reason, requested_timeout = _compute_effective_timeout(
         decision_timeout_s=decision.timeout_s,
         task_default_timeout_s=engine.task_default_timeout_s,
@@ -623,10 +686,19 @@ async def _handle_require_approval(
         "status": "PENDING",
         "created_at": _iso_now(),
         "timeout_s": effective_timeout,
-        "ttl": int(time.time()) + effective_timeout + CLEANUP_MARGIN_120S,
         "user_id": user_id or "",
         "repo": engine.repo,
     }
+    if effective_timeout > 0:
+        row["deadline_epoch"] = (
+            int(
+                datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+                .replace(tzinfo=UTC)
+                .timestamp()
+            )
+            + effective_timeout
+        )
+    deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself
@@ -696,14 +768,87 @@ async def _handle_require_approval(
             matching_rule_ids=list(decision.matching_rule_ids),
         )
 
-    # Step 9 — poll for a decision.
-    outcome = await _poll_for_decision(
-        task_id=task_id,
-        request_id=request_id,
-        timeout_s=effective_timeout,
-        progress=progress,
-        ts=ts,
+    # Step 9 — register the exact persisted gate and its ORIGINAL deadline.
+    # The SDK wrapper already tracks this tool; direct/legacy callers without a
+    # lifecycle context keep their existing approval behavior.
+    lifecycle = get_context(task_id)
+    park = (
+        lifecycle.park_approval(
+            request_id,
+            tool_use_id,
+            deadline,
+            record=ApprovalRecord(
+                user_id=row["user_id"],
+                repo=row["repo"],
+                created_at=row["created_at"],
+                timeout_s=effective_timeout,
+            ),
+        )
+        if lifecycle
+        else None
     )
+    from continuation_runtime import current_runtime
+
+    continuation = current_runtime()
+    checkpoint_held = False
+    if continuation is not None and lifecycle is not None and park is not None:
+        try:
+            identity, receipt = await continuation.capture(
+                lifecycle,
+                park,
+                session_id=session_id,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                approval_scopes=engine.allowlist.snapshot_scopes(),
+                approval_gate_count=engine.approval_gate_count,
+            )
+            checkpoint_held = True
+            await asyncio.to_thread(
+                ts.publish_continuation_checkpoint,
+                identity,
+                receipt,
+                tool_input_sha256=tool_input_sha256,
+                cost_usd=continuation.context.cost_usd,
+                turns_used=continuation.context.turns_used,
+            )
+            log(
+                "TASK",
+                f"Continuation checkpoint ready task_id={task_id} request_id={request_id} "
+                f"attempt_id={identity.attempt_id}",
+            )
+        except Exception as exc:
+            # A failed or uncertain publish cannot authorize worker release.
+            # If a receipt was saved, keep tools held until the conditional
+            # RUNNING claim resolves any race with the coordinator.
+            log(
+                "WARN",
+                f"Continuation checkpoint unavailable task_id={task_id} request_id={request_id} "
+                f"code={getattr(exc, 'code', 'checkpoint_failed')} error_type={type(exc).__name__}",
+            )
+            _try_progress(
+                progress,
+                "write_agent_milestone",
+                milestone="continuation_unavailable",
+                details="Could not save recovery state. This worker must remain available "
+                f"until the decision is received. code={getattr(exc, 'code', 'checkpoint_failed')}",
+            )
+    try:
+        outcome = await _poll_for_decision(
+            task_id=task_id,
+            request_id=request_id,
+            deadline=deadline,
+            progress=progress,
+            ts=ts,
+        )
+    except BaseException:
+        if checkpoint_held and lifecycle:
+            lifecycle.close()
+        raise
+    finally:
+        if lifecycle and park and not checkpoint_held:
+            # Clear the safe point before ANY approval/task-state mutation or
+            # hook return. A concurrent suspend owns the barrier until resume.
+            await lifecycle.leave_approval(park)
 
     # Step 10 — VM-throttle + late-approval race. Best-effort flip to
     # TIMED_OUT; if ConditionCheckFailed, the user beat us — read and honor.
@@ -741,6 +886,13 @@ async def _handle_require_approval(
                 row_reread = None
             outcome = _reconcile_late_decision(outcome, row_reread, progress, request_id)
 
+    if outcome.get("status") == "CANCELLED":
+        # The platform closed the approval in the same transaction as task
+        # cancellation. Do not try to restore RUNNING or cache a human denial.
+        if checkpoint_held and lifecycle:
+            lifecycle.close()
+        return _deny_response("Task was cancelled; this approval is closed.")
+
     # Step 11 — resume transition (RUNNING). The ``awaiting_approval_request_id``
     # condition prevents resuming a cancelled task or racing with another
     # approval.
@@ -754,6 +906,8 @@ async def _handle_require_approval(
                 request_id=request_id,
                 error=f"cancelled: {exc.cancellation_reasons}",
             )
+        if checkpoint_held and lifecycle:
+            lifecycle.close()
         return _deny_response("task no longer awaiting approval")
     except Exception as exc:
         log("WARN", f"approval resume raised: {type(exc).__name__}: {exc}")
@@ -764,7 +918,12 @@ async def _handle_require_approval(
                 request_id=request_id,
                 error=f"{type(exc).__name__}: {exc}",
             )
+        if checkpoint_held and lifecycle:
+            lifecycle.close()
         return _deny_response("approval resume failed")
+
+    if checkpoint_held and lifecycle and park:
+        await lifecycle.release_continuation(park)
 
     # Step 12 — terminal branches.
     status = outcome.get("status")
@@ -892,6 +1051,7 @@ def _reconcile_late_decision(
 
     - ``row["status"] == "APPROVED"`` → rebuild as APPROVED (allow flow).
     - ``row["status"] == "DENIED"`` → rebuild as DENIED (deny flow).
+    - ``row["status"] == "CANCELLED"`` → close the wait without resuming the task.
     - Anything else (row gone, still PENDING) → fall through with the
       original TIMED_OUT (the fail-closed branch).
 
@@ -916,6 +1076,8 @@ def _reconcile_late_decision(
             "decided_at": row.get("decided_at"),
             "decided_by": row.get("user_id"),
         }
+    if status == "CANCELLED":
+        return {"status": "CANCELLED", "reason": row.get("cancellation_reason")}
     if status == "DENIED":
         if progress is not None:
             _try_progress(
@@ -937,7 +1099,7 @@ async def _poll_for_decision(
     *,
     task_id: str,
     request_id: str,
-    timeout_s: int,
+    deadline: _ApprovalDeadline,
     progress: Any,
     ts: Any,
 ) -> dict:
@@ -949,70 +1111,77 @@ async def _poll_for_decision(
     ``approval_poll_degraded``; at ``POLL_MAX_CONSECUTIVE_FAILS`` we
     fall through as TIMED_OUT with a distinct reason.
 
-    Returns an outcome dict mirroring the approval row's terminal fields.
+    Uses the deadline captured with the original approval row, including time
+    spent writing/notifying or suspended. Returns an outcome dict mirroring
+    the approval row's terminal fields.
     """
-    deadline = time.monotonic() + timeout_s
     start = time.monotonic()
     consecutive_fails = 0
     degraded_emitted = False
 
+    lifecycle = get_context(task_id)
     while True:
-        now = time.monotonic()
-        if now >= deadline:
-            return {"status": "TIMED_OUT", "reason": None}
+        async with lifecycle.approval_poll() if lifecycle else nullcontext():
+            if deadline.remaining_s() <= 0:
+                return {"status": "TIMED_OUT", "reason": None}
 
-        try:
-            row = await asyncio.to_thread(
-                ts.get_approval_row,
-                task_id,
-                request_id,
-                consistent_read=True,
-            )
-            consecutive_fails = 0
-        except Exception as exc:
-            consecutive_fails += 1
-            log(
-                "WARN",
-                f"approval poll get_item raised ({consecutive_fails}/"
-                f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
-            )
-            if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
-                if progress is not None:
-                    _try_progress(
-                        progress,
-                        "write_approval_poll_degraded",
-                        request_id=request_id,
-                        consecutive_failures=consecutive_fails,
-                    )
-                degraded_emitted = True
-            if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
-                return {
-                    "status": "TIMED_OUT",
-                    "reason": f"poll failed {consecutive_fails} consecutive times",
-                }
-            row = None  # force sleep below
+            try:
+                row = await asyncio.to_thread(
+                    ts.get_approval_row,
+                    task_id,
+                    request_id,
+                    consistent_read=True,
+                )
+                consecutive_fails = 0
+            except Exception as exc:
+                consecutive_fails += 1
+                log(
+                    "WARN",
+                    f"approval poll get_item raised ({consecutive_fails}/"
+                    f"{POLL_MAX_CONSECUTIVE_FAILS}): {type(exc).__name__}: {exc}",
+                )
+                if consecutive_fails >= POLL_DEGRADED_FAILS and not degraded_emitted:
+                    if progress is not None:
+                        _try_progress(
+                            progress,
+                            "write_approval_poll_degraded",
+                            request_id=request_id,
+                            consecutive_failures=consecutive_fails,
+                        )
+                    degraded_emitted = True
+                if consecutive_fails >= POLL_MAX_CONSECUTIVE_FAILS:
+                    return {
+                        "status": "TIMED_OUT",
+                        "reason": f"poll failed {consecutive_fails} consecutive times",
+                    }
+                row = None  # force sleep below
 
-        if row is not None:
-            status = row.get("status")
-            if status == "APPROVED":
-                return {
-                    "status": "APPROVED",
-                    "scope": row.get("scope"),
-                    "decided_at": row.get("decided_at"),
-                    "decided_by": row.get("user_id"),
-                }
-            if status == "DENIED":
-                return {
-                    "status": "DENIED",
-                    "reason": row.get("deny_reason") or "denied",
-                    "decided_at": row.get("decided_at"),
-                }
+            if row is not None:
+                status = row.get("status")
+                if status == "APPROVED":
+                    return {
+                        "status": "APPROVED",
+                        "scope": row.get("scope"),
+                        "decided_at": row.get("decided_at"),
+                        "decided_by": row.get("user_id"),
+                    }
+                if status == "DENIED":
+                    return {
+                        "status": "DENIED",
+                        "reason": row.get("deny_reason") or "denied",
+                        "decided_at": row.get("decided_at"),
+                    }
+                if status == "CANCELLED":
+                    return {
+                        "status": "CANCELLED",
+                        "reason": row.get("cancellation_reason"),
+                    }
 
         # Compute sleep interval based on elapsed since poll started.
         elapsed = time.monotonic() - start
         interval = POLL_FAST_INTERVAL_S if elapsed < POLL_FAST_DURATION_S else POLL_SLOW_INTERVAL_S
         # Clamp sleep against remaining deadline so we don't oversleep.
-        sleep_for = min(interval, max(0.0, deadline - time.monotonic()))
+        sleep_for = min(interval, deadline.remaining_s())
         if sleep_for <= 0:
             return {"status": "TIMED_OUT", "reason": None}
         await asyncio.sleep(sleep_for)
@@ -1047,6 +1216,8 @@ def _compute_effective_timeout(
     decision_value = (
         decision_timeout_s if decision_timeout_s is not None else task_default_timeout_s
     )
+    if decision_value == 0:
+        return 0, None, requested
 
     # Start with the decision value (already clipped by rule vs task default
     # in the engine) and apply the remaining-lifetime ceiling here.
@@ -1096,8 +1267,6 @@ def _remaining_maxlifetime_s() -> int | None:
         if started_at.isdigit():
             started_epoch = int(started_at)
         else:
-            from datetime import datetime
-
             # The trailing Z means UTC; strptime returns a naive datetime whose
             # .timestamp() would otherwise be interpreted in the container's
             # local TZ, skewing remaining-lifetime math by the UTC offset.
@@ -1730,8 +1899,9 @@ def build_hook_matchers(
     Returns a dict mapping HookEvent strings to lists of HookMatcher
     instances, ready to pass as ``hooks=...`` to ClaudeAgentOptions.
 
-    The SDK expects ``dict[HookEvent, list[HookMatcher]]`` where HookMatcher
-    has ``matcher: str | None`` and ``hooks: list[HookCallback]``.
+    The SDK expects ``dict[HookEvent, list[HookMatcher]]``. PreToolUse also needs
+    an explicit callback timeout: the CLI can otherwise cancel a live approval
+    wait and return a generic denial without completing its approval record.
 
     ``progress`` is forwarded to both the PreToolUse hook (approval gate
     milestones) and the Stop hook (nudge/denial acks). ``user_id`` is
@@ -1751,6 +1921,9 @@ def build_hook_matchers(
     # PostToolUse closure feeds it every tool result; the Stop closure reads it
     # between turns to steer / bail on a repeating failing command.
     _stuck_guard = StuckGuard()
+    # Retain the controller even after registry removal. A late callback must
+    # see its CLOSED barrier, not fall back to the non-MicroVM path.
+    lifecycle = get_context(task_id)
 
     # Closure-based wrapper matches the HookCallback signature exactly:
     # (HookInput, str | None, HookContext) -> Awaitable[HookJSONOutput]
@@ -1758,13 +1931,24 @@ def build_hook_matchers(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         # Fail-closed wrapper (mirrors _post and _stop). If the inner hook
-        # or its dispatch path raises an unexpected exception (asyncio
-        # cancellation, TypeError from a malformed payload, etc.), the
+        # or its dispatch path raises an unexpected exception (for example,
+        # TypeError from a malformed payload), the
         # SDK's default behaviour for an unhandled hook exception is
         # undefined — we MUST NOT trust it to fail closed. Mapping every
         # uncaught exception to a DENY here makes the security posture
-        # explicit at the SDK boundary.
+        # explicit at the SDK boundary. SDK cancellation propagates and still
+        # releases the tool registration in finally.
+        allowed = False
         try:
+            if lifecycle:
+                await lifecycle.tool_started(tool_use_id)
+                if isinstance(hook_input, dict):
+                    tool_input = hook_input.get("tool_input")
+                    # Legacy serialized inputs are normalized deeper in the
+                    # policy hook. Keep their tool behavior, but do not infer a
+                    # safe foreground-only execution from an opaque value here.
+                    if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
+                        lifecycle.disable_suspend()
             result = await pre_tool_use_hook(
                 hook_input,
                 tool_use_id,
@@ -1776,6 +1960,10 @@ def build_hook_matchers(
                 progress=progress,
                 repo_url=repo_url or None,
             )
+            if result.get("hookSpecificOutput", {}).get("permissionDecision") == "allow":
+                if lifecycle:
+                    await lifecycle.wait_until_open()
+                allowed = True
         except Exception as exc:
             log(
                 "ERROR",
@@ -1788,6 +1976,9 @@ def build_hook_matchers(
             return SyncHookJSONOutput(
                 **_deny_response("Hook error — fail-closed deny"),
             )
+        finally:
+            if lifecycle and not allowed:
+                lifecycle.tool_finished(tool_use_id)
         return SyncHookJSONOutput(**result)
 
     async def _post(
@@ -1810,6 +2001,25 @@ def build_hook_matchers(
                 "updatedMCPToolOutput": "[Output redacted: hook error — fail-closed]",
             }
             return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
+        finally:
+            if lifecycle:
+                # Background Bash may be promoted after invocation. A returned
+                # background identifier means the tool's post hook is not a
+                # reliable indication that its child stopped.
+                if isinstance(hook_input, dict):
+                    response = hook_input.get("tool_response")
+                    if isinstance(response, dict) and (
+                        response.get("backgroundTaskId") or response.get("background_task_id")
+                    ):
+                        lifecycle.disable_suspend()
+                lifecycle.tool_finished(tool_use_id)
+
+    async def _post_failure(
+        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+    ) -> HookJSONOutput:
+        if lifecycle:
+            lifecycle.tool_finished(tool_use_id)
+        return SyncHookJSONOutput()
 
     async def _stop(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
@@ -1836,8 +2046,22 @@ def build_hook_matchers(
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.
         return SyncHookJSONOutput(**result)
 
-    return {
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[_pre])],
+    # The callback transport must outlive the approval loop. A frozen MicroVM
+    # may wake after the gate deadline during supervisor recovery, so keep that
+    # callback alive for the bounded VM lifetime. Explicit gate deadlines remain
+    # unchanged; a retained request can outlive this callback through continuation.
+    callback_window_s = SHARED_CONSTANTS["microvm_lifecycle"]["maximum_duration_seconds"]
+    matchers = {
+        "PreToolUse": [
+            HookMatcher(
+                matcher=None,
+                hooks=[_pre],
+                timeout=callback_window_s + CLEANUP_MARGIN_120S,
+            )
+        ],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }
+    if lifecycle:
+        matchers["PostToolUseFailure"] = [HookMatcher(matcher=None, hooks=[_post_failure])]
+    return matchers

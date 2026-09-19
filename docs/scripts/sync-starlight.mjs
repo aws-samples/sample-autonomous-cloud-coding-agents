@@ -32,6 +32,12 @@ function rewriteDocsLinkTarget(target) {
   }
 
   const normalizedPath = pathPart.replaceAll('\\', '/');
+  // Verification runbooks remain repository documents, not Starlight pages.
+  // Preserve their real destination instead of inventing an architecture route.
+  const verification = normalizedPath.match(/(?:^|\/)verification\/(.+)$/);
+  if (verification) {
+    return `https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/${verification[1]}${anchor ? `#${anchor}` : ''}`;
+  }
   const stem = path.basename(normalizedPath, '.md');
   const slug = normalizeFileStem(stem).toLowerCase();
   const anchorSuffix = anchor ? `#${anchor}` : '';
@@ -111,12 +117,8 @@ function ensureFrontmatter(content, title) {
       // must carry that prefix — otherwise they resolve to the domain root
       // and 404. Starlight prefixes its own nav links automatically, but our
       // rewritten body links are raw markdown and need it added explicitly
-      // (same reason the image rewrites above include docsBase). Every
-      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
-      // `#…` anchors and external links return undefined and keep their
-      // original text above), so the prefix always applies.
-      // (Fixes the broken in-body design-doc links.)
-      return `[${label}](${docsBase}${rewritten})`;
+      // Repository-only documents instead retain their absolute GitHub URL.
+      return `[${label}](${rewritten.startsWith('/') ? docsBase : ''}${rewritten})`;
     });
 
   const trimmed = normalized.trimStart();

@@ -20,8 +20,8 @@
 /**
  * Integration-style tests for the start-session step composition:
  *   resolveComputeStrategy → strategy.startSession → transitionTask → emitTaskEvent
- * These verify that the orchestrate-task handler's step 4 logic correctly
- * wires the strategy, state transitions, and event emission together.
+ * These compose the real helpers. The actual durable handler, including
+ * MicroVM recovery/finalization, is exercised in orchestrate-task-microvm.test.ts.
  */
 
 const mockDdbSend = jest.fn();
@@ -45,6 +45,7 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockMicrovmSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  GetMicrovmImageVersionCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovmImageVersion', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
   MicrovmState: {
     PENDING: 'PENDING',
@@ -56,10 +57,17 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   },
 }));
 
-jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
-  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
-  DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
+// This suite checks strategy/metadata composition. Real bootstrap replay is
+// covered by microvm-start-recovery and orchestrate-task-microvm.
+jest.mock('../../src/handlers/shared/payload-bootstrap', () => ({
+  ...jest.requireActual('../../src/handlers/shared/payload-bootstrap'),
+  preparePayloadReference: jest.fn(async ({ taskId }: { taskId: string }) => ({
+    version: 2,
+    task_id: taskId,
+    bootstrap_s3_uri: 's3://bucket/bootstrap/example.json',
+    payload_url: 'https://signed.example/task',
+    expires_at: Date.now() + 900000,
+  })),
 }));
 
 jest.mock('../../src/handlers/shared/repo-config', () => ({
@@ -199,7 +207,19 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
   const blueprintConfig: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn: '' };
   const payload = { repo_url: 'org/repo', task_id: taskId };
 
-  test('startSession → buildComputeMetadata → transitionTask persists microvmId and endpoint', async () => {
+  beforeEach(() => {
+    let receipt: unknown;
+    mockDdbSend.mockReset().mockImplementation(async (command) => {
+      if (command._type === 'Get') {
+        return { Item: { user_id: 'cognito-test', status: TaskStatus.HYDRATING, microvm_start: receipt } };
+      }
+      const saved = command.input.ExpressionAttributeValues?.[':receipt'];
+      if (saved) receipt = saved;
+      return {};
+    });
+  });
+
+  test('startSession → buildComputeMetadata → transitionTask persists the worker and actual image', async () => {
     mockMicrovmSend.mockResolvedValueOnce({
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
@@ -207,8 +227,6 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
       imageArn: 'arn:image',
       imageVersion: '7',
     });
-    mockDdbSend.mockResolvedValue({});
-
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
 
@@ -225,45 +243,53 @@ describe('start-session step composition — lambda-microvm (ADR-021)', () => {
 
     // The persisted attributes are what cancel-task (and P3's approve/deny
     // resume) read back, so assert them on the real UpdateCommand input.
-    const update = mockDdbSend.mock.calls.find(c => c[0]._type === 'Update')![0];
+    const update = mockDdbSend.mock.calls.find(c =>
+      c[0]._type === 'Update' && c[0].input.ExpressionAttributeValues[':toStatus'] === TaskStatus.RUNNING)![0];
     const values = update.input.ExpressionAttributeValues as Record<string, unknown>;
     expect(values[':attr_compute_type']).toBe('lambda-microvm');
-    expect(values[':attr_compute_metadata']).toEqual({ microvmId: MICROVM_ID, endpoint: ENDPOINT });
+    expect(values[':attr_compute_metadata']).toEqual({
+      microvmId: MICROVM_ID, endpoint: ENDPOINT, imageArn: 'arn:image', imageVersion: '7',
+    });
     expect(values[':attr_session_id']).toBe(MICROVM_ID);
     expect(values[':toStatus']).toBe(TaskStatus.RUNNING);
   });
 
-  test('compute_metadata carries ONLY the two lifecycle keys (no image ARN)', async () => {
+  test('image identity alone does not claim verified lifecycle support', async () => {
     mockMicrovmSend.mockResolvedValueOnce({
       microvmId: MICROVM_ID,
       endpoint: ENDPOINT,
       state: 'RUNNING',
       imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
       imageVersion: '7',
+    }).mockResolvedValueOnce({
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
+      imageVersion: '7',
+      hooks: {},
     });
 
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
     const metadata = buildComputeMetadata(handle);
 
-    // ADR-021: the image ARN is deployment-time config, logged not persisted.
-    expect(Object.keys(metadata).sort()).toEqual(['endpoint', 'microvmId']);
-    expect(JSON.stringify(metadata)).not.toContain('microvm-image');
+    expect(metadata).toEqual({
+      microvmId: MICROVM_ID,
+      endpoint: ENDPOINT,
+      imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image/abca-agent',
+      imageVersion: '7',
+    });
+    expect(metadata.lifecycleProtocol).toBeUndefined();
+    expect(mockMicrovmSend.mock.calls[1][0]._type).toBe('GetMicrovmImageVersion');
   });
 
-  test('error path: a marked RunMicrovm failure flows into failTask', async () => {
+  test('a rejected RunMicrovm preserves its marked AWS exception for the caller', async () => {
     const err = new Error('Rate exceeded');
     err.name = 'ThrottlingException';
     mockMicrovmSend.mockRejectedValueOnce(err);
-    mockDdbSend.mockResolvedValue({});
 
     const strategy = resolveComputeStrategy(blueprintConfig);
 
     await expect(
       strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig }),
     ).rejects.toThrow('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded');
-
-    await failTask(taskId, TaskStatus.HYDRATING, 'Session start failed: boom', 'user-123', true);
-    expect(mockDdbSend).toHaveBeenCalled();
   });
 });

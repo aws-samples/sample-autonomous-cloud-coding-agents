@@ -19,18 +19,29 @@
 
 import {
   GetMicrovmCommand,
+  GetMicrovmImageVersionCommand,
   LambdaMicrovmsClient,
   MicrovmState,
   RunMicrovmCommand,
   TerminateMicrovmCommand,
+  SuspendMicrovmCommand,
+  ResumeMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 // Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
 import sharedConstants from '../../../../../contracts/constants.json';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus, SessionStopResult } from '../compute-strategy';
+import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
+import { validAttemptId } from '../microvm-continuation-types';
+import { microvmErrorIdentity, microvmRequestIdentity } from '../microvm-control';
+import {
+  MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
+  readMicrovmImageMetadata, verifyMicrovmImageLifecycle,
+} from '../microvm-image-capability';
+import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle, saveMicrovmImageCapability } from '../microvm-start';
+import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
 
@@ -42,12 +53,14 @@ function getClient(): LambdaMicrovmsClient {
   return sharedClient;
 }
 
-let sharedS3Client: S3Client | undefined;
-function getS3Client(): S3Client {
-  if (!sharedS3Client) {
-    sharedS3Client = makeClient(S3Client);
-  }
-  return sharedS3Client;
+/** Bound a control request, not the transition itself. A timeout needs reconciliation. */
+export const MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS = 10_000;
+
+function controlSignal(options?: SessionControlOptions): AbortSignal {
+  const limit = AbortSignal.timeout(MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS);
+  const signal = options?.abortSignal ? AbortSignal.any([limit, options.abortSignal]) : limit;
+  signal.throwIfAborted();
+  return signal;
 }
 
 /**
@@ -80,6 +93,7 @@ const MICROVM_EGRESS_CONNECTOR_ARNS = process.env.MICROVM_EGRESS_CONNECTOR_ARNS;
  */
 const MICROVM_INGRESS_CONNECTOR_ARNS = process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 const MICROVM_PAYLOAD_BUCKET = process.env.MICROVM_PAYLOAD_BUCKET;
+const HTTP_REQUEST_TIMEOUT = 408;
 
 /**
  * Session wall-clock ceiling passed on EVERY ``RunMicrovm`` call, pinned to the
@@ -94,7 +108,7 @@ const MICROVM_PAYLOAD_BUCKET = process.env.MICROVM_PAYLOAD_BUCKET;
  * so a Blueprint override would be policy without a driver; add one only if a
  * real need appears.
  */
-export const MICROVM_MAX_DURATION_SECONDS = 28_800;
+export const MICROVM_MAX_DURATION_SECONDS = sharedConstants.microvm_lifecycle.maximum_duration_seconds;
 
 /**
  * Hard service cap on ``runHookPayload`` (bytes), measured live rather than read
@@ -112,43 +126,15 @@ export const MICROVM_MAX_DURATION_SECONDS = 28_800;
  * old 16 384 threshold would have inlined every envelope between 4 097 and
  * 16 384 bytes and had the service reject all of them.
  *
- * This is the EXACT branch point for the inline/S3-pointer decision, with no
- * safety margin — deliberately unlike ``ecs-strategy``, which keeps its inline
- * warn line at 6 144 of ECS's 8 192-byte cap. That margin exists because ECS
- * counts the *whole* ``containerOverrides`` blob (env vars, command, and payload
- * share one budget), so the strategy cannot know how much of the 8 192 the
- * payload actually gets. ``runHookPayload`` is a single standalone string, so
- * the counted size is exactly what we measure and the boundary is computable.
- *
- * Consequence worth stating plainly: at 4 KB the **S3-pointer path is the
- * dominant one**. A hydrated task payload (prompt + issue thread + repo context)
- * essentially always exceeds 4 KB, so the inline branch is the exception (tiny
- * repo-less prompts), not the common case.
+ * V2 always sends a signed payload reference. Enforce this byte limit on the
+ * final serialized reference; payload/config bytes live in S3, not in the hook.
  */
 const RUN_HOOK_PAYLOAD_LIMIT_BYTES = 4_096;
 
 /**
- * The ``GetMicrovm`` ``stateReason`` value that means "nothing to report".
- *
- * Live-observed, not guessed: an orchestrator-initiated ``TerminateMicrovm`` on the
- * SUCCESS path leaves the MicroVM ``TERMINATED`` with exactly
- * ``stateReason: "Success."`` — trailing period included. Recorded three times in
- * ``docs/verification/645-p2-smoke-runbook.md``: **§5.1** ("Finalization called
- * `TerminateMicrovm`", the verbatim CLI output), **§6.2** (the suspend/resume
- * latency table) and **§2.9** ("Lifecycle — PASS", run 2). A healthy ``RUNNING``
- * MicroVM reports no reason at all (``None``, same §6.2 table).
- *
- * Normalized away in {@link LambdaMicrovmComputeStrategy.pollSession} so it never
- * reaches the reconcile ``detail`` string, where it would append noise to every
- * cleanly-finished task.
- *
- * A bare literal comparison is deliberate and the brittleness is bounded: this is
- * a service-owned display string, so an exact match can only fail OPEN — a future
- * ``"Success"`` without the period, or a different capitalisation, would leak one
- * benign phrase into an operator-facing string. It cannot suppress a real reason,
- * which is the direction that would matter. Left out of
- * ``contracts/constants.json`` for the same reason: nothing in the agent reads it,
- * so it is not a cross-language contract.
+ * The service reports "Success." after normal termination. Suppress only that
+ * exact benign display string; preserve other reasons for operator diagnosis.
+ * A future wording change may add harmless detail but cannot hide a failure.
  */
 const MICROVM_BENIGN_STATE_REASON = 'Success.';
 
@@ -186,9 +172,10 @@ const MICROVM_BENIGN_STATE_REASON = 'Success.';
  * ## What may and may not go in here
  *
  * NON-SECRET IDENTIFIERS ONLY — table names, bucket names, log-group names, and
- * secret/role **ARNs**. Never a token, never a secret *value*: the envelope is
- * written to an S3 object and echoed into MicroVM logs on a hook failure, and
- * the agent resolves an ARN itself through its own (SessionRole /
+ * secret/role **ARNs**. Never a token, never a secret *value*: configuration is
+ * stored in the worker-readable deployment manifest and task object. Hook
+ * diagnostics omit payloads and redact signed URLs. The agent resolves an ARN
+ * itself through its own (SessionRole /
  * execution-role) credentials. The producer below is a map over exactly the
  * contract's keys, so a value can only reach the wire by being added to the
  * contract — an unrelated `process.env` entry (`GITHUB_TOKEN`,
@@ -198,7 +185,7 @@ const MICROVM_BENIGN_STATE_REASON = 'Success.';
  *
  * The contract's declaration order is the emission order (`JSON.stringify`
  * preserves insertion order for string keys), which keeps the serialized
- * envelope — and therefore the 4 KB inline/S3 branch decision — deterministic
+ * manifest serialization deterministic
  * for a given environment.
  */
 const PLATFORM_CONFIG_CONTRACT = sharedConstants.microvm_platform_config;
@@ -351,91 +338,38 @@ export function buildMicrovmPlatformConfig(
 export const MICROVM_ERROR_MARKER = 'MicroVM';
 
 /**
- * Wrap an error escaping a MicroVM control-plane (or payload-upload) call so it
+ * Wrap an error escaping a MicroVM control-plane or payload-bootstrap call so it
  * carries {@link MICROVM_ERROR_MARKER} plus the originating operation.
  *
  * The AWS exception NAME is spliced into the message explicitly because
  * ``err.message`` alone omits it (``String(err)`` would include it, but the
  * classifier is handed the *wrapped* error) and the classifier keys on that
- * name. ``cause`` retains the original for anyone who needs ``err.name``.
+ * name. ``cause`` retains a sanitized name/message copy: SDK errors and their
+ * nested causes can contain signed URLs or request metadata.
  *
  * The wrapper's own ``name`` is intentionally left as ``Error`` so
  * ``String(wrapped)`` reads ``Error: MicroVM <op> failed: <Name>: <msg>`` —
  * marker first, which is the order the classifier patterns document.
  */
 function wrapMicrovmError(operation: string, err: unknown): Error {
-  const name = err instanceof Error ? err.name : undefined;
-  const message = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? redactPayloadUrls(err.name) : undefined;
+  const message = redactPayloadUrls(err instanceof Error ? err.message : String(err));
   const detail = name && name !== 'Error' && !message.includes(name)
     ? `${name}: ${message}`
     : message;
-  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: err });
+  const safeCause = new Error(message);
+  safeCause.name = name ?? 'Error';
+  const requestId = microvmErrorIdentity(err).aws_request_id;
+  if (requestId) Object.assign(safeCause, { $metadata: { requestId } });
+  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: safeCause });
 }
 
-/**
- * S3 object key for a task's MicroVM ``/run`` payload. Same key shape as the
- * ECS payload bucket (``ecsPayloadKey``): one object per task under its own
- * task-id prefix, deleted by the orchestrator at finalize (see
- * {@link deleteMicrovmPayload}), with the payload bucket's lifecycle-expiry rule
- * (ADR-021 sub-decision 3, ``MICROVM_PAYLOAD_TTL_DAYS``) as the backstop.
+/** Remove task instructions and their saved download capability after finalization.
+ * Best-effort; bucket lifecycle reaps leftovers. Deployment manifests are shared.
  */
-export function microvmPayloadKey(taskId: string): string {
-  return `${taskId}/payload.json`;
-}
-
-/**
- * Delete a task's MicroVM ``/run`` payload object. Best-effort: a failed delete
- * must never fail the task — the bucket's 1-day lifecycle rule reaps it
- * regardless. Called from the orchestrator's ``finalize`` step once the task is
- * terminal. No-ops when the payload bucket isn't configured.
- *
- * WHY this exists rather than leaning on the TTL alone (ECS parity, and a real
- * exposure delta): the execution role's payload-bucket grant is
- * ``grantRead`` on the WHOLE bucket — it cannot be per-task scoped, because the
- * MicroVM has to read its own object before any tenant identity is installed.
- * The key shape is ``<taskId>/payload.json``, so any running MicroVM that knows
- * (or guesses) another task's id can read that task's HYDRATED PROMPT — issue
- * body, comment thread, repo context. The MicroVM also runs untrusted repo code.
- * Relying only on ``MICROVM_PAYLOAD_TTL_DAYS = 1`` left that window open for up
- * to ~24 h; deleting at finalize closes it to the task's own lifetime, which is
- * exactly the posture ``deleteEcsPayload`` already gives the ECS backend.
- *
- * ISSUED UNCONDITIONALLY, including for a task whose payload went INLINE (under
- * the {@link RUN_HOOK_PAYLOAD_LIMIT_BYTES} cap, so no object was ever written).
- * That is on purpose: ``DeleteObject`` on a missing key succeeds, so the call is
- * harmless and idempotent, whereas *deciding* to skip it would mean trusting a
- * per-task record of the delivery mode — and if that record were ever wrong or
- * absent, the skip would leave a real payload behind for the full TTL. Attempting
- * always is the fail-safe direction.
- *
- * The consequence is that a successful call proves a delete was ISSUED, never that
- * an object existed — S3 returns nothing that distinguishes the two on an
- * unversioned bucket. The log line below says exactly that and no more; an earlier
- * "Deleted MicroVM payload object" asserted a deletion that never happened on
- * every inline task.
- */
-export async function deleteMicrovmPayload(taskId: string): Promise<void> {
+export async function deleteMicrovmPayload(taskId: string, attemptId?: string): Promise<void> {
   if (!MICROVM_PAYLOAD_BUCKET) return;
-  const key = microvmPayloadKey(taskId);
-  try {
-    await getS3Client().send(new DeleteObjectCommand({
-      Bucket: MICROVM_PAYLOAD_BUCKET,
-      Key: key,
-    }));
-    // "issued", not "deleted": see the docstring. An inline-delivered task has no
-    // object here and the call still succeeds.
-    logger.info('MicroVM payload delete issued', {
-      task_id: taskId,
-      bucket: MICROVM_PAYLOAD_BUCKET,
-      key,
-    });
-  } catch (err) {
-    // Non-fatal — the lifecycle rule is the backstop.
-    logger.warn('Failed to delete MicroVM payload object (non-fatal)', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await deletePayloadReference(MICROVM_PAYLOAD_BUCKET, taskId, attemptId);
 }
 
 /** Split a comma-separated env-var list into trimmed, non-empty entries. */
@@ -509,23 +443,21 @@ function assertImageArn(identifier: string): void {
  * control-plane state machine the orchestrator can observe through
  * {@link LambdaMicrovmComputeStrategy.pollSession}.
  *
- * P1 scope is start / poll / stop only. ``suspendSession`` / ``resumeSession``
- * (the interface widening across all three strategies) land in P3 — do NOT add
- * them here piecemeal, ADR-021 sub-decision 1 requires them in one commit so
- * the exhaustive-``never`` switch culture forces every backend to make a
- * compile-checked decision about its suspend semantics.
+ * Suspend/resume submit service commands; the other two strategies return
+ * explicit unsupported results. microvm-supervisor supplies gate policy,
+ * durable intent and state reconciliation. Automatic suspension additionally
+ * requires compatible image hooks and enabled static/live rollout settings.
  */
 export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
   readonly type = 'lambda-microvm';
 
   async startSession(input: {
     taskId: string;
-    /** Accepted to satisfy the ComputeStrategy interface. MicroVMs have no
-     *  workload-token-injecting runtime (they inherit the ECS env-var identity
-     *  posture until #249 / ADR-016 redesign the seam), so this is unused. */
+    /** Checked against the stored task owner before claiming a start receipt. */
     userId: string;
     payload: Record<string, unknown>;
     blueprintConfig: BlueprintConfig;
+    microvmImage?: { readonly imageArn: string; readonly imageVersion: string };
   }): Promise<SessionHandle> {
     if (!MICROVM_IMAGE_IDENTIFIER || !MICROVM_EXECUTION_ROLE_ARN || !MICROVM_EGRESS_CONNECTOR_ARNS || !MICROVM_PAYLOAD_BUCKET) {
       // Config/deploy mismatch: this repo is compute_type=lambda-microvm but the
@@ -545,101 +477,28 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     }
 
     const { taskId, payload } = input;
+    const attemptId = payload.attempt_id ?? taskId;
+    if (!validAttemptId(attemptId)) throw new Error('MICROVM_START_STATE_INVALID: invalid worker attempt');
 
     // An identifier that is not an ARN cannot launch anything — check before the
     // payload upload so a misconfiguration never leaves an orphan S3 object.
     assertImageArn(MICROVM_IMAGE_IDENTIFIER);
-
-    // Payload delivery (ADR-021 sub-decision 3): the `/run` lifecycle hook
-    // receives `runHookPayload` as its request body, capped at 4 KB by the
-    // service. The hydrated_context essentially always blows that, so the
-    // S3-pointer path (mirroring ECS #502) is the DOMINANT one here and the
-    // inline branch is the exception. The MicroVM EXECUTION role holds the read
-    // grant, exactly as the ECS task role does today.
-    //
-    // Three keys, deliberately mirroring the ECS container env contract
-    // (AGENT_PAYLOAD / AGENT_PAYLOAD_S3_URI) so the agent's `/run` hook has one
-    // self-describing shape to branch on:
-    //   { "agent_payload": {...},     "platform_config": {...} }  — inline
-    //   { "agent_payload_s3_uri": "…", "platform_config": {...} }  — pointer
-    //
-    // `platform_config` (see MICROVM_PLATFORM_CONFIG_KEYS) rides in BOTH forms,
-    // and is ALSO merged into the S3 object on the pointer path:
-    //   s3://…/<task>/payload.json = { ...agent_payload, "platform_config": {…} }
-    // The duplication is deliberate and cheap (a few hundred bytes). It is the
-    // agent's env-block substitute — nothing else delivers it, because the
-    // snapshot must not bake it in — so it must be reachable whether the agent
-    // reads it off the hook body before fetching S3 or out of the fetched object.
-    const platformConfig = buildMicrovmPlatformConfig();
-    const inlineEnvelope = JSON.stringify({ agent_payload: payload, platform_config: platformConfig });
-    // Measure the SERIALIZED envelope, not the bare payload: the envelope is
-    // what the service counts against the 4 KB cap, and `platform_config` is part
-    // of it — which is precisely why nearly everything lands on the S3 path.
-    // Byte length (not String.length) because a multi-byte prompt/diff makes
-    // chars an undercount.
-    const inlineBytes = Buffer.byteLength(inlineEnvelope, 'utf8');
-
-    let runHookPayload: string;
-    let payloadS3Uri: string | undefined;
-    // EXACT boundary: `<= limit` inlines, `> limit` uploads. The service accepts
-    // 4 096 bytes and rejects 4 097 (measured), so 4 096 must still go inline.
-    if (inlineBytes <= RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-      runHookPayload = inlineEnvelope;
-    } else {
-      const key = microvmPayloadKey(taskId);
-      const uri = `s3://${MICROVM_PAYLOAD_BUCKET}/${key}`;
-      const pointerEnvelope = JSON.stringify({
-        agent_payload_s3_uri: uri,
-        platform_config: platformConfig,
-      });
-      // The pointer envelope is the LAST RESORT — there is no smaller shape to
-      // fall back to — so check it BEFORE the upload (an upload followed by a
-      // throw would leave an orphan object for the lifecycle rule to reap) and
-      // name the one thing an operator can actually act on. Unreachable in
-      // practice: the pointer plus all thirteen identifiers is well under 4 KB.
-      const pointerBytes = Buffer.byteLength(pointerEnvelope, 'utf8');
-      if (pointerBytes > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-        throw new Error(
-          `The MicroVM /run pointer envelope is ${pointerBytes} bytes, over the service's `
-          + `${RUN_HOOK_PAYLOAD_LIMIT_BYTES}-byte runHookPayload cap, with the payload already moved `
-          + 'to S3. The remaining size is the S3 URI plus the platform_config identifiers, so a '
-          + 'pathologically long table/bucket/ARN name is the only possible cause — shorten the '
-          + 'stack name (physical resource names derive from it) and redeploy.',
-        );
-      }
-      // The S3 object carries the payload with `platform_config` merged in at the
-      // top level, so an agent that fetches the object gets the config with it.
-      // Platform config wins on a key collision — the payload has no
-      // `platform_config` key today, and if one ever appeared the platform's
-      // value is the authoritative one.
-      const payloadJson = JSON.stringify({ ...payload, platform_config: platformConfig });
-      try {
-        await getS3Client().send(new PutObjectCommand({
-          Bucket: MICROVM_PAYLOAD_BUCKET,
-          Key: key,
-          Body: payloadJson,
-          ContentType: 'application/json',
-        }));
-      } catch (err) {
-        // Marked so the classifier attributes an upload failure to this backend
-        // rather than letting a bare S3 exception name fall through to UNKNOWN.
-        throw wrapMicrovmError('payload upload', err);
-      }
-      payloadS3Uri = uri;
-      runHookPayload = pointerEnvelope;
-      logger.info('Wrote MicroVM run-hook payload to S3', {
-        task_id: taskId,
-        bytes: Buffer.byteLength(payloadJson, 'utf8'),
-        inline_bytes: inlineBytes,
-        inline_limit_bytes: RUN_HOOK_PAYLOAD_LIMIT_BYTES,
-        uri: payloadS3Uri,
-      });
+    if (input.microvmImage && (input.microvmImage.imageArn !== MICROVM_IMAGE_IDENTIFIER
+      || !/^\d+\.\d+$/.test(input.microvmImage.imageVersion))) {
+      throw new Error('MICROVM_CONTINUATION_IMAGE_INVALID: recovery must use a version of the configured image');
     }
+    const imageVersion = input.microvmImage?.imageVersion ?? MICROVM_IMAGE_VERSION;
+
+    // The manifest authenticates deployment settings through the worker's IAM
+    // grant. Payload access uses a single-object URL, saved outside TaskTable.
+    const platformConfig = buildMicrovmPlatformConfig();
 
     // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
     // default to "no ingress" — omitting the field attaches the AWS-managed
-    // PUBLIC `HTTP_INGRESS` connector and mints a public
-    // `*.lambda-microvm.<region>.on.aws` endpoint. So the field is ALWAYS sent.
+    // PUBLIC `HTTP_INGRESS` connector. So the field is ALWAYS sent.
+    // A service endpoint URL is also returned with `NO_INGRESS`; the URL alone
+    // does not establish guest reachability. Requests require a MicroVM auth
+    // token, and an unauthenticated 403 proves only that authentication check.
     //
     // The env var is unconditional in every CDK-deployed stack (its prop is
     // required), so in practice this always takes the `configuredIngress` branch
@@ -651,9 +510,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       ? configuredIngress
       : [noIngressConnectorArn()];
 
-    const command = new RunMicrovmCommand({
+    const request = {
       imageIdentifier: MICROVM_IMAGE_IDENTIFIER,
-      ...(MICROVM_IMAGE_VERSION && { imageVersion: MICROVM_IMAGE_VERSION }),
+      ...(imageVersion && { imageVersion }),
       executionRoleArn: MICROVM_EXECUTION_ROLE_ARN,
       // Egress rides the platform VPC through an egress network connector so the
       // DNS Firewall / security-group / flow-log stack applies unchanged
@@ -662,7 +521,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // Never omitted — see the comment above. `NO_INGRESS` is the suppression
       // mechanism, not an empty list.
       ingressNetworkConnectors,
-      runHookPayload,
+      runHookPayload: 'payload-bootstrap-v2',
       maximumDurationInSeconds: MICROVM_MAX_DURATION_SECONDS,
       // `idlePolicy` is OMITTED — never passed, in any phase (ADR-021
       // sub-decision 1, asserted by an invariant unit test). MicroVM idle
@@ -673,15 +532,39 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // is present, so omission is the unambiguous disabled state. Suspension is
       // orchestrator-owned (P3) — do NOT reintroduce this field.
       //
-      // `clientToken` is also deliberately omitted. It is an idempotency token,
-      // and the one place a MicroVM start is retried is `startSessionWithRetry`,
-      // which retries precisely BECAUSE the first attempt FAILED. Passing a
-      // task-derived token there would ask the service to dedupe against that
-      // failed attempt and could replay its outcome instead of genuinely
-      // retrying — turning the auto-retry into a no-op. Session start is already
-      // idempotent by construction at the ABCA level (no clone, commit, or PR has
-      // happened yet), so the token buys nothing and risks the retry.
-    });
+      // The receipt below supplies a task-stable token across new SDK commands.
+    };
+
+    const requestHash = microvmStartRequestHash(
+      { ...request, payloadBucket: MICROVM_PAYLOAD_BUCKET }, { ...payload, platform_config: platformConfig },
+    );
+    const claim = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
+    if (claim.closed) {
+      if (claim.handle) await this.stopSession(claim.handle);
+      throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
+    }
+    if (claim.handle) return claim.handle;
+    const reference = await preparePayloadReference({
+      bucket: MICROVM_PAYLOAD_BUCKET,
+      taskId,
+      backend: 'lambda-microvm',
+      payload,
+      platformConfig,
+      ...(attemptId !== taskId && { attemptId }),
+    }).catch((error: unknown) => { throw wrapMicrovmError('payload bootstrap', error); });
+    const runHookPayload = JSON.stringify(reference);
+    if (Buffer.byteLength(runHookPayload, 'utf8') > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
+      throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: launch reference exceeds the MicroVM hook limit');
+    }
+    // Uploads can take time. Observe cancellation/another saved handle again
+    // immediately before the service call, using the same immutable request.
+    const latest = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
+    if (latest.closed) {
+      if (latest.handle) await this.stopSession(latest.handle);
+      throw new Error('MICROVM_START_TASK_CLOSED: task became terminal before session start');
+    }
+    if (latest.handle) return latest.handle;
+    const command = new RunMicrovmCommand({ ...request, runHookPayload, clientToken: latest.clientToken });
 
     let result;
     try {
@@ -691,16 +574,29 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // / `ResourceNotFoundException` from THIS backend classify as MicroVM
       // faults, while identically-named AgentCore/ECS errors keep their existing
       // classification. See MICROVM_ERROR_MARKER.
-      throw wrapMicrovmError('RunMicrovm', err);
+      const wrapped = wrapMicrovmError('RunMicrovm', err);
+      const serviceError = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+      const httpStatus = serviceError?.$metadata?.httpStatusCode;
+      // A service timeout can carry a 4xx status without proving that creation
+      // never happened. Preserve uncertainty across any subsequent rejection.
+      const timedOut = httpStatus === HTTP_REQUEST_TIMEOUT
+        || ['TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(serviceError?.name ?? '');
+      const knownRejection = !timedOut && (httpStatus !== undefined
+        ? httpStatus >= 400 && httpStatus < 500
+        : ['AccessDeniedException', 'UnauthorizedException', 'ValidationException',
+          'InvalidParameterValueException', 'ResourceNotFoundException', 'ThrottlingException',
+          'TooManyRequestsException', 'ServiceQuotaExceededException', 'ConflictException']
+          .includes(serviceError?.name ?? ''));
+      if (!knownRejection) throw new MicrovmStartUncertainError(wrapped.message, { cause: wrapped });
+      throw wrapped;
     }
 
     const { microvmId, endpoint } = result;
     if (!microvmId || !endpoint) {
-      // A malformed response means a MicroVM may ALREADY BE RUNNING (and billing)
-      // that no caller will ever receive a handle for — nothing self-terminates on
-      // this substrate. Reap it here, best-effort, before failing: this is the one
-      // orphan window the orchestrator's own catch cannot cover, because
-      // `startSession` never returned a handle to it.
+      // A malformed response may describe an existing VM without a usable handle.
+      // The eight-hour service lifetime is a backstop, not prompt cleanup.
+      // Clean up any available ID here: the caller will not receive a handle
+      // it can use to stop this VM.
       if (microvmId) {
         await this.terminateBestEffort(microvmId, 'incomplete RunMicrovm response');
       }
@@ -709,28 +605,76 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       // failed` bucket with "Check AgentCore Runtime or ECS cluster health" —
       // advice that names the wrong substrate entirely. `RunMicrovm` is the
       // operation because that is the call whose response is malformed.
-      throw wrapMicrovmError(
+      const incomplete = wrapMicrovmError(
         'RunMicrovm',
         new Error(
           `RunMicrovm returned an incomplete response (microvmId=${microvmId ?? 'missing'}, `
           + `endpoint=${endpoint ? 'present' : 'missing'}, state=${result.state ?? 'unknown'})`,
         ),
       );
+      if (!microvmId) throw new MicrovmStartUncertainError(incomplete.message, { cause: incomplete });
+      throw incomplete;
     }
 
-    // Image ARN/version is logged, NOT carried in the handle (ADR-021
-    // sub-decision 1) — it is deployment-time config, and this line is the
-    // diagnostic record of which snapshot a given session actually booted.
+    let handle: Extract<SessionHandle, { strategyType: 'lambda-microvm' }> = {
+      sessionId: microvmId,
+      strategyType: 'lambda-microvm',
+      microvmId,
+      endpoint,
+      ...readMicrovmImageMetadata({ imageArn: result.imageArn, imageVersion: result.imageVersion }),
+    };
+    try {
+      await saveMicrovmStartHandle(taskId, latest.clientToken, handle);
+    } catch (err) {
+      // The write may have committed before its response was lost. Recover that
+      // receipt before destroying a computer whose handle is already durable.
+      try {
+        const saved = await claimMicrovmStart(taskId, input.userId, requestHash, attemptId);
+        if (!saved.closed && saved.handle?.microvmId === microvmId) return saved.handle;
+      } catch (readErr) {
+        logger.warn('Could not reconcile the MicroVM start receipt', { task_id: taskId, error: String(readErr) });
+      }
+      await this.terminateBestEffort(microvmId, 'start receipt could not save handle');
+      throw new Error(`MICROVM_START_RECEIPT_SAVE_FAILED: ${String(err)}`, { cause: err });
+    }
+
+    // Persist the known worker above BEFORE optional image discovery. A crash or
+    // failed lookup must not widen the orphan window or break ordinary coding.
+    // Never infer capability from a requested pin or the deployment's latest image.
+    if (handle.imageArn === MICROVM_IMAGE_IDENTIFIER && handle.imageVersion) {
+      try {
+        const identity = { imageArn: handle.imageArn, imageVersion: handle.imageVersion };
+        const version = await getClient().send(new GetMicrovmImageVersionCommand({
+          imageIdentifier: identity.imageArn, imageVersion: identity.imageVersion,
+        }), { abortSignal: AbortSignal.timeout(MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS) });
+        if (verifyMicrovmImageLifecycle(identity, version)) {
+          const capable = { ...handle, lifecycleProtocol: MICROVM_LIFECYCLE_PROTOCOL };
+          await saveMicrovmImageCapability(taskId, latest.clientToken, capable);
+          handle = capable;
+        }
+      } catch (error) {
+        // Explicit degraded mode: the saved worker remains usable, with new
+        // suspension disabled. Do not expose image environment or AWS error text.
+        const name = (error as { name?: unknown })?.name;
+        logger.warn('MicroVM image capability unavailable; automatic suspension remains disabled', {
+          task_id: taskId,
+          microvm_id: microvmId,
+          error_type: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error',
+        });
+      }
+    }
+
+    // The durable handle carries actual identity/capability for later decisions.
     logger.info('Lambda MicroVM session started', {
       task_id: taskId,
       microvm_id: microvmId,
       state: result.state,
       image_identifier: MICROVM_IMAGE_IDENTIFIER,
       image_arn: result.imageArn,
-      image_version: result.imageVersion ?? MICROVM_IMAGE_VERSION,
+      image_version: handle.imageVersion ?? null,
+      lifecycle_protocol: handle.lifecycleProtocol ?? 'unverified',
       maximum_duration_seconds: MICROVM_MAX_DURATION_SECONDS,
-      payload_delivery: payloadS3Uri ? 's3_pointer' : 'inline',
-      ...(payloadS3Uri && { payload_s3_uri: payloadS3Uri }),
+      payload_delivery: 'signed_reference',
       // KEY NAMES only, never values: this is the one operator-visible record of
       // which optional platform identifiers a given session actually received, and
       // "the agent said ARTIFACTS_BUCKET_NAME is not configured" is otherwise a
@@ -738,27 +682,15 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       platform_config_keys: Object.keys(platformConfig),
     });
 
-    return {
-      // sessionId = microvmId, mirroring the ECS variant's "sessionId = the
-      // substrate identifier" precedent (ECS uses the task ARN) rather than
-      // AgentCore's fresh UUID — AgentCore only needs a UUID because
-      // `runtimeSessionId` is a caller-minted value that must be ≥ 33 chars.
-      // Here the substrate mints the id, every lifecycle API keys on it, and it
-      // is what an operator needs to correlate `TaskRecord.session_id` with the
-      // MicroVM in logs/console. A second synthetic UUID would add a
-      // non-actionable identifier and leave `session_id` un-joinable.
-      sessionId: microvmId,
-      strategyType: 'lambda-microvm',
-      microvmId,
-      endpoint,
-    };
+    // Use AWS's identifier for both lifecycle calls and TaskRecord.session_id.
+    return handle;
   }
 
   /**
    * Report the substrate's view of the session — MECHANICALLY. No task-state
    * interpretation happens here (ADR-021 sub-decision 1): this method sees only
    * the handle, so the health rules that need the task's DynamoDB status live in
-   * the orchestrator (``reconcileMicrovmSubstrateState``).
+   * the durable supervisor (``superviseMicrovm``).
    *
    * State mapping:
    *   - ``PENDING`` / ``RUNNING`` → ``running`` (PENDING is still booting, the
@@ -766,33 +698,28 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    *   - ``SUSPENDING`` / ``SUSPENDED`` → ``suspended``. SUSPENDING is folded in
    *     because the VM is already on its way to frozen; reporting ``running``
    *     would tell the orchestrator compute is still progressing when it is not.
-   *     Both map to a state the orchestrator treats as benign-or-anomalous
-   *     depending on the task status, never as a failure. (``SUSPENDING`` was
-   *     never observable live — suspend reaches ``SUSPENDED`` in under a second
-   *     — so nothing may WAIT for it; it is mapped for completeness only.)
+   *     The supervisor checks task/gate state to distinguish an expected wait
+   *     from an anomaly. When a wake is needed, it saves wake intent and waits
+   *     for SUSPENDED before issuing ResumeMicrovm. Unresolved transitions have
+   *     a bounded recovery deadline.
    *   - ``TERMINATING`` / ``TERMINATED`` → ``completed``. Both are terminal or
-   *     terminal-bound and carry no exit code, so "the substrate is gone" is all
-   *     the strategy can honestly say; whether that is success or failure is the
-   *     orchestrator's call (it cross-references the DynamoDB status). This is
+   *     terminal-bound and carry no exit code. TERMINATING confirms shutdown is
+   *     underway, not that it has finished. The orchestrator determines task
+   *     success or failure by cross-referencing DynamoDB status. This is
    *     the load-bearing terminal signal: a terminated MicroVM stays observable
    *     as ``TERMINATED`` for at least ~10 minutes (live-measured), so a poller
    *     that waited for NotFound would spin on a finished VM.
-   *   - anything else (an unrecognized future state) → ``running``, so a service
-   *     enum addition can never fail a healthy task.
+   *   - anything else (an unrecognized future state) → ``running`` with explicit
+   *     UNKNOWN state. The supervisor applies bounded recovery instead of
+   *     immediately declaring the task finished.
+   * ``microvmState`` also reports the explicit observed state (or local UNKNOWN /
+   * NOT_FOUND). P3 uses it to distinguish readiness from the coarse status.
    *
-   * ``stateReason`` is carried through on every mapped state as
-   * ``SessionStatus.reason``, VERBATIM and uninterpreted. It is the substrate's
-   * own account of WHY, and mapping it away is what made the dominant runtime
-   * failure unreadable: a ``/run`` hook 4xx self-terminates the VM within ~12 s
-   * (``docs/verification/645-p2-smoke-runbook.md`` §6.1) with
-   * ``stateReason = "Run lifecycle hook returned HTTP status 400. Please check
-   * your hook endpoint and application logs for more details."`` — and because
-   * ``TERMINATED → completed`` has no error slot, the orchestrator's reconcile
-   * detail read ``"substrate state completed"``, naming none of the three causes
-   * its remedy suggested. Reporting the reason keeps this method mechanical (no
-   * branch reads it) while giving the orchestrator something true to say.
+   * Service failure reasons are preserved in SessionStatus.reason so a failed
+   * hook is not reduced to "substrate completed". Suppress only the known benign
+   * success string; the orchestrator decides whether the task itself succeeded.
    */
-  async pollSession(handle: SessionHandle): Promise<SessionStatus> {
+  async pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error('pollSession called with non-lambda-microvm handle');
     }
@@ -800,11 +727,22 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     let state: string | undefined;
     let stateReason: string | undefined;
+    let requestIdentity: ReturnType<typeof microvmRequestIdentity> = {};
+    let lifetime: Pick<SessionStatus, 'microvmStartedAtMs' | 'microvmMaximumDurationSeconds'> = {};
     try {
       const result = await getClient().send(new GetMicrovmCommand({
         microvmIdentifier: microvmId,
-      }));
+      }), { abortSignal: controlSignal(options) });
       state = result.state;
+      requestIdentity = microvmRequestIdentity(result);
+      const startedAtMs = result.startedAt instanceof Date ? result.startedAt.getTime() : NaN;
+      if (Number.isSafeInteger(startedAtMs) && startedAtMs >= 0
+        && Number.isSafeInteger(result.maximumDurationInSeconds) && result.maximumDurationInSeconds! > 0) {
+        lifetime = {
+          microvmStartedAtMs: startedAtMs,
+          microvmMaximumDurationSeconds: result.maximumDurationInSeconds,
+        };
+      }
       // `Success.` is the service's own "nothing to report" value on a clean
       // termination — carrying it would append noise to every healthy task's
       // detail string, so it is normalized away here rather than filtered at
@@ -838,8 +776,9 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       if (err instanceof Error && err.name === 'ResourceNotFoundException') {
         logger.info('MicroVM not found on poll — treating as terminal', {
           microvm_id: microvmId,
+          ...microvmErrorIdentity(err),
         });
-        return { status: 'completed' };
+        return { status: 'completed', microvmState: 'NOT_FOUND' };
       }
       throw wrapMicrovmError('GetMicrovm', err);
     }
@@ -847,10 +786,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     switch (state) {
       case MicrovmState.PENDING:
       case MicrovmState.RUNNING:
-        return { status: 'running', ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.SUSPENDING:
       case MicrovmState.SUSPENDED:
-        return { status: 'suspended', ...(stateReason && { reason: stateReason }) };
+        return { status: 'suspended', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       case MicrovmState.TERMINATING:
       case MicrovmState.TERMINATED:
         if (stateReason) {
@@ -860,18 +799,22 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
           // where the operator happens to be looking.
           logger.warn('MicroVM reached a terminal state with a substrate reason', {
             microvm_id: microvmId,
+            image_arn: handle.imageArn,
+            image_version: handle.imageVersion,
+            ...requestIdentity,
             state,
             state_reason: stateReason,
           });
         }
-        return { status: 'completed', ...(stateReason && { reason: stateReason }) };
+        return { status: 'completed', microvmState: state, ...lifetime, ...(stateReason && { reason: stateReason }) };
       default:
         logger.warn('Unrecognized MicroVM state — reporting running', {
           microvm_id: microvmId,
+          ...requestIdentity,
           state,
           ...(stateReason && { state_reason: stateReason }),
         });
-        return { status: 'running', ...(stateReason && { reason: stateReason }) };
+        return { status: 'running', microvmState: 'UNKNOWN', ...lifetime, ...(stateReason && { reason: stateReason }) };
     }
   }
 
@@ -890,11 +833,62 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * ``stateReason`` — nothing self-terminates, so nothing cleans up if the
    * orchestrator does not.
    */
-  async stopSession(handle: SessionHandle): Promise<void> {
+  async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult> {
     if (handle.strategyType !== 'lambda-microvm') {
       throw new Error('stopSession called with non-lambda-microvm handle');
     }
-    await this.terminateBestEffort(handle.microvmId, 'session stop');
+    return this.terminateBestEffort(handle.microvmId, 'session stop', options);
+  }
+
+  /** Submit a suspend request; the caller owns gate checks and state reconciliation. */
+  async suspendSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('suspendSession', handle, options);
+  }
+
+  /** Submit a resume request; acknowledgement alone does not establish RUNNING. */
+  async resumeSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionLifecycleResult> {
+    return this.requestLifecycle('resumeSession', handle, options);
+  }
+
+  private async requestLifecycle(
+    operation: 'suspendSession' | 'resumeSession',
+    handle: SessionHandle,
+    options?: SessionControlOptions,
+  ): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'lambda-microvm') {
+      throw new Error(`${operation} called with non-lambda-microvm handle`);
+    }
+    if (typeof handle.microvmId !== 'string' || !handle.microvmId.trim()) {
+      throw new Error(`${operation} requires a non-empty MicroVM identifier`);
+    }
+    const suspend = operation === 'suspendSession';
+    const request = { microvmIdentifier: handle.microvmId };
+    const startedAt = Date.now();
+    const diagnostic = {
+      operation: suspend ? 'SuspendMicrovm' : 'ResumeMicrovm',
+      microvm_id: handle.microvmId,
+      image_arn: handle.imageArn,
+      image_version: handle.imageVersion,
+    };
+    logger.info('MicroVM lifecycle request started', diagnostic);
+    try {
+      const response = await getClient().send(
+        suspend ? new SuspendMicrovmCommand(request) : new ResumeMicrovmCommand(request),
+        { abortSignal: controlSignal(options) },
+      );
+      // An accepted command is distinct from the observed transition/guest acknowledgment.
+      logger.info('MicroVM lifecycle request acknowledged', {
+        ...diagnostic, elapsed_ms: Date.now() - startedAt, ...microvmRequestIdentity(response),
+      });
+    } catch (error) {
+      // Includes Conflict/NotFound: neither proves the desired state was reached.
+      // Even a timeout may have committed; the durable caller must observe again.
+      logger.warn('MicroVM lifecycle request failed', {
+        ...diagnostic, elapsed_ms: Date.now() - startedAt, ...microvmErrorIdentity(error),
+      });
+      throw wrapMicrovmError(suspend ? 'SuspendMicrovm' : 'ResumeMicrovm', error);
+    }
+    return { supported: true };
   }
 
   /**
@@ -911,40 +905,44 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * @param reason - why we are terminating, for the log line (the orphan-reap and
    *   the ordinary finalize path are worth telling apart in CloudWatch).
    */
-  private async terminateBestEffort(microvmId: string, reason: string): Promise<void> {
+  private async terminateBestEffort(microvmId: string, reason: string, options?: SessionControlOptions): Promise<SessionStopResult> {
+    const startedAt = Date.now();
     try {
-      await getClient().send(new TerminateMicrovmCommand({
+      const response = await getClient().send(new TerminateMicrovmCommand({
         microvmIdentifier: microvmId,
-      }));
-      logger.info('Lambda MicroVM terminated', { microvm_id: microvmId, reason });
+      }), { abortSignal: controlSignal(options) });
+      logger.info('Lambda MicroVM termination requested', {
+        microvm_id: microvmId, reason, elapsed_ms: Date.now() - startedAt, ...microvmRequestIdentity(response),
+      });
+      return { outcome: 'requested' };
     } catch (err) {
-      const errName = err instanceof Error ? err.name : undefined;
-      if (errName === 'ResourceNotFoundException' || errName === 'ConflictException') {
-        // Already terminated (reaped) or already TERMINATING — the desired end
-        // state either way. ConflictException joins the info branch because a
-        // concurrent terminate (orchestrator finalize racing a user cancel) is
-        // routine here, and warning on it would train operators to ignore warns.
-        logger.info('MicroVM already terminated or terminating', {
+      const identity = microvmErrorIdentity(err);
+      const errName = identity.error_type;
+      if (errName === 'ResourceNotFoundException') {
+        logger.info('MicroVM no longer found during termination', {
           microvm_id: microvmId,
           reason,
           error_type: errName,
         });
+        return { outcome: 'not-found' };
       } else if (errName === 'ThrottlingException' || errName === 'AccessDeniedException') {
         // A throttle or a missing lambda:TerminateMicrovm grant means the VM is
         // probably STILL RUNNING and billing — escalate.
         logger.error('Failed to terminate MicroVM', {
           microvm_id: microvmId,
           reason,
-          error_type: errName,
-          error: err instanceof Error ? err.message : String(err),
+          ...identity,
         });
       } else {
         logger.warn('Failed to terminate MicroVM (best-effort)', {
           microvm_id: microvmId,
           reason,
-          error: err instanceof Error ? err.message : String(err),
+          ...identity,
         });
       }
+      // Conflict can mean another lifecycle operation is in flight. It does not
+      // prove termination; retain that uncertainty for caller orphan reporting.
+      return { outcome: 'unconfirmed', ...identity };
     }
   }
 }
@@ -952,7 +950,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 /**
  * Re-exported so tests and future callers can assert the documented cap without
  * duplicating the literal. This is BOTH the service's limit and our exact
- * inline/S3-pointer branch point — there is no separate threshold.
+ * maximum serialized v2 launch-reference size.
  */
 export const MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES = RUN_HOOK_PAYLOAD_LIMIT_BYTES;
 

@@ -18,6 +18,10 @@
 # ---------------------------------------------------------------------------
 # BOOTSTRAP SEQUENCE (first time)
 # ---------------------------------------------------------------------------
+#   0. Use bootstrap policy bundle >= 1.9.0 for the default nested layout.
+#      Existing flat deployments must retain microvm_nested_stack=false until
+#      their resources are migrated; see docs/verification/645-p3-nested-stack.md.
+#
 #   1. Deploy the MicroVM substrate WITHOUT an image. Synth warns that no image
 #      is configured; that is expected — the artifact bucket must exist before
 #      you can upload to it.
@@ -25,8 +29,8 @@
 #        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm
 #
 #   2. Package + upload the artifact (this script). It reads the bucket name and
-#      object key straight from the stack outputs, so there is nothing to copy
-#      by hand:
+#      base object key from stack outputs, uploads an immutable hash-suffixed
+#      artifact, and prints the digest required by the subsequent deployment:
 #
 #        cdk/scripts/package-microvm-artifact.sh --stack-name backgroundagent-dev
 #
@@ -45,11 +49,13 @@
 #        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
 #          --context compute_type=lambda-microvm \
 #          --context microvm_base_image_arn=<baseImageArn> \
-#          --context microvm_base_image_version=<version>
+#          --context microvm_base_image_version=<version> \
+#          --context microvm_artifact_sha256=<digest printed by this script>
 #
-# On subsequent agent changes only step 2 is needed, followed by a CloudFormation
-# update of the image resource (the service builds a NEW image version from the
-# refreshed artifact).
+# On subsequent agent changes repeat step 2 and deploy with the NEW digest.
+# Changing the digest changes CodeArtifact.Uri, causing a new image version.
+# Retain the digest in the deployment's context for later unrelated deploys;
+# overwriting a fixed key alone never signals a CloudFormation image update.
 #
 # ---------------------------------------------------------------------------
 # THE OUT-OF-BAND ALTERNATIVE (--create-image)
@@ -74,15 +80,14 @@
 # is therefore:
 #
 #   Dockerfile      <- verbatim copy of agent/Dockerfile (MicroVM needs it at the root)
-#   agent/          <- minus .venv/, __pycache__, test caches
+#   agent/          <- only local Dockerfile COPY inputs, without bytecode/caches
 #   contracts/      <- cross-language constants the agent reads at runtime
 #
 # ---------------------------------------------------------------------------
-# !! A P2 IMAGE IS FULLY WIRED, BUT NOT SMOKE-VERIFIED !!
+# VERIFICATION
 # ---------------------------------------------------------------------------
-# This script packages and uploads a real artifact, and the image the service
-# builds from it will reach ACTIVE, accept a `runHookPayload`, and launch. What
-# it does NOT have is any smoke-parity guarantee.
+# Test the selected image/coordinator together before enabling automatic sleep.
+# See docs/verification/README.md for acceptance criteria and remaining PR checks.
 #
 # ADR-021 sub-decision 3's hook-phasing table (corrected after the live P1
 # verification run, then completed in P2) is now:
@@ -102,23 +107,14 @@
 #                                   breadcrumb that must not write terminal task
 #                                   status — the orchestrator finalizes the task
 #                                   and THEN calls TerminateMicrovm.
-#   /suspend, /resume               P3. A hook the service calls but nothing
-#                                   answers fails its lifecycle transition, so
-#                                   each is enabled only once it is served.
+#   /suspend, /resume               declared AND served in P3, with the image
+#                                   protocol marker. The coordinator verifies the
+#                                   actual launched version before allowing sleep.
 #
-# A P2 smoke run HAS now completed clone → change → PR on this substrate
-# (2026-08-07: two tasks COMPLETED with pull requests, live progress events, and
-# the 45 s agent heartbeat observed). What is still missing is a run with NO manual
-# intervention: that smoke needed a live IAM workaround, and the two defects behind
-# it (ADR-021 P2r2-F9 / P2r2-F10 — the `iam:PassedToService` condition on both
-# `iam:PassRole` paths) are fixed in source but not yet re-exercised live. Keep
-# production repos on compute_type=agentcore or ecs until a clean run is on record,
-# and note that the CDK-managed image path additionally needs bootstrap policy
-# bundle >= 1.6.0 (see the banner after upload). The Dockerfile is the P2 tuned base
-# and is copied unmodified — further customization (e.g., Alpine adoption) would be
-# P2.5 work.
+# The clean P2 deployment used bootstrap policy bundle 1.7.0. The Dockerfile is
+# copied unmodified; image build success does not establish full P2 acceptance.
 #
-# Requires: awscli v2, zip, rsync, python3 (none of which are installed by this script).
+# Requires: awscli v2 with conditional PutObject/checksum support, python3.
 
 set -euo pipefail
 
@@ -196,7 +192,7 @@ case " ${SUPPORTED_MEMORY_MIB} " in
     ;;
 esac
 
-for tool in aws zip python3 rsync; do
+for tool in aws python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' is required but not on PATH" >&2; exit 1; }
 done
 
@@ -224,6 +220,9 @@ for output in stacks[0].get("Outputs", []):
 
 ARTIFACT_BUCKET="$(stack_output MicrovmArtifactBucketName)"
 ARTIFACT_KEY="$(stack_output MicrovmArtifactObjectKey)"
+ARTIFACT_BASE_KEY="$(stack_output MicrovmArtifactBaseObjectKey)"
+# Before hashed-artifact support, ObjectKey was always the unsuffixed base.
+ARTIFACT_BASE_KEY="${ARTIFACT_BASE_KEY:-${ARTIFACT_KEY}}"
 BUILD_ROLE_ARN="$(stack_output MicrovmBuildRoleArn)"
 EGRESS_CONNECTORS="$(stack_output MicrovmEgressConnectorArns)"
 # BUILD-time connectors (TCP 443 + 80). `agent/Dockerfile` runs `apt-get`, which
@@ -265,18 +264,14 @@ echo "    log group       : ${LOG_GROUP}"
 print_p1_reminder() {
   cat <<'EOF'
 
-!! REMINDER (ADR-021 P2): smoke-verified ONCE, and only WITH a manual workaround.
-   The image is creatable and launchable, the agent serves all four declared hooks
-   (/ready + /validate on the build path, /run + /terminate at runtime), the
-   execution role holds its full runtime permission set, and a 2026-08-07 run took
-   two tasks clone -> change -> PR to COMPLETED with a live 45 s heartbeat.
-   NOT verified: an UNATTENDED run. That smoke needed a live IAM workaround, and the
-   two defects behind it (ADR-021 P2r2-F9 / P2r2-F10) are fixed in source but not
-   re-exercised. The CDK-managed image path also needs bootstrap bundle >= 1.6.0.
-   Keep production repos on compute_type=agentcore or ecs until a clean run is on
-   record. /suspend and /resume stay disabled until P3. CDK synth emits the same
-   warning (abca:microvm-image-p1-smoke-unverified) on every deploy that configures
-   an image.
+REMINDER (ADR-021): verify the deployed image and coordinator together before
+   enabling automatic suspension. Managed images declare all six hooks;
+   compatible coordinator, IAM and image configuration are required.
+   Nested deployments require bootstrap bundle 1.9.0 or later. Existing flat
+   deployments need the staged migration in docs/verification/645-p3-nested-stack.md.
+   Acceptance criteria and remaining PR checks: docs/verification/README.md.
+   Preserve a compatible published coordinator and explicit image pin for rollback.
+   CDK retains warning ID abca:microvm-image-p1-smoke-unverified for compatibility.
 EOF
 }
 
@@ -291,69 +286,86 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Staging agent tree in ${STAGE_DIR}"
-# The MicroVM build context is the zip root, and agent/Dockerfile COPYs
-# repo-root-relative paths — so the staged tree mirrors the repo, with the
-# Dockerfile additionally promoted to the root where the service looks for it.
-cp "${REPO_ROOT}/agent/Dockerfile" "${STAGE_DIR}/Dockerfile"
-
-# Excludes match the build inputs the Dockerfile never COPYs but which dominate
-# the zip size: the local virtualenv, Python/pytest caches, and node_modules.
-rsync -a \
-  --exclude '.venv/' \
-  --exclude '__pycache__/' \
-  --exclude '.pytest_cache/' \
-  --exclude '.ruff_cache/' \
-  --exclude '.mypy_cache/' \
-  --exclude 'node_modules/' \
-  --exclude '*.pyc' \
-  "${REPO_ROOT}/agent" "${STAGE_DIR}/"
-rsync -a --exclude 'node_modules/' "${REPO_ROOT}/contracts" "${STAGE_DIR}/"
-
-ARTIFACT_ZIP="${STAGE_DIR}.zip"
-rm -f "${ARTIFACT_ZIP}"
-echo "==> Zipping to ${ARTIFACT_ZIP}"
-( cd "${STAGE_DIR}" && zip -q -r "${ARTIFACT_ZIP}" . )
-echo "    $(du -h "${ARTIFACT_ZIP}" | cut -f1) artifact"
+ARTIFACT_ZIP="${STAGE_DIR}/agent-artifact.zip"
+echo "==> Packaging reproducible build inputs to ${ARTIFACT_ZIP}"
+ARTIFACT_INFO="$(python3 "${REPO_ROOT}/cdk/scripts/build-microvm-artifact.py" \
+  --repo-root "${REPO_ROOT}" --output "${ARTIFACT_ZIP}")"
+ARTIFACT_SHA256="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["sha256"])' <<<"${ARTIFACT_INFO}")"
+ARTIFACT_CHECKSUM="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["checksum_sha256"])' <<<"${ARTIFACT_INFO}")"
+echo "    ${ARTIFACT_INFO}"
 
 # --- Upload -------------------------------------------------------------------
+if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
+  ARTIFACT_KEY="${ARTIFACT_BASE_KEY%.zip}-${ARTIFACT_SHA256}.zip"
+else
+  # The manual create API starts a build explicitly; retain its fixed-key path.
+  ARTIFACT_KEY="${ARTIFACT_BASE_KEY}"
+fi
 echo "==> Uploading to s3://${ARTIFACT_BUCKET}/${ARTIFACT_KEY}"
-aws s3 cp "${ARTIFACT_ZIP}" "s3://${ARTIFACT_BUCKET}/${ARTIFACT_KEY}"
-rm -f "${ARTIFACT_ZIP}"
+if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
+  # S3 verifies the bytes against the checksum. Never overwrite a managed build's
+  # inputs, including a repeated invocation or concurrent publisher.
+  if aws s3api put-object --bucket "${ARTIFACT_BUCKET}" --key "${ARTIFACT_KEY}" \
+    --body "${ARTIFACT_ZIP}" --if-none-match '*' \
+    --checksum-algorithm SHA256 --checksum-sha256 "${ARTIFACT_CHECKSUM}" \
+    >"${STAGE_DIR}/upload.json" 2>"${STAGE_DIR}/upload.err"; then
+    echo "    Created immutable artifact"
+  else
+    UPLOAD_STATUS=$?
+    case "$(cat "${STAGE_DIR}/upload.err")" in
+      *"(PreconditionFailed)"*)
+        EXISTING_CHECKSUM="$(aws s3api head-object --bucket "${ARTIFACT_BUCKET}" \
+          --key "${ARTIFACT_KEY}" --checksum-mode ENABLED \
+          --query ChecksumSHA256 --output text)"
+        if [[ "${EXISTING_CHECKSUM}" != "${ARTIFACT_CHECKSUM}" ]]; then
+          echo "error: existing artifact checksum does not match; refusing to overwrite ${ARTIFACT_KEY}" >&2
+          exit 1
+        fi
+        echo "    Reusing checksum-verified existing artifact"
+        ;;
+      *)
+        cat "${STAGE_DIR}/upload.err" >&2
+        exit "${UPLOAD_STATUS}"
+        ;;
+    esac
+  fi
+else
+  aws s3api put-object --bucket "${ARTIFACT_BUCKET}" --key "${ARTIFACT_KEY}" \
+    --body "${ARTIFACT_ZIP}" \
+    --checksum-algorithm SHA256 --checksum-sha256 "${ARTIFACT_CHECKSUM}"
+fi
 
 if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   cat <<EOF
 
 ==> Artifact uploaded. Next: create (or update) the image.
 
-  CDK-managed (recommended) — redeploy with the base image pinned.
+  CDK-managed (recommended) — redeploy with the base image and artifact pinned.
+  Keep this digest with the deployment's context; it identifies these exact ZIP bytes.
 
-  !! RE-BOOTSTRAP REQUIRED (bootstrap policy bundle >= 1.6.0) !!
-  This path took two live-verified fixes to work. The first (ADR-021 P2-F2: the L1
-  sent hook paths and \`arm64\` where CloudFormation wants ENABLED / ARM_64) is
-  DISCHARGED — change-set early validation now passes. The second (ADR-021
-  P2r2-F9) is a BOOTSTRAP change: CloudFormation could not pass the MicroVM build
-  role, because the deploy role's \`iam:PassRole\` carried an
-  \`iam:PassedToService\` condition the Lambda MicroVMs service does not satisfy.
-  The fix is the \`MicrovmPassRoles\` statement in the conditional
-  IaCRole-ABCA-Compute-LambdaMicrovms policy, which only reaches your account when
-  you re-bootstrap:
+  The default nested layout requires bootstrap policy bundle >= 1.9.0.
+  Flat P3 deployments require >= 1.8.0. Check the installed bundle:
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
       --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text
-    # if that is below 1.6.0:
     MISE_EXPERIMENTAL=1 mise //cdk:bootstrap   # ComputeTypes must include lambda-microvm
 
-  Without it the image resource fails with
-  "is not authorized to perform: iam:PassRole on resource:
-   ...LambdaMicrovmComputeBuildRole... (Service: LambdaMicrovms, Status Code: 403)".
-  Then:
+  An older bundle may deny iam:PassRole for the image's build role. Updating the
+  source bundle alone does not update the account's installed policies.
+
+  Existing flat stacks: keep --context microvm_nested_stack=false on deployment
+  commands until the resource migration is complete. Changing the layout directly
+  can replace resources or delete bucket contents. See:
+    docs/verification/645-p3-nested-stack.md
+
+  For a new nested deployment (or a completed migration):
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
       --context compute_type=lambda-microvm \\
       --context microvm_base_image_arn=<baseImageArn> \\
-      --context microvm_base_image_version=<version>
+      --context microvm_base_image_version=<version> \\
+      --context microvm_artifact_sha256=${ARTIFACT_SHA256}
 
   Out of band — re-run this script with:
 
@@ -404,12 +416,11 @@ echo "==> Creating MicroVM image '${IMAGE_NAME}' (${MEMORY_MIB} MiB baseline)"
 #   * `/ready` is MANDATORY whenever any lifecycle hook is enabled:
 #       "The ready (/ready) MicroVM image hook must be enabled when any MicroVM
 #        lifecycle hook (run, resume, suspend, or terminate) is enabled."
-#   * all four hooks the agent serves are enabled: `/ready` + `/validate` (build)
-#     and `/run` + `/terminate` (runtime). `/suspend` and `/resume` stay DISABLED
-#     until P3 implements them — a hook the service calls but nothing answers
-#     fails the corresponding build or lifecycle transition.
+#   * all six served hooks are enabled: `/ready` + `/validate` (build), `/run`,
+#     `/terminate`, `/suspend` and `/resume` (runtime). The non-secret lifecycle
+#     protocol marker describes the source's checkpoint/credential/gate protocol.
 #   * the timeouts mirror the construct's constants
-#     (`RUN_/READY_/VALIDATE_/TERMINATE_HOOK_TIMEOUT_SECONDS` in
+#     (`RUN_/READY_/VALIDATE_/TERMINATE_/LIFECYCLE_HOOK_TIMEOUT_SECONDS` in
 #     `cdk/src/constructs/lambda-microvm-compute.ts`), which carry the rationale
 #     for each value. A bash helper cannot import them, and "keep the two in step"
 #     as prose already FAILED once — `readyTimeoutInSeconds` stayed at 60 here when
@@ -436,7 +447,8 @@ CREATE_RESPONSE="$(aws lambda-microvms create-microvm-image \
   --resources "[{\"minimumMemoryInMiB\":${MEMORY_MIB}}]" \
   --egress-network-connectors "${BUILD_EGRESS_CONNECTORS}" \
   --logging "{\"cloudWatch\":{\"logGroup\":\"${LOG_GROUP}\"}}" \
-  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
+  --hooks '{"port":8080,"microvmHooks":{"run":"ENABLED","runTimeoutInSeconds":60,"terminate":"ENABLED","terminateTimeoutInSeconds":15,"suspend":"ENABLED","suspendTimeoutInSeconds":30,"resume":"ENABLED","resumeTimeoutInSeconds":30},"microvmImageHooks":{"ready":"ENABLED","readyTimeoutInSeconds":300,"validate":"ENABLED","validateTimeoutInSeconds":60}}' \
+  --environment-variables '{"ABCA_MICROVM_LIFECYCLE_PROTOCOL":"1"}' \
   --tags "abca:compute-backend=lambda-microvm" \
   --output json)"
 

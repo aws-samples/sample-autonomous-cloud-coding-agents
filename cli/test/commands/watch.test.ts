@@ -133,6 +133,8 @@ describe('renderEvent', () => {
         timeout_s: 300,
         matching_rule_ids: ['rule-1', 'rule-2'],
         scope: 'this_call',
+        reason: 'Needs your permission',
+        input_preview: 'git push --force',
       },
     });
     const output = renderEvent(event);
@@ -142,6 +144,19 @@ describe('renderEvent', () => {
     expect(output).toContain('timeout=300s');
     expect(output).toContain('rules=rule-1,rule-2');
     expect(output).toContain('scope=this_call');
+    expect(output).toContain('Needs your permission');
+    expect(output).toContain('Action: git push --force');
+    expect(renderEvent(event, 'task-1')).toContain('bgagent approve task-1 req-abc --scope this_call');
+    expect(renderEvent(event, 'task-1')).toContain('bgagent deny task-1 req-abc');
+  });
+
+  test('renders a closed approval with its cancellation reason', () => {
+    const output = renderEvent(makeEvent({
+      event_type: 'approval_cancelled',
+      metadata: { request_id: 'gate', status: 'CANCELLED', reason: 'Task cancelled by its owner' },
+    }));
+    expect(output).toContain('Approval request closed');
+    expect(output).toContain('Task cancelled by its owner');
   });
 
   test('renders policy_decision milestone metadata', () => {

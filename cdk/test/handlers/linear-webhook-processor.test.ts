@@ -20,6 +20,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+const approvalReplyMock = jest.fn();
+jest.mock('../../src/handlers/shared/linear-approval-reply', () => ({
+  handleLinearApprovalReply: (...args: unknown[]) => approvalReplyMock(...args),
+}));
+
 const ddbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -1187,5 +1192,35 @@ describe('every channel_metadata builder carries the vault fields', () => {
     const count = src.split('\n')
       .filter((l) => l.trim() === 'linear_workspace_slug: resolved.workspaceSlug,').length;
     expect(count).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('native approval reply routing', () => {
+  const oldTable = process.env.TASK_APPROVALS_TABLE_NAME;
+  afterEach(() => {
+    if (oldTable === undefined) delete process.env.TASK_APPROVALS_TABLE_NAME;
+    else process.env.TASK_APPROVALS_TABLE_NAME = oldTable;
+    approvalReplyMock.mockReset();
+  });
+  test('consumes approval replies before mention or new-task routing', async () => {
+    process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+    approvalReplyMock.mockResolvedValue(true);
+    createTaskCoreMock.mockClear();
+    const payload = {
+      type: 'Comment',
+      action: 'create',
+      organizationId: 'org-1',
+      actor: { id: 'user-1' },
+      data: { id: 'reply', parentId: 'approval-root', issueId: 'issue-1', body: 'approve' },
+    };
+    await handler(eventWith(payload));
+    expect(approvalReplyMock).toHaveBeenCalledWith(payload, expect.objectContaining({ approvalsTable: 'Approvals' }));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+  test('lets transient approval failures reach the async retry mechanism', async () => {
+    process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
+    approvalReplyMock.mockRejectedValue(new Error('approval unavailable'));
+    await expect(handler(eventWith({ type: 'Comment', action: 'create', data: { id: 'reply', body: 'approve' } })))
+      .rejects.toThrow('approval unavailable');
   });
 });

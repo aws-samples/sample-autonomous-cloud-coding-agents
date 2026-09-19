@@ -20,22 +20,23 @@
 /**
  * Session-start transient auto-retry (once), extracted from the durable
  * ``orchestrate-task`` handler so the four retry branches are unit-testable in
- * isolation (the handler's inline ``start-session`` step is never invoked by
- * the test suite). See #599 review B1/B2.
+ * isolation, with MicroVM receipt/replay behavior also covered through the
+ * strategy and durable-handler tests. See #599 review B1/B2.
  *
- * session-start is the ONE place a retry is idempotent by construction — no repo
- * clone, no commits, no PR have happened yet, so re-invoking
- * RunTask/InvokeAgentRuntime can't double-run work. A transient hiccup here (an
+ * This retries the start API, before the caller has a session handle. That does
+ * not guarantee idempotency: a lost success response can leave a live session
+ * behind. MicroVM uses its saved start receipt and token; each other backend
+ * still needs its own idempotency policy. A transient hiccup here (an
  * ECS deploy-race "TaskDefinition is inactive", ENI/capacity delay, a
  * Bedrock/agentcore throttle) usually clears on a second attempt, so the first
  * transient failure is swallowed and retried once. A NON-transient failure (bad
  * config, missing ECS substrate) is re-thrown immediately — retrying it just
- * wastes ~a minute. Mid-run crashes are NOT handled here (that's a later step;
+ * wastes another request. Mid-run crashes are NOT handled here (that's a later step;
  * the agent may have pushed commits).
  */
 
 import type { ComputeStrategy, SessionHandle } from './compute-strategy';
-import { classifyError, isTransientError } from './error-classifier';
+import { classifyError, isTransientError, MicrovmStartUncertainError } from './error-classifier';
 
 /** Emit a ``session_start_retry`` telemetry event. Matches the shape of
  *  ``emitTaskEvent`` bound at the call site (best-effort — see below). */
@@ -114,17 +115,20 @@ export async function startSessionWithRetry(
     // classifier's transient patterns — e.g. ThrottlingException — is a separate
     // classifier-completeness concern, not this retry gate.)
     const classification = classifyError(String(firstErr));
-    if (!isTransientError(classification)) {
+    if (!isTransientError(classification) && !(firstErr instanceof MicrovmStartUncertainError)) {
       throw firstErr; // service/user error — a retry won't help; surface now.
     }
-    deps.logger.warn('Session start hit a transient error — auto-retrying once', {
+    const uncertain = firstErr instanceof MicrovmStartUncertainError;
+    deps.logger.warn(uncertain
+      ? 'MicroVM start response is unknown — recovering the same request once'
+      : 'Session start hit a transient error — auto-retrying once', {
       task_id: deps.taskId,
       error: firstErr instanceof Error ? firstErr.message : String(firstErr),
     });
     // Best-effort telemetry — a PutItem fault here must never abort the retry
     // or mis-report the outcome (B1).
     try {
-      await deps.emitRetryEvent(classification?.title ?? 'transient');
+      await deps.emitRetryEvent(uncertain ? 'MicroVM start response unknown' : classification?.title ?? 'transient');
     } catch (emitErr) {
       deps.logger.warn('session_start_retry event emit failed (non-fatal)', {
         task_id: deps.taskId,
@@ -135,14 +139,19 @@ export async function startSessionWithRetry(
       const handle = await strategy.startSession(input);
       return { handle, autoRetried: true };
     } catch (retryErr) {
+      // Even a definite rejection on the second call cannot prove that the
+      // first, unanswered call created nothing. Preserve that uncertainty.
+      const finalError = firstErr instanceof MicrovmStartUncertainError || retryErr instanceof MicrovmStartUncertainError
+        ? new MicrovmStartUncertainError(String(retryErr), { cause: retryErr })
+        : retryErr;
       // Branch 4: the retry ALSO failed. Pin the retry fact onto the thrown error
       // so the caller can stamp ``[auto-retried]`` (N1) — otherwise a double-
       // transient failure is indistinguishable from a first-attempt failure and
       // the user is wrongly told "reply to retry" instead of "I already retried".
-      if (typeof retryErr === 'object' && retryErr !== null) {
-        (retryErr as Record<symbol, unknown>)[AUTO_RETRIED] = true;
+      if (typeof finalError === 'object' && finalError !== null) {
+        (finalError as Record<symbol, unknown>)[AUTO_RETRIED] = true;
       }
-      throw retryErr;
+      throw finalError;
     }
   }
 }

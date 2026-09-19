@@ -1,6 +1,7 @@
 """Unit tests for hooks.py — Cedar policy SDK hook callbacks."""
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ cedarpy = pytest.importorskip("cedarpy")
 from hooks import (
     _is_self_reclone,
     _reset_blocker_reason_for_tests,
+    _sha256_tool_input_for_row,
     _stuck_guard_between_turns_hook,
     build_hook_matchers,
     detect_egress_denial,
@@ -19,7 +21,7 @@ from hooks import (
     pre_tool_use_hook,
     reset_stuck_summary,
 )
-from policy import PolicyEngine
+from policy import Outcome, PolicyEngine
 
 
 @pytest.fixture(autouse=True)
@@ -725,6 +727,31 @@ class TestBuildHookMatchers:
         assert post_matcher.matcher is None
         assert len(post_matcher.hooks) == 1
 
+    @pytest.mark.parametrize("microvm", [False, True])
+    def test_callback_budget_outlives_approval_without_changing_its_deadline(self, microvm):
+        from hooks import _ApprovalDeadline
+        from microvm_lifecycle import register_task, unregister_task
+        from shared_constants import SHARED_CONSTANTS
+
+        context = register_task("callback-budget", "owned-vm") if microvm else None
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo", task_default_timeout_s=30)
+        original = _ApprovalDeadline.from_recorded("2026-09-15T23:00:00Z", 30)
+        try:
+            matchers = build_hook_matchers(engine=engine, task_id="callback-budget")
+            protected_window = (
+                SHARED_CONSTANTS["microvm_lifecycle"]["maximum_duration_seconds"]
+                if microvm
+                else SHARED_CONSTANTS["approval_timeout_s"]["max"]
+            )
+            assert matchers["PreToolUse"][0].timeout > protected_window
+            assert engine.task_default_timeout_s == 30
+            assert original.wall_deadline == 1789513230
+            assert matchers["PostToolUse"][0].timeout is None
+            assert matchers["Stop"][0].timeout is None
+        finally:
+            if context:
+                unregister_task(context)
+
     def test_matchers_with_trajectory(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         # Pass None for trajectory — should still work
@@ -755,7 +782,6 @@ class TestBuildHookMatchers:
 import hashlib
 import json as _json
 from collections import deque
-from datetime import UTC
 from typing import Any
 
 import hooks
@@ -950,6 +976,152 @@ def _hook_input(tool_name: str = "Bash", command: str = "echo foo") -> dict:
     }
 
 
+@pytest.fixture()
+def restored_approval_runtime():
+    from unittest.mock import MagicMock
+
+    from continuation_runtime import ContinuationRuntime
+    from continuation_storage import ContinuationContext
+    from models import RepoSetup
+
+    runtime = ContinuationRuntime(
+        ContinuationContext(
+            RepoSetup(repo_dir="/workspace/task", branch="main", build_before=False),
+            "Original request",
+            "System prompt",
+            "coding/new-task-v1",
+            "1",
+        ),
+        MagicMock(),
+        restored={
+            "action": {
+                "tool_name": "Bash",
+                "tool_input_sha256": _sha256_tool_input_for_row({"command": "echo foo"}),
+            }
+        },
+    )
+    runtime.human_decision = {
+        "request_id": "original-request",
+        "status": "APPROVED",
+        "scope": "this_call",
+        "decided_at": "2026-09-17T17:00:00Z",
+        "created_at": "2026-09-16T17:00:00Z",
+        "matching_rule_ids": ["test_bash_foo"],
+    }
+    return runtime
+
+
+class TestRestoredApproval:
+    def test_exact_saved_action_is_approved_once_without_another_request(
+        self, restored_approval_runtime, engine_with_soft_gate, fake_task_state, progress
+    ):
+        from continuation_runtime import bind_runtime
+
+        async def call(command="echo foo"):
+            return await pre_tool_use_hook(
+                _hook_input(command=command),
+                "new-tool-id",
+                {},
+                engine=engine_with_soft_gate,
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+
+        with bind_runtime(restored_approval_runtime):
+            # A different proposal does not spend the single-action grant.
+            changed = asyncio.run(call("echo other-foo"))
+            assert changed["hookSpecificOutput"]["permissionDecision"] == "deny"
+            approved = asyncio.run(call())
+            assert approved["hookSpecificOutput"]["permissionDecision"] == "allow"
+            repeated = asyncio.run(call())
+            assert repeated["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert fake_task_state.write_calls == []
+        assert fake_task_state.gate_count_calls == []
+        assert engine_with_soft_gate.approval_gate_count == 0
+        grants = [kwargs for name, kwargs in progress.calls if name == "write_approval_granted"]
+        assert len(grants) == 1
+        assert grants[0]["request_id"] == "original-request"
+        assert grants[0]["decided_at"] == "2026-09-17T17:00:00Z"
+
+    def test_hard_denial_wins_without_consuming_saved_approval(
+        self, restored_approval_runtime, fake_task_state
+    ):
+        from continuation_runtime import bind_runtime
+
+        engine = PolicyEngine(
+            task_type="new_task",
+            repo="owner/repo",
+            blueprint_hard_policies=(
+                '@tier("hard") @rule_id("never_foo") '
+                'forbid (principal, action == Agent::Action::"execute_bash", resource) '
+                'when { context.command like "*foo*" };'
+            ),
+        )
+        with bind_runtime(restored_approval_runtime):
+            result = asyncio.run(
+                pre_tool_use_hook(
+                    _hook_input(),
+                    "new-tool-id",
+                    {},
+                    engine=engine,
+                    task_state_module=fake_task_state,
+                )
+            )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            restored_approval_runtime.consume_approved_action(
+                "Bash", _sha256_tool_input_for_row({"command": "echo foo"})
+            )
+            is not None
+        )
+
+    @pytest.mark.parametrize("status", ["DENIED", "TIMED_OUT"])
+    def test_recorded_denial_seeds_normal_policy_cache(
+        self, restored_approval_runtime, engine_with_soft_gate, status
+    ):
+        restored_approval_runtime.human_decision.update(
+            status=status, deny_reason="Use another approach"
+        )
+        restored_approval_runtime.seed_policy(engine_with_soft_gate)
+        decision = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
+        assert decision.outcome == Outcome.DENY
+        assert decision.cache_hit_metadata["original_decision_ts"] == "2026-09-17T17:00:00Z"
+        # Explicit denials also cover cosmetic changes under the same rule.
+        changed = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo other-foo"})
+        assert changed.outcome == (Outcome.DENY if status == "DENIED" else Outcome.REQUIRE_APPROVAL)
+
+    def test_grants_survive_a_replacement(self, restored_approval_runtime, engine_with_soft_gate):
+        from dataclasses import replace
+
+        from policy import ApprovalAllowlist
+
+        scopes = [
+            "tool_type: Read",
+            "tool_group:file_write",
+            "rule:other_rule",
+            "bash_pattern:git status*",
+            "write_path:/workspace/docs/*",
+        ]
+        original = ApprovalAllowlist(scopes)
+        restored_approval_runtime.context = replace(
+            restored_approval_runtime.context, approval_scopes=original.snapshot_scopes()
+        )
+        restored_approval_runtime.human_decision["scope"] = "rule:test_bash_foo"
+        restored_approval_runtime.seed_policy(engine_with_soft_gate)
+        for tool, tool_input in [
+            ("Read", {}),
+            ("Write", {"file_path": "/workspace/a"}),
+            ("Bash", {"command": "git status --short"}),
+            ("Bash", {"command": "echo foo"}),
+        ]:
+            assert (
+                engine_with_soft_gate.evaluate_tool_use(tool, tool_input).outcome == Outcome.ALLOW
+            )
+        assert engine_with_soft_gate.allowlist.rule_ids == {"other_rule", "test_bash_foo"}
+        original.add("all_session")
+        assert ApprovalAllowlist(list(original.snapshot_scopes())).matches("AnyTool", {})
+
+
 def _prime_approval(fake: _FakeTaskState, terminal_row: dict) -> None:
     """Queue an ``APPROVED``/``DENIED`` row on the second poll iteration.
 
@@ -971,10 +1143,9 @@ def _fast_poll(monkeypatch):
     """Collapse poll intervals so tests run instantly.
 
     Swaps ``asyncio.sleep`` for a no-op AND advances ``hooks.time.monotonic``
-    by the requested sleep duration each call so the poll's wall-clock
-    deadline actually trips. Without the monotonic advance the poll spins
-    forever when the script runs out of rows (deque empty → default
-    PENDING row → never terminal).
+    by the requested sleep duration each call so the monotonic deadline
+    trips without waiting for real UTC time to pass. When scripted rows
+    run out, the fake returns PENDING until that deadline.
     """
     fake_clock = {"now": 0.0}
 
@@ -988,10 +1159,329 @@ def _fast_poll(monkeypatch):
     monkeypatch.setattr(hooks.asyncio, "sleep", _zero_sleep)
 
 
+@pytest.fixture()
+def approval_clock(monkeypatch):
+    """Control elapsed and UTC time independently, including a frozen guest clock."""
+    clock = {"wall": 1_800_000_000.0, "monotonic": 100.0}
+    monkeypatch.setattr(hooks.time, "time", lambda: clock["wall"])
+    monkeypatch.setattr(hooks.time, "monotonic", lambda: clock["monotonic"])
+    monkeypatch.setattr(
+        hooks,
+        "_iso_now",
+        lambda: datetime.fromtimestamp(clock["wall"], UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    return clock
+
+
+class TestApprovalDeadline:
+    def test_frozen_monotonic_clock_still_expires_after_sleep(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, approval_clock
+    ):
+        engine_with_soft_gate._task_default_timeout_s = 30
+        sleeps = []
+
+        async def frozen_sleep(seconds):
+            sleeps.append(seconds)
+            assert len(sleeps) == 1, "The expired gate must not restart polling after waking"
+            approval_clock["wall"] += 600
+
+        monkeypatch.setattr(hooks.asyncio, "sleep", frozen_sleep)
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
+        assert len(fake_task_state.get_calls) == 1
+
+    @pytest.mark.parametrize("wall_change", [12, -120])
+    def test_database_write_time_counts_even_if_wall_clock_moves_back(
+        self,
+        fake_task_state,
+        progress,
+        engine_with_soft_gate,
+        monkeypatch,
+        approval_clock,
+        wall_change,
+    ):
+        engine_with_soft_gate._task_default_timeout_s = 30
+        original_write = fake_task_state.transact_write_approval_request
+        sleeps = []
+
+        def delayed_write(*args, **kwargs):
+            original_write(*args, **kwargs)
+            approval_clock["wall"] += wall_change
+            approval_clock["monotonic"] += 12
+
+        async def advance(seconds):
+            sleeps.append(seconds)
+            approval_clock["wall"] += seconds
+            approval_clock["monotonic"] += seconds
+
+        monkeypatch.setattr(fake_task_state, "transact_write_approval_request", delayed_write)
+        monkeypatch.setattr(hooks.asyncio, "sleep", advance)
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert sum(sleeps) == 18
+        assert approval_clock["monotonic"] == 130
+
+    @pytest.mark.parametrize("wall_jump,expected_wait", [(27, 3), (-3600, 30)])
+    def test_clock_changes_clamp_next_sleep_and_never_extend_window(
+        self,
+        fake_task_state,
+        progress,
+        engine_with_soft_gate,
+        monkeypatch,
+        approval_clock,
+        wall_jump,
+        expected_wait,
+    ):
+        engine_with_soft_gate._task_default_timeout_s = 30
+        sleeps = []
+
+        async def advance(seconds):
+            sleeps.append(seconds)
+            approval_clock["monotonic"] += seconds
+            approval_clock["wall"] += seconds + (wall_jump if len(sleeps) == 1 else 0)
+
+        monkeypatch.setattr(hooks.asyncio, "sleep", advance)
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert sum(sleeps) == expected_wait
+        if wall_jump > 0:
+            assert sleeps == [2, 1]
+
+    @pytest.mark.parametrize(
+        "reread_row,cancelled,expected",
+        [
+            ({"status": "APPROVED", "scope": "this_call"}, False, "allow"),
+            ({"status": "DENIED", "deny_reason": "no"}, False, "deny"),
+            ({"status": "PENDING"}, False, "deny"),
+            (None, False, "deny"),
+            ({"status": "APPROVED", "scope": "this_call"}, True, "deny"),
+        ],
+    )
+    def test_waking_after_deadline_preserves_decision_race_and_cancellation(
+        self,
+        fake_task_state,
+        progress,
+        engine_with_soft_gate,
+        monkeypatch,
+        approval_clock,
+        reread_row,
+        cancelled,
+        expected,
+    ):
+        engine_with_soft_gate._task_default_timeout_s = 30
+        fake_task_state.best_effort_return = False
+        fake_task_state.reread_row = reread_row
+        if reread_row is None:
+            # A missing/TTL-reaped row during the poll also stays fail-closed.
+            fake_task_state.get_row_script.append(None)
+        if cancelled:
+            fake_task_state.resume_raises = _FakeApprovalResumeError("cancelled")
+
+        async def frozen_sleep(_seconds):
+            approval_clock["wall"] += 600
+
+        monkeypatch.setattr(hooks.asyncio, "sleep", frozen_sleep)
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == expected
+        assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
+        assert len(fake_task_state.get_calls) == 2
+        assert all(consistent for _, _, consistent in fake_task_state.get_calls)
+        if cancelled:
+            assert "write_approval_granted" not in progress.milestones()
+
+    def test_decision_committed_during_slow_read_is_honored(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, approval_clock
+    ):
+        engine_with_soft_gate._task_default_timeout_s = 30
+
+        def slow_read(*_args, **kwargs):
+            assert kwargs["consistent_read"]
+            approval_clock["wall"] += 600
+            return {"status": "APPROVED", "scope": "this_call"}
+
+        monkeypatch.setattr(fake_task_state, "get_approval_row", slow_read)
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert not fake_task_state.update_calls
+
+    def test_coroutine_cancellation_does_not_become_a_timeout_or_allow(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, approval_clock
+    ):
+        async def cancelled_sleep(_seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(hooks.asyncio, "sleep", cancelled_sleep)
+        with pytest.raises(asyncio.CancelledError):
+            _run(
+                pre_tool_use_hook(
+                    _hook_input(),
+                    "tu-1",
+                    {},
+                    engine=engine_with_soft_gate,
+                    task_id="01KTASK",
+                    progress=progress,
+                    task_state_module=fake_task_state,
+                )
+            )
+        assert not fake_task_state.update_calls
+        assert not fake_task_state.resume_calls
+
+
 # --- Happy paths ----------------------------------------------------------
 
 
 class TestApprovedPath:
+    @pytest.mark.parametrize("transferred", [False, True])
+    @pytest.mark.parametrize("publish_failed", [False, True])
+    def test_checkpoint_holds_tools_until_same_worker_claims_decision(
+        self,
+        fake_task_state,
+        progress,
+        engine_with_soft_gate,
+        monkeypatch,
+        transferred,
+        publish_failed,
+    ):
+        from types import SimpleNamespace
+        from typing import Any
+
+        from continuation_runtime import bind_runtime
+        from continuation_session import CheckpointIdentity
+        from microvm_lifecycle import register_task, unregister_task
+
+        _fast_poll(monkeypatch)
+        _prime_approval(fake_task_state, {"status": "APPROVED", "scope": "this_call"})
+        lifecycle = register_task("checkpoint-hook-task", "microvm-hook")
+        phases = []
+        original_resume = fake_task_state.transact_resume_from_approval
+
+        async def capture(context, park, **kwargs):
+            assert kwargs["session_id"] == "sdk-session"
+            async with context.continuation_checkpoint(park):
+                phases.append(context.diagnostic_snapshot()["phase"])
+            return CheckpointIdentity(
+                lifecycle.task_id, lifecycle.microvm_id, park.request_id, "user", "owner/repo"
+            ), "owned-receipt"
+
+        def publish(*args, **kwargs):
+            phases.append(lifecycle.diagnostic_snapshot()["phase"])
+            if publish_failed:
+                raise TimeoutError("publication acknowledgement lost")
+
+        def resume(*args, **kwargs):
+            phases.append(lifecycle.diagnostic_snapshot()["phase"])
+            if transferred:
+                raise _FakeApprovalResumeError("coordinator now owns the checkpoint")
+            return original_resume(*args, **kwargs)
+
+        runtime: Any = SimpleNamespace(
+            capture=capture,
+            consume_approved_action=lambda *_: None,
+            context=SimpleNamespace(cost_usd=0.02, turns_used=1),
+        )
+        monkeypatch.setattr(
+            fake_task_state, "publish_continuation_checkpoint", publish, raising=False
+        )
+        monkeypatch.setattr(fake_task_state, "transact_resume_from_approval", resume)
+        monkeypatch.setattr(hooks, "task_state", fake_task_state)
+        matchers = build_hook_matchers(
+            engine=engine_with_soft_gate,
+            task_id=lifecycle.task_id,
+            user_id="user",
+            progress=progress,
+        )
+        try:
+            with bind_runtime(runtime):
+                result = _run(
+                    matchers["PreToolUse"][0].hooks[0](
+                        {**_hook_input(), "session_id": "sdk-session"},
+                        "tu-1",
+                        {},
+                    )
+                )
+            assert phases == ["checkpointing", "checkpoint-ready", "checkpoint-ready"]
+            unavailable = [
+                data
+                for method, data in progress.calls
+                if method == "write_agent_milestone"
+                and data.get("milestone") == "continuation_unavailable"
+            ]
+            assert len(unavailable) == int(publish_failed)
+            if publish_failed:
+                # Use the real signature so an incorrectly named keyword cannot
+                # pass through the permissive recording double unnoticed.
+                from progress_writer import _ProgressWriter
+
+                writer = MagicMock(spec=_ProgressWriter)
+                import inspect
+
+                inspect.signature(_ProgressWriter.write_agent_milestone).bind(
+                    writer, **unavailable[0]
+                )
+            expected = "deny" if transferred else "allow"
+            assert result["hookSpecificOutput"]["permissionDecision"] == expected
+            assert lifecycle.diagnostic_snapshot()["phase"] == (
+                "closed" if transferred else "active"
+            )
+        finally:
+            unregister_task(lifecycle)
+
     def test_approved_returns_allow_and_propagates_scope(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -1084,8 +1574,46 @@ class TestDeniedPath:
         # Recent-decision cache populated — identical next call auto-denies.
         follow_up = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
         assert follow_up.outcome.value == "deny"
-        assert "Recent DENIED" in follow_up.reason
+        assert "Recorded DENIED at t1" in follow_up.reason
         assert "write_approval_denied" in progress.milestones()
+
+
+class TestCancelledPath:
+    @pytest.mark.parametrize("during_timeout", [False, True])
+    def test_cancellation_closes_wait_without_resuming_or_caching_a_human_denial(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, during_timeout
+    ):
+        _fast_poll(monkeypatch)
+        cancelled = {"status": "CANCELLED", "cancellation_reason": "Task cancelled by its owner"}
+        if during_timeout:
+            fake_task_state.best_effort_return = False
+            fake_task_state.reread_row = cancelled
+        else:
+            _prime_approval(fake_task_state, cancelled)
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "cancelled" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert not fake_task_state.resume_calls
+        if not during_timeout:
+            assert not fake_task_state.update_calls
+        assert not engine_with_soft_gate.drain_denial_injections()
+        follow_up = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
+        assert "Recent DENIED" not in follow_up.reason
+        assert "write_approval_denied" not in progress.milestones()
+        assert "write_approval_timed_out" not in progress.milestones()
 
 
 class TestPersistentGateCount:
@@ -1617,6 +2145,7 @@ class TestTimeoutCapping:
             task_type="new_task",
             repo="owner/repo",
             blueprint_soft_policies=blueprint_soft,
+            task_default_timeout_s=300,
         )
         _prime_approval(
             fake_task_state,
@@ -2013,3 +2542,66 @@ class TestStuckGuardHookIntegration:
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         matchers = build_hook_matchers(engine, task_id="t")
         assert "PostToolUse" in matchers and "Stop" in matchers
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_microvm_approval_cannot_return_until_resume_barrier_opens(
+    monkeypatch, engine_with_soft_gate, fake_task_state, progress, cancelled
+):
+    import threading
+
+    from microvm_lifecycle import register_task, unregister_task
+
+    context = register_task("lifecycle-hook-task", "microvm-hook")
+    entered = threading.Event()
+    answer = threading.Event()
+    original_read = fake_task_state.get_approval_row
+
+    def read(*args, **kwargs):
+        entered.set()
+        return {"status": "APPROVED", "scope": "once"} if answer.is_set() else {"status": "PENDING"}
+
+    fake_task_state.get_approval_row = read
+    monkeypatch.setattr(hooks, "task_state", fake_task_state)
+    monkeypatch.setattr(hooks, "POLL_FAST_INTERVAL_S", 0.01)
+    if cancelled:
+        fake_task_state.resume_raises = _FakeApprovalResumeError("cancel won")
+    matchers = build_hook_matchers(
+        engine=engine_with_soft_gate,
+        task_id=context.task_id,
+        progress=progress,
+    )
+
+    async def scenario():
+        pending = asyncio.create_task(matchers["PreToolUse"][0].hooks[0](_hook_input(), "tu-1", {}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            checkpoints = []
+            await context.suspend(checkpoints.append, budget_s=1)
+            park = checkpoints[0]
+            assert park.request_id == fake_task_state.write_calls[0][1]
+            assert park.deadline.remaining_s() > 0
+            answer.set()
+            await asyncio.sleep(0.04)
+            assert not pending.done()
+            assert fake_task_state.resume_calls == []
+            refreshed = []
+            await context.resume(refreshed.append, budget_s=1)
+            assert refreshed == [park]
+            result = await asyncio.wait_for(pending, 1)
+            expected = "deny" if cancelled else "allow"
+            assert result["hookSpecificOutput"]["permissionDecision"] == expected
+            if not cancelled:
+                await matchers["PostToolUse"][0].hooks[0](
+                    {"tool_name": "Bash", "tool_response": "ok"}, "tu-1", {}
+                )
+        finally:
+            answer.set()
+            context.close()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    try:
+        _run(scenario())
+    finally:
+        fake_task_state.get_approval_row = original_read
+        unregister_task(context)

@@ -18,6 +18,12 @@
  */
 
 // --- Mocks ---
+const mockAcquireTaskSlot = jest.fn();
+const mockReleaseTaskSlot = jest.fn();
+jest.mock('../../src/handlers/shared/task-concurrency', () => ({
+  acquireTaskSlot: (...args: unknown[]) => mockAcquireTaskSlot(...args),
+  releaseTaskSlot: (...args: unknown[]) => mockReleaseTaskSlot(...args),
+}));
 const mockDdbSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
@@ -106,6 +112,9 @@ const baseTask = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockDdbSend.mockReset();
+  mockAcquireTaskSlot.mockReset().mockResolvedValue(true);
+  mockReleaseTaskSlot.mockReset().mockResolvedValue(true);
   ulidCounter = 0;
   mockLoadRepoConfig.mockResolvedValue(null);
 });
@@ -124,22 +133,16 @@ describe('loadTask', () => {
 });
 
 describe('admissionControl', () => {
-  test('returns true when concurrency slot is available', async () => {
-    mockDdbSend.mockResolvedValueOnce({});
-    const result = await admissionControl(baseTask as any);
-    expect(result).toBe(true);
+  test('reserves using the task identity and configured user limit', async () => {
+    expect(await admissionControl(baseTask as any)).toBe(true);
+    expect(mockAcquireTaskSlot).toHaveBeenCalledWith('TASK001', 'user-123', 3);
   });
-
-  test('returns false when concurrency limit reached', async () => {
-    const condErr = new Error('Conditional check failed');
-    condErr.name = 'ConditionalCheckFailedException';
-    mockDdbSend.mockRejectedValueOnce(condErr);
-    const result = await admissionControl(baseTask as any);
-    expect(result).toBe(false);
+  test('returns false when no reservation was acquired', async () => {
+    mockAcquireTaskSlot.mockResolvedValue(false);
+    expect(await admissionControl(baseTask as any)).toBe(false);
   });
-
-  test('throws on unexpected DDB errors', async () => {
-    mockDdbSend.mockRejectedValueOnce(new Error('DynamoDB error'));
+  test('propagates an outage so durable execution can retry', async () => {
+    mockAcquireTaskSlot.mockRejectedValue(new Error('DynamoDB error'));
     await expect(admissionControl(baseTask as any)).rejects.toThrow('DynamoDB error');
   });
 });
@@ -548,6 +551,37 @@ describe('hydrateAndTransition — Cedar HITL payload threading', () => {
 });
 
 describe('pollTaskStatus', () => {
+  test.each(['agentcore', 'lambda-microvm'] as const)(
+    '%s stays healthy immediately after a long approval wait resumes',
+    async (computeType) => {
+      const beforeApproval = new Date(Date.now() - 600_000).toISOString();
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'AWAITING_APPROVAL',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: beforeApproval,
+        },
+      });
+      const waiting = await pollTaskStatus('TASK001', { attempts: 5 }, computeType);
+      expect(waiting.sessionUnhealthy).toBe(false);
+
+      // The agent's conditional resume transaction refreshes this timestamp with
+      // status RUNNING. Poll before the independent 45-second worker ticks.
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'RUNNING',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: new Date().toISOString(),
+        },
+      });
+      const resumed = await pollTaskStatus('TASK001', waiting, computeType);
+      expect(resumed.lastStatus).toBe('RUNNING');
+      expect(resumed.sessionUnhealthy).toBe(false);
+    },
+  );
+
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
     const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'agentcore');
@@ -1192,10 +1226,115 @@ describe('hydrateAndTransition — registry asset resolution (#246)', () => {
 });
 
 describe('finalizeTask', () => {
+  const supervisor = {
+    version: 1 as const,
+    microvmId: 'vm',
+    firstObservedAtMs: 1,
+    sessionDeadlineMs: 28_800_001,
+    lifetimeVerified: true,
+    consecutivePollFailures: 3,
+    consecutiveResumeFailures: 0,
+    anomalyReported: false,
+    nextPollInMs: 5_000,
+  };
+  const vmTask = () => ({
+    ...baseTask,
+    status: 'AWAITING_APPROVAL',
+    compute_type: 'lambda-microvm',
+    session_id: 'vm',
+    compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example' },
+  });
+
+  test.each(['AWAITING_APPROVAL', 'RUNNING', 'HYDRATING'])('supervisor failure strongly reads %s and conditionally fails only its worker', async status => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123');
+    const read = mockDdbSend.mock.calls[0][0];
+    expect(read.input.ConsistentRead).toBe(true);
+    const write = mockDdbSend.mock.calls[1][0];
+    expect(write.input.ConditionExpression).toContain('compute_metadata.microvmId = :microvmId');
+    expect(write.input.ExpressionAttributeValues).toMatchObject({
+      ':fromStatus': status,
+      ':toStatus': 'FAILED',
+      ':microvmId': 'vm',
+      ':attr_error_message': 'MicroVM supervisor: substrate-read-failed',
+    });
+    expect(mockReleaseTaskSlot).toHaveBeenCalledTimes(1);
+  });
+
+  test('supervisor finalization preserves a committed cancellation', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status: 'CANCELLED', memory_written: true } })
+      .mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'resume-request-failed-repeatedly',
+    }, 'user-123');
+    expect(mockDdbSend.mock.calls.some(([command]) => command.input.ExpressionAttributeValues?.[':toStatus'])).toBe(false);
+    expect(mockDdbSend.mock.calls.find(([command]) => command._type === 'Put')?.[0].input.Item.event_type).toBe('task_cancelled');
+  });
+
+  test('changed worker ownership skips both task mutation and reservation release', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), session_id: 'replacement' } });
+    await expect(finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123')).resolves.toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    expect(mockReleaseTaskSlot).not.toHaveBeenCalled();
+  });
+
+  test.each([['RUNNING', 'TIMED_OUT'], ['AWAITING_APPROVAL', 'FAILED'], ['HYDRATING', 'FAILED']])(
+    'absolute session expiry in %s uses the allowed %s task outcome', async (status, expected) => {
+      mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+      await finalizeTask('TASK001', {
+        attempts: 2000, microvmSupervisor: supervisor, microvmFailureReason: 'session-deadline',
+      }, 'user-123');
+      expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe(expected);
+    },
+  );
+
+  test('the legacy approval poll timeout also uses FAILED without changing the approval decision', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: vmTask() }).mockResolvedValue({});
+    await finalizeTask('TASK001', { attempts: 1020 }, 'user-123');
+    expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
+    expect(mockDdbSend.mock.calls[2][0].input.Item.event_type).toBe('task_failed');
+  });
+
+  test.each([
+    ['FAILED', 'HYDRATING'],
+    ['CANCELLED', 'RUNNING'],
+  ])('honors committed %s instead of stale %s during immediate finalization', async (committed, stale) => {
+    mockDdbSend.mockImplementation(async (command) => {
+      if (command._type === 'Get') {
+        return {
+          Item: {
+            ...baseTask,
+            status: command.input.ConsistentRead ? committed : stale,
+            memory_written: true,
+          },
+        };
+      }
+      // A stale transition loses to the terminal status already in DynamoDB.
+      if (command.input.ExpressionAttributeValues?.[':fromStatus']) {
+        throw Object.assign(new Error('terminal state already committed'), { name: 'ConditionalCheckFailedException' });
+      }
+      return {};
+    });
+    await finalizeTask('TASK001', { attempts: 0 }, 'user-123');
+    const events = mockDdbSend.mock.calls
+      .filter(([command]) => command._type === 'Put')
+      .map(([command]) => command.input.Item);
+    expect(events).toEqual([expect.objectContaining({
+      event_type: `task_${committed.toLowerCase()}`,
+      metadata: expect.objectContaining({ final_status: committed }),
+    })]);
+    expect(mockDdbSend.mock.calls.some(([command]) =>
+      command.input.ExpressionAttributeValues?.[':fromStatus'])).toBe(false);
+  });
+
   test('handles already-terminal task', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED' } }) // loadTask
-      .mockResolvedValue({}); // emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // emitTaskEvent
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     // Verify emitTaskEvent was called (PutCommand)
     expect(mockDdbSend).toHaveBeenCalled();
@@ -1204,7 +1343,7 @@ describe('finalizeTask', () => {
   test('transitions RUNNING to FAILED when pollState.sessionUnhealthy', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
-      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // transitionTask + emitTaskEvent
     await finalizeTask(
       'TASK001',
       { attempts: 12, lastStatus: 'RUNNING', sessionUnhealthy: true },
@@ -1296,7 +1435,7 @@ describe('finalizeTask', () => {
   test('transitions RUNNING to TIMED_OUT on poll timeout', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'RUNNING' } }) // loadTask
-      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // transitionTask + emitTaskEvent
     await finalizeTask('TASK001', { attempts: 1020, lastStatus: 'RUNNING' }, 'user-123');
     expect(mockDdbSend).toHaveBeenCalled();
   });
@@ -1304,7 +1443,7 @@ describe('finalizeTask', () => {
   test('transitions HYDRATING to FAILED when session never started', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'HYDRATING' } }) // loadTask
-      .mockResolvedValue({}); // transitionTask + emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // transitionTask + emitTaskEvent
     await finalizeTask('TASK001', { attempts: 15, lastStatus: 'HYDRATING' }, 'user-123');
     // First call: loadTask, second call: transitionTask (HYDRATING -> FAILED)
     const transitionCall = mockDdbSend.mock.calls[1][0];
@@ -1316,34 +1455,32 @@ describe('finalizeTask', () => {
     expect(eventCall.input.Item.metadata.reason).toBe('session_never_started');
   });
 
-  test('releases concurrency for unexpected task state', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'SUBMITTED' } }) // loadTask
-      .mockResolvedValue({}); // decrementConcurrency
-    await finalizeTask('TASK001', { attempts: 5, lastStatus: 'SUBMITTED' }, 'user-123');
-    // Should still call decrementConcurrency (UpdateCommand for user concurrency)
-    const lastCall = mockDdbSend.mock.calls[mockDdbSend.mock.calls.length - 1][0];
-    expect(lastCall.input.Key).toEqual({ user_id: 'user-123' });
+  test('an unexpected active state makes finalization retry instead of reporting success', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...baseTask, status: 'SUBMITTED' } });
+    mockReleaseTaskSlot.mockResolvedValue(false);
+    await expect(finalizeTask('TASK001', { attempts: 5 }, 'user-123')).rejects.toThrow('Cannot finalize');
+    expect(mockDdbSend.mock.calls.some(([command]) => command._type === 'Put')).toBe(false);
   });
 
-  test('resolves without throwing when decrementConcurrency hits ConditionalCheckFailedException', async () => {
-    const condErr = new Error('Conditional check failed');
-    condErr.name = 'ConditionalCheckFailedException';
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } }) // loadTask
-      .mockResolvedValueOnce({}) // TTL stamp
-      .mockResolvedValueOnce({}) // emitTaskEvent
-      .mockRejectedValueOnce(condErr); // decrementConcurrency CCF
-    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBeUndefined();
+  test('already-released reservations allow finalization to finish', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } })
+      .mockResolvedValue({});
+    mockReleaseTaskSlot.mockResolvedValue(false);
+    await expect(finalizeTask('TASK001', { attempts: 10 }, 'user-123')).resolves.toBe(true);
   });
 
-  test('resolves without throwing when decrementConcurrency hits a non-CCF error', async () => {
-    mockDdbSend
-      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } }) // loadTask
-      .mockResolvedValueOnce({}) // TTL stamp
-      .mockResolvedValueOnce({}) // emitTaskEvent
-      .mockRejectedValueOnce(new Error('DDB timeout')); // decrementConcurrency non-CCF
-    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBeUndefined();
+  test('a reservation release outage propagates for retry', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } })
+      .mockResolvedValue({});
+    mockReleaseTaskSlot.mockRejectedValue(new Error('DDB timeout'));
+    await expect(finalizeTask('TASK001', { attempts: 10 }, 'user-123')).rejects.toThrow('DDB timeout');
+  });
+
+  test('a terminal-event failure still attempts reservation release', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED', memory_written: true } })
+      .mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('event unavailable'));
+    await expect(finalizeTask('TASK001', { attempts: 10 }, 'user-123')).rejects.toThrow('event unavailable');
+    expect(mockReleaseTaskSlot).toHaveBeenCalledWith('TASK001', 'user-123');
   });
 });
 
@@ -1357,8 +1494,7 @@ describe('failTask', () => {
   test('releases concurrency when requested', async () => {
     mockDdbSend.mockResolvedValue({});
     await failTask('TASK001', 'HYDRATING', 'hydration error', 'user-123', true);
-    // transitionTask + emitTaskEvent + decrementConcurrency = 3 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(3);
+    expect(mockReleaseTaskSlot).toHaveBeenCalledWith('TASK001', 'user-123');
   });
 
   test('transitions from HYDRATING to FAILED when called with HYDRATING status', async () => {
@@ -1370,24 +1506,29 @@ describe('failTask', () => {
     expect(transitionCall.input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
   });
 
-  test('handles transition failure gracefully without emitting when not transitioned', async () => {
-    mockDdbSend.mockRejectedValueOnce(new Error('Condition failed')); // transitionTask only
+  test('a committed terminal winner is accepted without another failure event', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('Condition failed'))
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'CANCELLED' } });
     await expect(failTask('TASK001', 'SUBMITTED', 'error', 'user-123', false)).resolves.toBeUndefined();
-    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    expect(mockDdbSend.mock.calls.some(([command]) => command._type === 'Put')).toBe(false);
   });
 
-  test('second failTask does not re-emit or re-decrement when transition fails (idempotent under step retry)', async () => {
+  test('failure to persist a terminal state propagates without releasing an active task', async () => {
+    mockDdbSend.mockRejectedValueOnce(new Error('write unavailable'))
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'HYDRATING' } });
+    await expect(failTask('TASK001', 'HYDRATING', 'error', 'user-123', true)).rejects.toThrow('write unavailable');
+    expect(mockReleaseTaskSlot).not.toHaveBeenCalled();
+  });
+
+  test('failure replay rechecks release without duplicating the failure event', async () => {
     mockDdbSend.mockResolvedValue({});
     await failTask('TASK001', 'HYDRATING', 'first failure', 'user-123', true);
-    expect(mockDdbSend).toHaveBeenCalledTimes(3); // transition + emit + decrement
-
     mockDdbSend.mockClear();
-    const condErr = new Error('The conditional request failed');
-    condErr.name = 'ConditionalCheckFailedException';
-    mockDdbSend.mockRejectedValueOnce(condErr); // already FAILED — transition no-ops
-
-    await expect(failTask('TASK001', 'HYDRATING', 'durable replay', 'user-123', true)).resolves.toBeUndefined();
-    expect(mockDdbSend).toHaveBeenCalledTimes(1); // transition attempt only; no Put, no concurrency Update
+    mockDdbSend.mockRejectedValueOnce(new Error('already FAILED'))
+      .mockResolvedValueOnce({ Item: { ...baseTask, status: 'FAILED' } });
+    await expect(failTask('TASK001', 'HYDRATING', 'replay', 'user-123', true)).resolves.toBeUndefined();
+    expect(mockDdbSend.mock.calls.some(([command]) => command._type === 'Put')).toBe(false);
+    expect(mockReleaseTaskSlot).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1485,7 +1626,7 @@ describe('finalizeTask TTL stamping', () => {
   test('stamps TTL on task already in terminal state', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED' } }) // loadTask
-      .mockResolvedValue({}); // UpdateCommand (TTL stamp) + emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // UpdateCommand (TTL stamp) + emitTaskEvent
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     // Second call should be the TTL stamp UpdateCommand
     const ttlStampCall = mockDdbSend.mock.calls[1][0];
@@ -1498,7 +1639,7 @@ describe('finalizeTask TTL stamping', () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED' } }) // loadTask
       .mockRejectedValueOnce(new Error('DDB error')) // TTL stamp fails
-      .mockResolvedValue({}); // emitTaskEvent + decrementConcurrency
+      .mockResolvedValue({}); // emitTaskEvent
     // Should not throw
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     expect(mockDdbSend).toHaveBeenCalled();
@@ -1597,9 +1738,7 @@ describe('finalizeTask — memory fallback', () => {
     // Should not throw — the try-catch in finalizeTask prevents crash
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     expect(mockWriteMinimalEpisode).toHaveBeenCalled();
-    // decrementConcurrency should still be called (last UpdateCommand for user concurrency)
-    const lastCall = mockDdbSend.mock.calls[mockDdbSend.mock.calls.length - 1][0];
-    expect(lastCall.input.Key).toEqual({ user_id: 'user-123' });
+    expect(mockReleaseTaskSlot).toHaveBeenCalledWith('TASK001', 'user-123');
   });
 
   test('converts string duration_s and cost_usd to numbers', async () => {

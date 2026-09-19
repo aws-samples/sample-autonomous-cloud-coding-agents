@@ -12,9 +12,9 @@ two Cedar evaluations interleaved with in-process caches:
     2. Approval allowlist fast-path (tool_type, tool_group, bash_pattern,
        write_path, all_session scopes). Skips human prompt for pre-approved
        patterns.
-    2.5 Recent-decision cache: same (tool_name, input_sha256) within 60s of a
-        DENIED/TIMED_OUT outcome auto-denies. Session-scoped, cleared on
-        container restart (§12.8).
+    2.5 Recent-decision cache: the same (tool_name, input_sha256) auto-denies
+        for 60s after inserting a DENIED/TIMED_OUT outcome. Ordinary restarts
+        clear it; continuation restores the saved decision before SDK startup.
     3. Soft-deny Cedar eval (agent/policies/soft_deny.cedar + blueprint soft).
        Match → REQUIRE_APPROVAL with merged annotations; rule-scope allowlist
        match → ALLOW; no match → fall through to step 4.
@@ -26,10 +26,11 @@ two Cedar evaluations interleaved with in-process caches:
 ``context.file_path``, because Cedar entity UIDs cannot contain arbitrary
 characters.
 
-**Annotations** expected on every rule in hard_deny/soft_deny files
-(§5.2): ``@rule_id`` (globally unique, kebab/snake_case), ``@tier``
-("hard"|"soft"), ``@approval_timeout_s`` (int seconds ≥ 30; soft-deny
-only), ``@severity`` ("low"|"medium"|"high"; soft-deny only), ``@category``
+**Annotations** used by rules in hard_deny/soft_deny files (§5.2):
+``@rule_id`` (globally unique, kebab/snake_case), ``@tier``
+("hard"|"soft"), optional ``@approval_timeout_s`` (int seconds ≥ 30;
+soft-deny only; omission uses the task setting), ``@severity``
+("low"|"medium"|"high"; soft-deny only), ``@category``
 (free-form; UX grouping). Annotation recovery goes through cedarpy's
 ``policies_to_json_str()``; the round-trip contract is locked by
 ``tests/test_cedarpy_annotations_contract.py``.
@@ -95,7 +96,7 @@ def _validate_constants() -> None:
         raise ValueError(
             f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
         )
-    if DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
+    if DEFAULT_TASK_TIMEOUT_S != 0 and DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
         raise ValueError(
             f"contracts/constants.json: approval_timeout_s.default ({DEFAULT_TASK_TIMEOUT_S}) "
             f"must be >= min ({FLOOR_TIMEOUT_S})"
@@ -399,6 +400,19 @@ class ApprovalAllowlist:
         """Snapshot of rule-ID scopes, checked post-soft-deny in the engine."""
         return frozenset(self._rule_ids)
 
+    def snapshot_scopes(self) -> tuple[str, ...]:
+        """Export normalized session grants for an acknowledged continuation."""
+        scopes = ["all_session"] if self._all_session else []
+        for prefix, values in (
+            ("tool_type", self._tool_types),
+            ("tool_group", self._tool_groups),
+            ("rule", self._rule_ids),
+            ("bash_pattern", self._bash_patterns),
+            ("write_path", self._write_path_patterns),
+        ):
+            scopes.extend(f"{prefix}:{value}" for value in sorted(set(values)))
+        return tuple(scopes)
+
     def matches(self, tool_name: str, tool_input: dict) -> bool:
         """Return True if a non-rule scope pre-approves this tool call."""
         if self._all_session:
@@ -438,8 +452,9 @@ class RecentDecisionCache:
     DENIED/TIMED_OUT — NEVER on APPROVED (so a just-approved call does not
     auto-deny on the next identical invocation).
 
-    **Session-scoped**: cleared on container restart. Documented caveat in
-    §12.8 — not a bug. Persistent cache is §17.5 future work.
+    **Session-scoped**: ordinary process restarts clear this cache. A saved
+    MicroVM continuation seeds its recorded denial or timeout during restoration;
+    it does not serialize the entire cache.
     """
 
     def __init__(
@@ -698,15 +713,16 @@ def _merge_annotations(
         if rule is None:
             continue
         rule_ids.append(rule.rule_id or pid)
-        if rule.approval_timeout_s is not None:
+        if rule.approval_timeout_s is not None and rule.approval_timeout_s > 0:
             timeouts.append(rule.approval_timeout_s)
         severities.append(rule.severity or _DEFAULT_SEVERITY)
 
-    timeouts.append(task_default_timeout_s)
+    if task_default_timeout_s > 0:
+        timeouts.append(task_default_timeout_s)
     # Defensive only: load-time validation already rejects below-floor values,
     # but the clamp costs nothing and protects against a future caller that
     # bypasses validation (e.g. programmatic rule injection).
-    effective_timeout = max(FLOOR_TIMEOUT_S, min(timeouts))
+    effective_timeout = max(FLOOR_TIMEOUT_S, min(timeouts)) if timeouts else 0
 
     if severities:
         effective_severity = max(severities, key=lambda s: _SEVERITY_ORDER.get(s, 0))
@@ -1220,7 +1236,10 @@ class PolicyEngine:
                 # engine pure — policy.py never calls the progress writer.
                 return PolicyDecision(
                     outcome=Outcome.DENY,
-                    reason=f"Recent {cached.decision} within {int(CACHE_TTL_S)}s: {cached.reason}",
+                    reason=(
+                        f"Recorded {cached.decision} at {cached.original_decision_ts}: "
+                        f"{cached.reason}"
+                    ),
                     duration_ms=(time.monotonic() - start) * 1000,
                     cache_hit_metadata={
                         "tool_name": tool_name,
@@ -1273,8 +1292,8 @@ class PolicyEngine:
                     return PolicyDecision(
                         outcome=Outcome.DENY,
                         reason=(
-                            f"Recent {cached.decision} on rule {matched_rule_id!r} "
-                            f"within {int(CACHE_TTL_S)}s: {cached.reason}"
+                            f"Recorded {cached.decision} on rule {matched_rule_id!r} "
+                            f"at {cached.original_decision_ts}: {cached.reason}"
                         ),
                         duration_ms=(time.monotonic() - start) * 1000,
                         cache_hit_metadata={

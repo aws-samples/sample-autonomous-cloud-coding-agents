@@ -33,8 +33,8 @@
  *
  * Keep the pattern set in sync with `agent/src/output_scanner.py`; the
  * agent-side scanner is the canonical source for PostToolUse output
- * redaction, and this module is the REST-side port for the deny-reason
- * path only. If the agent-side patterns change, update here too.
+ * redaction, and this module also protects approval notification previews.
+ * If the agent-side patterns change, update here too.
  */
 
 interface SecretPattern {
