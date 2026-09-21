@@ -115,8 +115,11 @@ class TestSessionMirror:
 
     def test_missing_mirror_never_certifies_the_checkpoint(self):
         async def scenario():
-            with pytest.raises(checkpoint.ContinuationCheckpointError, match="did not acknowledge"):
+            with pytest.raises(
+                checkpoint.ContinuationCheckpointError, match="did not acknowledge"
+            ) as error:
                 await capture(checkpoint.CheckpointSessionStore(PROJECT))
+            assert error.value.code == "checkpoint_sdk_timeout"
 
         asyncio.run(scenario())
 
@@ -259,6 +262,11 @@ class VersionedS3:
 
 
 class TestImmutableStorage:
+    def test_missing_bucket_reports_storage_configuration_failure(self):
+        with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
+            checkpoint.S3ContinuationCheckpoints("")
+        assert error.value.code == "checkpoint_storage_unavailable"
+
     @pytest.fixture
     def storage(self):
         client = VersionedS3()
@@ -295,6 +303,16 @@ class TestImmutableStorage:
         assert store.load(receipt, IDENTITY) == body
         assert client.calls[-1][1]["VersionId"] == receipt.version_id
         assert all(stream.closed for stream in client.streams)
+
+    def test_unreadable_saved_version_reports_storage_failure(self, storage, body):
+        store, client = storage
+        receipt = store.save(body, IDENTITY)
+        client.get_object = Mock(
+            side_effect=ClientError({"Error": {"Code": "AccessDenied"}}, "GetObject")
+        )
+        with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
+            store.load(receipt, IDENTITY)
+        assert error.value.code == "checkpoint_storage_unavailable"
 
     def test_lost_write_reply_recovers_from_exact_read_back(self, storage, body):
         store, client = storage
@@ -373,8 +391,11 @@ class TestEnvelope:
 
     @pytest.mark.parametrize("body", [b"{", b"\xff", b"null", b""])
     def test_invalid_json_fails(self, body):
-        with pytest.raises(checkpoint.ContinuationCheckpointError):
+        with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
             checkpoint.decode_checkpoint(body, IDENTITY)
+        assert error.value.code == (
+            "checkpoint_failed" if body in (b"null", b"") else "checkpoint_invalid_json"
+        )
 
     @pytest.mark.parametrize("value", ["../task", "", "task/other", "x" * 129])
     def test_path_components_cannot_escape_task_prefix(self, value):
@@ -386,3 +407,7 @@ def test_invalid_json_reports_a_specific_checkpoint_code():
     with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
         checkpoint._encode({"not_json": object()})
     assert error.value.code == "checkpoint_invalid_json"
+
+
+def test_unspecified_checkpoint_failure_does_not_claim_invalid_data():
+    assert checkpoint.ContinuationCheckpointError("Unknown failure").code == "checkpoint_failed"

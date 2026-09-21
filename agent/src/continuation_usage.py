@@ -59,8 +59,15 @@ async def read_usage(client: Any) -> UsageSnapshot:
     query = getattr(client, "_query", None)
     send = getattr(query, "_send_control_request", None)
     if not callable(send):
-        raise ContinuationCheckpointError("Continuation accounting client is unavailable")
-    response = await asyncio.wait_for(send({"subtype": "get_usage"}), timeout=5)
+        raise ContinuationCheckpointError(
+            "Continuation accounting client is unavailable", code="checkpoint_sdk_unverified"
+        )
+    try:
+        response = await asyncio.wait_for(send({"subtype": "get_usage"}), timeout=5)
+    except TimeoutError as exc:
+        raise ContinuationCheckpointError(
+            "Continuation accounting request timed out", code="checkpoint_sdk_timeout"
+        ) from exc
     session = response.get("session") if isinstance(response, dict) else None
     if not isinstance(session, dict) or not valid_cost(session.get("total_cost_usd")):
         raise ContinuationCheckpointError("Continuation accounting response has no valid cost")
