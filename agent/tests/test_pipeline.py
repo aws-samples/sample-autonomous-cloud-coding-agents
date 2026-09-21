@@ -2340,3 +2340,30 @@ class TestEarlyAckOrdering:
         _args, kwargs = m_finished.call_args
         assert kwargs.get("success") is False
         assert kwargs.get("started_reaction_id") == "reaction-42"
+
+
+@pytest.mark.parametrize("outcome", ["failed", "superseded"])
+def test_finished_pipeline_cannot_report_success_without_committing_result(monkeypatch, outcome):
+    import task_state
+    from pipeline import _persist_finished_task
+
+    monkeypatch.setattr(
+        task_state,
+        "write_terminal",
+        MagicMock(return_value=task_state.TerminalWriteOutcome(outcome)),
+    )
+    with pytest.raises(task_state.TerminalWriteError, match="Task result was not committed"):
+        _persist_finished_task("task", "COMPLETED", {"status": "success"})
+
+
+@pytest.mark.parametrize("outcome", ["written", "disabled"])
+def test_finished_pipeline_accepts_persisted_result_or_local_run(monkeypatch, outcome):
+    import task_state
+    from pipeline import _persist_finished_task
+
+    monkeypatch.setattr(
+        task_state,
+        "write_terminal",
+        MagicMock(return_value=task_state.TerminalWriteOutcome(outcome)),
+    )
+    _persist_finished_task("task", "COMPLETED", {"status": "success"})

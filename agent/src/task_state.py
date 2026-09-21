@@ -7,7 +7,9 @@ its allowed attributes are pinned by the CDK agent-task-write-attributes contrac
 """
 
 import os
+import random
 import time
+from enum import StrEnum
 from typing import NotRequired, TypedDict
 
 from shell import log, log_error_cw
@@ -96,9 +98,31 @@ def _lease_check(task_id: str, *, low_level: bool, identity=None) -> dict | None
     }
 
 
+def _transact_with_conflict_retry(client, items: list):
+    """Retry only uncommitted transaction conflicts, never a failed ownership check."""
+    from botocore.exceptions import ClientError
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            return client.transact_write_items(TransactItems=items)
+        except ClientError as error:
+            code = error.response.get("Error", {}).get("Code")
+            reasons = _extract_cancellation_reasons(error)
+            codes = {reason.get("Code") for reason in reasons}
+            conflict = code == "TransactionConflictException" or (
+                code == "TransactionCanceledException"
+                and "TransactionConflict" in codes
+                and codes <= {"None", "TransactionConflict"}
+            )
+            if not conflict or attempt == max_attempts - 1:
+                raise
+            time.sleep(random.SystemRandom().uniform(0.025, 0.075) * (2**attempt))
+
+
 def _transact_task(client, task_id: str, *, TransactItems: list, identity=None):
     lease = _lease_check(task_id, low_level=True, identity=identity)
-    return client.transact_write_items(TransactItems=[*TransactItems, *([lease] if lease else [])])
+    return _transact_with_conflict_retry(client, [*TransactItems, *([lease] if lease else [])])
 
 
 def _update_task(table, task_id: str, *, low_level: bool = False, **operation):
@@ -108,7 +132,7 @@ def _update_task(table, task_id: str, *, low_level: bool = False, **operation):
     if not low_level:
         operation["TableName"] = table.name
     client = table if low_level else table.meta.client
-    return client.transact_write_items(TransactItems=[{"Update": operation}, lease])
+    return _transact_with_conflict_retry(client, [{"Update": operation}, lease])
 
 
 def _task_status_conflict(error: Exception) -> bool:
@@ -236,16 +260,29 @@ def write_running(task_id: str) -> None:
         log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
-def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
+class TerminalWriteOutcome(StrEnum):
+    WRITTEN = "written"
+    SUPERSEDED = "superseded"
+    FAILED = "failed"
+    DISABLED = "disabled"
+
+
+class TerminalWriteError(RuntimeError):
+    """The worker finished but could not commit its result to the task record."""
+
+
+def write_terminal(task_id: str, status: str, result: dict | None = None) -> TerminalWriteOutcome:
     """Transition a task to a terminal state (COMPLETED or FAILED).
 
     Updates ``status_created_at`` alongside ``status`` — see
-    :func:`write_running` for why.
+    :func:`write_running` for why. Callers must not report successful completion
+    when the result is FAILED or SUPERSEDED. DISABLED supports local runs without
+    a configured task table; crash-path callers already report failure.
     """
     try:
         table = _get_table()
         if table is None:
-            return
+            return TerminalWriteOutcome.DISABLED
         now = _now_iso()
         expr_names = {"#s": "status"}
         # Mixed value types: most are strings, but build_passed/lint_passed are
@@ -356,6 +393,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             ExpressionAttributeNames=expr_names,
             ExpressionAttributeValues=expr_values,
         )
+        return TerminalWriteOutcome.WRITTEN
     except Exception as e:
         if _task_status_conflict(e):
             log(
@@ -400,7 +438,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                         f"task_id={task_id!r} after ConditionalCheckFailed "
                         f"(terminal-state race).",
                     )
-            return
+            return TerminalWriteOutcome.SUPERSEDED
         # Include DynamoDB's cancellation reasons: losing worker ownership is
         # not a benign status race and must never trigger trace self-healing.
         log_error_cw(
@@ -408,6 +446,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             f"CancellationReasons={_extract_cancellation_reasons(e)}",
             task_id=task_id,
         )
+        return TerminalWriteOutcome.FAILED
 
 
 def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
@@ -447,12 +486,7 @@ def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
         )
         return True
     except Exception as e:
-        from botocore.exceptions import ClientError
-
-        if (
-            isinstance(e, ClientError)
-            and e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
-        ):
+        if _task_status_conflict(e):
             # Benign: URI was already persisted, or status isn't terminal yet.
             log(
                 "INFO",
@@ -464,7 +498,8 @@ def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
         log(
             "WARN",
             f"[task_state] write_trace_uri_conditional failed for "
-            f"task_id={task_id!r}: {type(e).__name__}: {e}",
+            f"task_id={task_id!r}: {type(e).__name__}: {e}; "
+            f"CancellationReasons={_extract_cancellation_reasons(e)}",
         )
         return False
 
