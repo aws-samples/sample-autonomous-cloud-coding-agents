@@ -87,7 +87,7 @@ def test_cloud_worker_missing_endpoint_reports_configuration_error(monkeypatch, 
     monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::123456789012:role/session")
     direct = MagicMock()
     monkeypatch.setattr(task_state, "_get_ddb_client", direct)
-    with pytest.raises(RuntimeError, match="APPROVAL_REQUESTS_API_URL.*matching CDK"):
+    with pytest.raises(RuntimeError, match=r"APPROVAL_REQUESTS_API_URL.*matching CDK"):
         if operation == "create":
             task_state.transact_write_approval_request("task", "request", pending_request())
         else:

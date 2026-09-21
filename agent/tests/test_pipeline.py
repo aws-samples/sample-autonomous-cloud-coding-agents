@@ -2413,24 +2413,28 @@ def test_terminal_persistence_through_task_entry_point(monkeypatch, repo_url, ou
             patch.object(task_state, "write_terminal", terminal),
         ):
             stack.enter_context(context)
-        kwargs = dict(
-            repo_url=repo_url,
-            task_description="Read the README",
-            github_token="ghp_test",
-            aws_region="us-east-1",
-            task_id="terminal-race",
-            channel_source="linear",
-            channel_metadata=_LINEAR_META,
-        )
-        if not repo_url:
-            kwargs["resolved_workflow"] = {"id": "default/agent-v1", "version": "1.0.0"}
+
+        def execute():
+            return run_task(
+                repo_url=repo_url,
+                task_description="Read the README",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="terminal-race",
+                channel_source="linear",
+                channel_metadata=_LINEAR_META,
+                resolved_workflow=None
+                if repo_url
+                else {"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
         if outcome == "failed":
             with pytest.raises(
                 task_state.TerminalWriteError, match="Task result was not committed"
             ):
-                run_task(**kwargs)
+                execute()
         else:
-            result = run_task(**kwargs)
+            result = execute()
             assert result["status"] == "success"
             terminal.assert_called_once()
             assert not any(call.kwargs.get("success") is False for call in finished.call_args_list)
