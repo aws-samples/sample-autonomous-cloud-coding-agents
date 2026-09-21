@@ -425,7 +425,7 @@ export async function readExistingWebhookSecret(
   try {
     raw = await fetchSecretString();
   } catch (err) {
-    if (isNotFound(err)) return undefined; // nosemgrep: ts-silent-success-masking -- genuine first install: `isNotFound` narrows to ResourceNotFoundException, so this is "no prior secret to preserve", an answered read with an empty answer, not a swallowed failure. EVERY other error throws on the very next line (fail closed, #612 review B1). The rule flags a conditional re-raise deliberately — see `masked_conditional_reraise` in .semgrep/silent-success-masking.py — so the allowlist is its intended remedy for this shape, and the guard cannot be restructured to clear it
+    if (isNotFound(err)) return undefined; // genuine first install
     throw err; // fail closed — caller wraps with an actionable CliError
   }
   if (!raw) return undefined;
@@ -493,7 +493,6 @@ export async function readExistingOauthTokens(
   try {
     raw = await fetchSecretString();
   } catch (err) {
-    // nosemgrep: ts-silent-success-masking -- "no such secret" IS the empty success here: a first install has no bundle, so there is no token to carry forward. Every other error rethrows below, which is the fail-closed half of the contract this function exists for.
     if (isNotFound(err)) return undefined; // genuine first install
     throw err;
   }

@@ -625,6 +625,45 @@ export interface LinearLinkResponse {
   readonly linked_at?: string;
 }
 
+/** Linear remove-workspace response from DELETE /v1/linear/workspaces/{slug}.
+ *
+ * `status` is `revoked` for the default soft-removal (registry row kept with
+ * `status=revoked` and `revoked_reason=admin_removed` for audit) or `purged`
+ * when the row was deleted outright (`--purge`). A revoked row no longer
+ * resolves tokens: the OAuth resolver refuses any non-active row, and
+ * `admin_removed` is deliberately not the one reason it re-probes instead of
+ * refusing — so the removal is terminal, not a latch a later vault probe can
+ * clear. Project→repo mappings are not touched (they carry no workspace id and
+ * are removed by project id).
+ *
+ * `provider_name` is present only for vault-managed workspaces, and its
+ * presence means **teardown is not finished**: an AgentCore OAuth2 credential
+ * provider survives outside CloudFormation, still holding the Linear client
+ * secret and a live, self-refreshing grant. The CLI prints the
+ * `delete-oauth2-credential-provider` follow-up when it is set. */
+export interface LinearRemoveWorkspaceResponse {
+  readonly workspace_slug: string;
+  readonly linear_workspace_id: string;
+  readonly status: 'revoked' | 'purged';
+  /**
+   * What happened to the per-workspace `bgagent-linear-oauth-<slug>` secret.
+   * Three states, not a boolean, because "nothing was deleted" does not always
+   * mean "teardown is complete":
+   * - `deleted` — a live secret was destroyed by this call.
+   * - `absent` — there was supposed to be one and it is already gone (a re-run,
+   *   or a prior partial teardown). Idempotent success.
+   * - `not_applicable` — the workspace is vault-managed and never had a Secrets
+   *   Manager secret of its own; its credential lives in the AgentCore provider
+   *   named by `provider_name`, which this endpoint does **not** delete.
+   *
+   * Inlined rather than given its own exported alias: `check-types-sync.ts`
+   * treats every exported CLI type as drift unless CDK exports it too, and the
+   * handler's matching shape is a module-local interface there.
+   */
+  readonly secret: 'deleted' | 'absent' | 'not_applicable';
+  readonly provider_name?: string;
+}
+
 /** Jira link response from POST /v1/jira/link.
  *
  * Mirrors LinearLinkResponse semantics: `dry_run: true` returns the
