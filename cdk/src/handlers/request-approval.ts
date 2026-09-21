@@ -53,11 +53,6 @@ function validId(value: unknown): value is string {
   return validShortText(value) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
 }
 
-/** Service-owned identity, compared as a DynamoDB value; never used as an IAM path. */
-function validWorkerId(value: unknown): value is string {
-  return validShortText(value) && !/[\u0000-\u001f\u007f]/.test(value);
-}
-
 /** Never copy decision, notification, retention or arbitrary caller fields. */
 function validateRequest(input: RequestInput, task: Record<string, any>): Record<string, unknown> {
   const row = input.approval;
@@ -88,7 +83,7 @@ function validateRequest(input: RequestInput, task: Record<string, any>): Record
  */
 export async function recordWorkerRequest(input: RequestInput): Promise<Record<string, unknown>> {
   if (!input || !validId(input.task_id) || !validId(input.request_id)
-    || (input.worker_attempt_id !== undefined && !validWorkerId(input.worker_attempt_id))
+    || (input.worker_attempt_id !== undefined && !validId(input.worker_attempt_id))
     || !['create', 'timeout'].includes(input.operation)) {
     return { ok: false, code: 'APPROVAL_REQUEST_INVALID' };
   }
