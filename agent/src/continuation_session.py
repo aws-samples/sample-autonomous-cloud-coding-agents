@@ -40,12 +40,18 @@ _HASH = re.compile(r"[0-9a-f]{64}\Z")
 class ContinuationCheckpointError(RuntimeError):
     """A checkpoint cannot be acknowledged or safely restored."""
 
+    def __init__(self, message: str, *, code: str = "checkpoint_invalid") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def _encode(value: Any) -> bytes:
     try:
         return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
     except (TypeError, ValueError, RecursionError) as exc:
-        raise ContinuationCheckpointError("Checkpoint contains invalid JSON data") from exc
+        raise ContinuationCheckpointError(
+            "Checkpoint contains invalid JSON data", code="checkpoint_invalid_json"
+        ) from exc
 
 
 def _copy(value: Any) -> Any:
@@ -74,6 +80,12 @@ def _action_hash(tool_input: dict) -> str:
 
 @dataclass(frozen=True)
 class CheckpointIdentity:
+    """Version-1 wire identity: attempt_id is the source physical MicroVM ID.
+
+    The coordinator's continuation.attempt_id is a separate logical launch token.
+    Renaming this serialized field requires a checkpoint-version migration.
+    """
+
     task_id: str
     attempt_id: str
     request_id: str
@@ -169,7 +181,9 @@ def decode_checkpoint(body: bytes, identity: CheckpointIdentity) -> dict:
     try:
         envelope = json.loads(body)
     except (ValueError, UnicodeError, RecursionError) as exc:
-        raise ContinuationCheckpointError("Checkpoint is not valid JSON") from exc
+        raise ContinuationCheckpointError(
+            "Checkpoint is not valid JSON", code="checkpoint_invalid_json"
+        ) from exc
     if (
         not isinstance(envelope, dict)
         or set(envelope)
@@ -323,7 +337,7 @@ class CheckpointSessionStore(SessionStore):
                     await self._changed.wait()
         except TimeoutError as exc:
             raise ContinuationCheckpointError(
-                "SDK mirror did not acknowledge the pending action"
+                "SDK mirror did not acknowledge the pending action", code="checkpoint_sdk_timeout"
             ) from exc
 
     @classmethod
@@ -422,7 +436,8 @@ class S3ContinuationCheckpoints:
         except Exception as exc:
             cause = write_error if write_error is not None else exc
             raise ContinuationCheckpointError(
-                "Checkpoint could not be verified; keep the current worker available"
+                "Checkpoint could not be verified; keep the current worker available",
+                code="checkpoint_storage_unverified",
             ) from cause
         receipt = CheckpointReceipt(key, version, digest, len(body))
         receipt.validate(identity)
@@ -433,7 +448,9 @@ class S3ContinuationCheckpoints:
         try:
             body, _ = self._read(receipt.key, version_id=receipt.version_id)
         except Exception as exc:
-            raise ContinuationCheckpointError("Saved checkpoint could not be read") from exc
+            raise ContinuationCheckpointError(
+                "Saved checkpoint could not be read", code="checkpoint_storage_unavailable"
+            ) from exc
         if len(body) != receipt.size_bytes or hashlib.sha256(body).hexdigest() != receipt.sha256:
             raise ContinuationCheckpointError("Saved checkpoint does not match its receipt")
         decode_checkpoint(body, identity)

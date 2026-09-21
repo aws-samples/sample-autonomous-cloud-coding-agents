@@ -315,8 +315,11 @@ class TestImmutableStorage:
     def test_unverifiable_storage_never_acknowledges(self, storage, body, failure):
         store, client = storage
         setattr(client, failure, failure != "versioned")
-        with pytest.raises(checkpoint.ContinuationCheckpointError, match="could not be verified"):
+        with pytest.raises(
+            checkpoint.ContinuationCheckpointError, match="could not be verified"
+        ) as error:
             store.save(body, IDENTITY)
+        assert error.value.code == "checkpoint_storage_unverified"
         assert all(stream.closed for stream in client.streams)
 
     def test_load_keeps_the_original_version_even_if_current_key_changes(self, storage, body):
@@ -377,3 +380,9 @@ class TestEnvelope:
     def test_path_components_cannot_escape_task_prefix(self, value):
         with pytest.raises(checkpoint.ContinuationCheckpointError):
             replace(IDENTITY, task_id=value)
+
+
+def test_invalid_json_reports_a_specific_checkpoint_code():
+    with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
+        checkpoint._encode({"not_json": object()})
+    assert error.value.code == "checkpoint_invalid_json"
