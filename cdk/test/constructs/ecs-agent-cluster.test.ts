@@ -771,6 +771,7 @@ describe('EcsAgentCluster construct', () => {
         userConcurrencyTable,
         githubTokenSecret,
         agentSessionRole: sessionRole,
+        approvalRequestsApiUrl: 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
       });
       return Template.fromStack(stack);
     }
@@ -846,21 +847,8 @@ describe('EcsAgentCluster construct', () => {
 });
 
 describe('EcsAgentCluster approval wiring without a SessionRole', () => {
-  let template: Template;
-  beforeAll(() => { template = createStack({ withApprovals: true }).template; });
-
-  test('grants approval reads even without a SessionRole, never direct writes', () => {
-    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
-      .find(id => id.startsWith('TaskApprovalsTable'));
-    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
-      .flatMap(policy => policy.Properties.PolicyDocument.Statement);
-    const grants = statements.filter(statement =>
-      JSON.stringify(statement.Resource).includes(approvalId!),
-    );
-    expect(grants).toEqual([expect.objectContaining({
-      Effect: 'Allow',
-      Action: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
-    })]);
+  test('rejects approval wiring without task-scoped credentials before synthesis', () => {
+    expect(() => createStack({ withApprovals: true })).toThrow('ECS approvals require agentSessionRole and approvalRequestsApiUrl');
   });
 
   test('rejects a build setting that would erase approval-table wiring', () => {

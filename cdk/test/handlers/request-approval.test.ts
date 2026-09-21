@@ -130,3 +130,10 @@ test('reports service failures as unavailable with a request ID, not invalid inp
     error: { code: 'ProvisionedThroughputExceededException', request_id: 'api-request' },
   });
 });
+
+test.each(['*', 'task/*', '../task', 'task?x', 'task#lease', 'task\n'])('rejects unsafe task/request/worker identifiers %j before database access', async id => {
+  for (const key of ['task_id', 'request_id', 'worker_attempt_id']) {
+    expect(await recordWorkerRequest({ ...input, [key]: id })).toEqual({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
+  }
+  expect(send).not.toHaveBeenCalled();
+});

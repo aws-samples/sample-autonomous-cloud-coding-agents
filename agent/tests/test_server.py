@@ -1799,10 +1799,11 @@ class TestPlatformConfigContract:
             "anthropic_model": "ANTHROPIC_MODEL",
         }
 
-    def test_required_subset_is_exactly_the_four_run_blocking_keys(self):
+    def test_required_subset_includes_the_trusted_approval_service(self):
         assert (
             frozenset(
                 {
+                    "approval_requests_api_url",
                     "task_table_name",
                     "task_events_table_name",
                     "github_token_secret_arn",
