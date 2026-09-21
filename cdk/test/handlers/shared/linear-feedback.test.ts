@@ -149,6 +149,8 @@ describe('linear-feedback', () => {
     test.each([
       ['Approval needed\r\nReply here\r\n', true],
       ['Approval needed\nApprove a DIFFERENT action', false],
+      ['Approval  needed\nReply here', false],
+      ['approval needed\nReply here', false],
     ])('compares replay content conservatively: %j', async (body, accepted) => {
       fetchMock.mockRejectedValueOnce(new Error('lost response'));
       fetchMock.mockResolvedValueOnce(jsonResponse({

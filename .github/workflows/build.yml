@@ -60,6 +60,7 @@ jobs:
           - 8000/tcp
     env:
       CI: "true"
+      ABCA_TEST_SDK_CONTINUATION: "1"
       MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
