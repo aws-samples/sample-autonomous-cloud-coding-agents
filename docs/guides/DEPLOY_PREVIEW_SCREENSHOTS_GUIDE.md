@@ -11,7 +11,7 @@ The pipeline accepts GitHub `deployment_status` events and successful AWS Amplif
 | Provider | Out of the box? | Notes |
 |---|---|---|
 | **Vercel** (managed hosting + GitHub app) | ✅ | The worked example below uses this. Default `environment` is `Preview`. |
-| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Enable PR previews and subscribe the ABCA webhook to **Check runs**. Successful `AWS Amplify Console Web Preview` checks are normalized to environment `Preview`. |
+| **AWS Amplify Hosting** (Connected to GitHub) | ✅ | Enable PR previews and subscribe the ABCA webhook to **Check runs**. Successful `AWS Amplify Console Web Preview` checks bypass the deployment environment filter. |
 | **Netlify** (managed hosting + GitHub app) | ⚠ | `environment` is `Deploy Preview <PR#>`, which the current single-string `SCREENSHOT_TARGET_ENVIRONMENT` filter doesn't match across all PRs. Workable today only by picking one specific PR's environment string; broader pattern matching isn't shipped. |
 | **GitHub Actions** that calls `POST /repos/.../deployments` (typical for ECS/Fargate, Cloud Run, Fly.io, Railway, Cloudflare Pages, etc.) | ✅ | Your workflow controls the `environment` field; pass whatever you want and set `SCREENSHOT_TARGET_ENVIRONMENT` to match. |
 | **External CI** (CircleCI, GitLab, ArgoCD) that doesn't touch GitHub Deployments | ❌ | Add a final job that calls the GitHub Deployments API after the deploy succeeds — see [GitHub's example](https://docs.github.com/en/rest/deployments/deployments#create-a-deployment). |
@@ -23,11 +23,13 @@ For a deployment-status event, ABCA needs:
 
 If your provider gives you that, you're done. The example below is Vercel because that's what we smoke-tested on; the pipeline doesn't otherwise prefer one provider over another.
 
-For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed.
+For Amplify, enable **Hosting → Previews** on the PR's target branch and add **Check runs** to the repository's ABCA webhook events. Amplify publishes the URL in the completed check's `details_url`; a green GitHub check alone will not trigger capture if the webhook only subscribes to Deployment statuses. ABCA accepts successful preview checks from the `aws-amplify-console` app owner with a matching PR number, head SHA, and HTTPS `pr-<number>.<app-id>.amplifyapp.com` URL. No manual deployment event or extra GitHub Actions workflow is needed. The processor fetches that exact PR and confirms it is still open with the same head SHA before capture, so two PRs sharing a commit cannot redirect the screenshot or Jira/Linear feedback.
+
+**Existing Amplify operators:** redeploy ABCA to pick up this receiver and processor, then add **Check runs** to your existing webhook while keeping **Deployment statuses** selected. Keep any branch-name `SCREENSHOT_TARGET_ENVIRONMENT` value (for example, `main`): deployment statuses still use it, while validated Amplify PR checks bypass it. After redeploy, a webhook already subscribed to **Check runs** will start capturing and publishing Amplify PR previews that a branch-name filter previously excluded, with no further configuration change; screenshots are publicly readable through CloudFront and may contain customer data rendered by the preview. To keep Amplify check-triggered capture disabled, deselect **Check runs** on the ABCA webhook. You do not need to change the environment filter to `Preview`. Subscriptions affect future events only; rebuild an existing PR preview to verify the change. If an earlier receiver already accepted and deduplicated a completion, replaying that same check within the one-hour dedup window will not capture again.
 
 ## What you get
 
-When you (or the agent) push to a branch that triggers a preview deploy, your provider deploys the preview, posts a `deployment_status` event back to GitHub, and ABCA's webhook receiver:
+When you (or the agent) push to a branch that triggers a preview deploy, your provider deploys the preview, posts a deployment status or Amplify preview check back to GitHub, and ABCA's webhook receiver:
 
 1. Captures a full-page screenshot of the preview URL via AgentCore Browser
 2. Uploads the PNG to a private S3 bucket served via CloudFront
@@ -39,13 +41,13 @@ End-to-end latency: typically 10–15 seconds after your provider reports the de
 ## How it works
 
 ```
-agent push → provider preview build → deployment_status webhook
+agent push → provider preview build → deployment_status / Amplify check_run
                                               ↓
                                     POST /v1/github/webhook
                                               ↓
                                   receiver Lambda (HMAC verify, dedup,
-                                                  state=success +
-                                                  environment filter)
+                                                  successful deploy/check +
+                                                  provider validation)
                                               ↓
                                     processor Lambda
                                               ↓
@@ -55,7 +57,7 @@ agent push → provider preview build → deployment_status webhook
                                               ↓
                               CloudFront-served public URL
                                               ↓
-                          GitHub PR comment (+ Linear issue comment if linked)
+                          GitHub PR comment (+ Jira/Linear feedback if linked)
 ```
 
 Architecture notes:
@@ -143,12 +145,13 @@ Open any PR on the configured repo (push a commit, open a PR however you normall
 
 ## Configuring for non-Vercel providers
 
-The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`, matches Vercel's per-PR environment label). To use a different value, pass `screenshotTargetEnvironment` to the `GitHubScreenshotIntegration` construct in your CDK app and redeploy.
+The pipeline filters `deployment_status` webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (default `Preview`, matches Vercel's per-PR environment label). To use a different value, pass `screenshotTargetEnvironment` to the `GitHubScreenshotIntegration` construct in your CDK app and redeploy.
 
 | Provider | Typical `environment` value | What to set |
 |---|---|---|
 | Vercel | `Preview` | leave default |
-| Amplify Hosting PR check | normalized to `Preview` | leave default; subscribe to Check runs |
+| Amplify Hosting PR check | not used for filtering | keep existing value; subscribe to Check runs |
+| Amplify branch deployment status | branch name | match the branch name exactly |
 | Netlify | `Deploy Preview <PR#>` | currently not directly matchable across all PRs (single fixed-string filter only) |
 | GitHub Actions custom | whatever your workflow passes | match it exactly |
 
@@ -162,7 +165,19 @@ The pipeline filters incoming webhooks against `SCREENSHOT_TARGET_ENVIRONMENT` (
 
 ### Webhook delivers 200 but no screenshot lands
 
-For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
+For Amplify, confirm **Check runs** is selected on the ABCA webhook, the `AWS Amplify Console Web Preview` check completed successfully, and its details link opens the PR preview. `skipped_check` means the event was not an eligible successful Amplify PR preview. Its `reason` is also logged by the receiver as `screenshot.amplify_check_rejected`, without the raw payload or URL. A valid `X-GitHub-Delivery` UUID is logged as `delivery_id` so you can locate the event in GitHub. Expected incomplete or unrelated checks retain info-level reason logs because every rejected check must be diagnosable. Adding the subscription only affects future events; rebuild an existing preview to exercise the automatic path.
+
+Inspect the receiver logs for rejected checks:
+
+| Reason | What to check |
+|---|---|
+| `action_not_completed`, `check_not_completed`, `check_not_successful` | Wait for a successful completed check. |
+| `unexpected_check_name`, `unexpected_app_owner`, `unexpected_app_slug` | The check must be `AWS Amplify Console Web Preview`, owned by `aws-amplify-console`, with an `aws-amplify-*` app slug. Other CI checks are ignored. |
+| `invalid_details_url`, `untrusted_preview_url`, `invalid_pr_number` | The details link must be a trusted HTTPS `pr-N.<app-id>.amplifyapp.com` preview URL with a positive PR number, no credentials, and no non-default port. |
+| `invalid_pull_requests`, `preview_pr_not_found`, `head_sha_mismatch` | The check must list the preview PR with the same head SHA as the check. |
+| `invalid_payload`, `invalid_check_id`, `invalid_head_sha`, `invalid_repository` | The webhook payload is malformed; inspect the delivery in GitHub. |
+
+Malformed JSON returns 400 and logs `screenshot.webhook_rejected` with `reason: invalid_json`. Invalid signatures return 401 before normalization. Valid checks use a separate `amplify#` dedup namespace, so a deployment-status event with identical IDs does not suppress the check. Duplicate checks return `deduped` without dispatching another capture.
 
 Check the screenshot processor logs:
 
@@ -175,9 +190,40 @@ aws lambda list-functions --region us-east-1 \
 Then tail the function's CloudWatch log group. Common silent skips:
 
 - `skipped_state` — the delivery was for a non-`success` status (e.g. `pending`, `in_progress`); ignore.
-- `skipped_environment` — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
+- `skipped_environment` (deployment statuses only) — the deploy's `environment` field doesn't match `SCREENSHOT_TARGET_ENVIRONMENT`. Common cause for non-Vercel providers; see "Configuring for non-Vercel providers" above.
 - `skipped_no_url` — the `success` status didn't include `environment_url`. Some providers post URL-less success events; the next push usually carries the URL.
-- `No open PR found for SHA after retries` — the deploy provider built and reported faster than the agent could `gh pr create` (race window > 35s). Rare; redeliver the webhook from GitHub's UI to retry.
+- `screenshot.amplify_pr_rejected` — invalid forwarded PR metadata or a terminal rejection of the live PR response, logged once at warn level. Capture stops immediately without retrying, falling back to another PR, or emitting `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. See the reasons below.
+- `screenshot.pr_lookup_rejected` / `SCREENSHOT_PR_LOOKUP_REJECTED` — GitHub rejected the validated PR lookup with a permanent HTTP failure, logged once at ERROR with `status`. Check token access and permissions, including for 404 responses that can conceal inaccessible repositories. Capture stops without retrying.
+- `screenshot.pr_lookup_exhausted` / `SCREENSHOT_PR_LOOKUP_EXHAUSTED` — retries or the lookup budget ran out. Check GitHub availability, token permissions, rate limits, or whether a deployment completed before the PR was created.
+- `screenshot.preview_url_rejected` — URL validation stopped capture. `untrusted_preview_url` logs at WARN with `preview_host` and `url_parsed`; `preview_pr_number_mismatch` logs at ERROR with `SCREENSHOT_PREVIEW_PR_MISMATCH` when the preview hostname disagrees with the forwarded PR number.
+
+Processor-side Amplify reasons:
+
+| Reason | What to check |
+|---|---|
+| `invalid_forwarded_pr_number` | The forwarded PR number must be a positive safe integer. Deploy the receiver and processor together. |
+| `pr_not_found` | GitHub returned 404 for the validated PR. Confirm the PR exists and the GitHub token can access it; GitHub also uses 404 to conceal inaccessible resources. |
+| `pr_request_rejected` | GitHub rejected the PR lookup with a non-retryable 4xx response. Inspect the logged `status`, token permissions, and request. |
+| `pr_number_mismatch` | GitHub returned a different PR number than the validated preview. Inspect the PR lookup response. |
+| `pr_not_open` | The PR closed or merged while Amplify built the preview. No capture is needed. |
+| `live_pr_head_sha_mismatch` | The live PR head changed after the check started. Rebuild the current preview. Receiver code `head_sha_mismatch` instead compares the check's embedded PR head with its own SHA. |
+| `missing_head_ref` | GitHub returned the expected PR and SHA without a usable branch name. Inspect the PR response. |
+| `malformed_pr_response` | GitHub returned a null, array, or non-object PR body. Inspect the API response. |
+
+The processor rechecks the Amplify URL's HTTPS origin, credentials, port, and PR number before requesting a token or capturing. URL rejection logs include only the hostname, never credentials, paths, or queries. A hostname/forwarded-number mismatch indicates an inconsistent invocation; inspect the receiver and processor deployment versions.
+
+Fetch failures, timeouts, non-JSON bodies, 5xx responses, HTTP 408/429, and all 403 responses retain bounded retries. Secondary rate limits can omit rate-limit headers, so even an ambiguous 403 retries; persistent permission failures then emit `SCREENSHOT_PR_LOOKUP_EXHAUSTED`. Deployment-status commit-pulls HTTP failures, including 404, also remain retryable. Exhaustion records the final reason:
+
+| Reason | What to check |
+|---|---|
+| `fetch_failed` | GitHub network reachability or per-request timeout. |
+| `http_error` | GitHub returned non-2xx responses; inspect the preceding logged HTTP statuses, token permissions, and rate limits. |
+| `non_json_response` | GitHub's response could not be parsed as JSON. |
+| `malformed_pr_response` | The deployment-status commit-pulls endpoint returned a non-array body. |
+| `pr_not_linked` | No open PR is associated with the deployment SHA yet. |
+| `budget_exhausted` | Earlier processing consumed the PR lookup budget before the first request. |
+
+After resolving a failure, rebuild the preview or wait for the one-hour dedup window before replaying the same check.
 
 ### No screenshots at all: check the processor alarms and DLQ
 

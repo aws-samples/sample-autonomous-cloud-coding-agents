@@ -67,7 +67,14 @@ jest.mock('../../src/handlers/shared/jira-deployment-preview', () => ({
   deliverJiraDeploymentPreview: (...args: unknown[]) => deliverJiraMock(...args),
 }));
 
-process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
+const originalJiraRegistry = process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+beforeEach(() => { process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry'; });
+afterEach(() => {
+  jest.useRealTimers();
+  jest.restoreAllMocks();
+  if (originalJiraRegistry === undefined) delete process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME;
+  else process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = originalJiraRegistry;
+});
 process.env.SCREENSHOT_BUCKET_NAME = 'screenshot-bucket';
 process.env.SCREENSHOT_PUBLIC_HOST = 'd1.cloudfront.net';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123:secret:gh-token';
@@ -75,6 +82,7 @@ process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 process.env.TASK_TABLE_NAME = 'TaskTable';
 
 import { handler } from '../../src/handlers/github-webhook-processor';
+import { normalizeAmplifyPreviewCheck } from '../../src/handlers/shared/github-deployment-status';
 import { logger } from '../../src/handlers/shared/logger';
 
 function payload(overrides: Record<string, unknown> = {}): { raw_body: string } {
@@ -95,12 +103,14 @@ function fetchOk(jsonValue: unknown, status = 200): jest.SpyInstance {
   return jest.spyOn(global, 'fetch').mockResolvedValueOnce({
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(),
     json: async () => jsonValue,
   } as unknown as Response);
 }
 
 describe('github-webhook-processor handler', () => {
   beforeEach(() => {
+    jest.restoreAllMocks();
     process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
     deliverJiraMock.mockReset();
     s3Send.mockReset();
@@ -115,7 +125,6 @@ describe('github-webhook-processor handler', () => {
     // task record (no orchestration_sub_issue_id) → standalone Linear comment
     // still posts, as the pre-existing tests expect.
     ddbSend.mockReset().mockResolvedValue({ Attributes: { channel_metadata: {} } });
-    jest.restoreAllMocks();
   });
 
   test('returns silently when raw_body is empty', async () => {
@@ -486,5 +495,313 @@ describe('authoritative Jira deployment routing', () => {
     expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
     expect(deliverJiraMock).not.toHaveBeenCalled();
     expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('validated Amplify PR routing', () => {
+  const sha = 'a'.repeat(40);
+  const taskId = '01JXABCDEF1234567890ABCDEF';
+  const branch = `bgagent/${taskId}/eng-42`;
+  const pr41 = { number: 41, state: 'open', title: 'ENG-41', head: { ref: 'bgagent/wrong-task/eng-41', sha } };
+  const pr42 = { number: 42, state: 'open', title: 'ENG-42', head: { ref: branch, sha } };
+
+  function amplifyEvent() {
+    const result = normalizeAmplifyPreviewCheck({
+      action: 'completed',
+      repository: { full_name: 'owner/repo' },
+      check_run: {
+        id: 123,
+        name: 'AWS Amplify Console Web Preview',
+        status: 'completed',
+        conclusion: 'success',
+        head_sha: sha,
+        details_url: 'https://pr-42.app123.amplifyapp.com',
+        app: { slug: 'aws-amplify-us-east-1', owner: { login: 'aws-amplify-console' } },
+        pull_requests: [pr41, pr42],
+      },
+    });
+    if (!result.ok) throw new Error(result.reason);
+    return { raw_body: JSON.stringify(result.payload), validated_pr_number: result.prNumber };
+  }
+
+  beforeEach(() => {
+    jest.restoreAllMocks();
+    process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraRegistry';
+    deliverJiraMock.mockReset().mockResolvedValue(undefined);
+    resolveGitHubTokenMock.mockReset().mockResolvedValue('token');
+    captureScreenshotMock.mockReset().mockResolvedValue(Buffer.from('png'));
+    s3Send.mockReset().mockResolvedValue({});
+    ddbSend.mockReset();
+    upsertTaskCommentMock.mockReset().mockResolvedValue({ commentId: 12 });
+    postIssueCommentMock.mockReset().mockResolvedValue(true);
+    findLinearIssueMock.mockReset().mockResolvedValue({ issueId: 'issue-42', linearWorkspaceId: 'ws' });
+    extractFromBranchMock.mockReset().mockImplementation((ref) => ref === branch ? 'ENG-42' : 'ENG-41');
+  });
+
+  test.each(['jira', 'linear'])('two PRs with one SHA route GitHub and %s feedback to the validated PR', async (source) => {
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async (url) => ({
+      ok: true,
+      status: 200,
+      // The commit-pulls endpoint would pick PR 41. Only a lookup by number
+      // preserves the PR encoded in the preview URL through task persistence.
+      json: async () => String(url).endsWith('/pulls/42') ? pr42 : [pr41, pr42],
+    } as Response));
+    const task = { task_id: taskId, repo: 'owner/repo', head_sha: sha, channel_source: source, channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'TG-42' } };
+    ddbSend.mockResolvedValue({ Attributes: task });
+
+    await handler(amplifyEvent());
+
+    expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/repos/owner/repo/pulls/42', expect.anything());
+    expect(captureScreenshotMock).toHaveBeenCalledWith('https://pr-42.app123.amplifyapp.com', expect.anything());
+    expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ repo: 'owner/repo', issueOrPrNumber: 42 }));
+    expect(ddbSend.mock.calls[0][0].input.Key).toEqual({ task_id: taskId });
+    if (source === 'jira') {
+      expect(deliverJiraMock).toHaveBeenCalledWith(expect.anything(), 'TaskTable', 'JiraRegistry', task,
+        'owner/repo', sha, expect.stringContaining('https://d1.cloudfront.net/'),
+        'https://pr-42.app123.amplifyapp.com', expect.any(Function));
+      expect(findLinearIssueMock).not.toHaveBeenCalled();
+    } else {
+      expect(findLinearIssueMock).toHaveBeenCalledWith('ENG-42', 'LinearWorkspaceRegistry');
+      expect(postIssueCommentMock).toHaveBeenCalledWith(expect.anything(), 'issue-42', expect.stringContaining('https://pr-42.app123.amplifyapp.com'));
+      expect(deliverJiraMock).not.toHaveBeenCalled();
+    }
+  });
+
+  test.each([
+    [pr41, 'pr_number_mismatch'],
+    [{ ...pr42, state: 'closed' }, 'pr_not_open'],
+    [{ ...pr42, head: { ref: branch, sha: 'b'.repeat(40) } }, 'live_pr_head_sha_mismatch'],
+    [{ ...pr42, head: { sha } }, 'missing_head_ref'],
+    [null, 'malformed_pr_response'],
+    [[pr41, pr42], 'malformed_pr_response'],
+    ['invalid', 'malformed_pr_response'],
+  ])('rejects a changed or malformed PR without capturing or falling back: %j', async (pr, reason) => {
+    jest.useFakeTimers();
+    try {
+      const log = jest.spyOn(logger, 'warn');
+      const error = jest.spyOn(logger, 'error');
+      const start = Date.now();
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => pr } as Response);
+      const pending = handler(amplifyEvent());
+      await jest.runAllTimersAsync();
+      await pending;
+      expect(log).toHaveBeenCalledWith('Validated Amplify PR no longer matches preview', {
+        event: 'screenshot.amplify_pr_rejected', reason, repo: 'owner/repo', pr_number: 42,
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/repos/owner/repo/pulls/42', expect.anything());
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(error).not.toHaveBeenCalled();
+      expect(Date.now()).toBe(start);
+      expect(captureScreenshotMock).not.toHaveBeenCalled();
+      expect(ddbSend).not.toHaveBeenCalled();
+      expect(upsertTaskCommentMock).not.toHaveBeenCalled();
+      expect(deliverJiraMock).not.toHaveBeenCalled();
+      expect(postIssueCommentMock).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([404, 400, 401, 422])('HTTP %s stops immediately with an actionable request error', async (status) => {
+    jest.useFakeTimers();
+    try {
+      const warn = jest.spyOn(logger, 'warn');
+      const error = jest.spyOn(logger, 'error');
+      const fetchMock = fetchOk({}, status);
+      const start = Date.now();
+      const pending = handler(amplifyEvent());
+      await jest.runAllTimersAsync();
+      await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledWith('GitHub rejected the validated Amplify PR lookup', {
+        event: 'screenshot.pr_lookup_rejected',
+        error_id: 'SCREENSHOT_PR_LOOKUP_REJECTED',
+        reason: status === 404 ? 'pr_not_found' : 'pr_request_rejected',
+        repo: 'owner/repo',
+        pr_number: 42,
+        status,
+      });
+      expect(Date.now()).toBe(start);
+      expect(captureScreenshotMock).not.toHaveBeenCalled();
+      expect(upsertTaskCommentMock).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each(['fetch error', 'timeout', '500', '502', '503', 'non-JSON', '403 quota', '403 retry-after', '403 no headers', '403 remaining quota', '408', '429'])('retries transient %s and captures the same PR after recovery', async (failure) => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest.spyOn(global, 'fetch');
+      if (failure === 'fetch error') {
+        fetchMock.mockRejectedValueOnce(new Error('network unavailable'));
+      } else if (failure === 'timeout') {
+        fetchMock.mockImplementationOnce((_url, options) => new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        }));
+      } else if (failure.startsWith('403')) {
+        fetchMock.mockResolvedValueOnce({
+          ok: false,
+          status: 403,
+          headers: new Headers(failure === '403 quota' ? { 'x-ratelimit-remaining': '0' }
+            : failure === '403 retry-after' ? { 'retry-after': '5' }
+              : failure === '403 remaining quota' ? { 'x-ratelimit-remaining': '4999' } : {}),
+        } as Response);
+      } else if (['408', '429', '500', '502', '503'].includes(failure)) {
+        fetchMock.mockResolvedValueOnce({ ok: false, status: Number(failure), headers: new Headers() } as Response);
+      } else {
+        fetchMock.mockResolvedValueOnce({ ok: true, json: async () => { throw new SyntaxError('secret-response-fragment'); } } as unknown as Response);
+      }
+      fetchMock.mockResolvedValueOnce({ ok: true, json: async () => pr42 } as Response);
+      const error = jest.spyOn(logger, 'error');
+      const warn = jest.spyOn(logger, 'warn');
+      const pending = handler(amplifyEvent());
+      await jest.runAllTimersAsync();
+      await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      for (const [url] of fetchMock.mock.calls) expect(url).toBe('https://api.github.com/repos/owner/repo/pulls/42');
+      expect(captureScreenshotMock).toHaveBeenCalledTimes(1);
+      expect(upsertTaskCommentMock).toHaveBeenCalledWith(expect.objectContaining({ issueOrPrNumber: 42 }));
+      expect(error).not.toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-response-fragment');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test.each([503, 403])('persistent HTTP %s failures retain the operational error', async (status) => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status, headers: new Headers({ 'x-ratelimit-remaining': '4999' }) } as Response);
+      const error = jest.spyOn(logger, 'error');
+      const pending = handler(amplifyEvent());
+      await jest.runAllTimersAsync();
+      await pending;
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        error_id: 'SCREENSHOT_PR_LOOKUP_EXHAUSTED', reason: 'http_error',
+      }));
+      expect(captureScreenshotMock).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('coerces non-string PR title/body before Linear identifier lookup', async () => {
+    fetchOk({ ...pr42, title: {}, body: 42 });
+    ddbSend.mockResolvedValue({ Attributes: {} });
+    extractLinearIdentifierMock.mockReset().mockReturnValue(null);
+    extractFromBranchMock.mockReturnValue(null);
+    await handler(amplifyEvent());
+    expect(extractLinearIdentifierMock).toHaveBeenCalledTimes(2);
+    expect(extractLinearIdentifierMock).toHaveBeenNthCalledWith(1, '');
+    expect(extractLinearIdentifierMock).toHaveBeenNthCalledWith(2, '');
+    expect(upsertTaskCommentMock).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    'https://preview.example.com/path?token=secret',
+    'not-a-url?token=secret',
+    'https://user:secret@pr-42.app123.amplifyapp.com',
+    'https://pr-42.app123.amplifyapp.com:8080/path?token=secret',
+    'http://pr-42.app123.amplifyapp.com/path?token=secret',
+  ])('revalidates the forwarded Amplify URL without logging secrets: %s', async (url) => {
+    const warn = jest.spyOn(logger, 'warn');
+    const forwarded = amplifyEvent();
+    const raw = JSON.parse(forwarded.raw_body);
+    raw.deployment_status.environment_url = url;
+    await handler({ ...forwarded, raw_body: JSON.stringify(raw) });
+    expect(resolveGitHubTokenMock).not.toHaveBeenCalled();
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ event: 'screenshot.preview_url_rejected', reason: 'untrusted_preview_url', url_parsed: url.startsWith('http') }));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('secret');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(url);
+  });
+
+  test.each([41, 99])('a preview for PR %s cannot override forwarded PR 42', async (previewPr) => {
+    const warn = jest.spyOn(logger, 'warn');
+    const error = jest.spyOn(logger, 'error');
+    const forwarded = amplifyEvent();
+    const raw = JSON.parse(forwarded.raw_body);
+    raw.deployment_status.environment_url = `https://pr-${previewPr}.app123.amplifyapp.com/path?token=secret`;
+    await handler({ ...forwarded, raw_body: JSON.stringify(raw) });
+    expect(resolveGitHubTokenMock).not.toHaveBeenCalled();
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      event: 'screenshot.preview_url_rejected',
+      error_id: 'SCREENSHOT_PREVIEW_PR_MISMATCH',
+      reason: 'preview_pr_number_mismatch',
+      pr_number: 42,
+    }));
+    expect(JSON.stringify(error.mock.calls)).not.toContain('secret');
+  });
+
+  test.each([
+    ['deployment', 'http_error', 404],
+    ['deployment', 'malformed_pr_response', 200],
+    ['deployment', 'pr_not_linked', 200],
+    ['amplify', 'fetch_failed', 200],
+    ['amplify', 'non_json_response', 200],
+  ] as const)('%s lookup exhausts %s without capture', async (provider, reason, status) => {
+    jest.useFakeTimers();
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      if (reason === 'fetch_failed') throw new Error('network unavailable');
+      return {
+        ok: status === 200,
+        status,
+        headers: new Headers(),
+        json: async () => {
+          if (reason === 'non_json_response') throw new SyntaxError('secret-response-fragment');
+          return reason === 'pr_not_linked' ? [] : {};
+        },
+      } as Response;
+    });
+    const error = jest.spyOn(logger, 'error');
+    const warn = jest.spyOn(logger, 'warn');
+    const pending = handler(provider === 'amplify' ? amplifyEvent() : payload());
+    await jest.runAllTimersAsync();
+    await pending;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    if (provider === 'deployment') {
+      expect(fetchMock).toHaveBeenCalledWith('https://api.github.com/repos/owner/repo/commits/abc1234/pulls', expect.anything());
+    }
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      event: 'screenshot.pr_lookup_exhausted', error_id: 'SCREENSHOT_PR_LOOKUP_EXHAUSTED', reason,
+    }));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-response-fragment');
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
+    expect(upsertTaskCommentMock).not.toHaveBeenCalled();
+  });
+
+  test('token resolution consuming the lookup budget skips GitHub and capture', async () => {
+    jest.useFakeTimers();
+    resolveGitHubTokenMock.mockImplementationOnce(async () => {
+      jest.setSystemTime(Date.now() + 65_000);
+      return 'token';
+    });
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const error = jest.spyOn(logger, 'error');
+    await handler(amplifyEvent());
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      error_id: 'SCREENSHOT_PR_LOOKUP_EXHAUSTED', reason: 'budget_exhausted', budget_ms: 0,
+    }));
+  });
+
+  test.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])('rejects invalid forwarded PR number %s', async (number) => {
+    const warn = jest.spyOn(logger, 'warn');
+    await handler({ ...amplifyEvent(), validated_pr_number: number });
+    expect(warn).toHaveBeenCalledWith(expect.any(String), {
+      event: 'screenshot.amplify_pr_rejected', reason: 'invalid_forwarded_pr_number',
+    });
+    expect(resolveGitHubTokenMock).not.toHaveBeenCalled();
+    expect(captureScreenshotMock).not.toHaveBeenCalled();
   });
 });
