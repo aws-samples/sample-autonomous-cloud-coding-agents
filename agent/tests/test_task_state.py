@@ -87,6 +87,121 @@ def test_terminal_transaction_heals_trace_only_when_worker_lease_passed(
         assert "CancellationReasons" in report.call_args.args[0]
 
 
+@pytest.mark.parametrize(
+    ("codes", "benign"),
+    [
+        (["ConditionalCheckFailed", "None"], True),
+        (["None", "ConditionalCheckFailed"], False),
+        (["ConditionalCheckFailed", "ConditionalCheckFailed"], False),
+    ],
+)
+def test_trace_transaction_classifies_status_race_separately_from_lease_loss(
+    monkeypatch, codes, benign
+):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(task_state, "_update_task", MagicMock(side_effect=error))
+    report = MagicMock()
+    monkeypatch.setattr(task_state, "log", report)
+    assert not task_state.write_trace_uri_conditional("task", "s3://bucket/trace")
+    assert report.call_args.args[0] == ("INFO" if benign else "WARN")
+    if not benign:
+        assert "CancellationReasons=" in report.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    "codes", [["TransactionConflict", "None"], ["None", "TransactionConflict"]]
+)
+def test_task_transaction_retries_conflict_with_identical_ownership_fence(monkeypatch, codes):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    client = MagicMock()
+    client.transact_write_items.side_effect = [error, {"committed": True}]
+    monkeypatch.setattr(task_state.time, "sleep", MagicMock())
+    lease = {
+        "ConditionCheck": {
+            "ConditionExpression": "lease_attempt_id = :attempt",
+            "ExpressionAttributeValues": {":attempt": "original-worker"},
+        }
+    }
+    monkeypatch.setattr(task_state, "_lease_check", lambda *args, **kwargs: lease)
+    operation = {"TableName": "tasks", "Key": {"task_id": {"S": "task"}}}
+    assert task_state._update_task(client, "task", low_level=True, **operation) == {
+        "committed": True
+    }
+    assert client.transact_write_items.call_count == 2
+    for call in client.transact_write_items.call_args_list:
+        assert call.kwargs["TransactItems"] == [{"Update": operation}, lease]
+
+
+@pytest.mark.parametrize(
+    ("codes", "attempts"),
+    [
+        (["TransactionConflict", "None"], 3),
+        (["TransactionConflict", "ConditionalCheckFailed"], 1),
+        (["None", "ConditionalCheckFailed"], 1),
+        ([], 1),
+    ],
+)
+def test_transaction_retry_is_bounded_and_never_retries_ownership_denial(
+    monkeypatch, codes, attempts
+):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    client = MagicMock()
+    client.transact_write_items.side_effect = error
+    monkeypatch.setattr(task_state.time, "sleep", MagicMock())
+    with pytest.raises(ClientError):
+        task_state._transact_with_conflict_retry(client, [])
+    assert client.transact_write_items.call_count == attempts
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (None, task_state.TerminalWriteOutcome.WRITTEN),
+        ("ConditionalCheckFailedException", task_state.TerminalWriteOutcome.SUPERSEDED),
+        ("AccessDeniedException", task_state.TerminalWriteOutcome.FAILED),
+    ],
+)
+def test_terminal_returns_persistence_outcome(monkeypatch, failure, expected):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(
+        task_state,
+        "_update_task",
+        MagicMock(
+            side_effect=(
+                ClientError({"Error": {"Code": failure}}, "UpdateItem") if failure else None
+            )
+        ),
+    )
+    assert task_state.write_terminal("task", "COMPLETED") is expected
+
+
 class TestAgentWriteContract:
     def test_current_task_writers_fit_the_deployed_attribute_allowlist(self, monkeypatch):
         """Exercise real writers; detect a new field before IAM rejects it live.
@@ -207,13 +322,15 @@ class TestAgentWriteContract:
                     )
                     or (
                         isinstance(child.func, ast.Name)
-                        and child.func.id in {"_update_task", "_transact_task"}
+                        and child.func.id
+                        in {"_update_task", "_transact_task", "_transact_with_conflict_retry"}
                     )
                 )
                 for child in ast.walk(node)
             )
         }
         assert writers == {
+            "_transact_with_conflict_retry",
             "_update_task",
             "_transact_task",
             "write_running",

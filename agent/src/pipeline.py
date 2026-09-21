@@ -466,8 +466,20 @@ def _run_repoless_task(
 
     print_metrics(result_dict)
     terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
-    task_state.write_terminal(config.task_id, terminal_status, result_dict)
+    _persist_finished_task(config.task_id, terminal_status, result_dict)
     return result_dict
+
+
+def _persist_finished_task(task_id: str, status: str, result: dict) -> None:
+    outcome = task_state.write_terminal(task_id, status, result)
+    if outcome in (
+        task_state.TerminalWriteOutcome.FAILED,
+        task_state.TerminalWriteOutcome.SUPERSEDED,
+    ):
+        raise task_state.TerminalWriteError(
+            f"Task result was not committed ({outcome.value}); "
+            "inspect the task record and worker lease"
+        )
 
 
 def _apply_post_hook_gates(
@@ -1824,7 +1836,7 @@ def run_task(
 
             # Persist terminal state to DynamoDB
             terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
-            task_state.write_terminal(config.task_id, terminal_status, result_dict)
+            _persist_finished_task(config.task_id, terminal_status, result_dict)
 
             return result_dict
 
