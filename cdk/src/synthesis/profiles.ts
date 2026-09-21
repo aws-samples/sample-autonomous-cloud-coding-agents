@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
 import type { BlueprintProvisioningMode } from '../blueprints/configuration';
 
 export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
@@ -44,7 +45,7 @@ export const FIXTURE = {
 export const STRUCTURAL_CONTEXT: Context = {
   'aws:cdk:version-reporting': true,
   'aws:cdk:enable-path-metadata': true,
-  'aws:cdk:asset-staging': false,
+  [DISABLE_ASSET_STAGING_CONTEXT]: true,
   [`availability-zones:account=${FIXTURE.account}:region=${FIXTURE.region}`]: FIXTURE.zones.map(zone => zone.zoneName),
 };
 
@@ -54,6 +55,7 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
     microvmImageConfigured: compute === 'lambda-microvm' && image !== 'none',
     context: {
       stackName: 'backgroundagent-dev',
+      networkTopology: 'inline',
       blueprintRepo: 'awslabs/agent-plugins',
       bedrockGeoRegion: 'global',
       compute_type: compute,
@@ -86,9 +88,14 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
     }
   }
 
-  // Probe supplemental options together in the high-resource ECS profile too:
+  // Probe supplemental options together for every backend's widest profile:
   // IAM policy overflow means their effects cannot be added to default counts.
-  for (const base of [profile('agentcore', false, true, false, 'none'), profile('ecs', true, true, true, 'none')]) {
+  for (const base of [
+    profile('agentcore', false, true, false, 'none'),
+    profile('agentcore', true, true, true, 'none'),
+    profile('ecs', true, true, true, 'none'),
+    profile('lambda-microvm', true, true, true, 'managed'),
+  ]) {
     profiles.push({
       ...base,
       name: `${base.name}-email-fork`,
@@ -101,7 +108,12 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  return provisioningMode === undefined ? profiles : profiles.map(candidate => ({
+  const topologies = [...profiles, ...profiles.map(candidate => ({
+    ...candidate,
+    name: `${candidate.name}-split`,
+    context: { ...candidate.context, networkTopology: 'split' },
+  }))];
+  return provisioningMode === undefined ? topologies : topologies.map(candidate => ({
     ...candidate, context: { ...candidate.context, blueprintProvisioning: provisioningMode },
   }));
 }

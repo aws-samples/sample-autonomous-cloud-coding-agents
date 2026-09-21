@@ -17,12 +17,13 @@
  *  SOFTWARE.
  */
 
-import { App, Stack } from 'aws-cdk-lib';
+import { readdirSync } from 'node:fs';
+import { App, AssetStaging, Stack } from 'aws-cdk-lib';
 import { FIXTURE, STRUCTURAL_CONTEXT, synthesisEnvironment, synthesisProfiles } from '../../src/synthesis/profiles';
 
 describe('structural synthesis profiles', () => {
   const profiles = synthesisProfiles();
-  const matrix = profiles.filter(p => /-(none|managed|external)$/.test(p.name));
+  const matrix = profiles.filter(p => /-(none|managed|external)(-split)?$/.test(p.name));
 
   test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)('measures the complete matrix in %s provisioning mode', mode => {
     const selected = synthesisProfiles(mode);
@@ -31,14 +32,17 @@ describe('structural synthesis profiles', () => {
     expect(selected.map(profile => profile.expectedError)).toEqual(profiles.map(profile => profile.expectedError));
   });
 
-  test('enumerates the real 40-cell product without duplicate names', () => {
-    expect(matrix).toHaveLength(40);
+  test.each(['inline', 'split'])('enumerates the real 40-cell product for the %s topology', topology => {
+    const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
+    expect(matrix).toHaveLength(80);
+    expect(topologyMatrix).toHaveLength(40);
+    expect(profiles).toHaveLength(90);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
         for (const registry of [false, true]) {
           for (const vault of [false, true]) {
-            const matches = matrix.filter(p =>
+            const matches = topologyMatrix.filter(p =>
               p.context.compute_type === compute && p.context.enableToolGateway === gateway &&
               p.context.enableAgentRegistry === registry && p.context.enableLinearIdentityVault === vault,
             );
@@ -55,7 +59,7 @@ describe('structural synthesis profiles', () => {
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_type === 'lambda-microvm' && !p.expectedError);
-    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(16);
+    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(32);
     for (const p of matrix) {
       expect(p.microvmImageConfigured).toBe(!!(p.context.microvm_base_image_arn || p.context.microvm_image_identifier));
       expect(!!p.context.microvm_base_image_arn && !!p.context.microvm_image_identifier).toBe(false);
@@ -69,10 +73,10 @@ describe('structural synthesis profiles', () => {
     expect(app.synth().manifest.missing ?? []).toEqual([]);
   });
 
-  test('exercises supplemental resources together on the widest ECS profile', () => {
+  test.each(['agentcore', 'ecs', 'lambda-microvm'])('exercises supplemental resources together on the widest %s profile', compute => {
     expect(profiles).toContainEqual(expect.objectContaining({
       context: expect.objectContaining({
-        compute_type: 'ecs',
+        compute_type: compute,
         enableToolGateway: true,
         enableAgentRegistry: true,
         enableLinearIdentityVault: true,
@@ -81,6 +85,14 @@ describe('structural synthesis profiles', () => {
       }),
     }));
     expect(profiles.some(p => p.context.linearVaultHostedReturnUrl)).toBe(true);
+  });
+
+  test('disables real CDK asset copying so a census does not duplicate dependency archives per profile', () => {
+    const app = new App({ autoSynth: false, postCliContext: STRUCTURAL_CONTEXT });
+    const stack = new Stack(app, 'AssetFixture');
+    const asset = new AssetStaging(stack, 'Source', { sourcePath: __dirname });
+    expect(asset.stagedPath).toBe(__dirname);
+    expect(readdirSync(app.synth().directory).filter(name => name.startsWith('asset.'))).toEqual([]);
   });
 
   test('isolates worker configuration and credentials while keeping metadata/bundling explicit', () => {

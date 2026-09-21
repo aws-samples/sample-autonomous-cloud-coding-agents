@@ -19,6 +19,7 @@
 
 import { App, AppProps, AspectPriority, Aspects, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from './blueprints/definitions';
 import {
   applyAgentCoreAzDiagnostics,
   DescribeAzsFn,
@@ -28,6 +29,7 @@ import {
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
 import { resolveComputeBackend } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
+import { NetworkStack, resolveNetworkTopology } from './stacks/network';
 
 // for development, use account/region from cdk cli
 const devEnv = {
@@ -47,6 +49,8 @@ export interface BuildAppOptions {
   readonly describeAzs?: DescribeAzsFn;
   /** Injectable caller-account lookup so tests need no AWS access. */
   readonly resolveCallerAccount?: ResolveCallerAccountFn;
+  /** Repository configuration shared by provisioning and DNS policy. */
+  readonly blueprints?: readonly BlueprintDefinition[];
 }
 
 /**
@@ -63,10 +67,14 @@ export interface BuildAppOptions {
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);
+  // Apply to every parent and nested template, including newly extracted stacks.
+  app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
 
   Aspects.of(app).add(new AwsSolutionsChecks());
 
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
+  const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
+  const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
 
   const env = {
     account: options.account ?? devEnv.account,
@@ -89,31 +97,33 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     resolveCallerAccount: options.resolveCallerAccount,
   });
 
+  const network = networkTopology === 'split' ? new NetworkStack(app, `${stackName}-network`, {
+    env,
+    applicationStackName: stackName,
+    agentCoreAvailabilityZones: azResolution.zones,
+    additionalAllowedDomains: blueprintEgressDomains(blueprints),
+    description: 'ABCA network infrastructure (uksb-wt64nei4u6)',
+  }) : undefined;
+
   const stack = new AgentStack(
     app,
     stackName,
     {
       env,
       agentCoreAvailabilityZones: azResolution.zones,
+      network,
+      blueprints,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
-      // Emit compact JSON for a CloudFormation 1 MB template-body ceiling.
-      suppressTemplateIndentation: true,
     },
   );
 
-  applyAgentCoreAzDiagnostics(stack, azResolution);
+  applyAgentCoreAzDiagnostics(network ?? stack, azResolution);
 
   // Outbound SDK solution attribution (#319): set AWS_SDK_UA_APP_ID on every
   // Lambda so the SDK emits `app/uksb-wt64nei4u6#{stackName}` natively. One
   // Aspect covers current and future functions structurally. Override via
   // `-c sdkUaAppId=...`; `-c sdkUaAppId=''` opts out (no app/ segment anywhere).
   const sdkUaAppIdOverride = app.node.tryGetContext('sdkUaAppId') as string | undefined;
-  // MUTATING priority so the env var is set before cdk-nag (priority 500)
-  // inspects the synthesized functions — matches the agent stack's aspects.
-  Aspects.of(stack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
-    priority: AspectPriority.MUTATING,
-  });
-
   // Route53 Resolver resources where tag changes trigger replacement cascades.
   // Config: treats ANY property change (including tags) as requiring replacement.
   // Association: depends on Config's physical ID; if Config is replaced, the
@@ -122,8 +132,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'AWS::Route53Resolver::ResolverQueryLoggingConfig',
     'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
   ];
-
-  Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
   const githubTagKeys = [
     'sha',
@@ -141,9 +149,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'clean',
   ] as const;
 
-  for (const key of githubTagKeys) {
-    const value = app.node.tryGetContext(`github:${key}`);
-    Tags.of(stack).add(`github:${key}`, value || 'none', { excludeResourceTypes });
+  for (const deploymentStack of network ? [network, stack] : [stack]) {
+    // Keep the application deployment identity on both stacks' SDK calls.
+    Aspects.of(deploymentStack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
+      priority: AspectPriority.MUTATING,
+    });
+    Tags.of(deploymentStack).add('compute_type', computeType, { excludeResourceTypes });
+    for (const key of githubTagKeys) {
+      const value = app.node.tryGetContext(`github:${key}`);
+      Tags.of(deploymentStack).add(`github:${key}`, value || 'none', { excludeResourceTypes });
+    }
   }
 
   return app;

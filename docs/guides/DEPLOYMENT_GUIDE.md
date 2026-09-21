@@ -4,7 +4,7 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys from the `backgroundagent-dev` root stack with nested stacks for selected subsystems. Each deployment provisions exactly one compute backend:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. Each deployment provisions exactly one compute backend:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
@@ -20,6 +20,31 @@ All backends are orchestrated by the same durable Lambda function. The `ComputeS
 AgentCore is the default. Select ECS with `mise //cdk:deploy -- --context compute_type=ecs`; select MicroVM as described below. Repositories inherit this choice unless they have an explicit matching override. Optional services such as Memory, Gateway and the Linear vault are independent of Runtime selection.
 
 Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources: drain active tasks and review the [backend transition procedure](../design/COMPUTE.md#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
+
+### Network stack topology
+
+`networkTopology=inline` is the default. Use `networkTopology=split` for a new environment to put the VPC, subnets, endpoints, flow logs and DNS firewall in `${stackName}-network`. The application stack retains its name, data stores, compute resources and shared Task API. It depends on network exports, so CDK deploys the network first. The complete VPC/subnet/security-group export set stays present across compute-backend changes. Keep the same topology context on subsequent synth, diff and deploy commands.
+
+For a **new installation with no existing resources or repository rows**:
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all \
+  -c networkTopology=split -c blueprintProvisioning=managed
+```
+
+This can be combined with the existing `compute_type`, `stackName` and optional-service context settings. The split preserves the supported-AZ selection, HTTPS egress rules, endpoints and DNS observation mode. Configure additional Blueprint domains in `cdk/src/blueprints/definitions.ts`; both stacks consume those inputs before any repository resource is created.
+
+**An existing inline deployment needs an ownership transfer.** Changing the flag in an ordinary deploy creates a different VPC and removes the old resources; matching logical IDs in different stacks do not preserve physical identity. The implementation has local synthesis coverage only. No populated AWS migration or rollback rehearsal was performed.
+
+For an existing deployment, prepare a migration against its actual deployed templates:
+
+1. Apply the [retention prerequisite](./DEVELOPER_GUIDE.md#stateful-retention-and-stack-decomposition) while keeping `networkTopology=inline`. Settle compute selection, Blueprint controller handoff, guardrail identity, asset normalization and provider attribution as separate updates. Record the resulting templates and configuration as the source baseline.
+2. Inventory physical IDs for the VPC, subnets, endpoints, security groups, routes, DNS associations, log groups and provider resources. Expect an ECS orchestrator Lambda version update when subnet environment references become imports. Preserve application data inventories and backups. Drain active tasks before moving network ownership.
+3. Check CloudFormation refactor/import support for each resource type and inspect the proposed mapping. `cdk refactor` requires `--unstable=refactor`; custom resources and provider changes need explicit handling. The target duplicates the shared AWS custom-resource provider and adds stack metadata, so the final template is not a move-only change. Do not assume a single refactor operation can apply it.
+4. If using retain/import, first deploy both retention policies on **every resource being transferred** in the source stack. The stateful-retention aspect protects network log groups, not every VPC/DNS resource. Resolve provider callbacks before detaching custom resources: the DNS configuration helper's Delete call changes fail-open behavior. Import eligibility and a resource-specific procedure must be established before removing source ownership.
+5. Transfer supported resources, establish network exports, then switch application consumers. Verify physical IDs and DNS/network behavior, API routes, authentication and retained data before resuming tasks. Keep source/target templates and the final mapping for recovery.
+
+Rollback requires the reverse ownership plan. CloudFormation will not remove or change exports while the application imports them. Redeploying `inline` or destroying the network stack is not an automatic rollback. These are migration requirements, not a validated migration script; the local feature can be used for fresh environments without claiming that existing-resource migration is verified.
 
 ### Lambda MicroVMs backend (experimental)
 
@@ -71,7 +96,7 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
-This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+This context removes the registry API and runtime wiring. After the retention prerequisite is deployed, the registry custom resource and its external records are retained when disabled; re-enabling does not automatically adopt that registry. Inventory it and plan recovery or cleanup explicitly. Older deployments without retention can delete the registry and its records. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
 
 ## Bedrock inference geography
 

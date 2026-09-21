@@ -129,6 +129,18 @@ describe('buildApp — AgentCore AZ wiring', () => {
     expect(errors[0].entry.data).toContain('Could not resolve AgentCore-supported availability zones');
   });
 
+  it('attaches AZ lookup errors to the network stack in the split topology', async () => {
+    const built = await app({
+      appProps: { context: { networkTopology: 'split' } },
+      describeAzs: async () => { throw new Error('AccessDeniedException'); },
+    });
+    const assembly = built.synth();
+    const errors = assembly.getStackByName(`${STACK_NAME}-network`).messages.filter(message => message.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].entry.data).toContain('Could not resolve AgentCore-supported availability zones');
+    expect(assembly.getStackByName(STACK_NAME).messages.filter(message => message.level === 'error')).toEqual([]);
+  });
+
   it('surfaces the unpinned env-agnostic case as a stack-artifact WARNING', async () => {
     const built = await buildApp({ account: undefined, region: undefined });
     Annotations.fromStack(stackOf(built)).hasWarning(

@@ -29,10 +29,11 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
+import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from '../blueprints/definitions';
 import { AdmissionQueuePickup } from '../constructs/admission-queue-pickup';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentSessionRole } from '../constructs/agent-session-role';
-import { AgentVpc } from '../constructs/agent-vpc';
+import { AgentNetwork, AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
@@ -154,6 +155,10 @@ export interface AgentStackProps extends StackProps {
    * values under one name in one class is a trap for `Stack.of(x)` callers.
    */
   readonly agentCoreAvailabilityZones?: string[];
+  /** Network owned by a separate stack. Omit to preserve the inline topology. */
+  readonly network?: AgentNetwork;
+  /** Shared plain configuration, resolved before network/application construction. */
+  readonly blueprints?: readonly BlueprintDefinition[];
 }
 
 export class AgentStack extends Stack {
@@ -280,29 +285,9 @@ export class AgentStack extends Stack {
     ]);
 
     // --- Repository onboarding ---
-    const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
-    const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-      repo: blueprintRepo,
-      repoTable: repoTable.table,
-    });
-
-    const blueprints = [agentPluginsBlueprint];
-
-    // Optional per-repo blueprint pinning registry assets (#246), opt-in via
-    // context/env so it does not hardcode a specific fork for other contributors.
-    // Set ``forkBlueprintRepo`` (e.g. ``--context forkBlueprintRepo=owner/repo``)
-    // to onboard a repo with the AWS Knowledge MCP asset pinned.
-    const forkBlueprintRepo = process.env.FORK_BLUEPRINT_REPO ?? this.node.tryGetContext('forkBlueprintRepo');
-    if (forkBlueprintRepo) {
-      blueprints.push(new Blueprint(this, 'ForkBlueprint', {
-        repo: forkBlueprintRepo,
-        repoTable: repoTable.table,
-        assets: {
-          mcpServers: ['registry://mcp_server/acme/aws-knowledge@^1.0.0'],
-          cedarPolicyModules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
-          skills: ['registry://skill/acme/readme-helper@^1.0.0'],
-        },
-      }));
+    const blueprintDefinitions = props.blueprints ?? resolveBlueprintDefinitions(this.node);
+    for (const { id: blueprintId, ...definition } of blueprintDefinitions) {
+      new Blueprint(this, blueprintId, { ...definition, repoTable: repoTable.table });
     }
 
     // GitHub token stored in Secrets Manager — agent fetches at startup via ARN
@@ -385,19 +370,20 @@ export class AgentStack extends Stack {
     // override, else auto-selected from the account's AgentCore-supported zones
     // when synth has a concrete account/region. Left undefined otherwise, so the
     // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
-    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+    const agentVpc = props.network ?? new AgentVpc(this, 'AgentVpc', {
       ...(props.agentCoreAvailabilityZones?.length
         ? { availabilityZones: props.agentCoreAvailabilityZones }
         : {}),
     });
 
-    // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
-    const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
-    new DnsFirewall(this, 'DnsFirewall', {
-      vpc: agentVpc.vpc,
-      additionalAllowedDomains: additionalDomains,
-      observationMode: true,
-    });
+    if (!props.network) {
+      // The default topology retains the original ownership and construct paths.
+      new DnsFirewall(this, 'DnsFirewall', {
+        vpc: agentVpc.vpc,
+        additionalAllowedDomains: blueprintEgressDomains(blueprintDefinitions),
+        observationMode: true,
+      });
+    }
 
     // --- AgentCore Memory (cross-task learning) ---
     const agentMemory = new AgentMemory(this, 'AgentMemory');

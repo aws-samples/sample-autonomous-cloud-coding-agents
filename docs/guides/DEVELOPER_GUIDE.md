@@ -59,21 +59,21 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 
 ### Multiple repositories
 
-To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
+To onboard additional repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
 
 ```typescript
-new Blueprint(this, 'MyServiceBlueprint', {
+definitions.push({
+  id: 'MyServiceBlueprint',
   repo: 'acme/my-service',
-  repoTable: repoTable.table,
 });
 ```
 
-Each Blueprint supports per-repo overrides grouped into nested props (`BlueprintProps` in `cdk/src/constructs/blueprint.ts`):
+Each entry supports the per-repo overrides from `BlueprintProps` in `cdk/src/constructs/blueprint.ts`, without a table reference. Keep its `id` stable across releases:
 
 ```typescript
-new Blueprint(this, 'MyServiceBlueprint', {
+definitions.push({
+  id: 'MyServiceBlueprint',
   repo: 'acme/my-service',
-  repoTable: repoTable.table,
   compute: { runtimeArn: '...' },                    // override the default runtime ARN
   agent: {
     modelId: 'global.anthropic.claude-opus-5',       // foundation model override
@@ -132,7 +132,7 @@ This verifies template structure and repeatability. Live transactions, rollback 
 
 ### Stateful retention and stack decomposition
 
-`AgentStack` installs `StatefulRetentionAspect` across the application and its nested stacks. Both `DeletionPolicy` and `UpdateReplacePolicy` are `Retain` for DynamoDB tables, S3 buckets, Secrets Manager secrets, Cognito user pools, KMS keys, log groups, SQS queues, SNS topics and AgentCore Memory. Agent Registry and Linear workload-identity custom resources are retained too.
+`AgentStack` and `NetworkStack` install `StatefulRetentionAspect` across their resources, including nested stacks. Both `DeletionPolicy` and `UpdateReplacePolicy` are `Retain` for DynamoDB tables, S3 buckets, Secrets Manager secrets, Cognito user pools, KMS keys, log groups, SQS queues, SNS topics and AgentCore Memory. Agent Registry and Linear workload-identity custom resources are retained too.
 
 S3 cleanup resources (`Custom::S3AutoDeleteObjects` and `Custom::CDKBucketDeployment`) also retain their existing logical IDs and gain both retention policies. Removing a live cleanup helper while retaining only its bucket could still invoke Delete and empty that bucket. For buckets, the aspect uses CloudFormation attribute overrides because the CDK Bucket L2 rejects `RETAIN` while `autoDeleteObjects` is configured. The existing helper remains present and retained; synthesis tests check that the change does not modify resource properties or remove helpers.
 
@@ -140,13 +140,17 @@ S3 cleanup resources (`Custom::S3AutoDeleteObjects` and `Custom::CDKBucketDeploy
 
 Retention preserves stored resources, not the deleted application's roles, endpoints or sessions. TTLs, log retention periods and S3 lifecycle expiration continue to apply. Retained resources need an inventory and explicit recovery/import or cleanup; recreating a stack does not automatically adopt them. Disabling a registry or vault leaves its retained external identity in the account. Blueprint soft-delete behavior is unchanged, so protect repository rows with the staged handoff above when changing controller ownership.
 
-The normal CDK test suite evaluates all 43 named profiles from `synthesisProfiles`, using managed Blueprint provisioning and the production app builder. It checks every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs, checks stateful retention, and verifies that only the selected compute backend is provisioned. The offline census uses the same default budgets and retention checks:
+The normal CDK test suite evaluates all 90 named profiles from `synthesisProfiles`, using managed Blueprint provisioning and the production app builder. Both `inline` and `split` network topologies exercise the compute/Gateway/Registry/vault/image product and supplemental alert, fork and consent configurations. It checks every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs, checks stateful retention, and verifies that only the selected compute backend is provisioned. The offline census uses the same default budgets and retention checks:
 
 ```bash
 MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
 ```
 
-Networking remains in `AgentStack`. [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md) records the intended boundary and the required populated AWS refactor rehearsal. Local template checks do not establish CloudFormation refactor eligibility or preservation of physical IDs in a live deployment.
+`networkTopology` defaults to `inline`, preserving existing stack ownership. Selecting `split` places AgentVpc and DnsFirewall in a top-level `${stackName}-network` stack. The application consumes VPC/subnet/security-group references through CloudFormation exports; the network stack has no application dependencies. VPC, private-subnet and runtime-security-group exports remain present for every backend, including values that a particular backend leaves unused. Changing compute therefore does not remove an export still consumed by the old application. Task API routes, authorizers, permissions, CORS, deployment and integrations stay together in `AgentStack`.
+
+The split preserves network logical IDs below the stack root, generated Name tags and replacement-sensitive endpoint security-group descriptions. Tests compare application resources after resolving network imports and the expected ECS orchestrator version change, check shared API dependencies and method-scoped permissions, and verify solution attribution and provenance tags. The ECS orchestrator publishes a new Lambda version because its subnet environment values become import expressions; its alias follows that version. All parent and nested templates use compact JSON.
+
+For new installations and existing-resource migration constraints, see [Network stack topology](./DEPLOYMENT_GUIDE.md#network-stack-topology). [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md) records the boundary and measured headroom. Implementation proceeded without a populated AWS rehearsal; local template checks do not establish refactor/import eligibility or preservation of physical IDs in a live deployment.
 
 ### Customizing the agent image
 

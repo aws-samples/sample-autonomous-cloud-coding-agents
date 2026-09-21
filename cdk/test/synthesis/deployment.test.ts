@@ -57,6 +57,14 @@ describe.each(synthesisProfiles('managed'))('$name deployment', profile => {
     expect(audit.failures).toEqual([]);
   });
 
+  test('keeps stack dependencies one-way for the selected topology', () => {
+    const application = 'backgroundagent-dev.template.json';
+    const network = 'backgroundagent-dev-network.template.json';
+    expect(census.stackDependencies).toEqual(profile.context.networkTopology === 'split'
+      ? { [application]: [network], [network]: [] }
+      : { [application]: [] });
+  });
+
   test('provisions only the selected compute backend across the assembly', () => {
     const resources = census.templates.flatMap(template => template.inventory);
     const count = (type: string): number => resources.filter(resource => resource.type === type).length;
