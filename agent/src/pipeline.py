@@ -472,14 +472,13 @@ def _run_repoless_task(
 
 def _persist_finished_task(task_id: str, status: str, result: dict) -> None:
     outcome = task_state.write_terminal(task_id, status, result)
-    if outcome in (
-        task_state.TerminalWriteOutcome.FAILED,
-        task_state.TerminalWriteOutcome.SUPERSEDED,
-    ):
+    if outcome == task_state.TerminalWriteOutcome.FAILED:
         raise task_state.TerminalWriteError(
             f"Task result was not committed ({outcome.value}); "
             "inspect the task record and worker lease"
         )
+    # A cancel or another terminal writer won the status race. Its result stays
+    # authoritative; this is not a worker crash and must not emit a failure reaction.
 
 
 def _apply_post_hook_gates(
