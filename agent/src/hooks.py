@@ -2046,10 +2046,10 @@ def build_hook_matchers(
         # Empty dict == allow stop.  SyncHookJSONOutput(**{}) is fine.
         return SyncHookJSONOutput(**result)
 
-    # The callback transport must outlive the approval loop. A frozen MicroVM
-    # may wake after the gate deadline during supervisor recovery, so keep that
-    # callback alive for the bounded VM lifetime. Explicit gate deadlines remain
-    # unchanged; a retained request can outlive this callback through continuation.
+    # All backends share this bounded SDK callback window (eight hours plus
+    # cleanup). It is separate from the human decision deadline and also covers
+    # MicroVM freeze/recovery. A retained request can outlive a callback only
+    # through a verified continuation; this does not extend compute lifetime.
     callback_window_s = SHARED_CONSTANTS["microvm_lifecycle"]["maximum_duration_seconds"]
     matchers = {
         "PreToolUse": [

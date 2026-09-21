@@ -44,7 +44,7 @@ Never force a novice to read expert material to proceed. Never force an expert t
 ### Self-contained references
 
 When referencing another document:
-- State what the reader gets from it: "See [Deployment Guide](link) for AWS account setup (required before this step)"
+- State what the reader gets from it: "See [Deployment Guide](../guides/DEPLOYMENT_GUIDE.md) for AWS account setup (required before this step)"
 - Never assume the reader has read it
 - Never use "as mentioned above" — each section must stand alone after context compaction
 

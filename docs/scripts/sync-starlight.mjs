@@ -8,7 +8,7 @@ const docsBase = '/sample-autonomous-cloud-coding-agents';
 
 function normalizeFileStem(input) {
   const cleaned = input
-    .replace(/\.md$/i, '')
+    .replace(/\.mdx?$/i, '')
     .replace(/[^a-zA-Z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
@@ -18,7 +18,15 @@ function normalizeFileStem(input) {
   return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)}`;
 }
 
-function rewriteDocsLinkTarget(target) {
+function rewriteDocsLinkTarget(target, sourcePath) {
+  if (target?.startsWith('#') && path.basename(sourcePath) === 'USER_GUIDE.md') {
+    const route = {
+      '#joining-an-existing-deployment': '/using/authentication#joining-an-existing-deployment',
+      '#get-stack-outputs': '/using/authentication#get-stack-outputs',
+      '#approval-gates-cedar-hitl': '/using/approval-gates-cedar-hitl',
+    }[target];
+    if (route) return route;
+  }
   if (!target || target.startsWith('#') || target.startsWith('/')) {
     return undefined;
   }
@@ -27,18 +35,28 @@ function rewriteDocsLinkTarget(target) {
   }
 
   const [pathPart, anchor] = target.split('#');
-  if (!pathPart.toLowerCase().endsWith('.md')) {
-    return undefined;
-  }
 
   const normalizedPath = pathPart.replaceAll('\\', '/');
-  // Verification runbooks remain repository documents, not Starlight pages.
-  // Preserve their real destination instead of inventing an architecture route.
-  const verification = normalizedPath.match(/(?:^|\/)verification\/(.+)$/);
-  if (verification) {
-    return `https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/${verification[1]}${anchor ? `#${anchor}` : ''}`;
+  // Resolve relative links in the source tree before assigning a site route.
+  // In particular, ./README.md inside verification is not architecture/readme.
+  const sourceTarget = path.resolve(path.dirname(sourcePath), normalizedPath);
+  if (sourceTarget === path.join(targetRoot, 'index.md')) return '/';
+  if (sourceTarget === path.join(docsRoot, 'decisions')) return '/decisions/readme';
+  const relativeSource = path.relative(repoRoot, sourceTarget).replaceAll('\\', '/');
+  if (!relativeSource.startsWith('../') && fs.existsSync(sourceTarget)
+    && (!sourceTarget.startsWith(docsRoot + path.sep) || sourceTarget === path.join(docsRoot, 'README.md')
+      || sourceTarget.startsWith(path.join(docsRoot, 'abca-plugin') + path.sep))) {
+    const kind = fs.statSync(sourceTarget).isDirectory() ? 'tree' : 'blob';
+    return `https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/${kind}/main/${relativeSource}${anchor ? `#${anchor}` : ''}`;
   }
-  const stem = path.basename(normalizedPath, '.md');
+  if (!/\.mdx?$/i.test(pathPart)) return undefined;
+  for (const directory of ['verification', 'decisions']) {
+    if (path.dirname(sourceTarget) === path.join(docsRoot, directory)) {
+      const slug = normalizeFileStem(path.basename(sourceTarget)).toLowerCase();
+      return `/${directory}/${slug}${anchor ? `#${anchor}` : ''}`;
+    }
+  }
+  const stem = path.basename(normalizedPath).replace(/\.mdx?$/i, '');
   const slug = normalizeFileStem(stem).toLowerCase();
   const anchorSuffix = anchor ? `#${anchor}` : '';
 
@@ -77,6 +95,9 @@ function rewriteDocsLinkTarget(target) {
   const userGuideAnchorRoutes = {
     overview: '/using/overview',
     authentication: '/using/authentication',
+    'joining-an-existing-deployment': '/using/authentication#joining-an-existing-deployment',
+    'get-stack-outputs': '/using/authentication#get-stack-outputs',
+    'operator-commands-stack-admin': '/using/using-the-cli#operator-commands-stack-admin',
     'repository-onboarding': '/customizing/repository-onboarding',
     'per-repo-overrides': '/customizing/per-repo-overrides',
     'monthly-user-and-team-budgets': '/customizing/per-repo-overrides#monthly-user-and-team-budgets',
@@ -86,6 +107,7 @@ function rewriteDocsLinkTarget(target) {
     'webhook-integration': '/using/webhook-integration',
     'task-lifecycle': '/using/task-lifecycle',
     'what-the-agent-does': '/using/what-the-agent-does',
+    'approval-gates-cedar-hitl': '/using/approval-gates-cedar-hitl',
     'tips-for-being-a-good-citizen': '/using/tips-for-being-a-good-citizen',
   };
   if (stem === 'USER_GUIDE' && anchor) {
@@ -105,11 +127,11 @@ function rewriteDocsLinkTarget(target) {
   return `/architecture/${slug}${anchorSuffix}`;
 }
 
-function ensureFrontmatter(content, title) {
+function ensureFrontmatter(content, title, sourcePath) {
   const normalized = content
     .replaceAll('../imgs/', `${docsBase}/imgs/`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
-      const rewritten = rewriteDocsLinkTarget(target);
+      const rewritten = rewriteDocsLinkTarget(target, sourcePath);
       if (!rewritten) {
         return match;
       }
@@ -154,7 +176,7 @@ function mirrorMarkdownFile(sourcePath, targetRelativePath) {
   const ext = path.extname(sourcePath);
   const stem = path.basename(sourcePath, ext);
   const fallbackTitle = normalizeFileStem(stem).replace(/-/g, ' ');
-  const out = ensureFrontmatter(raw, fallbackTitle);
+  const out = ensureFrontmatter(raw, fallbackTitle, sourcePath);
   writeFile(path.join(docsRoot, targetRelativePath), out);
 }
 
@@ -170,7 +192,7 @@ function mirrorDirectory(sourceDir, targetDirRelative) {
     const sourcePath = path.join(sourceDir, file);
     const raw = fs.readFileSync(sourcePath, 'utf8');
     const fallbackTitle = normalizeFileStem(file).replace(/-/g, ' ');
-    const out = ensureFrontmatter(raw, fallbackTitle);
+    const out = ensureFrontmatter(raw, fallbackTitle, sourcePath);
     const normalizedName = `${normalizeFileStem(file)}.md`;
     writeFile(path.join(docsRoot, targetDirRelative, normalizedName), out);
   }
@@ -202,7 +224,7 @@ function splitGuide(sourcePath, targetDirRelative, introTitle) {
   const raw = fs.readFileSync(sourcePath, 'utf8');
   const parts = raw.split(/\n##\s+/g);
   const intro = parts.shift() ?? '';
-  const introOut = ensureFrontmatter(intro.trim(), introTitle);
+  const introOut = ensureFrontmatter(intro.trim(), introTitle, sourcePath);
   writeFile(path.join(docsRoot, targetDirRelative, 'Introduction.md'), introOut);
 
   for (const part of parts) {
@@ -210,7 +232,7 @@ function splitGuide(sourcePath, targetDirRelative, introTitle) {
     const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
     const body = firstNewline === -1 ? '' : part.slice(firstNewline + 1).trim();
     const filename = `${normalizeFileStem(heading)}.md`;
-    const out = ensureFrontmatter(body, heading);
+    const out = ensureFrontmatter(body, heading, sourcePath);
     writeFile(path.join(docsRoot, targetDirRelative, filename), out);
   }
 }
@@ -317,6 +339,9 @@ mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs
 
 // --- Decision records (ADRs): mirror to decisions/ ---
 mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
+
+// Verification runbooks ship with the same revision as their referring pages.
+mirrorDirectory(path.join(docsRoot, 'verification'), path.join('src', 'content', 'docs', 'verification'));
 
 // --- Static assets: copy source image dir into the site's public/ ---
 // Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns

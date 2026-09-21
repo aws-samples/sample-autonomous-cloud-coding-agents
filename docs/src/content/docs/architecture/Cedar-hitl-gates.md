@@ -21,11 +21,11 @@ title: Cedar hitl gates
 > Linear accepts an owner’s `approve` or `deny` reply to the approval comment;
 > the handler verifies the actual comment through Linear’s API. Slack uses CLI
 > response instructions. See the current
-> [user guide](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl) and
+> [user guide](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl) and
 > [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#retained-microvm-approvals).
 > The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
 > and sleep-off/rollback acceptance; see the
-> [deployment record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md).
+> [deployment record](/sample-autonomous-cloud-coding-agents/verification/readme).
 
 ---
 
@@ -1048,7 +1048,7 @@ event. A later decision is rejected: the existing API returns
 `404 REQUEST_NOT_FOUND` for missing, foreign or already-decided approval rows,
 including a cancelled row. If approval committed first, cancellation preserves
 the recorded decision while cancelling the task. See the
-[P3 approval verification record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md)
+[P3 approval verification record](/sample-autonomous-cloud-coding-agents/verification/readme)
 for source versus deployment status.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
@@ -1367,7 +1367,7 @@ t=45m:  Task #1 completes. count → 9. Bob can submit task #11.
 
 AgentCore Runtime's `maxLifetime = 28800s` (8h) is an absolute timer from session start. It does NOT pause during `AWAITING_APPROVAL`.
 
-An explicitly timed approval is bounded by the remaining worker lifetime minus the 120-second cleanup margin. Below the 30-second floor, the hook denies the action with reason `"insufficient lifetime"`.
+When the worker supplies a remaining-lifetime estimate, the hook refuses to open a new gate if fewer than 30 seconds remain after the 120-second cleanup margin. This check applies to timed and untimed approvals and reports `"insufficient maxLifetime remaining (<seconds>s) for approval"`. A positive approval timeout is also capped by that remaining budget.
 
 The default approval timeout is `0`: no decision deadline. Worker lifetime does not turn silence into a human denial. ECS and AgentCore do not currently restore a waiting agent into a replacement worker; when their task execution limit is reached, the task closes and its pending approval is cancelled. MicroVM can retain a verified checkpoint and continue on a replacement worker. Setting its sleep delay to `0` disables early sleep/retirement, but the coordinator still attempts retirement before the service lifetime ends. This option trades idle cost for faster replies.
 
@@ -1541,7 +1541,7 @@ cancellations, timeouts and stranded waits also produce messages. The response
 path supports the CLI and native Linear thread replies. Slack approval buttons
 and the Slack OAuth/button design below remain proposed. Email remains a log-only stub and GitHub does not
 receive approval messages. Deployment status is recorded in the
-[P3 verification record](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md).
+[P3 verification record](/sample-autonomous-cloud-coding-agents/verification/readme).
 
 **TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled. (Retains the `stream` attribute commented out for future use if needed.)
 
@@ -1698,18 +1698,26 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
   `POST /v1/tasks/{task_id}` to the session's `task_id` tag. The service creates
   `PENDING` rows or conditionally records a non-human `TIMED_OUT`; it rejects
   human decisions, notification markers, retention TTL and other extra fields.
-  It checks current task ownership/state and, for MicroVM, the active worker
-  lease in the same transaction. Worker-provided action descriptions remain
-  untrusted. This protects approval records; it does not sandbox code running
+  IAM binds the caller to a task path; the transaction prevents concurrent task
+  ownership/state changes and, for MicroVM, checks the active worker lease.
+  The tool preview, its hash, severity, reason and matching rules are worker
+  assertions, not independently evaluated policy results. The preview can be
+  truncated, so its bytes cannot be used to verify the full-input hash. This protects approval records; it does not sandbox code running
   inside the agent or bind ambient compute credentials to one task.
 - **User CLI ↔ API Gateway**: Cognito JWT (same authorizer as `/tasks/*`). Cognito `sub` is the canonical caller identity, used **verbatim** in DDB `ConditionExpression` (§7.1, finding #6).
 - **ApproveTaskFn/DenyTaskFn ↔ TaskApprovalsTable + TaskTable**: Lambda IAM policy allows `UpdateItem` on both tables under `TransactWriteItems`. Authorization is in the ConditionExpression (ownership AND state), not in a separate IAM boundary.
 - **Blueprint origin**: blueprints are CDK-deployed constructs (see `cdk/src/constructs/blueprint.ts`). Platform operators deploy them. Users cannot upload arbitrary blueprint.yaml from the target repo. This property is load-bearing for the security model — if blueprint origin ever becomes user-uploaded, the blueprint-injection section (§12.4) must be re-evaluated. The 64 KB text cap (§5.1, finding #12) and `disable:` hard-deny rejection (finding #9) are applied regardless of origin as defense in depth.
 - **Linear → decision handlers**: the mapped task owner must author the actual
-  reply returned by Linear's API. A webhook signature alone is insufficient.
+  reply returned by Linear's API. Bot comments and comments authored as the
+  saved OAuth token identity are rejected. For approvals, install with the
+  default `actor=app`; diagnostic user-mode credentials cannot approve on
+  behalf of their authorizing user. Use the authenticated CLI in that case.
+  A webhook signature alone is insufficient: legacy workers can read a bundle
+  containing OAuth credentials and the webhook signing key. The authoritative
+  readback protects this approval path, not every other webhook action.
   The Slack button/proxy design in §11.2 remains future work.
 
-See [upgrading approval permissions](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#upgrading-approval-permissions)
+See [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-trusted-approval-writer) for the decision and limits, and [upgrading approval permissions](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#upgrading-approval-permissions)
 before updating an existing deployment.
 
 ### 12.2 Ownership encoded in ConditionExpression
@@ -1837,7 +1845,7 @@ Tracked as IMPL-22. Without these telemetry-driven re-evaluations, 50 will ossif
 
 ### 12.10 JWT replay
 
-Cognito JWT with signature + expiry validation on API Gateway. Approval row conditional-update prevents replay from mutating state. Slack button replays similarly mediated by `SlackUserMappingTable` (§11.2) + Slack's own request signing.
+Cognito JWT with signature + expiry validation on API Gateway. Approval row conditional-update prevents replay from mutating state. Native Slack approval buttons are not implemented; §11.2 describes the proposed flow.
 
 ---
 

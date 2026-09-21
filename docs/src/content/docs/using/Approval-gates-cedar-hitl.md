@@ -141,4 +141,4 @@ pauses can cost more than staying awake. The API equivalent is
 `microvm_sleep_after_s` (zero means off); task
 details return the saved setting. Automatic suspension is disabled by default for
 new deployments. An operator enables it after [verifying the deployed image and
-coordinator](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md#live-acceptance-for-an-installation).
+coordinator](/sample-autonomous-cloud-coding-agents/verification/readme#live-acceptance-for-an-installation).
