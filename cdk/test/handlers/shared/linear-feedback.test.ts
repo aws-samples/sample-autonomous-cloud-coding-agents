@@ -85,19 +85,38 @@ describe('linear-feedback', () => {
         issue: { id: ISSUE_ID },
         parent: { id: 'root' },
       };
-      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, comment } }));
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, viewer: { id: 'app-identity' }, comment } }));
       expect(await readLinearApprovalComment(CTX, 'reply')).toEqual(comment);
       const request = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(request.variables).toEqual({ id: 'reply' });
       expect(request.query).toContain('user { id }');
       expect(request.query).toContain('botActor { id }');
+      expect(request.query).toContain('viewer { id }');
+    });
+    test('rejects a genuine human comment made as the saved OAuth token identity', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({
+        data: {
+          organization: { id: CTX.linearWorkspaceId },
+          viewer: { id: 'task-owner' },
+          comment: {
+            id: 'reply',
+            body: 'approve',
+            user: { id: 'task-owner' },
+            botActor: null,
+            issue: { id: ISSUE_ID },
+            parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await readLinearApprovalComment(CTX, 'reply')).toBeNull();
     });
     test('returns no consent for a deleted comment', async () => {
-      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, comment: null } }));
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, viewer: { id: 'app-identity' }, comment: null } }));
       expect(await readLinearApprovalComment(CTX, 'deleted')).toBeNull();
     });
     test.each([
       { errors: [{ message: 'Unavailable' }] },
+      { data: { organization: { id: CTX.linearWorkspaceId }, comment: { user: { id: 'human' } } } },
       { data: { organization: { id: 'other-workspace' }, comment: {} } },
     ])('fails closed on lookup errors or incorrect workspace: %j', async response => {
       fetchMock.mockResolvedValue(jsonResponse(response));
