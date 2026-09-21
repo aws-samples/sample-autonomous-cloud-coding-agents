@@ -259,6 +259,9 @@ directly to DynamoDB and cannot create new gates after those permissions are rem
 3. Deploy the stack. Check that the SessionRole has approval-table reads and
    condition checks only, plus `execute-api:Invoke` restricted to its task tag.
    CDK supplies `APPROVAL_REQUESTS_API_URL` to all three compute backends.
+   Custom ECS constructs must provide both the SessionRole and service URL;
+   approval wiring without them is rejected before deployment. A MicroVM
+   manifest missing the URL is rejected before the worker starts.
 4. Submit a test task that triggers a known approval rule on each enabled backend.
    Verify that the request appears, an owner decision resumes it, and an explicit
    deadline records `TIMED_OUT` without overwriting a human decision. Then resume

@@ -42,6 +42,7 @@ export interface ContinuationReceipt {
 
 export interface ContinuationRecord {
   readonly version: number;
+  /** PARKED means the source worker has retired; the guest's local parked phase only means a safe approval wait. */
   readonly state: 'READY' | 'FENCED' | 'PARKED' | 'STARTING' | 'RESTORING' | 'CONSUMED';
   readonly identity: ContinuationIdentity;
   readonly manifest: ContinuationReceipt;

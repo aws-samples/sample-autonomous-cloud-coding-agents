@@ -6,7 +6,7 @@ title: Cedar policy guide
 
 This guide is for **blueprint authors** — repo owners writing the Cedar policies that govern what tool calls the agent can make unattended versus which ones pause for human approval.
 
-> **If you are a task submitter** looking for how approvals work at the CLI, see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl). This guide is about *writing* the rules that cause approvals.
+> **If you are a task submitter** looking for how approvals work at the CLI, see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl). This guide is about *writing* the rules that cause approvals.
 >
 > **For the full design** (fail-closed posture, engine internals, concurrency), see [Cedar HITL gates design doc](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates).
 
@@ -47,7 +47,7 @@ security:
   approvalGateCap: 50                         # optional per-task gate budget (1–500, default 50)
 ```
 
-The built-in rule set is documented in [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar). Run `bgagent policies list --repo owner/repo` against a deployed stack to see the effective rules for a repo.
+The built-in rule set is documented in [`agent/policies/hard_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/hard_deny.cedar) and [`agent/policies/soft_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/soft_deny.cedar). Run `bgagent policies list --repo owner/repo` against a deployed stack to see the effective rules for a repo.
 
 ## Vocabulary
 
@@ -162,12 +162,12 @@ Fix the blueprint, redeploy (or update the `blueprint.yaml` if you're using a pu
 
 ## Testing policies before shipping
 
-Every repo blueprint is covered by **cross-engine parity fixtures** in [`contracts/cedar-parity/`](../../contracts/cedar-parity/). Before shipping a non-trivial rule change, drop a golden-file fixture that pins the expected `(decision, matching_rule_ids)` for a representative `(policies, input)` pair. Both the Python `cedarpy` engine and the TypeScript `@cedar-policy/cedar-wasm` engine run it — divergence fails CI. See the directory's README for the fixture schema.
+Every repo blueprint is covered by **cross-engine parity fixtures** in [`contracts/cedar-parity/`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/contracts/cedar-parity). Before shipping a non-trivial rule change, drop a golden-file fixture that pins the expected `(decision, matching_rule_ids)` for a representative `(policies, input)` pair. Both the Python `cedarpy` engine and the TypeScript `@cedar-policy/cedar-wasm` engine run it — divergence fails CI. See the directory's README for the fixture schema.
 
-For unit coverage of your own rules without the cross-engine guarantee, add a case to [`agent/tests/test_policy.py`](../../agent/tests/test_policy.py) using `PolicyEngine.evaluate_tool_use(...)`.
+For unit coverage of your own rules without the cross-engine guarantee, add a case to [`agent/tests/test_policy.py`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/tests/test_policy.py) using `PolicyEngine.evaluate_tool_use(...)`.
 
 ## Where to look next
 
 - [`docs/design/CEDAR_HITL_GATES.md`](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — full design: engine internals, fail-closed posture, late-approval races, concurrency.
-- [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) + [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar) — the built-in rule set, good starting point for copy-paste.
-- [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).
+- [`agent/policies/hard_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/hard_deny.cedar) + [`agent/policies/soft_deny.cedar`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/policies/soft_deny.cedar) — the built-in rule set, good starting point for copy-paste.
+- [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl) — the CLI side (`bgagent pending` / `approve` / `deny` / `policies`).

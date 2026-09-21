@@ -170,7 +170,7 @@ If you have not yet added `blueprintRepo` to `cdk/cdk.json`, go back to [Registe
 
 :::note[Collaborator or cross-org repos?]
 
-Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for details.
+Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/README.md#github-pat--minimal-permissions) for details.
 
 :::
 
@@ -492,7 +492,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve write_path:tests/**
 ```
 
-Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ## What happened behind the scenes
 

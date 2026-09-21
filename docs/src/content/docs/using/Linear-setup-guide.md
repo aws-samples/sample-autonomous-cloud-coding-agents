@@ -217,7 +217,7 @@ Pick the teammate from the list of human members. You get a one-time code (24h T
 
 They need an ABCA account first. If they don't have one:
 
-1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/authentication#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash

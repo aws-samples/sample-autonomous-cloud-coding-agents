@@ -94,7 +94,7 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 
 - **Backend-agnostic.** One `resolve_<integration>_token()` contract serves both the AgentCore Runtime backend (token arrives via the `WorkloadAccessToken` header) and the parked ECS backend (in-process boto3). The backend decides how the token arrives; the seam does not care.
 - **Incremental.** The rollout is phased and flag-gated, and the shared PAT fallback stays until the vault path is green. No big-bang cutover.
-- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
+- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/sample-autonomous-cloud-coding-agents/decisions/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
 
 ## Credential types
 
@@ -246,7 +246,7 @@ revoking a grant — it changes who stores and refreshes the token, not whether 
 - Issue [#215](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/215) — Bedrock billing attribution
 - Issue [#237](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/237) — governance planes / `abca.audit.v1` correlation block
 - Issue [#288](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/288) / PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) — Jira integration (second provider through the resolver seam)
-- [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
+- [ADR-014](/sample-autonomous-cloud-coding-agents/decisions/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
 - [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) — the worked use-cases, seams table, decision tree, and Linear before/after
 - [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) — current auth posture, the shared-PAT limitation this ADR resolves
 - GitHub issues — per-repo GitHub credentials, layered credential derivation, delegation chain propagation (priority labels `P0`, `P1`, etc.)

@@ -27,9 +27,10 @@ mise //cdk:destroy          # destroy stack
 | Code | Test location |
 |------|---------------|
 | Shared handler logic | `cdk/test/handlers/shared/*.test.ts` |
+| Trusted approval writer | `src/handlers/request-approval.ts`, `src/constructs/approval-request-service.ts`; handler/unit, DynamoDB Local and construct tests |
 | Handler entrypoints | `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.test.ts`, `webhook-create-task.test.ts` |
 | Constructs | `cdk/test/constructs/task-orchestrator.test.ts`, `task-api.test.ts` |
-| MicroVM lifecycle/capacity transactions | `test/handlers/shared/*-local.test.ts`; use a loopback DynamoDB Local endpoint in `ABCA_DDB_LOCAL_ENDPOINT` (mandatory in CI) |
+| MicroVM lifecycle/capacity transactions | `test/handlers/shared/*-local.test.ts` and `test/handlers/request-approval-local.test.ts`; use a loopback DynamoDB Local endpoint in `ABCA_DDB_LOCAL_ENDPOINT` (mandatory in CI) |
 | Staged flat-to-nested migration helpers | `src/migration/`, `test/migration/`; these are not a deployable migration command |
 | Live verification harnesses | `test/live/`; explicitly invoked against an owned fixture, excluded from normal Jest collection |
 

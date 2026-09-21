@@ -36,6 +36,7 @@ export interface MigrationTemplate {
   [key: string]: any;
 }
 
+/** Template digests use code-unit key order; runtime receipts use localeCompare. Do not interchange persisted hashes. */
 export function canonical(value: unknown): string {
   const sort = (item: any): any => {
     if (Array.isArray(item)) return item.map(sort);

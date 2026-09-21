@@ -4,7 +4,7 @@ title: Deployment guide
 
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 
 ## Architecture overview
 
@@ -25,7 +25,7 @@ ECS Fargate is **opt-in**. Deploy with `--context compute_type=ecs`; the stack e
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend).
 
 Selecting it is a synth-time context flag:
 
@@ -263,6 +263,9 @@ directly to DynamoDB and cannot create new gates after those permissions are rem
 3. Deploy the stack. Check that the SessionRole has approval-table reads and
    condition checks only, plus `execute-api:Invoke` restricted to its task tag.
    CDK supplies `APPROVAL_REQUESTS_API_URL` to all three compute backends.
+   Custom ECS constructs must provide both the SessionRole and service URL;
+   approval wiring without them is rejected before deployment. A MicroVM
+   manifest missing the URL is rejected before the worker starts.
 4. Submit a test task that triggers a known approval rule on each enabled backend.
    Verify that the request appears, an owner decision resumes it, and an explicit
    deadline records `TIMED_OUT` without overwriting a human decision. Then resume
@@ -344,7 +347,7 @@ aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
   --query 'Subnets[].[SubnetId,AvailabilityZone,AvailabilityZoneId]' --output text
 ```
 
-Be aware that destroying a VPC whose subnets held AgentCore ENIs can take 20–40 minutes while AWS reclaims them (see the `DELETE_FAILED` note in the [quick start](./QUICK_START.mdx) troubleshooting table).
+Be aware that destroying a VPC whose subnets held AgentCore ENIs can take 20–40 minutes while AWS reclaims them (see the `DELETE_FAILED` note in the [quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) troubleshooting table).
 
 ### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
 
@@ -407,11 +410,11 @@ For users without AWS CLI access.
 
 ## Related docs
 
-- [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
+- [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) -- Local development, testing, repository onboarding.
 - [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
 - [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.
-- [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.
+- [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.

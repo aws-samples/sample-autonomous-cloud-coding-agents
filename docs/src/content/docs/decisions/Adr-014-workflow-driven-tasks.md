@@ -106,5 +106,5 @@ With both resolved and the one schema reshape applied, the Phase-0 schema is **f
 - [docs/design/REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) — the Blueprint construct and `step_sequence` model
 - [docs/design/CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — policy engine the `agent_config` feeds
 - Prior art: `origin/merge/akw-integration` (commit `9d066a8`) — AKW YAML registry and models (reconciled, scoped down)
-- [ADR-013](/sample-autonomous-cloud-coding-agents/architecture/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
-- [ADR-005](/sample-autonomous-cloud-coding-agents/architecture/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)
+- [ADR-013](/sample-autonomous-cloud-coding-agents/decisions/adr-013-tiered-validation-pyramid) — the validation pyramid the `promotion_gate` layers onto
+- [ADR-005](/sample-autonomous-cloud-coding-agents/decisions/adr-005-feedback-loop) — the feedback loop that workflow trajectory-evolution would extend (future, out of scope)
