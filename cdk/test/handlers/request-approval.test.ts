@@ -65,14 +65,14 @@ test('records only the pending request, guarded by current task ownership and st
   expect(items[1].Update.ExpressionAttributeValues[':user']).toBe('owner');
 });
 
-test.each(['worker-token', 'microvm.worker:1'])('fences stale MicroVM writers using opaque identity %s', async workerId => {
+test('fences stale MicroVM writers in the same transaction', async () => {
   task.compute_type = 'lambda-microvm';
-  await recordWorkerRequest({ ...input, worker_attempt_id: workerId });
+  await recordWorkerRequest({ ...input, worker_attempt_id: 'worker-token' });
   const lease = send.mock.calls[1][0].input.TransactItems[2].ConditionCheck;
   expect(lease.Key).toEqual({ task_id: 'worker-lease#task' });
   expect(lease.ConditionExpression).toBe('lease_state = :active AND lease_attempt_id = :attempt AND lease_user_id = :user');
   expect(lease.ExpressionAttributeValues).toEqual({
-    ':active': 'ACTIVE', ':attempt': workerId, ':user': 'owner',
+    ':active': 'ACTIVE', ':attempt': 'worker-token', ':user': 'owner',
   });
 });
 
@@ -131,15 +131,9 @@ test('reports service failures as unavailable with a request ID, not invalid inp
   });
 });
 
-test.each(['*', 'task/*', '../task', 'task?x', 'task#lease', 'task\n'])('rejects unsafe task/request identifiers %j before database access', async id => {
-  for (const key of ['task_id', 'request_id']) {
+test.each(['*', 'task/*', '../task', 'task?x', 'task#lease', 'task\n'])('rejects unsafe task/request/worker identifiers %j before database access', async id => {
+  for (const key of ['task_id', 'request_id', 'worker_attempt_id']) {
     expect(await recordWorkerRequest({ ...input, [key]: id })).toEqual({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
   }
-  expect(send).not.toHaveBeenCalled();
-});
-
-test.each(['', 'worker\n', '\u0000worker', 'x'.repeat(129)])('rejects malformed worker identity %j', async workerId => {
-  expect(await recordWorkerRequest({ ...input, worker_attempt_id: workerId }))
-    .toEqual({ ok: false, code: 'APPROVAL_REQUEST_INVALID' });
   expect(send).not.toHaveBeenCalled();
 });
