@@ -72,6 +72,7 @@ import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { buildAppId } from '../constructs/solution-ua-aspect';
+import { StatefulRetentionAspect } from '../constructs/stateful-retention';
 import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { TaskApi } from '../constructs/task-api';
@@ -157,6 +158,10 @@ export interface AgentStackProps extends StackProps {
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
+
+    // Includes nested stacks. Install retention before any future resource move
+    // so the deployed source template protects data on deletion and replacement.
+    Aspects.of(this).add(new StatefulRetentionAspect(), { priority: AspectPriority.MUTATING });
 
     const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
     if (
