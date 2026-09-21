@@ -73,11 +73,12 @@ def test_ping_healthy_by_default(client):
     assert r.json() == {"status": "healthy"}
 
 
-def test_background_thread_failure_503_and_backup_terminal_write(client, monkeypatch):
+@pytest.mark.parametrize("outcome", ["written", "failed", "superseded"])
+def test_background_thread_failure_503_and_backup_terminal_write(client, monkeypatch, outcome):
     def boom(**_kwargs):
         raise RuntimeError("simulated pipeline crash")
 
-    mock_write = MagicMock()
+    mock_write = MagicMock(return_value=server.task_state.TerminalWriteOutcome(outcome))
     monkeypatch.setattr(server, "run_task", boom)
     monkeypatch.setattr(server.task_state, "write_terminal", mock_write)
 
@@ -115,13 +116,8 @@ def test_background_thread_failure_503_and_backup_terminal_write(client, monkeyp
     assert body["status"] == "unhealthy"
     assert body["reason"] == "background_pipeline_failed"
 
-    # Race: /ping flips to 503 as soon as ``_background_pipeline_failed = True``
-    # is set in the except block, but ``task_state.write_terminal(...)`` happens
-    # a few lines later (after ``print()`` + ``traceback.print_exc()``). Wait
-    # for the mock to actually be invoked before asserting.
-    deadline2 = time.time() + 5.0
-    while time.time() < deadline2 and not mock_write.called:
-        time.sleep(0.05)
+    # The thread has exited, including the backup write. Even a failed backup
+    # must leave /ping unhealthy so the coordinator can recover the task.
     mock_write.assert_called()
     call_kw = mock_write.call_args
     assert call_kw[0][0] == "task-crash-1"
