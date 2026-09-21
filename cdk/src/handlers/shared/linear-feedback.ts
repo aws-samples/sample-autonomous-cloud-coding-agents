@@ -429,13 +429,21 @@ export async function readLinearApprovalComment(
   const result = await graphqlData(token, `
     query VerifyApprovalComment($id: String!) {
       organization { id }
+      viewer { id }
       comment(id: $id) { id body user { id } botActor { id } issue { id } parent { id } }
     }`, { id });
   if (!result.ok) throw new Error('Linear approval comment verification unavailable');
   if ((result.value.organization as { id?: string } | undefined)?.id !== ctx.linearWorkspaceId) {
     throw new Error('Linear approval verification workspace mismatch');
   }
-  return result.value.comment as Awaited<ReturnType<typeof readLinearApprovalComment>> ?? null;
+  const viewerId = (result.value.viewer as { id?: string } | undefined)?.id;
+  if (!viewerId) throw new Error('Linear approval verification identity unavailable');
+  const comment = result.value.comment as Awaited<ReturnType<typeof readLinearApprovalComment>> ?? null;
+  // Diagnostic user-mode OAuth tokens can post genuine human comments. Workers
+  // holding that token must not manufacture consent from its own identity.
+  // Read the identity from Linear, including for installations predating this check.
+  if (comment?.user?.id === viewerId) return null;
+  return comment;
 }
 
 /** Retry-safe posting for approval prompts and acknowledgements. */
