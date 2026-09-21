@@ -146,6 +146,19 @@ describe('linear-feedback', () => {
       }));
       expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: true });
     });
+    test.each([
+      ['Approval needed\r\nReply here\r\n', true],
+      ['Approval needed\nApprove a DIFFERENT action', false],
+    ])('compares replay content conservatively: %j', async (body, accepted) => {
+      fetchMock.mockRejectedValueOnce(new Error('lost response'));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: { body, issue: { id: ISSUE_ID }, parent: { id: 'root' } },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, { ...input, body: 'Approval needed\nReply here' }))
+        .toEqual(accepted ? { ok: true } : { ok: false, retryable: false });
+    });
     test('does not accept an ID collision in another issue or thread', async () => {
       fetchMock.mockResolvedValueOnce(jsonResponse({ errors: ['already exists'] }));
       fetchMock.mockResolvedValueOnce(jsonResponse({
