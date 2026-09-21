@@ -32,11 +32,9 @@ const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
 // --- platform_config (ADR-021 P2) ---
-// The FOUR required identifiers, and only those, are set for the main describes,
-// so the default `platform_config` block is small and its exact serialized size is
-// known — which the 4 KB boundary probes below depend on. The nine optional keys
-// get their own describe (and are deleted here so a leaked env var from another
-// suite cannot silently change the envelope's byte length).
+// Set only the required platform fields for the main cases. Optional fields
+// are tested separately so ambient environment cannot change payload size.
+const APPROVAL_REQUESTS_API_URL = 'https://approval.execute-api.us-east-1.amazonaws.com/v1';
 const TASK_TABLE_NAME = 'abca-task-table';
 const TASK_EVENTS_TABLE_NAME = 'abca-task-events-table';
 const GITHUB_TOKEN_SECRET_ARN =
@@ -58,6 +56,7 @@ process.env.MICROVM_PAYLOAD_BUCKET = PAYLOAD_BUCKET;
 process.env.AWS_REGION = 'us-east-1';
 delete process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 
+process.env.APPROVAL_REQUESTS_API_URL = APPROVAL_REQUESTS_API_URL;
 process.env.TASK_TABLE_NAME = TASK_TABLE_NAME;
 process.env.TASK_EVENTS_TABLE_NAME = TASK_EVENTS_TABLE_NAME;
 process.env.GITHUB_TOKEN_SECRET_ARN = GITHUB_TOKEN_SECRET_ARN;
@@ -145,6 +144,7 @@ const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn
 const EXPECTED_PLATFORM_CONFIG = {
   task_table_name: TASK_TABLE_NAME,
   task_events_table_name: TASK_EVENTS_TABLE_NAME,
+  approval_requests_api_url: APPROVAL_REQUESTS_API_URL,
   github_token_secret_arn: GITHUB_TOKEN_SECRET_ARN,
   agent_session_role_arn: AGENT_SESSION_ROLE_ARN,
 };
@@ -1190,10 +1190,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     }
   });
 
-  test('pins the REQUIRED subset — these four are what a task cannot start without', () => {
+  test('pins the required platform fields including the trusted approval service', () => {
     expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS]).toEqual([
       'task_table_name',
       'task_events_table_name',
+      'approval_requests_api_url',
       'github_token_secret_arn',
       'agent_session_role_arn',
     ]);
@@ -1226,6 +1227,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     const config = buildMicrovmPlatformConfig({
       TASK_TABLE_NAME: 'tasks',
       TASK_EVENTS_TABLE_NAME: 'events',
+      APPROVAL_REQUESTS_API_URL,
       GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-AbCdEf',
       AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
     });
@@ -1235,6 +1237,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(Object.keys(config)).toEqual([
       'task_table_name',
       'task_events_table_name',
+      'approval_requests_api_url',
       'github_token_secret_arn',
       'agent_session_role_arn',
     ]);
@@ -1269,6 +1272,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   });
 
   test.each([
+    ['APPROVAL_REQUESTS_API_URL', 'approval_requests_api_url'],
     ['TASK_TABLE_NAME', 'task_table_name'],
     ['TASK_EVENTS_TABLE_NAME', 'task_events_table_name'],
     ['GITHUB_TOKEN_SECRET_ARN', 'github_token_secret_arn'],
@@ -1286,7 +1290,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
 
   test('names EVERY missing required key at once, not just the first', () => {
     // One redeploy should fix all of them; reporting one per attempt turns a
-    // misconfiguration into four round-trips.
+    // misconfiguration into repeated round-trips.
     expect(() => buildMicrovmPlatformConfig({})).toThrow(
       /task_table_name.*task_events_table_name.*github_token_secret_arn.*agent_session_role_arn/s,
     );
@@ -1351,7 +1355,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   test('does NOT throw for a missing OPTIONAL key', () => {
     const env = { ...FULL_ENV };
     for (const optional of [
-      'TASK_APPROVALS_TABLE_NAME', 'APPROVAL_REQUESTS_API_URL', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
+      'TASK_APPROVALS_TABLE_NAME', 'NUDGES_TABLE_NAME', 'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
       'LINEAR_VAULT_ENABLED', 'LINEAR_WORKLOAD_IDENTITY_NAME',
       'CONTINUATION_BUCKET_NAME',

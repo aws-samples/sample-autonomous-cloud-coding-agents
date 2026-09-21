@@ -44,6 +44,7 @@ def signed_url(task_id="task-1", bucket="payload-bucket", region="us-east-1"):
 def transport(monkeypatch):
     config = {
         "task_table_name": "Tasks",
+        "approval_requests_api_url": "https://approval.execute-api.us-east-1.amazonaws.com/v1",
         "task_events_table_name": "Events",
         "agent_session_role_arn": "arn:aws:iam::123456789012:role/AgentSession",
         "github_token_secret_arn": (

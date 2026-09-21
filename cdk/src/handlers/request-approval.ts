@@ -45,8 +45,12 @@ interface RequestInput {
   readonly reason?: string;
 }
 
-function validId(value: unknown): value is string {
+function validShortText(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH;
+}
+
+function validId(value: unknown): value is string {
+  return validShortText(value) && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value);
 }
 
 /** Never copy decision, notification, retention or arbitrary caller fields. */
@@ -56,12 +60,12 @@ function validateRequest(input: RequestInput, task: Record<string, any>): Record
     || row.task_id !== input.task_id || row.request_id !== input.request_id
     || row.user_id !== task.user_id || row.repo !== (task.repo ?? '')
     || row.status !== 'PENDING'
-    || !validId(row.tool_name) || typeof row.tool_input_preview !== 'string' || row.tool_input_preview.length > MAX_TEXT_LENGTH
+    || !validShortText(row.tool_name) || typeof row.tool_input_preview !== 'string' || row.tool_input_preview.length > MAX_TEXT_LENGTH
     || typeof row.tool_input_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.tool_input_sha256)
     || typeof row.reason !== 'string' || row.reason.length > MAX_TEXT_LENGTH
     || !['low', 'medium', 'high'].includes(row.severity as string)
     || !Array.isArray(row.matching_rule_ids) || row.matching_rule_ids.length > 500
-    || !row.matching_rule_ids.every(validId)
+    || !row.matching_rule_ids.every(validShortText)
     || typeof row.created_at !== 'string' || !Number.isFinite(Date.parse(row.created_at))
     || typeof row.timeout_s !== 'number' || !Number.isInteger(row.timeout_s)
     || row.timeout_s < 0 || row.timeout_s > constants.approval_timeout_s.max
@@ -79,6 +83,7 @@ function validateRequest(input: RequestInput, task: Record<string, any>): Record
  */
 export async function recordWorkerRequest(input: RequestInput): Promise<Record<string, unknown>> {
   if (!input || !validId(input.task_id) || !validId(input.request_id)
+    || (input.worker_attempt_id !== undefined && !validId(input.worker_attempt_id))
     || !['create', 'timeout'].includes(input.operation)) {
     return { ok: false, code: 'APPROVAL_REQUEST_INVALID' };
   }

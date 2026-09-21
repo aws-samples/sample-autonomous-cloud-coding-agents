@@ -60,6 +60,7 @@
     "required": [
       "task_table_name",
       "task_events_table_name",
+      "approval_requests_api_url",
       "github_token_secret_arn",
       "agent_session_role_arn"
     ],

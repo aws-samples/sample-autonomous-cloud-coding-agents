@@ -29,7 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
-import { AgentSessionRole, grantAgentTaskTableAccess, grantAgentApprovalReadAccess } from './agent-session-role';
+import { AgentSessionRole, grantAgentTaskTableAccess } from './agent-session-role';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
@@ -322,6 +322,10 @@ export class EcsAgentCluster extends Construct {
   constructor(scope: Construct, id: string, props: EcsAgentClusterProps) {
     super(scope, id);
 
+    if ((props.taskApprovalsTable || props.approvalRequestsApiUrl)
+      && (!props.agentSessionRole || !props.approvalRequestsApiUrl)) {
+      throw new Error('ECS approvals require agentSessionRole and approvalRequestsApiUrl with a task-scoped invocation grant');
+    }
     this.containerName = 'AgentContainer';
 
     // ECS Cluster with Fargate capacity provider and container insights
@@ -513,7 +517,6 @@ export class EcsAgentCluster extends Construct {
     } else {
       grantAgentTaskTableAccess(props.taskTable, taskRole, false);
       props.taskEventsTable.grantReadWriteData(taskRole);
-      if (props.taskApprovalsTable) grantAgentApprovalReadAccess(props.taskApprovalsTable, taskRole, false);
     }
     // Capacity counters are coordinator-owned. The agent never accesses them.
 

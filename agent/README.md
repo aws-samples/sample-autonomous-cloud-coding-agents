@@ -286,6 +286,7 @@ Each snake_case key installs into its UPPER_SNAKE env var, and a payload value *
 |---|---|---|
 | `task_table_name` | `TASK_TABLE_NAME` | ✅ |
 | `task_events_table_name` | `TASK_EVENTS_TABLE_NAME` | ✅ |
+| `approval_requests_api_url` | `APPROVAL_REQUESTS_API_URL` | ✅ |
 | `github_token_secret_arn` | `GITHUB_TOKEN_SECRET_ARN` | ✅ |
 | `agent_session_role_arn` | `AGENT_SESSION_ROLE_ARN` | ✅ |
 | `task_approvals_table_name` | `TASK_APPROVALS_TABLE_NAME` | |
@@ -301,6 +302,8 @@ Each snake_case key installs into its UPPER_SNAKE env var, and a payload value *
 | `aws_sdk_ua_app_id` | `AWS_SDK_UA_APP_ID` | |
 | `anthropic_default_haiku_model` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | |
 | `anthropic_model` | `ANTHROPIC_MODEL` | Main model profile for the deployment's configured geography |
+
+`APPROVAL_REQUESTS_API_URL` identifies the IAM-authenticated approval writer. All cloud backends receive it from CDK; workers create pending requests through this service and have read-only approval-table access. A MicroVM manifest missing the URL is rejected before execution. Deploy matching worker images and infrastructure together.
 
 Values are **non-secret configuration only**. Credentials are fetched at task startup from Secrets Manager or AgentCore Identity. Linear vault use requires `linear_vault_enabled="true"` and the workload identity name; the task's channel metadata identifies the workspace grant. The image carries no task credentials. The allowlist **fails closed**: an unrecognised key rejects the whole block. Blank optional values are skipped; blank required values, control characters and inconsistent ARN account/partition fields are rejected. Deployment authentication comes from the IAM-read manifest and exact configuration comparison, including same-account workspace identifiers ([#817](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/817)).
 
