@@ -73,7 +73,9 @@ export interface TaskOrchestratorProps {
   /**
    * ARN of the AgentCore runtime.
    */
-  readonly runtimeArn: string;
+  readonly runtimeArn?: string;
+  /** Exact backend selected by the deployment. Omit only for legacy composition. */
+  readonly deployedComputeType?: 'agentcore' | 'ecs' | 'lambda-microvm';
 
   /**
    * The DynamoDB repo config table. When provided, the orchestrator loads
@@ -279,6 +281,8 @@ export interface TaskOrchestratorProps {
      * no per-repo override failed at turn 0 with AccessDenied.
      */
     readonly anthropicModel: string;
+    /** Optional SigV4 tool gateway, forwarded to the MicroVM guest. */
+    readonly toolGatewayUrl?: string;
   };
 
   /**
@@ -388,6 +392,17 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
+    if (props.deployedComputeType) {
+      const backend = props.deployedComputeType;
+      if ((backend === 'agentcore' && !props.runtimeArn)
+        || (backend === 'ecs' && !props.ecsConfig)
+        || (backend !== 'agentcore' && (props.runtimeArn || props.additionalRuntimeArns?.length))
+        || (backend !== 'ecs' && props.ecsConfig)
+        || (backend !== 'lambda-microvm' && props.microvmConfig)) {
+        throw new Error(`TaskOrchestrator configuration must match the exclusive '${backend}' backend`);
+      }
+    }
+
     if (props.guardrailId && !props.guardrailVersion) {
       throw new Error('guardrailVersion is required when guardrailId is provided');
     }
@@ -446,7 +461,8 @@ export class TaskOrchestrator extends Construct {
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
-        RUNTIME_ARN: props.runtimeArn,
+        ...(props.runtimeArn && { RUNTIME_ARN: props.runtimeArn }),
+        ...(props.deployedComputeType && { DEPLOYED_COMPUTE_TYPE: props.deployedComputeType }),
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),
@@ -517,6 +533,7 @@ export class TaskOrchestrator extends Construct {
           // the backend that depends on this block, and it fell back to the Python
           // literal in `agent/src/config.py` regardless of the deployed geography.
           ANTHROPIC_MODEL: props.agentPlatformConfig.anthropicModel,
+          ...(props.agentPlatformConfig.toolGatewayUrl && { ABCA_TOOL_GATEWAY_URL: props.agentPlatformConfig.toolGatewayUrl }),
         }),
       },
       bundling: orchestratorBundling,
@@ -577,16 +594,18 @@ export class TaskOrchestrator extends Construct {
     // `BedrockAgentCoreContext.get_workload_access_token()` returns
     // non-None). Without this grant, `InvokeAgentRuntimeCommand` with
     // `runtimeUserId` set fails with AccessDenied.
-    const runtimeArns = [props.runtimeArn, ...(props.additionalRuntimeArns ?? [])];
+    const runtimeArns = [...(props.runtimeArn ? [props.runtimeArn] : []), ...(props.additionalRuntimeArns ?? [])];
     const runtimeResources = runtimeArns.flatMap(arn => [arn, `${arn}/*`]);
-    this.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock-agentcore:InvokeAgentRuntime',
-        'bedrock-agentcore:InvokeAgentRuntimeForUser',
-        'bedrock-agentcore:StopRuntimeSession',
-      ],
-      resources: runtimeResources,
-    }));
+    if (runtimeResources.length) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'bedrock-agentcore:InvokeAgentRuntimeForUser',
+          'bedrock-agentcore:StopRuntimeSession',
+        ],
+        resources: runtimeResources,
+      }));
+    }
 
     // Registry (#246): read-only access so the orchestrator can resolve the
     // Blueprint's registry:// asset refs at task start. Scoped to THIS registry

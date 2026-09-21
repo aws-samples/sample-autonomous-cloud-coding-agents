@@ -1625,3 +1625,21 @@ describe('finalizeTask — memory fallback', () => {
     expect(mockWriteMinimalEpisode).toHaveBeenCalled();
   });
 });
+
+describe('exclusive deployment routing', () => {
+  const original = process.env.DEPLOYED_COMPUTE_TYPE;
+  afterEach(() => {
+    if (original === undefined) delete process.env.DEPLOYED_COMPUTE_TYPE;
+    else process.env.DEPLOYED_COMPUTE_TYPE = original;
+  });
+  test.each(['agentcore', 'ecs', 'lambda-microvm'])('inherits %s for unpinned and repo-less tasks', async backend => {
+    process.env.DEPLOYED_COMPUTE_TYPE = backend;
+    expect((await loadBlueprintConfig(baseTask as any)).compute_type).toBe(backend);
+    expect((await loadBlueprintConfig({ ...baseTask, repo: undefined } as any)).compute_type).toBe(backend);
+  });
+  test('rejects a stored backend override that is no longer deployed', async () => {
+    process.env.DEPLOYED_COMPUTE_TYPE = 'ecs';
+    mockLoadRepoConfig.mockResolvedValueOnce({ compute_type: 'agentcore' });
+    await expect(loadBlueprintConfig(baseTask as any)).rejects.toThrow(/is not deployed/);
+  });
+});

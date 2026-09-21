@@ -83,6 +83,14 @@ describe('buildRuntimeStatusReport', () => {
     expect(controlPlaneSend).toHaveBeenCalledTimes(2);
   });
 
+  test.each(['ecs', 'lambda-microvm'] as const)('inherits %s without probing AgentCore', async backend => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([{ repo: 'acme/a', status: 'active' }]);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, { defaultComputeType: backend });
+    expect(report.blueprints[0].compute_type).toBe(backend);
+    expect(report.blueprints[0].runtime_arn).toBeUndefined();
+    expect(controlPlaneSend).not.toHaveBeenCalled();
+  });
+
   test('records probe errors without failing the report', async () => {
     controlPlaneSend.mockRejectedValue(new Error('AccessDenied'));
     (listRepoConfigs as jest.Mock).mockResolvedValue([{

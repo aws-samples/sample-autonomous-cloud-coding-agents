@@ -49,18 +49,13 @@ describe('structural synthesis profiles', () => {
     }
   });
 
-  test('labels the twelve rejected cells without bypassing the application guard', () => {
-    expect(matrix.filter(p => p.expectedError)).toHaveLength(12);
-    for (const profile of matrix) {
-      expect(!!profile.expectedError).toBe(
-        profile.context.compute_type === 'lambda-microvm' && profile.context.enableLinearIdentityVault === true,
-      );
-    }
+  test('expects all backend and optional-service combinations to synthesize', () => {
+    expect(matrix.filter(p => p.expectedError)).toHaveLength(0);
   });
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_type === 'lambda-microvm' && !p.expectedError);
-    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(8);
+    expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(16);
     for (const p of matrix) {
       expect(p.microvmImageConfigured).toBe(!!(p.context.microvm_base_image_arn || p.context.microvm_image_identifier));
       expect(!!p.context.microvm_base_image_arn && !!p.context.microvm_image_identifier).toBe(false);

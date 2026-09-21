@@ -27,12 +27,18 @@ import { synthesisProfiles } from '../../src/synthesis/profiles';
 describe('profile acceptance rules', () => {
   let directory: string;
   const profile = synthesisProfiles()[0];
-  const rejected = synthesisProfiles().find(candidate => candidate.expectedError)!;
+  const rejected = {
+    ...profile,
+    name: 'invalid-compute',
+    context: { ...profile.context, compute_type: 'unsupported' },
+    expectedError: 'compute_type must be agentcore, ecs or lambda-microvm',
+  };
   const budgets: Budgets = { resources: 500, bytes: 800_000, parameters: 200, outputs: 200 };
   beforeEach(() => { directory = mkdtempSync(path.join(tmpdir(), 'profile-audit-')); });
   afterEach(() => { rmSync(directory, { recursive: true, force: true }); });
 
-  function synthesize(target: string, padding = '', template: object = { Resources: { Bucket: { Type: 'AWS::S3::Bucket' } } }): WorkerResult {
+  const retained = { DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' };
+  function synthesize(target: string, padding = '', template: object = { Resources: { Bucket: { Type: 'AWS::S3::Bucket', ...retained } } }): WorkerResult {
     mkdirSync(target);
     writeFileSync(path.join(target, 'manifest.json'), JSON.stringify({
       artifacts: { Api: { type: 'aws:cloudformation:stack', properties: { templateFile: 'api.template.json' } } },
@@ -59,7 +65,7 @@ describe('profile acceptance rules', () => {
 
   test('enforces resource, byte, parameter, and output limits', () => {
     const worker = (_profile: unknown, target: string) => synthesize(target, '', {
-      Resources: { Bucket: { Type: 'AWS::S3::Bucket' }, Queue: { Type: 'AWS::SQS::Queue' } },
+      Resources: { Bucket: { Type: 'AWS::S3::Bucket', ...retained }, Queue: { Type: 'AWS::SQS::Queue', ...retained } },
       Parameters: { A: { Type: 'String' }, B: { Type: 'String' } },
       Outputs: { A: { Value: 'a' }, B: { Value: 'b' } },
     });
@@ -100,6 +106,32 @@ describe('profile acceptance rules', () => {
     expect(audit.first?.kind).toBe('synthesized');
     expect(audit.second).toBeUndefined();
     expect(audit.failures).toEqual(['worker timeout']);
+  });
+
+  test('rejects unprotected data and cleanup providers in nested templates', () => {
+    const worker = (_profile: unknown, target: string): WorkerResult => {
+      synthesize(target);
+      writeFileSync(path.join(target, 'child.template.json'), JSON.stringify({
+        Resources: {
+          Data: { Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Delete' },
+          Bucket: { Type: 'AWS::S3::Bucket', ...retained },
+          Cleanup: { Type: 'Custom::S3AutoDeleteObjects' },
+        },
+      }));
+      writeFileSync(path.join(target, 'api.template.json'), JSON.stringify({
+        Resources: {
+          Child: { Type: 'AWS::CloudFormation::Stack', Metadata: { 'aws:asset:path': 'child.template.json' } },
+        },
+      }));
+      return { kind: 'synthesized', census: inspectAssembly(target) };
+    };
+    const audit = auditProfile(profile, path.join(directory, 'first'), budgets, true, worker);
+    expect(audit.failures).toEqual([
+      expect.stringContaining('child.template.json/Data: AWS::DynamoDB::Table requires'),
+      expect.stringContaining('child.template.json/Cleanup: Custom::S3AutoDeleteObjects requires'),
+      expect.stringContaining('Repeat: child.template.json/Data:'),
+      expect.stringContaining('Repeat: child.template.json/Cleanup:'),
+    ]);
   });
 
   test('carries unresolved-context diagnostics into profile failure', () => {

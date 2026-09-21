@@ -18,7 +18,7 @@
  */
 
 import { Command } from 'commander';
-import { assertComputeSubstrateDeployed } from '../compute-substrate';
+import { assertComputeSubstrateDeployed, defaultComputeType } from '../compute-substrate';
 import { CliError } from '../errors';
 import { assertModelIdUsable } from '../model-id';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
@@ -124,13 +124,16 @@ export function makeRepoCommand(): Command {
         }
 
         const config = await loadRepoConfig(region, tableName, repoId);
-        const [platformTokenArn, runtimeArn] = await Promise.all([
+        const [platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode] = await Promise.all([
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
           getStackOutput(region, stackName, 'RuntimeArn'),
+          getStackOutput(region, stackName, 'ComputeSubstrate'),
+          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
         ]);
         const display = formatRepoConfigForDisplay(config, {
           githubTokenSecretArn: platformTokenArn,
           runtimeArn,
+          defaultComputeType: defaultComputeType({ computeSubstrate, computeDeploymentMode }),
         });
 
         if (opts.output === 'json') {
@@ -173,7 +176,7 @@ export function makeRepoCommand(): Command {
         const { region, stackName } = resolveOperatorContext(opts);
         const [
           tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
-          grantedModelIds,
+          grantedModelIds, computeDeploymentMode,
         ] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
@@ -181,33 +184,16 @@ export function makeRepoCommand(): Command {
           getStackOutput(region, stackName, 'ComputeSubstrate'),
           getStackOutput(region, stackName, 'BedrockGeoRegion'),
           getStackOutput(region, stackName, 'BedrockModelIds'),
+          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
         ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
           );
         }
-        // Refuse to onboard a repo onto a compute backend the deployed stack did
-        // NOT provision — otherwise every task on this repo fails at session
-        // start ("ECS compute strategy requires ECS_CLUSTER_ARN…" for ecs, or the
-        // MicroVM strategy's "deployed without the Lambda MicroVMs substrate" for
-        // lambda-microvm). Catch it here, at config time, with a fixable message.
-        //
-        // ORDERING — this runs BEFORE `onboardRepo`, and that is deliberate:
-        // `onboardRepo` performs the live `ListManagedMicrovmImages` regional
-        // availability probe for lambda-microvm. The substrate gate is both
-        // CHEAPER (it reuses the `ComputeSubstrate` output already fetched in the
-        // Promise.all above — zero extra API calls, no extra IAM) and MORE
-        // SPECIFIC (a stack with no MicroVM substrate cannot run the backend even
-        // in a Region that supports it, whereas the reverse cannot happen: the
-        // synth-time Region gate means a stack carrying the MicroVM substrate is
-        // already in a supported Region). Reporting "this stack has no MicroVM
-        // substrate" beats reporting "MicroVMs are unavailable in this Region"
-        // when both are true — the first names the actual fix.
-        //
-        // See `assertComputeSubstrateDeployed` for the ComputeSubstrate output's
-        // exact semantics (single-valued today, list-tolerant by construction).
-        assertComputeSubstrateDeployed({ stackName, computeType: opts.computeType, computeSubstrate });
+        const deployment = { stackName, computeSubstrate, computeDeploymentMode };
+        // Check explicit input early; onboardRepo also checks any stored override.
+        assertComputeSubstrateDeployed({ ...deployment, computeType: opts.computeType });
 
         // Same reasoning as the substrate gate above: reuse an output already
         // fetched, and fail here rather than let a task die at turn 0 with an
@@ -231,6 +217,7 @@ export function makeRepoCommand(): Command {
 
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,
+          deployment,
           runtimeArn: opts.runtimeArn,
           modelId,
           githubTokenSecretArn: opts.tokenSecretArn,
@@ -241,6 +228,7 @@ export function makeRepoCommand(): Command {
           config,
           platformRuntimeArn,
           platformGithubTokenSecretArn,
+          defaultComputeType: defaultComputeType(deployment),
         });
 
         if (opts.output === 'json') {

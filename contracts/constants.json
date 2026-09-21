@@ -46,7 +46,10 @@
       "agent_session_role_arn": "AGENT_SESSION_ROLE_ARN",
       "aws_sdk_ua_app_id": "AWS_SDK_UA_APP_ID",
       "anthropic_default_haiku_model": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-      "anthropic_model": "ANTHROPIC_MODEL"
+      "anthropic_model": "ANTHROPIC_MODEL",
+      "tool_gateway_url": "ABCA_TOOL_GATEWAY_URL",
+      "linear_vault_enabled": "LINEAR_VAULT_ENABLED",
+      "linear_workload_identity_name": "LINEAR_WORKLOAD_IDENTITY_NAME"
     },
     "required": [
       "task_table_name",

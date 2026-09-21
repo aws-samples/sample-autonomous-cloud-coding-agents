@@ -4,7 +4,7 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all platform resources. The stack uses a `ComputeStrategy` interface to support three compute backends within the same stack:
+ABCA deploys from the `backgroundagent-dev` root stack with nested stacks for selected subsystems. Each deployment provisions exactly one compute backend:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
@@ -17,7 +17,9 @@ ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all pl
 
 All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
 
-ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is present in the stack code but commented out. To enable it, uncomment the ECS blocks in `cdk/src/stacks/agent.ts`.
+AgentCore is the default. Select ECS with `mise //cdk:deploy -- --context compute_type=ecs`; select MicroVM as described below. Repositories inherit this choice unless they have an explicit matching override. Optional services such as Memory, Gateway and the Linear vault are independent of Runtime selection.
+
+Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources: drain active tasks and review the [backend transition procedure](../design/COMPUTE.md#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
 
 ### Lambda MicroVMs backend (experimental)
 

@@ -49,7 +49,7 @@ interface BlueprintProps {
   repo: string;                        // "owner/repo"
   repoTable: dynamodb.ITable;
   compute?: {
-    type?: 'agentcore' | 'ecs';        // default: 'agentcore'
+    type?: 'agentcore' | 'ecs' | 'lambda-microvm'; // inherits deployed backend
     runtimeArn?: string;
     config?: Record<string, unknown>;
   };
@@ -122,7 +122,7 @@ From lowest to highest priority:
 
 | Field | Default | Source |
 |---|---|---|
-| `compute_type` | `agentcore` | Platform constant |
+| `compute_type` | Selected deployment backend (`agentcore` by default) | `DEPLOYED_COMPUTE_TYPE` on the orchestrator; `ComputeSubstrate` / `ComputeDeploymentMode` stack outputs for CLI discovery |
 | `runtime_arn` | Stack-level env var | CDK stack props |
 | `model_id` | `global.anthropic.claude-opus-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
@@ -243,7 +243,7 @@ interface ComputeStrategy {
 }
 ```
 
-The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The backend is selected per repo via `compute_type` in the Blueprint.
+The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The deployment selects one backend. A Blueprint `compute_type` override must match it; omit the override to inherit the platform selection. See [Compute](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before changing an existing deployment.
 
 ## Re-onboarding
 

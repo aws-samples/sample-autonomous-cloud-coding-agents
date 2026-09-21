@@ -18,6 +18,7 @@
  */
 
 import { Command } from 'commander';
+import { defaultComputeType } from '../compute-substrate';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { assertRepoFormat } from '../repo-lookup';
@@ -41,9 +42,11 @@ export function makeRuntimeCommand(): Command {
       .action(async (opts) => {
         if (opts.repo) assertRepoFormat(opts.repo);
         const { region, stackName } = resolveOperatorContext(opts);
-        const [repoTableName, platformRuntimeArn] = await Promise.all([
+        const [repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
+          getStackOutput(region, stackName, 'ComputeSubstrate'),
+          getStackOutput(region, stackName, 'ComputeDeploymentMode'),
         ]);
         if (!repoTableName) {
           throw new CliError(
@@ -51,11 +54,12 @@ export function makeRuntimeCommand(): Command {
           );
         }
 
+        const selectedComputeType = defaultComputeType({ computeSubstrate, computeDeploymentMode });
         const report = await buildRuntimeStatusReport(
           region,
           repoTableName,
           platformRuntimeArn,
-          { repo: opts.repo },
+          { repo: opts.repo, defaultComputeType: selectedComputeType },
         );
 
         if (opts.output === 'json') {
@@ -64,7 +68,8 @@ export function makeRuntimeCommand(): Command {
         }
 
         console.log('Runtime status is resolved per blueprint (RepoTable) with platform defaults.');
-        console.log(`Platform default RuntimeArn: ${platformRuntimeArn ?? '(stack output missing)'}`);
+        console.log(`Platform default compute: ${selectedComputeType}`);
+        if (selectedComputeType === 'agentcore') console.log(`Platform default RuntimeArn: ${platformRuntimeArn ?? '(stack output missing)'}`);
         console.log();
 
         if (report.blueprints.length === 0) {

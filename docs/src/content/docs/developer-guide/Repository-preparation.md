@@ -90,7 +90,7 @@ Adoption disables deletion so a failed cutover can return to the prepared templa
 
 For **new installations with no existing repository rows**, `managed` can be selected directly. Existing CLI-onboarded rows require adoption too. A different active Blueprint cannot claim the same row; repository/table changes get a new physical identity, and deletion of the old identity is scoped to its old row. Supported backend selection and transition rules still apply separately.
 
-The provider and its private DynamoDB ownership ledger live in one shared nested stack. Transactions update repository configuration, ownership and a request receipt together. A duplicate request, even after later updates, returns its original result without replaying a configuration write. An older owner's Delete cannot remove a row claimed by a newer owner. Coordination metadata is separate from RepoTable because older CLI versions rewrite repository rows. The ledger has PITR; normal group teardown deletes it only after dependent custom resources finish. Do not manually delete or restore it independently of those resources. A failed Create can leave external state if the CloudFormation response is lost; inspect the ledger and repository before retrying or retiring that stack identity.
+The provider and its private DynamoDB ownership ledger live in one shared nested stack. Transactions update repository configuration, ownership and a request receipt together. A duplicate request, even after later updates, returns its original result without replaying a configuration write. An older owner's Delete cannot remove a row claimed by a newer owner. Coordination metadata is separate from RepoTable because older CLI versions rewrite repository rows. The ledger has PITR and is retained on stack removal or replacement. Managed Blueprint delete callbacks still soft-delete their repository rows before the provider is removed. Do not manually delete or restore it independently of those resources. A failed Create can leave external state if the CloudFormation response is lost; inspect the ledger and repository before retrying or retiring that stack identity.
 
 Managed writes preserve `onboarded_at`, timestamp actual operations, clear stale TTLs on activation, and set only declared overrides. Empty asset lists explicitly remove `mcp_servers`, `cedar_policy_modules`, and `skills`; other omitted overrides remain available to the CLI. An unchanged template no longer writes repository configuration on every deployment.
 
@@ -101,6 +101,24 @@ MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --chec
 ```
 
 This verifies template structure and repeatability. Live transactions, rollback and deployed-state reconciliation still need a rehearsal before production migration.
+
+### Stateful retention and stack decomposition
+
+`AgentStack` installs `StatefulRetentionAspect` across the application and its nested stacks. Both `DeletionPolicy` and `UpdateReplacePolicy` are `Retain` for DynamoDB tables, S3 buckets, Secrets Manager secrets, Cognito user pools, KMS keys, log groups, SQS queues, SNS topics and AgentCore Memory. Agent Registry and Linear workload-identity custom resources are retained too.
+
+S3 cleanup resources (`Custom::S3AutoDeleteObjects` and `Custom::CDKBucketDeployment`) also retain their existing logical IDs and gain both retention policies. Removing a live cleanup helper while retaining only its bucket could still invoke Delete and empty that bucket. For buckets, the aspect uses CloudFormation attribute overrides because the CDK Bucket L2 rejects `RETAIN` while `autoDeleteObjects` is configured. The existing helper remains present and retained; synthesis tests check that the change does not modify resource properties or remove helpers.
+
+**Install retention on the existing resource identities before removing or moving them.** Apply the retention change as a separate release of the currently deployed topology. Inspect the deployed parent and nested templates to confirm both policies on every protected resource and cleanup helper. A policy added to the target template cannot protect a resource already absent from that template. In particular, existing additive ECS/MicroVM installations must protect their AgentCore log groups before the exclusive-compute transition removes them. Review the other changes on this branch separately, including guardrail version binding and Blueprint controller handoff.
+
+Retention preserves stored resources, not the deleted application's roles, endpoints or sessions. TTLs, log retention periods and S3 lifecycle expiration continue to apply. Retained resources need an inventory and explicit recovery/import or cleanup; recreating a stack does not automatically adopt them. Disabling a registry or vault leaves its retained external identity in the account. Blueprint soft-delete behavior is unchanged, so protect repository rows with the staged handoff above when changing controller ownership.
+
+The normal CDK test suite evaluates all 43 named profiles from `synthesisProfiles`, using managed Blueprint provisioning and the production app builder. It checks every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs, checks stateful retention, and verifies that only the selected compute backend is provisioned. The offline census uses the same default budgets and retention checks:
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
+```
+
+Networking remains in `AgentStack`. [ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries) records the intended boundary and the required populated AWS refactor rehearsal. Local template checks do not establish CloudFormation refactor eligibility or preservation of physical IDs in a live deployment.
 
 ### Customizing the agent image
 

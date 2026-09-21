@@ -1446,7 +1446,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
     );
     expect(policies).toContain('logs:CreateLogStream');
-    expect(policies).toContain('RuntimeApplicationLogGroup');
+    expect(policies).toContain('LambdaMicrovmComputeMicrovmLogGroup');
 
     // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
@@ -1454,7 +1454,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const logGroupEnv = JSON.stringify(
       orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
     );
-    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+    expect(logGroupEnv).toContain('LambdaMicrovmComputeMicrovmLogGroup');
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
@@ -1922,30 +1922,16 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
-    // — platform_config carries the workload name and the guest's execution role gets the
-    // mint grant — but the two cannot be enabled together today: 505 resources against a
-    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
-    // without saying so would be false.
-    //
-    // The stack refuses the combination itself rather than letting the counter throw,
-    // because the counter's message is a per-type census that never mentions either flag —
-    // the operator cannot tell from it what to change.
-    //
-    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
-    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
-    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
-    //
-    // When the room is found, this test should be replaced by a real parity assertion.
-    const app = new App({
-      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
-    });
-    expect(() => Template.fromStack(
-      new AgentStack(app, 'LinearVaultMicrovmStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' } });
+    const template = Template.fromStack(new AgentStack(app, 'LinearVaultMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    const policy = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')));
+    expect(policy).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThanOrEqual(500);
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {

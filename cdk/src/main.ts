@@ -26,6 +26,7 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
+import { resolveComputeBackend } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
 
 // for development, use account/region from cdk cli
@@ -72,11 +73,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     region: options.region ?? devEnv.region,
   };
 
+  // Preserve existing VPC placement across backend selection changes. The shared
+  // network continues to use the established AgentCore-compatible AZ policy.
   // Auto-pin the VPC to AgentCore-supported AZs (or honor the validated
   // `agentcore:availabilityZones` override). `zones` undefined => CDK default
   // selection; `diagnostics` are attached to the stack below, because CDK only
   // collects annotations that hang off a stack's tree — App-node metadata would
   // be silently dropped, which is how a failed lookup used to pass unnoticed.
+  const computeType = resolveComputeBackend(app.node.tryGetContext('compute_type'));
   const azResolution = await resolveAgentCoreAzs({
     node: app.node,
     account: env.account,
@@ -110,8 +114,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     priority: AspectPriority.MUTATING,
   });
 
-  const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
-
   // Route53 Resolver resources where tag changes trigger replacement cascades.
   // Config: treats ANY property change (including tags) as requiring replacement.
   // Association: depends on Config's physical ID; if Config is replaced, the
@@ -121,15 +123,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
   ];
 
-  // TODO(#645): with three backends this single-valued tag is no longer an honest
-  // statement of what a stack runs — a `--context compute_type=lambda-microvm`
-  // deploy still provisions the AgentCore runtime, so every resource gets tagged
-  // `compute_type=lambda-microvm` including the AgentCore ones. ADR-021
-  // sub-decision 4 flags revisiting the semantics (e.g. a `compute_types` list).
-  // Deliberately NOT changed here: retagging every resource in the stack is a
-  // replacement-risk change of its own, and MicroVM spend is already attributable
-  // through the per-resource `abca:compute-backend` tags the
-  // LambdaMicrovmCompute construct applies.
   Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
   const githubTagKeys = [

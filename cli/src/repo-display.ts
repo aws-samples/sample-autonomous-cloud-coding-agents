@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import type { OnboardComputeType } from './compute-substrate';
 import type { GithubTokenSecretSource } from './github-token';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
@@ -25,6 +26,7 @@ export type FieldSource = 'blueprint' | 'platform';
 
 /** Stack outputs + constants used to resolve platform defaults for display. */
 export interface PlatformStackContext {
+  readonly defaultComputeType?: OnboardComputeType;
   readonly runtimeArn: string | null;
   readonly githubTokenSecretArn: string | null;
 }
@@ -128,6 +130,7 @@ export function formatRepoConfigForDisplay(
     }
   }
 
+  const computeType = config.compute_type ?? platform.defaultComputeType ?? PLATFORM_REPO_DEFAULTS.compute_type;
   return {
     repo: config.repo,
     status: config.status,
@@ -135,8 +138,8 @@ export function formatRepoConfigForDisplay(
     updated_at: config.updated_at,
     blueprint_overrides: blueprintOverrides,
     effective: {
-      compute_type: config.compute_type ?? PLATFORM_REPO_DEFAULTS.compute_type,
-      runtime_arn: config.runtime_arn ?? platform.runtimeArn ?? undefined,
+      compute_type: computeType,
+      runtime_arn: computeType === 'agentcore' ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
       model_id: config.model_id ?? PLATFORM_REPO_DEFAULTS.model_id,
       max_turns: config.max_turns ?? PLATFORM_REPO_DEFAULTS.max_turns,
       max_budget_usd: config.max_budget_usd !== undefined
@@ -174,7 +177,9 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
       key: 'runtime_arn',
       text: display.effective.runtime_arn
         ? formatSourcedValue(display.effective.runtime_arn, display.field_sources.runtime_arn)
-        : '(platform default — RuntimeArn stack output not found)',
+        : display.effective.compute_type === 'agentcore'
+          ? '(platform default — RuntimeArn stack output not found)'
+          : `(not applicable — ${display.effective.compute_type} uses platform compute)`,
     },
     {
       key: 'model_id',

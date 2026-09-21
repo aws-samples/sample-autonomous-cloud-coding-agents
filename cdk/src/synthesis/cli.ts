@@ -26,12 +26,11 @@ import cdkPackage from 'aws-cdk-lib/package.json';
 import { blueprintProvisioningMode } from '../blueprints/configuration';
 import { buildApp } from '../main';
 import { inspectAssembly } from './assembly';
-import { auditProfile, ProfileAudit, WorkerResult } from './audit';
+import { auditProfile, DEFAULT_BUDGETS, ProfileAudit, WorkerResult } from './audit';
 import { FIXTURE, STRUCTURAL_CONTEXT, synthesisEnvironment, synthesisProfiles, SynthesisProfile } from './profiles';
 import { createOutputDirectory, projectContext, sourceProvenance } from './workspace';
 
 const PROCESS_OUTPUT_LIMIT = 8_388_608;
-const DEFAULT_TEMPLATE_BYTE_BUDGET = 800_000;
 const MAX_TEMPLATE_BYTES = 1_000_000;
 const CHECKOUT = path.resolve(__dirname, '../../..');
 
@@ -42,7 +41,7 @@ const HELP = `Usage: mise //cdk:census -- [options]
   --output DIRECTORY             New output directory (default: a temporary directory)
   --check-stability              Synthesize twice in independent processes; fail on differences
   --blueprint-provisioning MODE  Select legacy, prepare, adopt, or managed for every profile
-  --max-resources NUMBER          Per-template ceiling (default: 500; may only tighten)
+  --max-resources NUMBER          Per-template ceiling (default: 490; maximum: 500)
   --max-template-bytes NUMBER     Per-template ceiling (default: 800000)
   --help                         Show this help
 
@@ -145,12 +144,12 @@ async function main(): Promise<void> {
     await synthesize(selected[0], path.resolve(values.output));
     return;
   }
-  const resourceLimit = ceiling(values['max-resources'], 500, 500, 'max-resources');
-  const byteLimit = ceiling(values['max-template-bytes'], DEFAULT_TEMPLATE_BYTE_BUDGET, MAX_TEMPLATE_BYTES, 'max-template-bytes');
+  const resourceLimit = ceiling(values['max-resources'], DEFAULT_BUDGETS.resources, 500, 'max-resources');
+  const byteLimit = ceiling(values['max-template-bytes'], DEFAULT_BUDGETS.bytes, MAX_TEMPLATE_BYTES, 'max-template-bytes');
   const directory = createOutputDirectory(CHECKOUT, values.output);
   const before = sourceProvenance(CHECKOUT);
   const baseContext = projectContext(CHECKOUT);
-  const budgets = { resources: resourceLimit, bytes: byteLimit, parameters: 200, outputs: 200 };
+  const budgets = { ...DEFAULT_BUDGETS, resources: resourceLimit, bytes: byteLimit };
   const results: ProfileAudit[] = [];
   let failed = false;
   for (const profile of selected) {

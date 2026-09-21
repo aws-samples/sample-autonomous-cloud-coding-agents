@@ -21,6 +21,7 @@ import {
   BedrockAgentCoreControlClient,
   GetAgentRuntimeCommand,
 } from '@aws-sdk/client-bedrock-agentcore-control';
+import type { OnboardComputeType } from './compute-substrate';
 import { PLATFORM_REPO_DEFAULTS } from './repo-display';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { makeClient } from './ua';
@@ -95,8 +96,9 @@ export function parseAgentRuntimeArn(runtimeArn: string): { agentRuntimeId: stri
 function bindingForRepo(
   config: RepoConfigRow,
   platformRuntimeArn: string | null,
+  defaultComputeType: OnboardComputeType,
 ): BlueprintRuntimeBinding {
-  const computeType = config.compute_type ?? PLATFORM_REPO_DEFAULTS.compute_type;
+  const computeType = config.compute_type ?? defaultComputeType;
   const hasBlueprintRuntime = config.runtime_arn !== undefined;
   const runtimeArn = computeType === 'agentcore'
     ? hasBlueprintRuntime ? config.runtime_arn : platformRuntimeArn ?? undefined
@@ -153,14 +155,14 @@ export async function buildRuntimeStatusReport(
   region: string,
   repoTableName: string,
   platformRuntimeArn: string | null,
-  options: { readonly repo?: string } = {},
+  options: { readonly repo?: string; readonly defaultComputeType?: OnboardComputeType } = {},
 ): Promise<RuntimeStatusReport> {
   let repos = await listRepoConfigs(region, repoTableName);
   if (options.repo) {
     repos = repos.filter((r) => r.repo === options.repo);
   }
 
-  const blueprints = repos.map((r) => bindingForRepo(r, platformRuntimeArn));
+  const blueprints = repos.map((r) => bindingForRepo(r, platformRuntimeArn, options.defaultComputeType ?? PLATFORM_REPO_DEFAULTS.compute_type));
 
   const agentcoreMap = new Map<string, string[]>();
   const ecsRepos: string[] = [];

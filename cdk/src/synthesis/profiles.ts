@@ -48,13 +48,10 @@ export const STRUCTURAL_CONTEXT: Context = {
   [`availability-zones:account=${FIXTURE.account}:region=${FIXTURE.region}`]: FIXTURE.zones.map(zone => zone.zoneName),
 };
 
-const VAULT_MICROVM_ERROR = 'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm:';
-
 function profile(compute: Compute, gateway: boolean, registry: boolean, vault: boolean, image: Image): SynthesisProfile {
   return {
     name: `${compute}-gw${+gateway}-reg${+registry}-vault${+vault}-${image}`,
     microvmImageConfigured: compute === 'lambda-microvm' && image !== 'none',
-    ...(compute === 'lambda-microvm' && vault ? { expectedError: VAULT_MICROVM_ERROR } : {}),
     context: {
       stackName: 'backgroundagent-dev',
       blueprintRepo: 'awslabs/agent-plugins',

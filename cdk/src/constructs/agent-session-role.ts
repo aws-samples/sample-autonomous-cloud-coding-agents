@@ -18,7 +18,7 @@
  */
 
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, Lazy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -42,7 +42,9 @@ export interface AgentSessionRoleProps {
    * the trust surface. Both run the same trusted agent code, which sources the
    * `{user_id, repo, task_id}` tag values from the resolved TaskConfig.
    */
-  readonly assumingRoles: iam.IRole[];
+  readonly assumingRoles?: iam.IRole[];
+  /** Admit the selected backend with admitComputeRole after constructing this role. */
+  readonly deferComputeRoleBinding?: boolean;
 
   /**
    * The four task-scoped DynamoDB tables, all partitioned by `task_id`. The
@@ -125,11 +127,12 @@ export class AgentSessionRole extends Construct {
 
   /** The SessionRole. Assumed by the agent at task startup. */
   public readonly role: iam.Role;
+  private readonly admittedRoles = new Set<iam.IRole>();
 
   constructor(scope: Construct, id: string, props: AgentSessionRoleProps) {
     super(scope, id);
 
-    if (props.assumingRoles.length === 0) {
+    if (!props.assumingRoles?.length && !props.deferComputeRoleBinding) {
       // A SessionRole no principal can assume is dead weight and would
       // synthesize an empty/invalid trust policy. Fail at synth instead.
       throw new Error(
@@ -137,12 +140,22 @@ export class AgentSessionRole extends Construct {
       );
     }
 
-    const [firstAssumingRole] = props.assumingRoles;
+    if (props.assumingRoles?.length && props.deferComputeRoleBinding) {
+      throw new Error('Specify assumingRoles or deferComputeRoleBinding, not both');
+    }
+    this.node.addValidation({ validate: () => this.admittedRoles.size ? [] : ['AgentSessionRole requires an admitted compute role before synthesis'] });
+    const firstAssumingRoleArn = props.assumingRoles?.[0]?.roleArn ?? Lazy.string({
+      produce: () => {
+        const first = this.admittedRoles.values().next().value;
+        if (!first) throw new Error('AgentSessionRole requires an admitted compute role before synthesis');
+        return first.roleArn;
+      },
+    });
 
     // CDK requires assumedBy; additional principals are admitted via
     // admitComputeRole so trust + grant always wire together.
     this.role = new iam.Role(this, 'Role', {
-      assumedBy: new iam.ArnPrincipal(firstAssumingRole.roleArn),
+      assumedBy: new iam.ArnPrincipal(firstAssumingRoleArn),
       description:
         'Per-task scoped credentials for ABCA agent tenant-data access '
         + '(DynamoDB task rows + S3 trace/attachment objects), constrained by '
@@ -249,7 +262,7 @@ export class AgentSessionRole extends Construct {
       true,
     );
 
-    for (const computeRole of props.assumingRoles) {
+    for (const computeRole of props.assumingRoles ?? []) {
       this.admitComputeRole(computeRole);
     }
   }
@@ -260,6 +273,8 @@ export class AgentSessionRole extends Construct {
    * `sts:AssumeRole`/`sts:TagSession` on the compute role's identity policy.
    */
   public admitComputeRole(computeRole: iam.IRole): void {
+    if (this.admittedRoles.has(computeRole)) return;
+    this.admittedRoles.add(computeRole);
     this.addTrustForComputeRole(computeRole);
     this.grantAssumeToComputeRole(computeRole);
   }

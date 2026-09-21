@@ -7,7 +7,7 @@ Every task runs in an isolated cloud compute environment. Nothing runs on the us
 
 ## Compute options
 
-The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. For repos that exceed AgentCore's constraints (2 GB image limit, no GPU), the `ComputeStrategy` interface allows switching to alternative backends per repo.
+The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. The deployment selects exactly one backend using the `compute_type` CDK context: `agentcore` (default), `ecs`, or `lambda-microvm`. The `ComputeStrategy` interface dispatches tasks to that deployed backend.
 
 | | AgentCore Runtime | ECS on Fargate | **Lambda MicroVMs** | ECS on EC2 | EKS | AWS Batch | Lambda (functions) | Custom EC2 + Firecracker |
 |---|---|---|---|---|---|---|---|---|
@@ -23,7 +23,21 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 
 > **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
-The backend is selected per repo via `compute_type` in the Blueprint config. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the `ComputeStrategy` interface.
+Repositories without a `compute_type` override inherit the deployment selection. An explicit Blueprint or RepoTable override must match the deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the `ComputeStrategy` interface.
+
+## Selecting and changing the backend
+
+Set `compute_type` in `cdk/cdk.json` or pass `--context compute_type=ecs` (or `lambda-microvm`) to the deployment task. Invalid values fail synthesis. `ComputeSubstrate` advertises the selected backend and `ComputeDeploymentMode=exclusive` distinguishes this contract from older additive deployments. `RuntimeArn` exists only for AgentCore. The CLI uses these outputs for onboarding defaults, repository display and runtime discovery; it retains the old additive interpretation when the mode output is absent.
+
+**Upgrading an existing ECS or MicroVM deployment removes its previously co-deployed AgentCore Runtime**, even if the context value does not change. Treat this as a compute migration, separate from a stack-ownership move or Blueprint-controller handoff:
+
+1. Record the deployed context and templates, image identifiers, repository backend/runtime overrides, and active sessions. Pause task submissions, webhook producers and scheduled work. Let all running and suspended tasks finish, or cancel them with the existing deployment and verify compute termination.
+2. Reconcile repository overrides with the target backend. Omitted `compute_type` inherits the target; a stored incompatible value is rejected, including during CLI re-onboarding. Remove obsolete runtime overrides when leaving AgentCore. Use the updated CLI alongside this CDK version.
+3. Prepare the target image and bootstrap permissions. MicroVM requires a compatible snapshot; rebuild/repackage it from this checkout before enabling Gateway or the vault because their optional settings now travel through the shared `platform_config` contract. A MicroVM deployment without an image provisions infrastructure but cannot run tasks.
+4. Review the complete CloudFormation change set. Expect removal of the unused Runtime, its delivery resources and its runtime log groups for ECS/MicroVM. First install the [retention prerequisite](../guides/DEVELOPER_GUIDE.md#stateful-retention-and-stack-decomposition) on the existing topology and verify the deployed policies. Log groups removed by this update are protected only if their source templates already retain them; the target template cannot add policies to absent resources. VPC placement continues to use the existing AZ policy. Verify shared stateful resources keep their identities.
+5. Rehearse deployment and rollback in a disposable environment, then deploy during the submission pause. Verify the backend outputs, an ordinary task, repository-less work, cancellation, logs and enabled integrations before resuming producers. Rollback can recreate compute but cannot resume deleted sessions or recover destroyed runtime storage/logs.
+
+Local synthesis proves resource wiring, quota headroom and template stability. It does not qualify a live backend transition or change the experimental status of Lambda MicroVMs.
 
 ## What runs in the session
 

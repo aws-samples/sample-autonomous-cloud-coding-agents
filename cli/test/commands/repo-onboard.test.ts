@@ -132,6 +132,26 @@ describe('repo onboard/offboard', () => {
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
+  test('inherits MicroVM selection and probes availability without persisting a default pin', async () => {
+    const send = jest.fn().mockResolvedValue({ images: [] });
+    const config = await onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: { stackName: 'test', computeSubstrate: 'lambda-microvm', computeDeploymentMode: 'exclusive' },
+    }, { lambdaMicrovmClientFactory: () => ({ send }) });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(config.compute_type).toBeUndefined();
+  });
+
+  test('rejects stale stored overrides before a probe or write', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' });
+    const send = jest.fn();
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: { stackName: 'test', computeSubstrate: 'ecs', computeDeploymentMode: 'exclusive' },
+    }, { lambdaMicrovmClientFactory: () => ({ send }) })).rejects.toThrow(/deploys only 'ecs'/);
+    expect(send).not.toHaveBeenCalled();
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
   test('offboardRepo sets removed status and TTL', async () => {
     await offboardRepo('us-east-1', 'RepoTable', 'acme/a');
 
