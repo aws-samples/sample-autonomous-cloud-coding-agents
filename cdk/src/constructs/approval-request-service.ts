@@ -86,7 +86,7 @@ export class ApprovalRequestService extends NestedStack {
       id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole provides Lambda runtime logging.',
     }], true);
     NagSuppressions.addResourceSuppressions(this.api, [
-      { id: 'AwsSolutions-APIG2', reason: 'The handler validates the operation and an explicit approval-field allowlist before every write.' },
+      { id: 'AwsSolutions-APIG2', reason: 'The handler validates request shape and allowed fields. Action descriptions and policy metadata remain worker assertions, not independently verified policy results.' },
       { id: 'AwsSolutions-APIG3', reason: 'Machine-only IAM-signed API; session policy restricts POST to its tagged task path, with stage throttling.' },
       { id: 'AwsSolutions-COG4', reason: 'Workers authenticate with task-scoped AWS credentials, not human Cognito credentials.' },
     ], true);

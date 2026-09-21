@@ -81,6 +81,20 @@ def test_new_writers_use_service_instead_of_direct_dynamodb(transport, monkeypat
     direct.assert_not_called()
 
 
+@pytest.mark.parametrize("operation", ["create", "timeout"])
+def test_cloud_worker_missing_endpoint_reports_configuration_error(monkeypatch, operation):
+    monkeypatch.delenv(broker.API_ENV, raising=False)
+    monkeypatch.setenv("AGENT_SESSION_ROLE_ARN", "arn:aws:iam::123456789012:role/session")
+    direct = MagicMock()
+    monkeypatch.setattr(task_state, "_get_ddb_client", direct)
+    with pytest.raises(RuntimeError, match="APPROVAL_REQUESTS_API_URL.*matching CDK"):
+        if operation == "create":
+            task_state.transact_write_approval_request("task", "request", pending_request())
+        else:
+            task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
+    direct.assert_not_called()
+
+
 @pytest.mark.parametrize("status", ["APPROVED", "DENIED", "PENDING", "CANCELLED"])
 def test_worker_api_cannot_record_a_human_decision(transport, status):
     with pytest.raises(ValueError, match="non-human timeouts"):

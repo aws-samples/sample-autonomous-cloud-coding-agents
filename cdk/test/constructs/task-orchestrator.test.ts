@@ -36,6 +36,7 @@ interface StackOverrides {
   /** ADR-021 P2: the identifiers the orchestrator forwards as `platform_config`. */
   agentPlatformConfig?: {
     taskApprovalsTableName: string;
+    approvalRequestsApiUrl?: string;
     nudgesTableName: string;
     logGroupName: string;
     artifactsBucketName: string;
@@ -891,7 +892,10 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
    * NAME, grants nothing" property can be asserted against actual logical IDs
    * rather than string literals.
    */
-  function createPlatformConfigStack(withConfig: boolean): { template: Template } {
+  function createPlatformConfigStack(
+    withConfig: boolean,
+    approvalRequestsApiUrl = 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
+  ): { template: Template } {
     const app = new App();
     const stack = new Stack(app, 'TestStack', {
       env: { account: '123456789012', region: 'us-east-1' },
@@ -913,6 +917,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       ...(withConfig && {
         agentPlatformConfig: {
           taskApprovalsTableName: approvalsTable.tableName,
+          approvalRequestsApiUrl,
           nudgesTableName: nudgesTable.tableName,
           logGroupName: '/aws/abca/application',
           artifactsBucketName: traceBucket.bucketName,
@@ -941,7 +946,11 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     withoutConfigTemplate = createPlatformConfigStack(false).template;
   });
 
-  test('injects the eight forwarded identifiers under the names the strategy reads', () => {
+  test('rejects platform approval configuration without the service URL', () => {
+    expect(() => createPlatformConfigStack(true, '')).toThrow('requires approvalRequestsApiUrl');
+  });
+
+  test('injects forwarded identifiers under the names the strategy reads', () => {
     // These names are a CONTRACT with
     // `handlers/shared/strategies/lambda-microvm-strategy.ts`'s
     // PLATFORM_CONFIG_ENV_VARS map, and with the AgentCore runtime env block in
@@ -949,6 +958,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     // side silently strips a key from every MicroVM task's platform_config.
     const env = orchestratorEnvVars(template);
     expect(env.TASK_APPROVALS_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskApprovalsTable/) });
+    expect(env.APPROVAL_REQUESTS_API_URL).toBe('https://approval.execute-api.us-east-1.amazonaws.com/v1');
     expect(env.NUDGES_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskNudgesTable/) });
     expect(env.LOG_GROUP_NAME).toBe('/aws/abca/application');
     expect(env.ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
