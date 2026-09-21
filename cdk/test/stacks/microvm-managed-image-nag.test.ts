@@ -24,9 +24,10 @@ import { TaskOrchestrator } from '../../src/constructs/task-orchestrator';
 import { buildApp } from '../../src/main';
 
 const configurations = [false, true].flatMap(enableLinearIdentityVault =>
-  [false, true].map(extraWildcard => ({ enableLinearIdentityVault, extraWildcard })));
+  [false, true].flatMap(extraWildcard =>
+    [false, true].map(microvmNested => ({ enableLinearIdentityVault, extraWildcard, microvmNested }))));
 
-describe.each(configurations)('managed MicroVM security checks (vault=$enableLinearIdentityVault, extra wildcard=$extraWildcard)', ({ enableLinearIdentityVault, extraWildcard }) => {
+describe.each(configurations)('managed MicroVM security checks (vault=$enableLinearIdentityVault, extra wildcard=$extraWildcard, nested=$microvmNested)', ({ enableLinearIdentityVault, extraWildcard, microvmNested }) => {
   let errors: string[];
 
   beforeAll(async () => {
@@ -42,7 +43,7 @@ describe.each(configurations)('managed MicroVM security checks (vault=$enableLin
       appProps: {
         context: {
           compute_type: 'lambda-microvm',
-          microvm_nested_stack: true,
+          microvm_nested_stack: microvmNested,
           enableLinearIdentityVault,
           enableToolGateway: true,
           microvm_base_image_arn: 'arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1',

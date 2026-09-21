@@ -48,15 +48,22 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('nests the concurrency repair job while retaining its tables in the parent', () => {
+  test('nests scheduled maintenance while retaining its data in the parent', () => {
     const parentFunctions = Object.keys(template.findResources('AWS::Lambda::Function'));
-    expect(parentFunctions.some(id => id.startsWith('ConcurrencyReconciler'))).toBe(false);
-    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 1);
+    for (const prefix of ['ConcurrencyReconciler', 'AdmissionQueuePickup', 'StrandedTaskReconciler', 'PendingUploadCleanup']) {
+      expect(parentFunctions.some(id => id.startsWith(prefix))).toBe(false);
+      expect(Object.keys(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+        .filter(id => id.startsWith(prefix))).toHaveLength(1);
+    }
+    concurrencyMaintenance.resourceCountIs('AWS::Lambda::Function', 4);
+    concurrencyMaintenance.resourceCountIs('AWS::Events::Rule', 4);
+    concurrencyMaintenance.resourceCountIs('AWS::S3::Bucket', 0);
     concurrencyMaintenance.resourceCountIs('AWS::DynamoDB::Table', 0);
     concurrencyMaintenance.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(15 minutes)',
     });
-    const fn = Object.values(concurrencyMaintenance.findResources('AWS::Lambda::Function'))[0];
+    const fn = Object.entries(concurrencyMaintenance.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('ConcurrencyReconciler'))![1];
     const variables = fn.Properties.Environment.Variables;
     const nested = Object.entries(template.findResources('AWS::CloudFormation::Stack'))
       .find(([id]) => id.startsWith('ConcurrencyMaintenanceNestedStack'))![1];
@@ -2211,15 +2218,12 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
   // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
   const SYNTH_ONLY_RESOURCES = 1;
 
-  const CONFIGURATIONS = [
-    { name: 'agentcore', context: { compute_type: 'agentcore' } },
-    { name: 'ecs', context: { compute_type: 'ecs' } },
-    { name: 'microvm-bootstrap', context: { compute_type: 'lambda-microvm', microvm_nested_stack: true } },
+  const MICROVM_CONFIGURATIONS = [
+    { name: 'microvm-bootstrap', context: { compute_type: 'lambda-microvm' } },
     {
       name: 'microvm-imported',
       context: {
         compute_type: 'lambda-microvm',
-        microvm_nested_stack: true,
         microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:existing-agent',
         microvm_image_version: '6.0',
       },
@@ -2228,12 +2232,22 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
       name: 'microvm-managed',
       context: {
         compute_type: 'lambda-microvm',
-        microvm_nested_stack: true,
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
       },
     },
+  ];
+  const CONFIGURATIONS = [
+    { name: 'agentcore', context: { compute_type: 'agentcore' } },
+    { name: 'ecs', context: { compute_type: 'ecs' } },
+    ...MICROVM_CONFIGURATIONS.flatMap(configuration => [
+      { ...configuration, name: `${configuration.name}-default-flat` },
+      {
+        name: `${configuration.name}-nested`,
+        context: { ...configuration.context, microvm_nested_stack: true },
+      },
+    ]),
   ];
   const CELLS = CONFIGURATIONS.flatMap(configuration =>
     [false, true].flatMap(enableToolGateway =>

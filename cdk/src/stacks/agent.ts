@@ -1409,11 +1409,15 @@ export class AgentStack extends Stack {
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
     orchestratorArnHolder = orchestrator.alias.functionArn;
+    // Stateless scheduled jobs share a nested stack to leave room in both
+    // flat and nested MicroVM layouts. Upgrades replace their generated-name
+    // functions/schedules; task tables, buckets and compute resources stay put.
+    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
     if (continuationBucket && lambdaMicrovm?.imageArn) {
       taskApi.enableMicrovmContinuations(
         continuationBucket.bucket.bucketName, orchestrator.fn.functionArn, userConcurrencyTable.table,
       );
-      new MicrovmContinuationManager(this, 'MicrovmContinuationManager', {
+      new MicrovmContinuationManager(concurrencyMaintenance, 'MicrovmContinuationManager', {
         taskTable: taskTable.table,
         approvalsTable: taskApprovalsTable.table,
         userConcurrencyTable: userConcurrencyTable.table,
@@ -1428,9 +1432,6 @@ export class AgentStack extends Stack {
     agentMemory.grantReadWrite(orchestrator.fn);
 
     // --- Concurrency counter reconciler (drift correction) ---
-    // Keep this stateless repair job out of the parent resource budget.
-    // Existing deployments recreate its function/schedule; the tables stay put.
-    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
     new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1441,7 +1442,7 @@ export class AgentStack extends Stack {
     // concurrency cap is hit) in FIFO order as slots free up: flips
     // QUEUED -> SUBMITTED and re-invokes the orchestrator, whose atomic
     // admissionControl remains the single writer of the counter.
-    new AdmissionQueuePickup(this, 'AdmissionQueuePickup', {
+    new AdmissionQueuePickup(concurrencyMaintenance, 'AdmissionQueuePickup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1453,7 +1454,7 @@ export class AgentStack extends Stack {
     // (orchestrator Lambda crash between TaskTable write and InvokeAgentRuntime,
     // container crash during startup, etc.). Transitions to FAILED with a
     // `task_stranded` event.
-    new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
+    new StrandedTaskReconciler(concurrencyMaintenance, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskApprovalsTable: taskApprovalsTable.table,
@@ -1464,7 +1465,7 @@ export class AgentStack extends Stack {
     // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
     // 30 minutes (client crash, abandoned session, network failure).
     // Cleans up orphaned S3 objects under the task's attachment prefix.
-    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+    new PendingUploadCleanup(concurrencyMaintenance, 'PendingUploadCleanup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       attachmentsBucket: attachmentsBucket.bucket,
