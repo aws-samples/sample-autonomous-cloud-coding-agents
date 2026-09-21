@@ -169,6 +169,8 @@ class MicrovmLifecycle:
             # A new gate cannot acknowledge a wake using the previous gate's
             # cached result. Its own suspend must establish a fresh safe point.
             self._last_resume_park = None
+            # Local "parked" keeps this worker alive at a safe tool boundary.
+            # The coordinator's persisted PARKED continuation means source retirement.
             self._phase = "parked"
             return park
 

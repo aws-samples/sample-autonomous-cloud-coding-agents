@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..', 'dist');
+const repoRoot = path.resolve(import.meta.dirname, '..', '..');
+const repoBlobPrefix = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/';
 const base = '/sample-autonomous-cloud-coding-agents/';
 const pages = fs.readdirSync(root, { recursive: true }).filter(file => file.endsWith('.html'));
 if (pages.length < 10) throw new Error('Expected a built documentation site before checking links');
@@ -17,6 +19,14 @@ for (const file of pages) {
   const origin = `https://local${base}${file.replace(/index\.html$/, '')}`;
   for (const match of read(path.join(root, file)).matchAll(/<a\b[^>]*\bhref="([^"]*)"/g)) {
     const href = match[1].replaceAll('&amp;', '&');
+    if (href.startsWith(repoBlobPrefix)) {
+      const relative = decodeURIComponent(href.slice(repoBlobPrefix.length).split(/[?#]/)[0]);
+      const target = path.resolve(repoRoot, relative);
+      if (!target.startsWith(`${repoRoot}${path.sep}`) || !fs.existsSync(target) || !fs.statSync(target).isFile()) {
+        errors.add(`${file}: missing repository file: ${href}`);
+      }
+      continue;
+    }
     // This check is offline. External availability is outside its scope.
     if (/^(?:[a-z]+:|\/\/)/i.test(href)) continue;
     const url = new URL(href, origin);
