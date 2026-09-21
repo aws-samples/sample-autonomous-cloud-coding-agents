@@ -461,7 +461,7 @@ export async function postIdentifiedComment(
     return { ok: true };
   }
   // A successful write can lose its response. A duplicate ID is acceptable only
-  // when the saved comment exactly matches this destination and content.
+  // when destination and content match, ignoring transport line endings only.
   const existing = await graphqlData(token, `
     query ApprovalComment($id: String!) {
       comment(id: $id) { body issue { id } parent { id } }
@@ -470,7 +470,9 @@ export async function postIdentifiedComment(
   const comment = existing.value.comment as {
     body?: string; issue?: { id?: string }; parent?: { id?: string };
   } | undefined;
-  return comment?.body === input.body && comment.issue?.id === input.issueId
+  const normalizeBody = (body: string) => body.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+  return typeof comment?.body === 'string' && normalizeBody(comment.body) === normalizeBody(input.body)
+    && comment.issue?.id === input.issueId
     && comment.parent?.id === input.parentId
     ? { ok: true } : { ok: false, retryable: false };
 }
