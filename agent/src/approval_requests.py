@@ -22,7 +22,13 @@ API_ENV = "APPROVAL_REQUESTS_API_URL"
 
 
 def configured() -> bool:
-    return bool(os.environ.get(API_ENV))
+    available = bool(os.environ.get(API_ENV))
+    if not available and os.environ.get("AGENT_SESSION_ROLE_ARN"):
+        raise RuntimeError(
+            "APPROVAL_REQUESTS_API_URL is required for cloud approval requests; "
+            "deploy matching CDK and worker images"
+        )
+    return available
 
 
 def record_request(

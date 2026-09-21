@@ -740,8 +740,8 @@ def transact_write_approval_request(
                     f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
                 ) from exc
             raise
-    # Compatibility with older deployments. New stacks grant no direct writes,
-    # so a missing service URL fails closed there rather than bypassing the broker.
+    # Compatibility with unscoped legacy/local deployments. configured() rejects
+    # a missing service URL for cloud workers that use the session role.
     task_table, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 

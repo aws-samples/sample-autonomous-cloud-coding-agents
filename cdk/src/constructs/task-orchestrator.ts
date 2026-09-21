@@ -398,6 +398,9 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
+    if (props.agentPlatformConfig && !props.agentPlatformConfig.approvalRequestsApiUrl) {
+      throw new Error('agentPlatformConfig requires approvalRequestsApiUrl; deploy the matching approval service');
+    }
     if (props.guardrailId && !props.guardrailVersion) {
       throw new Error('guardrailVersion is required when guardrailId is provided');
     }
