@@ -15,12 +15,14 @@ Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architectur
 ```bash
 mise run install          # yarn workspaces + agent Python (uv)
 mise run build            # agent quality + cdk + cli + docs (parallel)
-mise run security         # secrets, deps, sast, grype, retire, gh-actions, agent
+mise run security         # secrets, deps, sast, sast:masking, grype, retire, gh-actions, agent
 mise run hooks:install    # prek git hooks (also runs at end of install)
 mise run hooks:run        # pre-commit + pre-push locally
 ```
 
 Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment on the flagged `return` line (or the line immediately above) — the rule anchors on the `return`, so a token placed higher does not bind.
+
+**Claim the security legs one at a time, never in aggregate.** `mise run security` runs its eight legs in the order listed above and stops at the first failure, so "`mise run security` passes" is only ever a statement about the legs that actually ran. This is not a local-only hazard: the weekly `security.yml` cron — the *only* surface that runs the container image scan — invokes the same aggregate, so a red early leg suppresses the later ones there too, and the issue it auto-files names just the first failure. That is how 14 fixable HIGH/CRITICAL findings in the image-bundled `gh` / `uv` / `npm` binaries sat unseen: the container scan is inside the *last* leg, and a red `security:sast` (3rd) or `security:sast:masking` (4th) stops the chain five legs short of it — see [#897](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/897). Note which leg is red is not stable, so do not memorise one: fixing the earlier one just uncovers the next. PR checks do not compensate: `security-pr.yml` runs only the diff-scoped `security:secrets:range` and `security:sast:masking:range` plus `security:deps` and `security:gh-actions`; whole-repo `security:sast` and `//agent:security` are absent from it, and `build.yml` sets `MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"` ([#235](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/235)). So 8/8 green PR checks say nothing about those legs — run them by name before asserting they pass.
 
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
