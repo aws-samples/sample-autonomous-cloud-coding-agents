@@ -249,7 +249,7 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ### Upgrading approval permissions
 
-PR #904 moves worker approval creation and timeout writes into an IAM-authenticated
+Worker approval creation and timeout writes now use an IAM-authenticated
 service. Deploy the matching agent image and CDK together: old workers write
 directly to DynamoDB and cannot create new gates after those permissions are removed.
 
@@ -272,6 +272,20 @@ If an old worker survives the upgrade, its next approval write fails closed.
 Existing rows remain readable; do not restore direct writes to work around a stale
 image. Roll forward with the matching image. Rolling back IAM restores the original
 approval-record vulnerability and requires a deliberate operator decision.
+
+### Scheduled maintenance stack
+
+Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
+cleanup run in the `ConcurrencyMaintenance` nested stack. MicroVM continuation
+recovery also runs there when an image is configured. An upgrade recreates the
+stateless functions, roles and schedules; their task tables and storage stay in
+the parent stack. Review those replacements in the change set after draining tasks
+as described above. Both flat and nested MicroVM layouts support the optional
+tool gateway and Linear Identity vault without exceeding the template budget.
+
+This does not migrate existing MicroVM compute resources. Keep an existing flat
+deployment on `microvm_nested_stack=false` until its separate resource migration
+has been reviewed.
 
 ### AgentCore unsupported Availability Zones
 

@@ -92,11 +92,11 @@ describe('Bootstrap policy synth coverage', () => {
     expect(missingByType).toEqual({});
   });
 
-  it('covers the managed MicroVM image, suspend parameter and every nested resource', () => {
+  it.each([false, true])('covers managed MicroVM and nested resources (microvm_nested_stack=%s)', microvmNested => {
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
-        microvm_nested_stack: true,
+        microvm_nested_stack: microvmNested,
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
