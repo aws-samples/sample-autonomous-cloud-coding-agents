@@ -226,7 +226,7 @@ function resolveStackName(argv: readonly string[]): { stackName: string; source:
       try {
         cfg = JSON.parse(readFileSync(new URL(name, contextDir), 'utf8'));
       } catch {
-        // nosemgrep: ts-silent-success-masking -- an absent context file is the normal case (cdk.context.json is generated, and cdk.json has no context block here), not a failure; the next source is tried and 'default' is the documented floor
+        // An absent context file is the normal case (cdk.context.json is generated, and cdk.json has no context block here), not a failure; the next source is tried and 'default' is the documented floor
         continue;
       }
       // `cdk.context.json` is a flat map; `cdk.json` nests under `context`.
