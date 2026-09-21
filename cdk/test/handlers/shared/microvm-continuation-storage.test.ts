@@ -157,6 +157,18 @@ test.each(['checksum', 'length', 'identity', 'version'])('rejects a manifest %s 
   const bytes = Buffer.from(JSON.stringify({
     version: mismatch === 'version' ? 999 : 1,
     identity: mismatch === 'identity' ? { ...identity, user_id: 'other' } : identity,
+    conversation: {
+      key: `continuations/task/vm/request/${'a'.repeat(64)}.json`,
+      sha256: 'a'.repeat(64),
+      size_bytes: 100,
+      version_id: 'conversation-v',
+    },
+    workspace: {
+      key: `continuations/task/vm/request/workspace/${'b'.repeat(64)}.tar`,
+      sha256: 'b'.repeat(64),
+      size_bytes: 512,
+      version_id: 'workspace-v',
+    },
   }));
   const record: ContinuationRecord = {
     version: 1,
@@ -171,7 +183,11 @@ test.each(['checksum', 'length', 'identity', 'version'])('rejects a manifest %s 
     },
   };
   mockS3.mockResolvedValueOnce(object(bytes));
-  await expect(verifyContinuationCheckpoint(record)).rejects.toThrow('MICROVM_CONTINUATION_STORAGE_INVALID');
+  await expect(verifyContinuationCheckpoint(record)).rejects.toThrow(
+    mismatch === 'checksum' || mismatch === 'length'
+      ? 'checkpoint manifest checksum does not match'
+      : 'checkpoint manifest identity does not match',
+  );
   expect(mockS3).toHaveBeenCalledTimes(1);
 });
 

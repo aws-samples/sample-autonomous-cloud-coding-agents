@@ -70,6 +70,7 @@ test('fences stale MicroVM writers in the same transaction', async () => {
   await recordWorkerRequest({ ...input, worker_attempt_id: 'worker-token' });
   const lease = send.mock.calls[1][0].input.TransactItems[2].ConditionCheck;
   expect(lease.Key).toEqual({ task_id: 'worker-lease#task' });
+  expect(lease.ConditionExpression).toBe('lease_state = :active AND lease_attempt_id = :attempt AND lease_user_id = :user');
   expect(lease.ExpressionAttributeValues).toEqual({
     ':active': 'ACTIVE', ':attempt': 'worker-token', ':user': 'owner',
   });
