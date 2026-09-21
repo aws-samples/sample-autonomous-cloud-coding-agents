@@ -79,3 +79,18 @@ def test_unverified_sdk_upgrade_requires_explicit_accounting_validation(monkeypa
     with pytest.raises(ContinuationCheckpointError, match="verified SDK") as error:
         asyncio.run(read_usage(None))
     assert error.value.code == "checkpoint_sdk_unverified"
+
+
+def test_missing_sdk_accounting_interface_is_not_invalid_checkpoint_data():
+    with pytest.raises(ContinuationCheckpointError) as error:
+        asyncio.run(read_usage(SimpleNamespace()))
+    assert error.value.code == "checkpoint_sdk_unverified"
+
+
+def test_sdk_accounting_timeout_reports_transport_failure():
+    client = SimpleNamespace(
+        _query=SimpleNamespace(_send_control_request=AsyncMock(side_effect=TimeoutError))
+    )
+    with pytest.raises(ContinuationCheckpointError) as error:
+        asyncio.run(read_usage(client))
+    assert error.value.code == "checkpoint_sdk_timeout"

@@ -40,7 +40,7 @@ _HASH = re.compile(r"[0-9a-f]{64}\Z")
 class ContinuationCheckpointError(RuntimeError):
     """A checkpoint cannot be acknowledged or safely restored."""
 
-    def __init__(self, message: str, *, code: str = "checkpoint_invalid") -> None:
+    def __init__(self, message: str, *, code: str = "checkpoint_failed") -> None:
         super().__init__(message)
         self.code = code
 
@@ -361,7 +361,9 @@ class S3ContinuationCheckpoints:
 
     def __init__(self, bucket: str, *, client: Any = None) -> None:
         if not isinstance(bucket, str) or not bucket or "/" in bucket:
-            raise ContinuationCheckpointError("Checkpoint bucket is unavailable")
+            raise ContinuationCheckpointError(
+                "Checkpoint bucket is unavailable", code="checkpoint_storage_unavailable"
+            )
         if client is None:
             from botocore.config import Config
 
