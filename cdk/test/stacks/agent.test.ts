@@ -153,6 +153,7 @@ describe('AgentStack', () => {
 
     for (const key of [
       'TASK_APPROVALS_TABLE_NAME',
+      'APPROVAL_REQUESTS_API_URL',
       'NUDGES_TABLE_NAME',
       'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME',
@@ -166,8 +167,7 @@ describe('AgentStack', () => {
     ]) {
       expect(env[key]).toBeDefined();
     }
-    // Plus the three the orchestrator already carried for its own work — together
-    // these cover all four identifiers the MicroVM strategy treats as required.
+    // These existing coordinator values complete the required platform configuration.
     expect(env.TASK_TABLE_NAME).toBeDefined();
     expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
     expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
@@ -187,6 +187,7 @@ describe('AgentStack', () => {
 
     for (const key of [
       'TASK_APPROVALS_TABLE_NAME',
+      'APPROVAL_REQUESTS_API_URL',
       'NUDGES_TABLE_NAME',
       'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME',

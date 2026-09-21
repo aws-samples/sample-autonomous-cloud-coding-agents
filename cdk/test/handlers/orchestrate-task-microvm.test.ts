@@ -159,11 +159,7 @@ process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.TASK_RETENTION_DAYS = '90';
 
-// platform_config (ADR-021 P2): the four REQUIRED identifiers the MicroVM
-// strategy refuses to start a session without — they are the agent's only
-// channel for them, since a snapshot must not bake configuration in. Read at
-// call time by `buildMicrovmPlatformConfig`, but set here alongside the rest
-// for clarity.
+// Required platform configuration is supplied at launch, never baked into the image.
 process.env.GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
