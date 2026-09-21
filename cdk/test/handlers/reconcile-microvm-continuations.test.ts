@@ -184,6 +184,10 @@ test('persists the last completed batch when invocation time is low, then resume
   expect(mockSend.mock.calls.find(([command]) => command.constructor.name === 'ScanCommand')![0].input.ExclusiveStartKey)
     .toEqual({ task_id: 'previous' });
   expect(mockSend.mock.calls.at(-1)![0].input.ExpressionAttributeValues[':cursor']).toEqual({ task_id: 'task-3' });
+  expect(mockSend.mock.calls.at(-1)![0].input).toMatchObject({
+    ConditionExpression: '#cursor = :previous',
+    ExpressionAttributeValues: { ':previous': { task_id: 'previous' } },
+  });
 });
 
 test('a failed row does not prevent later rows or clearing the cursor after a complete scan', async () => {
@@ -193,4 +197,20 @@ test('a failed row does not prevent later rows or clearing the cursor after a co
   await handler({}, { getRemainingTimeInMillis: () => 100000 });
   expect(mockDispatch).toHaveBeenCalledTimes(2);
   expect(mockSend.mock.calls.at(-1)![0].input.UpdateExpression).toBe('REMOVE #cursor');
+  expect(mockSend.mock.calls.at(-1)![0].input.ConditionExpression).toBe('attribute_not_exists(#cursor)');
 });
+
+test.each(['ConditionalCheckFailedException', 'ProvisionedThroughputExceededException'])(
+  'only an overlapping sweep may supersede the saved cursor: %s',
+  async name => {
+    const error = Object.assign(new Error('cursor write rejected'), { name });
+    mockSend.mockImplementation(async command => {
+      if (command.constructor.name === 'UpdateCommand') throw error;
+      return {};
+    });
+    const run = handler({}, { getRemainingTimeInMillis: () => 100000 });
+    if (name === 'ConditionalCheckFailedException') await expect(run).resolves.toBeUndefined();
+    else await expect(run).rejects.toBe(error);
+    expect(mockSend.mock.calls.filter(([command]) => command.constructor.name === 'UpdateCommand')).toHaveLength(1);
+  },
+);
