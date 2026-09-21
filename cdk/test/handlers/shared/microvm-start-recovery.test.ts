@@ -48,6 +48,7 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 
 Object.assign(process.env, {
   TASK_TABLE_NAME: 'tasks',
+  APPROVAL_REQUESTS_API_URL: 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
   TASK_EVENTS_TABLE_NAME: 'events',
   MICROVM_IMAGE_IDENTIFIER: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
   MICROVM_IMAGE_VERSION: '1',

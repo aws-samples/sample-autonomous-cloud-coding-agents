@@ -154,6 +154,7 @@ process.env.MICROVM_EXECUTION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaMic
 process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:123456789012:network-connector/egress-1';
 process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.APPROVAL_REQUESTS_API_URL = 'https://approval.execute-api.us-east-1.amazonaws.com/v1';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.TASK_RETENTION_DAYS = '90';
