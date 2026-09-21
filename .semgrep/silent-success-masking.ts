@@ -104,6 +104,23 @@ function maskedConditionalRethrow(s: string): Record<string, unknown> | null {
   }
 }
 
+// Classify-then-rethrow: a "not found" is a legitimate empty success, and
+// every other error rethrows on the fallthrough — so the caller can still tell
+// failure from empty. The rethrow comes AFTER the classified return, which is
+// what distinguishes this from maskedConditionalRethrow (throw guarded first).
+function okClassifyThenRethrow(
+  fetch: () => string,
+  isNotFound: (e: unknown) => boolean,
+): string | undefined {
+  try {
+    return fetch();
+  } catch (err) {
+    // ok: ts-silent-success-masking
+    if (isNotFound(err)) return undefined; // genuine empty success
+    throw err; // everything else fails closed
+  }
+}
+
 function okReturnInTryBody(items: string[]): string[] {
   try {
     if (items.length === 0) {

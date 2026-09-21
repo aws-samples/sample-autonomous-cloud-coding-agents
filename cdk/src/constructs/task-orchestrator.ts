@@ -263,10 +263,22 @@ export interface TaskOrchestratorProps {
      *
      * The prefix is whichever geography `resolveBedrockGeoRegion` resolves for the
      * deployment (`bedrockGeoRegion` context, default `us`), NOT a hardcoded `us.`:
-     * pass `haikuInferenceProfileId(bedrockGeoRegion)` so this value and the
+     * pass `inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID)` so this value and the
      * inference-profile ARNs the roles are granted come from the same source (#764).
      */
     readonly anthropicDefaultHaikuModel: string;
+
+    /**
+     * The MAIN coding model (`ANTHROPIC_MODEL`), same rules as the auxiliary one
+     * above: geo-prefixed profile id from the deployment's resolved geography.
+     *
+     * Delivered alongside it because only the auxiliary model was, which left the
+     * main model coming from a literal in `agent/src/config.py` that a geography
+     * change does not touch — so a non-default `bedrockGeoRegion` granted one
+     * geography's profiles while the agent asked for another's, and every task with
+     * no per-repo override failed at turn 0 with AccessDenied.
+     */
+    readonly anthropicModel: string;
   };
 
   /**
@@ -496,6 +508,15 @@ export class TaskOrchestrator extends Construct {
           TRACE_ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.traceArtifactsBucketName,
           AGENT_SESSION_ROLE_ARN: props.agentPlatformConfig.agentSessionRoleArn,
           ANTHROPIC_DEFAULT_HAIKU_MODEL: props.agentPlatformConfig.anthropicDefaultHaikuModel,
+          // The MAIN model belongs here for the same reason the auxiliary one does,
+          // and its absence was invisible: `anthropicModel` was declared on the prop
+          // interface and passed by the stack, but never read, so the compiler was
+          // satisfied while the value went nowhere. The two substrates that inject it
+          // directly (the AgentCore runtime env, the ECS task definitions) were
+          // unaffected, which is why every synth assertion still passed — MicroVM is
+          // the backend that depends on this block, and it fell back to the Python
+          // literal in `agent/src/config.py` regardless of the deployed geography.
+          ANTHROPIC_MODEL: props.agentPlatformConfig.anthropicModel,
         }),
       },
       bundling: orchestratorBundling,

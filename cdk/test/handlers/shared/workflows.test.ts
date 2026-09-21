@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
+import { BEDROCK_GEO_REGIONS, DEFAULT_BEDROCK_MODEL_IDS } from '../../../src/constructs/bedrock-models';
 import {
   CODING_WORKFLOW_ID,
   DEFAULT_WORKFLOW_ID,
@@ -305,19 +306,50 @@ describe('disallowedWorkflowModel (WORKFLOWS.md rule 13)', () => {
     expect(WORKFLOW_MODEL_ALLOWLIST).toContain('us.anthropic.claude-sonnet-4-6');
   });
 
-  test('every bare allow-listed id is paired with its us- inference-profile form', () => {
-    // An id admitted in only one of the two forms is a latent rejection: the
-    // workflow YAML may legitimately pin either, and admission compares the
-    // literal string. Pairing them is the invariant, so assert it for every
-    // entry rather than spot-checking one model.
-    const bare = WORKFLOW_MODEL_ALLOWLIST.filter(id => !id.startsWith('us.'));
-    expect(bare.length).toBeGreaterThan(0);
-    const missing = bare.filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(`us.${id}`));
+  // Every geography `resolveBedrockGeoRegion` ACCEPTS, not a hand-picked pair.
+  // `-c bedrockGeoRegion=eu` synths and deploys today, so an allow-list carrying only
+  // bare/`us.`/`global.` rejects every model-pinning workflow at admission on five of
+  // the seven — and the previous hardcoded ['us','global'] could not see it, while its
+  // comment claimed the others were undeployable. Derived, so a geography the CDK adds
+  // widens this test rather than silently escaping it.
+  const DEPLOYABLE_GEOS = BEDROCK_GEO_REGIONS;
+
+  test('the allow-list covers every GRANTED model in every geography it may be deployed with', () => {
+    // The real invariant: parity with the IAM grant list, not internal pairing.
+    //
+    // The previous version only checked that each entry had a matching bare/prefixed
+    // partner WITHIN the allow-list. That is satisfiable while being wrong in both
+    // directions, and both were live: three granted models had no `global.` form (so
+    // a workflow pinning one was rejected at admission on a global deploy), and an
+    // invented model pair passed the whole suite despite being granted nothing.
+    //
+    // Admission compares the literal string a workflow pins, and a deployment may run
+    // any geography, so every granted model needs its bare form plus a form for each
+    // geography a deploy could select.
+    const missing: string[] = [];
+    for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
+      if (!WORKFLOW_MODEL_ALLOWLIST.includes(bare)) missing.push(bare);
+      for (const geo of DEPLOYABLE_GEOS) {
+        const id = `${geo}.${bare}`;
+        if (!WORKFLOW_MODEL_ALLOWLIST.includes(id)) missing.push(id);
+      }
+    }
     expect(missing).toEqual([]);
-    // ...and no us- entry is orphaned (its bare form must be admitted too).
-    const orphaned = WORKFLOW_MODEL_ALLOWLIST
-      .filter(id => id.startsWith('us.'))
-      .filter(id => !WORKFLOW_MODEL_ALLOWLIST.includes(id.slice('us.'.length)));
-    expect(orphaned).toEqual([]);
+  });
+
+  test('the allow-list is exactly the granted set × every geography (admission is geo-blind)', () => {
+    // NOT a grant-parity proof, and worth being explicit about: both sides are built by
+    // the same `flatMap` over the same two constants, so this can only fail if that
+    // one-line derivation is edited. What it does pin is that the derivation stays
+    // exactly "granted models × all geographies" — which means six of the seven
+    // geographies are admitted while the deploy grants none of them. That gap is
+    // deliberate and tracked in #846; the fallback is a turn-0 AccessDenied.
+    const grantedForms = new Set<string>();
+    for (const bare of DEFAULT_BEDROCK_MODEL_IDS) {
+      grantedForms.add(bare);
+      for (const geo of DEPLOYABLE_GEOS) grantedForms.add(`${geo}.${bare}`);
+    }
+    const ungranted = WORKFLOW_MODEL_ALLOWLIST.filter((id) => !grantedForms.has(id));
+    expect(ungranted).toEqual([]);
   });
 });
