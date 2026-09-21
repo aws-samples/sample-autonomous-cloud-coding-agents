@@ -1883,7 +1883,7 @@ The per-task `approvalGateCap` (decision #13; default 50, configurable) is **per
 
 ### 13.7 Insufficient lifetime remaining for approval
 
-If `remaining_maxLifetime - CLEANUP_MARGIN_120S < FLOOR_30S`, hook immediately returns DENY with reason `"insufficient maxLifetime for approval"`. Task continues without a gate — or, if the gate was load-bearing, fails gracefully in RUNNING state.
+Without a continuation runtime, if `remaining_maxLifetime - CLEANUP_MARGIN_120S < FLOOR_30S`, the hook immediately denies the tool with reason `"insufficient maxLifetime remaining ({n}s) for approval"`, where `{n}` is the remaining lifetime in seconds. No approval request is created and the tool does not run. The agent receives the denial and may choose another action.
 
 ### 13.8 PreToolUse hook itself crashes
 

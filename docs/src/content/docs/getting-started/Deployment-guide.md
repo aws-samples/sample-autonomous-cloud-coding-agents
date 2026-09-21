@@ -266,6 +266,10 @@ directly to DynamoDB and cannot create new gates after those permissions are rem
    Custom ECS constructs must provide both the SessionRole and service URL;
    approval wiring without them is rejected before deployment. A MicroVM
    manifest missing the URL is rejected before the worker starts.
+   If an AgentCore environment was edited to remove the URL, the worker reports
+   `APPROVAL_REQUESTS_API_URL is required for cloud approval requests` at its
+   next gate rather than attempting a direct DynamoDB write. Redeploy the
+   matching stack and image.
 4. Submit a test task that triggers a known approval rule on each enabled backend.
    Verify that the request appears, an owner decision resumes it, and an explicit
    deadline records `TIMED_OUT` without overwriting a human decision. Then resume
@@ -282,8 +286,17 @@ Concurrency repair, admission-queue pickup, stranded-task repair and pending-upl
 cleanup run in the `ConcurrencyMaintenance` nested stack. MicroVM continuation
 recovery also runs there when an image is configured. An upgrade recreates the
 stateless functions, roles and schedules; their task tables and storage stay in
-the parent stack. Review those replacements in the change set after draining tasks
-as described above. Both flat and nested MicroVM layouts support the optional
+the parent stack. This applies to every compute backend, including AgentCore,
+and replaces roughly twenty resources, depending on enabled features.
+CloudFormation creates the new schedules before deleting the old ones, so both
+can fire during the update. Task mutations and the continuation scan cursor use
+conditional writes to tolerate that overlap. The drain above is required for
+the approval permission/image upgrade, not a scheduling gap.
+
+Review the replacements in the change set. Existing Lambda log groups remain
+under their old generated names; use the new function's log group for post-upgrade
+invocations and retain the old groups when investigating earlier runs.
+Both flat and nested MicroVM layouts support the optional
 tool gateway and Linear Identity vault without exceeding the template budget.
 
 This does not migrate existing MicroVM compute resources. Keep an existing flat

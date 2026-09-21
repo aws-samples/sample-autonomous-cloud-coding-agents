@@ -44,6 +44,7 @@ Construct tests: synthesize each distinct stack config once in `beforeAll`, asse
 | `cdk/src/stacks/` | WRITE | Stack definitions |
 | `cdk/src/constructs/` | WRITE | Reusable constructs |
 | `cdk/src/handlers/shared/types.ts` | WRITE | API types (mirror to `cli/src/types.ts`) |
+| `cdk/src/handlers/shared/canonical-json.ts` | WRITE | Runtime receipt encoding; preserve stored bytes and keep migration encoding separate |
 | `cdk/test/` | WRITE | Unit / snapshot tests |
 | `cli/src/types.ts` | WRITE (sync) | Must match shared types |
 
