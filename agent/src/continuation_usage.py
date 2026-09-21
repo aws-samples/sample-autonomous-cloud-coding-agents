@@ -46,14 +46,15 @@ async def read_usage(client: Any) -> UsageSnapshot:
     SDK 0.2.110 bundles CLI 2.1.191, whose experimental ``get_usage`` control
     request exposes exact session dollars and per-model token counters. Python
     has no public wrapper yet. Keep this dependency isolated and covered by the
-    opt-in real SDK probe; an upgrade must verify it before publishing checkpoints.
+    real SDK probe in CI; an upgrade must verify it before publishing checkpoints.
     """
     if (
         importlib.metadata.version("claude-agent-sdk")
         != SHARED_CONSTANTS["microvm_continuation"]["verified_sdk_version"]
     ):
         raise ContinuationCheckpointError(
-            "Continuation accounting requires the verified SDK version"
+            "Continuation accounting requires the verified SDK version",
+            code="checkpoint_sdk_unverified",
         )
     query = getattr(client, "_query", None)
     send = getattr(query, "_send_control_request", None)

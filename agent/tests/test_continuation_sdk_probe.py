@@ -204,8 +204,8 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
 
 
 @pytest.mark.skipif(
-    os.environ.get("ABCA_TEST_SDK_CONTINUATION") != "1",
-    reason="Opt-in pinned SDK/CLI subprocess diagnostic",
+    os.environ.get("ABCA_TEST_SDK_CONTINUATION") != "1" and os.environ.get("CI") != "true",
+    reason="Pinned SDK/CLI subprocess diagnostic runs in CI or by local opt-in",
 )
 @pytest.mark.parametrize("decision", ["approve", "deny"])
 def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision):

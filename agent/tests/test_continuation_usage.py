@@ -76,5 +76,6 @@ def test_incomplete_or_invalid_accounting_cannot_publish_a_checkpoint(mutation):
 
 def test_unverified_sdk_upgrade_requires_explicit_accounting_validation(monkeypatch):
     monkeypatch.setattr("continuation_usage.importlib.metadata.version", lambda _: "0.3.0")
-    with pytest.raises(ContinuationCheckpointError, match="verified SDK"):
+    with pytest.raises(ContinuationCheckpointError, match="verified SDK") as error:
         asyncio.run(read_usage(None))
+    assert error.value.code == "checkpoint_sdk_unverified"

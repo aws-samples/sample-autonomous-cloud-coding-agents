@@ -50,8 +50,7 @@ class WorkspaceCheckpointError(ContinuationCheckpointError):
     """A content-free stage code for lifecycle feedback."""
 
     def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
+        super().__init__(message, code=code)
 
 
 @dataclass(frozen=True)

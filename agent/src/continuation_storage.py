@@ -46,8 +46,7 @@ class ContinuationStorageError(ContinuationCheckpointError):
     """Content-free failure classification for lifecycle diagnostics."""
 
     def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(message)
+        super().__init__(message, code=code)
 
 
 @dataclass(frozen=True)
