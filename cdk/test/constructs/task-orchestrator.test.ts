@@ -965,14 +965,13 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     expect(env.ANTHROPIC_MODEL).toBe(MAIN_PROFILE);
   });
 
-  test('carries the four REQUIRED platform_config sources together (never a partial set)', () => {
-    // The strategy refuses to start a lambda-microvm session without these four.
-    // Three come from the orchestrator's own wiring and one from this block, so
-    // this is the assertion that they are all reachable from ONE deploy.
+  test('carries all required platform configuration, including the approval service', () => {
+    // One deployment must supply the complete configuration required at launch.
     const env = orchestratorEnvVars(createStack({
       githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
       agentPlatformConfig: {
         taskApprovalsTableName: 'approvals',
+        approvalRequestsApiUrl: 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
         nudgesTableName: 'nudges',
         logGroupName: '/aws/abca/application',
         artifactsBucketName: 'artifacts',
@@ -982,6 +981,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
         anthropicModel: MAIN_PROFILE,
       },
     }).template);
+    expect(env.APPROVAL_REQUESTS_API_URL).toBe('https://approval.execute-api.us-east-1.amazonaws.com/v1');
     expect(env.TASK_TABLE_NAME).toBeDefined();
     expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
     expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
