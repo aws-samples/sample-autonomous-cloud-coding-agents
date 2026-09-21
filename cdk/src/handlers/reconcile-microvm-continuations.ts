@@ -139,15 +139,26 @@ export async function handler(_event: unknown, context: Pick<Context, 'getRemain
   const saved = await ddb.send(new GetCommand({
     TableName: TABLE, Key: CURSOR_KEY, ConsistentRead: true,
   }), { abortSignal: AbortSignal.timeout(CONTINUATION_IO_TIMEOUT_MS) });
-  let lastKey: Record<string, any> | undefined = saved.Item?.cursor;
+  const initialCursor: Record<string, any> | undefined = saved.Item?.cursor;
+  let lastKey = initialCursor;
   const saveCursor = async (cursor?: Record<string, unknown>) => {
-    await ddb.send(new UpdateCommand({
-      TableName: TABLE,
-      Key: CURSOR_KEY,
-      UpdateExpression: cursor ? 'SET #cursor = :cursor' : 'REMOVE #cursor',
-      ExpressionAttributeNames: { '#cursor': 'cursor' },
-      ...(cursor && { ExpressionAttributeValues: { ':cursor': cursor } }),
-    }), { abortSignal: AbortSignal.timeout(CURSOR_WRITE_TIMEOUT_MS) });
+    const values = {
+      ...(cursor && { ':cursor': cursor }),
+      ...(initialCursor && { ':previous': initialCursor }),
+    };
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLE,
+        Key: CURSOR_KEY,
+        UpdateExpression: cursor ? 'SET #cursor = :cursor' : 'REMOVE #cursor',
+        ConditionExpression: initialCursor ? '#cursor = :previous' : 'attribute_not_exists(#cursor)',
+        ExpressionAttributeNames: { '#cursor': 'cursor' },
+        ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
+      }), { abortSignal: AbortSignal.timeout(CURSOR_WRITE_TIMEOUT_MS) });
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== 'ConditionalCheckFailedException') throw error;
+      logger.info('Another continuation sweep advanced the cursor; preserving its progress');
+    }
   };
   let processed = 0;
   let failures = 0;
