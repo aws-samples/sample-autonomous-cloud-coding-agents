@@ -868,8 +868,8 @@ export class TaskApi extends Construct {
     // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
     // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
     // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
-    // `test/stacks/agent.test.ts` asserts no `test-invoke-stage` permission is ever
-    // emitted.
+    // `test/synthesis/deployment.test.ts` checks method-scoped permissions and
+    // rejects `test-invoke-stage` grants in every parent/nested deployment template.
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');

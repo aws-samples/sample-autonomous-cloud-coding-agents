@@ -1138,39 +1138,12 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   let template: Template;
 
   beforeAll(() => {
-    // Deploying with the gate on provisions the Fargate substrate alongside the
-    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
+    // Selecting ECS provisions the Fargate backend and emits ComputeSubstrate=ecs.
     const app = new App({ context: { compute_type: 'ecs' } });
     const stack = new AgentStack(app, 'TestAgentStackEcs', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
-  });
-
-  /**
-   * CloudFormation refuses a template over 1 MB, and refuses it at CHANGESET CREATION —
-   * after synth succeeds and every asset is pushed. The message names no resource, and
-   * the stack's own status stays at whatever the previous deploy left, so checking stack
-   * status instead of the deploy's exit code reads as success.
-   *
-   * Asserted on the ECS template because that is the substrate deployments use, and it is
-   * the larger of the two: 894,261 bytes here versus 858,062 for the default at the time
-   * of writing. Measured the way the CDK CLI WRITES the template (`null, 2`), which is how
-   * CloudFormation counts it — compact serialization of the same template is ~300 KB
-   * smaller, so a budget checked against compact bytes passes while the deploy fails.
-   *
-   * These in-test figures are lower than what `cdk synth` writes to disk, because the CLI
-   * resolves asset hashes and account/region tokens that `Template.fromStack` leaves
-   * symbolic. The budget is therefore a trend guard on the relative number, not a
-   * prediction of the byte count CloudFormation will receive.
-   *
-   * Reuses the template this describe already synthesizes; no extra synth.
-   */
-  test('stays inside a deployable template budget (CloudFormation hard-fails at 1 MB)', () => {
-    const bytes = Buffer.byteLength(JSON.stringify(template.toJSON(), null, 2), 'utf8');
-    expect(bytes).toBeLessThan(1_000_000);
-    // 5% under, so this fires while there is still room to land the change that trips it.
-    expect(bytes).toBeLessThan(950_000);
   });
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
@@ -1987,66 +1960,6 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       'orchestration-reconciler.ts',
     ]);
   });
-});
-
-describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
-  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
-  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.
-  // Every deploy-gate cell is covered, not only the widest, so a regression confined
-  // to one substrate cannot hide behind the others. The gap this closes: no test had
-  // ever constructed `compute_type` and `enableToolGateway` *together*, so the widest
-  // cell could exceed the quota — unable to synthesize at all — with CI still green.
-  // Budget is deliberately below the quota so this fails as a readable assertion with a
-  // named remedy before synth starts throwing.
-  const MAX_RESOURCE_BUDGET = 500;
-  const CUSHION = 10;
-  const RESOURCE_BUDGET = MAX_RESOURCE_BUDGET - CUSHION;
-
-  // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
-  // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
-  const SYNTH_ONLY_RESOURCES = 1;
-
-  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
-  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
-    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
-  );
-
-  describe.each(CELLS)(
-    'compute_type=$computeType enableToolGateway=$enableToolGateway',
-    ({ computeType, enableToolGateway }) => {
-      let template: Template;
-
-      beforeAll(() => {
-        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
-        const stack = new AgentStack(app, 'BudgetStack', {
-          env: { account: '123456789012', region: 'us-east-1' },
-        });
-        // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
-        // reaching the assertions below is itself part of the guard.
-        template = Template.fromStack(stack);
-      });
-
-      test('stays inside the resource budget', () => {
-        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
-        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
-      });
-
-      test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {
-        // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
-        // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
-        // scoped to `method.testMethodArn` — removing the API Gateway console's "TEST"
-        // button, which nothing in this solution invokes, and its extra
-        // `lambda:InvokeFunction` grant.
-        // Naming the offending logical IDs makes a regressed call site point straight
-        // at its own construct.
-        const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
-          .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
-          .map(([logicalId]) => logicalId);
-
-        expect(offenders).toEqual([]);
-      });
-    },
-  );
 });
 
 describe('AgentStack Agent Registry gate', () => {

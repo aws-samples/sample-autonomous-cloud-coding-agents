@@ -235,21 +235,6 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     }
   });
 
-  test('keeps every API Gateway Lambda permission scoped to a method or a specific authorizer', () => {
-    const resources = split.census.templates.flatMap(template => Object.values(
-      JSON.parse(readFileSync(path.join(split.directory, template.file), 'utf8')).Resources as Record<string, TemplateJson>,
-    ));
-    const permissions = resources.filter(resource => resource.Type === 'AWS::Lambda::Permission'
-      && resource.Properties.Principal === 'apigateway.amazonaws.com');
-    expect(permissions.length).toBeGreaterThan(20);
-    const unscoped = permissions.filter(resource => {
-      const arn = JSON.stringify(resource.Properties.SourceArn);
-      return !/\/(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\//.test(arn) && !arn.includes('/authorizers/');
-    });
-    expect(unscoped).toEqual([]);
-    expect(permissions.some(resource => JSON.stringify(resource).includes('test-invoke-stage'))).toBe(false);
-  });
-
   test('feeds the same Blueprint domain configuration into DNS and repository provisioning', () => {
     const additional = Object.values(network.Resources as Record<string, TemplateJson>)
       .find(resource => resource.Type === 'AWS::Route53Resolver::FirewallDomainList' && resource.Properties.Name === 'blueprint-additional');
