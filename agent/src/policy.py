@@ -699,7 +699,8 @@ def _merge_annotations(
 ) -> tuple[list[str], int, str]:
     """Merge annotations across multiple matching soft-deny policies (§6.3).
 
-    Timeout: min across rules (clamped by FLOOR_TIMEOUT_S). Severity: max.
+    Timeout: shortest positive rule/task value (clamped by FLOOR_TIMEOUT_S),
+    or zero when no deadline is configured. Severity: max.
     rule_ids preserved in order of match. If a matching rule has no
     annotation data (shouldn't happen post-validation), falls back to the
     policy ID.

@@ -1,8 +1,9 @@
 """PreToolUse, PostToolUse, and Stop hook callbacks.
 
 - PreToolUse: three-outcome Cedar policy enforcement (ALLOW / DENY /
-  REQUIRE_APPROVAL). The REQUIRE_APPROVAL path writes a pending approval
-  row + transitions the task to AWAITING_APPROVAL atomically, polls for a
+  REQUIRE_APPROVAL). The REQUIRE_APPROVAL path asks the trusted approval
+  service to create a pending row and atomically transition the task to
+  AWAITING_APPROVAL, polls for a
   human decision, then resumes / denies per the user's input. See
   ``docs/design/CEDAR_HITL_GATES.md``.
 - PostToolUse: output scanner for secrets/PII.
@@ -417,8 +418,9 @@ async def pre_tool_use_hook(
     - permissionDecision: "allow" or "deny"
     - permissionDecisionReason: explanation string
 
-    The REQUIRE_APPROVAL path pauses here: writes a pending approval row
-    + transitions the task to AWAITING_APPROVAL atomically, polls for a
+    The REQUIRE_APPROVAL path pauses here: the trusted service creates a pending
+    approval row and atomically transitions the task to AWAITING_APPROVAL, then
+    the worker polls for a
     human decision with 2s→5s backoff, then returns allow / deny based on
     the decision. On TIMED_OUT a ConditionCheckFailed from the best-effort
     status write triggers a re-read — if the user's decision landed between
@@ -1195,14 +1197,10 @@ def _compute_effective_timeout(
 ) -> tuple[int, str | None, int]:
     """Compute the effective approval timeout.
 
-    ``min(rule-annotation timeout, task default, remaining lifetime -
-    cleanup margin)``, floored at FLOOR_30S. The engine's
-    ``_merge_annotations`` already applies ``min(rule_annotation,
-    task_default)`` — decision.timeout_s reaches us pre-clipped against
-    those two. Here we apply the remaining-lifetime ceiling and report
-    whichever source pulled the effective timeout below the task
-    default, so the user sees "your gate was clipped because ..." rather
-    than silent clipping.
+    The engine has already merged positive rule/task deadlines. Zero means
+    no deadline and returns unchanged. For a positive result, apply an optional
+    remaining-lifetime ceiling and the 30-second floor. Continuation runtimes
+    omit the lifetime ceiling because the request can outlive this worker.
 
     Returns ``(effective, clip_reason, requested)``:
     - ``requested`` — the user-visible "would have liked" value (task

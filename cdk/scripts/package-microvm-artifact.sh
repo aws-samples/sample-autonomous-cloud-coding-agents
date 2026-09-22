@@ -90,30 +90,14 @@
 # Test the selected image/coordinator together before enabling automatic sleep.
 # See docs/verification/README.md for acceptance criteria and remaining PR checks.
 #
-# ADR-021 sub-decision 3's hook-phasing table (corrected after the live P1
-# verification run, then completed in P2) is now:
-#
-#   /ready, /run                    declared by the CDK construct AND served by
-#                                   the agent in P1 (agent/src/server.py).
-#                                   /ready is MANDATORY: create-microvm-image
-#                                   refuses any lifecycle hook without it, and an
-#                                   image with no hooks at all cannot receive a
-#                                   runHookPayload — so "declare /run in P1,
-#                                   serve it in P2" was never a reachable state.
-#   /validate, /terminate           declared AND served in P2. /validate is a
-#                                   build-time self-check that makes ZERO AWS
-#                                   calls (it runs under the build role, which
-#                                   holds no Bedrock/Secrets/DynamoDB grants);
-#                                   /terminate is a best-effort in-guest
-#                                   breadcrumb that must not write terminal task
-#                                   status — the orchestrator finalizes the task
-#                                   and THEN calls TerminateMicrovm.
-#   /suspend, /resume               declared AND served in P3, with the image
-#                                   protocol marker. The coordinator verifies the
-#                                   actual launched version before allowing sleep.
-#
-# The clean P2 deployment used bootstrap policy bundle 1.7.0. The Dockerfile is
-# copied unmodified; image build success does not establish full P2 acceptance.
+# Managed images declare all six hooks:
+#   /ready, /validate   Local build-time checks and warm-up; no AWS calls.
+#   /run                Authenticated task bootstrap and asynchronous execution.
+#   /terminate          Close the coding barrier and acknowledge teardown without
+#                       finalizing the task; the worker may be retiring mid-task.
+#   /suspend, /resume   Checkpoint and credential/gate reconciliation. The
+#                       coordinator verifies the launched image's protocol marker
+#                       before allowing automatic sleep.
 #
 # Requires: awscli v2 with conditional PutObject/checksum support, python3.
 

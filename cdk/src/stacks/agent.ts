@@ -2319,8 +2319,8 @@ interface PinnedLogResource {
  * constructed — the hash in each one is not reproducible from the construct path
  * alone, which is precisely why they have to be written down.
  *
- * An entry stays until its stack is gone. Removing one while the stack still
- * exists re-introduces the rename and the failed update that comes with it.
+ * Removing an entry requires checking the deployed ids and completing any
+ * necessary log-delivery migration; otherwise the rename can fail the update.
  */
 const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
   'backgroundagent-dev': [
@@ -2357,7 +2357,7 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
 };
 
 /**
- * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
+ * Apply captured legacy log-delivery ids for entries in the pin table.
  *
  * These resources are created for us by the AgentCore Runtime and named after
  * whatever construct path the library uses internally, so a library-side rename
@@ -2368,15 +2368,12 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
  * update rolls the whole stack back. Owning the ids ourselves decouples us from
  * the library's internal naming.
  *
- * Applied unconditionally rather than behind a flag. Three cases, all safe:
- *
- *  - An existing stack in the account that owns these resources: the ids match
- *    what CloudFormation already recorded, so it updates them in place. This is
- *    the case that was broken.
- *  - A fresh stack or account: nothing owns these names yet, so they create
- *    normally. The ids are ours rather than the library's, which is the point;
- *    the values themselves carry no meaning beyond being stable.
- *  - Any other name: the ids embed the stack name, so each stack gets its own.
+ * Known limitation (#703): stack name does not identify deployment history.
+ * An existing same-named stack that already uses the library's current ids can
+ * collide when these pins rename its resources. Fresh stacks have no existing
+ * resources to collide with. Other stack names keep the library's naming.
+ * Removing the pins also requires migration for stacks still using these ids;
+ * the account-agnostic fix and migration are tracked in PR #705.
  *
  * The values were read off a stack deployed before the rename. Do not "tidy"
  * them — they are a record of what CloudFormation already has, and editing one
@@ -2385,9 +2382,7 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
 function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
   const stack = Stack.of(runtime);
   const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  // Only the stack these ids were recorded from can use them: they embed that
-  // stack's name. Any other stack keeps the library's own naming, which is
-  // correct for it — it has no pre-rename resources to line up with.
+  // This lookup checks only the name, not the account or deployed ids (#703).
   if (!pins) return;
 
   for (const pin of pins) {

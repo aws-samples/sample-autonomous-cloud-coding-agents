@@ -248,7 +248,7 @@ It runs under the **build role**, which has no Bedrock, Secrets Manager or Dynam
 
 Baked secrets are **reported, not enforced**: `warnings` lists the names (never values) of any credential-shaped env var present in the snapshot, because the build environment's own credentials may legitimately be in that env and failing here would fail every build.
 
-**`POST /aws/lambda-microvms/runtime/v1/terminate`** — Runtime hook (P2). Best-effort: emits one final structured log line and returns 200 — always, inside the hook budget, even with nothing running, and for **any body**: malformed JSON, a wrong content-type, an empty body or no body at all. That is why the handler takes the raw request instead of a typed body model — FastAPI validates a typed body *before* the handler runs, so a truncated body would answer 422 and report a hook failure for a teardown that actually succeeded. It does **not** join the pipeline thread (that is `lifespan`'s job on graceful shutdown) and it **never writes terminal task status**: the orchestrator finalizes the task and *then* calls `TerminateMicrovm`, so a status write here would race that finalization. `ProgressWriter` writes each event synchronously, but catches and drops failures; returning from an event method is not a durability guarantee. The P3 `/suspend` hook uses its own atomic acknowledged checkpoint after draining tracked activity.
+**`POST /aws/lambda-microvms/runtime/v1/terminate`** — Closes the local coding barrier, logs teardown and acknowledges any request body within the hook budget. Raw request parsing avoids a premature FastAPI validation error for malformed input. Each step is best-effort. The hook neither joins the pipeline thread nor writes terminal task status: termination can interrupt active work or retire a worker whose approval remains pending. Task finalization belongs to the coordinator. Acknowledged checkpointing belongs to `/suspend`; ordinary progress logging is not a durability guarantee.
 
 `microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
 
@@ -510,7 +510,7 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM /ready + /run lifecycle hooks, heartbeat daemon; OTEL session correlation
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM build/run/terminate hooks (suspend/resume in microvm_http.py), heartbeat daemon; OTEL session correlation
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent
