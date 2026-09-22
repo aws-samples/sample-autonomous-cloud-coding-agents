@@ -817,6 +817,21 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(call.input).toEqual({ microvmIdentifier: MICROVM_ID });
     });
 
+    test.each(['TERMINATED', 'TERMINATING', 'RUNNING'])('confirms termination conflicts against %s', async state => {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConflictException' }))
+        .mockResolvedValueOnce({ state });
+      const result = await new LambdaMicrovmComputeStrategy().stopSession(makeHandle());
+      expect(result).toEqual(state === 'TERMINATED' ? { outcome: 'terminated' }
+        : { outcome: 'unconfirmed', error_type: 'ConflictException' });
+      expect(mockSend.mock.calls[1][0]._type).toBe('GetMicrovm');
+    });
+
+    test('confirms an absent worker after a termination conflict', async () => {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConflictException' }))
+        .mockRejectedValueOnce(Object.assign(new Error('gone'), { name: 'ResourceNotFoundException' }));
+      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toEqual({ outcome: 'not-found' });
+    });
+
     test.each([
       ['ResourceNotFoundException', 'info'],
       ['ConflictException', 'warn'],

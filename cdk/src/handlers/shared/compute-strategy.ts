@@ -116,7 +116,7 @@ export type SessionLifecycleResult =
 
 /** Optional evidence from best-effort cleanup. A request is not confirmed teardown. */
 export type SessionStopResult =
-  | { readonly outcome: 'requested' | 'not-found' }
+  | { readonly outcome: 'requested' | 'not-found' | 'terminated' }
   | { readonly outcome: 'unconfirmed'; readonly error_type: string; readonly aws_request_id?: string };
 
 export interface ComputeStrategy {

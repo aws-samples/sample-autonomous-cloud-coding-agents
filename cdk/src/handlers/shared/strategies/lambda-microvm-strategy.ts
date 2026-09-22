@@ -916,6 +916,25 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     } catch (err) {
       const identity = microvmErrorIdentity(err);
       const errName = identity.error_type;
+      if (errName === 'ConflictException') {
+        try {
+          const observed = await getClient().send(new GetMicrovmCommand({
+            microvmIdentifier: microvmId,
+          }), { abortSignal: controlSignal(options) });
+          if (observed?.state === 'TERMINATED') {
+            logger.info('MicroVM already terminated during concurrent cleanup', { microvm_id: microvmId, reason });
+            return { outcome: 'terminated' };
+          }
+        } catch (confirmationError) {
+          if (microvmErrorIdentity(confirmationError).error_type === 'ResourceNotFoundException') {
+            logger.info('MicroVM no longer found during concurrent cleanup', { microvm_id: microvmId, reason });
+            return { outcome: 'not-found' };
+          }
+          logger.warn('MicroVM termination conflict could not be confirmed', {
+            microvm_id: microvmId, ...microvmErrorIdentity(confirmationError),
+          });
+        }
+      }
       if (errName === 'ResourceNotFoundException') {
         logger.info('MicroVM no longer found during termination', {
           microvm_id: microvmId,
