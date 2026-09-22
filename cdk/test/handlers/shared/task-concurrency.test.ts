@@ -18,6 +18,9 @@
  */
 
 const mockSend = jest.fn();
+jest.mock('node:timers/promises', () => ({
+  setTimeout: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ kind: 'get', input })),
   TransactWriteCommand: jest.fn((input: unknown) => ({ kind: 'transaction', input })),
@@ -28,6 +31,7 @@ jest.mock('../../../src/handlers/shared/ua', () => ({
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'Counters';
 
+import { setTimeout as delay } from 'node:timers/promises';
 import { acquireTaskSlot, releaseTaskSlot } from '../../../src/handlers/shared/task-concurrency';
 
 const base = { task_id: 'task', user_id: 'user', status: 'SUBMITTED' };
@@ -38,7 +42,71 @@ function cancelled(index: number) {
     CancellationReasons: [0, 1].map(i => ({ Code: i === index ? 'ConditionalCheckFailed' : 'None' })),
   });
 }
-beforeEach(() => mockSend.mockReset());
+beforeEach(() => {
+  mockSend.mockReset();
+  jest.mocked(delay).mockClear();
+});
+
+function conflict(codes = ['None', 'TransactionConflict']) {
+  return Object.assign(new Error('transaction conflict'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: codes.map(Code => ({ Code })),
+  });
+}
+
+test.each(['acquire', 'release'])('%s retries counter contention with the identical guarded transaction', async operation => {
+  mockSend.mockResolvedValueOnce({
+    Item: operation === 'acquire' ? base : { ...base, status: 'COMPLETED', concurrency_slot: held },
+  }).mockRejectedValueOnce(conflict()).mockRejectedValueOnce(conflict()).mockResolvedValueOnce({});
+  const result = operation === 'acquire'
+    ? await acquireTaskSlot('task', 'user', 10)
+    : await releaseTaskSlot('task', 'user');
+  expect(result).toBe(true);
+  const transactions = mockSend.mock.calls.filter(([command]) => command.kind === 'transaction');
+  expect(transactions).toHaveLength(3);
+  expect(transactions[1][0]).toBe(transactions[0][0]);
+  expect(transactions[2][0]).toBe(transactions[0][0]);
+  expect(delay).toHaveBeenCalledTimes(2);
+});
+
+test('persistent contention stays bounded and propagates the original error', async () => {
+  const error = conflict();
+  mockSend.mockImplementation(async command => {
+    if (command.kind === 'get') return { Item: { ...base, status: 'COMPLETED', concurrency_slot: held } };
+    throw error;
+  });
+  await expect(releaseTaskSlot('task', 'user')).rejects.toBe(error);
+  expect(mockSend.mock.calls.filter(([command]) => command.kind === 'transaction')).toHaveLength(5);
+  expect(delay).toHaveBeenCalledTimes(4);
+  for (const [index, call] of jest.mocked(delay).mock.calls.entries()) {
+    expect(call[0]).toBeGreaterThanOrEqual(0);
+    expect(call[0]).toBeLessThan(50 * 2 ** index);
+  }
+});
+
+test('a mixed conflict and capacity condition failure follows normal admission without retrying', async () => {
+  mockSend.mockResolvedValueOnce({ Item: base })
+    .mockRejectedValueOnce(conflict(['TransactionConflict', 'ConditionalCheckFailed']))
+    .mockResolvedValueOnce({ Item: base });
+  expect(await acquireTaskSlot('task', 'user', 10)).toBe(false);
+  expect(delay).not.toHaveBeenCalled();
+});
+
+test('a worker lease changing during contention cannot release its reservation', async () => {
+  const task = { ...base, status: 'FAILED', concurrency_slot: held, continuation_launch: {}, microvm_start: { clientToken: 'attempt' } };
+  const fenced = conflict(['None', 'None', 'ConditionalCheckFailed']);
+  mockSend.mockResolvedValueOnce({ Item: task })
+    .mockResolvedValueOnce({ Item: { lease_user_id: 'user', lease_attempt_id: 'attempt', lease_state: 'CLOSED' } })
+    .mockRejectedValueOnce(conflict(['None', 'TransactionConflict', 'None']))
+    .mockRejectedValueOnce(fenced)
+    .mockResolvedValueOnce({ Item: task });
+  await expect(releaseTaskSlot('task', 'user')).rejects.toBe(fenced);
+  const transactions = mockSend.mock.calls.filter(([command]) => command.kind === 'transaction');
+  expect(transactions).toHaveLength(2);
+  expect(transactions[1][0]).toBe(transactions[0][0]);
+  expect(transactions[1][0].input.TransactItems[2].ConditionCheck.ConditionExpression).toContain('lease_state = :closed');
+  expect(delay).toHaveBeenCalledTimes(1);
+});
 
 test.each([undefined, 'ACTIVE', 'FENCED', 'PARKED'])(
   'a terminal saved task keeps capacity until shutdown is confirmed (lease %s)', async leaseState => {
