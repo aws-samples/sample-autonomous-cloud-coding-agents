@@ -17,6 +17,11 @@
   <br />
 </div>
 
+> [!NOTE]
+> **The current version of ABCA remains available for use and is not deprecated.** It is in maintenance mode and will continue to receive updates and security fixes.
+>
+> The team is investing in **the next version of ABCA (V2)**, informed by customer feedback, lessons learned, and advances across the industry. We are sharing this direction early to signal a future transition. **No migration is required at this time.**
+
 ## What is ABCA
 
 **ABCA (Autonomous Background Coding Agents on AWS)** is a sample of what a self-hosted background coding agents platform might look like on AWS. You submit a coding task (via Slack, Linear, Jira, CLI, or webhook), walk away, and come back to a ready-to-review PR. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. No babysitting, no IDE sessions, no back-and-forth.
@@ -56,7 +61,7 @@ For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 ## Current status
 
-ABCA is under active development. The platform ships iteratively — each iteration adds features and builds on the previous one.
+See the note above for maintenance status and the planned transition to V2.
 
 See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work; use priority labels (`P0`, `P1`, etc.) to indicate urgency.
 
