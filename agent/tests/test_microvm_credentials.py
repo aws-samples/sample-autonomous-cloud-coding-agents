@@ -211,6 +211,27 @@ class TestRetainedCredentials:
         assert 3598 < (expiry - datetime.now(UTC)).total_seconds() <= 3600
         assert result["AccessKeyId"] == "PAIR"
 
+    @pytest.mark.parametrize(
+        ("remaining_seconds", "force", "must_fail"),
+        [(12 * 60, False, False), (5 * 60, False, True), (12 * 60, True, True)],
+    )
+    def test_refresh_outage_preserves_only_advisory_cached_credentials(
+        self, remaining_seconds, force, must_fail
+    ):
+        metadata = _metadata("CACHED")
+        credentials = DeferredRefreshableCredentials(method="test", refresh_using=lambda: metadata)
+        aws_session._locked_refresh(credentials, force=False)
+        credentials._expiry_time = datetime.now(UTC) + timedelta(seconds=remaining_seconds)
+        credentials._refresh_using = MagicMock(side_effect=RuntimeError("synthetic STS outage"))
+        if must_fail:
+            with pytest.raises(RuntimeError, match="synthetic STS outage"):
+                aws_session._locked_refresh(credentials, force=force)
+        else:
+            result = aws_session._locked_refresh(credentials, force=force)
+            assert result["AccessKeyId"] == "CACHED"
+            assert result["Token"] == metadata["token"]
+        credentials._refresh_using.assert_called_once()
+
 
 class TestScopedBroker:
     def test_requires_auth_and_scrubs_only_child_environment(self, monkeypatch):
