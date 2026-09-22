@@ -826,12 +826,10 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
    * MicroVMs may be leaking) from "something else" (worth a warning).
    *
    * ADR-021: termination is the active cleanup path — it must not rely on
-   * ``maximumDurationInSeconds`` expiring, which would keep paying for an
-   * 8-hour reservation after the task is done. Live verification made that
-   * mandatory rather than belt-and-braces: a hook-less MicroVM reached
-   * ``RUNNING`` in 12 s and stayed ``RUNNING`` indefinitely with no
-   * ``stateReason`` — nothing self-terminates, so nothing cleans up if the
-   * orchestrator does not.
+   * ``maximumDurationInSeconds`` expiring. The service enforces an eight-hour
+   * lifetime (including suspended time), but task completion does not itself
+   * terminate the VM. Explicit termination avoids paying for unused running time
+   * until that limit.
    */
   async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStopResult> {
     if (handle.strategyType !== 'lambda-microvm') {
