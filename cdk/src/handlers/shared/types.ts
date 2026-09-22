@@ -1392,7 +1392,7 @@ export interface TimedOutApprovalRecord extends ApprovalRecordBase {
 }
 
 /** STRANDED approval row, when explicitly recorded. The current stranded-task
- *  reconciler closes the owning task and leaves its approval row PENDING. */
+ *  reconciler closes the owning task and cancels its unanswered approval rows. */
 export interface StrandedApprovalRecord extends ApprovalRecordBase {
   readonly status: 'STRANDED';
   readonly decided_at: string;

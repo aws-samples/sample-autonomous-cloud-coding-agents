@@ -38,7 +38,7 @@ When a workspace's authorization dies, ABCA records it on the registry row and p
 
 #### Using the vault with Lambda MicroVMs
 
-Deploy with both `compute_type=lambda-microvm` and `enableLinearIdentityVault=true`. The coordinator sends the workload identity name through authenticated `platform_config`; the guest uses its compute execution role to obtain a Linear token. Credentials are not baked into the MicroVM image.
+Deploy with `compute_type=lambda-microvm`, `enableLinearIdentityVault=true` and an explicit `microvm_nested_stack` value (`true` for new/already-nested installations; retain `false` for existing flat installations until migration). The coordinator sends the workload identity name through authenticated `platform_config`; the guest uses its compute execution role to obtain a Linear token. Credentials are not baked into the MicroVM image.
 
 When upgrading an existing MicroVM deployment, rebuild the guest image too:
 the coordinator and guest must both support the vault configuration fields.

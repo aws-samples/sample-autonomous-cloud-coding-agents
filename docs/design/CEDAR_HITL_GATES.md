@@ -162,7 +162,7 @@ Settled during the 2026-04-23 design discussion and extended after the 2026-04-2
 
 ## 4. End-to-end request flow
 
-Narrative walk-through of the happy path. Sequence diagrams in the round-trip Mermaid below.
+Narrative walk-through with an explicit 600-second task deadline and a custom `force_push_any` policy annotated with `@approval_timeout_s("300")`. Built-in starter rules do not set deadlines. Sequence diagrams are below.
 
 ### Setup (task start)
 
@@ -212,7 +212,7 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
     )
     → effective = 300s
     ```
-    If `maxLifetime_remaining_s - CLEANUP_MARGIN_120S < FLOOR_30S`, hook returns DENY immediately with reason `"insufficient lifetime for approval"` (§13.7).
+    This lifetime ceiling applies to workers without continuation support. A continuation-capable MicroVM omits it because the approval can outlive the worker. With no positive task/rule deadline, the effective timeout is zero (no decision deadline).
 
 12. Hook checks per-task approval-gate cap (default 50, configurable per blueprint via `security.approvalGateCap`; §5.1) and per-minute rate limit (20/task, per-container). If either exceeded → DENY with reason `"approval-gate cap exceeded"` (fail-closed).
 13. Hook mints `request_id = _ulid()` (26-char ULID).
@@ -449,7 +449,7 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
   when { context.command like "*DROP TABLE*" };
 ```
 
-**Gate destructive git ops** (soft-deny — part of the built-in starter set):
+**Gate destructive git ops** (custom timed variants of the built-in starter rules):
 ```cedar
 @tier("soft")
 @rule_id("force_push_any")
@@ -484,7 +484,7 @@ forbid (principal, action == Agent::Action::"execute_bash", resource)
 
 A force-push to any branch needs approval in 300s. A force-push to `main` or `prod` gives the user 600s with elevated severity. A non-force push to a protected branch (`main`/`prod`/`master`/`release/*`) also gates — catches the case where an agent directly pushes rather than opening a PR. If a command matches both `force_push_any` and `force_push_main`, multi-match merging picks `min(300, 600) = 300s` and `max(medium, high) = high`.
 
-**Protect sensitive file paths** (soft-deny — part of the built-in starter set):
+**Protect sensitive file paths** (custom timed variants of the built-in starter rules):
 ```cedar
 @tier("soft")
 @rule_id("write_env_files")
@@ -2126,11 +2126,13 @@ Built-in policies shipped with the agent:
 **Hard-deny (absolute, cannot be disabled by blueprint)**: `rm_slash`, `write_git_internals`, `write_git_internals_nested`, `drop_table`. Absolute; no scope bypasses them; blueprint `disable:` cannot remove them (§5.1, finding #9).
 
 **Soft-deny starter set (require approval by default, may be disabled by blueprint)**:
-- `force_push_any` — `like "*git push --force*"` — medium, 300s
-- `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium, 300s
-- `force_push_main` — force-push specifically to `main`/`prod` — high, 600s
-- `write_env_files` — `like "*.env"` — high, 600s
-- `write_credentials` — `like "*credentials*"` — high, 300s
+- `force_push_any` — `like "*git push --force*"` — medium
+- `push_to_protected_branch` — pushes to `main`/`master`/`prod`/`release/*` (non-force) — medium
+- `force_push_main` — force-push specifically to `main`/`prod` — high
+- `write_env_files` — `like "*.env"` — high
+- `write_credentials` — `like "*credentials*"` — high
+
+These built-in rules inherit the task deadline: zero/no deadline by default. Custom rule annotations may impose a positive deadline.
 
 Users who want fully autonomous execution (no approval gates) pass `--pre-approve all_session --yes` at submit. Repos that want additional gates add them via `Blueprint.security.cedarPolicies.soft`. Repos that want a different policy set can override specific built-in **soft-deny** rules by `@rule_id` via the blueprint's `security.cedarPolicies.disable` list. The `disable:` mechanism is restricted: it may NOT include any built-in hard-deny rule_id, and the blueprint loader rejects such configurations at task start.
 
@@ -2512,7 +2514,7 @@ See §15.2. Net new files: ~15. Net modified files: ~15. Total LOC estimate: ~40
 - [ ] Backward compat: Phase 1a/1b tests pass without modification
 - [ ] ULID length references are 26 chars throughout CLI + docs
 - [ ] **Re-read approval row on TIMED_OUT ConditionCheckFailed (IMPL-24)**: `_best_effort_update_status("TIMED_OUT")` failure path re-reads with ConsistentRead and honors APPROVED/DENIED if the user's decision beat the agent's timer; emits `approval_late_win` milestone. See §6.5 pseudocode, §13.12 VM-throttle race, §14.6 trace, §15.2 task #43.
-- [ ] **Default `--approval-timeout` is 300s** documented consistently in decision #6, §5.2, §7.3 field table, §8.2 CLI flags, and §10.2 TaskTable schema.
+- [ ] **Default `--approval-timeout` is 0 (no deadline)** documented consistently in decision #6, §5.2, §7.3 field table, §8.2 CLI flags, and §10.2 TaskTable schema.
 - [ ] **Sub-120s `@approval_timeout_s` emits WARN (IMPL-25)** at blueprint load; sub-30s still rejected. `bgagent lint-policies` (§17.14) surfaces the same WARN pre-submit.
 - [ ] **User-visible timeout milestones (IMPL-26)**: `approval_timeout_capped` (per-gate, on SSE stream), `approval_timeout_capped_at_submit` (on `POST /v1/tasks` response), `approval_ceiling_shrinking` (once per task at lifetime threshold). All carry `{requested_timeout_s, effective_timeout_s, reason}`.
 - [ ] **Runtime JWT ceiling (IMPL-27)**: no separate JWT expiry term required in v1 — container uses auto-refreshed IAM credentials (verified by grep of `agent/src/`). Ceiling stays `min(1h, maxLifetime_remaining - cleanup_margin)`. Review if container auth shape changes (see §13.13).
