@@ -18,7 +18,10 @@
 # ---------------------------------------------------------------------------
 # BOOTSTRAP SEQUENCE (first time)
 # ---------------------------------------------------------------------------
-#   0. Use bootstrap policy bundle >= 1.9.0 for the default nested layout.
+#   Choose microvm_nested_stack=true for new/already-nested installations,
+#   or false for existing flat installations, in the commands below.
+#
+#   0. Use bootstrap policy bundle >= 1.9.0 for the nested layout.
 #      Before upgrading an existing flat deployment, set and retain
 #      microvm_nested_stack=false (bundle >= 1.8.0) on every deploy below until
 #      its resources are migrated; see docs/verification/645-p3-nested-stack.md.
@@ -27,7 +30,7 @@
 #      is configured; that is expected — the artifact bucket must exist before
 #      you can upload to it.
 #
-#        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm
+#        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
 #
 #   2. Package + upload the artifact (this script). It reads the bucket name and
 #      base object key from stack outputs, uploads an immutable hash-suffixed
@@ -48,7 +51,7 @@
 #      image resource and injects MICROVM_IMAGE_IDENTIFIER into the orchestrator:
 #
 #        MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
-#          --context compute_type=lambda-microvm \
+#          --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
 #          --context microvm_base_image_arn=<baseImageArn> \
 #          --context microvm_base_image_version=<version> \
 #          --context microvm_artifact_sha256=<digest printed by this script>
@@ -69,7 +72,7 @@
 # — `run-microvm` rejects a bare name):
 #
 #   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \
-#     --context compute_type=lambda-microvm \
+#     --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \
 #     --context microvm_image_identifier=<imageArn>
 #
 # ---------------------------------------------------------------------------
@@ -231,7 +234,7 @@ error: stack '${STACK_NAME}' has no MicrovmArtifactBucketName/MicrovmArtifactObj
 That means this stack was not deployed with the lambda-microvm compute backend.
 Deploy it first:
 
-  MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm
+  MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE
 EOF
   exit 1
 fi
@@ -328,7 +331,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   CDK-managed (recommended) — redeploy with the base image and artifact pinned.
   Keep this digest with the deployment's context; it identifies these exact ZIP bytes.
 
-  The default nested layout requires bootstrap policy bundle >= 1.9.0.
+  The nested layout requires bootstrap policy bundle >= 1.9.0.
   Flat P3 deployments require >= 1.8.0. Check the installed bundle:
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
@@ -347,7 +350,7 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
 
     aws lambda-microvms list-managed-microvm-images
     MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
-      --context compute_type=lambda-microvm \\
+      --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \\
       --context microvm_base_image_arn=<baseImageArn> \\
       --context microvm_base_image_version=<version> \\
       --context microvm_artifact_sha256=${ARTIFACT_SHA256}
@@ -477,7 +480,7 @@ cat <<EOF
 Once the version reports status ACTIVE, point the orchestrator at it:
 
   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- \\
-    --context compute_type=lambda-microvm \\
+    --context compute_type=lambda-microvm --context microvm_nested_stack=REPLACE_WITH_TRUE_OR_FALSE \\
     --context microvm_image_identifier=${IMAGE_ARN:-${IMAGE_NAME}} \\
     --context microvm_image_version=${IMAGE_VERSION:-1.0}
 

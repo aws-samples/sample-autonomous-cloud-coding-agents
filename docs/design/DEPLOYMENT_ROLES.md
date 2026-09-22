@@ -846,7 +846,7 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 
 P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
 
-The default nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
+The nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
 explicit parent-derived names `backgroundagent-dev-MicrovmBuildRole` and
 `backgroundagent-dev-MicrovmConnectorRole`; `MicrovmPassRoles` admits those two
 exact names in addition to the legacy flat-layout prefixes. The execution role

@@ -1303,6 +1303,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
@@ -2243,7 +2244,7 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
     { name: 'agentcore', context: { compute_type: 'agentcore' } },
     { name: 'ecs', context: { compute_type: 'ecs' } },
     ...MICROVM_CONFIGURATIONS.flatMap(configuration => [
-      { ...configuration, name: `${configuration.name}-default-nested` },
+      { name: `${configuration.name}-nested`, context: { ...configuration.context, microvm_nested_stack: true } },
       {
         name: `${configuration.name}-flat`,
         context: { ...configuration.context, microvm_nested_stack: false },

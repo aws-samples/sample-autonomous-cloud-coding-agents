@@ -18,7 +18,7 @@
  */
 
 import { App } from 'aws-cdk-lib';
-import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
+import { Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
 
 const env = { account: '123456789012', region: 'us-east-1' };
@@ -28,35 +28,26 @@ const imageContext = {
   microvm_artifact_sha256: 'a'.repeat(64),
 };
 
+test.each([{}, imageContext])('rejects an omitted layout before synthesizing MicroVM resources: %j', context => {
+  const app = new App({ context: { compute_type: 'lambda-microvm', ...context } });
+  expect(() => new AgentStack(app, 'ImplicitLayout', { env }))
+    .toThrow('microvm_nested_stack must be explicitly selected');
+});
+
 describe.each([
-  { name: 'MicrovmBootstrap', context: { compute_type: 'lambda-microvm' }, warns: true },
-  { name: 'MicrovmManaged', context: { compute_type: 'lambda-microvm', ...imageContext }, warns: true },
   ...[true, 'true', false, 'false'].map((value, index) => ({
     name: `ExplicitLayout${index}`,
     context: { compute_type: 'lambda-microvm', microvm_nested_stack: value },
-    warns: false,
   })),
-  { name: 'Agentcore', context: { compute_type: 'agentcore' }, warns: false },
-  { name: 'Ecs', context: { compute_type: 'ecs' }, warns: false },
-])('MicroVM layout warning: $name', ({ name, context, warns }) => {
-  let annotations: Annotations;
-
+  { name: 'Agentcore', context: { compute_type: 'agentcore' } },
+  { name: 'Ecs', context: { compute_type: 'ecs' } },
+])('MicroVM layout selection: $name', ({ name, context }) => {
+  let template: Template;
   beforeAll(() => {
-    const stack = new AgentStack(new App({ context }), name, { env });
-    Template.fromStack(stack);
-    annotations = Annotations.fromStack(stack);
+    template = Template.fromStack(new AgentStack(new App({ context }), name, { env }));
   });
-
-  test('warns only when MicroVM layout is implicit, even before an image exists', () => {
-    const warnings = annotations.findWarning('*', Match.stringLikeRegexp('microvm_nested_stack is unset'));
-    expect(warnings).toHaveLength(warns ? 1 : 0);
-    if (warns) {
-      const message = warnings[0]!.entry.data;
-      expect(message).toContain('--context microvm_nested_stack=false');
-      expect(message).toContain('erase artifacts and pending payloads');
-      expect(message).toContain('does not inspect deployed resources or perform a migration');
-      expect(message).toContain('docs/verification/645-p3-nested-stack.md');
-    }
+  test('accepts explicit MicroVM layouts and leaves other backends unaffected', () => {
+    expect(template.toJSON().Resources).toBeDefined();
   });
 });
 
@@ -73,10 +64,11 @@ describe('MicroVM resource prefix validation', () => {
       .toThrow('microvm_resource_name_prefix cannot be used with microvm_nested_stack=false');
   });
 
-  test.each([42, true, null])('identifies non-string prefix %s without requiring an explicit true flag', value => {
+  test.each([42, true, null])('identifies non-string prefix %s in nested mode', value => {
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_resource_name_prefix: value,
       },
     });
@@ -84,10 +76,11 @@ describe('MicroVM resource prefix validation', () => {
       .toThrow('microvm_resource_name_prefix must be a string');
   });
 
-  test('accepts a valid prefix with the default nested layout', () => {
+  test('accepts a valid prefix with an explicit nested layout', () => {
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: true,
         microvm_resource_name_prefix: 'migration',
       },
     });
