@@ -382,7 +382,7 @@ When a task pauses in `AWAITING_APPROVAL` (Cedar soft-deny gate), the owner appr
 { "data": { "task_id": "01HYX...", "request_id": "...", "status": "DENIED", "decided_at": "2025-03-15T10:35:00Z" } }
 ```
 
-**Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`, `404 REQUEST_NOT_FOUND` (collapses "row missing" and "wrong caller"), `409 REQUEST_ALREADY_DECIDED`, `409 TASK_NOT_AWAITING_APPROVAL`.
+**Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`, `404 REQUEST_NOT_FOUND` (collapses missing, inaccessible, closed or expired approval rows), `409 TASK_NOT_AWAITING_APPROVAL` (task-only state conflict).
 
 ### List pending approvals
 
@@ -608,7 +608,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `RATE_LIMIT_EXCEEDED` | 429 | Rate/concurrency gate exceeded — per-task nudge limit, the application rate limiter on approval endpoints, or the user concurrency limit on confirm-uploads |
 | `BUDGET_EXCEEDED` | 429 | A configured user or Cognito-team monthly budget reached 100% with hard stop enabled |
 | `REQUEST_NOT_FOUND` | 404 | Cedar HITL approval request not found (also returned when the caller does not own it) |
-| `REQUEST_ALREADY_DECIDED` | 409 | Cedar HITL approval request was already approved or denied |
+| `REQUEST_ALREADY_DECIDED` | 409 | Legacy error-code enum; current approve/deny handlers return `404 REQUEST_NOT_FOUND` for closed or inaccessible approval rows |
 | `TASK_NOT_AWAITING_APPROVAL` | 409 | Task is not in `AWAITING_APPROVAL`, so the approval decision does not apply |
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (retry with backoff) |
