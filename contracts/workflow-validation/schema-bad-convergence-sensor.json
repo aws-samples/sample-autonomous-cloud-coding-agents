@@ -1,20 +1,18 @@
 {
-  "name": "valid-coding-new-task",
-  "description": "Canonical valid coding workflow.",
+  "name": "schema-bad-convergence-sensor",
+  "description": "A convergence contract may only require a sensor produced by a matching verification step.",
   "workflow": {
     "id": "coding/new-task-v1",
     "version": "1.0.0",
     "domain": "coding",
-    "description": "Implement a GitHub issue and open a PR.",
     "requires_repo": true,
     "read_only": false,
     "prompt": {
-      "template": "registry://prompt/coding-new-task-workflow"
+      "template": "do the thing"
     },
     "hydration": {
       "sources": [
         "issue",
-        "memory",
         "task_description"
       ]
     },
@@ -24,10 +22,7 @@
         "Bash",
         "Read",
         "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "WebFetch"
+        "Edit"
       ],
       "cedar_policy_modules": [
         "builtin/hard_deny",
@@ -46,25 +41,20 @@
     },
     "steps": [
       {
-        "kind": "clone_repo",
-        "name": "setup"
+        "kind": "clone_repo"
       },
       {
-        "kind": "hydrate_context",
-        "name": "context"
+        "kind": "hydrate_context"
       },
       {
-        "kind": "run_agent",
-        "name": "implement"
+        "kind": "run_agent"
       },
       {
         "kind": "verify_build",
-        "name": "build",
         "gate": "regression_only"
       },
       {
         "kind": "ensure_pr",
-        "name": "open_pr",
         "strategy": "create"
       }
     ],
@@ -74,24 +64,18 @@
     "convergence": {
       "mode": "test_gated",
       "required_sensors": [
-        "verify_build"
+        "verify_lint"
       ],
       "terminal_outcomes": [
         "pr_opened"
       ]
     },
-    "limits": {
-      "max_turns": 100
-    },
-    "promotion_gate": {
-      "requires": [
-        "tests:agent/new_task"
-      ]
-    },
     "status": "production"
   },
   "expected": {
-    "valid": true,
-    "violations": []
+    "valid": false,
+    "violations": [
+      "schema"
+    ]
   }
 }

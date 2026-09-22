@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/agent/workflows/schema/workflow.schema.json",
   "title": "ABCA Workflow",
-  "description": "A versioned, declarative description of how the agent executes one kind of task. See docs/design/WORKFLOWS.md and ADR-014. Phase-0 schema for issue #248.",
+  "description": "A versioned, declarative description of how the agent executes one kind of task. See docs/design/WORKFLOWS.md and ADR-014. Introduced by issue #248; explicit convergence metadata added by issue #517.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "version", "domain", "prompt", "hydration", "agent_config", "steps", "terminal_outcomes", "status"],
@@ -238,6 +238,91 @@
         }
       }
     },
+    "convergence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "terminal_outcomes"],
+      "description": "Declarative contract for how a harness decides the workflow is done. In v1 this documents existing terminal behavior for conformance tooling; it does not change runtime success inference.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "The convergence strategy used to decide that the workflow is complete.",
+          "enum": ["test_gated", "artifact_delivered", "human_approved", "review_submitted"]
+        },
+        "required_sensors": {
+          "type": "array",
+          "description": "Verification step results that must be available before convergence can be evaluated.",
+          "items": { "enum": ["verify_build", "verify_lint"] },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "terminal_outcomes": {
+          "type": "array",
+          "description": "Externally observable outcomes that satisfy this convergence contract.",
+          "items": {
+            "enum": ["pr_opened", "review_published", "artifact_delivered", "human_approved"]
+          },
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "early_exit": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Explicit exceptions that may terminate the workflow before its normal convergence outcome.",
+          "properties": {
+            "allow_on_policy_deny": {
+              "type": "boolean",
+              "description": "Whether a policy denial may end the workflow without satisfying its normal terminal outcomes.",
+              "default": false
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "test_gated" } }
+          },
+          "then": {
+            "required": ["required_sensors"]
+          }
+        },
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "artifact_delivered" } }
+          },
+          "then": {
+            "properties": {
+              "terminal_outcomes": { "contains": { "const": "artifact_delivered" } }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "human_approved" } }
+          },
+          "then": {
+            "properties": {
+              "terminal_outcomes": { "contains": { "const": "human_approved" } }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["mode"],
+            "properties": { "mode": { "const": "review_submitted" } }
+          },
+          "then": {
+            "properties": {
+              "terminal_outcomes": { "contains": { "const": "review_published" } }
+            }
+          }
+        }
+      ]
+    },
     "limits": {
       "type": "object",
       "additionalProperties": false,
@@ -309,6 +394,54 @@
               "discover": { "const": false }
             },
             "not": { "required": ["provider"] }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence"],
+        "properties": {
+          "convergence": {
+            "required": ["required_sensors"],
+            "properties": {
+              "required_sensors": { "contains": { "const": "verify_build" } }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "steps": {
+            "contains": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "verify_build" } }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["convergence"],
+        "properties": {
+          "convergence": {
+            "required": ["required_sensors"],
+            "properties": {
+              "required_sensors": { "contains": { "const": "verify_lint" } }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "steps": {
+            "contains": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": { "kind": { "const": "verify_lint" } }
+            }
           }
         }
       }
