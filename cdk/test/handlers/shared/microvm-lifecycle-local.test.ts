@@ -32,6 +32,11 @@ if (endpoint && (new URL(endpoint).hostname !== '127.0.0.1' || new URL(endpoint)
 const mockBeforeSend = jest.fn();
 const mockAfterSend = jest.fn();
 const mockClients: DynamoDBDocumentClient[] = [];
+const mockDeleteContinuations = jest.fn();
+jest.mock('../../../src/handlers/shared/microvm-continuation-storage', () => ({
+  ...jest.requireActual('../../../src/handlers/shared/microvm-continuation-storage'),
+  deleteClosedTaskContinuations: (...args: unknown[]) => mockDeleteContinuations(...args),
+}));
 jest.mock('../../../src/handlers/shared/microvm-suspend-config', () => ({
   readMicrovmSuspendEnabled: async () => true,
 }));
@@ -64,6 +69,9 @@ Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: 
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../src/handlers/shared/microvm-lifecycle';
 import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../src/handlers/shared/microvm-start';
 import { superviseMicrovm, type MicrovmSupervisorState } from '../../../src/handlers/shared/microvm-supervisor';
+import { failContinuationAttempt } from '../../../src/handlers/shared/microvm-continuation-runner';
+import { reconcileMicrovmContinuation } from '../../../src/handlers/reconcile-microvm-continuations';
+import { workerLeaseKey } from '../../../src/handlers/shared/microvm-continuation-types';
 
 const raw = new DynamoDBClient({
   endpoint: endpoint ?? 'http://127.0.0.1:1',
@@ -90,6 +98,7 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
   beforeEach(async () => {
     mockBeforeSend.mockReset();
     mockAfterSend.mockReset();
+    mockDeleteContinuations.mockReset();
     for (const name of [tasks, approvals]) {
       const result = await admin.send(new ScanCommand({ TableName: name }));
       for (const item of result.Items ?? []) {
@@ -144,6 +153,55 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
     if (!value) throw new Error('Expected a MicroVM task');
     return value;
   }
+
+  test.each([false, true])('cleans an early failed replacement, preserving a concurrent worker ID (%s)', async lateWorker => {
+    const attempt = randomUUID();
+    await admin.send(new PutCommand({
+      TableName: tasks,
+      Item: {
+        task_id: 'task', user_id: 'user', status: 'AWAITING_APPROVAL', compute_type: 'lambda-microvm',
+        continuation: { state: 'STARTING', attempt_id: attempt },
+        concurrency_slot: { state: 'held', attempt_id: attempt },
+      },
+    }));
+    await admin.send(new PutCommand({
+      TableName: tasks,
+      Item: { ...workerLeaseKey('task'), lease_user_id: 'user', lease_attempt_id: attempt, lease_state: 'ACTIVE' },
+    }));
+    await failContinuationAttempt({
+      task_id: 'task', continuation_request_id: 'gate', continuation_attempt_id: attempt,
+    }, 'user', 'MICROVM_CONTINUATION_VERSION_CHANGED');
+    expect((await admin.send(new GetCommand({ TableName: tasks, Key: workerLeaseKey('task') }))).Item?.lease_state)
+      .toBe('FENCED');
+    // Finalization can release a no-receipt attempt before the scheduled sweep.
+    await admin.send(new UpdateCommand({
+      TableName: tasks, Key: { task_id: 'task' },
+      UpdateExpression: 'SET concurrency_slot.#state = :released',
+      ExpressionAttributeNames: { '#state': 'state' }, ExpressionAttributeValues: { ':released': 'released' },
+    }));
+    expect(await claimMicrovmStart('task', 'user', 'hash', attempt)).toMatchObject({ closed: true });
+    if (lateWorker) {
+      mockBeforeSend.mockImplementation(async command => {
+        if (command instanceof UpdateCommand && command.input.UpdateExpression?.includes('lease_state = :closed')) {
+          await admin.send(new UpdateCommand({
+            TableName: tasks, Key: workerLeaseKey('task'),
+            UpdateExpression: 'SET lease_microvm_id = :id', ExpressionAttributeValues: { ':id': 'late-worker' },
+          }));
+        }
+      });
+    }
+    const row = (await admin.send(new GetCommand({ TableName: tasks, Key: { task_id: 'task' } }))).Item!;
+    if (lateWorker) {
+      await expect(reconcileMicrovmContinuation(row as Parameters<typeof reconcileMicrovmContinuation>[0]))
+        .rejects.toThrow('The conditional request failed');
+      expect(mockDeleteContinuations).not.toHaveBeenCalled();
+    } else {
+      await reconcileMicrovmContinuation(row as Parameters<typeof reconcileMicrovmContinuation>[0]);
+      expect((await admin.send(new GetCommand({ TableName: tasks, Key: workerLeaseKey('task') }))).Item?.lease_state)
+        .toBe('CLOSED');
+      expect(mockDeleteContinuations).toHaveBeenCalledWith('task', 'user', expect.any(Object));
+    }
+  });
 
   test('real supervisor and store preserve approval-during-suspend wake across serialized polls', async () => {
     const handle = (await current()).handle;
