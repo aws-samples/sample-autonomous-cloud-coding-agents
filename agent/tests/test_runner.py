@@ -50,7 +50,9 @@ def _config(**overrides: Any) -> TaskConfig:
 
 class TestClaudeSessionOwnership:
     @pytest.mark.parametrize("microvm", [False, True])
-    @pytest.mark.parametrize("failure", [None, "connect", "query", "receive", "cancel", "hook-denied"])
+    @pytest.mark.parametrize(
+        "failure", [None, "connect", "query", "receive", "cancel", "hook-denied"]
+    )
     def test_broker_selection_and_cleanup_on_every_session_exit(
         self, monkeypatch, microvm, failure
     ):
@@ -77,11 +79,15 @@ class TestClaudeSessionOwnership:
                 if context is not None:
                     await context.tool_started("denied-call")
                     await context.tool_started("other-active-call")
-                yield claude_agent_sdk.UserMessage(content=[
-                    claude_agent_sdk.ToolResultBlock(
-                        tool_use_id="denied-call", content="Project hook denied", is_error=True,
-                    ),
-                ])
+                yield claude_agent_sdk.UserMessage(
+                    content=[
+                        claude_agent_sdk.ToolResultBlock(
+                            tool_use_id="denied-call",
+                            content="Project hook denied",
+                            is_error=True,
+                        ),
+                    ]
+                )
                 if context is not None:
                     assert context.diagnostic_snapshot()["active_tools"] == 1
                     assert "other-active-call" in context._tools
@@ -118,7 +124,8 @@ class TestClaudeSessionOwnership:
                 result = asyncio.run(
                     runner.run_agent("probe", "probe", config, trajectory=MagicMock())
                 )
-                assert result.status == ("error" if failure not in {None, "hook-denied"} else "success")
+                expected = "error" if failure not in {None, "hook-denied"} else "success"
+                assert result.status == expected
             options = make_client.call_args.kwargs["options"]
             if microvm:
                 make_broker.assert_called_once_with(context)
