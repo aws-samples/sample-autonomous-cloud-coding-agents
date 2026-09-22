@@ -48,6 +48,9 @@ parent stack.
 - Finish reusable flat-to-nested migration commands and independently test an
   upgrade from current `main` on the same deployment. The earlier bespoke
   migration is not a substitute for that acceptance.
+- Deploy the latest review fixes and verify CLI/API approve and deny on a
+  `PARKED` task, including immediate replacement admission. Earlier Linear
+  acceptance does not exercise the decision API functions' configuration.
 
 ## Reproduce local checks
 
@@ -71,6 +74,8 @@ The last command opts into the pinned real SDK/CLI probe with a deterministic
 loopback model; it does not launch a cloud worker. Optional DynamoDB Local tests
 require their documented local service. Mocks do not establish effective AWS IAM.
 The standalone cloud acceptance harness and raw receipts remain outside this PR.
+The repository's narrower [launch, payload and replay probes](../../cdk/test/live/README.md)
+have separate inspection and execution commands.
 
 ## Live acceptance for an installation
 
@@ -87,6 +92,7 @@ only after verifying that image and coordinator together.
 | Default and disabled sleep | Omitted override uses 600 seconds; task-level off and deployment off prevent new suspension while wake/cleanup remain available. |
 | Credential expiry | Sleep past the original credential lifetime, then perform actual task-scoped AWS operations. |
 | Retirement/replacement | Confirm old-worker shutdown before capacity release; one replacement restores files/conversation and preserves approval identity and usage. |
+| CLI/API replacement | After the task reaches `PARKED`, approve or deny through the CLI/API. Verify replacement admission starts from that decision without waiting for the scheduled sweep, and the exact pending tool follows the decision. |
 | Upgrade/rollback | Preserve unrelated resource identities, old in-flight work and recoverable checkpoints; test compatible code/image/policy rollback. |
 
 Include effective-role checks for own-task access and denial of cross-task data,
