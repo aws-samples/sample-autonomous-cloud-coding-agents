@@ -1303,7 +1303,6 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
-        microvm_nested_stack: true,
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
@@ -1317,7 +1316,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     childTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
   });
 
-  test('provisions the MicroVM image + BOTH egress network connectors', () => {
+  test('defaults to a child stack for the MicroVM image and both egress network connectors', () => {
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 0);
     template.resourceCountIs('AWS::Lambda::NetworkConnector', 0);
     childTemplate.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
@@ -1664,13 +1663,14 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
   });
 });
 
-describe('AgentStack MicroVM flat-layout migration compatibility', () => {
+describe.each([false, 'false'])('AgentStack MicroVM flat-layout escape hatch (%s)', microvmNested => {
   let template: Template;
 
   beforeAll(() => {
     const app = new App({
       context: {
         compute_type: 'lambda-microvm',
+        microvm_nested_stack: microvmNested,
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
         microvm_artifact_sha256: 'a'.repeat(64),
@@ -1681,7 +1681,7 @@ describe('AgentStack MicroVM flat-layout migration compatibility', () => {
     }));
   });
 
-  test('preserves flat resource identities when nesting is not configured', () => {
+  test('preserves flat resource identities when nesting is explicitly disabled', () => {
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
     template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
     expect(Object.keys(template.findResources('AWS::Lambda::MicrovmImage'))[0])
@@ -2243,10 +2243,10 @@ describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
     { name: 'agentcore', context: { compute_type: 'agentcore' } },
     { name: 'ecs', context: { compute_type: 'ecs' } },
     ...MICROVM_CONFIGURATIONS.flatMap(configuration => [
-      { ...configuration, name: `${configuration.name}-default-flat` },
+      { ...configuration, name: `${configuration.name}-default-nested` },
       {
-        name: `${configuration.name}-nested`,
-        context: { ...configuration.context, microvm_nested_stack: true },
+        name: `${configuration.name}-flat`,
+        context: { ...configuration.context, microvm_nested_stack: false },
       },
     ]),
   ];

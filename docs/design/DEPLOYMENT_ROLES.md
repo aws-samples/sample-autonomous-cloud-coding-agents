@@ -846,13 +846,13 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 
 P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
 
-The nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
+The default nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
 explicit parent-derived names `backgroundagent-dev-MicrovmBuildRole` and
 `backgroundagent-dev-MicrovmConnectorRole`; `MicrovmPassRoles` admits those two
 exact names in addition to the legacy flat-layout prefixes. The execution role
 stays in the parent and is still excluded. Re-bootstrap before deploying the
-child stack. Existing flat deployments must keep `microvm_nested_stack=false`
-until their resource migration is reviewed; changing ownership is not an ordinary
+child stack. Before upgrading an existing flat deployment, set and retain
+`microvm_nested_stack=false` until its resource migration is complete; changing ownership is not an ordinary
 in-place update. See the [nested-stack runbook](../verification/645-p3-nested-stack.md).
 
 For a reviewed migration that keeps old and new resources side by side,

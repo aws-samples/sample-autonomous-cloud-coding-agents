@@ -19,8 +19,9 @@
 # BOOTSTRAP SEQUENCE (first time)
 # ---------------------------------------------------------------------------
 #   0. Use bootstrap policy bundle >= 1.9.0 for the default nested layout.
-#      Existing flat deployments must retain microvm_nested_stack=false until
-#      their resources are migrated; see docs/verification/645-p3-nested-stack.md.
+#      Before upgrading an existing flat deployment, set and retain
+#      microvm_nested_stack=false (bundle >= 1.8.0) on every deploy below until
+#      its resources are migrated; see docs/verification/645-p3-nested-stack.md.
 #
 #   1. Deploy the MicroVM substrate WITHOUT an image. Synth warns that no image
 #      is configured; that is expected — the artifact bucket must exist before
@@ -353,8 +354,8 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   An older bundle may deny iam:PassRole for the image's build role. Updating the
   source bundle alone does not update the account's installed policies.
 
-  Existing flat stacks: keep --context microvm_nested_stack=false on deployment
-  commands until the resource migration is complete. Changing the layout directly
+  Existing flat stacks: set --context microvm_nested_stack=false before upgrading
+  and retain it until the resource migration is complete. Changing the layout directly
   can replace resources or delete bucket contents. See:
     docs/verification/645-p3-nested-stack.md
 

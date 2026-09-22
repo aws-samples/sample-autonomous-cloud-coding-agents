@@ -299,9 +299,12 @@ invocations and retain the old groups when investigating earlier runs.
 Both flat and nested MicroVM layouts support the optional
 tool gateway and Linear Identity vault without exceeding the template budget.
 
-This does not migrate existing MicroVM compute resources. Keep an existing flat
-deployment on `microvm_nested_stack=false` until its separate resource migration
-has been reviewed.
+MicroVM infrastructure now defaults to a nested stack (bootstrap bundle 1.9.0).
+Before upgrading an existing flat MicroVM deployment, save
+`"microvm_nested_stack": false` in its CDK context or pass
+`--context microvm_nested_stack=false` on every deploy. Keep this escape hatch
+until completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
+Omitting the setting does not automatically migrate existing resources.
 
 ### AgentCore unsupported Availability Zones
 

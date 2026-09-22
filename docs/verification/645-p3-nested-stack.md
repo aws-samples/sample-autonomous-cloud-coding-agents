@@ -19,7 +19,7 @@ Names derive from the concrete parent deployment name, not the child stack token
 
 | Setting | Behavior |
 |---|---|
-| `microvm_nested_stack` | Defaults to `false`, preserving flat resource identities. Set `true` for a new installation or after completing the reviewed migration. |
+| `microvm_nested_stack` | Defaults to `true`. Before upgrading an existing flat deployment, set `false` and retain it until completing the reviewed migration. |
 | `microvm_resource_name_prefix` | Supplies distinct names for overlapping nested resources; preserve it after migration. It does not retain old resources or permissions by itself. |
 | `microvm_managed_image_version` | Pins new tasks to an explicitly verified image version. Without a pin, selection follows the latest active version. |
 | `microvm_approval_suspend_enabled` | Defaults to `false`; enable only after testing the deployed image/coordinator. Disabling new sleep preserves wake and cleanup. |
@@ -32,6 +32,11 @@ silently change the image used by a pinned coordinator. Retain a compatible
 published coordinator and exact image version for rollback.
 
 ## Existing flat deployments
+
+Before the first upgrade, save `"microvm_nested_stack": false` in the deployment's
+CDK context or pass `--context microvm_nested_stack=false` on every deploy.
+Omitting the setting now selects nested infrastructure; it does not detect or
+migrate existing flat resources. Keep `false` until the migration below is complete.
 
 Do not deploy the nested template directly over a flat deployment. CloudFormation
 sees removed parent resources and newly created child resources; names can collide
