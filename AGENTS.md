@@ -20,7 +20,7 @@ mise run hooks:install    # prek git hooks (also runs at end of install)
 mise run hooks:run        # pre-commit + pre-push locally
 ```
 
-Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment.
+Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment on the flagged `return` line (or the line immediately above) — the rule anchors on the `return`, so a token placed higher does not bind.
 
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
