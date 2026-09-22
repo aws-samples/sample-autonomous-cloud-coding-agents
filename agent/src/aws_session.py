@@ -386,7 +386,10 @@ def _locked_refresh(credentials: Any, *, force: bool) -> dict[str, str]:
         raise TimeoutError("Credential refresh lock did not become available")
     try:
         if force or credentials.refresh_needed():
-            credentials._protected_refresh(is_mandatory=True)
+            credentials._protected_refresh(
+                is_mandatory=force
+                or credentials.refresh_needed(credentials._mandatory_refresh_timeout)
+            )
         frozen = credentials._frozen_credentials
         expiry = credentials._expiry_time
         if (
