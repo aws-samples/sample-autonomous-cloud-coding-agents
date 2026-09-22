@@ -66,12 +66,12 @@ const suffix = randomUUID();
 const tasks = `lifecycle-tasks-${suffix}`;
 const approvals = `lifecycle-approvals-${suffix}`;
 Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals });
+import { reconcileMicrovmContinuation } from '../../../src/handlers/reconcile-microvm-continuations';
+import { failContinuationAttempt } from '../../../src/handlers/shared/microvm-continuation-runner';
+import { workerLeaseKey } from '../../../src/handlers/shared/microvm-continuation-types';
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../src/handlers/shared/microvm-lifecycle';
 import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../src/handlers/shared/microvm-start';
 import { superviseMicrovm, type MicrovmSupervisorState } from '../../../src/handlers/shared/microvm-supervisor';
-import { failContinuationAttempt } from '../../../src/handlers/shared/microvm-continuation-runner';
-import { reconcileMicrovmContinuation } from '../../../src/handlers/reconcile-microvm-continuations';
-import { workerLeaseKey } from '../../../src/handlers/shared/microvm-continuation-types';
 
 const raw = new DynamoDBClient({
   endpoint: endpoint ?? 'http://127.0.0.1:1',
@@ -159,7 +159,10 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
     await admin.send(new PutCommand({
       TableName: tasks,
       Item: {
-        task_id: 'task', user_id: 'user', status: 'AWAITING_APPROVAL', compute_type: 'lambda-microvm',
+        task_id: 'task',
+        user_id: 'user',
+        status: 'AWAITING_APPROVAL',
+        compute_type: 'lambda-microvm',
         continuation: { state: 'STARTING', attempt_id: attempt },
         concurrency_slot: { state: 'held', attempt_id: attempt },
       },
@@ -175,17 +178,21 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
       .toBe('FENCED');
     // Finalization can release a no-receipt attempt before the scheduled sweep.
     await admin.send(new UpdateCommand({
-      TableName: tasks, Key: { task_id: 'task' },
+      TableName: tasks,
+      Key: { task_id: 'task' },
       UpdateExpression: 'SET concurrency_slot.#state = :released',
-      ExpressionAttributeNames: { '#state': 'state' }, ExpressionAttributeValues: { ':released': 'released' },
+      ExpressionAttributeNames: { '#state': 'state' },
+      ExpressionAttributeValues: { ':released': 'released' },
     }));
     expect(await claimMicrovmStart('task', 'user', 'hash', attempt)).toMatchObject({ closed: true });
     if (lateWorker) {
       mockBeforeSend.mockImplementation(async command => {
         if (command instanceof UpdateCommand && command.input.UpdateExpression?.includes('lease_state = :closed')) {
           await admin.send(new UpdateCommand({
-            TableName: tasks, Key: workerLeaseKey('task'),
-            UpdateExpression: 'SET lease_microvm_id = :id', ExpressionAttributeValues: { ':id': 'late-worker' },
+            TableName: tasks,
+            Key: workerLeaseKey('task'),
+            UpdateExpression: 'SET lease_microvm_id = :id',
+            ExpressionAttributeValues: { ':id': 'late-worker' },
           }));
         }
       });
