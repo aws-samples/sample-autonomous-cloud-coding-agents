@@ -222,7 +222,11 @@ export async function resolveTemplateCallbackUrls(args: {
   region?: string;
   stackName?: string;
   slug?: string;
-}): Promise<{ hostedConsentUrl?: string; vaultCallbackUrl?: string; webhookUrl?: string }> {
+}): Promise<{
+  hostedConsentUrl?: string;
+  vaultCallbackUrl?: string;
+  webhookUrl?: string;
+}> {
   // Unconfigured CLI is an expected state here, not an error.
   let config: CliConfig | undefined;
   try {
@@ -240,8 +244,10 @@ export async function resolveTemplateCallbackUrls(args: {
   const hostedConsentUrl = args.stackName
     ? await getStackOutput(region, args.stackName, 'LinearVaultConsentUrl').catch(() => null)
     : null;
-  // Needs a slug: the provider is per-workspace, so without one there is nothing
-  // specific to look up.
+  // Needs a slug: the provider is per-workspace, so without one there is nothing specific to
+  // look up. Inferring it from the registry belongs with the workspace-enumeration helpers
+  // landing in #917 (`listOnboardedWorkspaceSlugs`, which also falls back to Secrets Manager
+  // when the registry is empty) rather than in a second copy here.
   const vaultCallbackUrl = args.slug
     ? await lookupLinearVaultCallbackUrl({ region, workspaceSlug: args.slug })
     : null;
@@ -283,34 +289,55 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  Description:         ${description}`,
     '',
     // Linear's field is literally "Redirect URIs — All OAuth redirect URIs,
-    // separated with newlines". Each entry is annotated with the command that
-    // redirects to it: the flows use DIFFERENT URIs, and registering one then
-    // running the other yields an opaque "Invalid redirect_uri".
+    // separated with newlines". ONLY URIs Linear itself redirects to belong here:
+    // it validates the `redirect_uri` on the authorize request against this list,
+    // so an entry Linear never sends to is inert, and a missing one is an opaque
+    // "Invalid redirect_uri".
+    //
+    // The hosted consent page is NOT one of them, and printing it here cost a real
+    // onboarding: it is AgentCore's `resourceOauth2ReturnUrl` (where AgentCore sends
+    // the browser AFTER Linear redirects, to show the session id — see
+    // `beginVaultConsent`), never Linear's `redirect_uri`. On the vault path Linear
+    // redirects to the AgentCore provider callback; on the `add-workspace` path it
+    // redirects to the CLI's own loopback listener. It is described below the block
+    // instead, so it cannot be pasted into this field.
     '  Redirect URIs (one per line, copied EXACTLY — paste, do not retype):',
-    // Exactly the URI the CLI sends, and no variants of it. Listing a second
+    // Exactly the URIs the CLI sends, and no variants of them. Listing a second
     // slashless form was meant as insurance against a typo, but Linear validates the
     // whole field on save, so one bad line loses the good ones too — and the error
     // then reads as though it were about the line just added. Fewer entries is
-    // strictly safer here; the CLI sends one string and this prints that string.
-    ...(opts.hostedConsentUrl ? [`    ${opts.hostedConsentUrl}`] : [`    ${callbackUrl}`]),
-    ...(opts.vaultCallbackUrl ? [`    ${opts.vaultCallbackUrl}`] : []),
-    ...(opts.hostedConsentUrl
-      ? []
-      : [
-        '',
-        '    (That is a loopback URL, so it only works when your browser runs on the',
-        '    same machine as the CLI. Deploy with',
-        '    `--context enableLinearIdentityVault=true` for a hosted consent page that',
-        '    works from anywhere, and this command will list it instead.)',
-      ]),
-    ...(opts.vaultCallbackUrl || !opts.hostedConsentUrl
-      ? []
-      : [
-        '',
-        '    `bgagent linear setup <slug>` prints one more URI the first time it runs —',
-        '    the vault\'s own callback, whose id does not exist until then. Add it and',
-        '    re-run.',
-      ]),
+    // strictly safer here; each line below is a string some flow actually sends.
+    //
+    // Loopback stays listed even when the vault is deployed: it is the working
+    // `redirect_uri` for `add-workspace`, Linear requires at least one entry to
+    // create the app, and on a first run the vault callback does not exist yet — so
+    // dropping it would leave the field empty at exactly the moment the operator is
+    // filling the form.
+    // ONE URI, and only ever the one the operator's own path actually uses. Listing a
+    // second flow's URI alongside it reads as two required fields and was the confusion
+    // that made this command hard to follow: a vault operator was told to register the
+    // loopback (which setup never redirects to) and, on a first run, was given nothing
+    // for the URI Linear does need.
+    //
+    // Bare URI per line, never annotated: `annotate` appends "← note" past a pad column,
+    // and the AgentCore callback runs ~100 chars, so an inline note would wrap the line —
+    // producing exactly the two-malformed-entries failure the traps below warn about.
+    ...(opts.vaultCallbackUrl
+      // Provider exists: this is the only URI Linear redirects to.
+      ? [`    ${opts.vaultCallbackUrl}`]
+      : opts.hostedConsentUrl
+        // First run: the callback id is minted by setup, so there is nothing to paste yet.
+        // Deliberately one line — the ordering is setup's to explain, at the moment it
+        // hands over the URI. Recovering a callback for an already-onboarded workspace is
+        // `--slug`, documented on the flag, not here: a first-time reader does not have a
+        // workspace yet and every extra sentence competes with the fields that ARE needed.
+        ? ['    Leave empty — `bgagent linear setup <slug>` prints the URI to add, then stops.']
+        // No vault: the CLI's own loopback listener genuinely is the redirect_uri.
+        : [
+          `    ${callbackUrl}`,
+          '    (loopback — needs the browser on this machine; deploy with',
+          '    `--context enableLinearIdentityVault=true` for a hosted consent page)',
+        ]),
     '',
     '  Public:              OFF',
     '  Client credentials:  OFF',
@@ -323,6 +350,16 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     'Click Create, then come back with the Client ID, Client Secret and that',
     'signing secret:  bgagent linear setup <slug>',
     '',
+    // Printed AFTER the form, never inside it. Linear does not redirect to the consent
+    // page, so listing it among the Redirect URIs registers a URI no flow uses while the
+    // one Linear needs stays missing — which is exactly the dead end #914 fixes. It is
+    // still worth showing: it is how an operator confirms the vault is deployed.
+    ...(opts.hostedConsentUrl
+      ? [
+        `Identity vault consent page (nothing to paste): ${opts.hostedConsentUrl}`,
+        '',
+      ]
+      : []),
     // Each trap below cost someone a failed onboarding. Kept short deliberately:
     // the list grew long enough that operators stopped reading it and missed real
     // fields, which is its own failure mode.
@@ -341,14 +378,6 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
     `  • The app name is not the trigger: that is always \`${COMMENT_TRIGGER_TOKEN} <request>\`, however`,
     '    you name the app (Linear lowercases the name for the display handle).',
     '  • actor=app cannot also request the `admin` scope — Linear rejects the pair.',
-    ...(opts.hostedConsentUrl
-      ? [
-        '  • Using the older `add-workspace` command? It still redirects to',
-        `    ${'http://localhost:8080/oauth/callback'} and is Secrets-Manager only, so add`,
-        '    that URI too if you plan to use it. `bgagent linear setup <slug>` needs no',
-        '    localhost and is the only path that supports the Identity vault.',
-      ]
-      : []),
     bar,
   ].join('\n');
 }
@@ -1023,9 +1052,22 @@ export function makeLinearCommand(): Command {
             });
 
             if (consent.kind === 'consent-required') {
+              // The redirect URI is stated on EVERY consent, not just the run that minted
+              // the provider (#914). `provider.created` is true exactly once per provider
+              // lifetime, while the thing it stands in for — "this URI is registered on the
+              // Linear app" — stays false until a human pastes it in. So anyone who
+              // interrupted the first run, lost the scrollback, or never finished the paste
+              // used to get no remedy on any later run: just an authorize URL that fails in
+              // the browser with "Invalid redirect_uri", naming the URI but not the cause.
+              // One line costs nothing when it is already registered.
+              if (provider.callbackUrl) {
+                console.log('\n  This consent redirects through the vault callback below, which MUST be');
+                console.log('  one of the Linear app\'s Redirect URIs — otherwise Linear answers');
+                console.log('  "Invalid redirect_uri parameter for the application":\n');
+                console.log(provider.callbackUrl);
+              }
               // One URL, one action. The page the browser lands on shows the session
-              // id and names itself, so printing it here is noise; the redirect URIs
-              // were dealt with on the first run above.
+              // id and names itself, so printing it here is noise.
               console.log('\n  → Open this URL and Authorize:\n');
               console.log(consent.authorizationUrl);
               console.log('');
