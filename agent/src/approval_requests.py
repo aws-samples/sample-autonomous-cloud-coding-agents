@@ -106,11 +106,23 @@ def record_request(
     )
     details = error.get("details") if isinstance(error, dict) else None
     reasons = details.get("cancellation_reasons", []) if isinstance(details, dict) else []
+    lease_failed = False
+    # The third transaction item authorizes the MicroVM worker lease.
+    match reasons:
+        case [_, _, {"Code": "ConditionalCheckFailed"}]:
+            lease_failed = code == "TransactionCanceledException"
+    message = (
+        "MicroVM approval worker lease is missing or inactive. Check worker ownership; "
+        "pre-upgrade tasks must be drained and resubmitted with matching worker images "
+        "and coordinator versions."
+        if lease_failed
+        else "Control plane did not acknowledge the approval write"
+    )
     raise ClientError(
         {
             "Error": {
                 "Code": code,
-                "Message": "Control plane did not acknowledge the approval write",
+                "Message": message,
             },
             "CancellationReasons": reasons,
             "ResponseMetadata": {
