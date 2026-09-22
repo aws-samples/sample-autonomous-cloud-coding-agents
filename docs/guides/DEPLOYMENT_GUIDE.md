@@ -23,11 +23,14 @@ ECS Fargate is **opt-in**. Deploy with `--context compute_type=ecs`; the stack e
 
 > **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
-Selecting it is a synth-time context flag:
+For a new installation, select the backend and nested layout:
 
 ```bash
-mise //cdk:deploy -- --context compute_type=lambda-microvm
+mise //cdk:deploy -- --context compute_type=lambda-microvm --context microvm_nested_stack=true
 ```
+
+Existing flat installations must retain `microvm_nested_stack=false` until
+completing the [resource migration](../verification/645-p3-nested-stack.md).
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
 
