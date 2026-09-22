@@ -83,7 +83,8 @@ See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orches
 
 Lambda MicroVMs are an opt-in third backend, selected per repository with `compute_type: lambda-microvm`; AgentCore remains the default. Image configuration has three states: a managed base-image ARN, version and artifact digest create the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither image provisions only the roles, buckets, and connectors needed for the bootstrap deploy. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
 
-MicroVM infrastructure defaults to a nested stack and requires bootstrap bundle 1.9.0.
+New MicroVM installations should select `microvm_nested_stack=true` and require bootstrap bundle 1.9.0.
+The layout setting is temporarily required; omission fails synthesis until migration is verified.
 Before upgrading an existing flat installation, set `microvm_nested_stack=false`
 and retain it until completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
 

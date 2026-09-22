@@ -23,7 +23,7 @@ Names derive from the concrete parent deployment name, not the child stack token
 
 | Setting | Behavior |
 |---|---|
-| `microvm_nested_stack` | Defaults to `true`. When MicroVM is enabled, omission emits a synthesis warning. Before upgrading an existing flat deployment, set `false` and retain it until completing the reviewed migration. |
+| `microvm_nested_stack` | Required when MicroVM is enabled: use `true` for new or already-nested deployments; retain `false` for existing flat deployments until completing the reviewed migration. Omission fails synthesis. |
 | `microvm_resource_name_prefix` | Supplies distinct names for overlapping nested resources; preserve it after migration. It does not retain old resources or permissions by itself. |
 | `microvm_managed_image_version` | Pins new tasks to an explicitly verified image version. Without a pin, selection follows the latest active version. |
 | `microvm_approval_suspend_enabled` | Defaults to `false`; enable only after testing the deployed image/coordinator. Disabling new sleep preserves wake and cleanup. |
@@ -39,11 +39,10 @@ published coordinator and exact image version for rollback.
 
 Before the first upgrade, save `"microvm_nested_stack": false` in the deployment's
 CDK context or pass `--context microvm_nested_stack=false` on every deploy.
-Omitting the setting now selects nested infrastructure; it does not detect or
-migrate existing flat resources. Keep `false` until the migration below is complete.
-The synthesis warning is advisory: it does not inspect the deployed stack or block
-deployment. New and already-nested installations can explicitly set `true` to
-acknowledge the layout; setting it is not a migration.
+Omitting the setting fails synthesis. This temporary requirement protects upgrades
+that previously omitted the setting; it does not inspect live resources or perform
+a migration. New and already-nested installations should explicitly set `true`.
+Do not reuse older synthesized assemblies: regenerate them with this version.
 
 Do not deploy the nested template directly over a flat deployment. CloudFormation
 sees removed parent resources and newly created child resources; names can collide
