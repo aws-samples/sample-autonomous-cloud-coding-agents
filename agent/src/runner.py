@@ -887,6 +887,12 @@ async def run_agent(
                 if isinstance(message.content, list):
                     for block in message.content:
                         if isinstance(block, ToolResultBlock):
+                            # A later project hook can deny a call our pre-hook
+                            # allowed without emitting either post-tool hook.
+                            # The CLI's error result retires only that call;
+                            # unrelated active/background work remains fenced.
+                            if lifecycle is not None and block.is_error:
+                                lifecycle.tool_finished(block.tool_use_id)
                             status, content = _format_tool_result(block)
                             log("RESULT", f"[{status}] {truncate(content)}")
                             tool_name = tool_use_id_to_name.get(
