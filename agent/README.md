@@ -331,6 +331,9 @@ and untracked/ignored files, with a 1 GiB / 100,000-entry default limit. Restore
 rebuilds Git configuration and refuses to replace an existing destination.
 Unsupported filesystem/Git states or detected concurrent writes prevent capture.
 Repository-free tasks use a private workspace with a local Git baseline.
+MicroVM tasks default `UV_LINK_MODE=copy` before repository setup so `uv` does not
+hardlink installed packages to its cache. Explicit overrides or commands using
+hardlinks can still make the workspace ineligible for capture.
 
 `S3ContinuationStorage` uploads and verifies version-pinned, checksummed objects
 using task-scoped credentials. The continuation bucket and SessionRole grants
