@@ -19,7 +19,7 @@
 
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { Annotations, ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -360,10 +360,26 @@ export class AgentStack extends Stack {
     // New installations use a child stack. Existing flat deployments must set
     // false before upgrading and retain it until their resources are migrated.
     const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
+    if (lambdaMicrovmEnabled && microvmNestedContext === undefined) {
+      Annotations.of(this).addWarningV2(
+        'abca:microvm-implicit-nested-layout',
+        'microvm_nested_stack is unset: MicroVM infrastructure defaults to a nested stack. '
+        + 'Before upgrading an existing flat MicroVM deployment, set --context microvm_nested_stack=false '
+        + 'and retain it until migration is complete. Applying the nested template directly can cause '
+        + 'resource-name collisions and bucket auto-delete handlers can erase artifacts and pending payloads. '
+        + 'For a new or already-nested deployment, explicitly set microvm_nested_stack=true to acknowledge '
+        + 'the layout. This warning does not inspect deployed resources or perform a migration. '
+        + 'See docs/verification/645-p3-nested-stack.md.',
+      );
+    }
     const microvmResourceNamePrefix = this.node.tryGetContext('microvm_resource_name_prefix');
-    if (microvmResourceNamePrefix !== undefined
-      && (!microvmNested || typeof microvmResourceNamePrefix !== 'string')) {
-      throw new Error('microvm_resource_name_prefix requires a string and microvm_nested_stack=true');
+    if (microvmResourceNamePrefix !== undefined) {
+      if (typeof microvmResourceNamePrefix !== 'string') {
+        throw new Error('microvm_resource_name_prefix must be a string');
+      }
+      if (!microvmNested) {
+        throw new Error('microvm_resource_name_prefix cannot be used with microvm_nested_stack=false');
+      }
     }
     const suspendContext = this.node.tryGetContext('microvm_approval_suspend_enabled');
     if (suspendContext !== undefined && ![true, false, 'true', 'false'].includes(suspendContext)) {
