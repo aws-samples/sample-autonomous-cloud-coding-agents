@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, AppProps, AspectPriority, Aspects, Tags } from 'aws-cdk-lib';
+import { App, AppProps, AspectPriority, Aspects, STACK_RESOURCE_LIMIT_CONTEXT, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from './blueprints/definitions';
 import {
@@ -30,6 +30,7 @@ import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
 import { resolveComputeBackend } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
 import { NetworkStack, resolveNetworkTopology } from './stacks/network';
+import { DEFAULT_BUDGETS } from './synthesis/budgets';
 
 // for development, use account/region from cdk cli
 const devEnv = {
@@ -69,6 +70,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);
   // Apply to every parent and nested template, including newly extracted stacks.
   app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
+  // Enforce the same ceiling on actual deploy inputs, including operator overrides
+  // outside the census. CDK applies this context to parent and nested stacks.
+  const configuredLimit: unknown = app.node.tryGetContext(STACK_RESOURCE_LIMIT_CONTEXT);
+  const resourceLimit = configuredLimit === undefined ? DEFAULT_BUDGETS.resources
+    : typeof configuredLimit === 'string' ? Number(configuredLimit) : configuredLimit;
+  if (typeof resourceLimit !== 'number' || !Number.isInteger(resourceLimit)
+    || resourceLimit < 1 || resourceLimit > DEFAULT_BUDGETS.resources) {
+    throw new Error(
+      `Context '${STACK_RESOURCE_LIMIT_CONTEXT}' must be an integer from 1 to ${DEFAULT_BUDGETS.resources}. `
+      + 'The ABCA resource budget can be tightened but not raised. Use networkTopology=split for more '
+      + 'application headroom; existing deployments require an explicit network migration.',
+    );
+  }
+  app.node.setContext(STACK_RESOURCE_LIMIT_CONTEXT, resourceLimit);
 
   Aspects.of(app).add(new AwsSolutionsChecks());
 

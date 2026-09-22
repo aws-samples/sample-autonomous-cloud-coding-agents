@@ -41,13 +41,14 @@ const HELP = `Usage: mise //cdk:census -- [options]
   --output DIRECTORY             New output directory (default: a temporary directory)
   --check-stability              Synthesize twice in independent processes; fail on differences
   --blueprint-provisioning MODE  Select legacy, prepare, adopt, or managed for every profile
-  --max-resources NUMBER          Per-template ceiling (default: 490; maximum: 500)
+  --max-resources NUMBER          Per-template audit ceiling (default/maximum: ${DEFAULT_BUDGETS.resources})
   --max-template-bytes NUMBER     Per-template ceiling (default: 800000)
   --help                         Show this help
 
 Uses the production buildApp with fixed account/AZ/context inputs, metadata enabled,
 and bundling/staging disabled. No AWS credentials or network lookups are required.
 This is structural evidence, not a deploy or bundled-release validation.
+Production synthesis always enforces the ${DEFAULT_BUDGETS.resources}-resource ceiling; audit options cannot raise it.
 Reports, source fingerprints, templates, and per-profile logs stay in the output
 directory. The stability check preserves timestamps, logical IDs, metadata, and
 stack dependencies. Missing CDK context fails the audit instead of triggering lookups.
@@ -127,8 +128,9 @@ async function main(): Promise<void> {
     },
   });
   if (values.help) { process.stdout.write(HELP); return; }
-  const all = synthesisProfiles(values['blueprint-provisioning'] === undefined
-    ? undefined : blueprintProvisioningMode(values['blueprint-provisioning']));
+  const all = synthesisProfiles(blueprintProvisioningMode(
+    values['blueprint-provisioning'] ?? projectContext(CHECKOUT).blueprintProvisioning,
+  ));
   if (values.list) {
     for (const profile of all) process.stdout.write(`${profile.name}${profile.expectedError ? ' [expected rejection]' : ''}\n`);
     return;
@@ -144,7 +146,7 @@ async function main(): Promise<void> {
     await synthesize(selected[0], path.resolve(values.output));
     return;
   }
-  const resourceLimit = ceiling(values['max-resources'], DEFAULT_BUDGETS.resources, 500, 'max-resources');
+  const resourceLimit = ceiling(values['max-resources'], DEFAULT_BUDGETS.resources, DEFAULT_BUDGETS.resources, 'max-resources');
   const byteLimit = ceiling(values['max-template-bytes'], DEFAULT_BUDGETS.bytes, MAX_TEMPLATE_BYTES, 'max-template-bytes');
   const directory = createOutputDirectory(CHECKOUT, values.output);
   const before = sourceProvenance(CHECKOUT);

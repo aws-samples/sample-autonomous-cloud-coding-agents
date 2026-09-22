@@ -29,6 +29,10 @@ Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading re
 
 `networkTopology=inline` is the default. Use `networkTopology=split` for a new environment to put the VPC, subnets, endpoints, flow logs and DNS firewall in `${stackName}-network`. The application stack retains its name, data stores, compute resources and shared Task API. It depends on network exports, so CDK deploys the network first. The complete VPC/subnet/security-group export set stays present across compute-backend changes. Keep the same topology context on subsequent synth, diff and deploy commands.
 
+Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
+
+An explicit three-zone pin adds eight network resources. With Gateway, Registry, the Linear vault, alert email and a fork Blueprint enabled, the widest managed ECS and MicroVM configurations reach 491 and 497 inline resources and are rejected; AgentCore reaches 490. Legacy/prepare Blueprint provisioning adds one more application resource, so AgentCore is rejected there too. All three split counterparts pass. For these combinations, select split topology for a new installation or follow the existing-deployment ownership-transfer procedure below. The budget guard does not switch topology.
+
 For a **new installation with no existing resources or repository rows**:
 
 ```bash
@@ -321,6 +325,8 @@ AGENTCORE_AVAILABILITY_ZONES = ["us-east-1b","us-east-1c"]
    ```
 
 The override is validated at synth time, and both the JSON-array and `-c` string forms behave identically. Synth fails with a message naming the key when the value is not an array, has an empty/non-string entry, lists fewer than two **distinct** zones, contains zone *IDs* instead of names (`use1-az2` — a common column mix-up), or names zones outside the target region. When the account's mapping is knowable, the override is additionally cross-checked against the supported set, and unsupported or nonexistent zones fail synth.
+
+Auto-pin selects two supported zones; an explicit override uses all the zones supplied. Pins above two zones remain subject to the 490-resource production ceiling. Configurations that exceed it need split networking; see [Network stack topology](#network-stack-topology) for the measured boundaries and migration requirements.
 
 **Upgrading an existing stack.** Auto-pin is on by default, so a local `cdk deploy` against a stack created before this change may select different zones than the deployed subnets use. `Subnet.AvailabilityZone` is create-only, so that is a **replacement** of the subnets and the resources bound to them (route tables, NAT gateway/EIP, VPC endpoints). Run `mise //cdk:diff` first. If the diff shows subnet replacement and you would rather keep the current topology, pin the override to the zones already deployed:
 

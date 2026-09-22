@@ -18,7 +18,9 @@
  */
 
 import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
+import { DEFAULT_BUDGETS } from './budgets';
 import type { BlueprintProvisioningMode } from '../blueprints/configuration';
+import { AGENTCORE_AZS_CONTEXT_KEY } from '../constructs/agentcore-azs';
 
 export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
 export type Image = 'none' | 'managed' | 'external';
@@ -29,7 +31,8 @@ export interface SynthesisProfile {
   readonly name: string;
   readonly context: Context;
   readonly microvmImageConfigured: boolean;
-  readonly expectedError?: string;
+  /** An error prefix or the specific resource ceiling that must reject this profile. */
+  readonly expectedError?: string | { readonly stackName: string; readonly resourceLimit: number };
 }
 
 export const FIXTURE = {
@@ -38,6 +41,7 @@ export const FIXTURE = {
   zones: [
     { zoneName: 'us-east-1a', zoneId: 'use1-az2' },
     { zoneName: 'us-east-1b', zoneId: 'use1-az4' },
+    { zoneName: 'us-east-1c', zoneId: 'use1-az1' },
   ],
 } as const;
 
@@ -90,29 +94,50 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
 
   // Probe supplemental options together for every backend's widest profile:
   // IAM policy overflow means their effects cannot be added to default counts.
-  for (const base of [
+  const supplemental: SynthesisProfile[] = [
     profile('agentcore', false, true, false, 'none'),
     profile('agentcore', true, true, true, 'none'),
     profile('ecs', true, true, true, 'none'),
     profile('lambda-microvm', true, true, true, 'managed'),
-  ]) {
-    profiles.push({
-      ...base,
-      name: `${base.name}-email-fork`,
-      context: { ...base.context, alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' },
-    });
-  }
+  ].map(base => ({
+    ...base,
+    name: `${base.name}-email-fork`,
+    context: { ...base.context, alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' },
+  }));
+  profiles.push(...supplemental);
   const externalConsent = profile('ecs', true, true, true, 'none');
   profiles.push({
     ...externalConsent,
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  const topologies = [...profiles, ...profiles.map(candidate => ({
+  const topologies: SynthesisProfile[] = [...profiles, ...profiles.map(candidate => ({
     ...candidate,
     name: `${candidate.name}-split`,
     context: { ...candidate.context, networkTopology: 'split' },
   }))];
+  // Auto-pin still selects two zones. Explicit pins use every requested zone,
+  // adding eight resources that the original two-zone product could not expose.
+  // Legacy/prepare provisioning adds one application resource versus adopt/managed.
+  const managedProvider = provisioningMode === 'adopt' || provisioningMode === 'managed';
+  for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
+    for (const networkTopology of ['inline', 'split'] as const) {
+      const overBudget = networkTopology === 'inline'
+        && (base.context.compute_type !== 'agentcore' || !managedProvider);
+      topologies.push({
+        ...base,
+        name: `${base.name}-az3${networkTopology === 'split' ? '-split' : ''}`,
+        context: {
+          ...base.context,
+          networkTopology,
+          [AGENTCORE_AZS_CONTEXT_KEY]: FIXTURE.zones.map(zone => zone.zoneName),
+        },
+        ...(overBudget ? {
+          expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
+        } : {}),
+      });
+    }
+  }
   return provisioningMode === undefined ? topologies : topologies.map(candidate => ({
     ...candidate, context: { ...candidate.context, blueprintProvisioning: provisioningMode },
   }));

@@ -18,7 +18,7 @@
  */
 
 import * as fs from 'fs';
-import { App, Stack } from 'aws-cdk-lib';
+import { App, CfnResource, NestedStack, STACK_RESOURCE_LIMIT_CONTEXT, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import {
   AGENTCORE_AZS_CONTEXT_KEY,
@@ -185,4 +185,43 @@ describe('buildApp — compact template output', () => {
     // not need re-baselining every time a resource is added.
     expect(templateText).not.toContain('\n  ');
   });
+});
+
+describe('buildApp — production resource ceiling', () => {
+  describe.each(['parent', 'nested'] as const)('%s template', kind => {
+    test.each([490, 491])('enforces the boundary at %i resources without the census', async count => {
+      const built = await app();
+      const parent = new Stack(built, 'BudgetProbe', { analyticsReporting: false });
+      const scope = kind === 'nested' ? new NestedStack(parent, 'Child') : parent;
+      for (let i = 0; i < count; i++) {
+        new CfnResource(scope, `Handle${i}`, { type: 'AWS::CloudFormation::WaitConditionHandle' });
+      }
+      if (count === 490) {
+        expect(() => built.synth()).not.toThrow();
+      } else {
+        expect(() => built.synth()).toThrow(/491 is greater than allowed maximum of 490:/);
+      }
+    });
+  });
+
+  test.each([480, '480'])('honors a stricter numeric or CLI-string ceiling: %s', async limit => {
+    const built = await app({ appProps: { context: { [STACK_RESOURCE_LIMIT_CONTEXT]: limit } } });
+    const probe = new Stack(built, 'BudgetProbe', { analyticsReporting: false });
+    for (let i = 0; i < 481; i++) {
+      new CfnResource(probe, `Handle${i}`, { type: 'AWS::CloudFormation::WaitConditionHandle' });
+    }
+    expect(() => built.synth()).toThrow(/481 is greater than allowed maximum of 480:/);
+  });
+
+  test.each([500, '500', 0, -1, 490.5, null, true, 'invalid', ''])(
+    'rejects an invalid or weakened resource ceiling before resolving AWS inputs: %s',
+    async limit => {
+      const lookup = jest.fn(okZones);
+      await expect(app({
+        describeAzs: lookup,
+        appProps: { context: { [STACK_RESOURCE_LIMIT_CONTEXT]: limit } },
+      })).rejects.toThrow(`Context '${STACK_RESOURCE_LIMIT_CONTEXT}' must be an integer from 1 to 490`);
+      expect(lookup).not.toHaveBeenCalled();
+    },
+  );
 });

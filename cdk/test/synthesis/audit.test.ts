@@ -92,6 +92,25 @@ describe('profile acceptance rules', () => {
     expect(auditProfile(rejected, directory, budgets, true, worker).failures).toEqual(['Repeat: unrelated synthesis failure']);
   });
 
+  test('accepts only the named stack and production ceiling for a resource-budget rejection', () => {
+    const limited = {
+      ...profile,
+      expectedError: { stackName: 'backgroundagent-dev', resourceLimit: 490 },
+    };
+    const expected = "Number of resources in stack 'backgroundagent-dev': 497 is greater than allowed maximum of 490: fixture";
+    for (const message of [expected, expected.replace('497', '498')]) {
+      expect(auditProfile(limited, directory, budgets, false, () => ({ kind: 'rejected', error: message })).failures).toEqual([]);
+    }
+    for (const message of [
+      expected.replace('maximum of 490', 'maximum of 500'),
+      expected.replace('497', '490'),
+      expected.replace('backgroundagent-dev', 'unrelated'),
+      `Unrelated failure: ${expected}`,
+    ]) {
+      expect(auditProfile(limited, directory, budgets, false, () => ({ kind: 'rejected', error: message })).failures).toEqual([message]);
+    }
+  });
+
   test('fails if an invalid profile unexpectedly synthesizes', () => {
     const worker = (_profile: unknown, target: string) => synthesize(target);
     const audit = auditProfile(rejected, path.join(directory, 'first'), budgets, false, worker);

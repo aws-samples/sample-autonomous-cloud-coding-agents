@@ -19,6 +19,7 @@
 
 import { readdirSync } from 'node:fs';
 import { App, AssetStaging, Stack } from 'aws-cdk-lib';
+import { AGENTCORE_AZS_CONTEXT_KEY, AGENTCORE_SUPPORTED_AZ_IDS } from '../../src/constructs/agentcore-azs';
 import { FIXTURE, STRUCTURAL_CONTEXT, synthesisEnvironment, synthesisProfiles } from '../../src/synthesis/profiles';
 
 describe('structural synthesis profiles', () => {
@@ -29,14 +30,14 @@ describe('structural synthesis profiles', () => {
     const selected = synthesisProfiles(mode);
     expect(selected.map(profile => profile.name)).toEqual(profiles.map(profile => profile.name));
     expect(selected.every(profile => profile.context.blueprintProvisioning === mode)).toBe(true);
-    expect(selected.map(profile => profile.expectedError)).toEqual(profiles.map(profile => profile.expectedError));
+    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 3 : 2);
   });
 
   test.each(['inline', 'split'])('enumerates the real 40-cell product for the %s topology', topology => {
     const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
     expect(matrix).toHaveLength(80);
     expect(topologyMatrix).toHaveLength(40);
-    expect(profiles).toHaveLength(90);
+    expect(profiles).toHaveLength(96);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
@@ -56,6 +57,37 @@ describe('structural synthesis profiles', () => {
   test('expects all backend and optional-service combinations to synthesize', () => {
     expect(matrix.filter(p => p.expectedError)).toHaveLength(0);
   });
+
+  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)(
+    'covers three-zone pins and their budget rejections in %s mode',
+    mode => {
+      const selected = synthesisProfiles(mode);
+      const pinned = selected.filter(profile => profile.context[AGENTCORE_AZS_CONTEXT_KEY]);
+      expect(pinned).toHaveLength(6);
+      expect(FIXTURE.zones).toHaveLength(3);
+      for (const zone of FIXTURE.zones) {
+        expect(AGENTCORE_SUPPORTED_AZ_IDS[FIXTURE.region]).toContain(zone.zoneId);
+      }
+      for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
+        for (const topology of ['inline', 'split']) {
+          const matches = pinned.filter(profile => profile.context.compute_type === compute
+            && profile.context.networkTopology === topology);
+          expect(matches).toHaveLength(1);
+          expect(matches[0].context).toMatchObject({
+            [AGENTCORE_AZS_CONTEXT_KEY]: ['us-east-1a', 'us-east-1b', 'us-east-1c'],
+            enableToolGateway: true,
+            enableAgentRegistry: true,
+            enableLinearIdentityVault: true,
+            alertEmail: 'census@example.com',
+            forkBlueprintRepo: 'example/census-blueprints',
+          });
+          const rejects = topology === 'inline'
+            && (compute !== 'agentcore' || mode === 'legacy' || mode === 'prepare');
+          expect(!!matches[0].expectedError).toBe(rejects);
+        }
+      }
+    },
+  );
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_type === 'lambda-microvm' && !p.expectedError);

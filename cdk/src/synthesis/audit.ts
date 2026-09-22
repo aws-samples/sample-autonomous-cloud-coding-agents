@@ -18,15 +18,15 @@
  */
 
 import { AssemblyCensus, AssemblyDifference, compareAssemblies } from './assembly';
+import type { Budgets } from './budgets';
 import { SynthesisProfile } from './profiles';
 import { requiresStatefulRetention } from '../constructs/stateful-retention';
 
-export type WorkerResult = { kind: 'synthesized'; census: AssemblyCensus } | { kind: 'rejected'; error: string };
-export type Budgets = Readonly<Record<'resources' | 'bytes' | 'parameters' | 'outputs', number>>;
-export type Worker = (profile: SynthesisProfile, directory: string) => WorkerResult;
+export { DEFAULT_BUDGETS } from './budgets';
+export type { Budgets } from './budgets';
 
-/** Leave room for the next change instead of waiting for CloudFormation's hard limit. */
-export const DEFAULT_BUDGETS: Budgets = { resources: 490, bytes: 800_000, parameters: 200, outputs: 200 };
+export type WorkerResult = { kind: 'synthesized'; census: AssemblyCensus } | { kind: 'rejected'; error: string };
+export type Worker = (profile: SynthesisProfile, directory: string) => WorkerResult;
 
 export interface ProfileAudit {
   readonly profile: SynthesisProfile;
@@ -38,10 +38,15 @@ export interface ProfileAudit {
 
 function resultFailures(profile: SynthesisProfile, result: WorkerResult, budgets: Budgets): string[] {
   if (result.kind === 'rejected') {
-    return profile.expectedError && result.error.startsWith(profile.expectedError) ? [] : [result.error];
+    const expected = profile.expectedError;
+    if (!expected) return [result.error];
+    if (typeof expected === 'string') return result.error.startsWith(expected) ? [] : [result.error];
+    const match = /^Number of resources in stack '([^']+)': (\d+) is greater than allowed maximum of (\d+):/.exec(result.error);
+    return match && match[1] === expected.stackName && Number(match[2]) > expected.resourceLimit
+      && Number(match[3]) === expected.resourceLimit ? [] : [result.error];
   }
   const failures = [...result.census.errors];
-  if (profile.expectedError) failures.push(`Expected rejection was not raised: ${profile.expectedError}`);
+  if (profile.expectedError) failures.push(`Expected rejection was not raised: ${JSON.stringify(profile.expectedError)}`);
   for (const template of result.census.templates) {
     for (const resource of template.inventory) {
       if (requiresStatefulRetention(resource.type)
