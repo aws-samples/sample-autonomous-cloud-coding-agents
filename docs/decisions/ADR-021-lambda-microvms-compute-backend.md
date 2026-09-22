@@ -174,7 +174,7 @@ The launch-region list is us-east-1, us-east-2, us-west-2, eu-west-1 and ap-nort
 - CLI onboarding and platform doctor probe `list-managed-microvm-images`.
 - Runtime regional failures receive a configuration remedy instead of an opaque SDK error.
 
-### 5. Rollout: phased, default unchanged
+### 5. Rollout: phased, AgentCore remains the default backend
 
 | Phase | Delivered behavior |
 |---|---|
@@ -184,7 +184,7 @@ The launch-region list is us-east-1, us-east-2, us-west-2, eu-west-1 and ap-nort
 
 Activate sleep only after verifying the deployed image and coordinator together. Keep a compatible published coordinator and explicit image pin for rollback. Normal acceptance includes the 600-second default, explicit expiry, new and existing task off-switch behavior, replacement, cleanup and preservation of unrelated infrastructure.
 
-Changing the default backend, GPU support, native Slack approval buttons, approval-by-Linear-reply and operator shell access are outside this ADR. CLI responses remain the supported approval path. Future work needs its own scope; “P4” is not an approved phase here.
+Approval responses are supported through the authenticated CLI and owner-authored `approve`/`deny` replies to Linear approval comments. Changing the default backend, GPU support, native Slack approval buttons and operator shell access remain outside this ADR. Future work needs its own scope; “P4” is not an approved phase here.
 
 ## Consequences
 
