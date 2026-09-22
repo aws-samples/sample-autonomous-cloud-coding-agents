@@ -46,6 +46,11 @@ jest.mock('../../src/handlers/shared/create-task-core', () => ({
   createTaskCore: (...args: unknown[]) => createTaskCoreMock(...args),
 }));
 
+const rollupTaskCostMock = jest.fn();
+jest.mock('../../src/handlers/budget-rollup', () => ({
+  rollupTaskCost: (...args: unknown[]) => rollupTaskCostMock(...args),
+}));
+
 const postIssueCommentMock = jest.fn();
 const upsertStatusCommentMock = jest.fn();
 const swapIssueReactionMock = jest.fn();
@@ -76,6 +81,22 @@ const jiraBuildAdfDocumentMock = jest.fn(
   (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
 );
 const jiraTransitionIssueStateMock = jest.fn();
+const mockIterationStatus = jest.fn();
+afterEach(() => {
+  for (const [status] of mockIterationStatus.mock.calls) {
+    expect(status).toEqual(expect.objectContaining({ terminal: true }));
+  }
+  mockIterationStatus.mockClear();
+});
+// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
+jest.mock('../../src/handlers/shared/jira-preview', () => ({
+  updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
+    ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
+    mockIterationStatus(status);
+    return jiraUpdateIssueCommentAdfMock(ctx, issue, comment, status.body);
+  },
+}));
+
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueComment: (...args: unknown[]) => jiraPostIssueCommentMock(...args),
   updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
@@ -99,6 +120,10 @@ process.env.ARTIFACTS_BUCKET_NAME = 'ArtifactsBucket';
 
 import { TERMINAL_STATUSES } from '../../src/constructs/task-status';
 import { handler, parseTerminalTaskRecord } from '../../src/handlers/orchestration-reconciler';
+
+beforeEach(() => {
+  rollupTaskCostMock.mockReset().mockResolvedValue(false);
+});
 
 /** Build a TaskTable stream MODIFY record. */
 function taskRecord(fields: {
@@ -317,6 +342,56 @@ describe('orchestration-reconciler handler', () => {
     expect(ctx.idempotencyKey).toBe('orch_1_B');
   });
 
+  test('rolls up a terminal task even when it does not belong to an orchestration', async () => {
+    rollupTaskCostMock.mockResolvedValueOnce(true);
+    const record = taskRecord({ task_id: 'standalone', status: 'COMPLETED' });
+
+    const result = await handler({ Records: [record] } as never);
+
+    expect(rollupTaskCostMock).toHaveBeenCalledWith(record);
+    expect(result.batchItemFailures).toEqual([]);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  test('releases orchestration dependents before reporting a budget-rollup retry', async () => {
+    mockOrchestration({
+      subIssueId: 'A',
+      children: [
+        { sub_issue_id: 'A', child_status: 'released' },
+        { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked' },
+      ],
+    });
+    rollupTaskCostMock.mockRejectedValueOnce(new Error('budget table unavailable'));
+    const record = taskRecord({
+      task_id: 'TA',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      sequenceNumber: 'seq-budget',
+    });
+
+    const result = await handler({ Records: [record] } as never);
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][1].idempotencyKey).toBe('orch_1_B');
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'seq-budget' }]);
+  });
+
+  test('rolls up spend even when orchestration reconciliation needs a retry', async () => {
+    ddbSend.mockRejectedValueOnce(new Error('orchestration table unavailable'));
+    rollupTaskCostMock.mockResolvedValueOnce(true);
+    const record = taskRecord({
+      task_id: 'TA',
+      status: 'COMPLETED',
+      orchestration_id: 'orch_1',
+      sequenceNumber: 'seq-orchestration',
+    });
+
+    const result = await handler({ Records: [record] } as never);
+
+    expect(rollupTaskCostMock).toHaveBeenCalledWith(record);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'seq-orchestration' }]);
+  });
+
   test('A fails → no release, B skipped (createTaskCore not called)', async () => {
     mockOrchestration({
       subIssueId: 'A',
@@ -457,11 +532,14 @@ describe('orchestration-reconciler handler', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
-  test('an all-terminal epic with an integration node → embeds its combined screenshot in the panel', async () => {
+  test.each(['linear', 'jira'])('an all-terminal %s epic embeds the integration preview on its parent', async (source) => {
     upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
     transitionIssueStateMock.mockReset().mockResolvedValue(true);
     swapIssueReactionMock.mockReset().mockResolvedValue(true);
     const meta = {
+      channel_source: source,
+      parent_issue_ref: 'PARENT',
+      credentials_ref: 'WS',
       sub_issue_id: '#meta',
       orchestration_id: 'orch_1',
       parent_linear_issue_id: 'PARENT',
@@ -523,8 +601,11 @@ describe('orchestration-reconciler handler', () => {
       })],
     } as never);
 
-    expect(upsertStatusCommentMock).toHaveBeenCalled();
-    const body = upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+    const calls = source === 'jira' ? jiraUpdateIssueCommentMock.mock.calls : upsertStatusCommentMock.mock.calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toBe('PARENT');
+    const body = calls[0][source === 'jira' ? 3 : 2] as string;
+    if (source === 'jira') expect(jiraPostIssueCommentMock).not.toHaveBeenCalled();
     expect(body).toContain('✅'); // complete
     // The panel embeds the image AND deep-links to the live combined deploy.
     expect(body).toContain('[![combined preview](https://cdn.example/combined.png)](https://combined.vercel.app)');
@@ -1320,7 +1401,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     expect(jiraPostIssueCommentAdfMock).not.toHaveBeenCalled();
   });
 
-  test('a terminal Jira result-post failure folds the full ADF outcome into the status comment', async () => {
+  test.each([false, true])('Jira result-post failure folds the outcome into the status comment (retry budget exhausted: %s)', async (exhausted) => {
     mockCascade(
       [{
         sub_issue_id: 'KAN-2',
@@ -1336,8 +1417,19 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
     );
     jiraPostIssueCommentAdfMock.mockResolvedValue({
       ok: false,
-      retryable: false,
+      retryable: exhausted,
     });
+
+    if (exhausted) {
+      const base = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (command: { _type: string; input: Record<string, unknown> }) => {
+        if (String(command.input.UpdateExpression).includes('REMOVE ack_replied_at')) {
+          throw Object.assign(new Error('attempts exhausted'), { name: 'ConditionalCheckFailedException' });
+        }
+        if (command.input.ProjectionExpression === 'ack_reply_attempts') return { Item: { ack_reply_attempts: 3 } };
+        return base(command);
+      });
+    }
 
     await handler({
       Records: [taskRecord({
@@ -1370,7 +1462,7 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
         command._type === 'Update'
         && /REMOVE ack_replied_at/.test(command.input?.UpdateExpression ?? ''),
       );
-    expect(releases).toHaveLength(0);
+    expect(releases).toHaveLength(exhausted ? 1 : 0);
   });
 
   test('redelivered Jira iteration matures its status comment once', async () => {

@@ -61,6 +61,12 @@
     "terminal_outcomes": {
       "primary": "review_posted"
     },
+    "convergence": {
+      "mode": "review_submitted",
+      "terminal_outcomes": [
+        "review_published"
+      ]
+    },
     "status": "production"
   },
   "expected": {

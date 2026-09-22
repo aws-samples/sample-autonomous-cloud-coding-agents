@@ -46,6 +46,10 @@ steps:
   - { kind: ensure_pr,       name: open_pr, strategy: create }
 terminal_outcomes:
   primary: pr_url
+convergence:
+  mode: test_gated
+  required_sensors: [verify_build]
+  terminal_outcomes: [pr_opened]
 limits:
   max_turns: 100
 promotion_gate:

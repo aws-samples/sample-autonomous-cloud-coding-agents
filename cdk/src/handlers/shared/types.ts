@@ -162,6 +162,8 @@ export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
+  /** Cognito group names captured at admission for team-budget rollups. */
+  readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) runs with no repo. */
@@ -327,6 +329,11 @@ export interface TaskRecord {
    * marker. Absent until the first successful ordinary-task post.
    */
   readonly jira_final_comment_event_id?: string;
+  /** Durable Jira iteration body, merged with preview metadata by every writer. */
+  readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
+  /** At-most-once claim for the standalone preview comment POST. */
+  readonly jira_preview_claimed?: boolean;
+  readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -572,6 +579,28 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+}
+
+/** Authenticated caller's personal monthly budget status. */
+export interface PersonalBudgetStatus {
+  /** UTC calendar month in ``YYYY-MM`` form. */
+  readonly period: string;
+  /** First instant of the next UTC calendar month. */
+  readonly resets_at: string;
+  /** Whether an administrator configured a recurring personal limit. */
+  readonly configured: boolean;
+  /** Estimated terminal-task spend attributed to the caller this month. */
+  readonly spend_usd: number;
+  /** Configured recurring limit, or null when no personal limit exists. */
+  readonly monthly_limit_usd: number | null;
+  /** Non-negative estimated amount remaining, or null without a limit. */
+  readonly remaining_usd: number | null;
+  /** Percentage of the configured limit used, or null without a limit. */
+  readonly utilization_percent: number | null;
+  /** Whether the administrator enabled admission hard-stop enforcement. */
+  readonly hard_stop: boolean;
+  /** Whether the configured hard stop is currently blocking new tasks. */
+  readonly hard_stop_active: boolean;
 }
 
 /**

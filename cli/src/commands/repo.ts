@@ -20,6 +20,7 @@
 import { Command } from 'commander';
 import { assertComputeSubstrateDeployed } from '../compute-substrate';
 import { CliError } from '../errors';
+import { assertModelIdUsable } from '../model-id';
 import { DEFAULT_STACK_NAME, redactSecretArn, resolveOperatorContext } from '../operator-context';
 import {
   buildRepoShowLines,
@@ -170,11 +171,16 @@ export function makeRepoCommand(): Command {
         }
 
         const { region, stackName } = resolveOperatorContext(opts);
-        const [tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate] = await Promise.all([
+        const [
+          tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
+          grantedModelIds,
+        ] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
           getStackOutput(region, stackName, 'ComputeSubstrate'),
+          getStackOutput(region, stackName, 'BedrockGeoRegion'),
+          getStackOutput(region, stackName, 'BedrockModelIds'),
         ]);
         if (!tableName) {
           throw new CliError(
@@ -203,10 +209,30 @@ export function makeRepoCommand(): Command {
         // exact semantics (single-valued today, list-tolerant by construction).
         assertComputeSubstrateDeployed({ stackName, computeType: opts.computeType, computeSubstrate });
 
+        // Same reasoning as the substrate gate above: reuse an output already
+        // fetched, and fail here rather than let a task die at turn 0 with an
+        // AccessDenied that names nothing.
+        //
+        // Trimmed HERE, not just inside the guard: validating a trimmed copy while
+        // writing the raw value means a trailing space passes the check and lands in
+        // the RepoTable, where it matches no real profile id. The granted set is
+        // trimmed for the same reason — `resolveBedrockModelIds` validates
+        // `trim().length` but stores the entry untrimmed, so an untrimmed grant would
+        // make the exact-match check falsely reject a model it just listed.
+        const modelId = opts.model?.trim() || undefined;
+        assertModelIdUsable({
+          modelId,
+          deployedGeo,
+          stackName,
+          ...(grantedModelIds && {
+            grantedBareIds: grantedModelIds.split(',').map((m) => m.trim()).filter(Boolean),
+          }),
+        });
+
         const config = await onboardRepo(region, tableName, repoId, {
           computeType: opts.computeType,
           runtimeArn: opts.runtimeArn,
-          modelId: opts.model,
+          modelId,
           githubTokenSecretArn: opts.tokenSecretArn,
           maxTurns: opts.maxTurns,
           pollIntervalMs: opts.pollInterval,

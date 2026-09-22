@@ -133,7 +133,7 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `us.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
+| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
 | `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
@@ -175,11 +175,13 @@ After deployment, the stack emits these outputs (retrieve with `aws cloudformati
 | `TaskNudgesTableName` | DynamoDB table for task nudges |
 | `TaskApprovalsTableName` | DynamoDB table for Cedar HITL approval gates |
 | `UserConcurrencyTableName` | DynamoDB table for per-user concurrency |
+| `BudgetTableName` | DynamoDB table for recurring user/team limits and monthly estimated spend |
 | `WebhookTableName` | DynamoDB table for webhook integrations |
 | `RepoTableName` | DynamoDB table for per-repo Blueprint config |
 | `CedarWasmLayerArn` | Lambda layer ARN for the Cedar WASM policy engine |
 | `TraceArtifactsBucketName` | S3 bucket for agent trace artifacts (7-day lifecycle) |
 | `GitHubTokenSecretArn` | Secrets Manager secret ARN for the GitHub PAT |
+| `OperationalAlertsTopicArn` | SNS topic for DLQ and monthly-budget alarms |
 
 When the Slack or Linear integrations are enabled, the stack emits additional outputs (e.g. `Slack*` and `Linear*` secret ARNs and integration table names).
 

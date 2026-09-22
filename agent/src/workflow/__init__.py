@@ -24,6 +24,8 @@ from .loader import (
 )
 from .models import (
     AgentConfig,
+    Convergence,
+    ConvergenceEarlyExit,
     Hydration,
     Limits,
     ModelPreference,
@@ -47,6 +49,8 @@ from .validator import assert_valid, validate_workflow
 __all__ = [
     "STEP_HANDLERS",
     "AgentConfig",
+    "Convergence",
+    "ConvergenceEarlyExit",
     "Hydration",
     "Limits",
     "ModelPreference",

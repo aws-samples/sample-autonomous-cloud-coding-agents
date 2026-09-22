@@ -102,6 +102,7 @@ process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
 process.env.MAX_CONCURRENT_TASKS_PER_USER = '10';
 
 import { handler } from '../../src/handlers/jira-webhook-processor';
+import { LOOKUP_ABSENT, lookupFound } from '../../src/handlers/shared/lookup-result';
 
 const oauth = {
   accessToken: 'jira-token',
@@ -246,7 +247,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
     applyTerminalCreateFailuresMock.mockResolvedValue(snapshot.children);
     readConcurrencyBudgetMock.mockReset().mockResolvedValue(7);
     upsertEpicPanelMock.mockReset();
-    upsertEpicPanelMock.mockResolvedValue(null);
+    upsertEpicPanelMock.mockResolvedValue(LOOKUP_ABSENT);
     setStatusCommentIdMock.mockReset();
     claimCommentAckMock.mockReset().mockResolvedValue(true);
     clearRollupClaimMock.mockReset().mockResolvedValue(undefined);
@@ -634,7 +635,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
     loadOrchestrationMock
       .mockResolvedValueOnce(snapshot)
       .mockResolvedValueOnce(extendedSnapshot);
-    upsertEpicPanelMock.mockResolvedValueOnce('new-panel');
+    upsertEpicPanelMock.mockResolvedValueOnce(lookupFound('new-panel'));
 
     const extensionEvent = event();
     const payload = JSON.parse(extensionEvent.raw_body);
