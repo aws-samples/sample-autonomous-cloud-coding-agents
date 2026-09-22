@@ -27,6 +27,7 @@ import {
 } from '../../src/repo-display';
 
 const PLATFORM = {
+  deployment: { stackName: 'backgroundagent-dev', computeSubstrate: null },
   runtimeArn: 'arn:aws:bedrock:us-east-1:123456789012:runtime/test',
   githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:GitHubTokenSecret-AbCdEf',
 };
@@ -45,6 +46,47 @@ describe('formatRepoConfigForDisplay', () => {
     expect(display.field_sources.compute_type).toBe('platform');
     expect(Object.keys(display.blueprint_overrides)).toHaveLength(0);
   });
+
+  test.each(['agentcore', 'ecs', 'lambda-microvm'] as const)(
+    'checks every repository pin against the exclusive %s deployment',
+    backend => {
+      const platform = {
+        ...PLATFORM,
+        deployment: { stackName: 'backgroundagent-dev', computeSubstrate: backend, computeDeploymentMode: 'exclusive' },
+      };
+      const inherited = formatRepoConfigForDisplay({ repo: 'acme/default', status: 'active' }, platform);
+      expect(inherited.effective.compute_type).toBe(backend);
+      expect(inherited.compute_available).toBe(true);
+      expect(inherited.compute_deployment).toEqual({
+        stack_name: 'backgroundagent-dev',
+        compute_substrate: backend,
+        compute_deployment_mode: 'exclusive',
+        default_compute_type: backend,
+      });
+
+      for (const requested of ['agentcore', 'ecs', 'lambda-microvm'] as const) {
+        const display = formatRepoConfigForDisplay({
+          repo: 'acme/pinned',
+          status: 'active',
+          compute_type: requested,
+          runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+        }, platform);
+        expect(display.blueprint_overrides.compute_type).toBe(requested);
+        expect(display.compute_available).toBe(requested === backend);
+        const lines = buildRepoShowLines(display);
+        if (requested === backend) {
+          expect(display.configuration_error).toBeUndefined();
+          expect(lines.find(line => line.key === 'compute_type')?.text).not.toContain('UNAVAILABLE');
+        } else {
+          expect(display.configuration_error).toContain(`deploys only '${backend}'`);
+          expect(display.effective.runtime_arn).toBeUndefined();
+          expect(lines.find(line => line.key === 'compute_type')?.text).toContain('UNAVAILABLE');
+          expect(lines.find(line => line.key === 'runtime_arn')?.text).toContain('unavailable');
+          expect(lines.find(line => line.key === 'configuration_error')?.text).toBe(display.configuration_error);
+        }
+      }
+    },
+  );
 
   test('marks blueprint override when github_token_secret_arn is set', () => {
     const display = formatRepoConfigForDisplay(
@@ -160,7 +202,7 @@ describe('buildRepoShowLines', () => {
   test('warns when platform stack output is missing', () => {
     const display = formatRepoConfigForDisplay(
       { repo: 'awslabs/agent-plugins', status: 'active' },
-      { runtimeArn: null, githubTokenSecretArn: null },
+      { ...PLATFORM, runtimeArn: null, githubTokenSecretArn: null },
     );
 
     expect(formatGithubTokenSecretLine(display))

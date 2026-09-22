@@ -111,7 +111,12 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  const topologies: SynthesisProfile[] = [...profiles, ...profiles.map(candidate => ({
+  // Owning the two named AgentCore log groups across backend switches pushes
+  // this two-zone MicroVM combination over budget as well (491 when managed).
+  const widestInlineMicrovm = 'lambda-microvm-gw1-reg1-vault1-managed-email-fork';
+  const topologies: SynthesisProfile[] = [...profiles.map(candidate => candidate.name === widestInlineMicrovm
+    ? { ...candidate, expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources } }
+    : candidate), ...profiles.map(candidate => ({
     ...candidate,
     name: `${candidate.name}-split`,
     context: { ...candidate.context, networkTopology: 'split' },

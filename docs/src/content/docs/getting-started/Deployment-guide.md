@@ -23,7 +23,7 @@ All backends are orchestrated by the same durable Lambda function. The `ComputeS
 
 AgentCore is the default. Select ECS with `mise //cdk:deploy -- --context compute_type=ecs`; select MicroVM as described below. Repositories inherit this choice unless they have an explicit matching override. Optional services such as Memory, Gateway and the Linear vault are independent of Runtime selection.
 
-Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources: drain active tasks and review the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
+Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources. The two named AgentCore log groups remain owned by the application stack so a later return to AgentCore can reuse them. Drain active tasks and review the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
 
 ### Network stack topology
 
@@ -31,7 +31,7 @@ Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading re
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-An explicit three-zone pin adds eight network resources. With Gateway, Registry, the Linear vault, alert email and a fork Blueprint enabled, the widest managed ECS and MicroVM configurations reach 491 and 497 inline resources and are rejected; AgentCore reaches 490. Legacy/prepare Blueprint provisioning adds one more application resource, so AgentCore is rejected there too. All three split counterparts pass. For these combinations, select split topology for a new installation or follow the existing-deployment ownership-transfer procedure below. The budget guard does not switch topology.
+With Gateway, Registry, the Linear vault, alert email and a fork Blueprint enabled, the widest managed-image MicroVM configuration reaches **491 inline resources even with two zones** and is rejected. Keeping the two named AgentCore log groups owned across backend changes accounts for two of those resources. An explicit three-zone pin adds eight network resources: the widest managed ECS and MicroVM configurations reach 493 and 499 inline resources and are rejected; AgentCore reaches 490. Legacy/prepare Blueprint provisioning adds one more application resource, so three-zone AgentCore is rejected there too. All split counterparts pass. For these combinations, select split topology for a new installation or follow the existing-deployment ownership-transfer procedure below. The budget guard does not switch topology.
 
 For a **new installation with no existing resources or repository rows**:
 
@@ -53,6 +53,52 @@ For an existing deployment, prepare a migration against its actual deployed temp
 5. Transfer supported resources, establish network exports, then switch application consumers. Verify physical IDs and DNS/network behavior, API routes, authentication and retained data before resuming tasks. Keep source/target templates and the final mapping for recovery.
 
 Rollback requires the reverse ownership plan. CloudFormation will not remove or change exports while the application imports them. Redeploying `inline` or destroying the network stack is not an automatic rollback. These are migration requirements, not a validated migration script; the local feature can be used for fresh environments without claiming that existing-resource migration is verified.
+
+#### Reducing AZs in an existing split network
+
+A normal `--all` deployment updates the network first, so removing an AZ can fail because the old application still imports its private-subnet export. Reducing the count also shifts CDK's private-subnet CIDRs unless the vacated address slot stays reserved. Use the following staged procedure for a **three-to-two-zone reduction that keeps the first two existing AZs in their original order**. Replacing or reordering AZs requires a separate network migration.
+
+1. Pause automated deployments, task submissions, webhooks and scheduled work. Drain running and suspended sessions. Record the deployed templates, AZ order, subnet CIDRs, physical IDs and network exports. Keep the same account, region, stack identity, backend, image and Blueprint configuration throughout.
+2. Persist the target AZ list in the existing `cdk/cdk.json` context, keeping `networkTopology=split`. Increase `networkReservedAzs` by the number of removed trailing AZs, so active plus reserved slots remains constant. For three active zones with no reservations, the target is two active zones and one reserved slot. These example names must match the deployment's first two AZs:
+
+   ```json
+   "agentcore:availabilityZones": ["us-east-1a", "us-east-1b"],
+   "networkReservedAzs": 1
+   ```
+
+   `networkReservedAzs` accepts an integer from 0 to 6, as a JSON number or CLI string; the default is 0. It reserves address space and creates no AWS resources. Keep this setting in every subsequent synth/deploy, including automation.
+3. Set `APP_STACK` to the existing application stack name and review both target templates. The remaining subnets must keep their logical IDs, CIDRs and AZs; the target application must stop importing the removed subnet. Stop if the diff changes a retained subnet or any unrelated configuration.
+
+   ```bash
+   APP_STACK=backgroundagent-dev
+   MISE_EXPERIMENTAL=1 mise //cdk:diff -- --all --method template
+   ```
+
+4. Deploy **only the application**, leaving the existing three-zone network in place. `--exclusively` prevents CDK from deploying its network dependency:
+
+   ```bash
+   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- "$APP_STACK" --exclusively
+   ```
+
+5. Copy each removed private-subnet export's exact name from the deployed network outputs. Verify that `list-imports` returns `[]` before changing the network. Any additional consumer stack must also release that export.
+
+   ```bash
+   aws cloudformation describe-stacks --stack-name "${APP_STACK}-network" \
+     --query 'Stacks[0].Outputs[].{ExportName:ExportName,Value:OutputValue}' --output table
+   REMOVED_SUBNET_EXPORT='<exact removed private-subnet export name>'
+   aws cloudformation list-imports --export-name "$REMOVED_SUBNET_EXPORT" \
+     --query Imports --output json
+   ```
+
+6. Deploy both stacks with the same persisted target context. The network can now remove the unused export and AZ resources. Verify the remaining subnet physical IDs and CIDRs, DNS/egress behavior and a task before resuming producers and automation.
+
+   ```bash
+   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all
+   ```
+
+To restore the previous three-zone layout, restore its AZ list and reservation count, then deploy the network before the application (`--all` uses this order). The network must recreate the third subnet and export before the application imports it again. Keep active plus reserved slots constant during this recovery too.
+
+Local synthesis tests verify the import ordering and unchanged remaining subnet properties for all three backends. This procedure still requires a disposable AWS rehearsal before a production network update.
 
 ### Lambda MicroVMs backend (experimental)
 

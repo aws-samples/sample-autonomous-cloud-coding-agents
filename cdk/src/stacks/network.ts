@@ -69,6 +69,9 @@ export class NetworkStack extends Stack implements AgentNetwork {
     // Export the complete interface even when a backend does not use every
     // value. Otherwise switching AgentCore <-> ECS/MicroVM tries to remove an
     // export while the old application still imports it, blocking the deploy.
+    // AZ removal additionally needs an application-only deployment to release
+    // imports, with networkReservedAzs preserving the remaining subnet CIDRs.
+    // See the split-network AZ reduction procedure in DEPLOYMENT_GUIDE.md.
     this.exportValue(this.vpc.vpcId);
     this.exportValue(this.runtimeSecurityGroup.securityGroupId);
     for (const subnet of this.vpc.privateSubnets) this.exportValue(subnet.subnetId);

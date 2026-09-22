@@ -133,7 +133,7 @@ export function makeRepoCommand(): Command {
         const display = formatRepoConfigForDisplay(config, {
           githubTokenSecretArn: platformTokenArn,
           runtimeArn,
-          defaultComputeType: defaultComputeType({ computeSubstrate, computeDeploymentMode }),
+          deployment: { stackName, computeSubstrate, computeDeploymentMode },
         });
 
         if (opts.output === 'json') {

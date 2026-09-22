@@ -48,11 +48,33 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     template.hasOutput('ComputeSubstrate', { Value: backend });
     template.hasOutput('ComputeDeploymentMode', { Value: 'exclusive' });
     expect(!!template.toJSON().Outputs.RuntimeArn).toBe(backend === 'agentcore');
-    const logIds = Object.keys(template.findResources('AWS::Logs::LogGroup'));
-    expect(logIds.some(id => id.startsWith('RuntimeApplicationLogGroup'))).toBe(backend === 'agentcore');
-    expect(logIds.some(id => id.startsWith('RuntimeUsageLogGroup'))).toBe(backend === 'agentcore');
     template.resourceCountIs('AWS::BedrockAgentCore::Memory', 1);
     template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
+  });
+
+  test('keeps the same named AgentCore logs owned and retained across backend switches', () => {
+    const groups = Object.fromEntries(Object.entries(template.findResources('AWS::Logs::LogGroup'))
+      .filter(([id]) => id.startsWith('RuntimeApplicationLogGroup') || id.startsWith('RuntimeUsageLogGroup'))
+      .map(([id, resource]) => [id, {
+        name: resource.Properties.LogGroupName,
+        retention: resource.Properties.RetentionInDays,
+        deletion: resource.DeletionPolicy,
+        replacement: resource.UpdateReplacePolicy,
+      }]));
+    expect(groups).toEqual({
+      RuntimeApplicationLogGroupCCD512EC: {
+        name: '/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/ComputeSelection',
+        retention: 90,
+        deletion: 'Retain',
+        replacement: 'Retain',
+      },
+      RuntimeUsageLogGroup3193D914: {
+        name: '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ComputeSelection',
+        retention: 90,
+        deletion: 'Retain',
+        replacement: 'Retain',
+      },
+    });
   });
 
   test('dispatch and cancellation target the selected backend', () => {

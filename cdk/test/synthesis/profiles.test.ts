@@ -30,7 +30,7 @@ describe('structural synthesis profiles', () => {
     const selected = synthesisProfiles(mode);
     expect(selected.map(profile => profile.name)).toEqual(profiles.map(profile => profile.name));
     expect(selected.every(profile => profile.context.blueprintProvisioning === mode)).toBe(true);
-    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 3 : 2);
+    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 4 : 3);
   });
 
   test.each(['inline', 'split'])('enumerates the real 40-cell product for the %s topology', topology => {
@@ -57,6 +57,17 @@ describe('structural synthesis profiles', () => {
   test('expects all backend and optional-service combinations to synthesize', () => {
     expect(matrix.filter(p => p.expectedError)).toHaveLength(0);
   });
+
+  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)(
+    'rejects the widest two-zone inline MicroVM profile while keeping its split counterpart in %s mode',
+    mode => {
+      const selected = synthesisProfiles(mode);
+      const inline = selected.find(profile => profile.name === 'lambda-microvm-gw1-reg1-vault1-managed-email-fork')!;
+      expect(inline.expectedError).toEqual({ stackName: 'backgroundagent-dev', resourceLimit: 490 });
+      expect(inline.context).not.toHaveProperty(AGENTCORE_AZS_CONTEXT_KEY);
+      expect(selected.find(profile => profile.name === `${inline.name}-split`)!.expectedError).toBeUndefined();
+    },
+  );
 
   test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)(
     'covers three-zone pins and their budget rejections in %s mode',

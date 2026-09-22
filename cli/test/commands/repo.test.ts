@@ -147,6 +147,31 @@ describe('repo command JSON output', () => {
     expect(out).toContain('****');
   });
 
+  test.each(['text', 'json'])('repo show reports an incompatible pin on an exclusive stack in %s', async format => {
+    getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable-dev',
+      ComputeSubstrate: 'ecs',
+      ComputeDeploymentMode: 'exclusive',
+    } as Record<string, string>)[key] ?? null);
+    ddbSend.mockResolvedValueOnce({
+      Item: { repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' },
+    });
+    await makeRepoCommand().parseAsync(['node', 'test', 'show', 'acme/a', '--region', 'us-east-1', '--output', format]);
+    if (format === 'json') {
+      const display = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+      expect(display.compute_available).toBe(false);
+      expect(display.configuration_error).toContain("deploys only 'ecs'");
+      expect(display.compute_deployment).toMatchObject({
+        compute_substrate: 'ecs', compute_deployment_mode: 'exclusive', default_compute_type: 'ecs',
+      });
+    } else {
+      const output = consoleSpy.mock.calls.map(call => call[0]).join('\n');
+      expect(output).toContain('UNAVAILABLE');
+      expect(output).toContain("deploys only 'ecs'");
+      expect(output).not.toContain('lambda-microvm uses platform compute');
+    }
+  });
+
   test('repo onboard --output json redacts the per-repo secret ARN', async () => {
     onboardRepoMock.mockResolvedValue({
       repo: 'acme/a',

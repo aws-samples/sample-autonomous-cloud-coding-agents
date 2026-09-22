@@ -21,15 +21,19 @@ import {
   BedrockAgentCoreControlClient,
   GetAgentRuntimeCommand,
 } from '@aws-sdk/client-bedrock-agentcore-control';
-import type { OnboardComputeType } from './compute-substrate';
-import { PLATFORM_REPO_DEFAULTS } from './repo-display';
+import {
+  describeComputeDeployment,
+  resolveRepositoryCompute,
+  type ComputeDeployment,
+  type ComputeDeploymentStatus,
+  type RepositoryComputeBinding,
+} from './compute-substrate';
 import { listRepoConfigs, RepoConfigRow } from './repo-lookup';
 import { makeClient } from './ua';
 
-interface BlueprintRuntimeBinding {
+interface BlueprintRuntimeBinding extends RepositoryComputeBinding {
   readonly repo: string;
   readonly status: RepoConfigRow['status'];
-  readonly compute_type: string;
   readonly runtime_arn?: string;
   readonly runtime_arn_source: 'blueprint' | 'platform';
 }
@@ -73,6 +77,7 @@ interface LambdaMicrovmSubstrateSummary {
 }
 
 export interface RuntimeStatusReport {
+  readonly compute_deployment: ComputeDeploymentStatus;
   readonly platform_default_runtime_arn: string | null;
   readonly blueprints: readonly BlueprintRuntimeBinding[];
   readonly agentcore_runtimes: readonly RuntimeProbeResult[];
@@ -96,18 +101,18 @@ export function parseAgentRuntimeArn(runtimeArn: string): { agentRuntimeId: stri
 function bindingForRepo(
   config: RepoConfigRow,
   platformRuntimeArn: string | null,
-  defaultComputeType: OnboardComputeType,
+  deployment: ComputeDeployment,
 ): BlueprintRuntimeBinding {
-  const computeType = config.compute_type ?? defaultComputeType;
+  const compute = resolveRepositoryCompute(deployment, config.compute_type);
   const hasBlueprintRuntime = config.runtime_arn !== undefined;
-  const runtimeArn = computeType === 'agentcore'
+  const runtimeArn = compute.compute_available && compute.compute_type === 'agentcore'
     ? hasBlueprintRuntime ? config.runtime_arn : platformRuntimeArn ?? undefined
     : undefined;
 
   return {
     repo: config.repo,
     status: config.status,
-    compute_type: computeType,
+    ...compute,
     runtime_arn: runtimeArn,
     runtime_arn_source: hasBlueprintRuntime ? 'blueprint' : 'platform',
   };
@@ -155,21 +160,22 @@ export async function buildRuntimeStatusReport(
   region: string,
   repoTableName: string,
   platformRuntimeArn: string | null,
-  options: { readonly repo?: string; readonly defaultComputeType?: OnboardComputeType } = {},
+  options: { readonly repo?: string; readonly deployment: ComputeDeployment },
 ): Promise<RuntimeStatusReport> {
+  const computeDeployment = describeComputeDeployment(options.deployment);
   let repos = await listRepoConfigs(region, repoTableName);
   if (options.repo) {
     repos = repos.filter((r) => r.repo === options.repo);
   }
 
-  const blueprints = repos.map((r) => bindingForRepo(r, platformRuntimeArn, options.defaultComputeType ?? PLATFORM_REPO_DEFAULTS.compute_type));
+  const blueprints = repos.map((r) => bindingForRepo(r, platformRuntimeArn, options.deployment));
 
   const agentcoreMap = new Map<string, string[]>();
   const ecsRepos: string[] = [];
   const lambdaMicrovmRepos: string[] = [];
 
   for (const binding of blueprints) {
-    if (binding.status !== 'active') continue;
+    if (binding.status !== 'active' || !binding.compute_available) continue;
     if (binding.compute_type === 'ecs') {
       ecsRepos.push(binding.repo);
       continue;
@@ -209,6 +215,7 @@ export async function buildRuntimeStatusReport(
     : [];
 
   return {
+    compute_deployment: computeDeployment,
     platform_default_runtime_arn: platformRuntimeArn,
     blueprints,
     agentcore_runtimes,

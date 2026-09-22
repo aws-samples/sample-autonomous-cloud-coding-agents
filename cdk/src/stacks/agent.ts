@@ -531,22 +531,24 @@ export class AgentStack extends Stack {
     // geography's profiles while telling the agent to call another's.
     const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
 
+    // Keep these named, retained groups owned by this stack across backend
+    // switches. Removing them would orphan the physical names and a later
+    // return to AgentCore would fail with AlreadyExists instead of reusing logs.
+    const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
+    const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     let runtime: agentcore.Runtime | undefined;
     let agentLogGroup: logs.ILogGroup | undefined;
     if (agentCoreEnabled) {
-      // Log groups (created before runtime so we can reference the name in env vars)
-      const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
-        logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
-        retention: logs.RetentionDays.THREE_MONTHS,
-        removalPolicy: RemovalPolicy.DESTROY,
-      });
-
-      const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
-        logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
-        retention: logs.RetentionDays.THREE_MONTHS,
-        removalPolicy: RemovalPolicy.DESTROY,
-      });
-
       const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, { file: 'agent/Dockerfile' });
       const runtimeEnvironmentVariables = {
         GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,

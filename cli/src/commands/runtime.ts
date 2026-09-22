@@ -18,7 +18,6 @@
  */
 
 import { Command } from 'commander';
-import { defaultComputeType } from '../compute-substrate';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { assertRepoFormat } from '../repo-lookup';
@@ -54,12 +53,11 @@ export function makeRuntimeCommand(): Command {
           );
         }
 
-        const selectedComputeType = defaultComputeType({ computeSubstrate, computeDeploymentMode });
         const report = await buildRuntimeStatusReport(
           region,
           repoTableName,
           platformRuntimeArn,
-          { repo: opts.repo, defaultComputeType: selectedComputeType },
+          { repo: opts.repo, deployment: { stackName, computeSubstrate, computeDeploymentMode } },
         );
 
         if (opts.output === 'json') {
@@ -68,7 +66,10 @@ export function makeRuntimeCommand(): Command {
         }
 
         console.log('Runtime status is resolved per blueprint (RepoTable) with platform defaults.');
+        const selectedComputeType = report.compute_deployment.default_compute_type;
         console.log(`Platform default compute: ${selectedComputeType}`);
+        console.log(`Compute deployment mode: ${report.compute_deployment.compute_deployment_mode ?? 'legacy additive'}`);
+        console.log(`ComputeSubstrate: ${report.compute_deployment.compute_substrate ?? '(stack output missing)'}`);
         if (selectedComputeType === 'agentcore') console.log(`Platform default RuntimeArn: ${platformRuntimeArn ?? '(stack output missing)'}`);
         console.log();
 
@@ -77,19 +78,21 @@ export function makeRuntimeCommand(): Command {
           return;
         }
 
-        console.log('Per-blueprint effective compute:');
+        console.log('Per-blueprint compute configuration:');
         console.log(
           `${'REPO'.padEnd(REPO_WIDTH)} ${'STATUS'.padEnd(10)} `
           + `${'COMPUTE'.padEnd(COMPUTE_WIDTH)} RUNTIME_ARN (source)`,
         );
         for (const b of report.blueprints) {
-          const runtimeLabel = b.runtime_arn
-            ? `${b.runtime_arn} (${b.runtime_arn_source})`
-            : b.compute_type === 'ecs'
-              ? '(n/a — ECS uses platform cluster)'
-              : b.compute_type === 'lambda-microvm'
-                ? '(n/a — Lambda MicroVMs are platform-managed)'
-                : '(missing)';
+          const runtimeLabel = !b.compute_available
+            ? `UNAVAILABLE: ${b.configuration_error}`
+            : b.runtime_arn
+              ? `${b.runtime_arn} (${b.runtime_arn_source})`
+              : b.compute_type === 'ecs'
+                ? '(n/a — ECS uses platform cluster)'
+                : b.compute_type === 'lambda-microvm'
+                  ? '(n/a — Lambda MicroVMs are platform-managed)'
+                  : '(missing)';
           console.log(
             `${b.repo.padEnd(REPO_WIDTH)} ${b.status.padEnd(10)} `
             + `${b.compute_type.padEnd(COMPUTE_WIDTH)} ${runtimeLabel}`,

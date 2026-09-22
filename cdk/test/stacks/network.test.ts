@@ -21,6 +21,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { BlueprintDefinition } from '../../src/blueprints/definitions';
+import { resolveNetworkReservedAzs } from '../../src/constructs/agent-vpc';
+import { AGENTCORE_AZS_CONTEXT_KEY } from '../../src/constructs/agentcore-azs';
 import { requiresStatefulRetention } from '../../src/constructs/stateful-retention';
 import { buildApp } from '../../src/main';
 import { NetworkTopology, resolveNetworkTopology } from '../../src/stacks/network';
@@ -55,12 +57,33 @@ function isNetworkResource(id: string): boolean {
   return id.startsWith('AgentVpc') || id.startsWith('DnsFirewall');
 }
 
+function importedExports(template: TemplateJson): Set<string> {
+  const imports = new Set<string>();
+  function visit(value: any): void {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value['Fn::ImportValue'] === 'string') imports.add(value['Fn::ImportValue']);
+    for (const child of Object.values(value)) visit(child);
+  }
+  visit(template);
+  return imports;
+}
+
 describe('network topology selection', () => {
   test('defaults to the existing inline ownership', () => {
     expect(resolveNetworkTopology(undefined)).toBe('inline');
     expect(resolveNetworkTopology('inline')).toBe('inline');
     expect(resolveNetworkTopology('split')).toBe('split');
   });
+
+  test.each([[undefined, 0], [0, 0], ['0', 0], [1, 1], ['1', 1], [6, 6]])(
+    'accepts reserved AZ slots %p as %p',
+    (value, expected) => { expect(resolveNetworkReservedAzs(value)).toBe(expected); },
+  );
+
+  test.each(['', ' ', 'typo', true, false, null, -1, 0.5, 7, Infinity])(
+    'rejects invalid reserved AZ slots %p',
+    value => { expect(() => resolveNetworkReservedAzs(value)).toThrow('networkReservedAzs must be an integer from 0 to 6'); },
+  );
 
   test.each(['', 'typo', true, false, null, 1])('rejects invalid topology %p before an AWS lookup', async value => {
     const describeAzs = jest.fn();
@@ -77,9 +100,11 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
   const directories: string[] = [];
   let inline: Deployment;
   let split: Deployment;
+  let threeZones: Deployment;
+  let reducedZones: Deployment;
   let network: TemplateJson;
 
-  async function synthesize(topology: NetworkTopology): Promise<Deployment> {
+  async function synthesize(topology: NetworkTopology, zones?: readonly string[], reservedAzs = '0'): Promise<Deployment> {
     const directory = mkdtempSync(path.join(tmpdir(), 'network-extraction-'));
     directories.push(directory);
     const app = await buildApp({
@@ -94,6 +119,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
         context: {
           'stackName': APP_NAME,
           'networkTopology': topology,
+          'networkReservedAzs': reservedAzs,
           'compute_type': compute,
           'blueprintProvisioning': 'managed',
           'bedrockGeoRegion': 'global',
@@ -102,9 +128,10 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'enableLinearIdentityVault': true,
           'alertEmail': 'census@example.com',
           'github:sha': 'fixture-revision',
+          ...(zones ? { [AGENTCORE_AZS_CONTEXT_KEY]: zones } : {}),
           ...(compute === 'lambda-microvm' ? {
-            microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
-            microvm_base_image_version: '1',
+            microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:fixture-image',
+            microvm_image_version: '1',
           } : {}),
         },
         postCliContext: STRUCTURAL_CONTEXT,
@@ -122,6 +149,8 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
   beforeAll(async () => {
     inline = await synthesize('inline');
     split = await synthesize('split');
+    threeZones = await synthesize('split', FIXTURE.zones.map(zone => zone.zoneName));
+    reducedZones = await synthesize('split', FIXTURE.zones.slice(0, 2).map(zone => zone.zoneName), '1');
     network = split.network!;
   }, 60_000);
 
@@ -156,6 +185,42 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     const outputs = Object.values(network.Outputs as Record<string, TemplateJson>);
     expect(outputs.map(output => JSON.stringify(output.Value)).sort()).toEqual(expected.map(value => JSON.stringify(value)).sort());
     for (const output of outputs) expect(output.Export.Name).toMatch(`${NETWORK_NAME}:ExportsOutput`);
+  });
+
+  test('can release the third subnet export by deploying only the two-zone application first', () => {
+    const oldExports = new Map(Object.values(threeZones.network!.Outputs as Record<string, TemplateJson>)
+      .map(output => [output.Export.Name, output.Value]));
+    const reducedNetwork = reducedZones.network!;
+    const newExports = new Map(Object.values(reducedNetwork.Outputs as Record<string, TemplateJson>)
+      .map(output => [output.Export.Name, output.Value]));
+    const removed = [...oldExports.keys()].filter(name => !newExports.has(name));
+    expect(removed).toHaveLength(1);
+    expect(importedExports(threeZones.application).has(removed[0])).toBe(true);
+
+    // Stage one: every import in the target application still resolves in the
+    // deployed three-zone network. --exclusively keeps that network unchanged.
+    const targetImports = importedExports(reducedZones.application);
+    expect(targetImports.has(removed[0])).toBe(false);
+    for (const name of targetImports) expect(oldExports.get(name)).toEqual(newExports.get(name));
+
+    // Stage two: the network can drop the unused export and subnet. Remaining
+    // exported resources keep their identities and service properties.
+    const removedSubnetId = oldExports.get(removed[0]).Ref;
+    expect(threeZones.network!.Resources[removedSubnetId].Type).toBe('AWS::EC2::Subnet');
+    expect(reducedNetwork.Resources).not.toHaveProperty(removedSubnetId);
+    for (const [name, reference] of newExports) {
+      expect(oldExports.get(name)).toEqual(reference);
+      const resourceId = reference.Ref ?? reference['Fn::GetAtt'][0];
+      expect(withoutMetadata(reducedNetwork.Resources[resourceId]))
+        .toEqual(withoutMetadata(threeZones.network!.Resources[resourceId]));
+    }
+    const subnets = Object.entries(reducedNetwork.Resources as Record<string, TemplateJson>)
+      .filter(([, resource]) => resource.Type === 'AWS::EC2::Subnet');
+    expect(subnets).toHaveLength(4);
+    for (const [id, subnet] of subnets) {
+      expect(subnet.Properties).toEqual(threeZones.network!.Resources[id].Properties);
+    }
+    expect(reducedZones.census.errors).toEqual([]);
   });
 
   test('moves the VPC and DNS definitions with the same logical IDs and service properties', () => {

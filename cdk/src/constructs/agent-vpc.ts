@@ -37,6 +37,20 @@ const DEFAULT_AGENT_VPC_AZS = 2;
 /** AgentCore high-availability floor: at least two zones. */
 const MIN_AGENT_VPC_AZS = 2;
 
+const MAX_RESERVED_NETWORK_AZS = 6;
+
+/** Reserve unused AZ address slots without allocating subnets or other resources. */
+export function resolveNetworkReservedAzs(value: unknown): number {
+  if (value === undefined) return 0;
+  const count = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  // Six slots cover the largest current regional AZ count and bound CDK's
+  // placeholder allocation. The normal three-to-two-zone reduction needs one.
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > MAX_RESERVED_NETWORK_AZS) {
+    throw new Error(`networkReservedAzs must be an integer from 0 to ${MAX_RESERVED_NETWORK_AZS}`);
+  }
+  return count;
+}
+
 /** The references consumed by any compute backend, regardless of stack ownership. */
 export interface AgentNetwork {
   readonly vpc: ec2.IVpc;
@@ -147,14 +161,20 @@ export class AgentVpc extends Construct implements AgentNetwork {
     const maxAzs = props.maxAzs ?? DEFAULT_AGENT_VPC_AZS;
     const natGateways = props.natGateways ?? 1;
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
+    const reservedAzs = resolveNetworkReservedAzs(this.node.tryGetContext('networkReservedAzs'));
 
     // --- VPC ---
     // When explicit AZs are provided (to target AgentCore-supported physical
     // zones), pass them directly and omit maxAzs — CDK does not allow both.
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       ...(pinnedAzs?.length
-        ? { availabilityZones: pinnedAzs }
+        // CDK appends reserved placeholders to this array; keep the caller's
+        // real AZ selection intact for application wiring and diagnostics.
+        ? { availabilityZones: [...pinnedAzs] }
         : { maxAzs }),
+      // Keep active + reserved slots constant during an AZ reduction so CDK's
+      // private subnet CIDRs do not shift and force subnet replacements.
+      reservedAzs,
       natGateways,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [

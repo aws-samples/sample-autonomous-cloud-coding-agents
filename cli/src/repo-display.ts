@@ -17,7 +17,12 @@
  *  SOFTWARE.
  */
 
-import type { OnboardComputeType } from './compute-substrate';
+import {
+  describeComputeDeployment,
+  resolveRepositoryCompute,
+  type ComputeDeployment,
+  type ComputeDeploymentStatus,
+} from './compute-substrate';
 import type { GithubTokenSecretSource } from './github-token';
 import { redactSecretArn } from './operator-context';
 import { RepoConfigRow } from './repo-lookup';
@@ -26,7 +31,7 @@ export type FieldSource = 'blueprint' | 'platform';
 
 /** Stack outputs + constants used to resolve platform defaults for display. */
 export interface PlatformStackContext {
-  readonly defaultComputeType?: OnboardComputeType;
+  readonly deployment: ComputeDeployment;
   readonly runtimeArn: string | null;
   readonly githubTokenSecretArn: string | null;
 }
@@ -62,9 +67,12 @@ export interface RepoConfigDisplay {
   readonly status: RepoConfigRow['status'];
   readonly onboarded_at?: string;
   readonly updated_at?: string;
+  readonly compute_deployment: ComputeDeploymentStatus;
+  readonly compute_available: boolean;
+  readonly configuration_error?: string;
   /** Raw RepoTable values (absent when the Blueprint did not override). */
   readonly blueprint_overrides: Record<string, unknown>;
-  /** Values used at task time after merging with platform defaults. */
+  /** Resolved configuration; dispatch requires compute_available to be true. */
   readonly effective: {
     readonly compute_type: string;
     readonly runtime_arn?: string;
@@ -130,16 +138,20 @@ export function formatRepoConfigForDisplay(
     }
   }
 
-  const computeType = config.compute_type ?? platform.defaultComputeType ?? PLATFORM_REPO_DEFAULTS.compute_type;
+  const compute = resolveRepositoryCompute(platform.deployment, config.compute_type);
   return {
     repo: config.repo,
     status: config.status,
     onboarded_at: config.onboarded_at,
     updated_at: config.updated_at,
+    compute_deployment: describeComputeDeployment(platform.deployment),
+    compute_available: compute.compute_available,
+    configuration_error: compute.configuration_error,
     blueprint_overrides: blueprintOverrides,
     effective: {
-      compute_type: computeType,
-      runtime_arn: computeType === 'agentcore' ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
+      compute_type: compute.compute_type,
+      runtime_arn: compute.compute_available && compute.compute_type === 'agentcore'
+        ? config.runtime_arn ?? platform.runtimeArn ?? undefined : undefined,
       model_id: config.model_id ?? PLATFORM_REPO_DEFAULTS.model_id,
       max_turns: config.max_turns ?? PLATFORM_REPO_DEFAULTS.max_turns,
       max_budget_usd: config.max_budget_usd !== undefined
@@ -171,15 +183,17 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     { key: 'updated_at', text: display.updated_at ?? '-' },
     {
       key: 'compute_type',
-      text: formatSourcedValue(display.effective.compute_type, display.field_sources.compute_type),
+      text: `${display.compute_available ? '' : 'UNAVAILABLE — '}${formatSourcedValue(display.effective.compute_type, display.field_sources.compute_type)}`,
     },
     {
       key: 'runtime_arn',
-      text: display.effective.runtime_arn
-        ? formatSourcedValue(display.effective.runtime_arn, display.field_sources.runtime_arn)
-        : display.effective.compute_type === 'agentcore'
-          ? '(platform default — RuntimeArn stack output not found)'
-          : `(not applicable — ${display.effective.compute_type} uses platform compute)`,
+      text: !display.compute_available
+        ? '(unavailable — repository compute configuration is incompatible)'
+        : display.effective.runtime_arn
+          ? formatSourcedValue(display.effective.runtime_arn, display.field_sources.runtime_arn)
+          : display.effective.compute_type === 'agentcore'
+            ? '(platform default — RuntimeArn stack output not found)'
+            : `(not applicable — ${display.effective.compute_type} uses platform compute)`,
     },
     {
       key: 'model_id',
@@ -210,6 +224,10 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
       ),
     },
   ];
+
+  if (display.configuration_error) {
+    lines.push({ key: 'configuration_error', text: display.configuration_error });
+  }
 
   if (typeof display.blueprint_overrides.system_prompt_overrides === 'string') {
     lines.push({
