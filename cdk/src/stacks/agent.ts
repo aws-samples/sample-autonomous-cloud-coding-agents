@@ -359,7 +359,7 @@ export class AgentStack extends Stack {
     }
     // Require an explicit layout until flat-to-nested migration is verified.
     // A synth-time AWS lookup cannot protect deployments of saved assemblies.
-    const microvmNested = microvmNestedContext === true || microvmNestedContext === 'true';
+    const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
     if (lambdaMicrovmEnabled && microvmNestedContext === undefined) {
       throw new Error(
         'microvm_nested_stack must be explicitly selected: use --context microvm_nested_stack=true '

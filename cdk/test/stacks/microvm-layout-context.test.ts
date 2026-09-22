@@ -41,6 +41,10 @@ describe.each([
   })),
   { name: 'Agentcore', context: { compute_type: 'agentcore' } },
   { name: 'Ecs', context: { compute_type: 'ecs' } },
+  ...['agentcore', 'ecs'].map(compute => ({
+    name: `${compute}WithUnusedPrefix`,
+    context: { compute_type: compute, microvm_resource_name_prefix: 'retained-config' },
+  })),
 ])('MicroVM layout selection: $name', ({ name, context }) => {
   let template: Template;
   beforeAll(() => {
