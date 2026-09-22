@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
 import { workerLeaseKey } from './microvm-continuation-types';
@@ -61,6 +62,46 @@ function conditionalFailure(error: unknown, index: number): boolean {
     && failure.CancellationReasons?.[index]?.Code === 'ConditionalCheckFailed';
 }
 
+/**
+ * The SDK does not retry TransactionCanceledException when another task is
+ * updating the same user's counter. Retry only explicit transaction conflicts;
+ * conditional failures still belong to the admission/release state machine.
+ */
+async function sendReservationTransaction(
+  command: TransactWriteCommand,
+  taskId: string,
+  userId: string,
+): Promise<void> {
+  const maxAttempts = 5;
+  const baseDelayMs = 50;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      // Keep the exact transaction and client token across retries, including
+      // the worker-lease condition. A retry cannot weaken the shutdown fence.
+      await ddb.send(command);
+      return;
+    } catch (error) {
+      const failure = error as { name?: string; CancellationReasons?: { Code?: string }[] };
+      const codes = failure?.CancellationReasons?.map(reason => reason.Code);
+      const conflict = failure?.name === 'TransactionCanceledException'
+        && codes?.includes('TransactionConflict')
+        && codes.every(code => code === 'None' || code === 'TransactionConflict');
+      if (!conflict) throw error;
+      if (attempt === maxAttempts) {
+        logger.warn('Capacity transaction contention exhausted bounded retries', {
+          task_id: taskId,
+          user_id: userId,
+          attempts: attempt,
+          error_id: 'CONCURRENCY_TRANSACTION_CONFLICT',
+          cancellation_codes: codes,
+        });
+        throw error;
+      }
+      await delay(Math.floor(Math.random() * baseDelayMs * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 /** Reserve once per task, including after a lost transaction acknowledgement. */
 export async function acquireTaskSlot(taskId: string, userId: string, limit: number): Promise<boolean> {
   const current = await readTask(taskId, userId);
@@ -73,7 +114,7 @@ export async function acquireTaskSlot(taskId: string, userId: string, limit: num
   const now = new Date().toISOString();
   const revision = randomUUID();
   try {
-    await ddb.send(new TransactWriteCommand({
+    await sendReservationTransaction(new TransactWriteCommand({
       ClientRequestToken: revision,
       TransactItems: [
         {
@@ -103,7 +144,7 @@ export async function acquireTaskSlot(taskId: string, userId: string, limit: num
           },
         },
       ],
-    }));
+    }), taskId, userId);
     return true;
   } catch (error) {
     // A competing invocation or a lost successful response may have reserved it.
@@ -142,7 +183,7 @@ export async function releaseTaskSlot(taskId: string, userId: string): Promise<b
     const now = new Date().toISOString();
     const revision = randomUUID();
     try {
-      await ddb.send(new TransactWriteCommand({
+      await sendReservationTransaction(new TransactWriteCommand({
         ClientRequestToken: revision,
         TransactItems: [
           {
@@ -189,7 +230,7 @@ export async function releaseTaskSlot(taskId: string, userId: string): Promise<b
             },
           }] : []),
         ],
-      }));
+      }), taskId, userId);
       if (emptyCounter) {
         logger.warn('Released task reservation whose counter was already empty', {
           task_id: taskId, user_id: userId, error_id: 'CONCURRENCY_EMPTY_COUNTER',
