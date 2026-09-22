@@ -471,6 +471,10 @@ def _run_task_background(
     lifecycle = (
         register_task(task_id, microvm_id, attempt_id=attempt_id or task_id) if microvm_id else None
     )
+    if lifecycle is not None:
+        # Linux uv defaults to cache hardlinks, which checkpoint capture rejects
+        # because another path can mutate the same inode outside the workspace.
+        os.environ.setdefault("UV_LINK_MODE", "copy")
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
     try:

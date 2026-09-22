@@ -3037,6 +3037,7 @@ def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(
 ):
     from microvm_lifecycle import get_context
 
+    monkeypatch.delenv("UV_LINK_MODE", raising=False)
     observed = []
 
     def run_task(**kwargs):
@@ -3045,6 +3046,7 @@ def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(
         assert context.microvm_id == "microvm-server"
         assert context.attempt_id == (attempt or "lifecycle-server-task")
         assert "microvm_id" not in kwargs
+        assert os.environ["UV_LINK_MODE"] == "copy"
         observed.append(context)
         if crash:
             raise RuntimeError("pipeline crashed")
