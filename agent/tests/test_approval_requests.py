@@ -124,5 +124,6 @@ def test_timeout_race_preserves_human_winner_but_lease_loss_is_not_benign(transp
     )
     assert not task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
     reasons[-1] = {"Code": "ConditionalCheckFailed"}
-    with pytest.raises(ClientError):
+    with pytest.raises(ClientError, match="pre-upgrade tasks must be drained") as failure:
         task_state.best_effort_update_approval_status("task", "request", "TIMED_OUT")
+    assert failure.value.response["Error"]["Code"] == "TransactionCanceledException"
