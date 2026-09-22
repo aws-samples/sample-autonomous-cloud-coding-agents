@@ -32,6 +32,9 @@ import {
 
 const PROJECT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PROJECT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+// Hex letters in the final group on purpose: a UUID ending in twelve consecutive
+// digits matches the secret scanner's AWS-account-id rule, which failed CI on a
+// fixture that holds no secret at all.
 const ORG_ACME = 'c0000000-0000-4000-8000-0000000ac0e1';
 const ORG_RIVAL = 'c0000000-0000-4000-8000-0000000b10a2';
 
