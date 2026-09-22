@@ -76,9 +76,14 @@ export async function reconcileMicrovmContinuation(task: ContinuableTask): Promi
         TableName: TABLE, Key: workerLeaseKey(task.task_id), ConsistentRead: true,
       }), options)).Item;
       if (lease) {
-        const notLaunched = lease.lease_state === 'ACTIVE' && !lease.lease_microvm_id
-          && task.concurrency_slot?.state === 'held'
-          && task.concurrency_slot.attempt_id === lease.lease_attempt_id;
+        // claimMicrovmStart persists its receipt before calling AWS and only
+        // while the task is active. This terminal task has no receipt, so a
+        // matching admitted attempt cannot still launch. Finalization may have
+        // already released its slot; that does not erase its attempt identity.
+        const notLaunched = ['ACTIVE', 'FENCED'].includes(lease.lease_state) && !lease.lease_microvm_id
+          && ['held', 'released'].includes(task.concurrency_slot?.state ?? '')
+          && task.concurrency_slot?.attempt_id === lease.lease_attempt_id
+          && task.continuation?.attempt_id === lease.lease_attempt_id;
         if (lease.lease_user_id !== task.user_id
           || (!['PARKED', 'CLOSED'].includes(lease.lease_state) && !notLaunched)
           || typeof lease.lease_attempt_id !== 'string' || !lease.lease_attempt_id) {
@@ -94,7 +99,7 @@ export async function reconcileMicrovmContinuation(task: ContinuableTask): Promi
       UpdateExpression: 'SET #ttl = :ttl, lease_state = :closed, lease_user_id = :user, lease_attempt_id = :attempt',
       ConditionExpression: 'attribute_not_exists(task_id) OR (lease_user_id = :user AND lease_attempt_id = :attempt'
         + (withoutStart ? ' AND lease_state = :observedState' : '')
-        + (leaseState === 'ACTIVE' ? ' AND attribute_not_exists(lease_microvm_id)' : '') + ')',
+        + (['ACTIVE', 'FENCED'].includes(leaseState ?? '') ? ' AND attribute_not_exists(lease_microvm_id)' : '') + ')',
       ExpressionAttributeNames: { '#ttl': 'ttl' },
       ExpressionAttributeValues: {
         ':user': task.user_id,

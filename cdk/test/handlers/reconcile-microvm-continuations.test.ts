@@ -163,6 +163,45 @@ test('does not release a live lease just because the start record is absent', as
   expect(mockDelete).not.toHaveBeenCalled();
 });
 
+test.each(['held', 'released'])('cleans a fenced pre-launch failure with a %s slot', async state => {
+  task.status = 'FAILED';
+  delete task.microvm_start;
+  task.continuation = { state: 'STARTING', attempt_id: 'new-token' };
+  task.concurrency_slot = { state, attempt_id: 'new-token' };
+  mockSend.mockImplementation(async command => {
+    if (command.constructor.name === 'UpdateCommand') return {};
+    return {
+      Item: command.input.Key.task_id === 'task' ? task : {
+        lease_user_id: 'user', lease_attempt_id: 'new-token', lease_state: 'FENCED',
+      },
+    };
+  });
+  await reconcileMicrovmContinuation(task);
+  const closed = mockSend.mock.calls.find(([command]) => command.constructor.name === 'UpdateCommand')![0].input;
+  expect(closed.ExpressionAttributeValues).toMatchObject({ ':attempt': 'new-token', ':observedState': 'FENCED' });
+  expect(closed.ConditionExpression).toContain('attribute_not_exists(lease_microvm_id)');
+  expect(mockDelete).toHaveBeenCalled();
+});
+
+test.each([
+  { lease_microvm_id: 'possibly-live-worker' },
+  { lease_user_id: 'other-user' },
+  { lease_attempt_id: 'other-attempt' },
+])('retains checkpoints for an inconsistent fenced attempt: %j', async mismatch => {
+  task.status = 'FAILED';
+  delete task.microvm_start;
+  task.continuation = { state: 'STARTING', attempt_id: 'new-token' };
+  task.concurrency_slot = { state: 'released', attempt_id: 'new-token' };
+  mockSend.mockImplementation(async command => ({
+    Item: command.input.Key.task_id === 'task' ? task : {
+      lease_user_id: 'user', lease_attempt_id: 'new-token', lease_state: 'FENCED', ...mismatch,
+    },
+  }));
+  await expect(reconcileMicrovmContinuation(task)).rejects.toThrow('LEASE_INVALID');
+  expect(mockRelease).not.toHaveBeenCalled();
+  expect(mockDelete).not.toHaveBeenCalled();
+});
+
 test('invalid unknown-start timestamp cannot be treated as proof of shutdown', async () => {
   task.status = 'FAILED';
   task.microvm_start.createdAt = 'invalid';
