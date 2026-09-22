@@ -1432,6 +1432,7 @@ export class AgentStack extends Stack {
     if (continuationBucket && lambdaMicrovm?.imageArn) {
       taskApi.enableMicrovmContinuations(
         continuationBucket.bucket.bucketName, orchestrator.fn.functionArn, userConcurrencyTable.table,
+        maxConcurrentTasksPerUser,
       );
       new MicrovmContinuationManager(concurrencyMaintenance, 'MicrovmContinuationManager', {
         taskTable: taskTable.table,

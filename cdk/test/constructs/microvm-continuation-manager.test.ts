@@ -44,7 +44,7 @@ test('scheduled recovery and decisions invoke retained versions of only the orig
     imageArn,
   });
   const api = new TaskApi(stack, 'Api', { taskTable, taskEventsTable: table('Events'), taskApprovalsTable: approvalsTable });
-  api.enableMicrovmContinuations(bucket.bucket.bucketName, coordinator, userConcurrencyTable);
+  api.enableMicrovmContinuations(bucket.bucket.bucketName, coordinator, userConcurrencyTable, 7);
   const template = Template.fromStack(stack);
   const policies = Object.entries(template.findResources('AWS::IAM::Policy'));
   for (const name of ['ManagerReconcilerFn', 'ApproveTaskFn', 'DenyTaskFn']) {
@@ -60,5 +60,10 @@ test('scheduled recovery and decisions invoke retained versions of only the orig
     const fn = functions.find(([id]) => id.includes(name))![1];
     expect(fn.Properties.Environment.Variables.ORCHESTRATOR_FUNCTION_ARN).toBe(coordinator);
     expect(fn.Properties.Environment.Variables.CONTINUATION_BUCKET_NAME).toBeDefined();
+    expect(fn.Properties.Environment.Variables.USER_CONCURRENCY_TABLE_NAME)
+      .toEqual(stack.resolve(userConcurrencyTable.tableName));
+    if (name !== 'ManagerReconcilerFn') {
+      expect(fn.Properties.Environment.Variables.MAX_CONCURRENT_TASKS_PER_USER).toBe('7');
+    }
   }
 });

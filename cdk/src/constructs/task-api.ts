@@ -1459,10 +1459,13 @@ export class TaskApi extends Construct {
   /** Wire after the coordinator and bucket exist, avoiding a construction-order cycle. */
   public enableMicrovmContinuations(
     bucketName: string, coordinatorArn: string, concurrencyTable: dynamodb.ITable,
+    maxConcurrentTasksPerUser: number,
   ): void {
     for (const fn of this.approvalDecisionFunctions) {
       fn.addEnvironment('CONTINUATION_BUCKET_NAME', bucketName);
       fn.addEnvironment('ORCHESTRATOR_FUNCTION_ARN', coordinatorArn);
+      fn.addEnvironment('USER_CONCURRENCY_TABLE_NAME', concurrencyTable.tableName);
+      fn.addEnvironment('MAX_CONCURRENT_TASKS_PER_USER', String(maxConcurrentTasksPerUser));
       concurrencyTable.grantReadWriteData(fn);
       fn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
