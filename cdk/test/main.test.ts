@@ -18,7 +18,7 @@
  */
 
 import * as fs from 'fs';
-import { App, Stack } from 'aws-cdk-lib';
+import { App, CfnResource, NestedStack, STACK_RESOURCE_LIMIT_CONTEXT, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import {
   AGENTCORE_AZS_CONTEXT_KEY,
@@ -129,6 +129,18 @@ describe('buildApp — AgentCore AZ wiring', () => {
     expect(errors[0].entry.data).toContain('Could not resolve AgentCore-supported availability zones');
   });
 
+  it('attaches AZ lookup errors to the network stack in the split topology', async () => {
+    const built = await app({
+      appProps: { context: { networkTopology: 'split' } },
+      describeAzs: async () => { throw new Error('AccessDeniedException'); },
+    });
+    const assembly = built.synth();
+    const errors = assembly.getStackByName(`${STACK_NAME}-network`).messages.filter(message => message.level === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].entry.data).toContain('Could not resolve AgentCore-supported availability zones');
+    expect(assembly.getStackByName(STACK_NAME).messages.filter(message => message.level === 'error')).toEqual([]);
+  });
+
   it('surfaces the unpinned env-agnostic case as a stack-artifact WARNING', async () => {
     const built = await buildApp({ account: undefined, region: undefined });
     Annotations.fromStack(stackOf(built)).hasWarning(
@@ -155,20 +167,9 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 });
 
-describe('buildApp — CloudFormation template-body budget within 80% 1Mb budget', () => {
-  // CloudFormation caps a template body at 1 MB; CDK checks against
-  // `TEMPLATE_BODY_MAXIMUM_SIZE = 1e6` and only
-  // raises an `@aws-cdk/core:Stack.templateSize` *warning* — so this ceiling fails
-  // **open**. A template can grow past it, synthesize cleanly, and fail at deploy.
-  // These assertions read the emitted artifact rather than `Template.fromStack`,
-  // because indentation is the thing under test and `Template` has already parsed
-  // it away.
-  const CDK_TEMPLATE_BODY_MAXIMUM_SIZE = 1_000_000;
-  // Budget to the point CDK starts warning, so a regression trips a readable assertion
-  // instead of silently riding the warning band up to the hard limit.
-  const WARNING_THRESHOLD = 0.8;
-  const TEMPLATE_BODY_BUDGET = CDK_TEMPLATE_BODY_MAXIMUM_SIZE * WARNING_THRESHOLD;
-
+describe('buildApp — compact template output', () => {
+  // Read the emitted artifact: parsing with Template.fromStack loses indentation.
+  // synthesis/deployment.test.ts owns byte budgets across the full profile product.
   let templateText: string;
 
   beforeAll(async () => {
@@ -184,8 +185,43 @@ describe('buildApp — CloudFormation template-body budget within 80% 1Mb budget
     // not need re-baselining every time a resource is added.
     expect(templateText).not.toContain('\n  ');
   });
+});
 
-  it('stays inside the template-body budget', () => {
-    expect(Buffer.byteLength(templateText, 'utf8')).toBeLessThan(TEMPLATE_BODY_BUDGET);
+describe('buildApp — production resource ceiling', () => {
+  describe.each(['parent', 'nested'] as const)('%s template', kind => {
+    test.each([490, 491])('enforces the boundary at %i resources without the census', async count => {
+      const built = await app();
+      const parent = new Stack(built, 'BudgetProbe', { analyticsReporting: false });
+      const scope = kind === 'nested' ? new NestedStack(parent, 'Child') : parent;
+      for (let i = 0; i < count; i++) {
+        new CfnResource(scope, `Handle${i}`, { type: 'AWS::CloudFormation::WaitConditionHandle' });
+      }
+      if (count === 490) {
+        expect(() => built.synth()).not.toThrow();
+      } else {
+        expect(() => built.synth()).toThrow(/491 is greater than allowed maximum of 490:/);
+      }
+    });
   });
+
+  test.each([480, '480'])('honors a stricter numeric or CLI-string ceiling: %s', async limit => {
+    const built = await app({ appProps: { context: { [STACK_RESOURCE_LIMIT_CONTEXT]: limit } } });
+    const probe = new Stack(built, 'BudgetProbe', { analyticsReporting: false });
+    for (let i = 0; i < 481; i++) {
+      new CfnResource(probe, `Handle${i}`, { type: 'AWS::CloudFormation::WaitConditionHandle' });
+    }
+    expect(() => built.synth()).toThrow(/481 is greater than allowed maximum of 480:/);
+  });
+
+  test.each([500, '500', 0, -1, 490.5, null, true, 'invalid', ''])(
+    'rejects an invalid or weakened resource ceiling before resolving AWS inputs: %s',
+    async limit => {
+      const lookup = jest.fn(okZones);
+      await expect(app({
+        describeAzs: lookup,
+        appProps: { context: { [STACK_RESOURCE_LIMIT_CONTEXT]: limit } },
+      })).rejects.toThrow(`Context '${STACK_RESOURCE_LIMIT_CONTEXT}' must be an integer from 1 to 490`);
+      expect(lookup).not.toHaveBeenCalled();
+    },
+  );
 });

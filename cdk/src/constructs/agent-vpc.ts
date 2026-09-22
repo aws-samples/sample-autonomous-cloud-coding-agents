@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { RemovalPolicy, Tags } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { NagSuppressions } from 'cdk-nag';
@@ -36,6 +36,26 @@ const DEFAULT_AGENT_VPC_AZS = 2;
 
 /** AgentCore high-availability floor: at least two zones. */
 const MIN_AGENT_VPC_AZS = 2;
+
+const MAX_RESERVED_NETWORK_AZS = 6;
+
+/** Reserve unused AZ address slots without allocating subnets or other resources. */
+export function resolveNetworkReservedAzs(value: unknown): number {
+  if (value === undefined) return 0;
+  const count = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  // Six slots cover the largest current regional AZ count and bound CDK's
+  // placeholder allocation. The normal three-to-two-zone reduction needs one.
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > MAX_RESERVED_NETWORK_AZS) {
+    throw new Error(`networkReservedAzs must be an integer from 0 to ${MAX_RESERVED_NETWORK_AZS}`);
+  }
+  return count;
+}
+
+/** The references consumed by any compute backend, regardless of stack ownership. */
+export interface AgentNetwork {
+  readonly vpc: ec2.IVpc;
+  readonly runtimeSecurityGroup: ec2.ISecurityGroup;
+}
 
 /**
  * Properties for the AgentVpc construct.
@@ -94,6 +114,13 @@ export interface AgentVpcProps {
    * @default RemovalPolicy.DESTROY
    */
   readonly removalPolicy?: RemovalPolicy;
+
+  /**
+   * Original AgentVpc construct path used for generated Name tags and endpoint
+   * security-group descriptions. Keeps service properties stable across a move.
+   * @default - this construct's current path
+   */
+  readonly resourcePath?: string;
 }
 
 /**
@@ -103,7 +130,7 @@ export interface AgentVpcProps {
  * and NAT for internet egress (GitHub and package registries).
  * Flow logs are enabled for audit.
  */
-export class AgentVpc extends Construct {
+export class AgentVpc extends Construct implements AgentNetwork {
   /** The VPC where the Runtime will be deployed. */
   public readonly vpc: ec2.Vpc;
 
@@ -134,14 +161,20 @@ export class AgentVpc extends Construct {
     const maxAzs = props.maxAzs ?? DEFAULT_AGENT_VPC_AZS;
     const natGateways = props.natGateways ?? 1;
     const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
+    const reservedAzs = resolveNetworkReservedAzs(this.node.tryGetContext('networkReservedAzs'));
 
     // --- VPC ---
     // When explicit AZs are provided (to target AgentCore-supported physical
     // zones), pass them directly and omit maxAzs — CDK does not allow both.
     this.vpc = new ec2.Vpc(this, 'Vpc', {
       ...(pinnedAzs?.length
-        ? { availabilityZones: pinnedAzs }
+        // CDK appends reserved placeholders to this array; keep the caller's
+        // real AZ selection intact for application wiring and diagnostics.
+        ? { availabilityZones: [...pinnedAzs] }
         : { maxAzs }),
+      // Keep active + reserved slots constant during an AZ reduction so CDK's
+      // private subnet CIDRs do not shift and force subnet replacements.
+      reservedAzs,
       natGateways,
       restrictDefaultSecurityGroup: true,
       subnetConfiguration: [
@@ -158,16 +191,27 @@ export class AgentVpc extends Construct {
       ],
     });
 
+    const resourceVpcPath = `${props.resourcePath ?? this.node.path}/Vpc`;
+    if (props.resourcePath !== undefined) {
+      // CDK gives the VPC and each subnet their own inherited Name tag. Preserve
+      // those scopes so routes, NAT, endpoints and the IGW keep their old names.
+      Tags.of(this.vpc).add('Name', resourceVpcPath);
+      for (const subnet of [...this.vpc.publicSubnets, ...this.vpc.privateSubnets]) {
+        Tags.of(subnet).add('Name', `${resourceVpcPath}${subnet.node.path.slice(this.vpc.node.path.length)}`);
+      }
+    }
+
     // --- Flow logs (satisfies AwsSolutions-VPC7) ---
     const flowLogGroup = new logs.LogGroup(this, 'FlowLogGroup', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy,
     });
 
-    this.vpc.addFlowLog('FlowLog', {
+    const flowLog = this.vpc.addFlowLog('FlowLog', {
       destination: ec2.FlowLogDestination.toCloudWatchLogs(flowLogGroup),
       trafficType: ec2.FlowLogTrafficType.ALL,
     });
+    if (props.resourcePath !== undefined) Tags.of(flowLog).add('Name', `${resourceVpcPath}/FlowLog`);
 
     NagSuppressions.addResourceSuppressions(this.vpc, [
       {
@@ -210,11 +254,17 @@ export class AgentVpc extends Construct {
     ];
 
     for (const ep of interfaceEndpoints) {
-      this.vpc.addInterfaceEndpoint(ep.id, {
+      const endpoint = this.vpc.addInterfaceEndpoint(ep.id, {
         service: ep.service,
         privateDnsEnabled: true,
         subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       });
+      if (props.resourcePath !== undefined) {
+        // GroupDescription is replacement-sensitive. The CDK default includes
+        // the current stack path, so explicitly keep the pre-extraction value.
+        const group = endpoint.node.findChild('SecurityGroup').node.defaultChild as ec2.CfnSecurityGroup;
+        group.groupDescription = `${resourceVpcPath}/${ep.id}/SecurityGroup`;
+      }
     }
   }
 }

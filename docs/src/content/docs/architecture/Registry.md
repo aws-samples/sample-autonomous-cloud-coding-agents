@@ -84,7 +84,7 @@ The boolean or string value `false` omits the registry nested stack, registry AP
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
-This is an infrastructure switch, not a pause control. Changing an existing enabled deployment to `false` removes its CloudFormation-managed registry and records; re-enabling creates an empty registry that must be republished.
+Disabling removes the API, outputs and runtime wiring. Once the [retention prerequisite](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stateful-retention-and-stack-decomposition) is deployed, `Custom::AgentRegistry` retains the external registry and records on removal or replacement. Re-enabling does not automatically adopt that retained registry; recovery or cleanup must be planned explicitly. A deployment whose custom resource still has a delete policy can delete the registry and records when disabled.
 
 ## 6. Governance: the approval state machine
 

@@ -20,6 +20,7 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { resolveRepositoryBackend } from './compute-backend';
 import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
@@ -582,19 +583,10 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
-  // Compute substrate is a per-repo property (``compute_type``, default
-  // ``agentcore``). It applies to ALL workflows on the repo — including a
-  // read-only pr-review task, because that task CLONES and
-  // READS the same repository the coding agent does, so its context/memory
-  // footprint is the same: a repo big enough to need the context-gated ECS
-  // tier for building is also big enough to OOM the fixed AgentCore microVM just
-  // reading it. So planning must run on the same substrate as the agent — do NOT
-  // special-case read-only workflows to agentcore. (An ecs-configured repo on a
-  // stack that hasn't wired the ECS substrate fails at session start; that's a
-  // stack-config gap surfaced by the honest "couldn't plan, nothing run — re-apply
-  // or run as single" note, not something to paper over by mis-routing compute.)
+  // All workflows inherit the deployment backend, including repo-less and read-only tasks.
+  // A conflicting repository pin fails before concurrency admission.
   return {
-    compute_type: repoConfig?.compute_type ?? 'agentcore',
+    compute_type: resolveRepositoryBackend(repoConfig?.compute_type, process.env.DEPLOYED_COMPUTE_TYPE),
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
     model_id: repoConfig?.model_id,
     max_turns: repoConfig?.max_turns,

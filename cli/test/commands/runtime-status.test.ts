@@ -21,6 +21,7 @@ import { listRepoConfigs } from '../../src/repo-lookup';
 import { buildRuntimeStatusReport } from '../../src/runtime-status';
 
 const controlPlaneSend = jest.fn();
+const LEGACY_DEPLOYMENT = { stackName: 'backgroundagent-dev', computeSubstrate: null };
 
 jest.mock('../../src/repo-lookup');
 jest.mock('@aws-sdk/client-bedrock-agentcore-control', () => ({
@@ -68,6 +69,7 @@ describe('buildRuntimeStatusReport', () => {
       'us-east-1',
       'RepoTable',
       'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      { deployment: LEGACY_DEPLOYMENT },
     );
 
     expect(report.agentcore_runtimes).toHaveLength(2);
@@ -83,6 +85,92 @@ describe('buildRuntimeStatusReport', () => {
     expect(controlPlaneSend).toHaveBeenCalledTimes(2);
   });
 
+  test.each(['ecs', 'lambda-microvm'] as const)('inherits %s without probing AgentCore', async backend => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([{ repo: 'acme/a', status: 'active' }]);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, {
+      deployment: { ...LEGACY_DEPLOYMENT, computeSubstrate: backend, computeDeploymentMode: 'exclusive' },
+    });
+    expect(report.blueprints[0].compute_type).toBe(backend);
+    expect(report.blueprints[0].runtime_arn).toBeUndefined();
+    expect(controlPlaneSend).not.toHaveBeenCalled();
+  });
+
+  test.each(['agentcore', 'ecs', 'lambda-microvm'] as const)(
+    'reports incompatible pins and probes only the exclusive %s deployment',
+    async backend => {
+      (listRepoConfigs as jest.Mock).mockResolvedValue(
+        ['agentcore', 'ecs', 'lambda-microvm'].map(compute_type => ({
+          repo: `acme/${compute_type}`,
+          status: 'active',
+          compute_type,
+          runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+        })),
+      );
+      const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, {
+        deployment: { ...LEGACY_DEPLOYMENT, computeSubstrate: backend, computeDeploymentMode: 'exclusive' },
+      });
+      expect(report.compute_deployment).toEqual({
+        stack_name: 'backgroundagent-dev',
+        compute_substrate: backend,
+        compute_deployment_mode: 'exclusive',
+        default_compute_type: backend,
+      });
+      expect(report.blueprints).toHaveLength(3);
+      for (const binding of report.blueprints) {
+        expect(binding.compute_available).toBe(binding.compute_type === backend);
+        if (binding.compute_available) {
+          expect(binding.configuration_error).toBeUndefined();
+        } else {
+          expect(binding.configuration_error).toContain(`deploys only '${backend}'`);
+          expect(binding.runtime_arn).toBeUndefined();
+        }
+      }
+      expect(report.ecs_substrates).toHaveLength(backend === 'ecs' ? 1 : 0);
+      expect(report.lambda_microvm_substrates).toHaveLength(backend === 'lambda-microvm' ? 1 : 0);
+      expect(report.agentcore_runtimes).toHaveLength(backend === 'agentcore' ? 1 : 0);
+      expect(controlPlaneSend).toHaveBeenCalledTimes(backend === 'agentcore' ? 1 : 0);
+    },
+  );
+
+  test('preserves the legacy additive contract while identifying an undeployed optional backend', async () => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([
+      { repo: 'acme/default', status: 'active' },
+      { repo: 'acme/ecs', status: 'active', compute_type: 'ecs' },
+      { repo: 'acme/microvm', status: 'active', compute_type: 'lambda-microvm' },
+    ]);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable',
+      'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform', {
+        deployment: { ...LEGACY_DEPLOYMENT, computeSubstrate: 'ecs' },
+      });
+    expect(report.compute_deployment.default_compute_type).toBe('agentcore');
+    expect(report.compute_deployment.compute_deployment_mode).toBeNull();
+    expect(report.blueprints.map(binding => binding.compute_available)).toEqual([true, true, false]);
+    expect(report.ecs_substrates).toHaveLength(1);
+    expect(report.agentcore_runtimes).toHaveLength(1);
+    expect(report.lambda_microvm_substrates).toEqual([]);
+  });
+
+  test('does not probe an unsupported repository compute type', async () => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([{
+      repo: 'acme/invalid',
+      status: 'active',
+      compute_type: 'unknown',
+      runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/custom',
+    }]);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, { deployment: LEGACY_DEPLOYMENT });
+    expect(report.blueprints[0].compute_available).toBe(false);
+    expect(report.blueprints[0].configuration_error).toContain('Unsupported repository compute_type');
+    expect(controlPlaneSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects malformed exclusive outputs even when there are no repositories', async () => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([]);
+    await expect(buildRuntimeStatusReport('us-east-1', 'RepoTable', null, {
+      deployment: { ...LEGACY_DEPLOYMENT, computeDeploymentMode: 'exclusive' },
+    })).rejects.toThrow('invalid or missing ComputeSubstrate');
+    expect(controlPlaneSend).not.toHaveBeenCalled();
+  });
+
   test('records probe errors without failing the report', async () => {
     controlPlaneSend.mockRejectedValue(new Error('AccessDenied'));
     (listRepoConfigs as jest.Mock).mockResolvedValue([{
@@ -96,6 +184,7 @@ describe('buildRuntimeStatusReport', () => {
       'us-east-1',
       'RepoTable',
       'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      { deployment: LEGACY_DEPLOYMENT },
     );
 
     expect(report.agentcore_runtimes[0].probe_status).toBe('error');
@@ -112,7 +201,7 @@ describe('buildRuntimeStatusReport', () => {
       'us-east-1',
       'RepoTable',
       'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
-      { repo: 'acme/b' },
+      { repo: 'acme/b', deployment: LEGACY_DEPLOYMENT },
     );
 
     expect(report.blueprints).toHaveLength(1);
@@ -137,6 +226,7 @@ describe('buildRuntimeStatusReport', () => {
       'us-east-1',
       'RepoTable',
       'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      { deployment: LEGACY_DEPLOYMENT },
     );
 
     expect(report.agentcore_runtimes[0].last_updated_at).toBe('2026-01-01T00:00:00.000Z');
@@ -160,6 +250,7 @@ describe('buildRuntimeStatusReport', () => {
       'us-east-1',
       'RepoTable',
       'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+      { deployment: LEGACY_DEPLOYMENT },
     );
 
     expect(report.agentcore_runtimes[0].failure_reason).toBe('image pull failed');
@@ -172,7 +263,7 @@ describe('buildRuntimeStatusReport', () => {
       compute_type: 'agentcore',
     }]);
 
-    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, { deployment: LEGACY_DEPLOYMENT });
 
     expect(report.agentcore_runtimes).toHaveLength(0);
     expect(report.blueprints[0].runtime_arn).toBeUndefined();

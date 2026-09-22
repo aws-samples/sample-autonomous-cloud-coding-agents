@@ -17,9 +17,11 @@
  *  SOFTWARE.
  */
 
+import type { OnboardComputeType } from './compute-substrate';
 import { RepoConfigRow } from './repo-lookup';
 
 export interface RepoOnboardNotesInput {
+  readonly defaultComputeType?: OnboardComputeType;
   readonly config: RepoConfigRow;
   readonly platformRuntimeArn: string | null;
   readonly platformGithubTokenSecretArn: string | null;
@@ -29,12 +31,13 @@ export interface RepoOnboardNotesInput {
 export function buildRepoOnboardNotes(input: RepoOnboardNotesInput): readonly string[] {
   const notes: string[] = [
     'This command writes RepoTable only. With no per-repo overrides, tasks inherit the '
-    + 'platform RuntimeArn and GitHubTokenSecretArn (IAM for those is granted at CDK deploy).',
+    + `platform compute backend (${input.defaultComputeType ?? 'agentcore'}) and GitHubTokenSecretArn (IAM for those is granted at CDK deploy).`,
     'For Cedar policies, egress rules, custom runtime/token IAM, and durable lifecycle, '
     + 'prefer a CDK Blueprint construct and `mise //cdk:deploy`.',
   ];
 
-  const customRuntime = input.config.runtime_arn;
+  const computeType = input.config.compute_type ?? input.defaultComputeType ?? 'agentcore';
+  const customRuntime = computeType === 'agentcore' ? input.config.runtime_arn : undefined;
   if (customRuntime && customRuntime !== input.platformRuntimeArn) {
     notes.push(
       'WARNING: A custom runtime_arn is stored. The orchestrator Lambda must be granted '
@@ -52,14 +55,14 @@ export function buildRepoOnboardNotes(input: RepoOnboardNotesInput): readonly st
     );
   }
 
-  if (input.config.compute_type === 'ecs') {
+  if (computeType === 'ecs') {
     notes.push(
       'NOTE: compute_type=ecs requires ECS wired into the stack (TaskOrchestrator ecsConfig). '
       + 'Verify your CDK stack before submitting tasks.',
     );
   }
 
-  if (input.config.compute_type === 'lambda-microvm') {
+  if (computeType === 'lambda-microvm') {
     // Mirrors the ECS note, plus the one thing that has no ECS analogue: the
     // substrate can be fully deployed and still carry no IMAGE (ADR-021's
     // three-state table — the artifact bucket must exist before the artifact can

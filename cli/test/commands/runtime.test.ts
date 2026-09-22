@@ -22,7 +22,17 @@ import { buildRuntimeStatusReport } from '../../src/runtime-status';
 import { getStackOutput } from '../../src/stack-outputs';
 
 jest.mock('../../src/runtime-status');
-jest.mock('../../src/stack-outputs');
+jest.mock('../../src/stack-outputs', () => ({
+  ...jest.requireActual('../../src/stack-outputs'),
+  getStackOutput: jest.fn(),
+}));
+
+const COMPUTE_DEPLOYMENT = {
+  stack_name: 'backgroundagent-dev',
+  compute_substrate: null,
+  compute_deployment_mode: null,
+  default_compute_type: 'agentcore',
+};
 
 describe('runtime status command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -35,12 +45,14 @@ describe('runtime status command', () => {
       return null;
     });
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/a',
         status: 'active',
         compute_type: 'agentcore',
         runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [{
@@ -64,19 +76,21 @@ describe('runtime status command', () => {
     await cmd.parseAsync(['node', 'test', 'status', '--region', 'us-east-1']);
 
     const output = consoleSpy.mock.calls.map((c) => c[0]).join('\n');
-    expect(output).toContain('Per-blueprint effective compute');
+    expect(output).toContain('Per-blueprint compute configuration');
     expect(output).toContain('acme/a');
     expect(output).toContain('READY');
   });
 
   test('prints ECS blueprint without runtime ARN', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/ecs',
         status: 'active',
         compute_type: 'ecs',
         runtime_arn: undefined,
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [],
@@ -97,12 +111,14 @@ describe('runtime status command', () => {
 
   test('prints ECS substrate note', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/ecs',
         status: 'active',
         compute_type: 'ecs',
         runtime_arn: undefined,
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [],
@@ -124,12 +140,14 @@ describe('runtime status command', () => {
 
   test('prints Lambda MicroVM substrate note without runtime probing', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/microvm',
         status: 'active',
         compute_type: 'lambda-microvm',
         runtime_arn: undefined,
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [],
@@ -163,6 +181,7 @@ describe('runtime status command', () => {
 
   test('reports empty blueprint set', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: null,
       blueprints: [],
       agentcore_runtimes: [],
@@ -178,12 +197,14 @@ describe('runtime status command', () => {
 
   test('shows successful probe metadata', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/a',
         status: 'active',
         compute_type: 'agentcore',
         runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [{
@@ -210,12 +231,14 @@ describe('runtime status command', () => {
 
   test('shows probe error details', async () => {
     (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: COMPUTE_DEPLOYMENT,
       platform_default_runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
       blueprints: [{
         repo: 'acme/a',
         status: 'active',
         compute_type: 'agentcore',
         runtime_arn: 'arn:aws:bedrock-agentcore:us-east-1:123:runtime/platform',
+        compute_available: true,
         runtime_arn_source: 'platform',
       }],
       agentcore_runtimes: [{
@@ -242,5 +265,52 @@ describe('runtime status command', () => {
 
     const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(payload.blueprints).toHaveLength(1);
+    expect(payload.compute_deployment).toEqual(COMPUTE_DEPLOYMENT);
+    expect(payload.blueprints[0].compute_available).toBe(true);
+  });
+
+  test.each(['text', 'json'])('passes the exclusive deployment contract and reports a stale pin in %s', async format => {
+    (getStackOutput as jest.Mock).mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable',
+      ComputeSubstrate: 'ecs',
+      ComputeDeploymentMode: 'exclusive',
+    } as Record<string, string>)[key] ?? null);
+    const configurationError = "Stack 'backgroundagent-dev' deploys only 'ecs'; lambda-microvm is unavailable.";
+    (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: {
+        ...COMPUTE_DEPLOYMENT,
+        compute_substrate: 'ecs',
+        compute_deployment_mode: 'exclusive',
+        default_compute_type: 'ecs',
+      },
+      platform_default_runtime_arn: null,
+      blueprints: [{
+        repo: 'acme/stale',
+        status: 'active',
+        compute_type: 'lambda-microvm',
+        compute_available: false,
+        configuration_error: configurationError,
+        runtime_arn_source: 'platform',
+      }],
+      agentcore_runtimes: [],
+      ecs_substrates: [],
+      lambda_microvm_substrates: [],
+    });
+    await makeRuntimeCommand().parseAsync(['node', 'test', 'status', '--region', 'us-east-1', '--output', format]);
+    expect(buildRuntimeStatusReport).toHaveBeenLastCalledWith('us-east-1', 'RepoTable', null, {
+      repo: undefined,
+      deployment: { stackName: 'backgroundagent-dev', computeSubstrate: 'ecs', computeDeploymentMode: 'exclusive' },
+    });
+    if (format === 'json') {
+      const report = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+      expect(report.blueprints[0].compute_available).toBe(false);
+      expect(report.blueprints[0].configuration_error).toBe(configurationError);
+      expect(report.compute_deployment.default_compute_type).toBe('ecs');
+    } else {
+      const output = consoleSpy.mock.calls.map(call => call[0]).join('\n');
+      expect(output).toContain(`UNAVAILABLE: ${configurationError}`);
+      expect(output).toContain('Compute deployment mode: exclusive');
+      expect(output).not.toContain('Lambda MicroVMs are platform-managed');
+    }
   });
 });

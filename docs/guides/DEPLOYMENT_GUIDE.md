@@ -4,7 +4,7 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all platform resources. The stack uses a `ComputeStrategy` interface to support three compute backends within the same stack:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. Each deployment provisions exactly one compute backend:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
@@ -17,7 +17,84 @@ ABCA deploys as a **single CDK stack** (`backgroundagent-dev`) containing all pl
 
 All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
 
-ECS Fargate is currently **opt-in** -- the `EcsAgentCluster` construct is present in the stack code but commented out. To enable it, uncomment the ECS blocks in `cdk/src/stacks/agent.ts`.
+AgentCore is the default. Select ECS with `mise //cdk:deploy -- --context compute_type=ecs`; select MicroVM as described below. Repositories inherit this choice unless they have an explicit matching override. Optional services such as Memory, Gateway and the Linear vault are independent of Runtime selection.
+
+Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources. The two named AgentCore log groups remain owned by the application stack so a later return to AgentCore can reuse them. Drain active tasks and review the [backend transition procedure](../design/COMPUTE.md#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
+
+### Network stack topology
+
+`networkTopology=inline` is the default. Use `networkTopology=split` for a new environment to put the VPC, subnets, endpoints, flow logs and DNS firewall in `${stackName}-network`. The application stack retains its name, data stores, compute resources and shared Task API. It depends on network exports, so CDK deploys the network first. The complete VPC/subnet/security-group export set stays present across compute-backend changes. Keep the same topology context on subsequent synth, diff and deploy commands.
+
+Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
+
+With Gateway, Registry, the Linear vault, alert email and a fork Blueprint enabled, the widest managed-image MicroVM configuration reaches **491 inline resources even with two zones** and is rejected. Keeping the two named AgentCore log groups owned across backend changes accounts for two of those resources. An explicit three-zone pin adds eight network resources: the widest managed ECS and MicroVM configurations reach 493 and 499 inline resources and are rejected; AgentCore reaches 490. Legacy/prepare Blueprint provisioning adds one more application resource, so three-zone AgentCore is rejected there too. All split counterparts pass. For these combinations, select split topology for a new installation or follow the existing-deployment ownership-transfer procedure below. The budget guard does not switch topology.
+
+For a **new installation with no existing resources or repository rows**:
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all \
+  -c networkTopology=split -c blueprintProvisioning=managed
+```
+
+This can be combined with the existing `compute_type`, `stackName` and optional-service context settings. The split preserves the supported-AZ selection, HTTPS egress rules, endpoints and DNS observation mode. Configure additional Blueprint domains in `cdk/src/blueprints/definitions.ts`; both stacks consume those inputs before any repository resource is created.
+
+**An existing inline deployment needs an ownership transfer.** Changing the flag in an ordinary deploy creates a different VPC and removes the old resources; matching logical IDs in different stacks do not preserve physical identity. The implementation has local synthesis coverage only. No populated AWS migration or rollback rehearsal was performed.
+
+For an existing deployment, prepare a migration against its actual deployed templates:
+
+1. Apply the [retention prerequisite](./DEVELOPER_GUIDE.md#stateful-retention-and-stack-decomposition) while keeping `networkTopology=inline`. Settle compute selection, Blueprint controller handoff, guardrail identity, asset normalization and provider attribution as separate updates. Record the resulting templates and configuration as the source baseline.
+2. Inventory physical IDs for the VPC, subnets, endpoints, security groups, routes, DNS associations, log groups and provider resources. Expect an ECS orchestrator Lambda version update when subnet environment references become imports. Preserve application data inventories and backups. Drain active tasks before moving network ownership.
+3. Check CloudFormation refactor/import support for each resource type and inspect the proposed mapping. `cdk refactor` requires `--unstable=refactor`; custom resources and provider changes need explicit handling. The target duplicates the shared AWS custom-resource provider and adds stack metadata, so the final template is not a move-only change. Do not assume a single refactor operation can apply it.
+4. If using retain/import, first deploy both retention policies on **every resource being transferred** in the source stack. The stateful-retention aspect protects network log groups, not every VPC/DNS resource. Resolve provider callbacks before detaching custom resources: the DNS configuration helper's Delete call changes fail-open behavior. Import eligibility and a resource-specific procedure must be established before removing source ownership.
+5. Transfer supported resources, establish network exports, then switch application consumers. Verify physical IDs and DNS/network behavior, API routes, authentication and retained data before resuming tasks. Keep source/target templates and the final mapping for recovery.
+
+Rollback requires the reverse ownership plan. CloudFormation will not remove or change exports while the application imports them. Redeploying `inline` or destroying the network stack is not an automatic rollback. These are migration requirements, not a validated migration script; the local feature can be used for fresh environments without claiming that existing-resource migration is verified.
+
+#### Reducing AZs in an existing split network
+
+A normal `--all` deployment updates the network first, so removing an AZ can fail because the old application still imports its private-subnet export. Reducing the count also shifts CDK's private-subnet CIDRs unless the vacated address slot stays reserved. Use the following staged procedure for a **three-to-two-zone reduction that keeps the first two existing AZs in their original order**. Replacing or reordering AZs requires a separate network migration.
+
+1. Pause automated deployments, task submissions, webhooks and scheduled work. Drain running and suspended sessions. Record the deployed templates, AZ order, subnet CIDRs, physical IDs and network exports. Keep the same account, region, stack identity, backend, image and Blueprint configuration throughout.
+2. Persist the target AZ list in the existing `cdk/cdk.json` context, keeping `networkTopology=split`. Increase `networkReservedAzs` by the number of removed trailing AZs, so active plus reserved slots remains constant. For three active zones with no reservations, the target is two active zones and one reserved slot. These example names must match the deployment's first two AZs:
+
+   ```json
+   "agentcore:availabilityZones": ["us-east-1a", "us-east-1b"],
+   "networkReservedAzs": 1
+   ```
+
+   `networkReservedAzs` accepts an integer from 0 to 6, as a JSON number or CLI string; the default is 0. It reserves address space and creates no AWS resources. Keep this setting in every subsequent synth/deploy, including automation.
+3. Set `APP_STACK` to the existing application stack name and review both target templates. The remaining subnets must keep their logical IDs, CIDRs and AZs; the target application must stop importing the removed subnet. Stop if the diff changes a retained subnet or any unrelated configuration.
+
+   ```bash
+   APP_STACK=backgroundagent-dev
+   MISE_EXPERIMENTAL=1 mise //cdk:diff -- --all --method template
+   ```
+
+4. Deploy **only the application**, leaving the existing three-zone network in place. `--exclusively` prevents CDK from deploying its network dependency:
+
+   ```bash
+   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- "$APP_STACK" --exclusively
+   ```
+
+5. Copy each removed private-subnet export's exact name from the deployed network outputs. Verify that `list-imports` returns `[]` before changing the network. Any additional consumer stack must also release that export.
+
+   ```bash
+   aws cloudformation describe-stacks --stack-name "${APP_STACK}-network" \
+     --query 'Stacks[0].Outputs[].{ExportName:ExportName,Value:OutputValue}' --output table
+   REMOVED_SUBNET_EXPORT='<exact removed private-subnet export name>'
+   aws cloudformation list-imports --export-name "$REMOVED_SUBNET_EXPORT" \
+     --query Imports --output json
+   ```
+
+6. Deploy both stacks with the same persisted target context. The network can now remove the unused export and AZ resources. Verify the remaining subnet physical IDs and CIDRs, DNS/egress behavior and a task before resuming producers and automation.
+
+   ```bash
+   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all
+   ```
+
+To restore the previous three-zone layout, restore its AZ list and reservation count, then deploy the network before the application (`--all` uses this order). The network must recreate the third subnet and export before the application imports it again. Keep active plus reserved slots constant during this recovery too.
+
+Local synthesis tests verify the import ordering and unchanged remaining subnet properties for all three backends. This procedure still requires a disposable AWS rehearsal before a production network update.
 
 ### Lambda MicroVMs backend (experimental)
 
@@ -69,7 +146,7 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
-This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+This context removes the registry API and runtime wiring. After the retention prerequisite is deployed, the registry custom resource and its external records are retained when disabled; re-enabling does not automatically adopt that registry. Inventory it and plan recovery or cleanup explicitly. Older deployments without retention can delete the registry and its records. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
 
 ## Bedrock inference geography
 
@@ -290,6 +367,8 @@ AGENTCORE_AVAILABILITY_ZONES = ["us-east-1b","us-east-1c"]
    ```
 
 The override is validated at synth time, and both the JSON-array and `-c` string forms behave identically. Synth fails with a message naming the key when the value is not an array, has an empty/non-string entry, lists fewer than two **distinct** zones, contains zone *IDs* instead of names (`use1-az2` — a common column mix-up), or names zones outside the target region. When the account's mapping is knowable, the override is additionally cross-checked against the supported set, and unsupported or nonexistent zones fail synth.
+
+Auto-pin selects two supported zones; an explicit override uses all the zones supplied. Pins above two zones remain subject to the 490-resource production ceiling. Configurations that exceed it need split networking; see [Network stack topology](#network-stack-topology) for the measured boundaries and migration requirements.
 
 **Upgrading an existing stack.** Auto-pin is on by default, so a local `cdk deploy` against a stack created before this change may select different zones than the deployed subnets use. `Subnet.AvailabilityZone` is create-only, so that is a **replacement** of the subnets and the resources bound to them (route tables, NAT gateway/EIP, VPC endpoints). Run `mise //cdk:diff` first. If the diff shows subnet replacement and you would rather keep the current topology, pin the override to the zones already deployed:
 

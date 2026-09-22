@@ -102,7 +102,7 @@ describe('assertComputeSubstrateDeployed', () => {
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/--context compute_type=lambda-microvm/);
     // The MicroVM remedy is more specific than ECS's about WHERE it fails,
     // because the strategy's env-var guard fires before any AWS call.
-    expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/MICROVM_\*/);
+    expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/fail at session start/);
   });
 
   test('refuses each optional backend on the OTHER one (they are mutually exclusive today)', () => {
@@ -119,5 +119,20 @@ describe('assertComputeSubstrateDeployed', () => {
     // `compute_types` follow-up would break onboarding for both backends.
     expect(assertFor('ecs', 'ecs,lambda-microvm')).not.toThrow();
     expect(assertFor('lambda-microvm', 'ecs,lambda-microvm')).not.toThrow();
+  });
+});
+
+describe('exclusive backend output', () => {
+  test.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('inherits %s and rejects every other backend', backend => {
+    const deployment = { stackName: 'test', computeSubstrate: backend, computeDeploymentMode: 'exclusive' };
+    expect(() => assertComputeSubstrateDeployed({ ...deployment, computeType: undefined })).not.toThrow();
+    for (const requested of ['agentcore', 'ecs', 'lambda-microvm'] as const) {
+      const check = () => assertComputeSubstrateDeployed({ ...deployment, computeType: requested });
+      if (requested === backend) expect(check).not.toThrow();
+      else expect(check).toThrow(/deploys only/);
+    }
+  });
+  test.each([null, '', 'ecs,lambda-microvm', 'unknown'])('rejects malformed exclusive output %p', computeSubstrate => {
+    expect(() => assertComputeSubstrateDeployed({ stackName: 'test', computeSubstrate, computeDeploymentMode: 'exclusive', computeType: undefined })).toThrow(/invalid or missing/);
   });
 });

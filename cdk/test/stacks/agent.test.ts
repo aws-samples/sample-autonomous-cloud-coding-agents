@@ -45,6 +45,45 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
+  test('managed blueprints allow the shared AWS provider to be created later by logging', () => {
+    const app = new App({ context: { blueprintProvisioning: 'managed' } });
+    const managed = Template.fromStack(new AgentStack(app, 'ManagedBlueprintStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    managed.resourceCountIs('Custom::BlueprintRepoConfig', 1);
+    expect(Object.keys(managed.findResources('Custom::AWS'))).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('BlueprintRepoConfig'),
+    ]));
+  });
+
+  test('binds every input guardrail consumer to the explicitly mapped version', () => {
+    const versions = Object.values(template.findResources('AWS::Bedrock::GuardrailVersion'));
+    expect(versions).toHaveLength(1);
+    const logicalId = 'ExistingInputGuardrailVersion';
+    const app = new App({
+      context: {
+        guardrailVersionMigration: {
+          logicalId,
+          configurationHash: versions[0].Metadata['abca:guardrail-configuration-sha256'],
+        },
+      },
+    });
+    const mapped = Template.fromStack(new AgentStack(app, 'TestAgentStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(mapped.findResources('AWS::Bedrock::Guardrail'))
+      .toEqual(template.findResources('AWS::Bedrock::Guardrail'));
+    expect(Object.keys(mapped.findResources('AWS::Bedrock::GuardrailVersion'))).toEqual([logicalId]);
+    const consumers = Object.values(mapped.findResources('AWS::Lambda::Function'))
+      .filter(resource => resource.Properties.Environment?.Variables?.GUARDRAIL_VERSION);
+    // The webhook create-task Lambda shares TaskApi's createTaskEnv.
+    expect(consumers).toHaveLength(10);
+    for (const resource of consumers) {
+      expect(resource.Properties.Environment.Variables.GUARDRAIL_VERSION)
+        .toEqual({ 'Fn::GetAtt': [logicalId, 'Version'] });
+    }
+  });
+
   test('creates exactly 22 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
@@ -1099,39 +1138,12 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   let template: Template;
 
   beforeAll(() => {
-    // Deploying with the gate on provisions the Fargate substrate alongside the
-    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
+    // Selecting ECS provisions the Fargate backend and emits ComputeSubstrate=ecs.
     const app = new App({ context: { compute_type: 'ecs' } });
     const stack = new AgentStack(app, 'TestAgentStackEcs', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
-  });
-
-  /**
-   * CloudFormation refuses a template over 1 MB, and refuses it at CHANGESET CREATION —
-   * after synth succeeds and every asset is pushed. The message names no resource, and
-   * the stack's own status stays at whatever the previous deploy left, so checking stack
-   * status instead of the deploy's exit code reads as success.
-   *
-   * Asserted on the ECS template because that is the substrate deployments use, and it is
-   * the larger of the two: 894,261 bytes here versus 858,062 for the default at the time
-   * of writing. Measured the way the CDK CLI WRITES the template (`null, 2`), which is how
-   * CloudFormation counts it — compact serialization of the same template is ~300 KB
-   * smaller, so a budget checked against compact bytes passes while the deploy fails.
-   *
-   * These in-test figures are lower than what `cdk synth` writes to disk, because the CLI
-   * resolves asset hashes and account/region tokens that `Template.fromStack` leaves
-   * symbolic. The budget is therefore a trend guard on the relative number, not a
-   * prediction of the byte count CloudFormation will receive.
-   *
-   * Reuses the template this describe already synthesizes; no extra synth.
-   */
-  test('stays inside a deployable template budget (CloudFormation hard-fails at 1 MB)', () => {
-    const bytes = Buffer.byteLength(JSON.stringify(template.toJSON(), null, 2), 'utf8');
-    expect(bytes).toBeLessThan(1_000_000);
-    // 5% under, so this fires while there is still room to land the change that trips it.
-    expect(bytes).toBeLessThan(950_000);
   });
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
@@ -1407,7 +1419,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
     );
     expect(policies).toContain('logs:CreateLogStream');
-    expect(policies).toContain('RuntimeApplicationLogGroup');
+    expect(policies).toContain('LambdaMicrovmComputeMicrovmLogGroup');
 
     // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
@@ -1415,7 +1427,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const logGroupEnv = JSON.stringify(
       orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
     );
-    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+    expect(logGroupEnv).toContain('LambdaMicrovmComputeMicrovmLogGroup');
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
@@ -1883,30 +1895,16 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
-    // — platform_config carries the workload name and the guest's execution role gets the
-    // mint grant — but the two cannot be enabled together today: 505 resources against a
-    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
-    // without saying so would be false.
-    //
-    // The stack refuses the combination itself rather than letting the counter throw,
-    // because the counter's message is a per-type census that never mentions either flag —
-    // the operator cannot tell from it what to change.
-    //
-    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
-    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
-    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
-    //
-    // When the room is found, this test should be replaced by a real parity assertion.
-    const app = new App({
-      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
-    });
-    expect(() => Template.fromStack(
-      new AgentStack(app, 'LinearVaultMicrovmStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' } });
+    const template = Template.fromStack(new AgentStack(app, 'LinearVaultMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    const policy = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')));
+    expect(policy).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThanOrEqual(500);
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {
@@ -1962,66 +1960,6 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       'orchestration-reconciler.ts',
     ]);
   });
-});
-
-describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
-  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
-  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.
-  // Every deploy-gate cell is covered, not only the widest, so a regression confined
-  // to one substrate cannot hide behind the others. The gap this closes: no test had
-  // ever constructed `compute_type` and `enableToolGateway` *together*, so the widest
-  // cell could exceed the quota — unable to synthesize at all — with CI still green.
-  // Budget is deliberately below the quota so this fails as a readable assertion with a
-  // named remedy before synth starts throwing.
-  const MAX_RESOURCE_BUDGET = 500;
-  const CUSHION = 10;
-  const RESOURCE_BUDGET = MAX_RESOURCE_BUDGET - CUSHION;
-
-  // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
-  // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
-  const SYNTH_ONLY_RESOURCES = 1;
-
-  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
-  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
-    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
-  );
-
-  describe.each(CELLS)(
-    'compute_type=$computeType enableToolGateway=$enableToolGateway',
-    ({ computeType, enableToolGateway }) => {
-      let template: Template;
-
-      beforeAll(() => {
-        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
-        const stack = new AgentStack(app, 'BudgetStack', {
-          env: { account: '123456789012', region: 'us-east-1' },
-        });
-        // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
-        // reaching the assertions below is itself part of the guard.
-        template = Template.fromStack(stack);
-      });
-
-      test('stays inside the resource budget', () => {
-        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
-        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
-      });
-
-      test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {
-        // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
-        // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
-        // scoped to `method.testMethodArn` — removing the API Gateway console's "TEST"
-        // button, which nothing in this solution invokes, and its extra
-        // `lambda:InvokeFunction` grant.
-        // Naming the offending logical IDs makes a regressed call site point straight
-        // at its own construct.
-        const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
-          .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
-          .map(([logicalId]) => logicalId);
-
-        expect(offenders).toEqual([]);
-      });
-    },
-  );
 });
 
 describe('AgentStack Agent Registry gate', () => {

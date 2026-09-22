@@ -19,125 +19,80 @@
 
 import { CliError } from './errors';
 
-/** Per-repo compute backend, mirrored from `cdk/src/handlers/shared/repo-config.ts`. */
+/** Mirrored from cdk/src/handlers/shared/compute-backend.ts. */
 export type OnboardComputeType = 'agentcore' | 'ecs' | 'lambda-microvm';
 
-/**
- * Parse the stack's `ComputeSubstrate` output into the set of OPTIONAL substrates
- * the deploy provisioned.
- *
- * ## What the output actually contains today: ONE value
- *
- * `cdk/src/stacks/agent.ts` emits
- * `ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore')`, and both
- * constructs are gated on the SAME single-valued `compute_type` deploy context
- * (`--context compute_type=…`). So the two optional backends are **mutually
- * exclusive today** — a mixed `ecs` + `lambda-microvm` deploy is not
- * expressible, which is why that ternary can never have to arbitrate, and why
- * the CDK test asserts "does NOT provision the ECS substrate (the gates are
- * mutually exclusive)" on a MicroVM stack.
- *
- * The three reachable values are therefore:
- *
- * | Output | Substrates available to tasks |
- * |---|---|
- * | `agentcore` | AgentCore only |
- * | `ecs` | AgentCore **and** ECS (the optional backends are additive) |
- * | `lambda-microvm` | AgentCore **and** Lambda MicroVMs |
- *
- * ## Why this parses a LIST anyway
- *
- * ADR-021 sub-decision 4 explicitly flags the single-value tag as "already
- * imprecise with two backends, wrong with three" and names a `compute_types` list
- * as the intended follow-up. If that lands, a stack would emit
- * `ecs,lambda-microvm` — and an `!== 'ecs'` equality check would then start
- * REFUSING valid onboardings, silently, in the safe-looking direction. Splitting
- * on commas makes that future value work correctly with no change here, while
- * being byte-identical in behaviour for the single values above.
- *
- * @param raw - the raw `ComputeSubstrate` output value, or null when absent.
- * @returns the provisioned substrate names, or `undefined` when the output is
- *   missing/blank (an older stack predating the output — "unknown", not "none").
- */
-export function parseComputeSubstrateOutput(
-  raw: string | null | undefined,
-): readonly string[] | undefined {
-  if (raw === null || raw === undefined) {
-    return undefined;
-  }
-  const values = raw.split(',').map((value) => value.trim()).filter(Boolean);
-  return values.length > 0 ? values : undefined;
+export interface ComputeDeployment {
+  readonly stackName: string;
+  readonly computeSubstrate: string | null | undefined;
+  readonly computeDeploymentMode?: string | null;
 }
 
-/** Backend-specific remedy copy for {@link assertComputeSubstrateDeployed}. */
-const SUBSTRATE_REMEDIES: Record<Exclude<OnboardComputeType, 'agentcore'>, {
-  readonly label: string;
-  readonly context: string;
-  readonly adds: string;
-  readonly runtimeFailure: string;
-}> = {
-  'ecs': {
-    label: 'ECS',
-    context: '`--context compute_type=ecs`',
-    adds: 'adds the Fargate substrate alongside AgentCore',
-    runtimeFailure: 'fail at task start',
-  },
-  'lambda-microvm': {
-    label: 'Lambda MicroVMs',
-    context: '`--context compute_type=lambda-microvm`',
-    adds: 'adds the Lambda MicroVMs substrate alongside AgentCore',
-    // More specific than the ECS wording because the MicroVM failure surfaces
-    // later and less legibly: the strategy's own env-var guard fires first if no
-    // image is configured, and otherwise RunMicrovm rejects the call.
-    runtimeFailure: 'fail at session start (no MICROVM_* configuration on the orchestrator)',
-  },
-};
+export interface ComputeDeploymentStatus {
+  readonly stack_name: string;
+  readonly compute_substrate: string | null;
+  readonly compute_deployment_mode: string | null;
+  readonly default_compute_type: OnboardComputeType;
+}
 
-/**
- * Refuse to onboard a repo onto a compute backend the deployed stack never
- * provisioned.
- *
- * Without this the row is written happily and every task on that repo dies at
- * session start — for `ecs` with "ECS compute strategy requires ECS_CLUSTER_ARN…",
- * for `lambda-microvm` with the strategy's "deployed without the Lambda MicroVMs
- * substrate" error (or, if an image somehow IS configured, a `RunMicrovm`
- * rejection). Catching it here turns a per-task runtime failure into one
- * config-time message with a fixable remedy.
- *
- * Two deliberate non-strictnesses, both carried over from the original ECS check:
- *
- *  - **`agentcore` is never gated.** The AgentCore runtime is unconditional; the
- *    other two backends are additive on top of it.
- *  - **An absent output means "unknown", not "none".** Stacks deployed before
- *    `ComputeSubstrate` existed return null, and hard-blocking there would break
- *    onboarding against a perfectly good older deploy. The runtime error remains
- *    the backstop in that case.
- *
- * @param args.stackName - stack the outputs were read from, for the message.
- * @param args.computeType - the backend the operator asked for.
- * @param args.computeSubstrate - raw `ComputeSubstrate` stack output (or null).
- * @throws CliError when the requested backend is definitely not deployed.
- */
-export function assertComputeSubstrateDeployed(args: {
-  stackName: string;
-  computeType: OnboardComputeType | undefined;
-  computeSubstrate: string | null | undefined;
-}): void {
-  const { stackName, computeType, computeSubstrate } = args;
-  if (!computeType || computeType === 'agentcore') {
-    return;
+/** Availability describes the deployment contract, not live backend health. */
+export interface RepositoryComputeBinding {
+  readonly compute_type: string;
+  readonly compute_available: boolean;
+  readonly configuration_error?: string;
+}
+
+/** Older deployments advertised optional backends as a comma-separated list. */
+export function parseComputeSubstrateOutput(raw: string | null | undefined): readonly string[] | undefined {
+  const values = raw?.split(',').map(value => value.trim()).filter(Boolean);
+  return values?.length ? values : undefined;
+}
+
+/** Explicit mode distinguishes exclusive deployments from existing additive stacks. */
+export function defaultComputeType(deployment: Pick<ComputeDeployment, 'computeSubstrate' | 'computeDeploymentMode'>): OnboardComputeType {
+  if (deployment.computeDeploymentMode !== 'exclusive') return 'agentcore';
+  const value = deployment.computeSubstrate;
+  if (value === 'agentcore' || value === 'ecs' || value === 'lambda-microvm') return value;
+  throw new CliError('Exclusive compute deployment has an invalid or missing ComputeSubstrate output. Re-deploy the CDK stack.');
+}
+
+export function describeComputeDeployment(deployment: ComputeDeployment): ComputeDeploymentStatus {
+  return {
+    stack_name: deployment.stackName,
+    compute_substrate: deployment.computeSubstrate ?? null,
+    compute_deployment_mode: deployment.computeDeploymentMode ?? null,
+    default_compute_type: defaultComputeType(deployment),
+  };
+}
+
+function computeConfigurationError(args: ComputeDeployment & { computeType: string | undefined }): string | undefined {
+  const selected = defaultComputeType(args);
+  const requested = args.computeType ?? selected;
+  if (!['agentcore', 'ecs', 'lambda-microvm'].includes(requested)) {
+    return `Unsupported repository compute_type '${requested}'. Choose agentcore, ecs or lambda-microvm.`;
   }
-
-  const provisioned = parseComputeSubstrateOutput(computeSubstrate);
-  if (!provisioned || provisioned.includes(computeType)) {
-    return;
+  if (args.computeDeploymentMode === 'exclusive') {
+    if (requested === selected) return;
+    return `Stack '${args.stackName}' deploys only '${selected}' (ComputeSubstrate=${args.computeSubstrate}); --compute-type ${requested} is unavailable. Use --compute-type ${selected}, or drain tasks and redeploy with --context compute_type=${requested}.`;
   }
+  const provisioned = parseComputeSubstrateOutput(args.computeSubstrate);
+  if (requested === 'agentcore' || !provisioned || provisioned.includes(requested)) return;
+  const label = requested === 'ecs' ? 'ECS' : 'Lambda MicroVMs';
+  return `Stack '${args.stackName}' was deployed without the ${label} substrate (ComputeSubstrate=${args.computeSubstrate}), so a repo onboarded as --compute-type ${requested} would fail at session start. Redeploy the stack with --context compute_type=${requested} first, then re-run this — or onboard with --compute-type agentcore.`;
+}
 
-  const remedy = SUBSTRATE_REMEDIES[computeType];
-  throw new CliError(
-    `Stack '${stackName}' was deployed without the ${remedy.label} substrate `
-    + `(ComputeSubstrate=${computeSubstrate}), so a repo onboarded as --compute-type ${computeType} `
-    + `would ${remedy.runtimeFailure}. Redeploy the stack with ${remedy.context} first `
-    + `(${remedy.adds}), then re-run this — or onboard with --compute-type agentcore.`,
-  );
+/** Report each stale pin without preventing inspection of other repositories. */
+export function resolveRepositoryCompute(deployment: ComputeDeployment, computeType?: string): RepositoryComputeBinding {
+  const configurationError = computeConfigurationError({ ...deployment, computeType });
+  return {
+    compute_type: computeType ?? defaultComputeType(deployment),
+    compute_available: configurationError === undefined,
+    ...(configurationError ? { configuration_error: configurationError } : {}),
+  };
+}
+
+/** Reject incompatible repository pins before writing RepoTable or probing MicroVM availability. */
+export function assertComputeSubstrateDeployed(args: ComputeDeployment & { computeType: string | undefined }): void {
+  const configurationError = computeConfigurationError(args);
+  if (configurationError) throw new CliError(configurationError);
 }

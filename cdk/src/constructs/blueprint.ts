@@ -17,18 +17,19 @@
  *  SOFTWARE.
  */
 
-import { Annotations, Duration } from 'aws-cdk-lib';
+import { Annotations, CustomResource, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct, IValidation } from 'constructs';
+import { BlueprintProvider } from './blueprint-provider';
 // Cross-language constants (S9 — see ``contracts/constants.md``). Import
 // the JSON directly rather than re-using ``handlers/shared/types.ts`` so
 // the construct layer stays decoupled from runtime-side types.
 import sharedConstants from '../../../contracts/constants.json';
+import { ASSET_FIELDS, BlueprintConfiguration, blueprintProvisioningMode, REPO_PATTERN } from '../blueprints/configuration';
 import { parseRef } from '../handlers/shared/registry/ref';
 
-const REPO_PATTERN = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const DOMAIN_PATTERN = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 
 /**
@@ -216,18 +217,12 @@ export interface BlueprintProps {
  * CDK construct that registers a repository with the platform by writing
  * a RepoConfig record to the shared RepoTable via a custom resource.
  *
- * Create: PutItem with status='active' and all config fields. Update: UpdateItem,
- * which SETs the fields a Blueprint declares and REMOVEs only per-repo **asset
- * refs** it no longer declares. Other dropped overrides are carried forward, not
- * cleared: `onUpdate` runs on every deploy and `bgagent repo onboard --model` is a
- * sanctioned second writer of the same row (ADR-017), so a blanket clear deleted an
- * operator's CLI pin on unrelated redeploys.
- * Delete: UpdateItem to set status='removed' and TTL for eventual cleanup.
- *
- * NOTE: Timestamps (onboarded_at, updated_at) are captured at CDK synth time,
- * not CloudFormation deploy time. This is an inherent limitation of AwsCustomResource
- * where parameters are baked into the template. For precise deploy-time timestamps,
- * a full custom resource Lambda would be needed.
+ * Legacy provisioning remains the default. The blueprintProvisioning context
+ * selects a staged handoff: prepare freezes the legacy callbacks, adopt installs
+ * the new controller without deletion authority, and managed enables its normal
+ * lifecycle. The managed controller timestamps mutations at execution time and
+ * preserves CLI-owned overrides. See the developer guide before an existing
+ * installation opts in; changing providers directly can invoke the old Delete.
  */
 export class Blueprint extends Construct {
   /**
@@ -300,65 +295,109 @@ export class Blueprint extends Construct {
     this.node.addValidation(new RegistryRefValidation('assets.cedarPolicyModules', this.cedarPolicyModuleRefs, 'cedar_policy_module'));
     this.node.addValidation(new RegistryRefValidation('assets.skills', this.skillRefs, 'skill'));
 
-    const now = new Date().toISOString();
+    const mode = blueprintProvisioningMode(this.node.tryGetContext('blueprintProvisioning'));
+    const configuration: BlueprintConfiguration = {};
+    if (props.compute?.type) {
+      configuration.compute_type = { S: props.compute.type };
+    }
+    if (props.compute?.runtimeArn) {
+      configuration.runtime_arn = { S: props.compute.runtimeArn };
+    }
+    if (props.agent?.modelId) {
+      configuration.model_id = { S: props.agent.modelId };
+    }
+    if (props.agent?.maxTurns !== undefined) {
+      configuration.max_turns = { N: String(props.agent.maxTurns) };
+    }
+    if (this.maxBudgetUsd !== undefined) {
+      configuration.max_budget_usd = { N: String(this.maxBudgetUsd) };
+    }
+    if (props.agent?.systemPromptOverrides) {
+      configuration.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
+    }
+    if (props.credentials?.githubTokenSecretArn) {
+      configuration.github_token_secret_arn = { S: props.credentials.githubTokenSecretArn };
+    }
+    if (props.pipeline?.pollIntervalMs !== undefined) {
+      configuration.poll_interval_ms = { N: String(props.pipeline.pollIntervalMs) };
+    }
+    if (props.pipeline?.buildCommand) {
+      configuration.build_command = { S: props.pipeline.buildCommand };
+    }
+    if (props.pipeline?.lintCommand) {
+      configuration.lint_command = { S: props.pipeline.lintCommand };
+    }
+    if (this.egressAllowlist.length > 0) {
+      configuration.egress_allowlist = { L: this.egressAllowlist.map(d => ({ S: d })) };
+    }
+    if (this.cedarPolicies.length > 0) {
+      configuration.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
+    }
+    if (this.approvalGateCap !== undefined) {
+      configuration.approval_gate_cap = { N: String(this.approvalGateCap) };
+    }
+    if (this.mcpServerRefs.length > 0) {
+      configuration.mcp_servers = { L: this.mcpServerRefs.map(r => ({ S: r })) };
+    }
+    if (this.cedarPolicyModuleRefs.length > 0) {
+      configuration.cedar_policy_modules = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
+    }
+    if (this.skillRefs.length > 0) {
+      configuration.skills = { L: this.skillRefs.map(r => ({ S: r })) };
+    }
 
-    // Build the DynamoDB item for PutItem
-    const item: Record<string, unknown> = {
+    if (mode === 'adopt' || mode === 'managed') {
+      const provider = BlueprintProvider.forScope(this, props.repoTable);
+      new CustomResource(this, 'ManagedRepoConfig', {
+        serviceToken: provider.serviceToken,
+        resourceType: 'Custom::BlueprintRepoConfig',
+        removalPolicy: mode === 'adopt' ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+        properties: {
+          TableName: props.repoTable.tableName,
+          Repo: props.repo,
+          Configuration: Stack.of(this).toJsonString(configuration),
+          Mode: mode,
+        },
+      });
+      return;
+    }
+    if (mode === 'prepare') {
+      // Preserve the legacy logical/physical identity, but make ALL callbacks inert.
+      // A rollback after cutover can then recreate this resource without PutItem
+      // overwriting the adopted row or Delete tombstoning it.
+      const describeTable = {
+        service: 'DynamoDB',
+        action: 'describeTable',
+        parameters: { TableName: props.repoTable.tableName },
+        outputPaths: ['Table.TableStatus'],
+        physicalResourceId: cr.PhysicalResourceId.of(`blueprint-${props.repo}`),
+      };
+      new cr.AwsCustomResource(this, 'RepoConfigCR', {
+        timeout: Duration.minutes(REPO_CONFIG_CR_TIMEOUT_MINUTES),
+        removalPolicy: RemovalPolicy.RETAIN,
+        onCreate: describeTable,
+        onUpdate: describeTable,
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({ actions: ['dynamodb:DescribeTable'], resources: [props.repoTable.tableArn] }),
+        ]),
+      });
+      return;
+    }
+
+    // Compatibility mode stays the default until an installation explicitly opts
+    // into the staged handoff. Preserve its existing SDK calls and identities.
+    const now = new Date().toISOString();
+    const item = {
       repo: { S: props.repo },
       status: { S: 'active' },
       onboarded_at: { S: now },
       updated_at: { S: now },
+      ...configuration,
     };
-
-    if (props.compute?.type) {
-      item.compute_type = { S: props.compute.type };
-    }
-    if (props.compute?.runtimeArn) {
-      item.runtime_arn = { S: props.compute.runtimeArn };
-    }
-    if (props.agent?.modelId) {
-      item.model_id = { S: props.agent.modelId };
-    }
-    if (props.agent?.maxTurns !== undefined) {
-      item.max_turns = { N: String(props.agent.maxTurns) };
-    }
-    if (this.maxBudgetUsd !== undefined) {
-      item.max_budget_usd = { N: String(this.maxBudgetUsd) };
-    }
-    if (props.agent?.systemPromptOverrides) {
-      item.system_prompt_overrides = { S: props.agent.systemPromptOverrides };
-    }
-    if (props.credentials?.githubTokenSecretArn) {
-      item.github_token_secret_arn = { S: props.credentials.githubTokenSecretArn };
-    }
-    if (props.pipeline?.pollIntervalMs !== undefined) {
-      item.poll_interval_ms = { N: String(props.pipeline.pollIntervalMs) };
-    }
-    if (props.pipeline?.buildCommand) {
-      item.build_command = { S: props.pipeline.buildCommand };
-    }
-    if (props.pipeline?.lintCommand) {
-      item.lint_command = { S: props.pipeline.lintCommand };
-    }
-    if (this.egressAllowlist.length > 0) {
-      item.egress_allowlist = { L: this.egressAllowlist.map(d => ({ S: d })) };
-    }
-    if (this.cedarPolicies.length > 0) {
-      item.cedar_policies = { L: this.cedarPolicies.map(p => ({ S: p })) };
-    }
-    if (this.approvalGateCap !== undefined) {
-      item.approval_gate_cap = { N: String(this.approvalGateCap) };
-    }
-    if (this.mcpServerRefs.length > 0) {
-      item.mcp_servers = { L: this.mcpServerRefs.map(r => ({ S: r })) };
-    }
-    if (this.cedarPolicyModuleRefs.length > 0) {
-      item.cedar_policy_modules = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
-    }
-    if (this.skillRefs.length > 0) {
-      item.skills = { L: this.skillRefs.map(r => ({ S: r })) };
-    }
-
+    const keys = Object.keys(configuration);
+    const removed = ASSET_FIELDS.filter(key => !configuration[key]);
+    const updateFields = keys.map(key => `, #${key} = :${key}`).join('');
+    const removeClause = removed.length ? ` REMOVE ${removed.map(key => `#${key}`).join(', ')}` : '';
     new cr.AwsCustomResource(this, 'RepoConfigCR', {
       timeout: Duration.minutes(REPO_CONFIG_CR_TIMEOUT_MINUTES),
       onCreate: {
@@ -376,17 +415,16 @@ export class Blueprint extends Construct {
         parameters: {
           TableName: props.repoTable.tableName,
           Key: { repo: { S: props.repo } },
-          UpdateExpression: `SET #status = :active, #updated = :now${this.buildUpdateFields(props)}${this.buildRemoveClause()}`,
+          UpdateExpression: `SET #status = :active, #updated = :now${updateFields}${removeClause}`,
           ExpressionAttributeNames: {
             '#status': 'status',
             '#updated': 'updated_at',
-            ...this.buildExpressionNames(props),
-            ...this.buildRemoveNames(),
+            ...Object.fromEntries([...keys, ...removed].map(key => [`#${key}`, key])),
           },
           ExpressionAttributeValues: {
             ':active': { S: 'active' },
             ':now': { S: new Date().toISOString() },
-            ...this.buildExpressionValues(props),
+            ...Object.fromEntries(Object.entries(configuration).map(([key, value]) => [`:${key}`, value])),
           },
         },
         physicalResourceId: cr.PhysicalResourceId.of(`blueprint-${props.repo}`),
@@ -417,95 +455,6 @@ export class Blueprint extends Construct {
         }),
       ]),
     });
-  }
-
-  private buildUpdateFields(props: BlueprintProps): string {
-    const fields: string[] = [];
-    if (props.compute?.type) fields.push(', #compute_type = :compute_type');
-    if (props.compute?.runtimeArn) fields.push(', #runtime_arn = :runtime_arn');
-    if (props.agent?.modelId) fields.push(', #model_id = :model_id');
-    if (props.agent?.maxTurns !== undefined) fields.push(', #max_turns = :max_turns');
-    if (this.maxBudgetUsd !== undefined) fields.push(', #max_budget_usd = :max_budget_usd');
-    if (props.agent?.systemPromptOverrides) fields.push(', #system_prompt_overrides = :system_prompt_overrides');
-    if (props.credentials?.githubTokenSecretArn) fields.push(', #github_token_secret_arn = :github_token_secret_arn');
-    if (props.pipeline?.pollIntervalMs !== undefined) fields.push(', #poll_interval_ms = :poll_interval_ms');
-    if (props.pipeline?.buildCommand) fields.push(', #build_command = :build_command');
-    if (props.pipeline?.lintCommand) fields.push(', #lint_command = :lint_command');
-    if (this.egressAllowlist.length > 0) fields.push(', #egress_allowlist = :egress_allowlist');
-    if (this.cedarPolicies.length > 0) fields.push(', #cedar_policies = :cedar_policies');
-    if (this.approvalGateCap !== undefined) fields.push(', #approval_gate_cap = :approval_gate_cap');
-    // Registry asset refs (#246) — must mirror onCreate's item, else a redeploy
-    // of an already-onboarded repo silently drops asset-ref changes.
-    if (this.mcpServerRefs.length > 0) fields.push(', #mcp_servers = :mcp_servers');
-    if (this.cedarPolicyModuleRefs.length > 0) fields.push(', #cedar_policy_modules = :cedar_policy_modules');
-    if (this.skillRefs.length > 0) fields.push(', #skills = :skills');
-    return fields.join('');
-  }
-
-  private buildExpressionNames(props: BlueprintProps): Record<string, string> {
-    const names: Record<string, string> = {};
-    if (props.compute?.type) names['#compute_type'] = 'compute_type';
-    if (props.compute?.runtimeArn) names['#runtime_arn'] = 'runtime_arn';
-    if (props.agent?.modelId) names['#model_id'] = 'model_id';
-    if (props.agent?.maxTurns !== undefined) names['#max_turns'] = 'max_turns';
-    if (this.maxBudgetUsd !== undefined) names['#max_budget_usd'] = 'max_budget_usd';
-    if (props.agent?.systemPromptOverrides) names['#system_prompt_overrides'] = 'system_prompt_overrides';
-    if (props.credentials?.githubTokenSecretArn) names['#github_token_secret_arn'] = 'github_token_secret_arn';
-    if (props.pipeline?.pollIntervalMs !== undefined) names['#poll_interval_ms'] = 'poll_interval_ms';
-    if (props.pipeline?.buildCommand) names['#build_command'] = 'build_command';
-    if (props.pipeline?.lintCommand) names['#lint_command'] = 'lint_command';
-    if (this.egressAllowlist.length > 0) names['#egress_allowlist'] = 'egress_allowlist';
-    if (this.cedarPolicies.length > 0) names['#cedar_policies'] = 'cedar_policies';
-    if (this.approvalGateCap !== undefined) names['#approval_gate_cap'] = 'approval_gate_cap';
-    if (this.mcpServerRefs.length > 0) names['#mcp_servers'] = 'mcp_servers';
-    if (this.cedarPolicyModuleRefs.length > 0) names['#cedar_policy_modules'] = 'cedar_policy_modules';
-    if (this.skillRefs.length > 0) names['#skills'] = 'skills';
-    return names;
-  }
-
-  private buildExpressionValues(props: BlueprintProps): Record<string, unknown> {
-    const values: Record<string, unknown> = {};
-    if (props.compute?.type) values[':compute_type'] = { S: props.compute.type };
-    if (props.compute?.runtimeArn) values[':runtime_arn'] = { S: props.compute.runtimeArn };
-    if (props.agent?.modelId) values[':model_id'] = { S: props.agent.modelId };
-    if (props.agent?.maxTurns !== undefined) values[':max_turns'] = { N: String(props.agent.maxTurns) };
-    if (this.maxBudgetUsd !== undefined) values[':max_budget_usd'] = { N: String(this.maxBudgetUsd) };
-    if (props.agent?.systemPromptOverrides) values[':system_prompt_overrides'] = { S: props.agent.systemPromptOverrides };
-    if (props.credentials?.githubTokenSecretArn) values[':github_token_secret_arn'] = { S: props.credentials.githubTokenSecretArn };
-    if (props.pipeline?.pollIntervalMs !== undefined) values[':poll_interval_ms'] = { N: String(props.pipeline.pollIntervalMs) };
-    if (props.pipeline?.buildCommand) values[':build_command'] = { S: props.pipeline.buildCommand };
-    if (props.pipeline?.lintCommand) values[':lint_command'] = { S: props.pipeline.lintCommand };
-    if (this.egressAllowlist.length > 0) values[':egress_allowlist'] = { L: this.egressAllowlist.map(d => ({ S: d })) };
-    if (this.cedarPolicies.length > 0) values[':cedar_policies'] = { L: this.cedarPolicies.map(p => ({ S: p })) };
-    if (this.approvalGateCap !== undefined) values[':approval_gate_cap'] = { N: String(this.approvalGateCap) };
-    if (this.mcpServerRefs.length > 0) values[':mcp_servers'] = { L: this.mcpServerRefs.map(r => ({ S: r })) };
-    if (this.cedarPolicyModuleRefs.length > 0) values[':cedar_policy_modules'] = { L: this.cedarPolicyModuleRefs.map(r => ({ S: r })) };
-    if (this.skillRefs.length > 0) values[':skills'] = { L: this.skillRefs.map(r => ({ S: r })) };
-    return values;
-  }
-
-  /** Registry asset fields that are now empty must be REMOVEd on update, not
-   *  just omitted from SET — otherwise a redeploy that cleared the last
-   *  mcp_server/cedar_policy_module/skill leaves the stale DDB refs active and
-   *  operators can't detach a pinned asset through the Blueprint API (#246). */
-  private emptyAssetFields(): string[] {
-    const empty: string[] = [];
-    if (this.mcpServerRefs.length === 0) empty.push('mcp_servers');
-    if (this.cedarPolicyModuleRefs.length === 0) empty.push('cedar_policy_modules');
-    if (this.skillRefs.length === 0) empty.push('skills');
-    return empty;
-  }
-
-  private buildRemoveClause(): string {
-    const fields = this.emptyAssetFields();
-    return fields.length > 0 ? ` REMOVE ${fields.map(f => `#${f}`).join(', ')}` : '';
-  }
-
-  private buildRemoveNames(): Record<string, string> {
-    const names: Record<string, string> = {};
-    const fields = this.emptyAssetFields();
-    for (const f of fields) names[`#${f}`] = f;
-    return names;
   }
 }
 

@@ -6,7 +6,7 @@ title: Adr 022 agent asset registry
 
 **Status:** accepted
 **Date:** 2026-07-08
-**Last-updated:** 2026-08-24
+**Last-updated:** 2026-09-21
 
 ## Context
 
@@ -145,7 +145,7 @@ The following platforms were reviewed but did not warrant a full write-up above,
 - Semver resolution added on top of Agent Registry's version string materially complicates the resolver or breaks the parity contract with WORKFLOWS.md.
 - A future Agent Registry contract migration cost, weighed against ABCA's release timeline, exceeds the cost of building DDB+S3 once.
 
-**Deployment gate after the 2026-08-06 cutover.** ABCA now targets the standalone `agent-registry` namespace. Agent Registry is enabled by default for compatibility, but operators in an unsupported or restricted account/region deploy with `--context enableAgentRegistry=false`. That omits the registry, registry API, registry IAM, environment wiring, and outputs; any remaining `registry://` reference fails closed. The migration creates a fresh registry, so operators must re-publish records or use AWS migration tooling outside ABCA. Turning the feature off on an existing stack removes the CloudFormation-managed registry and its records.
+**Deployment gate after the 2026-08-06 cutover.** ABCA now targets the standalone `agent-registry` namespace. Agent Registry is enabled by default for compatibility, but operators in an unsupported or restricted account/region deploy with `--context enableAgentRegistry=false`. That omits the registry, registry API, registry IAM, environment wiring, and outputs; any remaining `registry://` reference fails closed. The migration creates a fresh registry, so operators must re-publish records or use AWS migration tooling outside ABCA. After the #852 retention prerequisite is deployed, turning the feature off removes its CloudFormation resource while retaining the registry and its records. Before that prerequisite is installed, the deployed resource still has its original deletion behavior. Re-enabling the feature requires reconciling the retained registry; CloudFormation does not automatically adopt it.
 
 Regardless of substrate, the invariants above (semver, immutability, resolve-at-boundary, descriptor validation, governance workflow, fail-closed, resolver interface as the seam) hold.
 
@@ -197,6 +197,7 @@ Regardless of substrate, the invariants above (semver, immutability, resolve-at-
 
 ## Changelog
 
+- **2026-09-21 — retention prerequisite (#852).** Clarified registry removal after retention has been installed; feature disablement no longer implies deletion of the retained external registry.
 - **2026-08-24 — accepted; migrated to standalone AWS Agent Registry (#771).** Marked the ADR accepted after #664/#665 merged. Replaced the retired `bedrock-agentcore` preview assumptions with the standalone `agent-registry` namespace, recorded the fresh-registry migration requirement, and added the default-on `enableAgentRegistry` context gate (deploy with `enableAgentRegistry=false` to opt out) for unsupported or restricted accounts/regions.
 - **2026-08-11 — renumbered 018 → 022; added read-path + descriptor-integrity invariants.** Renamed the file `ADR-018 → ADR-022`: `ADR-018` was taken by the Linear agent-session-interaction ADR on `main`, and 019/020/021 were claimed (open PR #663 + merged ADRs), so `docs/decisions/README.md`'s "numbers are never reused" rule required the next free number, 022. Also, from a second implementation-review pass on #664/#665 (@scottschreckengaust): added **read-path confidentiality** invariants to sub-decision 11 and the substrate-invariant list — runtime payloads reference credentials (never inline them) and open read surfaces redact by **allowlist**, not denylist; and strengthened sub-decision 7 to require the validated descriptor be carried **isolated from caller-controlled discovery prose** (non-bypassable validation), covering `CUSTOM` too. Bumped `Last-updated`.
 - **2026-07-28 — kept `proposed`; qualified implementation claims.** Reverted a premature `proposed → accepted` flip: per `docs/decisions/README.md` an ADR flips to `accepted` when its implementing PR merges, and the implementation is still in review (#664/#665). Softened "shipped / proven E2E on a live stack" language to "targeted by #664/#665, exercised on a dev stack during review," and stopped citing the parked DDB+S3 PRs (#632–#634) as current. Added a Status note in the Decision section. The ADR flips to `accepted` — with a Changelog entry pointing at the merged SHAs — once #664/#665 land. Landed in this round: the kind-vocabulary alias note (short vs long forms), the federation Non-goal, and the 2026-08-06-cutover gate.

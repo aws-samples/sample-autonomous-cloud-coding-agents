@@ -17,8 +17,9 @@
  *  SOFTWARE.
  */
 
-import { App, AppProps, AspectPriority, Aspects, Tags } from 'aws-cdk-lib';
+import { App, AppProps, AspectPriority, Aspects, STACK_RESOURCE_LIMIT_CONTEXT, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
+import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from './blueprints/definitions';
 import {
   applyAgentCoreAzDiagnostics,
   DescribeAzsFn,
@@ -26,7 +27,10 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
+import { resolveComputeBackend } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
+import { NetworkStack, resolveNetworkTopology } from './stacks/network';
+import { DEFAULT_BUDGETS } from './synthesis/budgets';
 
 // for development, use account/region from cdk cli
 const devEnv = {
@@ -46,6 +50,8 @@ export interface BuildAppOptions {
   readonly describeAzs?: DescribeAzsFn;
   /** Injectable caller-account lookup so tests need no AWS access. */
   readonly resolveCallerAccount?: ResolveCallerAccountFn;
+  /** Repository configuration shared by provisioning and DNS policy. */
+  readonly blueprints?: readonly BlueprintDefinition[];
 }
 
 /**
@@ -62,21 +68,42 @@ export interface BuildAppOptions {
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);
+  // Apply to every parent and nested template, including newly extracted stacks.
+  app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
+  // Enforce the same ceiling on actual deploy inputs, including operator overrides
+  // outside the census. CDK applies this context to parent and nested stacks.
+  const configuredLimit: unknown = app.node.tryGetContext(STACK_RESOURCE_LIMIT_CONTEXT);
+  const resourceLimit = configuredLimit === undefined ? DEFAULT_BUDGETS.resources
+    : typeof configuredLimit === 'string' ? Number(configuredLimit) : configuredLimit;
+  if (typeof resourceLimit !== 'number' || !Number.isInteger(resourceLimit)
+    || resourceLimit < 1 || resourceLimit > DEFAULT_BUDGETS.resources) {
+    throw new Error(
+      `Context '${STACK_RESOURCE_LIMIT_CONTEXT}' must be an integer from 1 to ${DEFAULT_BUDGETS.resources}. `
+      + 'The ABCA resource budget can be tightened but not raised. Use networkTopology=split for more '
+      + 'application headroom; existing deployments require an explicit network migration.',
+    );
+  }
+  app.node.setContext(STACK_RESOURCE_LIMIT_CONTEXT, resourceLimit);
 
   Aspects.of(app).add(new AwsSolutionsChecks());
 
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
+  const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
+  const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
 
   const env = {
     account: options.account ?? devEnv.account,
     region: options.region ?? devEnv.region,
   };
 
+  // Preserve existing VPC placement across backend selection changes. The shared
+  // network continues to use the established AgentCore-compatible AZ policy.
   // Auto-pin the VPC to AgentCore-supported AZs (or honor the validated
   // `agentcore:availabilityZones` override). `zones` undefined => CDK default
   // selection; `diagnostics` are attached to the stack below, because CDK only
   // collects annotations that hang off a stack's tree — App-node metadata would
   // be silently dropped, which is how a failed lookup used to pass unnoticed.
+  const computeType = resolveComputeBackend(app.node.tryGetContext('compute_type'));
   const azResolution = await resolveAgentCoreAzs({
     node: app.node,
     account: env.account,
@@ -85,33 +112,33 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     resolveCallerAccount: options.resolveCallerAccount,
   });
 
+  const network = networkTopology === 'split' ? new NetworkStack(app, `${stackName}-network`, {
+    env,
+    applicationStackName: stackName,
+    agentCoreAvailabilityZones: azResolution.zones,
+    additionalAllowedDomains: blueprintEgressDomains(blueprints),
+    description: 'ABCA network infrastructure (uksb-wt64nei4u6)',
+  }) : undefined;
+
   const stack = new AgentStack(
     app,
     stackName,
     {
       env,
       agentCoreAvailabilityZones: azResolution.zones,
+      network,
+      blueprints,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
-      // Emit compact JSON for a CloudFormation 1 MB template-body ceiling.
-      suppressTemplateIndentation: true,
     },
   );
 
-  applyAgentCoreAzDiagnostics(stack, azResolution);
+  applyAgentCoreAzDiagnostics(network ?? stack, azResolution);
 
   // Outbound SDK solution attribution (#319): set AWS_SDK_UA_APP_ID on every
   // Lambda so the SDK emits `app/uksb-wt64nei4u6#{stackName}` natively. One
   // Aspect covers current and future functions structurally. Override via
   // `-c sdkUaAppId=...`; `-c sdkUaAppId=''` opts out (no app/ segment anywhere).
   const sdkUaAppIdOverride = app.node.tryGetContext('sdkUaAppId') as string | undefined;
-  // MUTATING priority so the env var is set before cdk-nag (priority 500)
-  // inspects the synthesized functions — matches the agent stack's aspects.
-  Aspects.of(stack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
-    priority: AspectPriority.MUTATING,
-  });
-
-  const computeType = app.node.tryGetContext('compute_type') ?? 'agentcore';
-
   // Route53 Resolver resources where tag changes trigger replacement cascades.
   // Config: treats ANY property change (including tags) as requiring replacement.
   // Association: depends on Config's physical ID; if Config is replaced, the
@@ -120,17 +147,6 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'AWS::Route53Resolver::ResolverQueryLoggingConfig',
     'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation',
   ];
-
-  // TODO(#645): with three backends this single-valued tag is no longer an honest
-  // statement of what a stack runs — a `--context compute_type=lambda-microvm`
-  // deploy still provisions the AgentCore runtime, so every resource gets tagged
-  // `compute_type=lambda-microvm` including the AgentCore ones. ADR-021
-  // sub-decision 4 flags revisiting the semantics (e.g. a `compute_types` list).
-  // Deliberately NOT changed here: retagging every resource in the stack is a
-  // replacement-risk change of its own, and MicroVM spend is already attributable
-  // through the per-resource `abca:compute-backend` tags the
-  // LambdaMicrovmCompute construct applies.
-  Tags.of(stack).add('compute_type', computeType, { excludeResourceTypes });
 
   const githubTagKeys = [
     'sha',
@@ -148,9 +164,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
     'clean',
   ] as const;
 
-  for (const key of githubTagKeys) {
-    const value = app.node.tryGetContext(`github:${key}`);
-    Tags.of(stack).add(`github:${key}`, value || 'none', { excludeResourceTypes });
+  for (const deploymentStack of network ? [network, stack] : [stack]) {
+    // Keep the application deployment identity on both stacks' SDK calls.
+    Aspects.of(deploymentStack).add(new SolutionUaAspect(buildAppId(stackName, sdkUaAppIdOverride)), {
+      priority: AspectPriority.MUTATING,
+    });
+    Tags.of(deploymentStack).add('compute_type', computeType, { excludeResourceTypes });
+    for (const key of githubTagKeys) {
+      const value = app.node.tryGetContext(`github:${key}`);
+      Tags.of(deploymentStack).add(`github:${key}`, value || 'none', { excludeResourceTypes });
+    }
   }
 
   return app;
