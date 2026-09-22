@@ -323,8 +323,8 @@ const MAX_POLL_INTERVAL_MS = 300_000;
 /**
  * Build the ``compute_metadata`` map persisted on the task row at session start,
  * so a later handler can act on the right backend without re-deriving anything:
- * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
- * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
+ * cancellation uses the backend's worker identity, and MicroVM approval wake
+ * uses ``microvmId`` plus the saved image identity.
  *
  * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
  * compile error here rather than a silently empty metadata map — the field is
