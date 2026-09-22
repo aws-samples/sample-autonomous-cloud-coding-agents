@@ -46,7 +46,7 @@ import {
   renderTaskLookupFailedNudge,
   renderWrongMentionNudge,
 } from './shared/linear-notes';
-import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
@@ -623,6 +623,16 @@ interface LinearCommentEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /**
+   * Whether the stack-wide secret — bound to no workspace — is what verified this
+   * delivery, as reported by the receiver.
+   *
+   * On that path the body's `organizationId` is claimed rather than attested, so it must
+   * not be used to select a tenant. Absent is read as `false`, which is correct for the
+   * per-workspace path and is also what an in-flight invocation from a previous version
+   * looks like during a deploy.
+   */
+  readonly verified_via_stack_wide?: boolean;
 }
 
 /**
@@ -689,6 +699,33 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
+  // A delivery verified by the stack-wide secret carries no proof of WHICH workspace
+  // sent it — that secret is bound to none of them — so the body's `organizationId`
+  // is a claim. Replace it with the only workspace it could mean, and drop the delivery
+  // when there is no single answer.
+  //
+  // Rewritten on the payload rather than threaded as a parameter because the workspace
+  // id is read from ~6 places downstream (task attribution, feedback, the comment path).
+  // Passing it alongside would leave every one of those a site where the claimed value
+  // could still be picked up by mistake; overwriting the untrusted field means the
+  // attested value is the only one reachable.
+  if (event.verified_via_stack_wide) {
+    const bound = await resolveSoleActiveLinearWorkspace(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (!bound) {
+      logger.warn('Dropping stack-wide-verified Linear delivery: cannot determine the sending workspace', {
+        claimed_workspace_id: payload.organizationId,
+      });
+      return;
+    }
+    if (payload.organizationId && payload.organizationId !== bound) {
+      logger.warn('Ignoring body organizationId on a stack-wide-verified delivery; binding to the sole active workspace', {
+        claimed_workspace_id: payload.organizationId,
+        bound_workspace_id: bound,
+      });
+    }
+    (payload as { organizationId?: string }).organizationId = bound;
+  }
+
   // A Comment with an @bgagent mention on an orchestrated sub-issue
   // re-iterates that sub-issue's PR (the reconciler then cascades the
   // re-stack). Handled on a separate path from Issue → task creation.
@@ -720,6 +757,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       mappingItem = mapping.Item;
     }
   }
+
+  // The mapping table is keyed on the project id alone, so `projectId` selects a
+  // repository on its own — and it arrives in the request body. Check the mapping
+  // against the workspace the delivery claims to be from, so naming another
+  // workspace's project cannot steer a task at that workspace's repository.
+  //
+  // Drop rather than reply. The reply would go to the sender's own workspace, and
+  // "that project belongs to someone else" both confirms the project exists and tells
+  // a prober the attempt was seen. The log line is the diagnostic surface instead.
+  const mappedWorkspaceId = mappingItem?.linear_workspace_id as string | undefined;
+  if (mappingItem && mappedWorkspaceId && mappedWorkspaceId !== payload.organizationId) {
+    logger.warn('Linear project is mapped to a different workspace than this webhook — dropping', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+      mapped_workspace_id: mappedWorkspaceId,
+    });
+    return;
+  }
+  if (mappingItem && !mappedWorkspaceId) {
+    // Allowed for now: rows written before the owning workspace was recorded have
+    // nothing to check against, and rejecting them would break working installs on
+    // deploy. `bgagent linear backfill-project-workspaces` fills them in and
+    // `bgagent platform doctor` reports what is left, which is what makes it safe to
+    // turn this into a rejection later.
+    logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+    });
+  }
+
   const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do

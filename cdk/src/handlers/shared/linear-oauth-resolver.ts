@@ -23,7 +23,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { announceRevocation, revocationAlertTopicArn } from './linear-revocation-alert';
 import {
   LINEAR_VAULT_SCOPES,
@@ -142,6 +142,22 @@ export interface RegistryRow {
    * stored; those fall back to the derived form.
    */
   readonly vault_user_id?: string;
+  /**
+   * Whether this workspace's `webhook_signing_secret` is provably its OWN, rather than
+   * a copy of another workspace's.
+   *
+   * Recorded by provenance — which `bgagent linear setup` branch produced the value —
+   * and NOT inferred by comparing the stored secret against the stack-wide one. Value
+   * equality cannot tell the two apart: a healthy single-workspace install also holds a
+   * secret equal to the stack-wide copy, because the first install stamps the same real
+   * secret into both slots. Rejecting on equality would therefore 401 exactly the
+   * deployments that are safe.
+   *
+   * Absent on rows written before this was recorded, which is why the reader treats
+   * absence as "not proven" rather than as `false`, and only acts on it where sharing
+   * can actually cross a tenant boundary — a stack with two or more active workspaces.
+   */
+  readonly webhook_secret_owned?: boolean;
   /**
    * Why `status` was flipped to `revoked`, as written by {@link markWorkspaceRevoked}.
    *
@@ -886,6 +902,10 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     // Distinguishes a latch built on Linear's own refusal from one built on an
     // inference the vault path can re-test. See RegistryRow.revoked_reason.
     ...(typeof item.revoked_reason === 'string' && { revoked_reason: item.revoked_reason }),
+    // Only a literal `true` counts as proof of ownership. A missing field, or any
+    // other value, leaves it absent so the reader sees "not proven" — the safe
+    // reading for the rows this field was added for, which predate it entirely.
+    ...(item.webhook_secret_owned === true && { webhook_secret_owned: true }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;
@@ -1357,6 +1377,51 @@ async function tryRefreshOnce(
   // Cache the freshest value.
   tokenCache.set(secretArn, { value: next, expiresAt: Date.now() + SECRET_CACHE_TTL_MS });
   return { kind: 'success', token: next };
+}
+
+/**
+ * The one active Linear workspace on this stack, or undefined when that is not a
+ * well-defined question.
+ *
+ * For binding a delivery that was verified by the stack-wide secret. That secret is
+ * bound to no workspace, so the body's `organizationId` is claimed rather than attested
+ * and must not select a tenant. When exactly one workspace is active there is only one
+ * tenant it could mean; with zero or several there is no answer, and returning undefined
+ * makes the caller drop the delivery rather than pick one.
+ *
+ * Mirrors `resolveSoleActiveJiraTenant`. Not cached: the callers reach it only on the
+ * back-compat path of a single-workspace install, which is rare enough that a Scan per
+ * delivery is cheaper than another cache to invalidate.
+ */
+export async function resolveSoleActiveLinearWorkspace(
+  ddbClient: DynamoDBDocumentClient,
+  registryTableName: string | undefined,
+): Promise<string | undefined> {
+  if (!registryTableName) return undefined;
+  const active: string[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddbClient.send(new ScanCommand({
+      TableName: registryTableName,
+      ProjectionExpression: 'linear_workspace_id, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
+    }));
+    for (const item of page.Items ?? []) {
+      if (item.status === 'active' && typeof item.linear_workspace_id === 'string') {
+        active.push(item.linear_workspace_id);
+      }
+    }
+    lastKey = page.LastEvaluatedKey;
+    if (active.length > 1) break;
+  } while (lastKey);
+
+  if (active.length === 1) return active[0];
+  logger.warn('Cannot bind a stack-wide-verified Linear delivery: registry does not have exactly one active workspace', {
+    active_workspace_count: active.length,
+  });
+  return undefined;
 }
 
 /** Test-only: clear all caches. */

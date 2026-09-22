@@ -27,11 +27,16 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({})),
 }));
+const ddbSend = jest.fn();
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: jest.fn() })) },
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
+  GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
 }));
 
 import {
+  _resetActiveWorkspaceCountCache,
+  countActiveLinearWorkspaces,
   getLinearSecret,
   invalidateLinearSecretCache,
   isWebhookTimestampFresh,
@@ -185,5 +190,51 @@ describe('isWebhookTimestampFresh', () => {
     expect(isWebhookTimestampFresh(undefined)).toBe(false);
     expect(isWebhookTimestampFresh(NaN)).toBe(false);
     expect(isWebhookTimestampFresh(Infinity)).toBe(false);
+  });
+});
+
+describe('countActiveLinearWorkspaces — one tenant versus more than one', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    _resetActiveWorkspaceCountCache();
+  });
+
+  test('counts only active rows', async () => {
+    ddbSend.mockResolvedValue({
+      Items: [
+        { linear_workspace_id: 'a', status: 'active' },
+        { linear_workspace_id: 'b', status: 'revoked' },
+      ],
+    });
+    await expect(countActiveLinearWorkspaces('registry')).resolves.toBe(1);
+  });
+
+  test('reports more than one so callers can refuse a tenant-less secret', async () => {
+    ddbSend.mockResolvedValue({
+      Items: [
+        { linear_workspace_id: 'a', status: 'active' },
+        { linear_workspace_id: 'b', status: 'active' },
+      ],
+    });
+    expect(await countActiveLinearWorkspaces('registry')).toBeGreaterThan(1);
+  });
+
+  test('caches, so the Scan does not run on every delivery', async () => {
+    ddbSend.mockResolvedValue({ Items: [{ linear_workspace_id: 'a', status: 'active' }] });
+    await countActiveLinearWorkspaces('registry');
+    await countActiveLinearWorkspaces('registry');
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('answers 1 when the registry cannot be read, rather than rejecting every delivery', async () => {
+    // Permissive on purpose. The callers are hardening a signature that already
+    // verified; a DynamoDB throttle must not turn into a stack-wide outage.
+    ddbSend.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+    await expect(countActiveLinearWorkspaces('registry')).resolves.toBe(1);
+  });
+
+  test('answers 1 when no registry table is configured', async () => {
+    await expect(countActiveLinearWorkspaces(undefined)).resolves.toBe(1);
+    expect(ddbSend).not.toHaveBeenCalled();
   });
 });

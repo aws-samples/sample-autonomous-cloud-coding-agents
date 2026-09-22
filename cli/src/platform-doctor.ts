@@ -130,6 +130,7 @@ export async function runPlatformDoctor(
     bedrockGeoRegion,
     bedrockModelIds,
     linearVaultWorkloadName,
+    linearProjectMappingTableName,
   ] = await Promise.all([
     getStackOutput(region, stackName, 'ApiUrl'),
     getStackOutput(region, stackName, 'UserPoolId'),
@@ -143,6 +144,7 @@ export async function runPlatformDoctor(
     // Absent unless the stack was deployed with the Linear identity vault enabled.
     // Its absence is the signal that no workspace here is vault-managed.
     getStackOutput(region, stackName, 'LinearVaultWorkloadName'),
+    getStackOutput(region, stackName, 'LinearProjectMappingTableName'),
   ]);
 
   const checks: DoctorCheckResult[] = [];
@@ -165,9 +167,179 @@ export async function runPlatformDoctor(
     region, linearRegistryTableName, options.linearProbe, options.linearVerifyRefresh,
     linearVaultWorkloadName,
   ));
+  checks.push(await checkLinearSecretProvenance(region, linearRegistryTableName));
+  checks.push(await checkLinearProjectWorkspaces(region, linearProjectMappingTableName));
   checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
+}
+
+/**
+ * Report workspaces whose signing secret is not recorded as provably their own.
+ *
+ * These are the workspaces whose deliveries get rejected once a stack has two or more
+ * active workspaces, because a secret shared between tenants attests only that the sender
+ * knows *some* tenant's secret. Reported before that bites rather than after: the failure
+ * mode otherwise is every webhook 401ing at once with the cause two layers down.
+ *
+ * Severity follows the workspace count, matching the enforcement path exactly. With one
+ * active workspace a shared secret cannot cross a boundary, so an unrecorded provenance
+ * is the normal, harmless state for every row written before that field existed.
+ */
+export async function checkLinearSecretProvenance(
+  region: string,
+  registryTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_secret_provenance';
+  const label = 'Linear per-workspace signing secrets';
+  if (!registryTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Linear workspace registry on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: Array<{ workspace_slug?: string; status?: string; webhook_secret_owned?: boolean }> = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: ['workspace_slug', '#status', 'webhook_secret_owned'].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as typeof rows);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Linear workspaces onboarded yet.' };
+    }
+
+    const unproven = active.filter((row) => row.webhook_secret_owned !== true);
+    if (unproven.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `All ${active.length} active Linear workspace(s) own their signing secret.`,
+      };
+    }
+
+    const slugs = unproven.map((row) => row.workspace_slug ?? '<unknown-slug>').join(', ');
+    if (active.length === 1) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: 'Single active Linear workspace, so a shared signing secret cannot reach another '
+          + 'tenant and provenance is not enforced. Onboarding a second workspace makes it matter — '
+          + 'run `bgagent linear backfill-secret-provenance` then.',
+      };
+    }
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unproven.length} of ${active.length} active Linear workspace(s) are not recorded as `
+        + `owning their signing secret, so their webhook deliveries are rejected: ${slugs}. Run `
+        + '`bgagent linear backfill-secret-provenance --dry-run` to see which can be recorded '
+        + 'automatically, then `bgagent linear update-webhook-secret <slug>` for the rest.',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear workspace registry: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Report project mappings that do not record which workspace owns them.
+ *
+ * The mapping table is keyed on the project id alone, so a row with no
+ * `linear_workspace_id` gives the webhook path nothing to check a body-supplied
+ * `projectId` against. Those rows are the population that must be backfilled before
+ * the enforcement path can move from warning to rejecting — this check is how an
+ * operator knows whether that work is finished.
+ */
+export async function checkLinearProjectWorkspaces(
+  region: string,
+  mappingTableName: string | null,
+): Promise<DoctorCheckResult> {
+  const id = 'linear_project_workspaces';
+  const label = 'Linear project → workspace binding';
+  if (!mappingTableName) {
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: 'No Linear project mapping table on this stack (integration not deployed).',
+    };
+  }
+
+  try {
+    const ddb = documentClient(region);
+    const rows: Array<{ linear_project_id?: string; linear_workspace_id?: string; status?: string }> = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: mappingTableName,
+        ProjectionExpression: ['linear_project_id', 'linear_workspace_id', '#status'].join(', '),
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      rows.push(...(page.Items ?? []) as typeof rows);
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+
+    const active = rows.filter((row) => row.status === 'active');
+    if (active.length === 0) {
+      return { id, label, status: 'pass', detail: 'No active Linear project mappings yet.' };
+    }
+
+    const unbacked = active.filter((row) => !row.linear_workspace_id);
+    if (unbacked.length === 0) {
+      return {
+        id,
+        label,
+        status: 'pass',
+        detail: `All ${active.length} active Linear project mapping(s) record an owning workspace.`,
+      };
+    }
+
+    // Named, but capped: the point of listing ids is to give the operator somewhere to
+    // start, and an uncapped list on a large install buries every other doctor line.
+    const NAMED_LIMIT = 10;
+    const allIds = unbacked.map((row) => row.linear_project_id ?? '<unknown-project-id>');
+    const projectIds = allIds.length > NAMED_LIMIT
+      ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
+      : allIds.join(', ');
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `${unbacked.length} of ${active.length} active Linear project mapping(s) do not record an `
+        + 'owning workspace, so a webhook naming them cannot be checked against the workspace that '
+        + `signed it: ${projectIds}. Harmless while one workspace is active — there is no other `
+        + 'tenant to reach — but re-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` '
+        + 'for each of them before onboarding a second workspace.',
+    };
+  } catch (err) {
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail: `Could not read the Linear project mapping table: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 interface JiraRegistryIdentityRow {

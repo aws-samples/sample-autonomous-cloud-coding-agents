@@ -22,6 +22,7 @@ import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { DeleteCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import {
+  countActiveLinearWorkspaces,
   isWebhookTimestampFresh,
   verifyLinearRequest,
   verifyLinearRequestForWorkspace,
@@ -133,18 +134,48 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           linear_workspace_id: payload.organizationId,
         });
         return jsonResponse(401, { error: 'Workspace not active' });
+      } else if (result === 'shared-secret') {
+        // The signature matched, but against a secret this workspace shares with
+        // another on the same stack — so it proves the sender knows SOME tenant's
+        // secret, not this one's. Fatal for the same reason `mismatch` is: falling
+        // through would re-admit it via the stack-wide path.
+        logger.warn('Linear webhook verified against a secret shared with another workspace — rejecting', {
+          linear_workspace_id: payload.organizationId,
+          remedy: 'bgagent linear update-webhook-secret <slug>',
+        });
+        return jsonResponse(401, { error: 'Workspace signing secret is not its own' });
       }
       // 'no-per-workspace-secret' falls through to the stack-wide path
       // below — back-compat for installs predating per-workspace secrets.
     }
 
+    // Whether the stack-wide secret was what verified this delivery. Forwarded to the
+    // processor, which routes from body-supplied identifiers that a tenant-less secret
+    // cannot attest to.
+    let verifiedViaStackWide = false;
+
     if (!verified) {
+      // The stack-wide secret is bound to no workspace, so on a stack with more than one
+      // it cannot say which tenant sent this — and the body's `organizationId` is the
+      // attacker's to choose. Refuse rather than guess. Single-workspace installs keep
+      // the fallback: there, the only tenant it could mean is the only tenant there is.
+      const activeWorkspaces = await countActiveLinearWorkspaces(WORKSPACE_REGISTRY_TABLE);
+      if (activeWorkspaces > 1) {
+        logger.warn('Refusing the stack-wide fallback on a multi-workspace stack', {
+          linear_workspace_id: payload.organizationId,
+          active_workspace_count: activeWorkspaces,
+          remedy: 'bgagent linear update-webhook-secret <slug>',
+        });
+        return jsonResponse(401, { error: 'Per-workspace signing secret required' });
+      }
+
       if (!await verifyLinearRequest(WEBHOOK_SECRET_ARN, signature, event.body)) {
         logger.warn('Invalid Linear webhook signature', {
           linear_workspace_id: payload.organizationId,
         });
         return jsonResponse(401, { error: 'Invalid signature' });
       }
+      verifiedViaStackWide = true;
       // Stack-wide fallback succeeded. Log positively so operators
       // diagnosing a per-workspace verification regression have a
       // breadcrumb that says "this workspace is verifying via the
@@ -244,7 +275,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       await lambdaClient.send(new InvokeCommand({
         FunctionName: PROCESSOR_FUNCTION_NAME,
         InvocationType: 'Event',
-        Payload: new TextEncoder().encode(JSON.stringify({ raw_body: event.body })),
+        // The verified context travels with the body. Without it the processor cannot
+        // tell a delivery whose tenant the signature attested from one whose tenant is
+        // only claimed, and it routes from that claim.
+        Payload: new TextEncoder().encode(JSON.stringify({
+          raw_body: event.body,
+          verified_via_stack_wide: verifiedViaStackWide,
+        })),
       }));
     } catch (invokeErr) {
       logger.error('Failed to invoke Linear webhook processor', {
