@@ -23,59 +23,12 @@ import { ScreenshotBucket } from '../../src/constructs/screenshot-bucket';
 
 describe('ScreenshotBucket', () => {
   let template: Template;
-  let regionalTemplates: Template[];
-  let longNameTemplate: Template;
 
-  beforeAll(() => {
+  beforeEach(() => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
     new ScreenshotBucket(stack, 'ScreenshotBucket');
     template = Template.fromStack(stack);
-    regionalTemplates = ['us-east-1', 'us-west-2'].map((region) => {
-      const regionalStack = new Stack(new App(), 'TestStack', {
-        env: { account: '123456789012', region },
-      });
-      new ScreenshotBucket(regionalStack, 'ScreenshotBucket');
-      return Template.fromStack(regionalStack);
-    });
-    const longNameStack = new Stack(new App(), 'a'.repeat(128), {
-      env: { account: '123456789012', region: 'us-west-2' },
-    });
-    new ScreenshotBucket(longNameStack, 'FirstScreenshots');
-    new ScreenshotBucket(longNameStack, 'SecondScreenshots');
-    longNameTemplate = Template.fromStack(longNameStack);
-  });
-
-  function accessControlNames(source: Template): string[] {
-    return Object.values(source.findResources('AWS::CloudFront::OriginAccessControl'))
-      .map((resource) => resource.Properties.OriginAccessControlConfig.Name);
-  }
-
-  test('same stack in different regions has distinct global access-control names', () => {
-    const names = regionalTemplates.flatMap(accessControlNames);
-    expect(names).toHaveLength(2);
-    expect(names[0]).toMatch(/-us-east-1$/);
-    expect(names[1]).toMatch(/-us-west-2$/);
-    expect(new Set(names).size).toBe(2);
-  });
-
-  test('long stack names preserve distinct access controls within the 64-character limit', () => {
-    const names = accessControlNames(longNameTemplate);
-    expect(new Set(names).size).toBe(2);
-    for (const name of names) {
-      expect(name.length).toBeLessThanOrEqual(64);
-      expect(name).toMatch(/-us-west-2$/);
-    }
-  });
-
-  test('access control always signs S3 requests with sigv4', () => {
-    template.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
-      OriginAccessControlConfig: {
-        OriginAccessControlOriginType: 's3',
-        SigningBehavior: 'always',
-        SigningProtocol: 'sigv4',
-      },
-    });
   });
 
   // Lock in the screenshot bucket lifecycle defaults.

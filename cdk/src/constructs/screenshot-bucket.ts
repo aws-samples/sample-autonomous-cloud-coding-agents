@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Duration, Names, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -97,14 +97,9 @@ export class ScreenshotBucket extends Construct {
     // and grants `s3:GetObject` to the distribution's CF service principal
     // only — no anonymous principal in the policy, so account-level BPA
     // doesn't reject it.
-    // OAC names are account-global. Keep the construct-path hash and leave
-    // room for the Region within CloudFront's 64-character name limit.
-    const originAccessControl = new cloudfront.S3OriginAccessControl(this, 'OriginAccessControl', {
-      originAccessControlName: `${Names.uniqueResourceName(this, { maxLength: 40 })}-${Stack.of(this).region}`,
-    });
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       defaultBehavior: {
-        origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket, { originAccessControl }),
+        origin: origins.S3BucketOrigin.withOriginAccessControl(this.bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         // Screenshots are immutable per (repo, sha) — long TTL is safe
         // and minimizes origin S3 requests on hot PRs.

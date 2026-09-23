@@ -139,7 +139,7 @@ Emitted as custom CloudWatch metrics and used in dashboards and alarms.
 
 ## Dashboard
 
-A CloudWatch dashboard (`BackgroundAgent-Tasks-${stackName}-${region}`) is deployed via the `TaskDashboard` CDK construct. Dashboard names are account-global, so the Region suffix lets identically named stacks coexist in different Regions. Updating a deployment from the earlier name replaces its dashboard resource; metric and log data remain in their existing stores, but saved dashboard links need the new name. It provides Logs Insights widgets for:
+A CloudWatch dashboard (`BackgroundAgent-Tasks-${stackName}`, i.e. the base name suffixed with the stack name) is deployed via the `TaskDashboard` CDK construct. It provides Logs Insights widgets for:
 
 - Task success rate and count by status
 - Cost per task and turns per task
