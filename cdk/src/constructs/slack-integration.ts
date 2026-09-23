@@ -64,6 +64,9 @@ export interface SlackIntegrationProps {
   /** The DynamoDB task events table (must have DynamoDB Streams enabled). */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Approval records closed atomically when their owner cancels a task. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
   /** Monthly user/team budget configuration and spend table. */
   readonly budgetTable?: dynamodb.ITable;
 
@@ -351,6 +354,9 @@ export class SlackIntegration extends Construct {
       environment: {
         SLACK_SIGNING_SECRET_ARN: this.signingSecret.secretArn,
         TASK_TABLE_NAME: props.taskTable.tableName,
+        TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+        TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
+        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         SLACK_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
       },
       bundling: commonBundling,
@@ -358,6 +364,8 @@ export class SlackIntegration extends Construct {
     this.signingSecret.grantRead(slackInteractionsFn);
     slackInteractionsFn.addToRolePolicy(readSlackSecretsPolicy);
     props.taskTable.grantReadWriteData(slackInteractionsFn);
+    props.taskEventsTable.grant(slackInteractionsFn, 'dynamodb:PutItem');
+    props.taskApprovalsTable?.grant(slackInteractionsFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
     this.userMappingTable.grantReadData(slackInteractionsFn);
 
     // --- Slash Command Acknowledger ---

@@ -21,3 +21,8 @@
 hook_context  # unused variable (src/hooks.py:132)
 hook_context  # unused variable (src/hooks.py:918)
 hook_context  # unused variable (src/hooks.py:1258)
+
+# urllib's HTTPRedirectHandler supplies this named parameter to redirect_request.
+# The bootstrap override intentionally rejects every redirect without inspecting
+# its destination; retain the standard-library callback signature.
+newurl  # unused variable (src/payload_bootstrap.py:_NoRedirect.redirect_request)

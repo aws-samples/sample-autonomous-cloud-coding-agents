@@ -201,7 +201,7 @@ class TestResolveLinearApiToken:
     The orchestrator stamps `linear_oauth_secret_arn` into the task's
     channel_metadata at creation time. resolve_linear_api_token reads
     the secret JSON via boto3, refreshes it if expiring, and caches the
-    access_token in `LINEAR_API_TOKEN` for the Linear MCP placeholder.
+    access_token in `LINEAR_API_TOKEN` for direct Linear API calls.
     """
 
     def test_returns_cached_value_without_calling_secrets_manager(self, monkeypatch):
@@ -227,6 +227,44 @@ class TestResolveLinearApiToken:
         with patch("boto3.client") as mock_boto:
             assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
             mock_boto.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"workspace_id": "ws", "provider_name": "bgagent-linear-oauth-acme"},
+            {"refresh_token": None, "client_id": "cid", "client_secret": "secret"},
+            {"refresh_token": "rt", "client_id": "", "client_secret": "secret"},
+            {"refresh_token": "rt", "client_id": "cid"},
+        ],
+    )
+    def test_incomplete_fallback_skips_refresh_without_crashing(self, monkeypatch, payload):
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.delenv("LINEAR_VAULT_ENABLED", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {
+            "SecretString": __import__("json").dumps(payload),
+        }
+        with (
+            patch("boto3.client", return_value=mock_sm),
+            patch("urllib.request.urlopen") as post,
+            patch("config.log") as log,
+        ):
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
+        post.assert_not_called()
+        assert any(
+            "linear_oauth_refresh_unavailable" in call.args[1] for call in log.call_args_list
+        )
+
+    @pytest.mark.parametrize("payload", ["null", "[]", '"text"'])
+    def test_non_object_fallback_returns_empty(self, monkeypatch, payload):
+        monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
+        monkeypatch.delenv("LINEAR_VAULT_ENABLED", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        mock_sm = MagicMock()
+        mock_sm.get_secret_value.return_value = {"SecretString": payload}
+        with patch("boto3.client", return_value=mock_sm):
+            assert resolve_linear_api_token({"linear_oauth_secret_arn": "arn:test"}) == ""
 
     def test_resolves_from_secrets_manager_and_caches_in_env(self, monkeypatch):
         """Happy path: channel_metadata carries the ARN, secret has access_token + future expiry."""

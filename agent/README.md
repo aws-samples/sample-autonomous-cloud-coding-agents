@@ -139,6 +139,14 @@ tenant's OAuth or Forge credential to the next task.
 
 † You need valid Bedrock credentials in the container: export keys (Option A), let `run.sh` inject keys from the AWS CLI after `aws sso login` or similar (Option B), or mount `~/.aws` (Option C). `run.sh` also sets `CLAUDE_CODE_USE_BEDROCK=1` so Claude Code uses Bedrock.
 
+MicroVM workers configure Claude's AWS provider internally at runtime. The parent
+sets `ABCA_MICROVM_CREDENTIAL_BROKER=1` **only in the Claude child**, points
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` at an authenticated loopback endpoint, and
+clears alternate credential sources in that child. Operators should not set this
+internal flag themselves. The endpoint serves the current task's scoped session;
+the parent's runtime credentials and other backends' attribution path remain
+separate. See [recorded credential-renewal acceptance](../docs/verification/README.md#recorded-acceptance).
+
 ### Examples
 
 ```bash
@@ -219,7 +227,7 @@ Immediate response (acceptance):
 
 Final metrics (PR URL, cost, turns, build status, etc.) appear in **container logs**, in **DynamoDB** when configured, and in the **REST API** for deployed tasks (`GET /v1/tasks/{task_id}` via the `bgagent` CLI or HTTP client).
 
-### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1 + P2)
+### AWS Lambda MicroVMs lifecycle hooks (ADR-021 P1–P3)
 
 The same uvicorn process also serves the **Lambda MicroVMs** lifecycle hooks, on the same port (8080 — the port declared in the image's `hooks.port`). On that backend there is no `InvokeAgentRuntime` and no orchestrator→agent HTTP path at all: the task payload arrives as the `/run` hook body and nothing else dials in.
 
@@ -236,31 +244,33 @@ The warm-up is the *primary* fix; the probe that failed is also now non-fatal. `
 
 **`POST /aws/lambda-microvms/runtime/v1/validate`** — Build hook (P2). A **shallow self-check only**: server alive, every hook route registered, interpreter floor, `platform_config` contract loaded. Returns 200 with the individual check results, or 503 while still initialising (which fails the build if it never clears — the right outcome for a broken snapshot). That 503 branch is a **refactor tripwire**, not a state you can reach today: `_module_initialized` is set as the module's last statement and uvicorn accepts no request until the import completes, so it only becomes reachable once someone moves warm-up work behind the bind — and a hook with only a 200 path would then report a still-initialising snapshot as valid.
 
-It runs under the **build role**, which deliberately holds no Bedrock / Secrets Manager / DynamoDB grants, so it **makes zero AWS API calls and must keep making zero** — including its own logging (both build hooks log to stdout via `_build_hook_log`, never through the CloudWatch writer). Two reasons: a Logs write under the build role can only fail, and each failure pollutes the shared `_debug_cw_failures` alarm signal; and `boto3.client(...)` populates `boto3.DEFAULT_SESSION`, a module global holding a resolved credential chain plus the build-time region, which the snapshot would then freeze in for every MicroVM launched from that image version. "Deeper warm-up assertions" (Bedrock reachability, Memory access, tool availability) are therefore *not* implementable here. The one member of that list that turned out to be partly implementable — proving the local `claude` binary execs — lives on `/ready` instead, as a side effect of warming it (above): a local `exec` is not an AWS call, and it belongs to the hook whose 200 gates the snapshot.
+It runs under the **build role**, which has no Bedrock, Secrets Manager or DynamoDB runtime grants. Both build hooks make **zero AWS API calls**, including logging: `_build_hook_log` writes to stdout. The build role can write within its MicroVM log namespace, but an application log group may be outside that grant. More importantly, resolving credentials before taking the snapshot can preserve build-role credential state. Boto3 caches resolved credentials; environment-derived region settings are re-read for each new client. Runtime debug/warn writer failures emit a `cloudwatch_write_failed` stdout record containing `writer`, `task_id` and `error_type` ([#810](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/810)). The unused counter was removed. The fallback performs no AWS call and includes neither the failed log body nor exception message. It is a structured log, not a metric or configured alarm; its visibility depends on guest stdout collection, which AgentCore APPLICATION_LOGS does not automatically provide. Local binary warm-up belongs in `/ready`; runtime AWS access must be tested on a real task.
 
 Baked secrets are **reported, not enforced**: `warnings` lists the names (never values) of any credential-shaped env var present in the snapshot, because the build environment's own credentials may legitimately be in that env and failing here would fail every build.
 
-**`POST /aws/lambda-microvms/runtime/v1/terminate`** — Runtime hook (P2). Best-effort: emits one final structured log line and returns 200 — always, inside the hook budget, even with nothing running, and for **any body**: malformed JSON, a wrong content-type, an empty body or no body at all. That is why the handler takes the raw request instead of a typed body model — FastAPI validates a typed body *before* the handler runs, so a truncated body would answer 422 and report a hook failure for a teardown that actually succeeded. It does **not** join the pipeline thread (that is `lifespan`'s job on graceful shutdown) and it **never writes terminal task status**: the orchestrator finalizes the task and *then* calls `TerminateMicrovm`, so a status write here would race that finalization. Nothing is buffered to flush — `ProgressWriter` does a synchronous `put_item` per event, so progress is already durable at call time.
+**`POST /aws/lambda-microvms/runtime/v1/terminate`** — Closes the local coding barrier, logs teardown and acknowledges any request body within the hook budget. Raw request parsing avoids a premature FastAPI validation error for malformed input. Each step is best-effort. The hook neither joins the pipeline thread nor writes terminal task status: termination can interrupt active work or retire a worker whose approval remains pending. Task finalization belongs to the coordinator. Acknowledged checkpointing belongs to `/suspend`; ordinary progress logging is not a durability guarantee.
 
 `microvmId` is parsed defensively and **arrives empty in practice**: the service sends `""` here, unlike `/run` where it is populated (live-verified, ADR-021 P2-F8). So an empty id is expected-normal, not a degraded read — and this hook therefore **cannot** join the guest's record to the control-plane one. `/run`'s `hook accepted task_id=… microvm_id=…` line carries that correlation; `/terminate`'s value is the pipeline-state snapshot it reports.
 
-**`POST /aws/lambda-microvms/runtime/v1/run`** — Payload delivery. Validates the body, installs `platform_config` (below), starts the pipeline in a background thread (the same `_extract_invocation_params` → `_spawn_background` path `/invocations` uses), and returns 200 inside the 1–60 s hook budget. Body:
+**`POST /aws/lambda-microvms/runtime/v1/run`** — Authenticate and download a task, install `platform_config` (below), start the pipeline in a background thread, and return 200 inside the hook budget. See the [payload contract and upgrade checks](../docs/verification/645-payload-bootstrap.md) and [recorded live acceptance](../docs/verification/README.md#recorded-acceptance).
+
+`runHookPayload` is a JSON **string** passed through by `RunMicrovm`, containing:
 
 ```json
 {
-  "microvmId": "microvm-b44b69d9-…",
-  "runHookPayload": "{\"agent_payload_s3_uri\": \"s3://bucket/<task_id>/payload.json\", \"platform_config\": {…}}"
+  "version": 2,
+  "task_id": "TASK001",
+  "bootstrap_s3_uri": "s3://deployment-bucket/bootstrap/<sha256>.json",
+  "payload_url": "<redacted single-object HTTPS URL>",
+  "expires_at": 1789312500000
 }
 ```
 
-`runHookPayload` is an opaque **string** the service passes through from `RunMicrovm`. ABCA's contract for it is one of two shapes, mirroring the ECS container env contract (`AGENT_PAYLOAD` / `AGENT_PAYLOAD_S3_URI`):
+The worker reads the deployment manifest with its ambient AWS role, which explicitly denies object reads outside that bucket's `bootstrap/*` prefix. It downloads the task using the coordinator's short-lived signed URL, verifies the task identity, and requires the task's configuration to equal the manifest. The digest in the manifest filename checks its bytes; IAM authenticates its origin. The entire reference must fit **4,096 bytes**. Manifests and task payloads are capped at **16 KiB** and **8 MiB**. Redirects, environment proxies and hosts/paths other than the task's regional S3 object are rejected.
 
-| Envelope | When |
-|---|---|
-| `{"agent_payload": {…}, "platform_config": {…}}` | the whole orchestrator payload inline — only when it fits |
-| `{"agent_payload_s3_uri": "s3://bucket/key", "platform_config": {…}}` | pointer to the payload in the platform payload bucket |
+ECS uses the same reference in `AGENT_PAYLOAD_REF`, with an empty manifest config because deployment settings already come from its task definition/overrides. `load_ecs_payload()` removes the capability environment variable before importing the pipeline. Neither backend accepts the old unsigned `AGENT_PAYLOAD`, `AGENT_PAYLOAD_S3_URI`, inline hook or S3-pointer formats. Roll out the matching coordinator, worker images and policies with admissions paused and old tasks drained; the runbook records upgrade and rollback steps.
 
-The service caps `runHookPayload` at **4 096 bytes**, so the **pointer form is the normal one** — a hydrated payload is essentially always larger. Fetching it needs no new env var: the MicroVM execution role holds read-only access to that bucket and the URI carries bucket + key.
+A presigned URL is a temporary download permission: **never log it**. Its requested lifetime is at most 900 seconds, shortened by known signer credential expiry; initial creation requires at least 300 seconds. The coordinator privately saves the exact URL for retries and deletes the payload and saved launch reference at finalization. An expired saved reference fails rather than being silently re-signed.
 
 #### `platform_config` — the agent's env, delivered per task (P2)
 
@@ -270,12 +280,13 @@ On AgentCore and ECS the agent's non-secret platform env arrives as runtime env 
 { "platform_config": { "task_table_name": "…", "github_token_secret_arn": "arn:…" } }
 ```
 
-Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** any credential or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and pins `boto3.DEFAULT_SESSION` (region included), and until the install has run the only environment available is whatever the snapshot baked. The single AWS call allowed before the install is the S3 payload fetch, because the config is inside the object being fetched. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
+Each snake_case key installs into its UPPER_SNAKE env var, and a payload value **wins** over any image/pre-existing value (the payload describes the live deployment; the snapshot describes a past one). Installation happens **before** task credential, secret or pipeline initialisation — the very next step resolves the GitHub token from `GITHUB_TOKEN_SECRET_ARN`. Everything the hook logs before that point goes to stdout only (`[server/run-pre-config]`), for the same reason the build hooks do: the CloudWatch writer resolves AWS credentials and can cache credential state in `boto3.DEFAULT_SESSION` (environment-derived region is re-read for new clients), and until the install has run the only environment available is whatever the snapshot baked. Before installation, bootstrap reads the deployment manifest through the attributed S3 client and downloads the single task object over signed HTTPS. Other pre-install diagnostics remain stdout-only. The allowlist lives in `contracts/constants.json` → `microvm_platform_config` (produced by the orchestrator, consumed here; shape enforced by `mise run check:constants-sync`):
 
 | Key | Env var | Required |
 |---|---|---|
 | `task_table_name` | `TASK_TABLE_NAME` | ✅ |
 | `task_events_table_name` | `TASK_EVENTS_TABLE_NAME` | ✅ |
+| `approval_requests_api_url` | `APPROVAL_REQUESTS_API_URL` | ✅ |
 | `github_token_secret_arn` | `GITHUB_TOKEN_SECRET_ARN` | ✅ |
 | `agent_session_role_arn` | `AGENT_SESSION_ROLE_ARN` | ✅ |
 | `task_approvals_table_name` | `TASK_APPROVALS_TABLE_NAME` | |
@@ -283,16 +294,67 @@ Each snake_case key installs into its UPPER_SNAKE env var, and a payload value *
 | `log_group_name` | `LOG_GROUP_NAME` | |
 | `artifacts_bucket_name` | `ARTIFACTS_BUCKET_NAME` | |
 | `trace_artifacts_bucket_name` | `TRACE_ARTIFACTS_BUCKET_NAME` | |
+| `continuation_bucket_name` | `CONTINUATION_BUCKET_NAME` | |
 | `linear_oauth_secret_arn` | `LINEAR_OAUTH_SECRET_ARN` | |
+| `linear_vault_enabled` | `LINEAR_VAULT_ENABLED` | |
+| `linear_workload_identity_name` | `LINEAR_WORKLOAD_IDENTITY_NAME` | |
 | `jira_oauth_secret_arn` | `JIRA_OAUTH_SECRET_ARN` | |
 | `aws_sdk_ua_app_id` | `AWS_SDK_UA_APP_ID` | |
 | `anthropic_default_haiku_model` | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | |
+| `anthropic_model` | `ANTHROPIC_MODEL` | Main model profile for the deployment's configured geography |
 
-Values are **non-secret identifiers only** — secrets are still fetched at `/run` time from Secrets Manager using the ARNs delivered here, so the snapshot stays secret-free. The allowlist **fails closed**: these values land in `os.environ` of the process that spawns the agent's tool subprocesses, so an unrecognised key is an env-injection attempt (`LD_PRELOAD`, `AWS_ENDPOINT_URL`, …) and the whole run is rejected with nothing installed. Blank/`null` values for optional keys are skipped rather than clobbering an image value; blank required keys are rejected. An envelope with no `platform_config` at all is accepted with a loud warning (the image and the orchestrator deploy on independent cadences).
+`APPROVAL_REQUESTS_API_URL` identifies the IAM-authenticated approval writer. All cloud backends receive it from CDK; workers create pending requests through this service and have read-only approval-table access. A MicroVM manifest missing the URL is rejected before execution. Deploy matching worker images and infrastructure together.
 
-Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (the S3 fetch failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+Values are **non-secret configuration only**. Credentials are fetched at task startup from Secrets Manager or AgentCore Identity. Linear vault use requires `linear_vault_enabled="true"` and the workload identity name; the task's channel metadata identifies the workspace grant. The image carries no task credentials. The allowlist **fails closed**: an unrecognised key rejects the whole block. Blank optional values are skipped; blank required values, control characters and inconsistent ARN account/partition fields are rejected. Deployment authentication comes from the IAM-read manifest and exact configuration comparison, including same-account workspace identifiers ([#817](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/817)).
 
-`/suspend` and `/resume` are deliberately **not** served — declaring a hook nothing answers fails the corresponding lifecycle transition, so the CDK construct declares exactly the hooks the agent serves. They land in P3 with the ComputeStrategy interface widening.
+Rejections are structured so they are readable in the MicroVM log group: `400 MICROVM_RUN_PAYLOAD_INVALID` (unusable envelope — retrying the same body cannot help), `500 MICROVM_RUN_PAYLOAD_UNREADABLE` (manifest/payload read or stored bytes failed), `400 MICROVM_RUN_PLATFORM_CONFIG_INVALID` (key off the allowlist, non-object block, or non-string value — fix the producer), `400 MICROVM_RUN_PLATFORM_CONFIG_INCOMPLETE` (a required key missing or blank — fix the deployment wiring), `400 TASK_RECORD_INCOMPLETE` (same validator and vocabulary as `/invocations`).
+
+`/suspend` and `/resume` are served by `microvm_http.py` and declared in managed images with 30-second service timeouts and a shared non-secret protocol marker. Pause requires an active original approval gate, matching coordinator intent, drained activity and an acknowledged checkpoint; wake renews credentials and atomically rechecks the original task/gate before allowing coding. Each handler has a 20-second total budget. `/validate` rejects a supplied incompatible image marker without contacting AWS. The coordinator checks the actual launched image version and persists support on that worker; missing support disables new suspension. See the [acceptance checklist](../docs/verification/README.md#live-acceptance-for-an-installation) and [nested deployment prerequisites](../docs/verification/645-p3-nested-stack.md).
+
+#### Conversation and workspace continuation
+
+`src/continuation_runtime.py` connects the SDK conversation store, workspace
+archive, approval hooks and production runner. Before retiring a worker, it
+saves the exact pending tool call, conversation, workflow state, cumulative usage
+and workspace in the versioned continuation bucket. A replacement restores those
+objects using the coordinator-owned assignment; task payloads cannot choose
+arbitrary checkpoint keys.
+
+`CheckpointSessionStore` implements the pinned SDK's public `SessionStore`
+contract with `session_store_flush="eager"`. `checkpoint_pending()` must
+acknowledge the exact assistant tool call: enabling transcript mirroring alone
+is insufficient because SDK writes are asynchronous. The conversation envelope
+has a 16 MiB / 50,000-entry limit.
+
+`src/continuation_workspace.py` preserves Git history, staged/unstaged changes,
+and untracked/ignored files, with a 1 GiB / 100,000-entry default limit. Restore
+rebuilds Git configuration and refuses to replace an existing destination.
+Unsupported filesystem/Git states or detected concurrent writes prevent capture.
+Repository-free tasks use a private workspace with a local Git baseline.
+MicroVM tasks default `UV_LINK_MODE=copy` before repository setup so `uv` does not
+hardlink installed packages to its cache. Explicit overrides or commands using
+hardlinks can still make the workspace ineligible for capture.
+
+`S3ContinuationStorage` uploads and verifies version-pinned, checksummed objects
+using task-scoped credentials. The continuation bucket and SessionRole grants
+are provisioned by CDK. A failed or incomplete save prevents planned retirement;
+capacity is released only after the coordinator confirms the old worker stopped.
+Checkpoints contain private task data, including unredacted conversation and
+workspace contents. They must not be published as diagnostic attachments.
+
+The replacement consumes the recorded decision and keeps the original cost/turn
+allowance minus accumulated usage. See the [retained approval protocol](../docs/design/ORCHESTRATOR.md#retained-microvm-approvals)
+for ownership, admission and cleanup.
+
+The opt-in test uses the actual pinned SDK/CLI with a deterministic loopback
+model. It kills the original process, deletes its configuration and workspace,
+restores the conversation and files, and verifies approve and deny through a
+fresh tool hook:
+
+```bash
+cd agent
+ABCA_TEST_SDK_CONTINUATION=1 uv run pytest tests/test_continuation_sdk_probe.py --no-cov
+```
 
 ### Testing Server Mode Locally
 
@@ -451,7 +513,7 @@ agent/
 │   ├── repo.py          Repository setup: clone, branch, git auth, mise trust/install/build/lint
 │   ├── shell.py         Shell utilities: log(), run_cmd(), redact_secrets(), slugify(), truncate()
 │   ├── telemetry.py     Metrics, disk usage, trajectory writer (_TrajectoryWriter with write_policy_decision)
-│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM /ready + /run lifecycle hooks, heartbeat daemon; OTEL session correlation
+│   ├── server.py        FastAPI — async /invocations (background thread), /ping health check, MicroVM build/run/terminate hooks (suspend/resume in microvm_http.py), heartbeat daemon; OTEL session correlation
 │   ├── task_state.py    Best-effort DynamoDB task status and heartbeat writes (no-op if TASK_TABLE_NAME unset)
 │   ├── observability.py OpenTelemetry helpers (e.g. AgentCore session id)
 │   ├── memory.py        Optional memory / episode integration for the agent

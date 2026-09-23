@@ -34,7 +34,7 @@ The policies are split into six IAM managed policies (each under the 6,144-chara
 
 > **Placeholder substitution**: Replace `ACCOUNT_ID` with your 12-digit AWS account ID and `REGION` with your deployment region (e.g., `us-east-1`) throughout this document.
 
-These policies are not created or attached manually. The repository generates them — and a custom bootstrap template that wires all six into the CloudFormation execution role — from the TypeScript sources, then bootstraps with that template:
+These policies are not created or attached manually. The repository generates them and a custom bootstrap template that attaches the selected policies to the CloudFormation execution role:
 
 ```bash
 # Regenerate artifacts (policies JSON + template YAML) and bootstrap.
@@ -52,14 +52,29 @@ aws cloudformation update-stack --stack-name CDKToolkit --use-previous-template 
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Parameters'
 ```
 
-Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
+
+**Re-bootstrap to bundle 1.7.0 or later before deploying nested stacks.** The
+execution role also needs the generated inline policy
+`PassExecutionRoleToCloudFormation`, from
+`cdk/src/bootstrap/nested-stack-policy.ts`. It grants `iam:PassRole` on that exact
+execution role, with `iam:PassedToService=cloudformation.amazonaws.com`. The ARN
+uses the bootstrap partition, account, Region and qualifier; it grants no access
+to pass other roles. Without it, a fresh 1.6.0 deployment fails change-set
+validation when CloudFormation tries to pass its role to the registry's nested
+stacks. Preserve all existing bootstrap parameters when updating the template.
+
+Bundle 1.7.0 also corrects `BootstrapPolicyHash`: it includes nested policy fields
+and the generated inline policy. Earlier hashes could remain unchanged after
+Action, Resource or Condition changes. A matching old hash is insufficient proof
+that deployed permissions match source.
 
 > **CloudFormation inline-template limit — 51,200 characters**: This is a second, independent size ceiling, distinct from the per-policy IAM 6,144-character limit above. `cdk bootstrap --template` sends the template inline as `TemplateBody`; above 51,200 characters the CLI has to stage it in S3 instead, which it **cannot** do while bootstrapping a fresh account, because that bucket is one of the resources bootstrap creates. The result is a hard `BootstrapStackRequired` failure with no way through `cdk bootstrap`, `--force` included ([#864](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/864)).
 >
 > Two consequences for anyone editing the policies:
 >
 > - **The gated size is not the file's size on disk.** The CLI parses the file, discards its formatting, and re-serialises the parsed object before measuring. Reformatting `bootstrap-template.yaml` therefore changes nothing; only the *content* moves the number. Check it with `npx cdk bootstrap --show-template --template bootstrap/bootstrap-template.yaml | wc -c`.
-> - **Each `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line — which is what keeps the body under the ceiling (45,743 characters, versus 53,369 as mappings).
+> - **Each managed-policy `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line. The original fix reduced the body to 45,743 characters from 53,369; subsequent policy additions remain subject to the budget. The small inline self-role policy uses a mapping to resolve its ARN with `Fn::Sub`.
 >
 > `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
 
@@ -96,7 +111,7 @@ Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootst
 
 For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
 
-> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (three always-applied, plus three compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
+> **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (four always applied, including AgentCore, plus optional ECS and MicroVM policies). The separate inline self-role grant is described above. They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
 ### IaCRole-ABCA-Infrastructure
 
@@ -289,6 +304,12 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
 ### IaCRole-ABCA-Application
 
 DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS, CloudFront, and Secrets Manager. When ECS Fargate compute is enabled, add the ECS statement below to this policy.
+
+Agent Registry provisioning also uses a Step Functions workflow to wait for
+asynchronous creation and deletion. Its construct explicitly names the workflow
+with the parent stack's `backgroundagent-dev-` prefix so it fits this policy,
+including when deployed in a nested stack. Adopting this name in an existing
+deployment replaces the provider's waiter state machine.
 
 ```json
 {
@@ -827,6 +848,31 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 
 > **Operators must re-bootstrap for this.** The statement ships in bootstrap policy bundle **1.6.0**; a CDKToolkit stack bootstrapped at 1.5.0 or earlier will fail the CDK-managed MicroVM image deploy with a caller-side `iam:PassRole` AccessDenied on the build role. Check `CDKToolkit`'s `BootstrapPolicyVersion` output, and re-run `mise //cdk:bootstrap` (with `ComputeTypes` including `lambda-microvm`) if it is behind.
 
+P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
+
+The nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
+explicit parent-derived names `backgroundagent-dev-MicrovmBuildRole` and
+`backgroundagent-dev-MicrovmConnectorRole`; `MicrovmPassRoles` admits those two
+exact names in addition to the legacy flat-layout prefixes. The execution role
+stays in the parent and is still excluded. Re-bootstrap before deploying the
+child stack. Before upgrading an existing flat deployment, set and retain
+`microvm_nested_stack=false` until its resource migration is complete; changing ownership is not an ordinary
+in-place update. See the [nested-stack runbook](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
+
+For a reviewed migration that keeps old and new resources side by side,
+`microvm_resource_name_prefix` gives the nested image, network connectors and log
+group distinct names. It requires nested mode and a concrete 1–40 character
+letter/digit/hyphen prefix. Build/operator IAM role names remain derived from the
+parent deployment so the bootstrap's existing `PassRole` scope still applies.
+Keep the selected prefix stable in later deployments. This option alone does
+not preserve the old resources or their runtime permissions; those remain part
+of the migration procedure.
+This statement lets CloudFormation manage and tag the live suspension setting
+at `/<backgroundagent-stack-name>/microvm-approval-suspend-enabled`. The
+coordinator gets only `GetParameter` on its exact parameter. Existing durable
+executions retain their Lambda version and reread this setting before new
+suspension, so disable can reach executions already running.
+
 ```json
 {
   "Statement": [
@@ -861,9 +907,24 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
       "Effect": "Allow",
       "Resource": [
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
-        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*"
+        "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*",
+        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole",
+        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole"
       ],
       "Sid": "MicrovmPassRoles"
+    },
+    {
+      "Action": [
+        "ssm:GetParameters",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "arn:aws:ssm:*:*:parameter/backgroundagent-*/microvm-approval-suspend-enabled",
+      "Sid": "MicrovmSuspendConfiguration"
     }
   ],
   "Version": "2012-10-17"

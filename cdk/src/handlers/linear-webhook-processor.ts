@@ -26,6 +26,7 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { handleLinearApprovalReply } from './shared/linear-approval-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import {
   deleteComment,
@@ -481,24 +482,6 @@ function patchChildOwnAttachments(
 }
 
 /**
- * Post a Linear comment + ❌ reaction without ever propagating an error.
- *
- * Phase 2.0b-O2: feedback is workspace-scoped — the resolver looks up
- * the per-workspace OAuth token via `LinearWorkspaceRegistryTable` and
- * issues a Bearer token. If the workspace isn't registered (drop-on-the-floor
- * for unmapped orgs) the feedback path no-ops cleanly.
- *
- * Two failure modes handled here:
- * - `LINEAR_WORKSPACE_REGISTRY_TABLE_NAME` env var unset (deploy misconfig) —
- *   skip with a clear diagnostic instead of letting the resolver fail
- *   per-call.
- * - `reportIssueFailure` throws synchronously (today impossible thanks to the
- *   helper's internal `Promise.allSettled`, but a future refactor could
- *   break that contract). Catching here means a synchronous throw can't
- *   bubble up and fail the Lambda — which would trigger SQS retries on a
- *   poison message.
- */
-/**
  * Iteration-UX: post the IMMEDIATE threaded "👀 On it" reply under the trigger
  * comment, synchronously at trigger time. This is what kills the multi-minute
  * silence (cold start + clone + agent run) — the user sees a textual ack at once,
@@ -535,6 +518,7 @@ async function postIterationAck(
   }
 }
 
+/** Report workspace-scoped failure feedback best-effort; skip missing OAuth routing. */
 async function safeReportIssueFailure(
   issueId: string,
   linearWorkspaceId: string | undefined,
@@ -689,9 +673,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  // A Comment with an @bgagent mention on an orchestrated sub-issue
-  // re-iterates that sub-issue's PR (the reconciler then cascades the
-  // re-stack). Handled on a separate path from Issue → task creation.
+  // Comments route approval replies first, then @bgagent task/iteration
+  // requests. Issue events use the separate task-creation path below.
   if (payload.type === 'Comment') {
     await handleCommentTrigger(payload as LinearCommentEvent);
     return;
@@ -1834,6 +1817,15 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
  * a clean no-op (no failure comment — comments are conversational).
  */
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
+  if (process.env.TASK_APPROVALS_TABLE_NAME && WORKSPACE_REGISTRY_TABLE
+    && await handleLinearApprovalReply(payload, {
+      ddb,
+      approvalsTable: process.env.TASK_APPROVALS_TABLE_NAME,
+      taskTable: process.env.TASK_TABLE_NAME!,
+      registryTable: WORKSPACE_REGISTRY_TABLE,
+      lookupUser: lookupPlatformUser,
+    })) return;
+
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
     return;
@@ -3288,6 +3280,7 @@ async function lookupPlatformUser(workspaceId: string, userId: string): Promise<
   const result = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { linear_identity: key },
+    ConsistentRead: true,
   }));
   if (!result.Item || result.Item.status === 'pending') return null;
   return (result.Item.platform_user_id as string) ?? null;

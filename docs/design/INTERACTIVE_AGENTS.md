@@ -1,6 +1,8 @@
 # Interactive Agents: Async Interaction Design
 
-> **Status:** Active design
+> **Status:** Historical interaction design with current approval-path corrections (2026-09-22).
+> Proposed dispatcher services and Slack buttons below are not all implemented; use the
+> [API contract](./API_CONTRACT.md) and [approval guide](../guides/USER_GUIDE.md#approval-gates-cedar-hitl) for supported interfaces.
 > **Branch:** `feature/interactive-background-agents`
 > **Last updated:** 2026-04-29 (rev 6)
 
@@ -19,7 +21,7 @@ This document describes the interactivity surfaces layered on top of that model 
 3. **Watch** — `bgagent watch <id>` polls `TaskEventsTable` with an adaptive interval (500 ms when events are arriving, back-off to 5 s when idle). Same endpoint used under the hood for foreground-block UX on `ask` and for HITL approval waits.
 4. **Nudge** — `bgagent nudge <id> "<text>"` writes a row into `TaskNudgesTable`. The agent reads pending nudges between turns, acknowledges with a `nudge_acknowledged` milestone event, and integrates the nudge on its next turn.
 5. **Ask** — `bgagent ask <id> "<question>"` (Phase 2) writes a question row. The agent answers at the next between-turns boundary; the answer surfaces as a `status_response` event. CLI default is foreground block-and-poll with a spinner; task and answer are both durable if the CLI disconnects.
-6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or a Slack button-press. Detailed design in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md).
+6. **Approval gates** — Phase 3 Cedar-driven hard gates. Agent emits `approval_requested`, waits for a decision from `bgagent approve` / `bgagent deny` or an owner-authored Linear thread reply. Slack notifications provide CLI instructions; buttons remain proposed. Detailed design in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md).
 
 ### Core architectural choices
 
@@ -27,7 +29,7 @@ This document describes the interactivity surfaces layered on top of that model 
 - **Durable event table (`TaskEventsTable`)** is the one source of truth for agent progress. Every reader — CLI, Slack/GitHub/email dispatchers, status Lambda — reads from this table, never from the live agent.
 - **Polling-only CLI.** No SSE, no WebSockets. DDB eventually-consistent reads with an `event_id` cursor are cheap, reliable, and compute-agnostic.
 - **Notification plane as first-class.** A FanOutConsumer Lambda subscribes to `TaskEventsTable` DDB Streams and routes per-event-type to per-channel dispatcher Lambdas (Slack, email, GitHub comment). Per-channel defaults ship in v1.
-- **Agent interaction via the hook mechanism the Claude Agent SDK provides.** Nudges, asks, and approvals all use `Stop` / between-turns hooks; no mechanism outside the SDK's contract is required.
+- **Agent interaction via the hook mechanism the Claude Agent SDK provides.** Nudges and asks use `Stop` / between-turns hooks; approval gates pause in `PreToolUse`, with denial steering delivered at a later Stop hook; no mechanism outside the SDK's contract is required.
 
 ---
 
@@ -111,7 +113,7 @@ This document describes the interactivity surfaces layered on top of that model 
          │  DELETE /tasks/{id}              cancel      │
          │  POST   /tasks/{id}/nudge        nudge       │
          │  POST   /tasks/{id}/asks         ask (P2)    │
-         │  POST   /tasks/{id}/approvals    approve P3  │
+         │  POST   /tasks/{id}/approve      approve     │
          │  POST   /webhooks/tasks          GH webhook  │
          └───────────┬──────────────────────────────────┘
                      │
@@ -223,17 +225,16 @@ Consumer: agent between-turns hook reads pending nudges, emits `nudge_acknowledg
 ### 3.7 TaskApprovalsTable (Phase 3)
 
 Phase 3 approval-request spine. Detailed schema in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md). Semantics summary:
-- Agent writes an approval row with the request context.
-- Agent transitions `RUNNING → AWAITING_APPROVAL` and enters a poll loop.
-- User responds via REST (`POST /tasks/{id}/approvals/{request_id}`) or via a Slack button dispatched by the notification plane.
+- The worker calls the trusted approval service, which atomically creates the pending row and transitions the task `RUNNING → AWAITING_APPROVAL`. The worker then polls for a decision.
+- The owner responds through `POST /tasks/{id}/approve` or `/deny` with `request_id` in the body, the equivalent CLI commands, or an `approve`/`deny` reply to the Linear approval comment.
 - On decision, agent transitions back to `RUNNING`; denial reasons are injected as Stop-hook steering on the next turn.
 
 ### 3.8 FanOutConsumer (router)
 
 Lambda subscribed to `TaskEventsTable` DDB Streams (relying on the DynamoDB Streams **default** `ParallelizationFactor` of 1, which preserves per-`task_id` ordering by shard — not set explicitly in `fanout-consumer.ts`; see §6.1). Reads per-task notification config (from `TaskTable` metadata or `RepoTable` defaults), filters events by channel subscription, and invokes per-channel dispatcher Lambdas.
 
-- **SlackDispatchFn** — posts to configured channel / DM. Includes action buttons for `approval_required` events.
-- **EmailDispatchFn** — SES.
+- **SlackDispatchFn** — posts to configured channel / DM. Approval notifications currently contain CLI response instructions; buttons remain proposed.
+- **EmailDispatchFn** — proposed SES delivery; current email dispatch is a log-only stub.
 - **GitHubDispatchFn** — edits a single GitHub issue comment in place via `PATCH /repos/{o}/{r}/issues/comments/{id}`. On 404 (comment deleted upstream) falls back to POSTing a fresh comment. Per-task ordering is guaranteed upstream by the DDB Streams default `ParallelizationFactor` of 1 (see §6.1), so no conditional-request header is needed (and GitHub's REST API does not accept `If-Match` on this endpoint — see §6.4).
 
 Detailed routing and default filters in §6.
@@ -296,8 +297,8 @@ Authentication: Cognito User Pool ID token in `Authorization` header for all RES
 | `agent_milestone` | Agent code (pipeline, hooks) | Named checkpoint (`repo_cloned`, `pr_opened`, `nudge_acknowledged`, ...) |
 | `agent_cost_update` | Runner | Cumulative token + dollar cost |
 | `agent_error` | Runner | Handled exception |
-| `approval_required` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
-| `approval_decided` (P3) | Approve/Deny Lambda | User responded |
+| `approval_requested` (P3) | PreToolUse Cedar hook | Cedar policy requires user decision |
+| `approval_decision_recorded` (P3) | Approve/Deny Lambda | User responded |
 | `status_response` (P2) | Between-turns hook | Agent answered an `ask` |
 | `nudge_acknowledged` | Between-turns hook | Agent saw a nudge before incorporating it |
 | `pr_created` | Pipeline | PR opened for the task |
@@ -320,7 +321,7 @@ Consumers page `TaskEventsTable` using `event_id` as a cursor: `KeyConditionExpr
 ### 5.1 `bgagent submit`
 
 ```
-$ bgagent submit --repo org/repo "fix the auth timeout bug"
+$ bgagent submit --repo org/repo --task "fix the auth timeout bug"
 task submitted: abc123
 ```
 
@@ -411,9 +412,9 @@ Flags:
 
 HITL approval commands. All flows are REST + DDB; no streaming. Detailed design in [`CEDAR_HITL_GATES.md`](./CEDAR_HITL_GATES.md). Summary:
 
-- Agent emits `approval_required` with the tool context.
-- Notification plane dispatches the event (Slack with action buttons, email, GitHub).
-- User responds via `bgagent approve <id>`, `bgagent deny <id> --reason "…"`, or Slack button click.
+- Agent emits `approval_requested` with the tool context.
+- The notification plane sends approval messages to Slack and Linear. Email is a stub; GitHub does not receive approval messages.
+- The owner responds via `bgagent approve <task_id> <request_id>`, `bgagent deny <task_id> <request_id> --reason "…"`, or an `approve`/`deny` reply to the Linear approval comment.
 - Agent's poll loop sees the decision and proceeds or deny-steers.
 
 ### 5.7 `bgagent cancel`
@@ -444,19 +445,22 @@ TaskEventsTable ──DDB Stream──▶ FanOutConsumer
 - Router reads per-task notification config (channel enablement + event-type filters), then invokes the relevant dispatcher Lambda(s) per event.
 - Dispatchers are separate Lambdas so a GitHub API outage doesn't block Slack notifications.
 
-### 6.2 Per-channel defaults (v1)
+### 6.2 Original proposed per-channel defaults (v1)
 
 | Channel | Default subscribed events | Opt-in via `--verbose` |
 |---|---|---|
-| **Slack** | `task_completed`, `task_failed`, `task_cancelled`, `pr_created`, `agent_error`, `approval_required`, `status_response` | adds `agent_milestone` |
-| **Email** | `task_completed`, `task_failed`, `approval_required` | — |
+| **Slack** | `task_completed`, `task_failed`, `task_cancelled`, `pr_created`, `agent_error`, `approval_requested`, `status_response` | adds `agent_milestone` |
+| **Email** | `task_completed`, `task_failed`, `approval_requested` | — |
 | **GitHub issue comment** | `pr_created`, terminal status (single edit-in-place comment) | — already minimal |
 
 Rationale: if Slack pings on every milestone, users mute the bot within days. Default to the minimal set that surfaces decision-requiring events and completion; power users opt into verbose streams.
 
 ### 6.3 Slack approval buttons
 
-`approval_required` events delivered to Slack include `Approve` / `Deny` action buttons. On click, Slack invokes an interaction callback Lambda which writes to `TaskApprovalsTable` via the same `POST /approvals` path the CLI uses. This gives the common case (reviewer in Slack, not at a terminal) a one-click response path.
+**Proposed, not implemented.** Current Slack approval messages contain CLI
+commands. A future button callback would need to map the Slack user to the task
+owner and use the authenticated decision path; a valid Slack signature alone
+would not authorize approval. Linear thread replies already support owner decisions.
 
 ### 6.4 GitHub issue comment — edit-in-place
 
@@ -482,7 +486,7 @@ Submitted with the task (optional) or resolved from repo defaults:
 {
   "notifications": {
     "slack":  { "enabled": true, "channel": "#coding-agents", "events": ["default"] },
-    "email":  { "enabled": true, "events": ["approval_required", "task_failed"] },
+    "email":  { "enabled": true, "events": ["approval_requested", "task_failed"] },
     "github": { "enabled": true, "events": ["default"] }
   }
 }

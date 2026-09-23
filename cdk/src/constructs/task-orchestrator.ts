@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Duration, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -26,6 +26,7 @@ import { Runtime, Architecture } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
@@ -51,10 +52,17 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
+import type { ContinuationBucket } from './continuation-bucket';
+import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
+
 /**
  * Properties for TaskOrchestrator construct.
  */
 export interface TaskOrchestratorProps {
+  /** Close outstanding requests and apply retention after task completion. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+  /** Versioned durable checkpoints and launch inputs for MicroVM worker replacement. */
+  readonly continuationBucket?: ContinuationBucket;
   /**
    * The DynamoDB task table.
    */
@@ -175,12 +183,11 @@ export interface TaskOrchestratorProps {
   };
 
   /**
-   * S3 bucket for per-task ECS payloads. When provided (alongside
-   * ``ecsConfig``), the orchestrator writes the payload here and passes only an
-   * ``AGENT_PAYLOAD_S3_URI`` pointer in the RunTask override (the full payload
-   * exceeds the 8 KB containerOverrides limit), then deletes the object in the
-   * finalize step. The orchestrator gets write + delete; the ECS task role gets
-   * read-only (granted on the bucket by ``EcsAgentCluster``).
+   * S3 storage for ECS v2 bootstrap manifests, task payloads and private launch
+   * references. The coordinator publishes/signs/replays the reference delivered
+   * in AGENT_PAYLOAD_REF, then deletes both task objects at finalization.
+   * EcsAgentCluster separately grants worker bootstrap-only reads and denies
+   * other object reads and payload-bucket listing.
    */
   readonly ecsPayloadBucket?: s3.IBucket;
 
@@ -209,11 +216,9 @@ export interface TaskOrchestratorProps {
    * ## Names, ARNs — and NO grants
    *
    * Every field is an identifier, never a secret value, and NONE of them adds an
-   * IAM grant to the orchestrator role: it forwards these strings and never calls
-   * the resources they name (the agent does, through its own execution role /
-   * SessionRole). The approvals and nudges tables in particular stay ungranted to
-   * the orchestrator, which is asserted by a unit test — a "while I'm here" grant
-   * would hand the orchestration plane tenant-data access it has never needed.
+   * IAM grant to the orchestrator role. P3's separate `microvmConfig` grants
+   * explicit approval reads/condition checks for lifecycle supervision. Forwarding
+   * these names alone still grants no access to approvals, nudges or tenant roles.
    *
    * ## All-or-nothing, and wired unconditionally
    *
@@ -224,8 +229,8 @@ export interface TaskOrchestratorProps {
    * only ever fire for a hand-edited Lambda environment — never because a
    * deploy-time gate and a per-repo `compute_type` disagreed.
    *
-   * Optional as a prop only so isolated construct tests can omit it. Four of the
-   * thirteen `platform_config` keys come from env vars the orchestrator already
+   * Optional as a prop only so isolated construct tests can omit it. Some
+   * `platform_config` keys come from env vars the orchestrator already
    * carries for its own work (`TASK_TABLE_NAME`, `TASK_EVENTS_TABLE_NAME`,
    * `GITHUB_TOKEN_SECRET_ARN`) or from the stack-wide `SolutionUaAspect`
    * (`AWS_SDK_UA_APP_ID`), so they are deliberately NOT repeated here.
@@ -237,6 +242,7 @@ export interface TaskOrchestratorProps {
      * fails closed with `approval_write_failed`.
      */
     readonly taskApprovalsTableName: string;
+    readonly approvalRequestsApiUrl?: string;
     /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
     readonly nudgesTableName: string;
     /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
@@ -294,8 +300,8 @@ export interface TaskOrchestratorProps {
    *
    * `ingressConnectorArns` is required for a different reason — it is a security
    * control whose absence has a *wider* meaning than "off" (see the field). Only
-   * `imageVersion` is genuinely optional, and its absent state ("let the service
-   * resolve the latest ACTIVE version") is a real, intended configuration.
+   * `imageVersion` may be omitted to resolve the latest ACTIVE version.
+   * Approval suspension defaults off while wake/cleanup stay available.
    */
   readonly microvmConfig?: {
     /**
@@ -326,6 +332,10 @@ export interface TaskOrchestratorProps {
      * active version, which is what a rebuild-in-place flow wants.
      */
     readonly imageVersion?: string;
+    /** Coordinator reads and condition-checks the current gate before sleeping. */
+    readonly approvalsTable: dynamodb.ITable;
+    /** Static opt-in and live Parameter Store value for new suspends; default false. */
+    readonly approvalSuspendEnabled?: boolean;
     /** Role the MicroVM assumes at runtime; passed on `RunMicrovm`. */
     readonly executionRoleArn: string;
     /** Egress network connectors; comma-joined into the env var. */
@@ -350,9 +360,9 @@ export interface TaskOrchestratorProps {
     /**
      * Bucket for `/run` payloads that exceed the 4 KB `runHookPayload` cap —
      * i.e. nearly all of them, since a hydrated payload is bigger than that.
-     * The orchestrator gets **write only**: unlike the ECS payload bucket
-     * there is no finalize-time delete on this backend (the bucket's lifecycle
-     * rule is the reaper), so `grantDelete` would be an unused permission.
+     * The orchestrator uploads payloads and deletes `<taskId>/payload.json` at
+     * finalization. It does not read them; the execution role is the reader.
+     * Lifecycle expiry is the fallback if finalization or deletion fails.
      */
     readonly payloadBucket: s3.IBucket;
   };
@@ -388,6 +398,9 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
+    if (props.agentPlatformConfig && !props.agentPlatformConfig.approvalRequestsApiUrl) {
+      throw new Error('agentPlatformConfig requires approvalRequestsApiUrl; deploy the matching approval service');
+    }
     if (props.guardrailId && !props.guardrailVersion) {
       throw new Error('guardrailVersion is required when guardrailId is provided');
     }
@@ -397,6 +410,12 @@ export class TaskOrchestrator extends Construct {
 
     const handlersDir = path.join(__dirname, '..', 'handlers');
     const maxConcurrent = props.maxConcurrentTasksPerUser ?? 10;
+    const suspendParameter = props.microvmConfig ? new ssm.StringParameter(this, 'MicrovmApprovalSuspendEnabled', {
+      parameterName: `/${Stack.of(this).stackName}/microvm-approval-suspend-enabled`,
+      stringValue: String(props.microvmConfig.approvalSuspendEnabled ?? false),
+      description: 'Allow new approval suspensions; existing durable executions reread before suspending.',
+      allowedPattern: '^(true|false)$',
+    }) : undefined;
 
     // Hydration pulls in bedrock-agentcore (bundled), durable-execution, and
     // attachment screening (URL resolution). pdf-parse is needed for PDF text
@@ -419,7 +438,6 @@ export class TaskOrchestrator extends Construct {
         '@aws-sdk/client-ecs',
         '@aws-sdk/client-lambda',
         '@aws-sdk/client-bedrock-runtime',
-        '@aws-sdk/client-s3',
         '@aws-sdk/client-secrets-manager',
         '@aws-sdk/lib-dynamodb',
         '@aws-sdk/util-dynamodb',
@@ -440,10 +458,14 @@ export class TaskOrchestrator extends Construct {
         executionTimeout: Duration.hours(DURABLE_EXECUTION_TIMEOUT_HOURS),
         retentionPeriod: Duration.days(DURABLE_RETENTION_DAYS),
       },
+      // Durable executions replay their original code and environment after a
+      // deployment. Keep published versions until no execution can resume them.
+      currentVersionOptions: { removalPolicy: RemovalPolicy.RETAIN },
       environment: {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
+        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         RUNTIME_ARN: props.runtimeArn,
@@ -488,6 +510,12 @@ export class TaskOrchestrator extends Construct {
           // unconditional; there is no "no ingress configured" state to express.
           MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
           MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
+          ...(props.continuationBucket && {
+            CONTINUATION_BUCKET_NAME: props.continuationBucket.bucket.bucketName,
+          }),
+          TASK_APPROVALS_TABLE_NAME: props.microvmConfig.approvalsTable.tableName,
+          MICROVM_APPROVAL_SUSPEND_ENABLED: String(props.microvmConfig.approvalSuspendEnabled ?? false),
+          MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME: suspendParameter!.parameterName,
           ...(props.microvmConfig.imageVersion && {
             MICROVM_IMAGE_VERSION: props.microvmConfig.imageVersion,
           }),
@@ -501,7 +529,10 @@ export class TaskOrchestrator extends Construct {
         // PLATFORM_CONFIG_ENV_VARS map verbatim — one stack value, one name, three
         // backends. NO IAM grant accompanies any of these (see the prop docs).
         ...(props.agentPlatformConfig && {
-          TASK_APPROVALS_TABLE_NAME: props.agentPlatformConfig.taskApprovalsTableName,
+          TASK_APPROVALS_TABLE_NAME: props.microvmConfig?.approvalsTable.tableName ?? props.agentPlatformConfig.taskApprovalsTableName,
+          ...(props.agentPlatformConfig.approvalRequestsApiUrl && {
+            APPROVAL_REQUESTS_API_URL: props.agentPlatformConfig.approvalRequestsApiUrl,
+          }),
           NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
           LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
           ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
@@ -524,6 +555,7 @@ export class TaskOrchestrator extends Construct {
 
     // DynamoDB grants
     props.taskTable.grantReadWriteData(this.fn);
+    props.taskApprovalsTable?.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
@@ -535,24 +567,11 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // ECS payload bucket — the orchestrator writes the payload before
-    // RunTask and deletes it at finalize. Write + delete only (it never reads
-    // its own payload back; the ECS container is the reader, with its own
-    // read-only grant from EcsAgentCluster).
-    if (props.ecsPayloadBucket) {
-      props.ecsPayloadBucket.grantPut(this.fn);
-      props.ecsPayloadBucket.grantDelete(this.fn);
-    }
-
-    // ADR-021: MicroVM payload bucket. WRITE only — the strategy uploads an
-    // oversized /run payload and never reads it back (the MicroVM execution
-    // role is the reader, with its own read-only grant), and it never deletes
-    // (the bucket's lifecycle rule reaps). No grantDelete, deliberately: the ECS
-    // path has one because the orchestrator deletes at finalize; this one does
-    // not, so the grant would be dead permission.
-    if (props.microvmConfig) {
-      props.microvmConfig.payloadBucket.grantPut(this.fn);
-    }
+    // Publish manifests/payloads, sign one-object reads and persist private
+    // launch references for replay. Workers cannot read the launch records.
+    if (props.ecsPayloadBucket) grantCoordinatorPayloads(props.ecsPayloadBucket, this.fn);
+    if (props.microvmConfig) grantCoordinatorPayloads(props.microvmConfig.payloadBucket, this.fn);
+    props.continuationBucket?.grantCoordinator(this.fn);
 
     // Durable execution managed policy
     this.fn.role!.addManagedPolicy(
@@ -645,20 +664,17 @@ export class TaskOrchestrator extends Construct {
 
     // Lambda MicroVMs compute strategy permissions (only when configured).
     //
-    // EXACTLY the four control-plane actions the P1 strategy calls, per
+    // Control-plane actions used by the strategy, per
     // ADR-021's "only the MicroVM lifecycle actions it calls" requirement:
     //   RunMicrovm       — startSession
     //   GetMicrovm       — pollSession
+    //   GetMicrovmImageVersion — attest the actual launched snapshot's lifecycle hooks
     //   TerminateMicrovm — stopSession / finalize (the active cleanup path)
+    //   SuspendMicrovm / ResumeMicrovm — durable approval-wait supervision
     //   PassNetworkConnector — required to attach egress connectors, even the
     //                          AWS-managed ones
     //
     // NOT granted, deliberately:
-    //   - lambda:SuspendMicrovm / lambda:ResumeMicrovm — the ADR's grant list
-    //     names them, but P1 has no suspend/resume code path. They land with the
-    //     P3 interface widening (mandatory suspendSession/resumeSession across
-    //     all three strategies) together with the approve/deny Lambdas'
-    //     conditional ResumeMicrovm + GetMicrovm.
     //   - lambda:CreateMicrovmAuthToken — granted to no role in any phase; no
     //     JWE consumer exists (ADR-021 sub-decision 3).
     if (props.microvmConfig) {
@@ -691,19 +707,26 @@ export class TaskOrchestrator extends Construct {
         actions: [
           'lambda:RunMicrovm',
           'lambda:GetMicrovm',
+          'lambda:GetMicrovmImageVersion',
           'lambda:TerminateMicrovm',
+          'lambda:SuspendMicrovm',
+          'lambda:ResumeMicrovm',
         ],
         resources: microvmImageResources,
       }));
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmApprovalObservation',
+        actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
+        resources: [props.microvmConfig.approvalsTable.tableArn],
+      }));
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        sid: 'MicrovmSuspendConfiguration',
+        actions: ['ssm:GetParameter'],
+        resources: [suspendParameter!.parameterArn],
+      }));
 
-      // `lambda:PassNetworkConnector` supports NO resource-level permissions
-      // (the Service Authorization Reference lists no resource type for it), so
-      // `Resource: '*'` is mandatory — a narrowed ARN would simply never match
-      // and RunMicrovm would fail with AccessDenied. It is also why the ADR
-      // notes the action is needed "even for the default connectors": the
-      // AWS-managed connectors live in the `aws` account, outside any ARN we
-      // could enumerate. The action only permits *passing* a connector to a
-      // service, not creating or reading one.
+      // PassNetworkConnector has no resource-level authorization support. Its
+      // wildcard permits attaching connectors, not creating or inspecting them.
       this.fn.addToRolePolicy(new iam.PolicyStatement({
         sid: 'MicrovmPassNetworkConnector',
         actions: ['lambda:PassNetworkConnector'],
@@ -821,7 +844,7 @@ export class TaskOrchestrator extends Construct {
       },
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com; S3 object/* wildcard from CDK grantPut on the dedicated MicroVM payload bucket; MicroVM lifecycle actions (RunMicrovm/GetMicrovm/TerminateMicrovm) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (every one of them authorizes against the image resource, not the per-session instance; no account-wide wildcard is used); lambda:PassNetworkConnector requires Resource:* because the action supports no resource-level permissions and the AWS-managed connectors live outside this account; iam:PassRole is scoped to the MicroVM execution role and conditioned on lambda.amazonaws.com; Agent Registry read scoped to the wired registry ARN, with a record/* suffix wildcard because record ids are server-assigned and unknown at synth (#246)',
+        reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData; AgentCore runtime/* required for sub-resource invocation; Secrets Manager wildcards generated by CDK grantRead; AgentCore Memory wildcards generated by CDK grantRead/grantWrite; ECS RunTask/DescribeTasks/StopTask conditioned on cluster ARN; iam:PassRole scoped to ECS task/execution roles and conditioned on ecs-tasks.amazonaws.com; S3 writes restricted to bootstrap manifests and task payload/launch objects; GetObject and DeleteObject restricted to */payload.json and */launch.json for signing, replay and cleanup; ListBucket is scoped to each payload bucket so absent launch records return NoSuchKey; MicroVM launch/state/sleep/wake/cleanup and image-capability actions (RunMicrovm/GetMicrovm/SuspendMicrovm/ResumeMicrovm/TerminateMicrovm/GetMicrovmImageVersion) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (every one of them authorizes against the image resource, not the per-session instance; no account-wide wildcard is used); lambda:PassNetworkConnector requires Resource:* because the action supports no resource-level permissions and the AWS-managed connectors live outside this account; iam:PassRole is scoped to the exact MicroVM execution role without iam:PassedToService (ADR-021 P2r2-F10); Agent Registry read scoped to the wired registry ARN, with a record/* suffix wildcard because record ids are server-assigned and unknown at synth (#246)',
       },
     ], true);
   }

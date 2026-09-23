@@ -42,12 +42,14 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
   PutCommand: jest.fn((input: unknown) => ({ _type: 'Put', input })),
+  TransactWriteCommand: jest.fn((input: unknown) => ({ _type: 'TransactWrite', input })),
 }));
 
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_RETENTION_DAYS = '90';
 process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/default';
 process.env.ECS_CLUSTER_ARN = 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster';
@@ -127,7 +129,32 @@ beforeEach(() => {
 });
 
 describe('cancel-task handler', () => {
-  test('cancels a running task successfully', async () => {
+  test('closes an unanswered approval atomically before stopping its worker', async () => {
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({
+      Item: {
+        ...RUNNING_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'request-1',
+      },
+    })
+      .mockResolvedValueOnce({ Item: { status: 'PENDING', user_id: RUNNING_TASK.user_id } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(200);
+    const transaction = mockSend.mock.calls.find(([command]) => command._type === 'TransactWrite')![0].input;
+    expect(transaction.TransactItems[0].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
+    expect(transaction.TransactItems[1].Update.Key.request_id).toBe('request-1');
+    expect(transaction.TransactItems[1].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
+    expect(transaction.TransactItems[2].Put.Item.event_type).toBe('approval_cancelled');
+    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('stops an AgentCore session when cancelling %s', async (status) => {
+    mockSend.mockReset();
+    mockSend
+      .mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status } })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(200);
@@ -187,19 +214,26 @@ describe('cancel-task handler', () => {
 
     expect(result.statusCode).toBe(409);
     expect(JSON.parse(result.body).error.code).toBe('TASK_ALREADY_TERMINAL');
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+    expect(mockEcsSend).not.toHaveBeenCalled();
+    expect(mockMicrovmSend).not.toHaveBeenCalled();
   });
 
-  test('returns 409 on ConditionalCheckFailedException (race condition)', async () => {
+  test.each(['RUNNING', 'AWAITING_APPROVAL'])('does not stop %s compute when cancellation loses a terminal race', async (status) => {
     mockSend.mockReset();
-    mockSend.mockResolvedValueOnce({ Item: RUNNING_TASK });
+    mockSend.mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status, compute_type: 'lambda-microvm' } });
     const condError = new Error('Condition not met');
     condError.name = 'ConditionalCheckFailedException';
     mockSend.mockRejectedValueOnce(condError);
+    mockSend.mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status: 'COMPLETED' } });
 
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(409);
     expect(JSON.parse(result.body).error.code).toBe('TASK_ALREADY_TERMINAL');
+    expect(mockAgentCoreSend).not.toHaveBeenCalled();
+    expect(mockEcsSend).not.toHaveBeenCalled();
+    expect(mockMicrovmSend).not.toHaveBeenCalled();
   });
 
   test('returns 500 on unexpected DynamoDB error', async () => {
@@ -232,21 +266,23 @@ describe('cancel-task handler', () => {
     expect(typeof eventCall.input.Item.ttl).toBe('number');
   });
 
-  test('can cancel tasks in SUBMITTED state', async () => {
+  test.each(['SUBMITTED', 'QUEUED', 'PENDING_UPLOADS'])('cancels %s without stopping compute', async (status) => {
     mockSend.mockReset();
     mockSend
-      .mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status: 'SUBMITTED' } })
+      .mockResolvedValueOnce({ Item: { ...RUNNING_TASK, status } })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({});
 
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(200);
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
+    expect(mockEcsSend).not.toHaveBeenCalled();
+    expect(mockMicrovmSend).not.toHaveBeenCalled();
   });
 
-  test('does not call StopRuntimeSession when RUNNING but session_id is missing', async () => {
+  test.each(['RUNNING', 'AWAITING_APPROVAL'])('does not call StopRuntimeSession when %s has no session_id', async (status) => {
     mockSend.mockReset();
-    const noSession = { ...RUNNING_TASK };
+    const noSession = { ...RUNNING_TASK, status };
     delete (noSession as { session_id?: string }).session_id;
     mockSend
       .mockResolvedValueOnce({ Item: noSession })
@@ -287,10 +323,11 @@ describe('cancel-task handler', () => {
     expect(mockAgentCoreSend).toHaveBeenCalled();
   });
 
-  test('cancels ECS-backed running task via StopTask', async () => {
+  test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('stops an ECS session when cancelling %s', async (status) => {
     mockSend.mockReset();
     const ecsTask = {
       ...RUNNING_TASK,
+      status,
       compute_type: 'ecs',
       compute_metadata: {
         clusterArn: 'arn:aws:ecs:us-east-1:123456789012:cluster/agent-cluster',
@@ -332,7 +369,7 @@ describe('cancel-task handler', () => {
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 
-  test('cancels a lambda-microvm task via TerminateMicrovm, not AgentCore or ECS', async () => {
+  test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('terminates only the MicroVM session when cancelling %s', async (status) => {
     mockSend.mockReset();
     // NOTE: RUNNING_TASK carries `agent_runtime_arn`, and RUNTIME_ARN is also set
     // in this suite's env — exactly the mixed-deployment shape that would send a
@@ -340,6 +377,7 @@ describe('cancel-task handler', () => {
     // first. This test is the regression guard for that branch ordering.
     const microvmTask = {
       ...RUNNING_TASK,
+      status,
       compute_type: 'lambda-microvm',
       session_id: 'mvm-0123456789abcdef',
       compute_metadata: {
@@ -378,10 +416,11 @@ describe('cancel-task handler', () => {
     expect(mockAgentCoreSend).not.toHaveBeenCalled();
   });
 
-  test('a TerminateMicrovm failure still returns 200 (the CANCELLED write stands)', async () => {
+  test.each(['RUNNING', 'AWAITING_APPROVAL'])('keeps cancellation committed when TerminateMicrovm fails for %s', async (status) => {
     mockSend.mockReset();
     const microvmTask = {
       ...RUNNING_TASK,
+      status,
       compute_type: 'lambda-microvm',
       compute_metadata: { microvmId: 'mvm-0123456789abcdef', endpoint: 'https://x' },
     };

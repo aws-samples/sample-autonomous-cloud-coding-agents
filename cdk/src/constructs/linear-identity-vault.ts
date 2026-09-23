@@ -70,7 +70,7 @@ export interface LinearIdentityVaultProps {
 /**
  * The Linear identity vault's workload identity. Grant helpers wire the token
  * data-plane permissions onto whichever principal resolves Linear tokens
- * (webhook processor, orchestrator, agent session role).
+ * (webhook processor, orchestrator, compute execution role).
  */
 export class LinearIdentityVault extends Construct {
   /** The provisioned workload identity name (stable natural id). */

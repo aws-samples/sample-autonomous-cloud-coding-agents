@@ -17,6 +17,7 @@ Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installe
 ## Testing
 
 - **Sync + build:** `mise //docs:build` (required before PR if you touched guides, design, ADRs, or `CONTRIBUTING.md`)
+- **Rendered links:** `mise //docs:build` checks all internal page and anchor links in `dist/`; external URLs are not checked offline.
 - **Sync only:** `mise //docs:sync` then `git diff docs/src/content/docs/` — commit mirror changes alongside sources
 - **Astro check:** `mise //docs:check` (or `cd docs && npm run docs:check`)
 
@@ -29,6 +30,7 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 | `docs/guides/` | WRITE | User and developer guides |
 | `docs/design/` | WRITE | Architecture and design docs |
 | `docs/decisions/` | WRITE | ADRs |
+| `docs/verification/` | WRITE | Operator runbooks mirrored to `/verification/` |
 | `docs/imgs/` | WRITE | Static images |
 | `CONTRIBUTING.md` (repo root) | WRITE | Mirrored to Starlight |
 | `docs/src/content/docs/` | READ only | Generated — never edit by hand |

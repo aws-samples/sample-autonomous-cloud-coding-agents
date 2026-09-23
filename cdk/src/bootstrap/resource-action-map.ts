@@ -49,6 +49,7 @@ export const CFN_TYPES_WITHOUT_EXEC_ROLE_IAM = new Set([
  * Parent issue: #350. Full synth-time aspect tracked in #125.
  */
 export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
+  'AWS::SSM::Parameter': ['ssm:PutParameter', 'ssm:GetParameters', 'ssm:DeleteParameter'],
   'AWS::ApiGateway::Authorizer': ['apigateway:POST'],
   'AWS::ApiGateway::Method': ['apigateway:POST'],
   'AWS::ApiGateway::RequestValidator': ['apigateway:POST'],

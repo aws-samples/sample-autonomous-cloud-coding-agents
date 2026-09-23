@@ -33,6 +33,8 @@ import {
   deleteComment,
   fetchRecentComments,
   postIssueComment,
+  postIdentifiedComment,
+  readLinearApprovalComment,
   reactToComment,
   replyToComment,
   reportIssueFailure,
@@ -71,6 +73,113 @@ describe('linear-feedback', () => {
       oauthSecretArn: 'arn:secret:acme',
     });
     fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: true } } }));
+  });
+
+  describe('readLinearApprovalComment', () => {
+    test('reads the workspace, human author, decision and exact thread from Linear', async () => {
+      const comment = {
+        id: 'reply',
+        body: 'approve',
+        user: { id: 'human' },
+        botActor: null,
+        issue: { id: ISSUE_ID },
+        parent: { id: 'root' },
+      };
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, viewer: { id: 'app-identity' }, comment } }));
+      expect(await readLinearApprovalComment(CTX, 'reply')).toEqual(comment);
+      const request = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(request.variables).toEqual({ id: 'reply' });
+      expect(request.query).toContain('user { id }');
+      expect(request.query).toContain('botActor { id }');
+      expect(request.query).toContain('viewer { id }');
+    });
+    test('rejects a genuine human comment made as the saved OAuth token identity', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({
+        data: {
+          organization: { id: CTX.linearWorkspaceId },
+          viewer: { id: 'task-owner' },
+          comment: {
+            id: 'reply',
+            body: 'approve',
+            user: { id: 'task-owner' },
+            botActor: null,
+            issue: { id: ISSUE_ID },
+            parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await readLinearApprovalComment(CTX, 'reply')).toBeNull();
+    });
+    test('returns no consent for a deleted comment', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { organization: { id: CTX.linearWorkspaceId }, viewer: { id: 'app-identity' }, comment: null } }));
+      expect(await readLinearApprovalComment(CTX, 'deleted')).toBeNull();
+    });
+    test.each([
+      { errors: [{ message: 'Unavailable' }] },
+      { data: { organization: { id: CTX.linearWorkspaceId }, comment: { user: { id: 'human' } } } },
+      { data: { organization: { id: 'other-workspace' }, comment: {} } },
+    ])('fails closed on lookup errors or incorrect workspace: %j', async response => {
+      fetchMock.mockResolvedValue(jsonResponse(response));
+      await expect(readLinearApprovalComment(CTX, 'reply')).rejects.toThrow('verification');
+    });
+    test('fails closed without credentials', async () => {
+      resolveLinearOauthTokenMock.mockResolvedValue(null);
+      await expect(readLinearApprovalComment(CTX, 'reply')).rejects.toThrow('token unavailable');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('postIdentifiedComment', () => {
+    const input = { id: 'stable', issueId: ISSUE_ID, body: 'Approval needed', parentId: 'root' };
+    test('passes the stable identity and exact thread to Linear', async () => {
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: true });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual({ input });
+    });
+    test('recovers a lost creation response by verifying saved content and destination', async () => {
+      fetchMock.mockRejectedValueOnce(new Error('lost response'));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: {
+            body: input.body, issue: { id: ISSUE_ID }, parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: true });
+    });
+    test.each([
+      ['Approval needed\r\nReply here\r\n', true],
+      ['Approval needed\nApprove a DIFFERENT action', false],
+      ['Approval  needed\nReply here', false],
+      ['approval needed\nReply here', false],
+    ])('compares replay content conservatively: %j', async (body, accepted) => {
+      fetchMock.mockRejectedValueOnce(new Error('lost response'));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: { body, issue: { id: ISSUE_ID }, parent: { id: 'root' } },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, { ...input, body: 'Approval needed\nReply here' }))
+        .toEqual(accepted ? { ok: true } : { ok: false, retryable: false });
+    });
+    test('does not accept an ID collision in another issue or thread', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ errors: ['already exists'] }));
+      fetchMock.mockResolvedValueOnce(jsonResponse({
+        data: {
+          comment: {
+            body: input.body, issue: { id: 'other' }, parent: { id: 'root' },
+          },
+        },
+      }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: false });
+    });
+    test('does not treat success=false as delivery', async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ data: { commentCreate: { success: false } } }));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: false });
+    });
+    test('retries when creation and verification are both unavailable', async () => {
+      fetchMock.mockRejectedValue(new Error('outage'));
+      expect(await postIdentifiedComment(CTX, input)).toEqual({ ok: false, retryable: true });
+    });
   });
 
   describe('postIssueComment', () => {

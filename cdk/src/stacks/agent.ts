@@ -19,7 +19,7 @@
 
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -27,7 +27,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
-import { NagSuppressions } from 'cdk-nag';
+import { NagSuppressions, type NagPackSuppression } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
 import { AdmissionQueuePickup } from '../constructs/admission-queue-pickup';
 import { AgentMemory } from '../constructs/agent-memory';
@@ -35,6 +35,7 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
+import { ApprovalRequestService } from '../constructs/approval-request-service';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
@@ -48,6 +49,7 @@ import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
+import { ContinuationBucket } from '../constructs/continuation-bucket';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
@@ -57,12 +59,15 @@ import { IterationHeartbeat } from '../constructs/iteration-heartbeat';
 import { JiraIntegration } from '../constructs/jira-integration';
 import {
   LambdaMicrovmCompute,
+  createMicrovmExecutionRole,
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
 } from '../constructs/lambda-microvm-compute';
+import { LambdaMicrovmStack } from '../constructs/lambda-microvm-stack';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
+import { MicrovmContinuationManager } from '../constructs/microvm-continuation-manager';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -348,6 +353,35 @@ export class AgentStack extends Stack {
     // MicroVM termination grant (ADR-021 sub-decision 4).
     const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
     const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+    const microvmNestedContext = this.node.tryGetContext('microvm_nested_stack');
+    if (microvmNestedContext !== undefined && ![true, false, 'true', 'false'].includes(microvmNestedContext)) {
+      throw new Error('microvm_nested_stack must be true or false');
+    }
+    // Require an explicit layout until flat-to-nested migration is verified.
+    // A synth-time AWS lookup cannot protect deployments of saved assemblies.
+    const microvmNested = microvmNestedContext !== false && microvmNestedContext !== 'false';
+    if (lambdaMicrovmEnabled && microvmNestedContext === undefined) {
+      throw new Error(
+        'microvm_nested_stack must be explicitly selected: use --context microvm_nested_stack=true '
+        + 'for new or already-nested deployments, or --context microvm_nested_stack=false for existing flat deployments. '
+        + 'Changing an existing flat deployment to nested can erase artifacts and pending payloads; '
+        + 'setting true does not perform a migration. See docs/verification/645-p3-nested-stack.md.',
+      );
+    }
+    const microvmResourceNamePrefix = this.node.tryGetContext('microvm_resource_name_prefix');
+    if (microvmResourceNamePrefix !== undefined) {
+      if (typeof microvmResourceNamePrefix !== 'string') {
+        throw new Error('microvm_resource_name_prefix must be a string');
+      }
+      if (!microvmNested) {
+        throw new Error('microvm_resource_name_prefix cannot be used with microvm_nested_stack=false');
+      }
+    }
+    const suspendContext = this.node.tryGetContext('microvm_approval_suspend_enabled');
+    if (suspendContext !== undefined && ![true, false, 'true', 'false'].includes(suspendContext)) {
+      throw new Error('microvm_approval_suspend_enabled must be true or false');
+    }
+    const microvmApprovalSuspendEnabled = suspendContext === true || suspendContext === 'true';
 
     // --- Tool-federation Gateway deploy gate (ADR-019 P1) ---
     // Whether to provision the AgentCore Gateway that federates the agent's MCP
@@ -371,20 +405,6 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
-    // Fail here, naming both flags, rather than 500 resources later. The two features
-    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
-    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
-    // the resource counter, the operator gets a per-type census and no hint that two
-    // context flags are the cause.
-    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
-      throw new Error(
-        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
-        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
-        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
-        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
-      );
-    }
-
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -402,6 +422,8 @@ export class AgentStack extends Stack {
     const microvmImageInputs: LambdaMicrovmImageInputs = {
       baseImageArn: this.node.tryGetContext('microvm_base_image_arn'),
       baseImageVersion: this.node.tryGetContext('microvm_base_image_version'),
+      artifactSha256: this.node.tryGetContext('microvm_artifact_sha256'),
+      managedImageVersion: this.node.tryGetContext('microvm_managed_image_version'),
       externalImageIdentifier: this.node.tryGetContext('microvm_image_identifier'),
       externalImageVersion: this.node.tryGetContext('microvm_image_version'),
     };
@@ -409,7 +431,7 @@ export class AgentStack extends Stack {
       && isLambdaMicrovmImageConfigured(microvmImageInputs);
 
     // MicroVM image ARN placeholder — the image is created AFTER TaskApi, but the
-    // cancel Lambda's grant must be scoped to it. Same Lazy.string cycle-break as
+    // cancel and decision-handler grants must be scoped to it. Same Lazy.string cycle-break as
     // the runtime / orchestrator / SessionRole ARNs below.
     let microvmImageArnHolder: string | undefined;
     const lazyMicrovmImageArn = Lazy.string({
@@ -474,6 +496,13 @@ export class AgentStack extends Stack {
     });
 
     inputGuardrail.createVersion('Initial version');
+    // A retained durable Lambda version also pins GUARDRAIL_VERSION. Preserve
+    // that immutable dependency across updates, even when CDK creates a new one.
+    for (const child of inputGuardrail.node.findAll()) {
+      if (child instanceof CfnResource && child.cfnResourceType === 'AWS::Bedrock::GuardrailVersion') {
+        child.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      }
+    }
 
     // --- TaskApi is constructed before the orchestrator (which it needs the
     // ARN of) and before the Runtime (which it needs the ARN of, for the
@@ -539,6 +568,13 @@ export class AgentStack extends Stack {
       // MicroVM-backed task to cancel then.
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
+
+    const approvalRequests = new ApprovalRequestService(this, 'ApprovalRequests', {
+      taskTable: taskTable.table, approvalsTable: taskApprovalsTable.table,
+    });
+    // Reuse the parent's regional API Gateway logging configuration.
+    const apiLoggingAccount = taskApi.api.node.tryFindChild('Account');
+    if (apiLoggingAccount) approvalRequests.node.addDependency(apiLoggingAccount);
 
     // Agent asset registry API (#246) in its own NestedStack + RestApi so its
     // ~35 resources don't count against this root stack's 500-resource limit.
@@ -613,6 +649,7 @@ export class AgentStack extends Stack {
       // AWAITING_APPROVAL; absent → hook fails closed with
       // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
       TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+      APPROVAL_REQUESTS_API_URL: approvalRequests.api.url,
       // Hint for the hook's remaining-maxLifetime calculation (§6.5
       // pseudocode line 793). Kept in sync with the AgentCore
       // lifecycle configuration below so drift is visible. 8 hours.
@@ -749,12 +786,9 @@ export class AgentStack extends Stack {
     // {user_id, repo, task_id}, and that role carries the tenant-data grants
     // constrained by aws:PrincipalTag conditions. The runtime role keeps only
     // non-tenant / shared access:
-    //   - UserConcurrencyTable: user-scoped counter (agent path does not write
-    //     it today; left here for the reconciler/orchestrator parity).
     //   - GitHub PAT secret: read once at startup, before the agent assumes the
     //     SessionRole.
     //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
-    userConcurrencyTable.table.grantReadWriteData(runtime);
     githubTokenSecret.grantRead(runtime);
     applicationLogGroup.grantWrite(runtime);
     agentMemory.grantReadWrite(runtime);
@@ -822,17 +856,19 @@ export class AgentStack extends Stack {
     // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
     // per-user-prefixed trace writes and attachment reads), each constrained
-    // by aws:PrincipalTag conditions so a compromised session reaches only its
-    // own task's data. The agent assumes this with refreshable credentials
+    // by aws:PrincipalTag conditions for the existing session credentials.
+    // The compute role chooses the tags; that choice is not independently
+    // authenticated by this trust policy. Main-task writes are restricted to
+    // reporting attributes. The agent assumes this with refreshable credentials
     // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
     // ExecutionRole as the assuming principal; the ECS task role is added in
     // the ECS block below when that backend is enabled.
     const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
       assumingRoles: [runtime.role],
+      taskTable: taskTable.table,
+      approvalsTable: taskApprovalsTable.table,
       taskScopedTables: [
-        taskTable.table,
         taskEventsTable.table,
-        taskApprovalsTable.table,
         taskNudgesTable.table,
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
@@ -843,6 +879,7 @@ export class AgentStack extends Stack {
       invokableModels: invokableBedrockModels,
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
+    approvalRequests.grantRequests(agentSessionRole.role);
 
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
     // which needs CloudWatch Logs resource policy propagation. Re-enable via
@@ -855,24 +892,15 @@ export class AgentStack extends Stack {
       },
     ], true);
 
-    // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
-    // grant + extra env vars) pushed the runtime
-    // execution role past CDK's per-inline-policy size limit, causing CDK
-    // to auto-split excess statements into ``OverflowPolicy1`` / etc.
-    // Those overflow policies inherit the same wildcard
-    // ``bedrock:InvokeModel*`` / CloudWatch / cross-region-inference
-    // actions as the base policy but live at paths that any suppression
-    // placed at constructor time does NOT reach (CDK creates the
-    // overflow policies lazily during synth ``prepare()``, after the
-    // construct tree has been frozen). Use an Aspect that visits every
-    // node during synth and matches overflow-policy children of the
-    // runtime ExecutionRole so any present or future overflow is
-    // suppressed automatically without hardcoding
-    // ``OverflowPolicy<N>`` indices.
-    // Roles known to overflow, with the evidence for each. Keyed by a path
-    // fragment rather than an `OverflowPolicy<N>` index so future splits are
-    // covered automatically.
-    const OVERFLOW_SUPPRESSIONS: readonly { readonly pathFragment: string; readonly reason: string }[] = [
+    // CDK splits large role policies during synth, after constructor-time
+    // suppressions have visited the existing children. Apply the documented
+    // exceptions to those later policies before cdk-nag inspects them, matching
+    // the owning role without relying on a particular OverflowPolicy<N> index.
+    const OVERFLOW_SUPPRESSIONS: readonly {
+      readonly pathFragment: string;
+      readonly reason: string;
+      readonly appliesTo?: NagPackSuppression['appliesTo'];
+    }[] = [
       {
         pathFragment: '/Runtime/ExecutionRole/OverflowPolicy',
         reason:
@@ -888,14 +916,41 @@ export class AgentStack extends Stack {
         reason:
           'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
       },
+      {
+        // Image lifecycle grants can push existing channel secret grants into
+        // an overflow policy. Exempt only those resource patterns; other wildcard
+        // grants in this role's future overflow documents still require review.
+        pathFragment: '/TaskOrchestrator/OrchestratorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'Channel setup creates workspace-specific OAuth secrets and Linear vault providers after deployment. These grants retain the configured account and Region and match only the Linear/Jira secret prefixes and Linear vault provider/client-secret prefixes.',
+        appliesTo: [{
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bgagent-jira-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-\\*$/',
+        }],
+      },
+      {
+        pathFragment: '/OrchestrationReconciler/ReconcilerFn/ServiceRole/OverflowPolicy',
+        reason:
+          'The reconciler mints Linear feedback tokens for workspace providers created during channel setup. The grant matches only Linear vault provider/client-secret prefixes in this account and Region.',
+        appliesTo: [{
+          regex: '/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-\\*$/',
+        }, {
+          regex: '/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-\\*$/',
+        }],
+      },
     ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
         const nodePath = node.node.path;
         if (!nodePath.endsWith('/Resource')) return;
-        for (const { pathFragment, reason } of OVERFLOW_SUPPRESSIONS) {
+        for (const { pathFragment, reason, appliesTo } of OVERFLOW_SUPPRESSIONS) {
           if (nodePath.includes(pathFragment)) {
-            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason }]);
+            NagSuppressions.addResourceSuppressions(node, [{ id: 'AwsSolutions-IAM5', reason, appliesTo }]);
             return;
           }
         }
@@ -997,10 +1052,10 @@ export class AgentStack extends Stack {
     // agentcore-only, matching how other optional constructs are context-gated.
     // (``computeType`` is read near the top of the constructor — TaskApi needs it
     // for the conditional MicroVM cancel grant.)
-    // Ephemeral bucket for ECS task payloads — the orchestrator writes the
-    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
-    // passes only an S3 URI pointer; the container fetches it on boot, the
-    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    // ECS v2 bootstrap storage: deployment manifests, task instructions and
+    // private launch references. Workers read manifests with IAM and download
+    // their task through a signed one-object URL. Finalize deletes task objects;
+    // the one-day lifecycle reaps leftovers. Synthesized only under the ECS gate.
     const ecsPayloadBucket = computeType === 'ecs'
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
@@ -1008,7 +1063,7 @@ export class AgentStack extends Stack {
       NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
         {
           id: 'AwsSolutions-S1',
-          reason: 'Ephemeral per-task payloads with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+          reason: 'Ephemeral bootstrap storage with a 1-day TTL. The coordinator writes manifests and task objects, signs task reads and deletes task objects at finalize. Workers read only bootstrap/* with IAM and use single-object signed URLs for payloads; other object reads and bucket listing are explicitly denied. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
         },
       ]);
     }
@@ -1092,6 +1147,8 @@ export class AgentStack extends Stack {
         }),
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
+        taskApprovalsTable: taskApprovalsTable.table,
+        approvalRequestsApiUrl: approvalRequests.api.url,
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
@@ -1101,7 +1158,7 @@ export class AgentStack extends Stack {
         // without this grant. The AgentCore runtime gets the equivalent grant
         // where it is created above.
         agentMemory,
-        // Read-only grant so the container can fetch its payload from S3.
+        // The task role reads bootstrap manifests; a signed URL delivers its payload.
         payloadBucket: ecsPayloadBucket!.bucket,
         // ECS parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
         // a repo-bound artifact workflow delivers here. Wires the
@@ -1132,40 +1189,57 @@ export class AgentStack extends Stack {
     // agentcore-only. The construct itself enforces the ADR's Region gate, so a
     // deploy into a Region without Lambda MicroVMs fails at synth rather than on
     // the first task.
-    const lambdaMicrovm = lambdaMicrovmEnabled
-      ? new LambdaMicrovmCompute(this, 'LambdaMicrovmCompute', {
-        vpc: agentVpc.vpc,
-        // Per-session IAM scoping (#209): the MicroVM execution role is admitted
-        // to the same per-task SessionRole the AgentCore runtime and the Fargate
-        // task role use, so tenant-data access is tag-scoped on every substrate.
-        agentSessionRole,
-        // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
-        // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
-        // before the SessionRole is assumed, and MEMORY_ID (already delivered in
-        // agent_payload) makes the agent ATTEMPT a memory write that fails closed
-        // without the grant. The remaining parity grants (channel OAuth, Bedrock,
-        // AZ describe) need no stack input and are wired inside the construct.
-        githubTokenSecret,
-        agentMemory,
-        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
-        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
-        // delivered the name without the grant, so the agent's structured per-task
-        // lines and its METRICS_REPORT were AccessDenied on
-        // logs:CreateLogStream and the platform's canonical observability streams
-        // were empty on this backend. Passing the construct (not the name) keeps the
-        // grant and the delivered value derived from one object.
-        applicationLogGroup,
-        // Resolved above TaskApi — see `microvmImageInputs`.
-        ...microvmImageInputs,
-      })
-      : undefined;
+    const microvmProps = {
+      vpc: agentVpc.vpc,
+      // Per-session IAM scoping (#209): the MicroVM execution role is admitted
+      // to the same per-task SessionRole the AgentCore runtime and the Fargate
+      // task role use, so tenant-data access is tag-scoped on every substrate.
+      agentSessionRole,
+      // ADR-021 P2 runtime parity on the MicroVM execution role. Same two props
+      // EcsAgentCluster takes, for the same reasons: the PAT is read at startup
+      // before the SessionRole is assumed, and MEMORY_ID (already delivered in
+      // agent_payload) makes the agent ATTEMPT a memory write that fails closed
+      // without the grant. The remaining parity grants (channel OAuth, Bedrock,
+      // AZ describe) need no stack input and are wired inside the construct.
+      githubTokenSecret,
+      agentMemory,
+      // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
+      // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
+      // delivered the name without the grant, so the agent's structured per-task
+      // lines and its METRICS_REPORT were AccessDenied on
+      // logs:CreateLogStream and the platform's canonical observability streams
+      // were empty on this backend. Passing the construct (not the name) keeps the
+      // grant and the delivered value derived from one object.
+      applicationLogGroup,
+      // Resolved above TaskApi — see `microvmImageInputs`.
+      ...microvmImageInputs,
+    };
+    let lambdaMicrovm: LambdaMicrovmCompute | undefined;
+    if (lambdaMicrovmEnabled) {
+      if (microvmNested) {
+        // Preserve the execution role's original parent path and therefore its
+        // logical ID. Moving it with the image creates a SessionRole trust cycle.
+        const roleScope = new Construct(this, 'LambdaMicrovmCompute');
+        const executionRole = createMicrovmExecutionRole(roleScope, 'ExecutionRole');
+        lambdaMicrovm = new LambdaMicrovmStack(this, 'Microvm', {
+          ...microvmProps,
+          deploymentName: this.stackName,
+          resourceNamePrefix: microvmResourceNamePrefix,
+          executionRole,
+        }).compute;
+      } else {
+        lambdaMicrovm = new LambdaMicrovmCompute(this, 'LambdaMicrovmCompute', microvmProps);
+      }
+    }
 
-    // Resolve the Lazy TaskApi's cancel grant is scoped by. The invariant the
+    // Resolve the image ARN used by TaskApi's cancel and wake grants. The invariant the
     // Lazy's `produce` guards: `microvmImageConfigured` (computed from the same
     // inputs, via the same predicate) is true exactly when the construct sets
     // `imageArn`, so a configured deployment always has an ARN to resolve and an
     // unconfigured one never asks for it.
     microvmImageArnHolder = lambdaMicrovm?.imageArn;
+    const continuationBucket = lambdaMicrovm ? new ContinuationBucket(this, 'ContinuationBucket') : undefined;
+    continuationBucket?.grantWorker(agentSessionRole.role);
 
     // Advertise which compute substrate this deploy actually provisioned, so the
     // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
@@ -1209,6 +1283,10 @@ export class AgentStack extends Stack {
       new CfnOutput(this, 'MicrovmArtifactObjectKey', {
         value: lambdaMicrovm.artifactObjectKey,
         description: 'S3 key the Lambda MicroVMs artifact must be uploaded to (matches the build role\'s s3:GetObject scope)',
+      });
+      new CfnOutput(this, 'MicrovmArtifactBaseObjectKey', {
+        value: lambdaMicrovm.artifactBaseObjectKey,
+        description: 'Base artifact key; managed packaging adds the ZIP SHA-256, manual builds use this key',
       });
       new CfnOutput(this, 'MicrovmBuildRoleArn', {
         value: lambdaMicrovm.buildRole.roleArn,
@@ -1268,6 +1346,7 @@ export class AgentStack extends Stack {
       // of the resources they identify.
       agentPlatformConfig: {
         taskApprovalsTableName: taskApprovalsTable.table.tableName,
+        approvalRequestsApiUrl: approvalRequests.api.url,
         nudgesTableName: taskNudgesTable.table.tableName,
         logGroupName: applicationLogGroup.logGroupName,
         // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
@@ -1289,29 +1368,11 @@ export class AgentStack extends Stack {
         // Same helper, same resolved geography as the AgentCore runtime env
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
-        // `inferenceProfileId(geo, AUX)` rather than main's `haikuInferenceProfileId(geo)`:
-        // that helper was removed on this branch when the two duplicate haiku paths were
-        // collapsed into one, so main's call site no longer resolves.
         anthropicDefaultHaikuModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
-        // The MAIN model, delivered the same way for the same reason. Only the auxiliary
-        // one was, so on this substrate the main model came from a literal in
-        // agent/src/config.py that a geography change does not touch: a non-default
-        // `bedrockGeoRegion` granted one geography while the agent asked for another,
-        // and every task with no per-repo override failed at turn 0 with AccessDenied.
         anthropicModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
-        // Substrate parity for the Identity vault: the AgentCore runtime gets these
-        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
-        // receive them too or its agent skips vault minting and falls back to a
-        // Secrets-Manager token a vault-managed workspace does not have — losing
-        // reactions and state transitions on work that otherwise succeeds. Forwarded
-        // as platform_config because a snapshot must not bake configuration in.
-        ...(linearIdentityVault
-          ? {
-            linearVaultEnabled: 'true',
-            linearWorkloadIdentityName: linearVaultWorkload,
-          }
-          : {}),
       },
+      ...(continuationBucket && { continuationBucket }),
+      taskApprovalsTable: taskApprovalsTable.table,
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when the cluster was synthesized (deploy --context compute_type=ecs).
       ...(ecsCluster && {
@@ -1344,6 +1405,8 @@ export class AgentStack extends Stack {
           imageIdentifier: lambdaMicrovm.imageIdentifier,
           imageArn: lambdaMicrovm.imageArn,
           imageVersion: lambdaMicrovm.imageVersion,
+          approvalsTable: taskApprovalsTable.table,
+          approvalSuspendEnabled: microvmApprovalSuspendEnabled,
           executionRoleArn: lambdaMicrovm.executionRole.roleArn,
           egressConnectorArns: lambdaMicrovm.egressConnectorArns,
           // Explicit NO_INGRESS, not an omission: RunMicrovm attaches a PUBLIC
@@ -1358,13 +1421,31 @@ export class AgentStack extends Stack {
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
     orchestratorArnHolder = orchestrator.alias.functionArn;
+    // Stateless scheduled jobs share a nested stack to leave room in both
+    // flat and nested MicroVM layouts. Upgrades replace their generated-name
+    // functions/schedules; task tables, buckets and compute resources stay put.
+    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
+    if (continuationBucket && lambdaMicrovm?.imageArn) {
+      taskApi.enableMicrovmContinuations(
+        continuationBucket.bucket.bucketName, orchestrator.fn.functionArn, userConcurrencyTable.table,
+        maxConcurrentTasksPerUser,
+      );
+      new MicrovmContinuationManager(concurrencyMaintenance, 'MicrovmContinuationManager', {
+        taskTable: taskTable.table,
+        approvalsTable: taskApprovalsTable.table,
+        userConcurrencyTable: userConcurrencyTable.table,
+        continuationBucket,
+        orchestratorFunctionArn: orchestrator.fn.functionArn,
+        imageArn: lambdaMicrovm.imageArn,
+      });
+    }
 
     // Grant the orchestrator Lambda read+write access to memory
     // (reads during context hydration, writes for fallback episodes)
     agentMemory.grantReadWrite(orchestrator.fn);
 
     // --- Concurrency counter reconciler (drift correction) ---
-    new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
+    new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
@@ -1374,7 +1455,7 @@ export class AgentStack extends Stack {
     // concurrency cap is hit) in FIFO order as slots free up: flips
     // QUEUED -> SUBMITTED and re-invokes the orchestrator, whose atomic
     // admissionControl remains the single writer of the counter.
-    new AdmissionQueuePickup(this, 'AdmissionQueuePickup', {
+    new AdmissionQueuePickup(concurrencyMaintenance, 'AdmissionQueuePickup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1386,9 +1467,10 @@ export class AgentStack extends Stack {
     // (orchestrator Lambda crash between TaskTable write and InvokeAgentRuntime,
     // container crash during startup, etc.). Transitions to FAILED with a
     // `task_stranded` event.
-    new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
+    new StrandedTaskReconciler(concurrencyMaintenance, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
@@ -1396,7 +1478,7 @@ export class AgentStack extends Stack {
     // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
     // 30 minutes (client crash, abandoned session, network failure).
     // Cleans up orphaned S3 objects under the task's attachment prefix.
-    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+    new PendingUploadCleanup(concurrencyMaintenance, 'PendingUploadCleanup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       attachmentsBucket: attachmentsBucket.bucket,
@@ -1428,6 +1510,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
@@ -1521,6 +1604,9 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
+      lambdaMicrovmImageArn: lambdaMicrovm?.imageArn,
+      continuationBucketName: continuationBucket?.bucket.bucketName,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
@@ -1926,6 +2012,7 @@ export class AgentStack extends Stack {
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
+      taskApprovalsTable: taskApprovalsTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
       // Slack bot-token grant is guarded on this prop — pass the
@@ -1988,24 +2075,12 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
     });
 
-    // --- Vault parity for every Lambda that talks to Linear -----------------
-    // The webhook processor was granted vault access when the vault landed and
-    // nothing else was, on the assumption that widening could wait. It could not:
-    // these three post the PR-opened comment, the terminal comment, the epic
-    // rollup, and the GitHub-side issue updates. Without the grant each falls back
-    // to a Secrets-Manager token that a vault-onboarded workspace does not
-    // maintain, so the task succeeds and the Linear issue shows nothing after the
-    // opening comment — no reaction, no state change, no PR link. Live-caught as
-    // 401s in the fan-out log while the task itself completed and opened its PR.
+    // Every Linear writer needs the vault grant; otherwise its feedback may fail
+    // while the coding task succeeds. The webhook processor is wired by
+    // LinearIntegration. The coordinator also forwards these identifiers to
+    // MicroVM guests in authenticated platform_config.
     if (linearIdentityVault) {
-      // The full set, derived from the transitive import graph rather than from the
-      // handlers that import a Linear module DIRECTLY — which is how the reconciler
-      // and the heartbeat were missed: both reach a minting resolver through
-      // orchestration-channel-factory, two hops away. A source-level test now
-      // recomputes this set and fails if a handler joins it without being wired.
-      //
-      // Deliberately NOT here: the webhook RECEIVER (verifies signatures, never
-      // mints) and the stranded reconciler (reaches no channel that mints).
+      // A source-graph test includes indirect callers and guards this inventory.
       for (const linearWriter of [
         fanOutConsumer.fn,
         orchestrator.fn,
@@ -2241,8 +2316,8 @@ interface PinnedLogResource {
  * constructed — the hash in each one is not reproducible from the construct path
  * alone, which is precisely why they have to be written down.
  *
- * An entry stays until its stack is gone. Removing one while the stack still
- * exists re-introduces the rename and the failed update that comes with it.
+ * Removing an entry requires checking the deployed ids and completing any
+ * necessary log-delivery migration; otherwise the rename can fail the update.
  */
 const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
   'backgroundagent-dev': [
@@ -2279,7 +2354,7 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
 };
 
 /**
- * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
+ * Apply captured legacy log-delivery ids for entries in the pin table.
  *
  * These resources are created for us by the AgentCore Runtime and named after
  * whatever construct path the library uses internally, so a library-side rename
@@ -2290,15 +2365,12 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
  * update rolls the whole stack back. Owning the ids ourselves decouples us from
  * the library's internal naming.
  *
- * Applied unconditionally rather than behind a flag. Three cases, all safe:
- *
- *  - An existing stack in the account that owns these resources: the ids match
- *    what CloudFormation already recorded, so it updates them in place. This is
- *    the case that was broken.
- *  - A fresh stack or account: nothing owns these names yet, so they create
- *    normally. The ids are ours rather than the library's, which is the point;
- *    the values themselves carry no meaning beyond being stable.
- *  - Any other name: the ids embed the stack name, so each stack gets its own.
+ * Known limitation (#703): stack name does not identify deployment history.
+ * An existing same-named stack that already uses the library's current ids can
+ * collide when these pins rename its resources. Fresh stacks have no existing
+ * resources to collide with. Other stack names keep the library's naming.
+ * Removing the pins also requires migration for stacks still using these ids;
+ * the account-agnostic fix and migration are tracked in PR #705.
  *
  * The values were read off a stack deployed before the rename. Do not "tidy"
  * them — they are a record of what CloudFormation already has, and editing one
@@ -2307,9 +2379,7 @@ const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]>
 function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
   const stack = Stack.of(runtime);
   const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  // Only the stack these ids were recorded from can use them: they embed that
-  // stack's name. Any other stack keeps the library's own naming, which is
-  // correct for it — it has no pre-rename resources to line up with.
+  // This lookup checks only the name, not the account or deployed ids (#703).
   if (!pins) return;
 
   for (const pin of pins) {

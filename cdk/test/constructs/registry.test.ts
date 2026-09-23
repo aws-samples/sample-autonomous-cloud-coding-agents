@@ -19,7 +19,8 @@
 
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import { AgentRegistry } from '../../src/constructs/registry';
+import { applicationPolicy } from '../../src/bootstrap/policies/application';
+import { AgentRegistry, AgentRegistryStack } from '../../src/constructs/registry';
 
 function createStack(): Template {
   const app = new App();
@@ -151,5 +152,51 @@ describe('AgentRegistry construct', () => {
     ]));
     expect(statement?.Resource).not.toBe('*');
     expect(JSON.stringify(statement?.Resource)).toContain('registry/*');
+  });
+});
+
+describe.each([
+  'backgroundagent-dev',
+  `backgroundagent-dev-${'x'.repeat(108)}`,
+])('registry waiter in parent stack %s', stackName => {
+  let names: string[];
+
+  beforeAll(() => {
+    const app = new App();
+    const parent = new Stack(app, 'Parent', {
+      stackName,
+      env: { account: '123456789012', region: 'us-west-2' },
+    });
+    const registries = ['FirstRegistry', 'SecondRegistry'].map(
+      id => new AgentRegistryStack(parent, id, { registryName: id }),
+    );
+    names = registries.map(nested => {
+      const waiters = Object.values(
+        Template.fromStack(nested).findResources('AWS::StepFunctions::StateMachine'),
+      );
+      expect(waiters).toHaveLength(1);
+      return waiters[0].Properties.StateMachineName as string;
+    });
+  });
+
+  test('uses names permitted by the deployed bootstrap policy', () => {
+    const statement = applicationPolicy().toJSON().Statement.find(
+      (candidate: { Sid: string }) => candidate.Sid === 'StepFunctions',
+    );
+    const resourcePattern = new RegExp(
+      `^${(statement.Resource as string).split('*').join('.*')}$`,
+    );
+    for (const name of names) {
+      expect(name).toBeDefined();
+      expect(`arn:aws:states:us-west-2:123456789012:stateMachine:${name}`)
+        .toMatch(resourcePattern);
+    }
+  });
+
+  test('keeps names distinct and within the Step Functions name limit', () => {
+    expect(new Set(names).size).toBe(2);
+    for (const name of names) {
+      expect(name).toMatch(/^[A-Za-z0-9-]{1,80}$/);
+    }
   });
 });

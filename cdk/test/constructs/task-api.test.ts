@@ -23,7 +23,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { TaskApi, type TaskApiProps } from '../../src/constructs/task-api';
 
-function createStack(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+function createStack(overrides?: Partial<TaskApiProps>, withUploads = false): { stack: Stack; template: Template } {
   const app = new App();
   const stack = new Stack(app, 'TestStack');
 
@@ -39,6 +39,12 @@ function createStack(overrides?: Partial<TaskApiProps>): { stack: Stack; templat
   new TaskApi(stack, 'TaskApi', {
     taskTable,
     taskEventsTable,
+    ...(withUploads && {
+      attachmentsBucket: new s3.Bucket(stack, 'UploadsBucket'),
+      userConcurrencyTable: new dynamodb.Table(stack, 'CapacityTable', {
+        partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+      }),
+    }),
     ...overrides,
   });
 
@@ -131,11 +137,26 @@ describe('TaskApi construct', () => {
   let baseTemplate: Template;
   let budgetTemplate: Template;
   let webhookTemplate: Template;
+  let uploadsTemplate: Template;
 
   beforeAll(() => {
     baseTemplate = createStack().template;
     budgetTemplate = createStackWithBudget().template;
     webhookTemplate = createStackWithWebhooks().template;
+    uploadsTemplate = createStack(undefined, true).template;
+  });
+
+  test('upload confirmation can inspect capacity but cannot reserve or return a seat', () => {
+    const policy = Object.entries(uploadsTemplate.findResources('AWS::IAM::Policy'))
+      .find(([id]) => id.includes('ConfirmUploadsFn'))![1];
+    const tableId = Object.keys(uploadsTemplate.findResources('AWS::DynamoDB::Table')).find(id => id.startsWith('CapacityTable'))!;
+    const actions = policy.Properties.PolicyDocument.Statement
+      .filter((statement: any) => JSON.stringify(statement.Resource).includes(tableId))
+      .flatMap((statement: any) => [statement.Action].flat());
+    expect(actions).toContain('dynamodb:GetItem');
+    expect(actions).not.toContain('dynamodb:UpdateItem');
+    expect(actions).not.toContain('dynamodb:PutItem');
+    expect(actions).not.toContain('dynamodb:DeleteItem');
   });
 
   test('creates a Cognito User Pool', () => {

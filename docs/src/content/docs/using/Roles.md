@@ -13,6 +13,6 @@ There are four lifecycle roles. They are often the same person early on, but the
 | **Repo onboarder** | Runs `bgagent linear onboard-project` (or registers a Blueprint via CDK) to wire a repo into the platform | As needed; any authenticated user |
 | **Teammate** | Runs `bgagent configure` once + `bgagent submit` / Linear or Jira label / Slack mention from then on | Daily user |
 
-If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](#joining-an-existing-deployment) below.
+If you're a teammate joining an existing deployment, jump to [Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/authentication#joining-an-existing-deployment) below.
 
-If you're standing up a new deployment from scratch, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) first, then come back here for the [admin onboarding flow](#get-stack-outputs).
+If you're standing up a new deployment from scratch, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) first, then come back here for the [admin onboarding flow](/sample-autonomous-cloud-coding-agents/using/authentication#get-stack-outputs).

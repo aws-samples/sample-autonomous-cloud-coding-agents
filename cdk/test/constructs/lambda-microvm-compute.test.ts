@@ -53,6 +53,7 @@ import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../src/handlers/shared/micr
 // keep passing after someone lowered the real budget.
 
 const BASE_IMAGE_ARN = 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1';
+const ARTIFACT_SHA256 = 'a'.repeat(64);
 const GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 /**
@@ -67,6 +68,9 @@ interface BuildOptions {
   readonly region?: string;
   readonly context?: Record<string, unknown>;
   readonly withImage?: boolean;
+  readonly imageEnvironmentVariables?: Record<string, string>;
+  readonly artifactSha256?: string | null;
+  readonly managedImageVersion?: string;
   readonly externalImageIdentifier?: string;
   readonly externalImageVersion?: string;
   readonly withSessionRole?: boolean;
@@ -113,11 +117,13 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     });
     agentSessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
       assumingRoles: [runtimeRole],
-      taskScopedTables: [
-        new dynamodb.Table(stack, 'TaskTable', {
-          partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-        }),
-      ],
+      taskTable: new dynamodb.Table(stack, 'TaskTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      }),
+      taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
       attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
     });
@@ -141,9 +147,12 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     ...(options.withImage && {
       baseImageArn: BASE_IMAGE_ARN,
       baseImageVersion: '1',
+      artifactSha256: options.artifactSha256 === null ? undefined : options.artifactSha256 ?? ARTIFACT_SHA256,
     }),
     externalImageIdentifier: options.externalImageIdentifier,
     externalImageVersion: options.externalImageVersion,
+    managedImageVersion: options.managedImageVersion,
+    imageEnvironmentVariables: options.imageEnvironmentVariables,
     minimumMemoryInMiB: options.minimumMemoryInMiB,
   });
 
@@ -165,6 +174,33 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     template = built.template;
   });
 
+  describe('explicit managed runtime version', () => {
+    let pinned: Built;
+
+    beforeAll(() => {
+      pinned = build({
+        withImage: true, withSessionRole: true, withRuntimeParity: true, managedImageVersion: '7.0',
+      });
+    });
+
+    test('pins new workers without changing the managed image build or ownership', () => {
+      expect(pinned.construct.imageVersion).toBe('7.0');
+      expect(pinned.template.findResources('AWS::Lambda::MicrovmImage'))
+        .toEqual(template.findResources('AWS::Lambda::MicrovmImage'));
+    });
+
+    // Constructor-validation cases deliberately have no successful template to cache.
+    test.each(['', 'latest', '0', '1.a'])('rejects invalid runtime version %p', managedImageVersion => {
+      expect(() => build({ withImage: true, managedImageVersion }))
+        .toThrow('microvm_managed_image_version');
+    });
+
+    test('requires managed image inputs', () => {
+      expect(() => build({ managedImageVersion: '7.0' }))
+        .toThrow('microvm_managed_image_version');
+    });
+  });
+
   test('synthesizes exactly one MicroVM image from the artifact bucket object', () => {
     template.resourceCountIs('AWS::Lambda::MicrovmImage', 1);
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
@@ -175,26 +211,36 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
           'Fn::Join': ['', [
             's3://',
             { Ref: Match.stringLikeRegexp('LambdaMicrovmComputeArtifactBucket') },
-            `/${MICROVM_ARTIFACT_OBJECT_KEY}`,
+            `/microvm-images/agent-artifact-${ARTIFACT_SHA256}.zip`,
           ]],
         },
       },
     });
   });
 
+  test('a changed artifact updates the URI without replacing the image identity', () => {
+    const next = build({ withImage: true, artifactSha256: 'b'.repeat(64) });
+    const firstImages = template.findResources('AWS::Lambda::MicrovmImage');
+    const nextImages = next.template.findResources('AWS::Lambda::MicrovmImage');
+    expect(Object.keys(nextImages)).toEqual(Object.keys(firstImages));
+    const first = Object.values(firstImages)[0]!.Properties;
+    const second = Object.values(nextImages)[0]!.Properties;
+    expect(second.Name).toEqual(first.Name);
+    expect(second.CodeArtifact.Uri).not.toEqual(first.CodeArtifact.Uri);
+    expect(JSON.stringify(second.CodeArtifact.Uri)).toContain(`agent-artifact-${'b'.repeat(64)}.zip`);
+  });
+
+  test.each([null, '', 'not-a-sha256', 'A'.repeat(64), 'a'.repeat(63)])(
+    'rejects managed builds without an exact artifact digest: %p',
+    artifactSha256 => {
+      expect(() => instantiate({ withImage: true, artifactSha256 }))
+        .toThrow(/microvm_artifact_sha256/);
+    },
+  );
+
   test('builds an ARM64 image at the largest ACCEPTED BASELINE (8 GiB)', () => {
-    // 32768 was rejected live: "The requested memory size of 32768 MiB is not
-    // supported by base MicroVM image …al2023-1. Supported memory sizes in MiB
-    // are: [512, 1024, 2048, 4096, 8192]." Note this configures the BASELINE —
-    // the service scales vertically to a 32 GiB / 16 vCPU peak on its own, which
-    // is why nothing here asks for the peak.
-    //
-    // `ARM_64`, not `arm64`: the CDK L1 types Architecture as a plain string and
-    // documents no allowed values, and CloudFormation rejected the lowercase
-    // spelling at change-set early validation — "arm64 is not a valid enum value.
-    // Supported values: [ARM_64]" (ADR-021 P2-F2). The literal is spelled out here
-    // rather than imported from the construct so the test fails if the constant is
-    // "corrected" back to Docker's spelling.
+    // Assert the accepted baseline and API enum spelling independently of source
+    // constants; this test does not measure runtime memory or scaling.
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
       CpuConfigurations: [{ Architecture: 'ARM_64' }],
       Resources: [{ MinimumMemoryInMiB: 8192 }],
@@ -204,13 +250,9 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(Math.max(...MICROVM_SUPPORTED_MEMORY_MIB)).toBe(DEFAULT_MINIMUM_MEMORY_MIB);
   });
 
-  test('declares EXACTLY the four hooks the agent serves (P2), and no more', () => {
-    // `toEqual` on the whole object, not per-key assertions: the invariant runs in
-    // BOTH directions. A hook the agent serves but the image does not declare is
-    // never called (the P2 R2 regression this replaces — the agent gained
-    // /validate and /terminate while the construct still advertised two hooks);
-    // a hook the image declares but the agent does not serve fails the
-    // corresponding build or lifecycle transition. Only an exact set catches both.
+  test('declares all six served hooks with the shared P3 lifecycle budget', () => {
+    // Compare the whole set; declaration and runtime support must move together.
+    // The supervisor still gates automatic sleep on each worker's saved capability.
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
     expect(hooks.Port).toBe(8080);
@@ -226,10 +268,14 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       RunTimeoutInSeconds: 60,
       Terminate: 'ENABLED',
       // Near the BOTTOM of the service's 1–60 s window on purpose: the handler is
-      // a log-and-acknowledge with nothing to drain (progress writes are already
-      // durable per event), and the budget bounds how long teardown waits on a
+      // a barrier close plus log-and-acknowledge with no progress queue to drain
+      // (ordinary event writes are best effort), and the budget bounds teardown on a
       // WEDGED guest that is still holding admission-gating memory quota.
       TerminateTimeoutInSeconds: 15,
+      Suspend: 'ENABLED',
+      SuspendTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+      Resume: 'ENABLED',
+      ResumeTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
     });
 
     // BUILD (image) hooks. /ready is MANDATORY: create-microvm-image refuses ANY
@@ -303,27 +349,25 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     };
 
     const image = Object.values(template.findResources('AWS::Lambda::MicrovmImage'))[0]!;
-    // Hooks: all four states AND all four timeouts, in one comparison — which is
+    // Hooks: all six states AND all six timeouts, in one comparison — which is
     // precisely the assertion the missing one would have been.
     expect(toCfnKeys(flagJson('hooks'))).toEqual(image.Properties.Hooks);
     // ...and the architecture enum, the other half of P2-F2.
     expect(toCfnKeys(flagJson('cpu-configurations'))).toEqual(image.Properties.CpuConfigurations);
+    expect(Object.entries(flagJson('environment-variables') as Record<string, string>)
+      .map(([Key, Value]) => ({ Key, Value }))).toEqual(image.Properties.EnvironmentVariables);
   });
 
-  test('does NOT declare /suspend or /resume — they are P3 and nothing answers them yet', () => {
-    // The remaining half of the exactness rule, called out separately because it
-    // is the one that must survive P3 landing suspend/resume in ONE commit across
-    // all three strategies: until then, declaring either fails the corresponding
-    // lifecycle transition on a real suspend attempt.
+  test('pause/wake handlers leave response headroom inside declared service timeouts', () => {
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const hooks = Object.values(images)[0]!.Properties.Hooks;
-    expect(hooks.MicrovmHooks.Suspend).toBeUndefined();
-    expect(hooks.MicrovmHooks.SuspendTimeoutInSeconds).toBeUndefined();
-    expect(hooks.MicrovmHooks.Resume).toBeUndefined();
-    expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds).toBeUndefined();
+    expect(hooks.MicrovmHooks.SuspendTimeoutInSeconds)
+      .toBeGreaterThan(sharedConstants.microvm_hook_budgets.lifecycle_handler_budget_seconds);
+    expect(hooks.MicrovmHooks.ResumeTimeoutInSeconds)
+      .toBeGreaterThan(sharedConstants.microvm_hook_budgets.lifecycle_handler_budget_seconds);
   });
 
-  test('the agent hook routes are exactly the four the service calls, under one prefix', () => {
+  test('the six declared agent hook routes share the service-owned prefix', () => {
     // The cross-package contract that used to be checked against the rendered
     // template. It cannot be any more: the template carries `ENABLED`, not a path
     // (P2-F2), so the routes now have a dedicated source — MICROVM_AGENT_HOOK_ROUTES
@@ -334,13 +378,15 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // service POSTs to exactly these paths ("POST /aws/lambda-microvms/runtime/v1/
     // ready HTTP/1.1" 200 OK, and the same for the other three).
     const routes = Object.values(MICROVM_AGENT_HOOK_ROUTES);
-    expect(routes).toHaveLength(4);
+    expect(routes).toHaveLength(6);
     for (const route of routes) {
-      expect(route).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate)$/);
+      expect(route).toMatch(/^\/aws\/lambda-microvms\/runtime\/v1\/(ready|validate|run|terminate|suspend|resume)$/);
     }
     expect([...routes].sort()).toEqual([
       '/aws/lambda-microvms/runtime/v1/ready',
+      '/aws/lambda-microvms/runtime/v1/resume',
       '/aws/lambda-microvms/runtime/v1/run',
+      '/aws/lambda-microvms/runtime/v1/suspend',
       '/aws/lambda-microvms/runtime/v1/terminate',
       '/aws/lambda-microvms/runtime/v1/validate',
     ]);
@@ -348,7 +394,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // Hooks properties use — so "the agent serves every hook the image enables"
     // stays checkable from one place.
     expect(Object.keys(MICROVM_AGENT_HOOK_ROUTES).sort())
-      .toEqual(['ready', 'run', 'terminate', 'validate']);
+      .toEqual(['ready', 'resume', 'run', 'suspend', 'terminate', 'validate']);
   });
 
   test('every declared hook timeout sits inside the service window for its kind', () => {
@@ -395,10 +441,19 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
       .toBeGreaterThanOrEqual(30);
   });
 
-  test('bakes NO environment variables into the snapshot (ADR-021: no secrets in the image)', () => {
+  test('bakes only the non-secret image protocol marker by default', () => {
     template.hasResourceProperties('AWS::Lambda::MicrovmImage', {
-      EnvironmentVariables: [],
+      EnvironmentVariables: [{
+        Key: sharedConstants.microvm_lifecycle.image_protocol_env,
+        Value: String(sharedConstants.microvm_lifecycle.protocol_version),
+      }],
     });
+  });
+  test('rejects an override of the image source protocol', () => {
+    expect(() => instantiate({
+      withImage: true,
+      imageEnvironmentVariables: { [sharedConstants.microvm_lifecycle.image_protocol_env]: '999' },
+    })).toThrow('protocol marker is owned by the image source');
   });
 
   test('routes image build-time egress through the BUILD connector, not the runtime one', () => {
@@ -575,7 +630,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
   });
 
-  test('payload bucket expires objects (the ONLY reaper on this backend)', () => {
+  test('payload bucket expires objects as a fallback for failed finalization', () => {
     template.hasResourceProperties('AWS::S3::Bucket', {
       LifecycleConfiguration: {
         Rules: Match.arrayWith([
@@ -622,29 +677,10 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
   });
 
   test('NO source-key condition on any MicroVM-facing role trust (P2-F1/F3)', () => {
-    // The sharpest IAM assertion in this file, and the one most likely to be
-    // "fixed" back by a reviewer applying the standard service-principal
-    // confused-deputy pattern. It must not be.
-    //
-    // The Lambda MicroVMs service presents NO source condition key when it assumes
-    // these roles, so a trust policy carrying one is unassumable. Live 2026-08-06/07
-    // (evidence inlined in ADR-021 §4; `docs/verification/645-p2-smoke-runbook.md`
-    // is the raw session log, additional detail rather than the sole proof), one
-    // root cause, two symptoms:
-    // both network connectors CREATE_FAILED deterministically on a freshly deleted
-    // stack (P2-F1), and RunMicrovm reported a MISLEADING caller-side
-    // `iam:PassRole` AccessDenied on the orchestrator (P2-F3) — with the grant
-    // present, `simulate-principal-policy` returning `allowed`, no permissions
-    // boundary, and an unconditioned PassRole ALSO denied. Removing the execution
-    // role's trust conditions made the next submission reach RUNNING in 6 s.
-    //
-    // What compensates is asserted elsewhere in this file and in
-    // `test/constructs/task-orchestrator.test.ts`: the EXECUTION role is passable by
-    // the orchestrator only, scoped to its EXACT ARN — and with NO
-    // `iam:PassedToService` condition either, because the same missing-context-key
-    // root cause blocks that path too (P2r2-F10), which is why the exact ARN is the
-    // whole of the scoping. Every resource these roles reach is account-scoped by
-    // ARN apart from two justified `Resource: '*'` statements.
+    // Recorded service calls rejected source-conditioned role trust; removing
+    // those conditions restored connector creation and worker launch. Keep exact
+    // resource grants and verify service support before adding conditions again.
+    // See ADR-021 §4 for the tested trust-policy limitations.
     const roles = Object.entries(template.findResources('AWS::IAM::Role'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole')
         || id.includes('LambdaMicrovmComputeExecutionRole')
@@ -663,7 +699,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     }
   });
 
-  test('build role reads exactly the one artifact object and writes MicroVM logs', () => {
+  test('build role reads exactly the selected and manual artifacts and writes MicroVM logs', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeBuildRole'));
     expect(policies).toHaveLength(1);
@@ -679,21 +715,31 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // Object-scoped, not bucket-scoped.
     const s3Statement = statements.find((s: { Action: string }) => s.Action === 's3:GetObject');
     expect(JSON.stringify(s3Statement.Resource)).toContain(MICROVM_ARTIFACT_OBJECT_KEY);
+    expect(s3Statement.Resource).toEqual([
+      built.stack.resolve(built.construct.artifactBucket.arnForObjects(
+        `microvm-images/agent-artifact-${ARTIFACT_SHA256}.zip`,
+      )),
+      built.stack.resolve(built.construct.artifactBucket.arnForObjects(MICROVM_ARTIFACT_OBJECT_KEY)),
+    ]);
   });
 
-  test('execution role gets READ-ONLY on the payload bucket and no write/delete', () => {
+  test('execution role gets only bootstrap reads, explicit payload/list denies and no writes', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement);
     const actions: string[] = statements.flatMap((s: { Action: string | string[] }) =>
       Array.isArray(s.Action) ? s.Action : [s.Action]);
 
-    // CDK's grantRead renders the Get*/List* read set.
-    expect(actions).toContain('s3:GetObject*');
+    const allowed = statements.filter((s: { Effect: string }) => s.Effect === 'Allow' && s.Action === 's3:GetObject');
+    expect(allowed).toHaveLength(1);
+    expect(JSON.stringify(allowed[0].Resource)).toContain('/bootstrap/*');
+    const denied = statements.find((s: { NotResource?: unknown }) => s.NotResource);
+    expect(denied.Effect).toBe('Deny');
+    expect(denied.NotResource).toEqual(allowed[0].Resource);
     // The MicroVM runs untrusted repo code — it must not be able to clobber
     // another task's payload, so nothing mutating may appear.
     const s3Actions = actions.filter(a => a.startsWith('s3:'));
-    expect(s3Actions).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
+    expect(s3Actions).toEqual(['s3:GetObject', 's3:GetObject*', 's3:List*']);
     for (const action of s3Actions) {
       expect(action).not.toMatch(/Put|Delete|Abort|Write|^s3:\*$/);
     }
@@ -745,7 +791,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // ecs-agent-cluster). Without it a Linear/Jira task's 👀→✅ reaction and the
     // channel MCP silently no-op.
     const prefixStatement = executionRoleStatements().find(
-      statement => JSON.stringify(statement.Resource).includes('bgagent-linear-oauth-*'),
+      statement => JSON.stringify(statement.Resource ?? '').includes('bgagent-linear-oauth-*'),
     )!;
     expect(prefixStatement).toBeDefined();
     expect(prefixStatement.Action).toBe('secretsmanager:GetSecretValue');
@@ -800,7 +846,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // why it survived P2: the substrate looked fine while the platform's canonical
     // observability streams were empty.
     const statements = executionRoleStatements().filter((statement) => {
-      const resource = JSON.stringify(statement.Resource);
+      const resource = JSON.stringify(statement.Resource ?? '');
       return resource.includes('ApplicationLogGroup');
     });
     expect(statements).toHaveLength(1);
@@ -893,7 +939,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const s3Resources = executionRoleStatements()
       .flatMap(st => (Array.isArray(st.Action) ? st.Action : [st.Action]))
       .filter(action => action.startsWith('s3:'));
-    expect(s3Resources).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
+    expect(s3Resources).toEqual(['s3:GetObject', 's3:GetObject*', 's3:List*']);
     const rendered = JSON.stringify(
       executionRoleStatements().filter((st) => {
         const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
@@ -946,11 +992,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     expect(JSON.stringify(template.toJSON())).not.toContain('CreateMicrovmAuthToken');
   });
 
-  test('warns that a configured image has no smoke-parity guarantee (hook phasing)', () => {
-    // ADR-021 sub-decision 3, as corrected by the live P1 run and completed in P2:
-    // all four served hooks are declared, so the image is creatable, launchable and
-    // payload-deliverable — which makes it look even MORE like a working backend,
-    // while nothing has exercised clone → change → PR on it.
+  test('describes configured-image verification and rollback without installation-specific history', () => {
     const warnings = built.construct.node.metadata.filter(m => m.type === 'aws:cdk:warning');
     const message = warnings.map(w => String(w.data)).join('\n');
     expect(JSON.stringify(built.construct.node.metadata))
@@ -958,18 +1000,14 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // The superseded id must be gone, not merely reworded — operators grep for it.
     expect(JSON.stringify(built.construct.node.metadata))
       .not.toContain('abca:microvm-image-p1-not-runnable');
-    expect(message).toContain('smoke');
-    expect(message).toContain('P2');
-    // It must state what IS true now, or it reads as the old (wrong) claim — and
-    // the hook list here is what an operator compares against a failed build or a
-    // failed lifecycle transition, so all four have to be named.
-    for (const hook of ['/ready', '/validate', '/run', '/terminate']) {
+    expect(message).toContain('verify the configured image and coordinator together');
+    for (const hook of ['/ready', '/validate', '/run', '/terminate', '/suspend', '/resume']) {
       expect(message).toContain(hook);
     }
-    // ...and it must still say which two are NOT declared, or the enumeration
-    // above reads as "everything is wired".
-    expect(message).toContain('/suspend');
-    expect(message).toContain('/resume');
+    expect(message).toContain('actual launched image version before allowing sleep');
+    expect(message).toContain('Nested deployments require bundle 1.9.0');
+    expect(message).toContain('explicit image version for rollback');
+    expect(message).not.toContain('Image 6.0');
   });
 
   test('enables every hook the agent serves, and only those (rendered form)', () => {
@@ -978,13 +1016,8 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     // the shape CloudFormation validates. `"ENABLED"`, never a path (P2-F2).
     const images = template.findResources('AWS::Lambda::MicrovmImage');
     const rendered = JSON.stringify(Object.values(images)[0]!.Properties.Hooks);
-    for (const hook of ['Run', 'Terminate', 'Ready', 'Validate']) {
+    for (const hook of ['Run', 'Terminate', 'Ready', 'Validate', 'Suspend', 'Resume']) {
       expect(rendered).toContain(`"${hook}":"ENABLED"`);
-    }
-    // P3, and nothing answers them yet. OMITTED rather than "DISABLED", so the
-    // absence assertion stays meaningful.
-    for (const hook of ['Suspend', 'Resume']) {
-      expect(rendered).not.toContain(hook);
     }
     expect(rendered).not.toContain('DISABLED');
   });
@@ -1186,12 +1219,8 @@ describe('LambdaMicrovmCompute — memory sizing', () => {
     expect(error).toBeDefined();
     expect(error!.message).toContain('32768');
     expect(error!.message).toContain('512, 1024, 2048, 4096, 8192');
-    // The message must say BASELINE, or an operator reads the rejection as "this
-    // backend caps at 8 GiB" and moves a repo to ECS it did not need to.
+    // Distinguish baseline validation from runtime capacity.
     expect(error!.message).toContain('BASELINE');
-    expect(error!.message).toContain('32 GiB');
-    // ...and points at the backend that DOES have the SUSTAINED capacity.
-    expect(error!.message).toContain('compute_type=ecs');
   });
 
   test.each([0, 256, 6144, 16384, 8193])('rejects the unsupported baseline %i MiB', (mib) => {

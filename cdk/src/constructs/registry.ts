@@ -23,7 +23,7 @@
 // this wraps the CDK Provider framework: an `onEvent` Lambda starts the mutation
 // and an `isComplete` Lambda is polled until the registry reaches a stable state.
 import * as path from 'path';
-import { CustomResource, Duration, NestedStack, type NestedStackProps, Stack } from 'aws-cdk-lib';
+import { CfnResource, CustomResource, Duration, Names, NestedStack, type NestedStackProps, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -146,6 +146,23 @@ export class AgentRegistry extends Construct {
       queryInterval: POLL_INTERVAL,
       totalTimeout: TOTAL_TIMEOUT,
     });
+
+    // CloudFormation's generated waiter name omits the parent stack prefix,
+    // falling outside the bootstrap policy's backgroundagent-dev-* namespace.
+    // Provider has no public naming option, so use its L1 escape hatch. Include
+    // the outer stack name and a path hash, even inside a nested stack.
+    const waiters = provider.node.findAll().filter(
+      (node): node is CfnResource => CfnResource.isCfnResource(node)
+        && node.cfnResourceType === 'AWS::StepFunctions::StateMachine',
+    );
+    if (waiters.length !== 1) {
+      throw new Error(`Expected one Agent Registry provider waiter, found ${waiters.length}`);
+    }
+    waiters[0].addPropertyOverride('StateMachineName', Names.uniqueResourceName(provider, {
+      maxLength: 80,
+      separator: '-',
+      allowedSpecialCharacters: '-',
+    }));
 
     const resource = new CustomResource(this, 'Resource', {
       serviceToken: provider.serviceToken,

@@ -52,8 +52,15 @@ jobs:
         compute_type: [agentcore]
     outputs:
       self_mutation_happened: ${{ steps.self_mutation.outputs.self_mutation_happened }}
+    services:
+      dynamodb:
+        # Pin the multi-architecture image used for real transaction assertions.
+        image: amazon/dynamodb-local@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab
+        ports:
+          - 8000/tcp
     env:
       CI: "true"
+      ABCA_TEST_SDK_CONTINUATION: "1"
       MISE_EXPERIMENTAL: "1"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -293,6 +300,7 @@ jobs:
       - name: build
         env:
           TMPDIR: ${{ runner.temp }}
+          ABCA_DDB_LOCAL_ENDPOINT: http://127.0.0.1:${{ job.services.dynamodb.ports[8000] }}
         run: |
           echo "::notice::Runner: $(nproc) cores, $(free -h | awk '/Mem:/{print $2}') RAM"
           SECONDS=0

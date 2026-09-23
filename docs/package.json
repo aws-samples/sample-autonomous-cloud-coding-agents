@@ -5,7 +5,7 @@
     "dev": "astro dev",
     "start": "astro dev",
     "docs:check": "npm run sync && astro check",
-    "docs:build": "npm run sync && astro build",
+    "docs:build": "npm run sync && astro build && node scripts/check-site-links.mjs",
     "build": "npm run docs:build",
     "preview": "astro preview",
     "security:retire": "retire --path . --severity high",
