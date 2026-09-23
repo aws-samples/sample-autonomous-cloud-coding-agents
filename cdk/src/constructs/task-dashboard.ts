@@ -64,9 +64,7 @@ export class TaskDashboard extends Construct {
     const logGroup = props.applicationLogGroup;
 
     this.dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {
-      // Dashboard names are account-global, so identical stack names in
-      // different Regions must not share one CloudFormation-owned dashboard.
-      dashboardName: `BackgroundAgent-Tasks-${Stack.of(this).stackName}-${Stack.of(this).region}`,
+      dashboardName: `BackgroundAgent-Tasks-${Stack.of(this).stackName}`,
       defaultInterval: Duration.hours(24),
     });
 
