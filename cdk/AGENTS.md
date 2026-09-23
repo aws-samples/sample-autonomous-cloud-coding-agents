@@ -31,7 +31,6 @@ mise //cdk:destroy          # destroy stack
 | Handler entrypoints | `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.test.ts`, `webhook-create-task.test.ts` |
 | Constructs | `cdk/test/constructs/task-orchestrator.test.ts`, `task-api.test.ts` |
 | MicroVM lifecycle/capacity transactions | `test/handlers/shared/*-local.test.ts` and `test/handlers/request-approval-local.test.ts`; use a loopback DynamoDB Local endpoint in `ABCA_DDB_LOCAL_ENDPOINT` (mandatory in CI) |
-| Staged flat-to-nested migration helpers | `src/migration/`, `test/migration/`; these are not a deployable migration command |
 | Live verification harnesses | `test/live/`; explicitly invoked against an owned fixture, excluded from normal Jest collection |
 
 Construct tests: synthesize each distinct stack config once in `beforeAll`, assert against cached `Template` — do not re-synth per test. Bundling is disabled globally via `test/setup/disable-bundling.ts` (see Common mistakes).
