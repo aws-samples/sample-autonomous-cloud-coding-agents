@@ -18,14 +18,13 @@
  */
 
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { recordDecisionPostCommit } from './shared/approval-decision';
 import { scanDenyReason } from './shared/deny-reason-scanner';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { APPROVAL_AUDIT_TIMEOUT_MS, approvalPostCommitOptions, wakeMicrovmAfterApproval } from './shared/microvm-approval-wake';
-import { microvmErrorIdentity } from './shared/microvm-control';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
@@ -205,66 +204,22 @@ export async function recordDenialForUser(
       throw err;
     }
 
-    const postCommit = approvalPostCommitOptions(invocationStartedMs, context);
-    // 5. Audit event.
-    try {
-      const abortSignal = AbortSignal.any([postCommit.abortSignal!, AbortSignal.timeout(APPROVAL_AUDIT_TIMEOUT_MS)]);
-      abortSignal.throwIfAborted();
-      await ddb.send(new PutCommand({
-        TableName: EVENTS_TABLE_NAME,
-        Item: {
-          task_id: taskId,
-          event_id: ulid(),
-          event_type: 'approval_decision_recorded',
-          timestamp: nowIso,
-          ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
-          metadata: {
-            request_id,
-            status: 'DENIED',
-            reason: sanitizedReason,
-            decided_at: nowIso,
-            caller_user_id: callerUserId,
-          },
-        },
-      }), { abortSignal });
-    } catch (auditErr) {
-      logger.warn('approval_decision_recorded audit write failed (decision already committed)', {
-        task_id: taskId,
-        request_id,
-        ...microvmErrorIdentity(auditErr),
-      });
-    }
-
-    // Wake is best-effort after commit. Even an unexpected helper failure must
-    // not turn an accepted human decision into an HTTP failure.
-    try {
-      await wakeMicrovmAfterApproval({
-        taskId,
-        userId: callerUserId,
-        requestId: request_id,
-        decision: 'DENIED',
-        options: postCommit,
-        emitEvent: async (eventType, metadata, options) => {
-          options.abortSignal?.throwIfAborted();
-          await ddb.send(new PutCommand({
-            TableName: EVENTS_TABLE_NAME,
-            Item: {
-              task_id: taskId,
-              user_id: callerUserId,
-              event_id: ulid(),
-              event_type: eventType,
-              timestamp: new Date().toISOString(),
-              ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
-              metadata,
-            },
-          }), options);
-        },
-      });
-    } catch (wakeError) {
-      logger.warn('MicroVM wake helper failed after decision commit', {
-        task_id: taskId, request_id, ...microvmErrorIdentity(wakeError),
-      });
-    }
+    // Audit + optional MicroVM wake are best-effort after commit (shared with
+    // approve); neither can turn an accepted human decision into an HTTP failure.
+    await recordDecisionPostCommit({
+      ddb,
+      eventsTableName: EVENTS_TABLE_NAME!,
+      taskId,
+      callerUserId,
+      requestId: request_id,
+      decision: 'DENIED',
+      auditMetadata: { reason: sanitizedReason },
+      decidedAt: nowIso,
+      nowEpoch,
+      retentionDays: AUDIT_EVENT_RETENTION_DAYS,
+      invocationStartedMs,
+      context,
+    });
 
     logger.info('Denial recorded', {
       task_id: taskId,
