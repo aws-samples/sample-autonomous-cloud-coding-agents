@@ -76,7 +76,7 @@ To validate delivery:
 
 A direct SNS test publish uses the operator's credentials, so it does not verify CloudWatch's publish permission. Deployment does not replay historical failed actions. ABCA records each user/team threshold as alerted for the UTC month when it emits the metric, before SNS delivery.
 
-Running `bgagent budget set` for a scope clears that scope's 80% and 100% alert markers for the current UTC month, even if the limit is unchanged, so re-running the command re-arms the thresholds for a repeat test. It preserves accumulated spend and does not immediately publish an alert; a subsequent eligible task-cost rollup evaluates the thresholds again. Use an alerts-only test scope if spend is already at 100%, since a hard-stop scope still rejects new tasks. Without re-arming, repeating an already-emitted threshold in the same month may produce no new metric or notification.
+Running `bgagent budget set` for a scope clears that scope's 80% and 100% alert markers for the current UTC month, even if the limit is unchanged, so re-running the command re-arms the thresholds for a repeat test. Re-run it with the scope's current `--monthly-usd` and, if the scope uses one, `--hard-stop`: omitting `--hard-stop` converts the scope to alerts-only. It preserves accumulated spend and does not immediately publish an alert; a subsequent eligible task-cost rollup evaluates the thresholds again. Use an alerts-only test scope if spend is already at 100%, since a hard-stop scope still rejects new tasks. Without re-arming, repeating an already-emitted threshold in the same month may produce no new metric or notification.
 
 ### Cost of the controls
 
