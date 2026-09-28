@@ -63,9 +63,9 @@ export interface OperationalAlertsProps {
  * encrypted with the AWS-managed key because that key's policy can't be
  * edited to grant the ``cloudwatch.amazonaws.com`` service principal
  * ``kms:GenerateDataKey*`` / ``kms:Decrypt``. The alarm→SNS action would
- * fail at delivery time. The CMK below grants CloudWatch
- * those actions, and the topic policy separately grants publish access, keeping
- * encryption-at-rest. Setting a CMK also satisfies cdk-nag
+ * fail at delivery time. The CMK below grants CloudWatch those actions;
+ * the topic policy separately grants publish access. Encryption at rest
+ * is preserved. Setting a CMK also satisfies cdk-nag
  * ``AwsSolutions-SNS2`` (encryption at rest) with no suppression needed.
  *
  * The topic is intentionally stack-wide (not per-consumer) so every
@@ -131,7 +131,6 @@ export class OperationalAlerts extends Construct {
     // account and Region to publish to this topic (#925).
     this.topic.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AllowCloudWatchAlarmsPublish',
-      effect: iam.Effect.ALLOW,
       principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
       actions: ['sns:Publish'],
       resources: [this.topic.topicArn],

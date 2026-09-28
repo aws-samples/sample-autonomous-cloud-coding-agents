@@ -95,10 +95,8 @@ describe('OperationalAlerts', () => {
   });
 
   test('CMK key policy grants CloudWatch decrypt + generate-data-key', () => {
-    // Load-bearing: CloudWatch cannot deliver to a topic on the
-    // AWS-managed key. Without this grant the alarm action deploys but
-    // every publish fails at runtime with KMS AccessDenied.
-
+    // Encrypted delivery needs this KMS grant in addition to the topic's
+    // SNS publish permission asserted above.
     template.hasResourceProperties('AWS::KMS::Key', {
       KeyPolicy: {
         Statement: Match.arrayWith([
