@@ -66,6 +66,20 @@ This is an operational guardrail, not invoice reconciliation. It inherits every 
 
 The recurring configuration survives month boundaries; spend automatically starts from zero at the next UTC month. Changing a limit or toggling hard stop is one `budget set` command. There is currently no `budget unset` command and no automatic default-group assignment.
 
+### Troubleshooting missing alarm notifications
+
+If a budget or DLQ alarm enters `ALARM` but no notification arrives, inspect that alarm's **History** in CloudWatch, including its action results. `CloudWatch Alarms is not authorized to perform: SNS:Publish` indicates a topic-policy problem. Earlier deployments created the shared topic with only `DenyInsecureTransport`; [#925](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/925) adds the missing CloudWatch publish permission, restricted to the deployment account and Region.
+
+Deploy a revision containing this fix using your normal stack deployment procedure, preserving the deployment's configuration. Verify that the topic identified by `OperationalAlertsTopicArn` has `AllowCloudWatchAlarmsPublish` in its access policy. Keep the topic's customer-managed encryption key and CloudWatch KMS permissions: SNS publishing and key access are both required.
+
+To validate delivery:
+
+1. Confirm that the email subscription on this topic is **Confirmed**, not `PendingConfirmation`, and that the alarm's actions are enabled.
+2. In a test deployment, trigger a fresh CloudWatch alarm transition to `ALARM` targeting this topic. For a budget test, use a non-production user whose monthly threshold has not already emitted, and let a task finish with enough cost to cross it. Wait for the aggregate alarm to return to `OK` before another threshold test.
+3. Verify a successful SNS action in the alarm's History and receipt at the subscribed destination. If the action succeeds but email is absent, inspect distribution-list restrictions and mail filtering.
+
+A direct SNS test publish uses the operator's credentials, so it does not verify CloudWatch's publish permission. Deployment does not replay historical failed actions. ABCA records each user/team threshold as alerted for the UTC month when it emits the metric, before SNS delivery; changing the budget limit does not reset that marker. Repeating the same threshold test may therefore produce no new metric or notification.
+
 ### Cost of the controls
 
 There are two kinds of cost:
