@@ -1058,6 +1058,33 @@ describe('AgentStack', () => {
     });
   });
 
+  test('allows regional CloudWatch alarms to publish to the exported alerts topic (#925)', () => {
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    template.hasResourceProperties('AWS::SNS::TopicPolicy', {
+      Topics: [topicRef],
+      PolicyDocument: {
+        Statement: Match.arrayWith([{
+          Sid: 'AllowCloudWatchAlarmsPublish',
+          Effect: 'Allow',
+          Principal: { Service: 'cloudwatch.amazonaws.com' },
+          Action: 'sns:Publish',
+          Resource: topicRef,
+          Condition: {
+            StringEquals: { 'aws:SourceAccount': '123456789012' },
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Join': ['', [
+                  'arn:', { Ref: 'AWS::Partition' },
+                  ':cloudwatch:us-east-1:123456789012:alarm:*',
+                ]],
+              },
+            },
+          },
+        }]),
+      },
+    });
+  });
+
   test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
     // FanOut, ApprovalMetricsPublisher, and screenshot processor DLQ alarms
     // must each carry an AlarmActions entry — otherwise a
