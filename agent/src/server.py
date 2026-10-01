@@ -475,6 +475,12 @@ def _run_task_background(
         # Linux uv defaults to cache hardlinks, which checkpoint capture rejects
         # because another path can mutate the same inode outside the workspace.
         os.environ.setdefault("UV_LINK_MODE", "copy")
+        # Sockets idle across a long suspend can be dropped silently (VPC
+        # endpoint/NAT idle timeout is 350 s), so the first model call after
+        # wake can wait for headers that never arrive. Claude Code's default
+        # wait is 300 s; fail fast and retry instead. Streamed bodies keep
+        # their own idle watchdog, so long generations are unaffected.
+        os.environ.setdefault("API_TIMEOUT_MS", "120000")
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
     try:

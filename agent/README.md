@@ -333,7 +333,9 @@ Unsupported filesystem/Git states or detected concurrent writes prevent capture.
 Repository-free tasks use a private workspace with a local Git baseline.
 MicroVM tasks default `UV_LINK_MODE=copy` before repository setup so `uv` does not
 hardlink installed packages to its cache. Explicit overrides or commands using
-hardlinks can still make the workspace ineligible for capture.
+hardlinks can still make the workspace ineligible for capture. They also default
+`API_TIMEOUT_MS=120000` so a model call on a connection dropped while suspended
+fails over in two minutes instead of Claude Code's 300-second default.
 
 `S3ContinuationStorage` uploads and verifies version-pinned, checksummed objects
 using task-scoped credentials. The continuation bucket and SessionRole grants
