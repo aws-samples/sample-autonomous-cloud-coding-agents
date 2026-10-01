@@ -1,6 +1,7 @@
 # Workflow validation parity fixtures
 
-Golden-file test vectors for the workflow cross-field validator (issue #248).
+Golden-file test vectors for the workflow schema and cross-field validator
+(issues #248 and #517).
 Each fixture is a workflow file body paired with its **expected verdict** —
 `valid`, or the exact set of violation codes the validator must report.
 
@@ -50,6 +51,10 @@ the create-task boundary, not by the file-local validator, so it never appears
 here (documented in `validator.py`). Rule 10 (single production per id lineage)
 is a cross-file/registry property, not a single-file check, so it is also out of
 scope for this corpus.
+
+Convergence fixtures exercise the optional `convergence` block introduced by
+#517. Schema failures cover invalid modes/sensors and required sensors that do
+not have a matching verification step.
 
 ## Consumers
 
