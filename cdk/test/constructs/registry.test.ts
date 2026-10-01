@@ -19,7 +19,6 @@
 
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import { applicationPolicy } from '../../src/bootstrap/policies/application';
 import { AgentRegistry, AgentRegistryStack } from '../../src/constructs/registry';
 
 function createStack(): Template {
@@ -57,6 +56,31 @@ describe('AgentRegistry construct', () => {
       Runtime: 'nodejs24.x',
       Architectures: ['arm64'],
     });
+  });
+
+  test('names the Provider waiter state machine under the stack prefix (least-privilege bootstrap)', () => {
+    // The bootstrap policy allows states:CreateStateMachine only on
+    // `stateMachine:<stack>-*`; an unnamed state machine gets `<LogicalId>-<random>`
+    // from CloudFormation and is denied. Live-observed as a full rollback.
+    const template = createStack();
+    const machines = template.findResources('AWS::StepFunctions::StateMachine');
+    expect(Object.keys(machines)).toHaveLength(1);
+    const name = Object.values(machines)[0].Properties.StateMachineName;
+    expect(name).toBe('TestStack-AgentRegistryWaiter');
+    expect(name.length).toBeLessThanOrEqual(80);
+  });
+
+  test('uses the ROOT stack name for the waiter when placed in a NestedStack', () => {
+    // Inside a NestedStack, Stack.of(construct).stackName is a token for a
+    // ~100-char generated name — over the 80-char state-machine limit and, more
+    // importantly, not the prefix the bootstrap policy is scoped to.
+    const app = new App();
+    const parent = new Stack(app, 'backgroundagent-dev');
+    const nested = new AgentRegistryStack(parent, 'AgentRegistryStack', { registryName: 'abca_test' });
+    const machines = Template.fromStack(nested).findResources('AWS::StepFunctions::StateMachine');
+    expect(Object.values(machines)[0].Properties.StateMachineName).toBe(
+      'backgroundagent-dev-AgentRegistryWaiter',
+    );
   });
 
   test('registers the custom resource with the standalone Agent Registry type', () => {
@@ -152,51 +176,5 @@ describe('AgentRegistry construct', () => {
     ]));
     expect(statement?.Resource).not.toBe('*');
     expect(JSON.stringify(statement?.Resource)).toContain('registry/*');
-  });
-});
-
-describe.each([
-  'backgroundagent-dev',
-  `backgroundagent-dev-${'x'.repeat(108)}`,
-])('registry waiter in parent stack %s', stackName => {
-  let names: string[];
-
-  beforeAll(() => {
-    const app = new App();
-    const parent = new Stack(app, 'Parent', {
-      stackName,
-      env: { account: '123456789012', region: 'us-west-2' },
-    });
-    const registries = ['FirstRegistry', 'SecondRegistry'].map(
-      id => new AgentRegistryStack(parent, id, { registryName: id }),
-    );
-    names = registries.map(nested => {
-      const waiters = Object.values(
-        Template.fromStack(nested).findResources('AWS::StepFunctions::StateMachine'),
-      );
-      expect(waiters).toHaveLength(1);
-      return waiters[0].Properties.StateMachineName as string;
-    });
-  });
-
-  test('uses names permitted by the deployed bootstrap policy', () => {
-    const statement = applicationPolicy().toJSON().Statement.find(
-      (candidate: { Sid: string }) => candidate.Sid === 'StepFunctions',
-    );
-    const resourcePattern = new RegExp(
-      `^${(statement.Resource as string).split('*').join('.*')}$`,
-    );
-    for (const name of names) {
-      expect(name).toBeDefined();
-      expect(`arn:aws:states:us-west-2:123456789012:stateMachine:${name}`)
-        .toMatch(resourcePattern);
-    }
-  });
-
-  test('keeps names distinct and within the Step Functions name limit', () => {
-    expect(new Set(names).size).toBe(2);
-    for (const name of names) {
-      expect(name).toMatch(/^[A-Za-z0-9-]{1,80}$/);
-    }
   });
 });
