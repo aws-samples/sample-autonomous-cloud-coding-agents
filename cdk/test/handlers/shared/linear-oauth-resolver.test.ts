@@ -23,6 +23,8 @@ import {
   clearWorkspaceRevocation,
   getOauthSecret,
   getOauthSecretStrict,
+  getRegistryRowStrict,
+  resolveSoleActiveLinearWorkspace,
   invalidateLinearOauthCache,
   isRefreshTokenRejection,
   isTokenExpiring,
@@ -1321,5 +1323,96 @@ describe('a vault-managed bundle carries no grant, and must still verify webhook
       'arn:secret:acme',
     );
     expect(fetched).toBeNull();
+  });
+});
+
+describe('webhook_secret_owned — provenance, not value equality', () => {
+  beforeEach(() => _resetCachesForTesting());
+
+  function rowWith(extra: Record<string, unknown>) {
+    return {
+      send: jest.fn().mockResolvedValue({
+        Item: {
+          linear_workspace_id: 'ws-1',
+          workspace_slug: 'acme',
+          oauth_secret_arn: 'arn:secret:acme',
+          status: 'active',
+          ...extra,
+        },
+      }),
+    } as unknown as Parameters<typeof getRegistryRowStrict>[0];
+  }
+
+  test('carries a recorded true through to the reader', async () => {
+    const row = await getRegistryRowStrict(rowWith({ webhook_secret_owned: true }), 'registry', 'ws-1');
+    expect(row?.webhook_secret_owned).toBe(true);
+  });
+
+  test('leaves the field absent when the row predates it', async () => {
+    // Absent must not read as `false`: the reader distinguishes "not proven" from
+    // "proven not owned", and every row written before this field is the former.
+    const row = await getRegistryRowStrict(rowWith({}), 'registry', 'ws-1');
+    expect(row?.webhook_secret_owned).toBeUndefined();
+  });
+
+  test.each([['false-ish string', 'true'], ['number', 1], ['explicit false', false]] as const)(
+    'refuses to treat a %s as proof of ownership',
+    async (_label, value) => {
+      // Only a literal boolean `true` counts. A truthy-but-not-true value reaching this
+      // field would otherwise silently grant the workspace the same standing as one the
+      // operator actually supplied a secret for.
+      const row = await getRegistryRowStrict(rowWith({ webhook_secret_owned: value }), 'registry', 'ws-1');
+      expect(row?.webhook_secret_owned).toBeUndefined();
+    },
+  );
+});
+
+describe('resolveSoleActiveLinearWorkspace — bind only when the answer is unambiguous', () => {
+  function scanning(pages: Array<{ Items: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> }>) {
+    let i = 0;
+    return { send: jest.fn(async () => pages[i++]) } as unknown as Parameters<typeof resolveSoleActiveLinearWorkspace>[0];
+  }
+
+  test('returns the id when exactly one workspace is active', async () => {
+    const ddb = scanning([{ Items: [{ linear_workspace_id: 'org-only', status: 'active' }] }]);
+    await expect(resolveSoleActiveLinearWorkspace(ddb, 'registry')).resolves.toBe('org-only');
+  });
+
+  test('returns undefined when two are active, rather than picking the first', async () => {
+    const ddb = scanning([{
+      Items: [
+        { linear_workspace_id: 'org-a', status: 'active' },
+        { linear_workspace_id: 'org-b', status: 'active' },
+      ],
+    }]);
+    await expect(resolveSoleActiveLinearWorkspace(ddb, 'registry')).resolves.toBeUndefined();
+  });
+
+  test('returns undefined on an empty registry', async () => {
+    await expect(resolveSoleActiveLinearWorkspace(scanning([{ Items: [] }]), 'registry')).resolves.toBeUndefined();
+  });
+
+  test('ignores revoked rows when deciding whether the answer is unique', async () => {
+    const ddb = scanning([{
+      Items: [
+        { linear_workspace_id: 'org-live', status: 'active' },
+        { linear_workspace_id: 'org-dead', status: 'revoked' },
+      ],
+    }]);
+    await expect(resolveSoleActiveLinearWorkspace(ddb, 'registry')).resolves.toBe('org-live');
+  });
+
+  test('follows pagination before concluding the answer is unique', async () => {
+    // A single-page read would report org-a as the sole workspace and bind deliveries to
+    // it, on a stack that actually has two tenants.
+    const ddb = scanning([
+      { Items: [{ linear_workspace_id: 'org-a', status: 'active' }], LastEvaluatedKey: { k: 1 } },
+      { Items: [{ linear_workspace_id: 'org-b', status: 'active' }] },
+    ]);
+    await expect(resolveSoleActiveLinearWorkspace(ddb, 'registry')).resolves.toBeUndefined();
+  });
+
+  test('returns undefined when no registry table is configured', async () => {
+    await expect(resolveSoleActiveLinearWorkspace(scanning([]), undefined)).resolves.toBeUndefined();
   });
 });

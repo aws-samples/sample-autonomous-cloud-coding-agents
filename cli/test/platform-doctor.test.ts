@@ -49,6 +49,8 @@ jest.mock('@aws-sdk/client-bedrock', () => ({
 
 import {
   checkJiraAppIdentity,
+  checkLinearProjectWorkspaces,
+  checkLinearSecretProvenance,
   runPlatformDoctor,
   type DoctorCheckResult,
 } from '../src/platform-doctor';
@@ -72,6 +74,147 @@ beforeEach(() => {
   ddbSendMock.mockResolvedValue({ Items: [] });
   stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
     (output === 'LinearWorkspaceRegistryTableName' ? REGISTRY : null));
+});
+
+describe('doctor verdict for Linear signing-secret provenance', () => {
+  const REG = 'LinearWorkspaceRegistry';
+
+  test('warns and names the workspaces whose deliveries are now rejected', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'acme', status: 'active', webhook_secret_owned: true },
+        { workspace_slug: 'shared-one', status: 'active' },
+        { workspace_slug: 'shared-two', status: 'active' },
+      ],
+    });
+
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('shared-one');
+    expect(check.detail).toContain('shared-two');
+    expect(check.detail).not.toContain('acme');
+    expect(check.detail).toContain('backfill-secret-provenance');
+  });
+
+  test('passes on a single-workspace stack even with no provenance recorded', async () => {
+    // The enforcement path is gated on the same count, so warning here would flag every
+    // pre-existing single-workspace install for a risk it does not carry.
+    ddbSendMock.mockResolvedValue({ Items: [{ workspace_slug: 'solo', status: 'active' }] });
+
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('cannot reach another tenant');
+  });
+
+  test('passes when every active workspace owns its secret', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'a', status: 'active', webhook_secret_owned: true },
+        { workspace_slug: 'b', status: 'active', webhook_secret_owned: true },
+      ],
+    });
+    const check = await checkLinearSecretProvenance('us-east-1', REG);
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('All 2 active');
+  });
+
+  test('ignores revoked rows when counting tenants', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { workspace_slug: 'live', status: 'active' },
+        { workspace_slug: 'dead', status: 'revoked' },
+      ],
+    });
+    // One ACTIVE workspace ⇒ the single-workspace pass, not a two-tenant warn.
+    expect((await checkLinearSecretProvenance('us-east-1', REG)).status).toBe('pass');
+  });
+
+  test('warns when the registry cannot be read', async () => {
+    ddbSendMock.mockRejectedValue(new Error('AccessDeniedException'));
+    expect((await checkLinearSecretProvenance('us-east-1', REG)).status).toBe('warn');
+  });
+
+  test('passes when Linear is not deployed', async () => {
+    expect((await checkLinearSecretProvenance('us-east-1', null)).status).toBe('pass');
+  });
+
+  test('is reported by the full doctor run', async () => {
+    stackOutputMock.mockImplementation(async (_r: string, _s: string, output: string) =>
+      (output === 'LinearWorkspaceRegistryTableName' ? REG : null));
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    expect(checks.map((c) => c.id)).toContain('linear_secret_provenance');
+  });
+});
+
+describe('doctor verdict for Linear project → workspace binding', () => {
+  const MAPPING = 'LinearProjectMapping';
+
+  test('warns and names the rows that record no owning workspace', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [
+        { linear_project_id: 'proj-backed', linear_workspace_id: 'org-1', status: 'active' },
+        { linear_project_id: 'proj-unbacked', status: 'active' },
+      ],
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('proj-unbacked');
+    expect(check.detail).not.toContain('proj-backed');
+    expect(check.detail).toContain('bgagent linear onboard-project');
+  });
+
+  test('caps the named ids so a large install does not bury the rest of the report', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: Array.from({ length: 14 }, (_, i) => ({ linear_project_id: `proj-${i}`, status: 'active' })),
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.detail).toContain('(and 4 more)');
+    expect(check.detail).toContain('proj-9');
+    expect(check.detail).not.toContain('proj-10');
+  });
+
+  test('passes once every active mapping records an owning workspace', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{ linear_project_id: 'proj-1', linear_workspace_id: 'org-1', status: 'active' }],
+    });
+
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+
+    expect(check.status).toBe('pass');
+    expect(check.detail).toContain('All 1 active');
+  });
+
+  test('ignores inactive rows — an offboarded mapping is not work to do', async () => {
+    ddbSendMock.mockResolvedValue({
+      Items: [{ linear_project_id: 'proj-old', status: 'inactive' }],
+    });
+
+    expect((await checkLinearProjectWorkspaces('us-east-1', MAPPING)).status).toBe('pass');
+  });
+
+  test('passes when the Linear integration is not deployed', async () => {
+    expect((await checkLinearProjectWorkspaces('us-east-1', null)).status).toBe('pass');
+  });
+
+  test('warns when the mapping table cannot be read', async () => {
+    ddbSendMock.mockRejectedValue(new Error('AccessDeniedException'));
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING);
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('AccessDeniedException');
+  });
+
+  test('is reported by the full doctor run', async () => {
+    stackOutputMock.mockImplementation(async (_region: string, _stack: string, output: string) =>
+      (output === 'LinearProjectMappingTableName' ? MAPPING : null));
+    const checks = await runPlatformDoctor({ region: 'us-east-1', stackName: 'Abca' });
+    expect(checks.map((c) => c.id)).toContain('linear_project_workspaces');
+  });
 });
 
 describe('doctor verdict for Jira app identity', () => {
