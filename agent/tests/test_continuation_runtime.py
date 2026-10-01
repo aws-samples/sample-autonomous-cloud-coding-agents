@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 from dataclasses import asdict
@@ -29,11 +30,18 @@ class Deadline:
 
 
 def git(workspace, *args):
+    # Git hooks in a linked worktree export GIT_DIR/GIT_INDEX_FILE, which
+    # override -C and would point these fixture commands at the real
+    # repository (#855). Strip them, and disable hooks so a fixture commit
+    # cannot re-enter the pre-commit suite.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, LC_ALL="C")
     return subprocess.run(
-        ["git", "-C", str(workspace), *args],
+        ["git", "-C", str(workspace), "-c", f"core.hooksPath={os.devnull}", *args],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     ).stdout.strip()
 
 
