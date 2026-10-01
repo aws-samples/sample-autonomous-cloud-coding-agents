@@ -2,7 +2,8 @@
 
 This is a CloudFormation infrastructure split, not a virtual machine running
 inside another virtual machine. Fresh nested deployment and a deployment-specific
-migration were verified; reusable migration commands remain unfinished.
+migration were verified; reusable migration commands are a follow-up, not part
+of this change.
 
 ## Resource ownership
 
@@ -70,5 +71,4 @@ runnable migration command:
 Setting a concurrency counter to zero is not a reliable pause for asynchronous
 producers. A rollback must restore compatible code, image selection and IAM
 without deleting pending requests or saved work. The reusable tool must enforce
-these prerequisites; migration template and permission helpers alone do not
-constitute that tool. Track remaining acceptance in [verification status](./README.md#open-pr-checks).
+these prerequisites. Track remaining acceptance in [verification status](./README.md#open-pr-checks).

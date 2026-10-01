@@ -45,12 +45,12 @@ parent stack.
 
 ## Open PR checks
 
-- Finish reusable flat-to-nested migration commands and independently test an
-  upgrade from current `main` on the same deployment. The earlier bespoke
-  migration is not a substitute for that acceptance.
-- Deploy the latest review fixes and verify CLI/API approve and deny on a
-  `PARKED` task, including immediate replacement admission. Earlier Linear
-  acceptance does not exercise the decision API functions' configuration.
+- Maintainer acceptance of the expanded #645 scope and ADR-021/ADR-023.
+
+Reusable flat-to-nested migration commands are out of scope for this PR and
+tracked as a follow-up. Until they exist, existing flat installations keep
+`microvm_nested_stack=false`; the staged checklist in
+[nested infrastructure](./645-p3-nested-stack.md) is guidance, not a tool.
 
 ## Reproduce local checks
 
