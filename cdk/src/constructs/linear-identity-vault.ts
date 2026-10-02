@@ -28,13 +28,13 @@
 // framework with a bundled `onEvent` handler (mirrors registry.ts). Workload-
 // identity create/delete are synchronous, so no `isComplete` poller is needed.
 import * as path from 'path';
-import { ArnFormat, CustomResource, Duration, Stack } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, CustomResource, Duration, Stack } from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 
 const PROVISION_TIMEOUT_SECONDS = 60;
 const PROVISION_MEMORY_MB = 256;
@@ -73,6 +73,8 @@ export interface LinearIdentityVaultProps {
  * (webhook processor, orchestrator, agent session role).
  */
 export class LinearIdentityVault extends Construct {
+  private readonly annotatedMintGrantees = new WeakSet<IConstruct>();
+
   /** The provisioned workload identity name (stable natural id). */
   public readonly workloadName: string;
 
@@ -317,18 +319,39 @@ export class LinearIdentityVault extends Construct {
     // Live-verified rather than reasoned: under the scoped grant a Linear mint for a
     // consented workspace succeeds, and `GetSecretValue` on the GitHub provider's
     // secret is denied. The trailing `*` covers the id suffix the service appends.
+    const credentialSecretArn = stack.formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      resourceName: `bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
+    });
     grantee.grantPrincipal.addToPrincipalPolicy(
       new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
-        resources: [
-          stack.formatArn({
-            service: 'secretsmanager',
-            resource: 'secret',
-            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-            resourceName: `bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}*`,
-          }),
-        ],
+        resources: [credentialSecretArn],
       }),
     );
+    this.annotateMintGrant(grantee);
+  }
+
+  /** Follow these specific grant resources into CDK's lazily created overflow policies. */
+  private annotateMintGrant(grantee: iam.IGrantable): void {
+    if (!Construct.isConstruct(grantee) || this.annotatedMintGrantees.has(grantee)) return;
+    this.annotatedMintGrantees.add(grantee);
+    Aspects.of(grantee).add({
+      visit(node: IConstruct): void {
+        if (!(node instanceof iam.CfnPolicy || node instanceof iam.CfnManagedPolicy)) return;
+        NagSuppressions.addResourceSuppressions(node, [{
+          id: 'AwsSolutions-IAM5',
+          reason: 'Linear OAuth providers are created per workspace after deployment. Minting requires the Linear-only provider prefix and its service-owned OAuth secret suffix; unrelated providers and secrets remain excluded.',
+          // Account/region/partition can render as literals or pseudo-parameter
+          // references. The service, full path and Linear-only prefix are fixed.
+          appliesTo: [
+            { regex: `/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
+            { regex: `/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
+          ],
+        }]);
+      },
+    }, { priority: AspectPriority.MUTATING });
   }
 }

@@ -280,3 +280,37 @@ describe('AgentSessionRole construct', () => {
     expect(stsGrant).toBeDefined();
   });
 });
+
+describe('deferred compute-role binding', () => {
+  function fixture() {
+    const app = new App();
+    const stack = new Stack(app, 'Deferred');
+    const session = new AgentSessionRole(stack, 'Session', {
+      deferComputeRoleBinding: true,
+      taskScopedTables: [],
+      traceArtifactsBucket: new s3.Bucket(stack, 'Traces'),
+      attachmentsBucket: new s3.Bucket(stack, 'Attachments'),
+    });
+    return { app, stack, session };
+  }
+  test('rejects an unbound role before synthesis', () => {
+    const { app } = fixture();
+    expect(() => app.synth()).toThrow(/admitted compute role/);
+  });
+  test('uses the admitted role for initial trust and grants AssumeRole with tags', () => {
+    const { stack, session } = fixture();
+    const role = new iam.Role(stack, 'Selected', { assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com') });
+    session.admitComputeRole(role);
+    session.admitComputeRole(role);
+    const template = Template.fromStack(stack);
+    const trust = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.startsWith('SessionRole'))![1];
+    expect(JSON.stringify(trust.Properties.AssumeRolePolicyDocument)).toContain('Selected');
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({ Action: ['sts:AssumeRole', 'sts:TagSession'] }),
+        ]),
+      },
+    });
+  });
+});

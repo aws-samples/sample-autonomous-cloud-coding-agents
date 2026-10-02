@@ -11,7 +11,8 @@
     "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
-    "synth:quiet": "npx cdk synth -q"
+    "synth:quiet": "npx cdk synth -q",
+    "census": "node -r ts-node/register/transpile-only src/synthesis/cli.ts"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-alpha": "2.260.0-alpha.0",
