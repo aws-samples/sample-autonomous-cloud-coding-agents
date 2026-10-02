@@ -21,6 +21,11 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 // --- Mocks ---
 const mockSend = jest.fn();
+const mockWake = jest.fn();
+jest.mock('../../src/handlers/shared/microvm-approval-wake', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm-approval-wake'),
+  wakeMicrovmAfterApproval: (...args: unknown[]) => mockWake(...args),
+}));
 
 // Construct a stub TransactionCanceledException that has the
 // `err.name` + `CancellationReasons` the handler reads, plus makes
@@ -56,7 +61,7 @@ process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 process.env.APPROVE_RATE_LIMIT_PER_MINUTE = '30';
 
-import { handler } from '../../src/handlers/approve-task';
+import { handler, recordApprovalForUser } from '../../src/handlers/approve-task';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
@@ -92,6 +97,7 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
 
 beforeEach(() => {
   mockSend.mockReset();
+  mockWake.mockReset().mockResolvedValue(undefined);
   ulidCounter = 0;
 });
 
@@ -233,5 +239,83 @@ describe('approve-task — error classification', () => {
       .mockRejectedValueOnce(new Error('ddb throttled on audit'));
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(202);
+  });
+});
+
+describe('postcommit MicroVM wake', () => {
+  test('wake diagnostics are task-bound and keep the supplied remaining-time signal', async () => {
+    mockSend.mockResolvedValue({});
+    mockWake.mockImplementationOnce(async input => {
+      await input.emitEvent('microvm_resume_orphan', { stage: 'resume-request' }, input.options);
+    });
+    expect((await handler(makeEvent())).statusCode).toBe(202);
+    const emitted = mockSend.mock.calls.find(([command]) => command.input.Item?.event_type === 'microvm_resume_orphan');
+    expect(emitted?.[0].input.Item).toMatchObject({
+      task_id: 'task-1', user_id: 'user-alice', metadata: { stage: 'resume-request' },
+    });
+    expect(emitted?.[1]).toBe(mockWake.mock.calls[0][0].options);
+  });
+
+  test('wake runs after the committed transaction and keeps its decision identity', async () => {
+    mockSend.mockResolvedValue({});
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(202);
+    const transaction = mockSend.mock.calls.findIndex(([command]) => command._type === 'TransactWrite');
+    expect(mockSend.mock.invocationCallOrder[transaction]).toBeLessThan(mockWake.mock.invocationCallOrder[0]);
+    expect(mockWake.mock.calls[0][0]).toMatchObject({
+      taskId: 'task-1',
+      userId: 'user-alice',
+      decision: 'APPROVED',
+      options: { abortSignal: expect.any(AbortSignal) },
+    });
+  });
+  test('an unexpected wake failure cannot change the committed202 response', async () => {
+    mockSend.mockResolvedValue({});
+    mockWake.mockRejectedValue(new Error('private wake failure'));
+    const response = await handler(makeEvent());
+    expect(response.statusCode).toBe(202);
+    expect(response.body).not.toContain('private wake failure');
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'TransactWrite')).toHaveLength(1);
+  });
+  test('transaction failure cannot wake a worker', async () => {
+    mockSend.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('transaction failed'));
+    expect((await handler(makeEvent())).statusCode).toBe(500);
+    expect(mockWake).not.toHaveBeenCalled();
+  });
+  test('near Lambda timeout, optional postcommit work gets an already-expired budget', async () => {
+    mockSend.mockResolvedValue({});
+    const response = await handler(makeEvent(), { getRemainingTimeInMillis: () => 500 });
+    expect(response.statusCode).toBe(202);
+    expect(mockSend.mock.calls.map(([command]) => command._type)).toEqual(['Update', 'TransactWrite']);
+    expect(mockWake.mock.calls[0][0].options.abortSignal.aborted).toBe(true);
+  });
+  test('audit failure still permits wake and does not fail the decision', async () => {
+    mockSend.mockResolvedValueOnce({}).mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('audit failed'));
+    expect((await handler(makeEvent())).statusCode).toBe(202);
+    expect(mockWake).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('trusted channel decision source', () => {
+  test('stores the source inside the guarded decision transaction', async () => {
+    mockSend.mockResolvedValue({});
+    const result = await recordApprovalForUser({
+      userId: 'user-alice',
+      taskId: 'task-1',
+      body: JSON.stringify({ request_id: 'gate', decision: 'approve' }),
+      decisionSource: 'linear-source',
+    });
+    expect(result.statusCode).toBe(202);
+    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
+    expect(update.UpdateExpression).toContain('decision_source = :source');
+    expect(update.ExpressionAttributeValues[':source']).toBe('linear-source');
+    expect(update.ConditionExpression).toContain('#status = :pending');
+    expect(update.ConditionExpression).toContain('deadline_epoch > :epoch');
+  });
+  test('does not trust a source supplied in the HTTP body', async () => {
+    mockSend.mockResolvedValue({});
+    await handler(makeEvent({ body: JSON.stringify({ request_id: 'gate', decision: 'approve', decisionSource: 'forged' }) }));
+    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
+    expect(update.UpdateExpression).not.toContain('decision_source');
   });
 });

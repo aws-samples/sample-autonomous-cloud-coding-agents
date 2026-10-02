@@ -1294,13 +1294,13 @@ The task record is preserved with status `CANCELLED` — `bgagent status <task_i
 
 ### Concurrency tracking changes
 
-The existing codebase increments user concurrency at task creation time (in `create-task-core.ts`), since tasks currently always start in `SUBMITTED`. With `PENDING_UPLOADS`, this must change:
+The orchestrator owns capacity acquisition for every submitted task, including the upload path:
 
-- **Create-task handler (PENDING_UPLOADS path):** Skip concurrency increment. No agent resources are allocated; the task may never be confirmed.
-- **Confirm-uploads handler (PENDING_UPLOADS → SUBMITTED):** Increment user concurrency. If the concurrency limit is reached at this point, the confirm-uploads call fails with `429 RATE_LIMIT_EXCEEDED` (the user concurrency gate on the confirm-uploads path; there is no separate `CONCURRENCY_LIMIT_EXCEEDED` code). The task remains in `PENDING_UPLOADS` and the user must wait for a slot or cancel another running task.
-- **Auto-cancel Lambda (PENDING_UPLOADS → CANCELLED):** No concurrency decrement needed (was never incremented).
+- **Create-task (`PENDING_UPLOADS`):** no reservation is acquired; the uploads may never be confirmed.
+- **Confirm-uploads (`PENDING_UPLOADS → SUBMITTED`):** an advisory capacity read runs before expensive screening and can return `429 RATE_LIMIT_EXCEEDED`. Successful confirmation submits the task without incrementing the counter. If capacity fills during screening, the orchestrator can queue the submitted task through its normal atomic admission path.
+- **Auto-cancel (`PENDING_UPLOADS → CANCELLED`):** no reservation exists to release.
 
-This ensures `PENDING_UPLOADS` tasks never count against the user's concurrency limit, while still enforcing the limit at the point where agent resources would actually be allocated.
+Confirm-uploads has read-only counter permissions. Conditional-write failure or a repeated confirmation cannot roll back another task's seat. The orchestrator saves its task reservation and counter increment in one transaction; cleanup releases that reservation at most once.
 
 ### Impact on existing code that assumes binary status classification
 
@@ -1308,7 +1308,7 @@ The existing codebase uses `ACTIVE_STATUSES` and `TERMINAL_STATUSES` for filteri
 
 | Code path | Current assumption | Required change |
 |---|---|---|
-| Concurrency counting | All non-terminal tasks are counted | Count only `ACTIVE_STATUSES` (excludes `PENDING_UPLOADS`) |
+| Capacity counting | Status implies reservation ownership | Count held `concurrency_slot` markers, including approval waits; leave ambiguous older records for safe reconciliation |
 | `bgagent list` status filter | Filters by active vs terminal | Add `PRE_ACTIVE_STATUSES` to "all non-terminal" filter |
 | Dashboard "active tasks" widget | Uses `ACTIVE_STATUSES` | No change needed (already correct) |
 | Task cleanup / retention | Applies to `TERMINAL_STATUSES` | No change needed (PENDING_UPLOADS auto-cancels to CANCELLED first) |
@@ -1613,7 +1613,7 @@ The implementation is ordered to deliver value incrementally while maintaining s
 24. Update all code paths that assume binary status classification (active vs terminal) — see [Impact on existing code](#impact-on-existing-code-that-assumes-binary-status-classification)
 25. Add `confirm-uploads` Lambda (1024 MB, 180s timeout) with parallel screening (concurrency 3), internal deadline timer, per-attachment screening state
 26. Add `POST /v1/tasks/{task_id}/confirm-uploads` API endpoint with concurrent-call safety (early short-circuit, conditional DynamoDB write for both success and failure paths)
-27. Move concurrency increment from create-task to confirm-uploads for presigned-upload tasks
+27. Route confirmed uploads through orchestrator-owned transactional admission; confirmation only performs an advisory capacity read
 28. Add presigned POST policy generation in create-task handler (with `content-length-range` enforcement, `expected_size_bytes` validation, S3 versioning)
 29. Add idempotency key special-casing for `PENDING_UPLOADS` (new S3 keys + new attachment IDs on retry to prevent collision, conditional DynamoDB write)
 30. Add `PendingUploadCleanupRule` EventBridge rule (5-minute schedule, conditional DynamoDB write for race safety, prefix-level S3 cleanup)

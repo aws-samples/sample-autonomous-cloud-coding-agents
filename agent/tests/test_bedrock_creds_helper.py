@@ -32,6 +32,19 @@ def attr_file(tmp_path, monkeypatch):
     return path
 
 
+def test_microvm_export_is_empty_without_reading_files_or_resolving_ambient(monkeypatch, capsys):
+    monkeypatch.setenv("ABCA_MICROVM_CREDENTIAL_BROKER", "1")
+    with (
+        patch("builtins.open", side_effect=AssertionError("must not read attribution")),
+        patch.object(
+            helper, "_ambient_credentials", side_effect=AssertionError("must not resolve")
+        ),
+        patch("boto3.client", side_effect=AssertionError("must not call STS")),
+    ):
+        assert helper.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"Credentials": {}}
+
+
 def test_write_attribution_file_is_0600(attr_file):
     tags = build_session_tags("u1", "owner/repo", "task123")
     written = helper.write_attribution_file("arn:aws:iam::1:role/SR", tags, attr_file)

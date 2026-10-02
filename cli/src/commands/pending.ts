@@ -65,7 +65,7 @@ function renderText(pending: readonly PendingApprovalSummary[]): void {
     }
     console.log(`  preview:    ${p.tool_input_preview}`);
     console.log(`  created:    ${p.created_at}`);
-    console.log(`  expires:    ${p.expires_at} (timeout_s=${p.timeout_s})`);
+    console.log(`  expires:    ${p.expires_at ?? 'no automatic expiry'}`);
     console.log(
       `  approve:    bgagent approve ${p.task_id} ${p.request_id}`,
     );

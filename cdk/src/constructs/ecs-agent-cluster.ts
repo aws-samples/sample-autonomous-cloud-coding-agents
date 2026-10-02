@@ -29,7 +29,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
 import { AgentMemory } from './agent-memory';
-import { AgentSessionRole } from './agent-session-role';
+import { AgentSessionRole, grantAgentTaskTableAccess } from './agent-session-role';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
   PLATFORM_DEFAULT_MODEL_ID,
@@ -38,6 +38,7 @@ import {
   resolveBedrockModelIds,
 } from './bedrock-models';
 import { LinearIdentityVault } from './linear-identity-vault';
+import { grantWorkerBootstrap } from './payload-bootstrap-permissions';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
 
@@ -46,6 +47,8 @@ export interface EcsAgentClusterProps {
   readonly agentImageAsset: ecr_assets.DockerImageAsset;
   readonly taskTable: dynamodb.ITable;
   readonly taskEventsTable: dynamodb.ITable;
+  /** Approval storage. Required for human approval gates; optional in isolated tests. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
@@ -58,14 +61,12 @@ export interface EcsAgentClusterProps {
   readonly taskSizing?: EcsTaskSizing;
 
   /**
-   * S3 bucket holding per-task ECS payloads. The orchestrator writes the
-   * payload (incl. the large hydrated_context, which can't fit in the 8 KB
-   * RunTask containerOverrides limit) here and passes only an
-   * `AGENT_PAYLOAD_S3_URI` pointer; the container fetches it on boot. The task
-   * role gets **read-only** on this bucket — the container runs untrusted repo
-   * code, so it must not be able to delete payloads (the trusted orchestrator
-   * owns write + delete). When omitted (isolated construct tests / deployments
-   * that still pass the payload inline), no grant or env var is added.
+   * S3 storage for deployment manifests, task payloads and private launch
+   * references. The v2 coordinator sends AGENT_PAYLOAD_REF, containing a
+   * single-object signed download URL. The task role can read only bootstrap/*;
+   * object reads elsewhere and bucket listing are explicitly denied. The
+   * coordinator owns writes and cleanup. Optional for isolated construct tests;
+   * production ECS launches require this bucket and a matching v2 image.
    */
   readonly payloadBucket?: s3.IBucket;
 
@@ -98,6 +99,7 @@ export interface EcsAgentClusterProps {
    * retains the direct grants.
    */
   readonly agentSessionRole?: AgentSessionRole;
+  readonly approvalRequestsApiUrl?: string;
 
   /**
    * AgentCore Memory for cross-task learning. When provided, the ECS task role
@@ -151,8 +153,8 @@ const HTTPS_PORT = 443;
  *    ~3.1 GB of the 16 GB, because ``MISE_JOBS=1`` serialises the packages so peak
  *    is max-single-package rather than sum-of-all. Nearly 5x headroom.
  *
- *    Disk is the tighter constraint and is sized less aggressively for that
- *    reason: the same build peaked at ~14.7 GiB, so Fargate's 21 GiB floor leaves
+ *    Disk is the tighter constraint: the same build peaked at ~14.7 GiB, so
+ *    Fargate's 20 GiB default leaves
  *    only ~1.4x — a heavier dependency cache or a second build sharing the task
  *    would run it out of space and surface as a spurious build failure. 50 GiB
  *    restores real margin, and ephemeral storage is a small fraction of the
@@ -170,16 +172,9 @@ const HTTPS_PORT = 443;
  *    execution role, because splitting them is how a grant silently lands on one
  *    def and not the other. Do not read the name as a privilege boundary.
  */
-// A MODEST default: 4 vCPU / 16 GB, and Fargate's own 20 GiB disk.
-//
-// Deliberately not the Fargate ceiling. A default is what an adopter who changes
-// nothing gets, and at 16 vCPU / 120 GB that is roughly 5x the per-build cost of
-// this size in us-east-1 on-demand. Under-provisioning surfaces as a slow or
-// OOM-ing build, which is diagnosable and fixable with one prop; over-provisioning
-// surfaces as a bill, which is not. A large TypeScript + Python monorepo genuinely
-// needs more — raise it through {@link EcsTaskSizing}, up to Fargate's 16 vCPU /
-// 120 GB maximum, and raise ephemeral storage with it if concurrent builds run the
-// disk out of space.
+// Build defaults: 4 vCPU / 16 GiB RAM / 50 GiB disk.
+// Planning defaults: 2 vCPU / 8 GiB RAM / Fargate's 20 GiB default disk.
+// EcsTaskSizing overrides these values for the target repository's workload.
 const DEFAULT_BUILD_TASK_CPU = 4096;
 const DEFAULT_BUILD_TASK_MEMORY_MIB = 16384;
 const DEFAULT_BUILD_TASK_EPHEMERAL_STORAGE_GIB = 50;
@@ -189,7 +184,7 @@ const DEFAULT_PLANNING_TASK_MEMORY_MIB = 8192;
 /**
  * Per-task Fargate sizing overrides. Every field is optional; anything left
  * unset uses the default above. A consumer with a lighter repo should shrink the
- * build task (for example 4 vCPU / 16 GB) to cut cost; a heavy monorepo can keep
+ * build task to cut cost; a heavy monorepo can keep
  * or raise it up to the Fargate ceiling of 16 vCPU / 120 GB. Values are passed
  * straight to the Fargate task definition, so they must be a valid Fargate
  * cpu/memory combination (see the AWS Fargate docs) — an invalid pair fails at
@@ -245,8 +240,10 @@ export interface EcsTaskSizing {
  * override key should fail synth, not disable an isolation control.
  */
 const RESERVED_BUILD_ENV_KEYS = new Set([
+  'APPROVAL_REQUESTS_API_URL',
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
+  'TASK_APPROVALS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
@@ -311,12 +308,10 @@ export class EcsAgentCluster extends Construct {
   public readonly taskDefinition: ecs.FargateTaskDefinition;
   /**
    * The smaller read-only PLANNING task def (8 GB / 2 vCPU) — for any read-only
-   * workflow that clones + reads + emits an artifact but never builds. Same
-   * image/role/env/grants as the build def (shared task+execution role + a shared
-   * container spec, so a grant present on one def but missing on the other can't
-   * silently diverge); the ONLY difference is cpu/mem. The orchestrator selects
-   * this for read-only workflows on an ECS repo, so planning doesn't
-   * over-allocate the large build task.
+   * workflow that clones + reads + emits an artifact but never builds. Both
+   * definitions share their image, roles, grants and platform environment.
+   * Sizing, disk and build-tool settings differ. The orchestrator selects this
+   * definition for read-only workflows on an ECS repo.
    */
   public readonly planningTaskDefinition: ecs.FargateTaskDefinition;
   public readonly securityGroup: ec2.SecurityGroup;
@@ -327,6 +322,10 @@ export class EcsAgentCluster extends Construct {
   constructor(scope: Construct, id: string, props: EcsAgentClusterProps) {
     super(scope, id);
 
+    if ((props.taskApprovalsTable || props.approvalRequestsApiUrl)
+      && (!props.agentSessionRole || !props.approvalRequestsApiUrl)) {
+      throw new Error('ECS approvals require agentSessionRole and approvalRequestsApiUrl with a task-scoped invocation grant');
+    }
     this.containerName = 'AgentContainer';
 
     // ECS Cluster with Fargate capacity provider and container insights
@@ -403,13 +402,16 @@ export class EcsAgentCluster extends Construct {
         inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      ...(props.taskApprovalsTable && {
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      }),
+      ...(props.approvalRequestsApiUrl && { APPROVAL_REQUESTS_API_URL: props.approvalRequestsApiUrl }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       ...(props.memoryId && { MEMORY_ID: props.memoryId }),
-      // The payload bucket name so the orchestrator-issued AGENT_PAYLOAD_S3_URI
-      // can be fetched. (The orchestrator sets the URI per-task via container
-      // override; this is set here for parity with the runtime env.)
+      // Deployment metadata; the per-task AGENT_PAYLOAD_REF supplies the
+      // manifest URI and signed payload URL. IAM authenticates the manifest.
       ...(props.payloadBucket && { ECS_PAYLOAD_BUCKET: props.payloadBucket.bucketName }),
       // Artifact workflows (planning/analysis) deliver their document to
       // this bucket. The AgentCore runtime has ARTIFACTS_BUCKET_NAME; the ECS task
@@ -478,51 +480,19 @@ export class EcsAgentCluster extends Construct {
     this.taskDefinition = makeTaskDef('TaskDef', buildCpu, buildMemory, {
       // Heavy CI-parity builds legitimately run longer than the 1800s default.
       BUILD_VERIFY_TIMEOUT_S: '3600',
-      // Pin the jest test fleet to an ABSOLUTE worker count on ECS. jest's
-      // `maxWorkers: 25%` is CORE-relative → 4 workers on this 16-vCPU box.
-      // Measured, the test suite at 4 workers peaks at only ~2.2 GB (whole process
-      // tree) — not tens of GB. Container OOMs were not driven by this test
-      // suite's worker count; they were driven by TOTAL concurrency — a
-      // full-parallel `mise run build` running every package's test/build legs
-      // plus the resident coding agent all at once. So the real memory driver is
-      // cross-package build parallelism, not jest's internal workers. 4 is
-      // comfortably safe on the 120 GB box even alongside the other packages +
-      // agent. Kept as an explicit env (not core-relative) so a future bigger box
-      // can't silently over-spawn. The test script reads JEST_MAX_WORKERS (default
-      // 25%), so this only pins the shared ECS box — CI (2–4 cores) and dev
-      // machines keep 25%, unaffected.
+      // Repositories that honor JEST_MAX_WORKERS use four Jest workers on build
+      // tasks. An absolute value keeps that limit stable when task CPU changes;
+      // it does not set worker counts for other test runners.
       JEST_MAX_WORKERS: '4',
-      // Serialize the mise task graph so the build steps' peak memory doesn't sum
-      // and OOM the task. `mise run build` fans out its `depends` (the per-package
-      // build/quality legs) up to MISE_JOBS in parallel (default 4); each package
-      // then spawns its OWN worker fleet (jest, pytest, esbuild, cdk synth). The
-      // measured memory driver of the OOMs was this CROSS-PACKAGE storm summing on
-      // top of the resident coding agent — not any single package. At 120 GB
-      // (Fargate's max at 16 vCPU) there is no more RAM to add, so the remedy is to
-      // cut peak parallelism. MISE_JOBS=1 runs the packages SEQUENTIALLY → peak ≈
-      // max(single package) instead of sum(all packages), while still building
-      // every package and keeping BOTH gates (baseline + post-agent).
-      // Within-package parallelism (JEST_MAX_WORKERS=4, pytest) is untouched, so a
-      // single package still uses the box's cores. Cost is wall-clock (~serial
-      // sum, still minutes) — trivial against BUILD_VERIFY_TIMEOUT_S=3600. Without
-      // this, the post-agent build OOM'd (exit 137) stacking on the still-resident
-      // agent; a gate that OOMs verified NOTHING — serializing lets it actually
-      // COMPLETE and gate. Only affects `mise run <task>` (the build legs); the
-      // agent's direct `uv run pytest` calls are unaffected.
+      // Run one mise task at a time to limit overlap between package builds.
+      // Individual tools can still run their own workers, and the coding agent
+      // remains resident. This trades build duration for lower peak memory;
+      // it does not cap direct pytest/Jest calls or guarantee a workload fits.
       MISE_JOBS: '1',
-      // Skip the target repo's pre-push TEST hook inside the agent container.
-      // `mise run install` installs prek git hooks, incl. a pre-push hook that
-      // re-runs the FULL cdk+cli+agent test suite on every `git push`. In this
-      // container that suite already ran TWICE (baseline + post-agent build gate)
-      // and GitHub CI runs it again — so the pre-push run is pure redundancy, AND
-      // it runs UNcapped (no JEST_MAX_WORKERS), stacking on the resident agent →
-      // OOM. The agent's only escape was `git push --no-verify`, which silently
-      // bypassed ALL hooks (incl. the security scan) and trained a
-      // skip-verification habit. SKIP is the pre-commit/prek standard env var
-      // (comma-separated hook ids); scoping it to the tests hook lets the push
-      // succeed WITHOUT --no-verify while KEEPING the pre-push security scan.
-      // Propagates to both the platform push (post_hooks.py) and the agent's own
-      // git-tool pushes via shell.py::_clean_env (blacklist — passes SKIP through).
+      // For repositories using this pre-commit/prek hook ID, skip that named
+      // pre-push test hook. Other hook IDs remain enabled. This does not establish
+      // that the repository's tests already ran; verification depends on its
+      // configured workflow. shell.py::_clean_env passes SKIP to git subprocesses.
       SKIP: 'monorepo-tests-pre-push',
       // Caller overrides win: the values above are tuned for one monorepo's
       // toolchain, so a deployment with a different build shape replaces them
@@ -545,24 +515,20 @@ export class EcsAgentCluster extends Construct {
     if (props.agentSessionRole) {
       props.agentSessionRole.admitComputeRole(taskRole);
     } else {
-      props.taskTable.grantReadWriteData(taskRole);
+      grantAgentTaskTableAccess(props.taskTable, taskRole, false);
       props.taskEventsTable.grantReadWriteData(taskRole);
     }
-    // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
-    // touched by the reconciler/orchestrator path; keep it on the task role.
-    props.userConcurrencyTable.grantReadWriteData(taskRole);
+    // Capacity counters are coordinator-owned. The agent never accesses them.
 
     // Secrets Manager read for GitHub token (read once at startup, before the
     // agent assumes the SessionRole — stays on the task role).
     props.githubTokenSecret.grantRead(taskRole);
 
-    // Read-only on the ECS payload bucket so the container can fetch its payload
-    // (AGENT_PAYLOAD_S3_URI) at boot. READ only — the container runs untrusted
-    // repo code, so it must not be able to write or delete payloads (the trusted
-    // orchestrator owns write + delete). Stays on the task role (read once at
-    // startup, before the agent assumes any SessionRole).
+    // Only deployment manifests use worker credentials. The boot helper reads
+    // its exact task object through a signed URL and removes that capability
+    // from the environment before starting repository code.
     if (props.payloadBucket) {
-      props.payloadBucket.grantRead(taskRole);
+      grantWorkerBootstrap(props.payloadBucket, taskRole);
     }
 
     // Artifact workflows (planning/analysis) deliver their document to the
@@ -700,7 +666,7 @@ export class EcsAgentCluster extends Construct {
     NagSuppressions.addResourceSuppressions(taskRole, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'DynamoDB index/* wildcards from CDK grantReadWriteData (UserConcurrencyTable, and task tables only when no SessionRole is wired); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; S3 object/* wildcard from CDK grantRead on the ECS payload bucket (read-only, scoped to that bucket — #502). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
+        reason: 'DynamoDB index/* wildcards from the legacy TaskEventsTable grant when no SessionRole is wired (TaskTable allows only reporting updates; the worker has no UserConcurrency access); Secrets Manager wildcards from CDK grantRead (GitHub token) and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant (ABCA-488 — per-workspace channel OAuth tokens are created by the CLI at setup, name unknown at synth, GetSecretValue only); CloudWatch Logs wildcards from CDK grantWrite; Worker S3 GetObject is restricted to bootstrap/*; other object reads and payload-bucket listing are explicitly denied (#700). Bedrock InvokeModel is scoped to explicit model/inference-profile ARNs (no wildcard resource). ec2:DescribeAvailabilityZones requires Resource:* (EC2 describe actions have no resource-level scoping) — read-only, no mutation/data access; needed so a CDK target repo\'s `cdk synth` build gate can resolve AZ context on a fresh clone (ECS-parity, no cdk.context.json cache in the container).',
       },
       {
         id: 'AwsSolutions-ECS2',

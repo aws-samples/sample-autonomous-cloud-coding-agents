@@ -20,10 +20,14 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
-import type { SessionHandle, SessionStatus } from './compute-strategy';
+import { evaluateAgentHeartbeat } from './agent-heartbeat';
+import { closeTaskApprovals } from './close-task-approvals';
+import type { SessionControlOptions, SessionHandle } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
 import { writeMinimalEpisode } from './memory';
+import { readMicrovmImageMetadata } from './microvm-image-capability';
+import type { MicrovmSupervisorState } from './microvm-supervisor';
 import { coerceNumericOrNull } from './numeric';
 import { computePromptVersion } from './prompt-version';
 import { makeRegistryClient } from './registry/factory';
@@ -31,6 +35,7 @@ import { parseRef } from './registry/ref';
 import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
+import { acquireTaskSlot, releaseTaskSlot } from './task-concurrency';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
@@ -40,7 +45,6 @@ const ddb = makeDocClient();
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
-const CONCURRENCY_TABLE_NAME = process.env.USER_CONCURRENCY_TABLE_NAME!;
 const RUNTIME_ARN = process.env.RUNTIME_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -62,24 +66,16 @@ export interface PollState {
   readonly consecutiveEcsPollFailures?: number;
   /** Consecutive polls where ECS reports completed but DDB is not terminal — escalated after 5. */
   readonly consecutiveEcsCompletedPolls?: number;
-  /**
-   * True once `microvm_suspend_anomaly` has been emitted for the CURRENT anomaly
-   * episode, so the event fires once per episode instead of on every ~30 s poll
-   * (an 8-hour suspended task would otherwise write ~960 identical events).
-   *
-   * Re-armed (set back to false) by any non-anomalous observation — see
-   * {@link reconcileMicrovmSubstrateState}. Kept as a plain boolean rather than a
-   * counter/timestamp on purpose: P3's suspend policy will reshape this area
-   * anyway, and one flag is the smallest thing that fixes the duplication without
-   * pre-committing to a shape that work will have to undo.
-   */
-  readonly microvmSuspendAnomalyReported?: boolean;
+  readonly microvmSupervisor?: MicrovmSupervisorState;
+  readonly microvmFailureReason?: string;
+  readonly microvmFailureMessage?: string;
+  /** A stale execution must clean up only its own handle, leaving the replacement alone. */
+  readonly microvmOwnershipLost?: boolean;
+  /** The worker is stopped and its reservation released; the approval remains open. */
+  readonly microvmParked?: boolean;
+  readonly microvmRetiring?: boolean;
+  readonly microvmRetirementError?: string;
 }
-
-/** After RUNNING this long, we expect `agent_heartbeat_at` from the agent (if ever set). */
-const AGENT_HEARTBEAT_GRACE_SEC = 120;
-/** If `agent_heartbeat_at` exists and is older than this, the session is treated as lost. */
-const AGENT_HEARTBEAT_STALE_SEC = 240;
 
 /**
  * Whether a backend's liveness is (partly) inferred from `agent_heartbeat_at`.
@@ -96,14 +92,12 @@ const AGENT_HEARTBEAT_STALE_SEC = 240;
  *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
  *   reports `running`, so a crashed container is invisible without the heartbeat.
  * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
- *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
- *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
- *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
- *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
- *   indefinitely with no `stateReason`). Without the heartbeat check such a task
- *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
- *   reservation, before the safety net fired. So liveness here is substrate state
- *   AND agent heartbeat.
+ *   (ADR-021 P2). `GetMicrovm` reports VM state; a stale heartbeat detects loss
+ *   of the in-guest heartbeat writer even if the VM still reports RUNNING.
+ *   The writer runs in a separate thread, so it can continue during a pipeline
+ *   deadlock: neither signal proves that coding work is progressing. A failed
+ *   run hook can cause service teardown; after an accepted hook, explicit
+ *   termination and the maximum session duration remain cleanup safeguards.
  * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
  *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
  *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
@@ -176,10 +170,11 @@ function substrateNoun(computeType: ComputeType | undefined): string {
  * @returns the task record.
  * @throws Error if the task is not found.
  */
-export async function loadTask(taskId: string): Promise<TaskRecord> {
+export async function loadTask(taskId: string, consistentRead = false): Promise<TaskRecord> {
   const result = await ddb.send(new GetCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
+    ...(consistentRead && { ConsistentRead: true }),
   }));
   if (!result.Item) {
     throw new Error(`Task ${taskId} not found`);
@@ -188,31 +183,12 @@ export async function loadTask(taskId: string): Promise<TaskRecord> {
 }
 
 /**
- * Admission control: check user concurrency and increment counter.
+ * Admission control: acquire or recover this task's capacity reservation.
  * @param task - the task record.
  * @returns true if admitted, false if concurrency limit reached.
  */
 export async function admissionControl(task: TaskRecord): Promise<boolean> {
-  try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: task.user_id },
-      UpdateExpression: 'SET active_count = if_not_exists(active_count, :zero) + :one, updated_at = :now',
-      ConditionExpression: 'attribute_not_exists(active_count) OR active_count < :max',
-      ExpressionAttributeValues: {
-        ':zero': 0,
-        ':one': 1,
-        ':max': MAX_CONCURRENT,
-        ':now': new Date().toISOString(),
-      },
-    }));
-    return true;
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      return false;
-    }
-    throw err;
-  }
+  return acquireTaskSlot(task.task_id, task.user_id, MAX_CONCURRENT);
 }
 
 /**
@@ -227,6 +203,7 @@ export async function transitionTask(
   fromStatus: TaskStatusType,
   toStatus: TaskStatusType,
   extraAttrs?: Record<string, unknown>,
+  expectedMicrovmId?: string,
 ): Promise<void> {
   const validTargets = VALID_TRANSITIONS[fromStatus];
   if (!validTargets.includes(toStatus)) {
@@ -263,11 +240,19 @@ export async function transitionTask(
     }
   }
 
+  let condition = fromStatus === TaskStatus.SUBMITTED && toStatus === TaskStatus.QUEUED
+    ? '#status = :fromStatus AND attribute_not_exists(concurrency_slot)'
+    : '#status = :fromStatus';
+  if (expectedMicrovmId) {
+    condition += ' AND compute_type = :microvmType AND session_id = :microvmId AND compute_metadata.microvmId = :microvmId';
+    expressionValues[':microvmType'] = 'lambda-microvm';
+    expressionValues[':microvmId'] = expectedMicrovmId;
+  }
   await ddb.send(new UpdateCommand({
     TableName: TABLE_NAME,
     Key: { task_id: taskId },
     UpdateExpression: updateExpression,
-    ConditionExpression: '#status = :fromStatus',
+    ConditionExpression: condition,
     ExpressionAttributeNames: expressionNames,
     ExpressionAttributeValues: expressionValues,
   }));
@@ -312,7 +297,9 @@ export async function emitTaskEvent(
   eventType: string,
   metadata?: Record<string, unknown>,
   correlation?: EventCorrelation,
+  options?: SessionControlOptions,
 ): Promise<void> {
+  options?.abortSignal?.throwIfAborted();
   await ddb.send(new PutCommand({
     TableName: EVENTS_TABLE_NAME,
     Item: {
@@ -325,7 +312,7 @@ export async function emitTaskEvent(
       ...(correlation?.repo && { repo: correlation.repo }),
       ...(metadata && { metadata }),
     },
-  }));
+  }), options);
 }
 
 /** Minimum allowed poll interval (5 seconds). */
@@ -336,8 +323,8 @@ const MAX_POLL_INTERVAL_MS = 300_000;
 /**
  * Build the ``compute_metadata`` map persisted on the task row at session start,
  * so a later handler can act on the right backend without re-deriving anything:
- * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
- * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
+ * cancellation uses the backend's worker identity, and MicroVM approval wake
+ * uses ``microvmId`` plus the saved image identity.
  *
  * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
  * compile error here rather than a silently empty metadata map — the field is
@@ -357,188 +344,12 @@ export function buildComputeMetadata(handle: SessionHandle): Record<string, stri
       // ADR-021: `microvmId` keys every lifecycle API; `endpoint` is per-session
       // state that becomes load-bearing the day an orchestrator→agent HTTP
       // consumer appears (none exists in P1–P3).
-      return { microvmId: handle.microvmId, endpoint: handle.endpoint };
+      return { microvmId: handle.microvmId, endpoint: handle.endpoint, ...readMicrovmImageMetadata(handle) };
     default: {
       const _exhaustive: never = handle;
       throw new Error(`Unknown strategyType on session handle: ${JSON.stringify(_exhaustive)}`);
     }
   }
-}
-
-/** Outcome of a MicroVM substrate cross-check. */
-export interface MicrovmReconcileResult {
-  /**
-   * True when this call drove the task to FAILED — the caller must stop polling
-   * and report ``lastStatus: FAILED``. False for every healthy or
-   * anomalous-but-not-fatal observation.
-   */
-  readonly taskFailed: boolean;
-
-  /**
-   * Value the caller must carry into the next poll cycle's
-   * ``PollState.microvmSuspendAnomalyReported``.
-   *
-   * True while a suspend anomaly is being (or has been) reported; false whenever
-   * the anomaly condition is absent, which RE-ARMS the event for a genuinely new
-   * episode. Returned rather than mutated so the durable poll's state stays a
-   * plain serializable value.
-   */
-  readonly suspendAnomalyReported: boolean;
-}
-
-/**
- * Cross-reference a MicroVM's substrate state against the task's DynamoDB status
- * — the interpretation half of ADR-021's "the strategy reports, the orchestrator
- * interprets" split. ``pollSession`` can only see the handle, so every rule that
- * needs the task status lives here, exactly as ``finalPollState`` already does
- * the substrate/DDB cross-check for ECS and ``pollTaskStatus`` does it for
- * AgentCore heartbeats.
- *
- * Rules (all three from ADR-021 sub-decision 1's EARS requirements):
- *   - substrate ``suspended`` + task ``AWAITING_APPROVAL`` → HEALTHY. This is the
- *     orchestrator's own intended suspend (P3); say nothing.
- *   - substrate ``suspended`` + any other task status → ANOMALY, not a failure.
- *     Surface a task event and keep polling: a suspended VM preserves full
- *     memory/disk state and can be resumed, so failing the task would destroy
- *     recoverable work over a condition we cannot yet explain.
- *   - substrate terminal + non-terminal task status → FAIL the task with the
- *     substrate-failure reason (``error-classifier`` has the matching entry).
- *
- * ## The anomaly event fires ONCE PER EPISODE, not once per poll
- *
- * The anomaly branch is reached on every poll while the condition holds, so a
- * task suspended out of band for hours would write one identical TaskEvent every
- * ~30 s (~960 of them across the 8 h poll window) — noise that buries the first,
- * informative one and inflates TaskEvents. ``suspendAnomalyReported`` (threaded
- * through {@link PollState}) suppresses the repeats while leaving the
- * do-not-fail-fast behaviour untouched: the function still returns
- * ``taskFailed: false`` on every one of those polls.
- *
- * **Recovery re-arms it.** Any observation that is NOT an anomaly — the VM
- * resumed (``running``), or the task moved into ``AWAITING_APPROVAL`` so the
- * suspend is now intended — resets the flag to false. A second, later episode is
- * new information (something suspended this VM twice), so it earns its own event.
- * The alternative (latch forever) would silently hide a flapping suspend loop,
- * which is exactly the pathology an operator most needs to see.
- *
- * The WARN log is emitted on every poll regardless. Logs are cheap, per-poll
- * evidence is what a timeline investigation needs, and CloudWatch is not a
- * user-facing surface the way TaskEvents is.
- *
- * The terminal branch RE-READS the task row before failing. The DynamoDB status
- * handed in was read earlier in the same poll cycle, and the ordinary happy path
- * is "agent writes terminal status, agent exits, VM terminates" — so a stale read
- * plus a fast teardown would otherwise fail a task that actually succeeded. The
- * re-read is the same "confirm before acting on a lost race" move ``finalizeTask``
- * makes after a failed transition. (ECS buys the same protection with a
- * 5-consecutive-poll patience counter; one extra GetItem on a path that is about
- * to end the task is cheaper and does not add state to ``PollState``.)
- *
- * @param taskId - the task being polled.
- * @param ddbStatus - the task status observed by this poll cycle.
- * @param substrate - what ``pollSession`` reported.
- * @param microvmId - for event/log correlation.
- * @param userId - owner, for ``failTask``.
- * @param correlation - the #245 envelope for emitted events.
- * @param log - the caller's child logger (already carries task/user/repo).
- * @param repo - optional target repo for the correlation envelope.
- * @param suspendAnomalyReported - the previous cycle's flag; see the section above.
- */
-export async function reconcileMicrovmSubstrateState(args: {
-  taskId: string;
-  ddbStatus: TaskStatusType;
-  substrate: SessionStatus;
-  microvmId: string;
-  userId: string;
-  correlation: EventCorrelation;
-  log: Logger;
-  repo?: string;
-  suspendAnomalyReported?: boolean;
-}): Promise<MicrovmReconcileResult> {
-  const {
-    taskId, ddbStatus, substrate, microvmId, userId, correlation, log, repo,
-    suspendAnomalyReported = false,
-  } = args;
-
-  if (substrate.status === 'running') {
-    // Healthy — and it also ENDS any anomaly episode, so the next one reports.
-    return { taskFailed: false, suspendAnomalyReported: false };
-  }
-
-  if (substrate.status === 'suspended') {
-    if (ddbStatus === TaskStatus.AWAITING_APPROVAL) {
-      // Orchestrator-intended suspend during an approval wait — the whole point
-      // of this backend. Nothing to report, and the anomaly is re-armed: if the
-      // task later leaves AWAITING_APPROVAL while still suspended, that is a new
-      // and genuinely reportable episode.
-      return { taskFailed: false, suspendAnomalyReported: false };
-    }
-    // Suspended outside an approval wait. Nothing in ABCA suspends a MicroVM
-    // except the orchestrator's (P3) approval-wait policy, so this means either
-    // an out-of-band SuspendMicrovm call or a substrate-side suspend we did not
-    // ask for. Surface it — do NOT fail-fast (ADR-021: "an anomaly to surface,
-    // not fail-fast"); the VM's state is intact and resumable.
-    log.warn('MicroVM is suspended while the task is not awaiting approval', {
-      microvm_id: microvmId,
-      task_status: ddbStatus,
-      anomaly_already_reported: suspendAnomalyReported,
-    });
-    if (!suspendAnomalyReported) {
-      await emitTaskEvent(taskId, 'microvm_suspend_anomaly', {
-        microvm_id: microvmId,
-        task_status: ddbStatus,
-        reason: 'suspended_outside_approval_wait',
-      }, correlation);
-    }
-    return { taskFailed: false, suspendAnomalyReported: true };
-  }
-
-  // Terminal substrate report (`completed` or `failed`). `pollSession` reports
-  // TERMINATING/TERMINATED/NotFound as `completed` because it cannot see an exit
-  // code; `failed` only reaches here if a future mapping adds one.
-  //
-  // `substrate.reason` is `GetMicrovm`'s `stateReason`, carried through verbatim.
-  // Appending it is what makes this string true on the dominant failure: without
-  // it a `/run` hook 4xx (which self-terminates the VM in ~12 s) rendered as the
-  // bare "substrate state completed", and the classifier's remedy then named a
-  // session duration cap, a host fault, or an external terminate — none of which
-  // happened. With it the operator gets "substrate state completed (Run lifecycle
-  // hook returned HTTP status 400…)", which points at the guest logs where the
-  // agent's own structured 4xx body already is.
-  const substrateReason = substrate.reason ? ` (${substrate.reason})` : '';
-  const detail = substrate.status === 'failed'
-    ? `${substrate.error}${substrateReason}`
-    : `substrate state ${substrate.status}${substrateReason}`;
-
-  const reread = await loadTask(taskId);
-  if (TERMINAL_STATUSES.includes(reread.status)) {
-    // The agent wrote its terminal status between this cycle's status read and
-    // now — the normal shutdown ordering. Not a failure.
-    log.info('MicroVM terminated after the agent wrote a terminal status', {
-      microvm_id: microvmId,
-      task_status: reread.status,
-    });
-    // Terminal either way, so the flag no longer matters; carried through
-    // unchanged rather than reset so the value never lies about what happened.
-    return { taskFailed: false, suspendAnomalyReported };
-  }
-
-  log.error('MicroVM reached a terminal state before the agent wrote a terminal status', {
-    microvm_id: microvmId,
-    task_status: reread.status,
-    detail,
-  });
-  // `releaseConcurrency: false` — the finalize step sees the now-terminal task
-  // and decrements, matching the ECS substrate-failure branch in orchestrate-task.
-  await failTask(
-    taskId,
-    reread.status,
-    `MicroVM substrate terminated before the agent wrote a terminal status: ${detail}`,
-    userId,
-    false,
-    repo,
-  );
-  return { taskFailed: true, suspendAnomalyReported };
 }
 
 /**
@@ -1103,36 +914,24 @@ export async function pollTaskStatus(
     && item?.session_id
     && typeof item.started_at === 'string'
   ) {
-    const startedMs = Date.parse(item.started_at);
     const now = Date.now();
-    if (!Number.isNaN(startedMs)) {
-      const runningAgeSec = (now - startedMs) / 1000;
-
-      if (typeof item.agent_heartbeat_at === 'string') {
-        // Agent has sent at least one heartbeat — check staleness
-        const hbMs = Date.parse(item.agent_heartbeat_at);
-        if (!Number.isNaN(hbMs)) {
-          const hbAgeSec = (now - hbMs) / 1000;
-          if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC && hbAgeSec > AGENT_HEARTBEAT_STALE_SEC) {
-            sessionUnhealthy = true;
-            logger.warn('Agent heartbeat stale while task RUNNING', {
-              task_id: taskId,
-              compute_type: computeType,
-              agent_heartbeat_at: item.agent_heartbeat_at,
-              heartbeat_age_sec: Math.round(hbAgeSec),
-            });
-          }
-        }
-      } else if (runningAgeSec > AGENT_HEARTBEAT_GRACE_SEC + AGENT_HEARTBEAT_STALE_SEC) {
-        // Agent never sent a heartbeat and task has been RUNNING well past
-        // the grace period — likely early crash before pipeline started.
-        sessionUnhealthy = true;
-        logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
-          task_id: taskId,
-          compute_type: computeType,
-          running_age_sec: Math.round(runningAgeSec),
-        });
-      }
+    const startedMs = Date.parse(item.started_at);
+    const heartbeatMs = typeof item.agent_heartbeat_at === 'string' ? Date.parse(item.agent_heartbeat_at) : undefined;
+    const health = evaluateAgentHeartbeat(startedMs, heartbeatMs, now);
+    sessionUnhealthy = health !== undefined;
+    if (health === 'stale') {
+      logger.warn('Agent heartbeat stale while task RUNNING', {
+        task_id: taskId,
+        compute_type: computeType,
+        agent_heartbeat_at: item.agent_heartbeat_at,
+        heartbeat_age_sec: Math.round((now - heartbeatMs!) / 1000),
+      });
+    } else if (health === 'missing') {
+      logger.warn('Agent never sent heartbeat while task RUNNING past grace period', {
+        task_id: taskId,
+        compute_type: computeType,
+        running_age_sec: Math.round((now - startedMs) / 1000),
+      });
     }
   }
 
@@ -1153,26 +952,63 @@ export async function finalizeTask(
   taskId: string,
   pollState: PollState,
   userId: string,
-): Promise<void> {
-  const task = await loadTask(taskId);
+): Promise<boolean> {
+  const current = await loadTask(taskId, true);
+  const expectedId = pollState.microvmSupervisor?.microvmId;
+  if (expectedId && (current.user_id !== userId || current.compute_type !== 'lambda-microvm'
+    || current.session_id !== expectedId || current.compute_metadata?.microvmId !== expectedId)) {
+    logger.warn('MicroVM finalization skipped after worker ownership changed', { task_id: taskId, microvm_id: expectedId });
+    return false;
+  }
+  try {
+    await finalizeTaskOutcome(taskId, pollState, current);
+    return true;
+  } finally {
+    // The marker makes this safe after a crash, an event failure, or a competing
+    // cleaner. A still-active task keeps its reservation.
+    await releaseTaskSlot(taskId, userId);
+    await closeTaskApprovals(taskId, userId);
+  }
+}
+
+async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: TaskRecord): Promise<void> {
+  // Finalization can immediately follow a committed start failure/cancellation.
+  // A stale active state would emit the wrong terminal event.
   const currentStatus = task.status;
   // Correlation envelope on this function's own log lines too, not just the
   // events it emits — admission→terminal logs must join by {user_id, repo}.
   const { log, correlation } = envelopeFor(task);
 
-  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast.
-  //
-  // FINALIZING is in the guard DEFENSIVELY, and is currently unreachable: the
-  // only writer of `sessionUnhealthy` is `pollTaskStatus`, which computes it
-  // under `currentStatus === TaskStatus.RUNNING`, so a FINALIZING task can never
-  // arrive here with the flag set. It is kept rather than removed because the
-  // reachability depends on a predicate in ANOTHER function: the day
-  // `pollTaskStatus` widens its own status gate (P3's suspend policy already has
-  // to revisit that block), a heartbeat-stale FINALIZING task must fail rather
-  // than fall through to the normal terminal path and be reported as a success.
-  // Dropping the arm would make that a silent behaviour change instead of a
-  // no-op. Do NOT "simplify" it away without also pinning `pollTaskStatus`'s
-  // RUNNING-only gate with a test.
+  if (pollState.microvmFailureReason && !TERMINAL_STATUSES.includes(currentStatus)) {
+    // Approval/HYDRATING permit FAILED, not TIMED_OUT. This is infrastructure
+    // failure and must not invent a TIMED_OUT decision on the approval row.
+    const timeout = pollState.microvmFailureReason === 'session-deadline'
+      && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING);
+    const terminal = timeout ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
+    try {
+      await transitionTask(taskId, currentStatus, terminal, {
+        completed_at: new Date().toISOString(),
+        error_message: pollState.microvmFailureMessage ?? `MicroVM supervisor: ${pollState.microvmFailureReason}`,
+      }, pollState.microvmSupervisor?.microvmId);
+    } catch (error) {
+      const winner = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(winner.status)) throw error;
+      await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
+        final_status: winner.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
+    }
+    await emitTaskEvent(taskId, timeout ? 'task_timed_out' : 'task_failed', {
+      reason: 'microvm_supervisor',
+      detail: pollState.microvmFailureReason,
+      microvm_id: pollState.microvmSupervisor?.microvmId,
+      poll_attempts: pollState.attempts,
+    }, correlation);
+    return;
+  }
+
+  // A heartbeat failure is detected while RUNNING. The strong read above may
+  // already observe FINALIZING; neither active status is a successful outcome.
   if (
     pollState.sessionUnhealthy
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
@@ -1184,11 +1020,11 @@ export async function finalizeTask(
         error_message:
           'Agent session lost: no recent heartbeat from the agent '
           + `(${substrateNoun(task.compute_type)} may have crashed, been OOM-killed, or stopped)`,
-      });
+      }, pollState.microvmSupervisor?.microvmId);
       transitioned = true;
     } catch (err) {
       // Task may have transitioned concurrently (e.g. agent wrote terminal status).
-      // Re-read to avoid double-decrement or contradictory events.
+      // Re-read to report the terminal status that actually won.
       log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -1198,21 +1034,19 @@ export async function finalizeTask(
         reason: 'agent_heartbeat_stale',
         poll_attempts: pollState.attempts,
       }, correlation);
-      await decrementConcurrency(userId);
     } else {
       // Transition failed — re-read task to determine actual state.
       // If already terminal the block below will handle TTL + concurrency.
-      const reread = await loadTask(taskId);
+      const reread = await loadTask(taskId, true);
       if (TERMINAL_STATUSES.includes(reread.status)) {
         log.info('Heartbeat path: task already terminal after failed transition', { status: reread.status });
         await emitTaskEvent(taskId, `task_${reread.status.toLowerCase()}`, {
           final_status: reread.status,
           poll_attempts: pollState.attempts,
         }, correlation);
-        await decrementConcurrency(userId);
       } else {
-        log.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { status: reread.status });
-        await decrementConcurrency(userId);
+        log.warn('Heartbeat path: task in unexpected state after failed transition, keeping its reservation until terminal', { status: reread.status });
+        throw new Error(`Heartbeat finalization left task ${taskId} active in ${reread.status}`);
       }
     }
     return;
@@ -1279,39 +1113,43 @@ export async function finalizeTask(
       final_status: currentStatus,
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
   // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
-  // window closes, transition to TIMED_OUT. AWAITING_APPROVAL uses the
-  // same transition — the stranded-approval reconciler is a secondary
-  // safety net with a longer timeout for tasks the orchestrator already
-  // lost track of.
+  // window closes, terminate the task through an allowed transition. Approval
+  // waits permit FAILED, not TIMED_OUT. Task closure cancels pending approvals;
+  // reaching the execution limit is not a human denial.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
     || currentStatus === TaskStatus.AWAITING_APPROVAL
   ) {
-    const terminalStatus = TaskStatus.TIMED_OUT;
+    const terminalStatus = currentStatus === TaskStatus.AWAITING_APPROVAL ? TaskStatus.FAILED : TaskStatus.TIMED_OUT;
     try {
       await transitionTask(taskId, currentStatus, terminalStatus, {
         completed_at: new Date().toISOString(),
         error_message: currentStatus === TaskStatus.AWAITING_APPROVAL
-          ? 'Orchestrator poll timeout exceeded while awaiting approval'
+          ? 'Task execution limit reached while waiting for approval. '
+            + 'The task has closed; submit a new task to continue.'
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
-      // Task may have transitioned concurrently — re-read and accept
+      // Accept a committed terminal winner; otherwise retry finalization.
       log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const current = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
+      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
+        final_status: current.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
-    await emitTaskEvent(taskId, 'task_timed_out', {
+    await emitTaskEvent(taskId, terminalStatus === TaskStatus.FAILED ? 'task_failed' : 'task_timed_out', {
       reason: currentStatus === TaskStatus.AWAITING_APPROVAL
         ? 'approval_poll_timeout'
         : 'poll_timeout',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
@@ -1325,18 +1163,23 @@ export async function finalizeTask(
       });
     } catch (err) {
       log.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
+      const current = await loadTask(taskId, true);
+      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
+      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
+        final_status: current.status, poll_attempts: pollState.attempts,
+      }, correlation);
+      return;
     }
     await emitTaskEvent(taskId, 'task_failed', {
       reason: 'session_never_started',
       poll_attempts: pollState.attempts,
     }, correlation);
-    await decrementConcurrency(userId);
     return;
   }
 
-  // Unexpected state — log and release concurrency
+  // Unexpected active state — retain its reservation until terminal.
   log.error('Unexpected task state during finalization', { status: currentStatus });
-  await decrementConcurrency(userId);
+  throw new Error(`Cannot finalize task ${taskId} in ${currentStatus}`);
 }
 
 /**
@@ -1392,7 +1235,7 @@ export async function queueTask(task: TaskRecord): Promise<boolean> {
  * @param fromStatus - the current status.
  * @param errorMessage - the error reason.
  * @param userId - the user who owns the task.
- * @param releaseConcurrency - whether to decrement the concurrency counter.
+ * @param releaseConcurrency - whether to release this task's held reservation.
  * @param repo - optional target repo (`owner/repo`) for the correlation
  *   envelope; omit for repo-less workflows.
  */
@@ -1416,41 +1259,17 @@ export async function failTask(
     log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });
+    const current = await loadTask(taskId, true);
+    if (!TERMINAL_STATUSES.includes(current.status)) throw err;
   }
-  // Only emit / release concurrency after a successful transition. Callers such as
-  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
-  // would otherwise re-run emit + decrement while the task is already FAILED.
-  if (transitioned) {
-    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
-    if (releaseConcurrency) {
-      await decrementConcurrency(userId);
-    }
-  }
-}
-
-/**
- * Decrement the user's concurrency counter (best-effort).
- * @param userId - the user ID.
- */
-async function decrementConcurrency(userId: string): Promise<void> {
+  // A replay may find the FAILED write already committed. Events remain
+  // transition-owned; reservation release is independently safe to repeat.
   try {
-    await ddb.send(new UpdateCommand({
-      TableName: CONCURRENCY_TABLE_NAME,
-      Key: { user_id: userId },
-      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
-      ConditionExpression: 'active_count > :zero',
-      ExpressionAttributeValues: {
-        ':one': 1,
-        ':zero': 0,
-        ':now': new Date().toISOString(),
-      },
-    }));
-  } catch (err: unknown) {
-    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
-      logger.info('Concurrency counter already at zero, nothing to decrement', { user_id: userId });
-    } else {
-      logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
+    if (transitioned) {
+      await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
     }
+  } finally {
+    if (releaseConcurrency) await releaseTaskSlot(taskId, userId);
   }
 }
 

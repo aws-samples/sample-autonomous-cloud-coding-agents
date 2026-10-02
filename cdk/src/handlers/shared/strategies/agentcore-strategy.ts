@@ -19,7 +19,7 @@
 
 import { randomUUID } from 'crypto';
 import { BedrockAgentCoreClient, InvokeAgentRuntimeCommand, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -49,7 +49,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     // injection: when set, AgentCore exchanges the caller's identity for
     // a workload token and delivers it to the agent container via the
     // `WorkloadAccessToken` request header (read by
-    // `BedrockAgentCoreContext.set_workload_access_token` in app.py).
+    // `BedrockAgentCoreContext.set_workload_access_token` in server.py).
     // Without it, the agent's `resolve_linear_api_token()` short-circuits
     // before reaching the Identity SDK call. Requires the orchestrator
     // role to have `bedrock-agentcore:InvokeAgentRuntimeForUser` in
@@ -79,21 +79,33 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     };
   }
 
-  async pollSession(_handle: SessionHandle): Promise<SessionStatus> {
+  async pollSession(_handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
+    options?.abortSignal?.throwIfAborted();
     return { status: 'running' };
   }
 
-  async stopSession(handle: SessionHandle): Promise<void> {
+  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'agentcore') throw new Error('suspendSession called with non-agentcore handle');
+    return { supported: false };
+  }
+
+  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'agentcore') throw new Error('resumeSession called with non-agentcore handle');
+    return { supported: false };
+  }
+
+  async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<void> {
     if (handle.strategyType !== 'agentcore') {
       throw new Error('stopSession called with non-agentcore handle');
     }
     const { runtimeArn } = handle;
 
     try {
+      options?.abortSignal?.throwIfAborted();
       await getClient().send(new StopRuntimeSessionCommand({
         agentRuntimeArn: runtimeArn,
         runtimeSessionId: handle.sessionId,
-      }));
+      }), options);
       logger.info('AgentCore session stopped', { session_id: handle.sessionId });
     } catch (err) {
       const errName = err instanceof Error ? err.name : undefined;

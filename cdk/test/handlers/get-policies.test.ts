@@ -249,7 +249,7 @@ describe('get-policies', () => {
     expect(hardRule.summary).toBeDefined();
   });
 
-  test('soft rules carry severity + approval_timeout_s', async () => {
+  test('built-in soft rules carry severity without an implicit approval deadline', async () => {
     mockSend.mockResolvedValue({});
     mockLoadRepoConfig.mockResolvedValue(null);
     const res = await handler(makeEvent('soft%2Fshape'));
@@ -258,6 +258,6 @@ describe('get-policies', () => {
       (r: { rule_id: string }) => r.rule_id === 'force_push_any',
     );
     expect(soft.severity).toBe('medium');
-    expect(soft.approval_timeout_s).toBe(300);
+    expect(soft.approval_timeout_s).toBeUndefined();
   });
 });

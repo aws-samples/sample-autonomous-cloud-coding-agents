@@ -407,9 +407,11 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
 
     Hydration is largely orchestrator-side today (WORKFLOWS.md open question #4
     leans "orchestrator hydrates, the agent step only consumes"); this handler is
-    that consumer. It sets BOTH prompts the ``run_agent`` step needs:
+    that consumer. It fills missing prompts for the ``run_agent`` step:
 
-    - ``ctx.user_prompt`` — the hydrated ``user_prompt`` when present.
+    - ``ctx.user_prompt`` — the hydrated ``user_prompt`` when the caller has
+      not already prepared one. A restored human decision or attachment context
+      must survive this step.
     - ``ctx.system_prompt`` — built via the existing ``build_system_prompt`` so
       the workflow path produces the same system prompt as ``pipeline.run_task``
       (repo_url/branch/workspace/max_turns/setup_notes/memory_context + overrides
@@ -418,7 +420,7 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
       the ``RepoSetup``; when absent (repo-less workflows) the system prompt is
       left to the caller, since ``build_system_prompt`` is repo-shaped today.
     """
-    if ctx.hydrated is not None:
+    if ctx.hydrated is not None and not ctx.user_prompt:
         ctx.user_prompt = ctx.hydrated.user_prompt
 
     built_system_prompt = False
@@ -476,6 +478,11 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
         )
     )
     ctx.agent_result = result
+    from microvm_lifecycle import get_context
+
+    lifecycle = get_context(ctx.config.task_id)
+    if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+        raise RuntimeError("Worker execution is closed; remaining workflow steps must not run")
     # The agent loop "failing" is not a step failure here: pipeline's
     # _resolve_overall_task_status owns success inference. The step succeeds if
     # the SDK ran; downstream steps and the terminal-outcome check decide done.

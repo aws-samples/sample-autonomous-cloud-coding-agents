@@ -21,10 +21,15 @@ the contract. This is the neutral location both runtimes read.
 |---|---|---|
 | `agent/src/shared_constants.py` | `/app/contracts/constants.json` | import-time |
 | `agent/src/policy.py`, `agent/src/jira_reactions.py` | `SHARED_CONSTANTS` | import-time |
-| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
+| `agent/src/payload_bootstrap.py` | `SHARED_CONSTANTS["payload_bootstrap"]` | import-time |
+| `cdk/src/handlers/shared/payload-bootstrap.ts`, `cdk/src/constructs/payload-bootstrap-permissions.ts` | `payload_bootstrap` | import-time |
+| `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]`, `SHARED_CONSTANTS["microvm_lifecycle"]` | import-time |
+| `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
+| `agent/src/hooks.py` | `microvm_lifecycle.maximum_duration_seconds`, `approval_timeout_s.max` | SDK matcher construction |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
-| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
+| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
+| `cdk/src/handlers/shared/microvm-image-capability.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | runtime `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
@@ -45,7 +50,7 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   "approval_timeout_s": {
     "min": 30,
     "max": 3600,
-    "default": 300
+    "default": 0
   },
   "max_budget_usd": {
     "min": 0.01,
@@ -77,10 +82,27 @@ JSON at TypeScript compile time via `resolveJsonModule`.
                  "jira_oauth_secret_arn", "agent_session_role_arn"],
     "account_anchor_key": "agent_session_role_arn"
   },
+  "payload_bootstrap": {
+    "version": 2,
+    "manifest_prefix": "bootstrap/",
+    "launch_filename": "launch.json",
+    "max_manifest_bytes": 16384,
+    "max_payload_bytes": 8388608,
+    "url_ttl_seconds": 900,
+    "minimum_url_lifetime_seconds": 300
+  },
   "microvm_hook_budgets": {
     "ready_hook_timeout_seconds": 300,
     "warmup_total_budget_seconds": 240,
-    "warmup_required_timeout_seconds": 120
+    "warmup_required_timeout_seconds": 120,
+    "lifecycle_hook_timeout_seconds": 30,
+    "lifecycle_handler_budget_seconds": 20
+  },
+  "microvm_lifecycle": {
+    "protocol_version": 1,
+    "image_protocol_env": "ABCA_MICROVM_LIFECYCLE_PROTOCOL",
+    "hook_port": 8080,
+    "maximum_duration_seconds": 28800
   }
 }
 ```
@@ -94,14 +116,25 @@ JSON at TypeScript compile time via `resolveJsonModule`.
 - **`approval_gate_cap.default`** — value applied when a blueprint omits
   the field. 50 is the design-decision default (see
   `docs/design/CEDAR_HITL_GATES.md` decision #13).
-- **`approval_timeout_s.min`** — floor for `approval_timeout_s` (§6
-  decision #6). 30 seconds — below this, humans cannot realistically
-  respond to an approval prompt.
-- **`approval_timeout_s.max`** — absolute ceiling for `approval_timeout_s`
-  before the `maxLifetime - 300` clip is applied (§7.3). 3600 seconds
-  (1 hour).
+- **`approval_timeout_s.min`** — minimum positive explicit timeout: 30 seconds.
+  Zero is separately accepted and means no automatic deadline.
+- **`approval_timeout_s.max`** — maximum positive explicit timeout: 3600 seconds
+  (1 hour). MicroVM continuation keeps this human deadline separate from a
+  worker's service lifetime.
 - **`approval_timeout_s.default`** — value applied when the submit payload
-  omits `approval_timeout_s`. 300 seconds (5 minutes) per §6 decision #6.
+  omits `approval_timeout_s`: zero, or no automatic expiry. Pending rows have
+  no DynamoDB TTL; task closure starts retention cleanup. Positive rule
+  annotations still apply, with the shortest positive deadline winning.
+- **`microvm_continuation`** — the versioned checkpoint contract. It pins object
+  prefixes, maximum archive sizes and the SDK version verified for conversation
+  and exact budget recovery. A saved approval can release its worker after one
+  hour when sleep is enabled, or five minutes before the worker's eight-hour
+  limit when sleep is disabled. The request remains open in both cases.
+- **`microvm_sleep_after_s`** — per-task delay before sleeping during a
+  pending human approval: whole seconds from 0 to 3600, default 600
+  (10 minutes). Zero disables sleep. Task creation persists the resolved
+  preference; only the MicroVM supervisor consumes it. It does not extend
+  approval deadlines or override the deployment's suspension switch.
 - **`max_budget_usd.min`** — floor for a task's `max_budget_usd` (1 cent).
   Validated server-side (`validation.ts`) and pre-validated by
   `bgagent submit --max-budget` (#258).
@@ -121,11 +154,11 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   variable the agent installs it as (UPPER_SNAKE). This block is unlike the
   others — it is a **security allowlist**, not a tuning bound. The MicroVM image
   is a snapshot whose env is frozen at build time, so the agent's non-secret
-  platform env arrives in the `/run` hook payload instead; the values land in
+  platform env arrives through an authenticated v2 manifest and task payload instead; the values land in
   `os.environ`, which makes an unrecognised key an env-injection attempt. The
   consumer (`agent/src/server.py`) therefore **rejects** any `platform_config`
-  carrying a key that is not in this map. Values are non-secret identifiers
-  (table/bucket names, secret ARNs, role ARNs) only.
+  carrying a key that is not in this map. Values are non-secret configuration:
+  resource identifiers and the Linear vault enabled flag/workload name.
 - **`microvm_platform_config.required`** — the subset without which a task cannot
   run (task + event tables, GitHub secret ARN, session role ARN). A `/run` hook
   whose `platform_config` misses or blanks any of these is rejected with HTTP 400.
@@ -138,15 +171,15 @@ JSON at TypeScript compile time via `resolveJsonModule`.
   that disagrees with the anchor below on partition or account, is rejected
   (HTTP 400 `MICROVM_RUN_PLATFORM_CONFIG_INVALID`). This is **fail-fast plus
   defence in depth, not an ownership proof** — the account-scoped IAM grants are
-  what actually deny a foreign read, and an in-account redirect is deliberately
-  *not* covered (see `MICROVM_PLATFORM_CONFIG_ARN_KEYS` in
-  `agent/src/server.py` for the full statement of what this does and does not buy).
+  what actually deny a foreign read, and this ARN check alone does not cover an in-account redirect. The v2 bootstrap
+  authenticates a deployment manifest with IAM and requires the downloaded config
+  to match it; that separate check rejects same-account workspace substitutions.
 - **`microvm_platform_config.account_anchor_key`** — which `arn_keys` entry supplies
   the expected partition + account. Must be `agent_session_role_arn`-shaped: a
   payload key rather than `os.environ` or an `sts:GetCallerIdentity`, because the
   environment is empty by construction on this backend (the snapshot bakes nothing)
-  and this check runs on the path that must make zero AWS calls beyond the S3
-  payload fetch. Two invariants follow and both are enforced: the anchor must be in
+  and the ARN consistency check itself makes no AWS calls. The v2 bootstrap
+  manifest read and signed task download precede it. Two invariants follow and both are enforced: the anchor must be in
   `arn_keys`, **and** it must be in `required` — an optional anchor would let a
   payload disarm the whole check by simply omitting it.
 
@@ -158,6 +191,18 @@ so a malformed contract fails the drift check *and* the MicroVM image build. The
 duplication is deliberate: a malformed entry here would silently **widen** what the
 agent accepts from a network payload, so neither side is trusted to be the only
 gate.
+
+- **`payload_bootstrap`** — the shared ECS/MicroVM v2 transport. `version` is
+  required on references, manifests and task documents. `manifest_prefix` and
+  `launch_filename` define the authenticated settings directory and private retry
+  record. Byte limits bound manifest and task downloads; URL lifetime is at most
+  `url_ttl_seconds`, shortened by known signer credential expiry, with initial
+  creation requiring `minimum_url_lifetime_seconds`. The constants checker
+  rejects nonpositive/noninteger bounds, unsafe/colliding paths, a minimum above
+  its maximum, and consumers that stop reading the shared block. Changing the
+  protocol requires matching coordinator, worker images and policies; old unsigned
+  transports are rejected. See repository runbook
+  `docs/verification/645-payload-bootstrap.md` for rollout and live checks.
 
 - **`microvm_hook_budgets.ready_hook_timeout_seconds`** — the `/ready` build-hook
   budget the CDK construct declares to `CreateMicrovmImage`
@@ -173,7 +218,7 @@ gate.
   purpose: a cold 225 MiB `exec` has no predictable duration, which is the lesson of
   P2-F5.
 
-Unlike every other block here, these three are not independent tuning bounds — they
+These three warm-up values are not independent tuning bounds — they
 are a **relationship**: `warmup_required < warmup_total < ready_hook`. The warm-up
 must finish inside the budget the service holds the hook to, or a fix for a runtime
 failure turns into a build failure. A relationship cannot be enforced from one side,
@@ -183,6 +228,32 @@ literal re-declaration on **either** side — the Python constants *and*
 `READY_HOOK_TIMEOUT_SECONDS` in the TypeScript construct — and
 `agent/src/server.py` re-checks the same ordering at import time, so a bad contract
 fails the drift check *and* the image build.
+
+The runtime lifecycle pair has its own relationship:
+`lifecycle_handler_budget_seconds < lifecycle_hook_timeout_seconds`. The 20-second
+handler limit covers reading the body, draining activity and checkpoint/refresh
+work together. The declared 30-second service hook timeout leaves response headroom.
+`microvm_http.py` checks the ordering at import time; the drift script checks
+positive integer values, ordering and hardcoded Python/TypeScript redeclarations.
+The image declares suspend/resume using this service timeout. These values do not
+enable automatic suspension.
+
+`microvm_lifecycle` owns protocol version `1`, marker name
+`ABCA_MICROVM_LIFECYCLE_PROTOCOL`, hook port `8080`, and the 28,800-second
+maximum VM lifetime. The strategy sends that lifetime to `RunMicrovm`; the
+agent sizes its PreToolUse SDK callback timeout to outlive the same bound by
+120 seconds. This callback timeout lets an expired approval finish reconciliation
+after a delayed wake; the original approval deadline still controls permission.
+Other backends use the maximum approval interval plus the same margin.
+
+The marker is baked into
+the immutable image; it is neither a credential nor task/deployment configuration.
+`/validate` rejects a supplied unsupported marker. The coordinator checks the exact
+image ARN/version returned by Run, including all six enabled hooks and lifecycle
+budgets, before persisting `lifecycleProtocol` alongside that worker's `imageArn`
+and `imageVersion`. Legacy or unverified workers cannot start a new suspension.
+The drift gate validates this shape and rejects literal copies in its TypeScript
+consumers; the artifact-script parity test checks the shell hook/environment JSON.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

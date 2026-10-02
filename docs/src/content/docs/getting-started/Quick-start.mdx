@@ -170,7 +170,7 @@ If you have not yet added `blueprintRepo` to `cdk/cdk.json`, go back to [Registe
 
 :::note[Collaborator or cross-org repos?]
 
-Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for details.
+Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/README.md#github-pat--minimal-permissions) for details.
 
 :::
 
@@ -480,7 +480,7 @@ node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> \
   --reason "Don't force-push shared branches; open a revert PR instead"
 ```
 
-The task transitions back to `RUNNING` immediately on a decision. The denial reason is injected into the agent's context so it can adapt rather than retry the same tool call. If no decision arrives within the rule's timeout (300 s by default), the gate is treated as a denial with `timed_out` as the reason.
+A decision lets the task continue; a sleeping or retired MicroVM first wakes or restores its saved work. The denial reason is passed to the agent so it can adapt. Requests have no decision deadline by default. If an explicit task or rule deadline expires, the gate is treated as a denial with `timed_out` as the reason. Worker lifetime limits remain separate.
 
 If you want a task to run without interactive gates (e.g. an unattended overnight job), pre-approve the scopes you trust up-front:
 
@@ -492,7 +492,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve write_path:tests/**
 ```
 
-Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
+Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies).
 
 ## What happened behind the scenes
 

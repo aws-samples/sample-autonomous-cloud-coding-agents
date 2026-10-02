@@ -100,6 +100,7 @@ jest.mock('../../src/handlers/slack-notify', () => {
 // + GraphQL path. Default ``{ ok: true }`` so a test that forgets to
 // script the mock still drives the happy path (postIssueComment returns
 // a LinearPostResult, not a bare boolean).
+const mockPostIdentifiedComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 const mockPostIssueComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 // Standalone comment-triggered iterations get a threaded reply to
 // the human's @bgagent comment, on top of the metrics comment. replyToComment
@@ -110,6 +111,7 @@ const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 // rather than posting a fresh replyToComment.
 const mockUpsertThreadedReply: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIdentifiedComment: (...args: unknown[]) => mockPostIdentifiedComment(...args),
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
@@ -181,6 +183,7 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
 
 /** Flatten the stubbed ADF (`{ _adf: paragraphs }`) back to a newline-joined
@@ -208,6 +211,8 @@ import {
   renderJiraFinishedPointer,
 } from '../../src/handlers/shared/jira-status-comment';
 
+let streamSequence = 1;
+
 function mkRecord(
   eventName: 'INSERT' | 'MODIFY' | 'REMOVE',
   newImage: Record<string, { S?: string; N?: string; BOOL?: boolean; M?: Record<string, { S?: string }> }> | undefined,
@@ -216,7 +221,7 @@ function mkRecord(
     eventID: `evt-${Math.random().toString(36).slice(2)}`,
     eventName,
     eventSource: 'aws:dynamodb',
-    dynamodb: newImage ? { NewImage: newImage as never } : {},
+    dynamodb: { SequenceNumber: String(streamSequence++), ...(newImage ? { NewImage: newImage as never } : {}) },
   } as unknown as DynamoDBRecord;
 }
 
@@ -324,8 +329,11 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     const f = CHANNEL_DEFAULTS.slack;
     expect([...f].sort()).toEqual([
       'agent_error',
+      'approval_cancelled',
+      'approval_decision_recorded',
       'approval_requested',
       'approval_stranded',
+      'approval_timed_out',
       'session_started',
       'status_response',
       'task_cancelled',
@@ -344,23 +352,12 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
   });
 
   test('every Slack-default event the dispatcher actually renders today is in NOTIFIABLE_EVENTS (drift guard)', () => {
-    // The router subscribes Slack to events the dispatcher must
-    // render. ``approval_requested``, ``approval_stranded``, and
-    // ``status_response`` are forward-compat (no Slack-side renderer
-    // today — the CLI surfaces approval UX; Slack is only in the
-    // channel-defaults set so a future Slack-button renderer can
-    // light up without changing the router filter). They're allowed
-    // to be in CHANNEL_DEFAULTS.slack but absent from
-    // NOTIFIABLE_EVENTS — when their emitters land, this test will
-    // start failing and force the dispatcher update at the same time.
-    // Every OTHER Slack default must be renderable, otherwise
-    // telemetry lies. Use ``requireActual`` to bypass the
-    // slack-notify mock and read the real exported NOTIFIABLE_EVENTS
-    // set.
+    // Approval emitters are live and must have a renderer. Only status_response
+    // remains a placeholder. Read the actual module despite the dispatcher mock.
     const real = jest.requireActual<typeof import('../../src/handlers/slack-notify')>(
       '../../src/handlers/slack-notify',
     );
-    const forwardCompat = new Set(['approval_requested', 'approval_stranded', 'status_response']);
+    const forwardCompat = new Set(['status_response']);
     const expectedRenderable = [...CHANNEL_DEFAULTS.slack].filter(
       e => !forwardCompat.has(e),
     );
@@ -395,11 +392,16 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     ]);
   });
 
-  test('Linear subscribes to pr_created + terminal events + task_timed_out (ADR-016 P4.5 courtesy comment + post-once final-status)', () => {
+  test('Linear subscribes to approvals, pr_created and terminal events', () => {
     // review should-fix: task_timed_out added so a Linear standalone iteration
     // that times out still settles (matches Jira/Slack, which already had it).
     const f = CHANNEL_DEFAULTS.linear;
     expect([...f].sort()).toEqual([
+      'approval_cancelled',
+      'approval_decision_recorded',
+      'approval_requested',
+      'approval_stranded',
+      'approval_timed_out',
       'pr_created',
       'task_cancelled',
       'task_completed',
@@ -780,6 +782,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     // task short-circuits inside the dispatcher (channel_source ===
     // 'api' / 'github'). Pre-existing tests don't assert on it.
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
   });
 
   test('first terminal event POSTs a new comment and persists the comment_id to TaskTable', async () => {
@@ -906,7 +909,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
     const event = { Records: [mkEvent('task_completed', 't-gh')] } as DynamoDBStreamEvent;
     const result = await handler(event);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].dynamodb!.SequenceNumber);
     // No UpdateCommand fires (no id to persist from a failed upsert).
     const updateCalls = mockDdbSend.mock.calls.filter(
       c => (c[0] as { _type?: string })._type === 'Update',
@@ -1071,7 +1074,7 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
       // Record IS in batchItemFailures — Lambda will replay until
       // the rate-limit window opens. Critical: the swallow-as-terminal
       // path would have produced an empty array (silent drop).
-      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb!.SequenceNumber }]);
     },
   );
 
@@ -1399,7 +1402,7 @@ describe('fanout-task-events: Slack dispatcher', () => {
 
     const record = mkEvent('task_completed', 't-slack-fail');
     const result = await handler({ Records: [record] });
-    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb!.SequenceNumber }]);
   });
 
   test('Slack dispatcher SlackApiError swallow does NOT escalate to retry', async () => {
@@ -1474,6 +1477,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
     mockReplyToComment.mockReset().mockResolvedValue('reply-id');
     mockUpsertThreadedReply.mockReset().mockResolvedValue('reply-id');
     // Slack/GitHub mocks aren't asserted here but leaving them
@@ -1498,6 +1502,77 @@ describe('fanout-task-events: Linear dispatcher', () => {
       return Promise.resolve({});
     });
   };
+
+  test.each([false, true])('routes wrapped approval to Linear without settling the task (post failure=%s)', async fails => {
+    mockDdbSend.mockImplementation(async command => {
+      if (command._type !== 'Get') return {};
+      if (command.input.TableName === 'Approvals') {
+        return {
+          Item: {
+            user_id: 'u-1',
+            status: 'PENDING',
+            tool_name: 'Bash',
+            severity: 'medium',
+            reason: 'Review this',
+            tool_input_preview: 'git push',
+            timeout_s: 1800,
+            created_at: '2026-09-16T12:00:00Z',
+          },
+        };
+      }
+      return {
+        Item: {
+          ...TASK_RECORD_LINEAR,
+          status: 'AWAITING_APPROVAL',
+          awaiting_approval_request_id: 'g1',
+          channel_metadata: { ...TASK_RECORD_LINEAR.channel_metadata, trigger_comment_id: 'trigger', iteration_reply_comment_id: 'reply' },
+        },
+      };
+    });
+    if (fails) mockPostIdentifiedComment.mockResolvedValueOnce({ ok: false, retryable: true });
+    const outcome = await routeEvent({
+      task_id: 't-lin',
+      event_id: 'approval-event',
+      event_type: 'agent_milestone',
+      timestamp: '2026-09-16T12:00:00Z',
+      metadata: { milestone: 'approval_requested', request_id: 'g1' },
+    });
+    expect(mockPostIdentifiedComment).toHaveBeenCalledTimes(1);
+    expect(mockPostIdentifiedComment.mock.calls[0][1].body).toContain('bgagent approve t-lin g1 --scope this_call');
+    expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+    const updates = mockDdbSend.mock.calls.filter(([c]) => c._type === 'Update');
+    if (fails) {
+      expect(outcome.infraRejections).toHaveLength(1);
+      expect(updates).toHaveLength(1);
+    } else {
+      expect(outcome.infraRejections).toHaveLength(0);
+      expect(updates).toHaveLength(2);
+      expect(updates[1][0].input.ExpressionAttributeNames).toEqual({ '#marker': 'notified_linear_approval_requested' });
+    }
+  });
+
+  test('starts binding retention when a closed-request notice cannot be delivered', async () => {
+    mockDdbSend.mockImplementation(async command => {
+      if (command._type !== 'Get') return {};
+      return {
+        Item: command.input.TableName === 'Approvals'
+          ? { user_id: 'u-1', status: 'CANCELLED', cancellation_reason: 'Cancelled by owner' }
+          : { ...TASK_RECORD_LINEAR, status: 'CANCELLED', awaiting_approval_request_id: 'g1' },
+      };
+    });
+    mockPostIssueComment.mockResolvedValueOnce({ ok: false, retryable: false });
+    await routeEvent({
+      task_id: 't-lin',
+      event_id: 'closed',
+      event_type: 'approval_cancelled',
+      timestamp: '2026-09-18T12:00:00Z',
+      metadata: { request_id: 'g1' },
+    });
+    const updates = mockDdbSend.mock.calls.filter(([c]) => c._type === 'Update');
+    expect(updates).toHaveLength(1);
+    expect(updates[0][0].input.Key.task_id).toContain('LINEAR_COMMENT#');
+    expect(updates[0][0].input.UpdateExpression).toContain('if_not_exists(#ttl');
+  });
 
   test('task_completed posts ✅ comment with cost / turns / duration on linked Linear issue', async () => {
     mockGet(TASK_RECORD_LINEAR);
@@ -1628,7 +1703,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
 
     // Transient failure → record enters batchItemFailures so Lambda retries.
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].eventID);
+    expect(result.batchItemFailures[0].itemIdentifier).toBe(event.Records[0].dynamodb!.SequenceNumber);
     // Marker NOT persisted — the retry will re-post.
     const updateCalls = mockDdbSend.mock.calls.filter((c) => (c[0] as { _type?: string })._type === 'Update');
     expect(updateCalls).toHaveLength(0);
@@ -1733,7 +1808,7 @@ describe('fanout-task-events: Linear dispatcher', () => {
 
     expect(mockPostIssueComment).toHaveBeenCalledTimes(1);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].eventID });
+    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].dynamodb!.SequenceNumber });
 
     // And no marker write: the retry must be allowed to post.
     const updates = mockDdbSend.mock.calls
@@ -1918,8 +1993,8 @@ describe('fanout-task-events: Linear dispatcher', () => {
       // task — so the thumbnail renders without depending on the racy comment edit.
       const PNG = 'https://cdn.example/screenshots/iter.png';
       const DEPLOY = 'https://app.vercel.app';
-      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { ConsistentRead?: boolean } }) => {
-        if (cmd?._type === 'Get' && cmd.input?.ConsistentRead) {
+      mockDdbSend.mockReset().mockImplementation((cmd: { _type?: string; input?: { ConsistentRead?: boolean; ProjectionExpression?: string } }) => {
+        if (cmd?._type === 'Get' && cmd.input?.ConsistentRead && cmd.input.ProjectionExpression === 'screenshot_url, screenshot_preview_url') {
           // the late re-read: screenshot has landed durably by now
           return Promise.resolve({ Item: { screenshot_url: PNG, screenshot_preview_url: DEPLOY } });
         }
@@ -2248,6 +2323,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     mockLoadRepoConfig.mockReset().mockResolvedValue(null);
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockPostIssueComment.mockReset().mockResolvedValue({ ok: true });
+    mockPostIdentifiedComment.mockReset().mockResolvedValue({ ok: true });
   });
 
   const mockGet = (item: unknown) => {
@@ -2476,7 +2552,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
     const result = await handler({ Records: [record] });
 
     expect(result.batchItemFailures).toEqual([
-      { itemIdentifier: record.eventID },
+      { itemIdentifier: record.dynamodb!.SequenceNumber },
     ]);
     const releases = mockDdbSend.mock.calls
       .map(([command]) => command as {
@@ -2541,7 +2617,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
 
     const result = await handler({ Records: [record] });
 
-    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.eventID }]);
+    expect(result.batchItemFailures).toEqual([{ itemIdentifier: record.dynamodb!.SequenceNumber }]);
     expect(mockUpdateIssueCommentAdf).toHaveBeenCalledTimes(1);
     const releases = mockDdbSend.mock.calls
       .map(([command]) => command as {
@@ -2635,7 +2711,7 @@ describe('fanout-task-events: Jira dispatcher', () => {
 
     expect(mockPostIssueCommentAdf).toHaveBeenCalledTimes(1);
     expect(result.batchItemFailures).toHaveLength(1);
-    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].eventID });
+    expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[0].dynamodb!.SequenceNumber });
 
     // No marker write — the retry must be allowed to post.
     const updates = mockDdbSend.mock.calls
@@ -3035,10 +3111,8 @@ describe('fanout-task-events: agent_milestone routing (effective event type)', (
 // ---------------------------------------------------------------------------
 
 /**
- * Stream record with a caller-supplied ``eventID`` so the test can
- * assert which record surfaces in ``batchItemFailures``. ``mkEvent``
- * uses ``Math.random()`` for the id which is fine for parse tests but
- * useless when we need to cross-reference the failure identifier.
+ * Stream record with distinct event and sequence identifiers. The event ID
+ * identifies log entries; only the numeric sequence is a valid retry cursor.
  */
 function mkEventWithId(type: string, eventID: string, taskId = 't-fail'): DynamoDBRecord {
   return {
@@ -3046,6 +3120,7 @@ function mkEventWithId(type: string, eventID: string, taskId = 't-fail'): Dynamo
     eventName: 'INSERT',
     eventSource: 'aws:dynamodb',
     dynamodb: {
+      SequenceNumber: String(streamSequence++),
       NewImage: {
         task_id: { S: taskId },
         event_id: { S: `01ABC${type}` },
@@ -3061,9 +3136,8 @@ describe('fanout-task-events: partial-batch response', () => {
   // The construct sets ``reportBatchItemFailures: true`` on
   // the event-source-mapping, so the handler must return a batch response
   // rather than ``void``. Returning ``void`` makes Lambda retry the WHOLE
-  // batch on any unhandled throw — replaying every sibling event and
-  // defeating the per-task ordering guarantee promised upstream by
-  // ``ParallelizationFactor: 1``.
+  // batch on an unhandled throw. A sequence cursor avoids replaying
+  // successful earlier records; later records still need deduplication.
   //
   // The architecturally reachable poison-pill path is a
   // throw that bypasses ``routeEvent``'s ``Promise.allSettled``. The
@@ -3079,11 +3153,31 @@ describe('fanout-task-events: partial-batch response', () => {
 
   beforeEach(() => {
     mockDdbSend.mockReset().mockResolvedValue({ Item: undefined });
+    mockDispatchSlackEvent.mockReset().mockResolvedValue(undefined);
     mockUpsertTaskComment.mockReset();
     mockRenderCommentBody.mockReset().mockReturnValue('rendered body');
     mockLoadRepoConfig.mockReset().mockResolvedValue(null);
     mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_fake');
     mockClearTokenCache.mockReset();
+  });
+
+  test.each([true, false])('returns the AWS sequence cursor when eventID is present=%s', async hasEventId => {
+    const record = mkEventWithId('task_created', 'opaque-event-id');
+    record.dynamodb!.SequenceNumber = '400000000000000000000001';
+    if (!hasEventId) delete record.eventID;
+    mockDispatchSlackEvent.mockRejectedValueOnce(new Error('temporary delivery failure'));
+    await expect(handler({ Records: [record] })).resolves.toEqual({
+      batchItemFailures: [{ itemIdentifier: '400000000000000000000001' }],
+    });
+  });
+
+  test.each([undefined, ''])('rejects the batch when a failed record has an invalid sequence (%s)', async sequence => {
+    const record = mkEventWithId('task_created', 'opaque-event-id');
+    record.dynamodb!.SequenceNumber = sequence;
+    mockDispatchSlackEvent.mockRejectedValueOnce(new Error('temporary delivery failure'));
+    await expect(handler({ Records: [record] })).rejects.toThrow(
+      'Failed DynamoDB record is missing its sequence number',
+    );
   });
 
   test('AccessDeniedException from resolveTokenSecretArn lands in infraRejections and flags the record for retry', async () => {
@@ -3125,8 +3219,8 @@ describe('fanout-task-events: partial-batch response', () => {
       const result = await handler(event);
 
       // Record is flagged for partial-batch retry — Lambda will replay
-      // this single eventID, leaving siblings alone.
-      expect(result.batchItemFailures).toEqual([{ itemIdentifier: poisonId }]);
+      // from its sequence onward, including any successful later records.
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: event.Records[0].dynamodb!.SequenceNumber }]);
 
       // The rejection is observable through the dispatcher-rejected
       // warn so operators can alarm distinctly from the generic
@@ -3147,11 +3241,8 @@ describe('fanout-task-events: partial-batch response', () => {
     // loop throws past ``routeEvent``'s containment (simulated here by
     // making ``logger.warn`` throw on the rate-limit path — the
     // closest real non-``routeEvent`` code path), the handler's
-    // per-record try/catch must push the record's ``eventID`` into
-    // ``batchItemFailures`` so Lambda retries ONLY that record. A handler
-    // that returned void would make Lambda retry the ENTIRE
-    // batch, replaying every sibling event and defeating per-task
-    // ordering.
+    // per-record try/catch must return its ``SequenceNumber`` so Lambda
+    // retries from the failed record onward.
     const loggerModule = await import('../../src/handlers/shared/logger');
     // Rate-limit warn on the 21st event throws; earlier events succeed.
     let warnCalls = 0;
@@ -3191,7 +3282,7 @@ describe('fanout-task-events: partial-batch response', () => {
       // from the handler's perspective (``routeEvent`` short-circuits
       // on "task not found" since the shared DDB mock returns no Item).
       expect(result.batchItemFailures).toEqual([
-        { itemIdentifier: 'evt-20' },
+        { itemIdentifier: records[20].dynamodb!.SequenceNumber },
       ]);
     } finally {
       warnSpy.mockRestore();
@@ -3202,7 +3293,7 @@ describe('fanout-task-events: partial-batch response', () => {
     // Mixed batch: one record throws past routeEvent (via the same
     // rate-limit-warn trick as above but in a simpler shape — we make
     // the second record specifically trigger the throw), the other
-    // routes cleanly. The response must list ONLY the failing eventID.
+    // routes cleanly. The response must list only the failed sequence.
     const loggerModule = await import('../../src/handlers/shared/logger');
     const warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(
       (_msg: string, meta?: Record<string, unknown>) => {
@@ -3222,9 +3313,9 @@ describe('fanout-task-events: partial-batch response', () => {
       const result = await handler({ Records: records });
 
       expect(result.batchItemFailures).toHaveLength(1);
-      expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: 'evt-chatty-20' });
+      expect(result.batchItemFailures[0]).toEqual({ itemIdentifier: records[21].dynamodb!.SequenceNumber });
       // Specifically NOT the successful record.
-      expect(result.batchItemFailures.map(f => f.itemIdentifier)).not.toContain('evt-ok');
+      expect(result.batchItemFailures.map(f => f.itemIdentifier)).not.toContain(records[0].dynamodb!.SequenceNumber);
     } finally {
       warnSpy.mockRestore();
     }

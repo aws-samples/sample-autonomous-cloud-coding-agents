@@ -40,6 +40,7 @@ const fetchMock = jest.fn();
 (global as unknown as { fetch: unknown }).fetch = fetchMock;
 
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { dispatchSlackEvent, SlackApiError, type SlackDispatchEvent } from '../../src/handlers/slack-notify';
@@ -70,6 +71,44 @@ describe('dispatchSlackEvent', () => {
       ok: true,
       json: () => Promise.resolve({ ok: true, ts: '1234.0001' }),
     });
+  });
+
+  test.each([false, true])('approval delivery records success only after posting (retryable failure=%s)', async fails => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        task_id: 't1',
+        user_id: 'u1',
+        status: 'AWAITING_APPROVAL',
+        awaiting_approval_request_id: 'g1',
+        channel_source: 'slack',
+        channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1', slack_thread_ts: 'thread' },
+      },
+    }).mockResolvedValueOnce({
+      Item: {
+        user_id: 'u1',
+        status: 'PENDING',
+        tool_name: 'Bash',
+        severity: 'high',
+        reason: 'Review this',
+        tool_input_preview: '<!channel> echo hello',
+        created_at: '2026-09-16T12:00:00Z',
+        timeout_s: 1800,
+      },
+    }).mockResolvedValue({});
+    if (fails) fetchMock.mockRejectedValueOnce(new Error('network unavailable'));
+    const dispatch = dispatchSlackEvent(mkEvent('t1', 'approval_requested', { request_id: 'g1' }), ddb);
+    if (fails) {
+      await expect(dispatch).rejects.toThrow('network unavailable');
+      expect(ddbSend).toHaveBeenCalledTimes(2);
+    } else {
+      await dispatch;
+      const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(payload.thread_ts).toBe('thread');
+      expect(payload.blocks[0].text.type).toBe('plain_text');
+      expect(payload.blocks[0].text.text).toContain('bgagent approve t1 g1 --scope this_call');
+      expect(ddbSend.mock.calls[2][0].input.ExpressionAttributeNames).toEqual({ '#marker': 'notified_slack_approval_requested' });
+      expect(fetchMock.mock.invocationCallOrder[0]).toBeLessThan(ddbSend.mock.invocationCallOrder[2]);
+    }
   });
 
   test('skips non-slack tasks without touching Slack', async () => {
