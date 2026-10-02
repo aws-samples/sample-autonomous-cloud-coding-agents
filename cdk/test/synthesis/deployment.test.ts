@@ -118,12 +118,13 @@ describe.each(synthesisProfiles('managed'))('$name deployment', profile => {
       : { [application]: [] });
   });
 
-  test('provisions only the selected compute backend across the assembly', () => {
+  test('provisions only the selected compute backends across the assembly', () => {
     const resources = census.templates.flatMap(template => template.inventory);
     const count = (type: string): number => resources.filter(resource => resource.type === type).length;
-    expect(count('AWS::BedrockAgentCore::Runtime')).toBe(profile.context.compute_type === 'agentcore' ? 1 : 0);
-    expect(count('AWS::ECS::Cluster')).toBe(profile.context.compute_type === 'ecs' ? 1 : 0);
-    expect(count('AWS::Lambda::NetworkConnector')).toBe(profile.context.compute_type === 'lambda-microvm' ? 2 : 0);
+    const backends = String(profile.context.compute_types).split(',');
+    expect(count('AWS::BedrockAgentCore::Runtime')).toBe(backends.includes('agentcore') ? 1 : 0);
+    expect(count('AWS::ECS::Cluster')).toBe(backends.includes('ecs') ? 1 : 0);
+    expect(count('AWS::Lambda::NetworkConnector')).toBe(backends.includes('lambda-microvm') ? 2 : 0);
     expect(count('AWS::CDK::Metadata')).toBeGreaterThan(0);
   });
 });

@@ -27,7 +27,7 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
-import { resolveComputeBackend } from './handlers/shared/compute-backend';
+import { resolveComputeBackends } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
 import { NetworkStack, resolveNetworkTopology } from './stacks/network';
 import { DEFAULT_BUDGETS } from './synthesis/budgets';
@@ -103,7 +103,9 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   // selection; `diagnostics` are attached to the stack below, because CDK only
   // collects annotations that hang off a stack's tree — App-node metadata would
   // be silently dropped, which is how a failed lookup used to pass unnoticed.
-  const computeType = resolveComputeBackend(app.node.tryGetContext('compute_type'));
+  // Tag values allow '+', not ','; the tag records every deployed backend.
+  const computeType = resolveComputeBackends(
+    app.node.tryGetContext('compute_types'), app.node.tryGetContext('compute_type')).join('+');
   const azResolution = await resolveAgentCoreAzs({
     node: app.node,
     account: env.account,

@@ -26,7 +26,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
   beforeAll(() => {
     const app = new App({
       context: {
-        compute_type: backend,
+        compute_types: backend,
         blueprintProvisioning: 'managed',
         enableToolGateway: true,
         enableLinearIdentityVault: true,
@@ -109,5 +109,48 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     const policies = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy')).filter(([id]) => id.startsWith(prefix)));
     expect(policies).toContain('bedrock-agentcore:InvokeGateway');
     expect(policies).toContain('bedrock-agentcore:GetResourceOauth2Token');
+  });
+});
+
+describe.each([
+  ['compute_types list', { compute_types: 'agentcore,lambda-microvm' }],
+  ['legacy compute_type', { compute_type: 'lambda-microvm' }],
+])('additive deployment from %s', (_label, selector) => {
+  let template: Template;
+  beforeAll(() => {
+    const app = new App({
+      context: {
+        ...selector,
+        blueprintProvisioning: 'managed',
+        microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test-image',
+        microvm_image_version: '1',
+      },
+    });
+    template = Template.fromStack(new AgentStack(app, 'ComputeSelection', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+  });
+
+  test('provisions every listed backend and keeps AgentCore as the repository default', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
+    template.resourceCountIs('AWS::ECS::Cluster', 0);
+    // Existing CLIs parse a comma list here on non-exclusive stacks.
+    template.hasOutput('ComputeSubstrate', { Value: 'agentcore,lambda-microvm' });
+    template.hasOutput('ComputeTypes', { Value: 'agentcore,lambda-microvm' });
+    template.hasOutput('ComputeDeploymentMode', { Value: 'additive' });
+    const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))![1];
+    const env = orchestrator.Properties.Environment.Variables;
+    expect(env.DEPLOYED_COMPUTE_TYPE).toBe('agentcore,lambda-microvm');
+    expect(env.RUNTIME_ARN).toBeDefined();
+  });
+
+  test('session trust admits every deployed compute role', () => {
+    const role = Object.entries(template.findResources('AWS::IAM::Role'))
+      .find(([id]) => id.startsWith('AgentSessionRole'))![1];
+    const trust = JSON.stringify(role.Properties.AssumeRolePolicyDocument);
+    expect(trust).toContain('RuntimeExecutionRole');
+    expect(trust).toContain('LambdaMicrovmComputeExecutionRole');
   });
 });

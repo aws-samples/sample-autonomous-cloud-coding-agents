@@ -30,7 +30,7 @@ describe('profile acceptance rules', () => {
   const rejected = {
     ...profile,
     name: 'invalid-compute',
-    context: { ...profile.context, compute_type: 'unsupported' },
+    context: { ...profile.context, compute_types: 'unsupported' },
     expectedError: 'compute_type must be agentcore, ecs or lambda-microvm',
   };
   const budgets: Budgets = { resources: 500, bytes: 800_000, parameters: 200, outputs: 200 };

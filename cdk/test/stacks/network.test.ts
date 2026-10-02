@@ -120,7 +120,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'stackName': APP_NAME,
           'networkTopology': topology,
           'networkReservedAzs': reservedAzs,
-          'compute_type': compute,
+          'compute_types': compute,
           'blueprintProvisioning': 'managed',
           'bedrockGeoRegion': 'global',
           'enableToolGateway': true,

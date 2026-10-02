@@ -30,21 +30,21 @@ describe('structural synthesis profiles', () => {
     const selected = synthesisProfiles(mode);
     expect(selected.map(profile => profile.name)).toEqual(profiles.map(profile => profile.name));
     expect(selected.every(profile => profile.context.blueprintProvisioning === mode)).toBe(true);
-    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 4 : 3);
+    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 8 : 7);
   });
 
   test.each(['inline', 'split'])('enumerates the real 40-cell product for the %s topology', topology => {
     const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
     expect(matrix).toHaveLength(80);
     expect(topologyMatrix).toHaveLength(40);
-    expect(profiles).toHaveLength(96);
+    expect(profiles).toHaveLength(108);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
         for (const registry of [false, true]) {
           for (const vault of [false, true]) {
             const matches = topologyMatrix.filter(p =>
-              p.context.compute_type === compute && p.context.enableToolGateway === gateway &&
+              p.context.compute_types === compute && p.context.enableToolGateway === gateway &&
               p.context.enableAgentRegistry === registry && p.context.enableLinearIdentityVault === vault,
             );
             expect(matches).toHaveLength(compute === 'lambda-microvm' ? 3 : 1);
@@ -81,7 +81,7 @@ describe('structural synthesis profiles', () => {
       }
       for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
         for (const topology of ['inline', 'split']) {
-          const matches = pinned.filter(profile => profile.context.compute_type === compute
+          const matches = pinned.filter(profile => profile.context.compute_types === compute
             && profile.context.networkTopology === topology);
           expect(matches).toHaveLength(1);
           expect(matches[0].context).toMatchObject({
@@ -101,7 +101,7 @@ describe('structural synthesis profiles', () => {
   );
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
-    const microvm = matrix.filter(p => p.context.compute_type === 'lambda-microvm' && !p.expectedError);
+    const microvm = matrix.filter(p => p.context.compute_types === 'lambda-microvm' && !p.expectedError);
     expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(32);
     for (const p of matrix) {
       expect(p.microvmImageConfigured).toBe(!!(p.context.microvm_base_image_arn || p.context.microvm_image_identifier));
@@ -119,7 +119,7 @@ describe('structural synthesis profiles', () => {
   test.each(['agentcore', 'ecs', 'lambda-microvm'])('exercises supplemental resources together on the widest %s profile', compute => {
     expect(profiles).toContainEqual(expect.objectContaining({
       context: expect.objectContaining({
-        compute_type: compute,
+        compute_types: compute,
         enableToolGateway: true,
         enableAgentRegistry: true,
         enableLinearIdentityVault: true,

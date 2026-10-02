@@ -88,7 +88,7 @@ import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { parseGuardrailVersionBinding, VersionedGuardrail } from '../constructs/versioned-guardrail';
 import { WebhookTable } from '../constructs/webhook-table';
-import { resolveComputeBackend } from '../handlers/shared/compute-backend';
+import { resolveComputeBackends } from '../handlers/shared/compute-backend';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
@@ -192,9 +192,11 @@ export class AgentStack extends Stack {
     // changes. Pattern lifted from ``merge/akw-integration``.
     const repoRoot = path.join(__dirname, '..', '..', '..');
 
-    const computeType = resolveComputeBackend(this.node.tryGetContext('compute_type'));
-    const agentCoreEnabled = computeType === 'agentcore';
-    const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
+    const computeTypes = resolveComputeBackends(
+      this.node.tryGetContext('compute_types'), this.node.tryGetContext('compute_type'));
+    const agentCoreEnabled = computeTypes.includes('agentcore');
+    const ecsEnabled = computeTypes.includes('ecs');
+    const lambdaMicrovmEnabled = computeTypes.includes('lambda-microvm');
 
     // Task state persistence
     const taskTable = new TaskTable(this, 'TaskTable');
@@ -478,7 +480,7 @@ export class AgentStack extends Stack {
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
       ...(agentCoreEnabled && { agentCoreStopSessionRuntimeArn: lazyRuntimeArn }),
-      ...(computeType === 'ecs' && { ecsClusterArn: lazyEcsClusterArn }),
+      ...(ecsEnabled && { ecsClusterArn: lazyEcsClusterArn }),
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -980,7 +982,7 @@ export class AgentStack extends Stack {
     // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
     // passes only an S3 URI pointer; the container fetches it on boot, the
     // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
-    const ecsPayloadBucket = computeType === 'ecs'
+    const ecsPayloadBucket = ecsEnabled
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
     if (ecsPayloadBucket) {
@@ -1059,7 +1061,7 @@ export class AgentStack extends Stack {
       }
     }
 
-    const ecsCluster = computeType === 'ecs'
+    const ecsCluster = ecsEnabled
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
         ...(linearIdentityVault && { linearIdentityVault }),
@@ -1138,7 +1140,9 @@ export class AgentStack extends Stack {
     // unconfigured one never asks for it.
     microvmImageArnHolder = lambdaMicrovm?.imageArn;
 
-    const selectedComputeRole = runtime?.role ?? ecsCluster?.taskDefinition.taskRole ?? lambdaMicrovm?.executionRole;
+    const computeRoles = [runtime?.role, ecsCluster?.taskDefinition.taskRole, lambdaMicrovm?.executionRole]
+      .filter((role): role is iam.IRole => role !== undefined);
+    const selectedComputeRole = computeRoles[0];
     ecsClusterArnHolder = ecsCluster?.cluster.clusterArn;
     agentLogGroup ??= ecsCluster?.logGroup ?? lambdaMicrovm?.logGroup;
     if (!selectedComputeRole || !agentLogGroup) throw new Error('Selected compute backend did not provide its role and logs');
@@ -1147,13 +1151,19 @@ export class AgentStack extends Stack {
       toolGateway?.grantInvoke(lambdaMicrovm.executionRole);
     }
 
+    // Additive stacks keep the comma-list contract existing CLIs parse; exclusive
+    // stacks name their only backend.
     new CfnOutput(this, 'ComputeSubstrate', {
-      value: computeType,
-      description: 'The single deployed compute backend and default for all repositories.',
+      value: computeTypes.join(','),
+      description: 'Deployed compute backends; with ComputeDeploymentMode=exclusive, the only one.',
+    });
+    new CfnOutput(this, 'ComputeTypes', {
+      value: computeTypes.join(','),
+      description: 'Every deployed compute backend; repositories may select any of them.',
     });
     new CfnOutput(this, 'ComputeDeploymentMode', {
-      value: 'exclusive',
-      description: 'ComputeSubstrate identifies the only deployed backend.',
+      value: computeTypes.length === 1 ? 'exclusive' : 'additive',
+      description: 'exclusive: ComputeSubstrate is the only deployed backend. additive: see ComputeTypes.',
     });
 
     // Both outputs are consumed by `platform doctor` and `repo onboard --model` to
@@ -1220,7 +1230,7 @@ export class AgentStack extends Stack {
       userConcurrencyTable: userConcurrencyTable.table,
       maxConcurrentTasksPerUser,
       repoTable: repoTable.table,
-      deployedComputeType: computeType,
+      deployedComputeTypes: computeTypes,
       runtimeArn: runtime?.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
@@ -1665,17 +1675,19 @@ export class AgentStack extends Stack {
     // For a 24h Linear access-token TTL, the practical impact is that
     // a stale token in the cache forces the agent's next call to fail
     // closed — preferable to a trust gap.
-    selectedComputeRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
-    }));
+    for (const role of computeRoles) {
+      role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bgagent-linear-oauth-*',
+          }),
+        ],
+      }));
+    }
 
     // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
     // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
@@ -1799,17 +1811,19 @@ export class AgentStack extends Stack {
     // any tenant's OAuth bundle. Lambdas (trusted code in this stack)
     // own the in-place refresh path; the agent proceeds with whatever
     // token Lambdas have most-recently written.
-    selectedComputeRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+    for (const role of computeRoles) {
+      role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bgagent-jira-oauth-*',
+          }),
+        ],
+      }));
+    }
 
     // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
     // grant into the orchestrator so the concurrency-cap rejection path

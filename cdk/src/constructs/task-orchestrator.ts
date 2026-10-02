@@ -74,8 +74,11 @@ export interface TaskOrchestratorProps {
    * ARN of the AgentCore runtime.
    */
   readonly runtimeArn?: string;
-  /** Exact backend selected by the deployment. Omit only for legacy composition. */
-  readonly deployedComputeType?: 'agentcore' | 'ecs' | 'lambda-microvm';
+  /**
+   * Backends deployed by this stack; the first is the repository default.
+   * Omit only for legacy composition.
+   */
+  readonly deployedComputeTypes?: ReadonlyArray<'agentcore' | 'ecs' | 'lambda-microvm'>;
 
   /**
    * The DynamoDB repo config table. When provided, the orchestrator loads
@@ -392,14 +395,15 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
-    if (props.deployedComputeType) {
-      const backend = props.deployedComputeType;
-      if ((backend === 'agentcore' && !props.runtimeArn)
-        || (backend === 'ecs' && !props.ecsConfig)
-        || (backend !== 'agentcore' && (props.runtimeArn || props.additionalRuntimeArns?.length))
-        || (backend !== 'ecs' && props.ecsConfig)
-        || (backend !== 'lambda-microvm' && props.microvmConfig)) {
-        throw new Error(`TaskOrchestrator configuration must match the exclusive '${backend}' backend`);
+    if (props.deployedComputeTypes) {
+      const backends = props.deployedComputeTypes;
+      const agentcore = backends.includes('agentcore');
+      const ecs = backends.includes('ecs');
+      if (agentcore !== Boolean(props.runtimeArn)
+        || (!agentcore && props.additionalRuntimeArns?.length)
+        || ecs !== Boolean(props.ecsConfig)
+        || (!backends.includes('lambda-microvm') && props.microvmConfig)) {
+        throw new Error(`TaskOrchestrator configuration must match the deployed '${backends.join(', ')}' backends`);
       }
     }
 
@@ -462,7 +466,7 @@ export class TaskOrchestrator extends Construct {
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         ...(props.runtimeArn && { RUNTIME_ARN: props.runtimeArn }),
-        ...(props.deployedComputeType && { DEPLOYED_COMPUTE_TYPE: props.deployedComputeType }),
+        ...(props.deployedComputeTypes && { DEPLOYED_COMPUTE_TYPE: props.deployedComputeTypes.join(',') }),
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),

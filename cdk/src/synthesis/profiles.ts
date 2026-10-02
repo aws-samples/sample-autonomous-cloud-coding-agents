@@ -62,7 +62,7 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
       networkTopology: 'inline',
       blueprintRepo: 'awslabs/agent-plugins',
       bedrockGeoRegion: 'global',
-      compute_type: compute,
+      compute_types: compute,
       enableToolGateway: gateway,
       enableAgentRegistry: registry,
       enableLinearIdentityVault: vault,
@@ -128,7 +128,7 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
   for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
     for (const networkTopology of ['inline', 'split'] as const) {
       const overBudget = networkTopology === 'inline'
-        && (base.context.compute_type !== 'agentcore' || !managedProvider);
+        && (base.context.compute_types !== 'agentcore' || !managedProvider);
       topologies.push({
         ...base,
         name: `${base.name}-az3${networkTopology === 'split' ? '-split' : ''}`,
@@ -141,6 +141,35 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
           expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
         } : {}),
       });
+    }
+  }
+  // Additive probes: several backends in one stack (`compute_types`). Measured
+  // in both topologies; the first listed backend is the repository default.
+  const ALL_BACKENDS = 3;
+  const additive: Array<readonly Compute[]> = [
+    ['agentcore', 'lambda-microvm'], ['agentcore', 'ecs'], ['agentcore', 'ecs', 'lambda-microvm'],
+  ];
+  for (const backends of additive) {
+    for (const wide of [false, true]) {
+      const microvm = backends.includes('lambda-microvm');
+      const base = profile(microvm ? 'lambda-microvm' : backends[backends.length - 1], wide, true, wide, microvm ? 'managed' : 'none');
+      for (const networkTopology of ['inline', 'split'] as const) {
+        // Inline, only the lighter two-backend stacks fit; split fits every combination.
+        const overBudget = networkTopology === 'inline' && (wide || backends.length === ALL_BACKENDS);
+        topologies.push({
+          ...base,
+          name: `additive-${backends.join('+')}-${wide ? 'widest' : 'default'}-${networkTopology}`,
+          context: {
+            ...base.context,
+            compute_types: backends.join(','),
+            networkTopology,
+            ...(wide ? { alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' } : {}),
+          },
+          ...(overBudget ? {
+            expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
+          } : {}),
+        });
+      }
     }
   }
   return provisioningMode === undefined ? topologies : topologies.map(candidate => ({

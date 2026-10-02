@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { resolveComputeBackend, resolveRepositoryBackend } from '../../../src/handlers/shared/compute-backend';
+import { resolveComputeBackend, resolveComputeBackends, resolveRepositoryBackend } from '../../../src/handlers/shared/compute-backend';
 
 test('defaults to AgentCore only when the selector is absent', () => {
   expect(resolveComputeBackend()).toBe('agentcore');
@@ -33,4 +33,23 @@ test.each(['agentcore', 'ecs', 'lambda-microvm'])('inherits and enforces deploye
 });
 test('preserves legacy routing without a deployed selector', () => {
   expect(resolveRepositoryBackend('ecs', undefined)).toBe('ecs');
+});
+test.each([
+  [undefined, undefined, ['agentcore']],
+  [undefined, 'agentcore', ['agentcore']],
+  [undefined, 'ecs', ['agentcore', 'ecs']],
+  [undefined, 'lambda-microvm', ['agentcore', 'lambda-microvm']],
+  ['lambda-microvm', 'ecs', ['lambda-microvm']],
+  ['agentcore, lambda-microvm,agentcore', undefined, ['agentcore', 'lambda-microvm']],
+  [['ecs', 'agentcore'], undefined, ['ecs', 'agentcore']],
+])('resolves compute_types %p with legacy compute_type %p', (list, legacy, expected) => {
+  expect(resolveComputeBackends(list, legacy)).toEqual(expected);
+});
+test.each(['agentcore,fargate', ',', [] as string[]])('rejects invalid compute_types %p', value => {
+  expect(() => resolveComputeBackends(value)).toThrow(/compute_type must be|at least one/);
+});
+test('enforces membership on additive deployments and defaults to the first backend', () => {
+  expect(resolveRepositoryBackend(undefined, 'agentcore,lambda-microvm')).toBe('agentcore');
+  expect(resolveRepositoryBackend('lambda-microvm', 'agentcore,lambda-microvm')).toBe('lambda-microvm');
+  expect(() => resolveRepositoryBackend('ecs', 'agentcore,lambda-microvm')).toThrow(/deploys only 'agentcore, lambda-microvm'/);
 });
