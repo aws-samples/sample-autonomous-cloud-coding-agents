@@ -30,10 +30,13 @@ describe('census workspace evidence', () => {
     directory = mkdtempSync(path.join(tmpdir(), 'census-workspace-'));
     checkout = path.join(directory, 'checkout');
     mkdirSync(checkout);
+    // Under a Git hook, GIT_DIR and friends point at the developer's repository;
+    // without stripping them the fixture commands would write there instead.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
     const git = (...args: string[]) => execFileSync('git', [
       '-c', `core.hooksPath=${devNull}`, '-c', 'commit.gpgSign=false',
       '-c', 'user.name=Census Test', '-c', 'user.email=census@example.com', ...args,
-    ], { cwd: checkout, stdio: 'pipe' });
+    ], { cwd: checkout, env, stdio: 'pipe' });
     git('init', '--quiet', '-b', 'census-fixture');
     writeFileSync(path.join(checkout, 'yarn.lock'), 'fixture lock');
     writeFileSync(path.join(checkout, '.gitignore'), 'build/\n');
