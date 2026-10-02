@@ -23,7 +23,9 @@
   "resolutions": {
     "@astrojs/markdown-remark": "7.2.0",
     "@astrojs/mdx": "6.0.3",
+    "basic-ftp": "^6.2.1",
     "brace-expansion": "^5.0.12",
+    "devalue": "^5.9.3",
     "fast-uri": "^3.1.8",
     "fast-xml-parser": "^5.7.0",
     "ip-address": "^10.5.1",
