@@ -47,6 +47,9 @@ steps:
   - { kind: ensure_pr,       name: resolve_pr, strategy: resolve }
 terminal_outcomes:
   primary: pr_url
+convergence:
+  mode: review_submitted
+  terminal_outcomes: [review_published]
 limits:
   max_turns: 100
 promotion_gate:
