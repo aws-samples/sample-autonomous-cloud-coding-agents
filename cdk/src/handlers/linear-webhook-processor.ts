@@ -645,10 +645,11 @@ interface ProcessorEvent {
  * workspace does not have: no reactions and no state transitions, on work that
  * otherwise succeeded.
  *
- * Two checks guard it, because they fail for different reasons. The source-level one
- * (in the test file) catches a builder nobody exercised, but keys off the object-literal
- * form and cannot see a builder that assigns onto an existing object; the behavioural
- * one asserts the fields actually reach `channel_metadata`.
+ * Three checks guard it, because they fail for different reasons. Two source-level ones
+ * (in the test file) catch a builder nobody exercised — one keys off the object-literal
+ * form, the other off the assignment form, so a builder that writes onto an existing
+ * object is covered too (#879). The behavioural one asserts the fields actually reach
+ * `channel_metadata`.
  */
 function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
   return {
@@ -858,7 +859,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const channelMetadata: Record<string, string> = {
+  // `let` because the vault branch below re-derives it by spread rather than mutating
+  // it in place; see the comment there for why spread and not `Object.assign` (#879).
+  let channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
     linear_project_id: projectId,
@@ -916,16 +919,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
     // agent stays on the Secrets-Manager path.
     if (resolved.providerName) {
-      // Through the shared helper, not hand-rolled. This builder assigns onto an
-      // existing object rather than constructing a literal, which is what hid it from
-      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
-      // that guard keys off the literal
-      // form, so the ONE path it was written for was the one path it never covered.
-      // The subject inside the helper is recorded rather than derived from the
-      // workspace id, so a single consent can onboard a workspace whose org UUID is
-      // not yet known; absent ⇒ the agent derives the legacy form.
-      channelMetadata.linear_workspace_id = workspaceId;
-      Object.assign(channelMetadata, vaultMetadata(resolved));
+      // Spread the helper rather than restating its fields: `vaultMetadata` is the one
+      // place that says which vault fields a task carries, so a builder that hand-rolls
+      // them drops whatever field is added there next. (The subject it emits is the
+      // recorded one, not derived from the workspace id, so a single consent can onboard
+      // a workspace whose org UUID is not yet known; absent ⇒ the agent derives the
+      // legacy form.)
+      //
+      // SPREAD, not `Object.assign` — a security property, not a style choice.
+      // `Object.assign` copies via [[Set]], which invokes the `__proto__` setter, so a
+      // source carrying that key would repoint this object's prototype; spread defines
+      // own properties, where the same key lands inert. Unreachable today (the helper
+      // returns a literal with two hard-coded keys), but the capability is what semgrep
+      // rates Blocking. Guard history and the pre-push consequence: #879.
+      channelMetadata = { ...channelMetadata, ...vaultMetadata(resolved) };
     }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
