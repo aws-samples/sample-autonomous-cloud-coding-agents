@@ -74,7 +74,7 @@ This prints the exact field values to paste, with the URLs already resolved from
 
 Two fields deserve attention:
 
-- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries. On a stack with the Identity vault, a **first** run has nothing to paste yet: the URI Linear needs is the vault's callback, which `bgagent linear setup` creates, prints, and asks you to add before re-running. If setup instead falls back to Secrets Manager, it tells you to register the hosted consent page — the template lists that page separately for this reason.
 - **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
 Click **Create** and copy the **Client ID** and **Client Secret**.
