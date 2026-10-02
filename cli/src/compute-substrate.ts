@@ -26,12 +26,15 @@ export interface ComputeDeployment {
   readonly stackName: string;
   readonly computeSubstrate: string | null | undefined;
   readonly computeDeploymentMode?: string | null;
+  /** Complete ordered list; its first entry is the repository default. */
+  readonly computeTypes?: string | null;
 }
 
 export interface ComputeDeploymentStatus {
   readonly stack_name: string;
   readonly compute_substrate: string | null;
   readonly compute_deployment_mode: string | null;
+  readonly compute_types: readonly OnboardComputeType[] | null;
   readonly default_compute_type: OnboardComputeType;
 }
 
@@ -48,12 +51,33 @@ export function parseComputeSubstrateOutput(raw: string | null | undefined): rea
   return values?.length ? values : undefined;
 }
 
-/** Explicit mode distinguishes exclusive deployments from existing additive stacks. */
-export function defaultComputeType(deployment: Pick<ComputeDeployment, 'computeSubstrate' | 'computeDeploymentMode'>): OnboardComputeType {
-  if (deployment.computeDeploymentMode !== 'exclusive') return 'agentcore';
-  const value = deployment.computeSubstrate;
-  if (value === 'agentcore' || value === 'ecs' || value === 'lambda-microvm') return value;
-  throw new CliError('Exclusive compute deployment has an invalid or missing ComputeSubstrate output. Re-deploy the CDK stack.');
+type ComputeOutputs = Pick<ComputeDeployment, 'computeSubstrate' | 'computeDeploymentMode' | 'computeTypes'>;
+
+/** Explicit outputs are authoritative; only stacks without them imply AgentCore. */
+function declaredComputeTypes(deployment: ComputeOutputs): readonly OnboardComputeType[] | undefined {
+  const mode = deployment.computeDeploymentMode;
+  if (mode != null && mode !== 'exclusive' && mode !== 'additive') {
+    throw new CliError(`Unknown ComputeDeploymentMode '${mode}'. Update the CLI or re-deploy the CDK stack.`);
+  }
+  if (deployment.computeTypes == null && mode == null) return undefined;
+  const output = deployment.computeTypes != null ? 'ComputeTypes' : 'ComputeSubstrate';
+  const raw = deployment.computeTypes ?? deployment.computeSubstrate;
+  const values = raw?.split(',').map(value => value.trim());
+  if (!values?.length || values.some(value => !['agentcore', 'ecs', 'lambda-microvm'].includes(value))
+    || new Set(values).size !== values.length
+    || (mode === 'exclusive' && values.length !== 1)
+    || (mode === 'additive' && values.length < 2)) {
+    throw new CliError(`Compute deployment has an invalid or missing ${output} output. Re-deploy the CDK stack.`);
+  }
+  if (deployment.computeTypes != null && deployment.computeSubstrate != null
+    && values.join(',') !== deployment.computeSubstrate.split(',').map(value => value.trim()).join(',')) {
+    throw new CliError('ComputeTypes and ComputeSubstrate outputs disagree. Re-deploy the CDK stack before changing repository configuration.');
+  }
+  return values as OnboardComputeType[];
+}
+
+export function defaultComputeType(deployment: ComputeOutputs): OnboardComputeType {
+  return declaredComputeTypes(deployment)?.[0] ?? 'agentcore';
 }
 
 export function describeComputeDeployment(deployment: ComputeDeployment): ComputeDeploymentStatus {
@@ -61,19 +85,21 @@ export function describeComputeDeployment(deployment: ComputeDeployment): Comput
     stack_name: deployment.stackName,
     compute_substrate: deployment.computeSubstrate ?? null,
     compute_deployment_mode: deployment.computeDeploymentMode ?? null,
+    compute_types: declaredComputeTypes(deployment) ?? null,
     default_compute_type: defaultComputeType(deployment),
   };
 }
 
 function computeConfigurationError(args: ComputeDeployment & { computeType: string | undefined }): string | undefined {
-  const selected = defaultComputeType(args);
+  const declared = declaredComputeTypes(args);
+  const selected = declared?.[0] ?? 'agentcore';
   const requested = args.computeType ?? selected;
   if (!['agentcore', 'ecs', 'lambda-microvm'].includes(requested)) {
     return `Unsupported repository compute_type '${requested}'. Choose agentcore, ecs or lambda-microvm.`;
   }
-  if (args.computeDeploymentMode === 'exclusive') {
-    if (requested === selected) return;
-    return `Stack '${args.stackName}' deploys only '${selected}' (ComputeSubstrate=${args.computeSubstrate}); --compute-type ${requested} is unavailable. Use --compute-type ${selected}, or drain tasks and redeploy with --context compute_type=${requested}.`;
+  if (declared) {
+    if (declared.includes(requested as OnboardComputeType)) return;
+    return `Stack '${args.stackName}' deploys only '${declared.join(', ')}' (ComputeSubstrate=${args.computeSubstrate}); --compute-type ${requested} is unavailable. Use --compute-type ${selected}, or add the backend with --context compute_types=${[...declared, requested].join(',')} and review the deployment change set.`;
   }
   const provisioned = parseComputeSubstrateOutput(args.computeSubstrate);
   if (requested === 'agentcore' || !provisioned || provisioned.includes(requested)) return;

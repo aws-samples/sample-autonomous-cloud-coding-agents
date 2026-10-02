@@ -42,7 +42,7 @@ When a workspace's authorization dies, ABCA records it on the registry row and p
 
 #### Using the vault with Lambda MicroVMs
 
-Exclusive backend selection removes the old co-deployed AgentCore Runtime and the previous MicroVM-plus-vault quota restriction. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
+Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 #### One workload identity per stack
 

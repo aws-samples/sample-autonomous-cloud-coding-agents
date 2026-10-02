@@ -17,12 +17,11 @@
  *  SOFTWARE.
  */
 
-import { AspectPriority, Aspects, Stack, StackProps } from 'aws-cdk-lib';
+import { Stack, StackProps } from 'aws-cdk-lib';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import { AgentNetwork, AgentVpc } from '../constructs/agent-vpc';
 import { DnsFirewall } from '../constructs/dns-firewall';
-import { StatefulRetentionAspect } from '../constructs/stateful-retention';
 
 export type NetworkTopology = 'inline' | 'split';
 
@@ -49,8 +48,6 @@ export class NetworkStack extends Stack implements AgentNetwork {
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
-    Aspects.of(this).add(new StatefulRetentionAspect(), { priority: AspectPriority.MUTATING });
-
     // Keep construct IDs below the stack unchanged for explicit ownership moves.
     const network = new AgentVpc(this, 'AgentVpc', {
       resourcePath: `${props.applicationStackName}/AgentVpc`,

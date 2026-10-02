@@ -19,7 +19,10 @@
 
 import {
   assertComputeSubstrateDeployed,
+  defaultComputeType,
+  describeComputeDeployment,
   parseComputeSubstrateOutput,
+  resolveRepositoryCompute,
 } from '../src/compute-substrate';
 import { CliError } from '../src/errors';
 
@@ -38,14 +41,11 @@ describe('parseComputeSubstrateOutput', () => {
     ['agentcore', ['agentcore']],
     ['ecs', ['ecs']],
     ['lambda-microvm', ['lambda-microvm']],
-  ])('parses the single value %s that the stack emits today', (raw, expected) => {
+  ])('parses the single value %s from legacy or single-backend stacks', (raw, expected) => {
     expect(parseComputeSubstrateOutput(raw)).toEqual(expected);
   });
 
-  test('tolerates a comma list, so a future compute_types output cannot silently over-refuse', () => {
-    // ADR-021 sub-decision 4 names a `compute_types` list as the intended
-    // follow-up to the single-valued tag. An `!== 'ecs'` equality check would
-    // start rejecting valid onboardings the day that lands.
+  test('parses complete comma-separated backend lists', () => {
     expect(parseComputeSubstrateOutput('ecs,lambda-microvm')).toEqual(['ecs', 'lambda-microvm']);
     expect(parseComputeSubstrateOutput(' ecs , lambda-microvm ')).toEqual(['ecs', 'lambda-microvm']);
   });
@@ -60,8 +60,8 @@ describe('parseComputeSubstrateOutput', () => {
   );
 });
 
-describe('assertComputeSubstrateDeployed', () => {
-  test('never gates agentcore — the runtime is unconditional', () => {
+describe('assertComputeSubstrateDeployed with legacy outputs', () => {
+  test('preserves the unconditional AgentCore backend of legacy stacks', () => {
     expect(assertFor('agentcore', 'agentcore')).not.toThrow();
     expect(assertFor('agentcore', 'ecs')).not.toThrow();
     expect(assertFor('agentcore', 'lambda-microvm')).not.toThrow();
@@ -105,7 +105,7 @@ describe('assertComputeSubstrateDeployed', () => {
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(/fail at session start/);
   });
 
-  test('refuses each optional backend on the OTHER one (they are mutually exclusive today)', () => {
+  test('refuses an optional backend absent from the legacy output', () => {
     expect(assertFor('lambda-microvm', 'ecs')).toThrow(/without the Lambda MicroVMs substrate/);
     expect(assertFor('ecs', 'lambda-microvm')).toThrow(/without the ECS substrate/);
   });
@@ -114,9 +114,7 @@ describe('assertComputeSubstrateDeployed', () => {
     expect(assertFor('lambda-microvm', 'agentcore')).toThrow(new RegExp(`'${STACK}'`));
   });
 
-  test('allows both optional backends against a hypothetical multi-substrate output', () => {
-    // Behavioural proof of the list tolerance above: this must NOT throw, or the
-    // `compute_types` follow-up would break onboarding for both backends.
+  test('allows each optional backend listed in ComputeSubstrate', () => {
     expect(assertFor('ecs', 'ecs,lambda-microvm')).not.toThrow();
     expect(assertFor('lambda-microvm', 'ecs,lambda-microvm')).not.toThrow();
   });
@@ -134,5 +132,45 @@ describe('exclusive backend output', () => {
   });
   test.each([null, '', 'ecs,lambda-microvm', 'unknown'])('rejects malformed exclusive output %p', computeSubstrate => {
     expect(() => assertComputeSubstrateDeployed({ stackName: 'test', computeSubstrate, computeDeploymentMode: 'exclusive', computeType: undefined })).toThrow(/invalid or missing/);
+  });
+});
+
+describe('ordered ComputeTypes output', () => {
+  const deployment = {
+    stackName: STACK,
+    computeTypes: 'lambda-microvm,ecs',
+    computeSubstrate: 'lambda-microvm,ecs',
+    computeDeploymentMode: 'additive',
+  };
+
+  test('inherits the first entry and enforces membership without assuming AgentCore', () => {
+    expect(defaultComputeType(deployment)).toBe('lambda-microvm');
+    expect(resolveRepositoryCompute(deployment)).toEqual({ compute_type: 'lambda-microvm', compute_available: true });
+    expect(resolveRepositoryCompute(deployment, 'ecs')).toEqual({ compute_type: 'ecs', compute_available: true });
+    expect(resolveRepositoryCompute(deployment, 'agentcore')).toMatchObject({
+      compute_type: 'agentcore',
+      compute_available: false,
+      configuration_error: expect.stringContaining('compute_types=lambda-microvm,ecs,agentcore'),
+    });
+    expect(describeComputeDeployment(deployment)).toMatchObject({
+      compute_types: ['lambda-microvm', 'ecs'],
+      default_compute_type: 'lambda-microvm',
+    });
+  });
+
+  test('supports the complete additive substrate output when ComputeTypes is absent', () => {
+    expect(defaultComputeType({ ...deployment, computeTypes: null })).toBe('lambda-microvm');
+    expect(resolveRepositoryCompute({ ...deployment, computeTypes: null }, 'agentcore').compute_available).toBe(false);
+  });
+
+  test.each(['', ' ', ',', 'ecs,', 'ecs,unknown', 'ecs,ecs'])('rejects malformed ComputeTypes %p', computeTypes => {
+    expect(() => defaultComputeType({ ...deployment, computeTypes })).toThrow(/invalid or missing ComputeTypes/);
+  });
+
+  test('refuses contradictory outputs and an unknown deployment mode', () => {
+    expect(() => defaultComputeType({ ...deployment, computeSubstrate: 'ecs' })).toThrow(/outputs disagree/);
+    expect(() => defaultComputeType({ ...deployment, computeDeploymentMode: 'exclusive' })).toThrow(/invalid or missing/);
+    expect(() => defaultComputeType({ ...deployment, computeTypes: 'ecs', computeSubstrate: 'ecs' })).toThrow(/invalid or missing/);
+    expect(() => defaultComputeType({ ...deployment, computeDeploymentMode: 'unknown' })).toThrow(/Unknown ComputeDeploymentMode/);
   });
 });

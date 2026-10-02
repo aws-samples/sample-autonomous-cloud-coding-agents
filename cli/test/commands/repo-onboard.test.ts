@@ -132,13 +132,32 @@ describe('repo onboard/offboard', () => {
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
-  test('inherits MicroVM selection and probes availability without persisting a default pin', async () => {
+  test.each(['lambda-microvm', 'lambda-microvm,ecs'])('inherits %s and probes availability without persisting a default pin', async computeTypes => {
     const send = jest.fn().mockResolvedValue({ images: [] });
     const config = await onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
-      deployment: { stackName: 'test', computeSubstrate: 'lambda-microvm', computeDeploymentMode: 'exclusive' },
+      deployment: {
+        stackName: 'test',
+        computeTypes,
+        computeSubstrate: computeTypes,
+        computeDeploymentMode: computeTypes.includes(',') ? 'additive' : 'exclusive',
+      },
     }, { lambdaMicrovmClientFactory: () => ({ send }) });
     expect(send).toHaveBeenCalledTimes(1);
     expect(config.compute_type).toBeUndefined();
+  });
+
+  test('rejects an AgentCore pin when the additive deployment omits AgentCore', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'active', compute_type: 'agentcore' });
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: {
+        stackName: 'test',
+        computeTypes: 'ecs,lambda-microvm',
+        computeSubstrate: 'ecs,lambda-microvm',
+        computeDeploymentMode: 'additive',
+      },
+    })).rejects.toThrow(/deploys only 'ecs, lambda-microvm'/);
+    expect(ddbSend).not.toHaveBeenCalled();
   });
 
   test('rejects stale stored overrides before a probe or write', async () => {

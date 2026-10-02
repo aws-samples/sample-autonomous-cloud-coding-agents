@@ -99,91 +99,33 @@ The command defaults to **`mise run build`** / **`mise run lint`**. A repo that 
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
-### Blueprint controller handoff
+### Stack decomposition and synthesis budgets
 
-`blueprintProvisioning` selects the repository-provisioning lifecycle. Its default is `legacy`, so upgrading source alone does not switch an existing installation to a different custom-resource provider.
+`networkTopology` defaults to `inline`, preserving existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`; the application consumes VPC, subnet and security-group exports. The network has no application dependencies. Plain Blueprint definitions are resolved once in `cdk/src/blueprints/definitions.ts` so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
 
-| Context value | Behavior |
-|---|---|
-| `legacy` | Existing `AwsCustomResource` writes, including synthesis-time timestamps. |
-| `prepare` | Preserve the legacy resource identity, retain it on removal/replacement, and replace Create/Update with read-only `DescribeTable` calls. Delete has no callback. Repository configuration is frozen during this stage. |
-| `adopt` | Replace the retained legacy resource with the new controller. Reconcile declared settings while preserving onboarding time and undeclared overrides. Retain the new resource and disable deletion, including during rollback. |
-| `managed` | Keep the new provider and resource identity; enable normal configuration updates and soft deletion with a TTL 30 days after the delete callback executes. |
-
-For **existing deployments**, use separate, verified deployments of `prepare`, then `adopt`, then `managed`. Pass the selected value through the normal CDK context mechanism, for example `-c blueprintProvisioning=prepare`. Keep the same stack identity, complete Blueprint set, repository names, table and configuration throughout the handoff. Inventory the deployed resource IDs and repository rows, establish backups/recovery, and rehearse on a populated disposable deployment first. Review the complete change set, including image/version changes and unrelated resources.
-
-After `prepare`, verify the deployed legacy resource has both retention policies, read-only Create/Update calls and no Delete property. After `adopt`, verify each row remains active, its original onboarding time and CLI overrides survive, stale TTLs are absent, and its new ownership record is present. Only then enable `managed`. Going directly to `managed` cannot adopt an existing unowned row; the transaction fails instead of overwriting it.
-
-Adoption disables deletion so a failed cutover can return to the prepared template without tombstoning repository rows. Recovery must use the **prepared** template, whose Create callback is also inert; returning to the original legacy template can run its unconditional `PutItem`. Once managed deletion is enabled, first deploy `adopt` again before any recovery that removes the new resource. Do not roll an existing managed deployment directly back to an old legacy checkout. Reconcile retained resources explicitly after a failed operation.
-
-For **new installations with no existing repository rows**, `managed` can be selected directly. Existing CLI-onboarded rows require adoption too. A different active Blueprint cannot claim the same row; repository/table changes get a new physical identity, and deletion of the old identity is scoped to its old row. Supported backend selection and transition rules still apply separately.
-
-The provider and its private DynamoDB ownership ledger live in one shared nested stack. Transactions update repository configuration, ownership and a request receipt together. A duplicate request, even after later updates, returns its original result without replaying a configuration write. An older owner's Delete cannot remove a row claimed by a newer owner. Coordination metadata is separate from RepoTable because older CLI versions rewrite repository rows. The ledger has PITR and is retained on stack removal or replacement. Managed Blueprint delete callbacks still soft-delete their repository rows before the provider is removed. Do not manually delete or restore it independently of those resources. A failed Create can leave external state if the CloudFormation response is lost; inspect the ledger and repository before retrying or retiring that stack identity.
-
-Managed writes preserve `onboarded_at`, timestamp actual operations, clear stale TTLs on activation, and set only declared overrides. Empty asset lists explicitly remove `mcp_servers`, `cedar_policy_modules`, and `skills`; other omitted overrides remain available to the CLI. An unchanged template no longer writes repository configuration on every deployment.
-
-To measure a lifecycle stage across the structural profiles without deploying:
+The CDK build and offline census share 116 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, every multi-backend set at default and widest settings, and legacy additive selectors. Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and template-size warnings, backend membership, and two-zone auto-pin versus explicit pins. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
 
 ```bash
-MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
+MISE_EXPERIMENTAL=1 mise //cdk:census -- --output /tmp/stack-census
 ```
 
-This verifies template structure and repeatability. Live transactions, rollback and deployed-state reconciliation still need a rehearsal before production migration.
+Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account/AZ inputs, CDK metadata enabled and bundling/staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before any stack is constructed, so actual operator configurations outside the census also fail above 490. Context overrides may tighten but cannot raise the limit. `--max-resources` can only tighten the census audit ceiling.
 
-### Stateful retention and stack decomposition
+`--check-stability` runs each selected profile twice in independent processes and fails on differences. It does not normalize away timestamps, logical IDs or asset hashes. The existing Blueprint callbacks embed synthesis-time timestamps, and the alpha Bedrock guardrail uses token-derived version IDs; unchanged source can therefore fail this optional diagnostic. Deterministic Blueprint provisioning, guardrail versioning and Docker build-context changes are deferred. Passing the budget gate is not a claim of repeatable synthesis or live resource preservation.
 
-`AgentStack` and `NetworkStack` install `StatefulRetentionAspect` across their resources, including nested stacks. Both `DeletionPolicy` and `UpdateReplacePolicy` are `Retain` for DynamoDB tables, S3 buckets, Secrets Manager secrets, Cognito user pools, KMS keys, log groups, SQS queues, SNS topics and AgentCore Memory. Agent Registry and Linear workload-identity custom resources are retained too.
+Network tests compare the moved definitions, generated Name tags, endpoint security-group descriptions, exports, application service properties, shared API resources, solution attribution and provenance tags. Comparison tests fix the clock and account for existing immutable guardrail/orchestrator version IDs; the census reports those real differences. `networkReservedAzs` reserves unused address slots so removing a trailing AZ need not shift remaining subnet CIDRs. Follow the [staged AZ reduction procedure](./DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network) to release old imports before changing the network.
 
-S3 cleanup resources (`Custom::S3AutoDeleteObjects` and `Custom::CDKBucketDeployment`) also retain their existing logical IDs and gain both retention policies. Removing a live cleanup helper while retaining only its bucket could still invoke Delete and empty that bucket. For buckets, the aspect uses CloudFormation attribute overrides because the CDK Bucket L2 rejects `RETAIN` while `autoDeleteObjects` is configured. The existing helper remains present and retained; synthesis tests check that the change does not modify resource properties or remove helpers.
-
-**Install retention on the existing resource identities before removing or moving them.** Apply the retention change as a separate release of the currently deployed topology. Inspect the deployed parent and nested templates to confirm both policies on every protected resource and cleanup helper. A policy added to the target template cannot protect a resource already absent from that template. AgentCore's two named application/usage log groups remain owned by the application stack for every backend, preserving their identities for a later return to AgentCore. Review the other changes on this branch separately, including guardrail version binding and Blueprint controller handoff.
-
-Retention preserves stored resources, not the deleted application's roles, endpoints or sessions. TTLs, log retention periods and S3 lifecycle expiration continue to apply. Retained resources need an inventory and explicit recovery/import or cleanup; recreating a stack does not automatically adopt them. Disabling a registry or vault leaves its retained external identity in the account. Blueprint soft-delete behavior is unchanged, so protect repository rows with the staged handoff above when changing controller ownership.
-
-The normal CDK test suite evaluates all 96 named profiles from `synthesisProfiles`, using managed Blueprint provisioning and the production app builder. Both `inline` and `split` network topologies exercise the compute/Gateway/Registry/vault/image product and supplemental alert, fork, consent and three-zone override configurations. With managed provisioning, 93 profiles synthesize and three must be rejected by the production resource ceiling: the widest inline MicroVM profile with either two or three zones, and the widest three-zone inline ECS profile. Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs, check stateful retention and API permissions, verify the selected compute backend, and check that auto-pin still selects two zones while explicit pins use every requested zone. Expected rejections must match the application stack and the 490-resource ceiling; unrelated failures are never accepted. The offline census uses the same profiles, default budgets and retention checks:
-
-```bash
-MISE_EXPERIMENTAL=1 mise //cdk:census -- --blueprint-provisioning managed --check-stability
-```
-
-The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before constructing any stacks, so configurations outside the census also fail synthesis above 490. Context overrides may tighten this limit but cannot raise it. `--max-resources` can lower the census audit ceiling, up to the same maximum of 490. Separate production tests exercise both parent and nested templates at 490 and 491 resources without invoking the census. Legacy/prepare Blueprint provisioning adds one application resource versus adopt/managed and therefore rejects the widest three-zone inline AgentCore profile as well as ECS and MicroVMs.
-
-`networkTopology` defaults to `inline`, preserving existing stack ownership. Selecting `split` places AgentVpc and DnsFirewall in a top-level `${stackName}-network` stack. The application consumes VPC/subnet/security-group references through CloudFormation exports; the network stack has no application dependencies. VPC, private-subnet and runtime-security-group exports remain present for every backend, including values that a particular backend leaves unused. Changing compute therefore does not remove an export still consumed by the old application. Task API routes, authorizers, permissions, CORS, deployment and integrations stay together in `AgentStack`.
-
-Reducing the AZ count is a separate transition: the old application imports the trailing subnet, and CDK also shifts private subnet CIDRs if its address allocation loses an AZ slot. `networkReservedAzs` (integer 0–6, default 0) preserves unused address slots without provisioning resources. Keep active plus reserved slots constant and release removed exports with an application-only deployment before updating the network. Tests cover three-to-two-zone reductions for every backend, checking that target imports resolve in the old network and all remaining subnet properties stay unchanged. Follow the [staged AZ reduction procedure](./DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network); this is distinct from an inline-to-split ownership transfer.
-
-The split preserves network logical IDs below the stack root, generated Name tags and replacement-sensitive endpoint security-group descriptions. Tests compare application resources after resolving network imports and the expected ECS orchestrator version change, check shared API dependencies and method-scoped permissions, and verify solution attribution and provenance tags. The ECS orchestrator publishes a new Lambda version because its subnet environment values become import expressions; its alias follows that version. All parent and nested templates use compact JSON.
-
-For new installations and existing-resource migration constraints, see [Network stack topology](./DEPLOYMENT_GUIDE.md#network-stack-topology). [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md) records the boundary and measured headroom. Implementation proceeded without a populated AWS rehearsal; local template checks do not establish refactor/import eligibility or preservation of physical IDs in a live deployment.
+Existing inline-to-split migration remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and Blueprint ownership handoff must be separately reviewed and released; this change keeps existing removal policies and the existing Blueprint provider. The concrete follow-up requirements are recorded in [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md#deferred-migration-work). See [Network stack topology](./DEPLOYMENT_GUIDE.md#network-stack-topology) for fresh-install guidance and migration limits.
 
 ### Customizing the agent image
 
 The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `gh`, Claude Code CLI, and `mise`. If your repositories need additional runtimes (Java, Go, native libs), extend the Dockerfile. A normal `cdk deploy` rebuilds the image asset.
-
-AgentCore and ECS use the repository root as their build context. The root `.dockerignore` admits the Dockerfile, its runtime `COPY` inputs and the ignore file itself. When adding a new runtime input, update both the Dockerfile and this allowlist; the CDK image-context tests check that copied files remain included and that generated files cannot change the image hash. Runtime code, prompts, policies, workflows, contracts, dependency locks and managed settings still invalidate the image when edited.
-
-The first deployment after narrowing the context publishes a new image asset hash. Treat that as an ordinary image release and verify it separately before moving resource ownership.
 
 ### Writing Cedar policies for the repo
 
 A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
 
 See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
-
-### Input guardrail versions
-
-The input guardrail publishes one version for each rendered configuration. Its logical ID hashes the final guardrail CloudFormation properties, excluding deployment tags, plus the publication description. Unrelated CDK tokens and GitHub run tags do not publish a new version. Policy changes, including changes made through CDK escape hatches, do; changing the publication description also requires a new version under CloudFormation's replacement rules. Published versions have `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain` so older executions can keep using them while the guardrail exists. Retained versions need explicit cleanup after consumers and rollback windows have expired, and count toward Bedrock version quotas. Retaining a version does not protect it if its parent guardrail is deleted.
-
-**Existing installations need an explicit binding before upgrading from the earlier alpha-CDK versioning scheme.** Without it, the new logical ID would remove the old version from the template, and that old resource may not yet have a retention policy. New installations need no binding.
-
-For an existing installation:
-
-1. Capture the deployed template and the input guardrail version's logical and physical IDs. Read the published Bedrock version's configuration too; the mutable `DRAFT` alone is not evidence of what that version contains.
-2. Synthesize the candidate using the installation's exact stack name, account, Region, configuration and build inputs. Read `abca:guardrail-configuration-sha256` from the candidate `AWS::Bedrock::GuardrailVersion` metadata. Compare the native guardrail configuration with both the deployed template and published version. Do not use a structural census fixture's hash for a real installation.
-3. Set the CDK context `guardrailVersionMigration` to `{"logicalId":"<deployed-version-logical-id>","configurationHash":"<candidate-64-character-sha256>"}`. CDK accepts this object in context or as a quoted JSON string passed through `-c`. Synthesize again and review the complete change set: the native guardrail, existing version identity/properties, and consumers must remain unchanged. Retention policies, metadata and an explicit dependency on the guardrail are the expected version changes.
-4. Rehearse the normalization before deploying it to a protected installation. Check all unrelated changes, active executions, rollback and quota headroom too. The binding checks the candidate hash locally; it does not query AWS or prove that the supplied logical ID and published configuration belong together.
-
-Keep the binding through unchanged releases. A configuration change while it is present fails synthesis. When intentionally releasing a new guardrail configuration, remove the binding in that release; this switches to configuration-derived identities and publishes a new version. First verify that the normalization successfully installed retention on the old version. Retain the binding with the old release inputs for rollback review; do not assume rolling back to the earlier alpha-CDK implementation reproduces its original token-derived identity.
 
 ### Other options
 

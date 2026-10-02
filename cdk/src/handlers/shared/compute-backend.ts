@@ -32,14 +32,16 @@ export function resolveComputeBackend(value: unknown = 'agentcore'): ComputeBack
  * that backend.
  */
 export function resolveComputeBackends(computeTypes: unknown, legacyComputeType?: unknown): ComputeBackend[] {
-  if (computeTypes === undefined || computeTypes === null || computeTypes === '') {
-    const legacy = resolveComputeBackend(legacyComputeType ?? 'agentcore');
+  if (computeTypes === undefined) {
+    const legacy = resolveComputeBackend(legacyComputeType);
     return legacy === 'agentcore' ? ['agentcore'] : ['agentcore', legacy];
   }
-  const raw = Array.isArray(computeTypes) ? computeTypes : String(computeTypes).split(',');
-  const backends = [...new Set(raw.map(value => resolveComputeBackend(String(value).trim())))];
-  if (backends.length === 0) throw new Error('compute_types must list at least one backend');
-  return backends;
+  const raw: unknown[] = Array.isArray(computeTypes) ? computeTypes
+    : typeof computeTypes === 'string' ? computeTypes.split(',') : [];
+  if (raw.length === 0 || raw.some(value => typeof value !== 'string' || !value.trim())) {
+    throw new Error('compute_types must be a non-empty comma-separated list or array of agentcore, ecs or lambda-microvm');
+  }
+  return [...new Set(raw.map(value => resolveComputeBackend((value as string).trim())))];
 }
 
 /** Legacy deployments without a selection retain their per-repository routing. */

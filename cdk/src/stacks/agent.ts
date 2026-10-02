@@ -73,7 +73,6 @@ import { RegistryApi } from '../constructs/registry-api';
 import { RepoTable } from '../constructs/repo-table';
 import { SlackIntegration } from '../constructs/slack-integration';
 import { buildAppId } from '../constructs/solution-ua-aspect';
-import { StatefulRetentionAspect } from '../constructs/stateful-retention';
 import { StrandedOrchestrationReconciler } from '../constructs/stranded-orchestration-reconciler';
 import { StrandedTaskReconciler } from '../constructs/stranded-task-reconciler';
 import { TaskApi } from '../constructs/task-api';
@@ -86,7 +85,6 @@ import { TaskTable } from '../constructs/task-table';
 import { ToolGateway } from '../constructs/tool-gateway';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
-import { parseGuardrailVersionBinding, VersionedGuardrail } from '../constructs/versioned-guardrail';
 import { WebhookTable } from '../constructs/webhook-table';
 import { resolveComputeBackends } from '../handlers/shared/compute-backend';
 
@@ -164,10 +162,6 @@ export interface AgentStackProps extends StackProps {
 export class AgentStack extends Stack {
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
-
-    // Includes nested stacks. Install retention before any future resource move
-    // so the deployed source template protects data on deletion and replacement.
-    Aspects.of(this).add(new StatefulRetentionAspect(), { priority: AspectPriority.MUTATING });
 
     const enableAgentRegistry = this.node.tryGetContext('enableAgentRegistry');
     if (
@@ -392,8 +386,7 @@ export class AgentStack extends Stack {
 
     // --- Bedrock Guardrail for prompt injection detection ---
     // (Declared early so TaskApi — constructed before the runtimes — can reference it.)
-    const inputGuardrail = new VersionedGuardrail(this, 'InputGuardrail', {
-      existingVersion: parseGuardrailVersionBinding(this.node.tryGetContext('guardrailVersionMigration')),
+    const inputGuardrail = new bedrock.Guardrail(this, 'InputGuardrail', {
       guardrailName: `task-input-guardrail-${this.stackName}`.slice(0, GUARDRAIL_NAME_MAX_LENGTH),
       description: 'Screens task submissions for prompt injection attacks',
       contentFilters: [
@@ -533,19 +526,18 @@ export class AgentStack extends Stack {
     // geography's profiles while telling the agent to call another's.
     const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
 
-    // Keep these named, retained groups owned by this stack across backend
-    // switches. Removing them would orphan the physical names and a later
-    // return to AgentCore would fail with AlreadyExists instead of reusing logs.
+    // Keep the AgentCore log groups owned across explicit backend switches,
+    // with the existing destroy policy so rollback and same-name reinstall work.
     const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
       logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
       logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
       retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     let runtime: agentcore.Runtime | undefined;
@@ -802,7 +794,7 @@ export class AgentStack extends Stack {
     // by aws:PrincipalTag conditions so a compromised session reaches only its
     // own task's data. The agent assumes this with refreshable credentials
     // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
-    // role of the selected backend as the assuming principal. ECS and MicroVM
+    // roles of the deployed backends as assuming principals. ECS and MicroVM
     // admit their role during construction below.
     const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
       ...(runtime ? { assumingRoles: [runtime.role] } : { deferComputeRoleBinding: true }),
@@ -971,13 +963,10 @@ export class AgentStack extends Stack {
     // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
     // sizing and the measurements behind it — a 32 GB task was OOM-killed by a
     // fully parallel build, which is why the build tier serialises with MISE_JOBS=1)
-    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
-    // (default 'agentcore') — ECS resources only synthesize when you deploy with
-    // ``--context compute_type=ecs``, so the default synth (and the
-    // bootstrap-coverage test that synths with default context) stays
-    // agentcore-only, matching how other optional constructs are context-gated.
-    // (``computeType`` is read near the top of the constructor — TaskApi needs it
-    // for the conditional MicroVM cancel grant.)
+    // for repositories selecting ECS. Resources synthesize when `compute_types`
+    // includes ecs or the legacy `compute_type=ecs` context is used. Default
+    // synthesis remains AgentCore-only. The backend list is resolved near the
+    // top of this constructor so TaskApi can apply the same cancellation gates.
     // Ephemeral bucket for ECS task payloads — the orchestrator writes the
     // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
     // passes only an S3 URI pointer; the container fetches it on boot, the
@@ -997,8 +986,8 @@ export class AgentStack extends Stack {
     // deliberately modest so an adopter who changes nothing does not pay for the
     // Fargate ceiling — but a large monorepo genuinely needs more, so the knobs
     // have to be reachable WITHOUT editing the construct. Same shape as
-    // ``compute_type`` above:
-    //   cdk deploy -c compute_type=ecs -c ecsBuildTaskCpu=16384 \
+    // ``compute_types`` above:
+    //   cdk deploy -c compute_types=agentcore,ecs -c ecsBuildTaskCpu=16384 \
     //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
     //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
     const ecsTaskSizing = resolveEcsTaskSizing(this.node);
@@ -1107,10 +1096,9 @@ export class AgentStack extends Stack {
     // task parked on a HITL approval gate stops billing compute while keeping
     // its cloned repo and warm build caches in memory.
     //
-    // Gated exactly like the ECS backend above: resources synthesize only under
-    // ``--context compute_type=lambda-microvm``, so the default synth — and the
-    // bootstrap-coverage test that synths with default context — stays
-    // agentcore-only. The construct itself enforces the ADR's Region gate, so a
+    // Resources synthesize when `compute_types` includes lambda-microvm or the
+    // legacy `compute_type=lambda-microvm` context is used. Default synthesis
+    // remains AgentCore-only. The construct enforces the ADR's Region gate, so a
     // deploy into a Region without Lambda MicroVMs fails at synth rather than on
     // the first task.
     const lambdaMicrovm = lambdaMicrovmEnabled
@@ -1159,7 +1147,7 @@ export class AgentStack extends Stack {
     });
     new CfnOutput(this, 'ComputeTypes', {
       value: computeTypes.join(','),
-      description: 'Every deployed compute backend; repositories may select any of them.',
+      description: 'Every deployed compute backend in order; the first is the repository default.',
     });
     new CfnOutput(this, 'ComputeDeploymentMode', {
       value: computeTypes.length === 1 ? 'exclusive' : 'additive',
@@ -1287,7 +1275,7 @@ export class AgentStack extends Stack {
         ...(toolGateway && { toolGatewayUrl: toolGateway.gatewayUrl }),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
-      // only when the cluster was synthesized (deploy --context compute_type=ecs).
+      // only when ECS is included in the deployment's backend list.
       ...(ecsCluster && {
         ecsConfig: {
           clusterArn: ecsCluster.cluster.clusterArn,
@@ -2159,9 +2147,8 @@ export class AgentStack extends Stack {
       ]),
     });
 
-    // The shared AwsCustomResource provider may first be created by DNS/model
-    // logging when Blueprints use their own provider. Apply suppressions after
-    // those consumers exist, independent of the Blueprint provisioning mode.
+    // Apply after all consumers exist: with no Blueprint definitions, DNS or
+    // model logging creates the shared AwsCustomResource provider instead.
     NagSuppressions.addResourceSuppressionsByPath(this, [
       `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
       `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,

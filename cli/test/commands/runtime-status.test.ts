@@ -113,6 +113,7 @@ describe('buildRuntimeStatusReport', () => {
         stack_name: 'backgroundagent-dev',
         compute_substrate: backend,
         compute_deployment_mode: 'exclusive',
+        compute_types: [backend],
         default_compute_type: backend,
       });
       expect(report.blueprints).toHaveLength(3);
@@ -148,6 +149,30 @@ describe('buildRuntimeStatusReport', () => {
     expect(report.ecs_substrates).toHaveLength(1);
     expect(report.agentcore_runtimes).toHaveLength(1);
     expect(report.lambda_microvm_substrates).toEqual([]);
+  });
+
+  test('uses the ordered additive default and skips unavailable AgentCore pins', async () => {
+    (listRepoConfigs as jest.Mock).mockResolvedValue([
+      { repo: 'acme/default', status: 'active' },
+      { repo: 'acme/ecs', status: 'active', compute_type: 'ecs' },
+      { repo: 'acme/stale', status: 'active', compute_type: 'agentcore' },
+    ]);
+    const report = await buildRuntimeStatusReport('us-east-1', 'RepoTable', null, {
+      deployment: {
+        ...LEGACY_DEPLOYMENT,
+        computeTypes: 'lambda-microvm,ecs',
+        computeSubstrate: 'lambda-microvm,ecs',
+        computeDeploymentMode: 'additive',
+      },
+    });
+    expect(report.compute_deployment.default_compute_type).toBe('lambda-microvm');
+    expect(report.compute_deployment.compute_types).toEqual(['lambda-microvm', 'ecs']);
+    expect(report.blueprints.map(binding => binding.compute_available)).toEqual([true, true, false]);
+    expect(report.blueprints[0].compute_type).toBe('lambda-microvm');
+    expect(report.agentcore_runtimes).toEqual([]);
+    expect(report.ecs_substrates).toHaveLength(1);
+    expect(report.lambda_microvm_substrates).toHaveLength(1);
+    expect(controlPlaneSend).not.toHaveBeenCalled();
   });
 
   test('does not probe an unsupported repository compute type', async () => {

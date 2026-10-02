@@ -182,6 +182,10 @@ export function buildRepoShowLines(display: RepoConfigDisplay): RepoShowLine[] {
     { key: 'onboarded_at', text: display.onboarded_at ?? '-' },
     { key: 'updated_at', text: display.updated_at ?? '-' },
     {
+      key: 'deployed_compute_types',
+      text: display.compute_deployment.compute_types?.join(', ') ?? '(legacy additive deployment)',
+    },
+    {
       key: 'compute_type',
       text: `${display.compute_available ? '' : 'UNAVAILABLE — '}${formatSourcedValue(display.effective.compute_type, display.field_sources.compute_type)}`,
     },

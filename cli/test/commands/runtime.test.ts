@@ -31,6 +31,7 @@ const COMPUTE_DEPLOYMENT = {
   stack_name: 'backgroundagent-dev',
   compute_substrate: null,
   compute_deployment_mode: null,
+  compute_types: null,
   default_compute_type: 'agentcore',
 };
 
@@ -299,7 +300,7 @@ describe('runtime status command', () => {
     await makeRuntimeCommand().parseAsync(['node', 'test', 'status', '--region', 'us-east-1', '--output', format]);
     expect(buildRuntimeStatusReport).toHaveBeenLastCalledWith('us-east-1', 'RepoTable', null, {
       repo: undefined,
-      deployment: { stackName: 'backgroundagent-dev', computeSubstrate: 'ecs', computeDeploymentMode: 'exclusive' },
+      deployment: { stackName: 'backgroundagent-dev', computeSubstrate: 'ecs', computeDeploymentMode: 'exclusive', computeTypes: null },
     });
     if (format === 'json') {
       const report = JSON.parse(consoleSpy.mock.calls[0][0] as string);
@@ -312,5 +313,35 @@ describe('runtime status command', () => {
       expect(output).toContain('Compute deployment mode: exclusive');
       expect(output).not.toContain('Lambda MicroVMs are platform-managed');
     }
+  });
+
+  test('passes the full ordered ComputeTypes output into runtime reporting', async () => {
+    (getStackOutput as jest.Mock).mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable',
+      ComputeSubstrate: 'ecs,agentcore',
+      ComputeTypes: 'ecs,agentcore',
+      ComputeDeploymentMode: 'additive',
+    } as Record<string, string>)[key] ?? null);
+    (buildRuntimeStatusReport as jest.Mock).mockResolvedValue({
+      compute_deployment: {
+        ...COMPUTE_DEPLOYMENT,
+        compute_substrate: 'ecs,agentcore',
+        compute_deployment_mode: 'additive',
+        compute_types: ['ecs', 'agentcore'],
+        default_compute_type: 'ecs',
+      },
+      blueprints: [],
+    });
+    await makeRuntimeCommand().parseAsync(['node', 'test', 'status', '--region', 'us-east-1']);
+    expect(buildRuntimeStatusReport).toHaveBeenLastCalledWith('us-east-1', 'RepoTable', null, {
+      repo: undefined,
+      deployment: {
+        stackName: 'backgroundagent-dev',
+        computeSubstrate: 'ecs,agentcore',
+        computeTypes: 'ecs,agentcore',
+        computeDeploymentMode: 'additive',
+      },
+    });
+    expect(consoleSpy.mock.calls.map(call => call[0]).join('\n')).toContain('ComputeTypes: ecs, agentcore');
   });
 });

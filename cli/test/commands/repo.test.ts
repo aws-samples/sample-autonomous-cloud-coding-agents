@@ -96,7 +96,8 @@ describe('repo command JSON output', () => {
   beforeEach(() => {
     ddbSend.mockReset();
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
-    getStackOutputMock.mockReset().mockResolvedValue('RepoTable-dev');
+    getStackOutputMock.mockReset().mockImplementation(async (_r: string, _s: string, key: string) =>
+      key === 'RepoTableName' ? 'RepoTable-dev' : null);
     onboardRepoMock.mockReset();
     offboardRepoMock.mockReset();
   });
@@ -191,11 +192,39 @@ describe('repo command JSON output', () => {
     expect(payload.repo.github_token_secret_arn).toContain('****');
   });
 
+  test('repo show reads ComputeTypes and inherits a non-AgentCore additive default', async () => {
+    getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable-dev',
+      ComputeSubstrate: 'ecs,lambda-microvm',
+      ComputeTypes: 'ecs,lambda-microvm',
+      ComputeDeploymentMode: 'additive',
+    } as Record<string, string>)[key] ?? null);
+    ddbSend.mockResolvedValueOnce({ Item: { repo: 'acme/a', status: 'active' } });
+    await makeRepoCommand().parseAsync(['node', 'test', 'show', 'acme/a', '--region', 'us-east-1', '--output', 'json']);
+    const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(payload.effective.compute_type).toBe('ecs');
+    expect(payload.compute_available).toBe(true);
+    expect(payload.compute_deployment.compute_types).toEqual(['ecs', 'lambda-microvm']);
+  });
+
+  test('onboard reads ComputeTypes before writing and refuses an omitted AgentCore backend', async () => {
+    getStackOutputMock.mockImplementation(async (_r: string, _s: string, key: string) => ({
+      RepoTableName: 'RepoTable-dev',
+      ComputeSubstrate: 'ecs,lambda-microvm',
+      ComputeTypes: 'ecs,lambda-microvm',
+      ComputeDeploymentMode: 'additive',
+    } as Record<string, string>)[key] ?? null);
+    await expect(makeRepoCommand().parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1', '--compute-type', 'agentcore',
+    ])).rejects.toThrow(/deploys only 'ecs, lambda-microvm'/);
+    expect(onboardRepoMock).not.toHaveBeenCalled();
+  });
+
   test('onboard --compute-type ecs is REFUSED when the stack has no ECS substrate', async () => {
     // Per-key outputs: RepoTableName present, ComputeSubstrate=agentcore (deployed
     // without --context compute_type=ecs).
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
 
     const cmd = makeRepoCommand();
     await expect(cmd.parseAsync([
@@ -207,7 +236,7 @@ describe('repo command JSON output', () => {
 
   test('onboard --compute-type ecs is ALLOWED when the stack provisioned ECS', async () => {
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'ecs' });
 
     const cmd = makeRepoCommand();
@@ -222,7 +251,7 @@ describe('repo command JSON output', () => {
     // Back-compat: pre-output stacks return null for ComputeSubstrate; don't hard-block
     // (the runtime error is the backstop there).
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? null : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? null : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'ecs' });
 
     const cmd = makeRepoCommand();
@@ -234,7 +263,7 @@ describe('repo command JSON output', () => {
 
   test('onboard --compute-type agentcore is unaffected by ComputeSubstrate', async () => {
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active', compute_type: 'agentcore' });
 
     const cmd = makeRepoCommand();
@@ -252,7 +281,7 @@ describe('repo command JSON output', () => {
 
   test('onboard --compute-type lambda-microvm is REFUSED when the stack has no MicroVM substrate', async () => {
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
 
     const cmd = makeRepoCommand();
     await expect(cmd.parseAsync([
@@ -268,7 +297,7 @@ describe('repo command JSON output', () => {
     // first. `onboardRepo` owns the ListManagedMicrovmImages probe, so "the probe
     // did not run" is exactly "onboardRepo was never called".
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockReset();
 
     const cmd = makeRepoCommand();
@@ -280,7 +309,7 @@ describe('repo command JSON output', () => {
 
   test('onboard --compute-type lambda-microvm is ALLOWED when the stack provisioned it', async () => {
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'lambda-microvm' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'lambda-microvm' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({
       repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm',
     });
@@ -300,7 +329,7 @@ describe('repo command JSON output', () => {
     // The two optional backends are mutually exclusive today, so an ecs stack is
     // a real (not hypothetical) way to get this wrong.
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'ecs' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
 
     const cmd = makeRepoCommand();
     await expect(cmd.parseAsync([
@@ -312,7 +341,7 @@ describe('repo command JSON output', () => {
   test('onboard --compute-type lambda-microvm proceeds against an OLDER stack lacking ComputeSubstrate', async () => {
     // Same back-compat posture as the ECS gate: null → "unknown", not "none".
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? null : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? null : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({
       repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm',
     });
@@ -328,7 +357,7 @@ describe('repo command JSON output', () => {
     // The effective compute type may come from the existing row, which the gate
     // cannot see — `onboardRepo` resolves that and runs its own probe.
     getStackOutputMock.mockReset().mockImplementation((_r: string, _s: string, key: string) =>
-      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : 'RepoTable-dev'));
+      Promise.resolve(key === 'ComputeSubstrate' ? 'agentcore' : key === 'RepoTableName' ? 'RepoTable-dev' : null));
     onboardRepoMock.mockResolvedValue({ repo: 'acme/a', status: 'active' });
 
     const cmd = makeRepoCommand();

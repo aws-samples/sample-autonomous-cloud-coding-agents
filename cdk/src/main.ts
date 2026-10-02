@@ -68,6 +68,16 @@ export interface BuildAppOptions {
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);
+  // Never silently downgrade an explicitly configured migration prototype to
+  // the original Blueprint provider or guardrail implementation.
+  for (const key of ['blueprintProvisioning', 'guardrailVersionMigration']) {
+    if (app.node.tryGetContext(key) !== undefined) {
+      throw new Error(
+        `Context '${key}' belongs to the deferred migration prototype and is no longer supported. `
+        + 'A stack deployed with that prototype needs a separate recovery plan; do not drop this setting and deploy over it.',
+      );
+    }
+  }
   // Apply to every parent and nested template, including newly extracted stacks.
   app.node.setContext('@aws-cdk/core:suppressTemplateIndentation', true);
   // Enforce the same ceiling on actual deploy inputs, including operator overrides

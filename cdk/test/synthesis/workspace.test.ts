@@ -18,7 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { devNull, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createOutputDirectory, projectContext, sourceProvenance } from '../../src/synthesis/workspace';
@@ -26,25 +26,55 @@ import { createOutputDirectory, projectContext, sourceProvenance } from '../../s
 describe('census workspace evidence', () => {
   let directory: string;
   let checkout: string;
-  beforeEach(() => {
-    directory = mkdtempSync(path.join(tmpdir(), 'census-workspace-'));
-    checkout = path.join(directory, 'checkout');
-    mkdirSync(checkout);
+  function createCheckout(root: string): void {
+    mkdirSync(root);
     // Under a Git hook, GIT_DIR and friends point at the developer's repository;
     // without stripping them the fixture commands would write there instead.
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
     const git = (...args: string[]) => execFileSync('git', [
       '-c', `core.hooksPath=${devNull}`, '-c', 'commit.gpgSign=false',
       '-c', 'user.name=Census Test', '-c', 'user.email=census@example.com', ...args,
-    ], { cwd: checkout, env, stdio: 'pipe' });
+    ], { cwd: root, env, stdio: 'pipe' });
     git('init', '--quiet', '-b', 'census-fixture');
-    writeFileSync(path.join(checkout, 'yarn.lock'), 'fixture lock');
-    writeFileSync(path.join(checkout, '.gitignore'), 'build/\n');
-    writeFileSync(path.join(checkout, 'input.txt'), '<deleted>');
+    writeFileSync(path.join(root, 'yarn.lock'), 'fixture lock');
+    writeFileSync(path.join(root, '.gitignore'), 'build/\n');
+    writeFileSync(path.join(root, 'input.txt'), '<deleted>');
     git('add', '.');
     git('commit', '--quiet', '-m', 'fixture');
+  }
+  beforeEach(() => {
+    directory = mkdtempSync(path.join(tmpdir(), 'census-workspace-'));
+    checkout = path.join(directory, 'checkout');
+    createCheckout(checkout);
   });
   afterEach(() => { rmSync(directory, { recursive: true, force: true }); });
+
+  test('fixture creation under Git hook variables cannot change another repository or its index', () => {
+    const before = sourceProvenance(checkout);
+    const indexPath = path.join(checkout, '.git/index');
+    const index = readFileSync(indexPath);
+    const inherited = {
+      GIT_DIR: path.join(checkout, '.git'),
+      GIT_COMMON_DIR: path.join(checkout, '.git'),
+      GIT_WORK_TREE: checkout,
+      GIT_INDEX_FILE: indexPath,
+    };
+    const saved = Object.fromEntries(Object.keys(inherited).map(key => [key, process.env[key]]));
+    try {
+      for (const [key, value] of Object.entries(inherited)) process.env[key] = value;
+      const fixture = path.join(directory, 'hook-fixture');
+      createCheckout(fixture);
+      expect(existsSync(path.join(fixture, '.git/HEAD'))).toBe(true);
+      expect(sourceProvenance(fixture).dirty).toBe(false);
+      expect(sourceProvenance(checkout)).toEqual(before);
+      expect(readFileSync(indexPath)).toEqual(index);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 
   test('detects tracked deletion even when the former bytes equal the old deletion sentinel', () => {
     const before = sourceProvenance(checkout);

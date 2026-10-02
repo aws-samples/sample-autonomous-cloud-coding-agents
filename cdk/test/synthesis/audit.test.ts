@@ -127,32 +127,6 @@ describe('profile acceptance rules', () => {
     expect(audit.failures).toEqual(['worker timeout']);
   });
 
-  test('rejects unprotected data and cleanup providers in nested templates', () => {
-    const worker = (_profile: unknown, target: string): WorkerResult => {
-      synthesize(target);
-      writeFileSync(path.join(target, 'child.template.json'), JSON.stringify({
-        Resources: {
-          Data: { Type: 'AWS::DynamoDB::Table', DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Delete' },
-          Bucket: { Type: 'AWS::S3::Bucket', ...retained },
-          Cleanup: { Type: 'Custom::S3AutoDeleteObjects' },
-        },
-      }));
-      writeFileSync(path.join(target, 'api.template.json'), JSON.stringify({
-        Resources: {
-          Child: { Type: 'AWS::CloudFormation::Stack', Metadata: { 'aws:asset:path': 'child.template.json' } },
-        },
-      }));
-      return { kind: 'synthesized', census: inspectAssembly(target) };
-    };
-    const audit = auditProfile(profile, path.join(directory, 'first'), budgets, true, worker);
-    expect(audit.failures).toEqual([
-      expect.stringContaining('child.template.json/Data: AWS::DynamoDB::Table requires'),
-      expect.stringContaining('child.template.json/Cleanup: Custom::S3AutoDeleteObjects requires'),
-      expect.stringContaining('Repeat: child.template.json/Data:'),
-      expect.stringContaining('Repeat: child.template.json/Cleanup:'),
-    ]);
-  });
-
   test('carries unresolved-context diagnostics into profile failure', () => {
     const worker = (_profile: unknown, target: string): WorkerResult => {
       const result = synthesize(target);

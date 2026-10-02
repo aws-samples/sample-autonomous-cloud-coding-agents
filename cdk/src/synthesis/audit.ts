@@ -20,7 +20,6 @@
 import { AssemblyCensus, AssemblyDifference, compareAssemblies } from './assembly';
 import type { Budgets } from './budgets';
 import { SynthesisProfile } from './profiles';
-import { requiresStatefulRetention } from '../constructs/stateful-retention';
 
 export { DEFAULT_BUDGETS } from './budgets';
 export type { Budgets } from './budgets';
@@ -48,12 +47,6 @@ function resultFailures(profile: SynthesisProfile, result: WorkerResult, budgets
   const failures = [...result.census.errors];
   if (profile.expectedError) failures.push(`Expected rejection was not raised: ${JSON.stringify(profile.expectedError)}`);
   for (const template of result.census.templates) {
-    for (const resource of template.inventory) {
-      if (requiresStatefulRetention(resource.type)
-        && (resource.deletionPolicy !== 'Retain' || resource.updateReplacePolicy !== 'Retain')) {
-        failures.push(`${template.file}/${resource.logicalId}: ${resource.type} requires DeletionPolicy and UpdateReplacePolicy Retain`);
-      }
-    }
     for (const metric of ['resources', 'bytes', 'parameters', 'outputs'] as const) {
       if (template[metric] > budgets[metric]) {
         failures.push(`${template.file}: ${template[metric]} ${metric} exceeds ${budgets[metric]}`);

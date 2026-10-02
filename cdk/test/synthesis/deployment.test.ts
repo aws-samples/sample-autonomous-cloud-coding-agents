@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import { Template } from 'aws-cdk-lib/assertions';
 import type { CloudAssembly } from 'aws-cdk-lib/cx-api';
 import { AGENTCORE_AZS_CONTEXT_KEY, AUTO_PIN_AZ_COUNT } from '../../src/constructs/agentcore-azs';
+import { resolveComputeBackends } from '../../src/handlers/shared/compute-backend';
 import { buildApp } from '../../src/main';
 import { AssemblyCensus, inspectAssembly } from '../../src/synthesis/assembly';
 import { auditProfile, DEFAULT_BUDGETS, WorkerResult } from '../../src/synthesis/audit';
@@ -30,10 +31,9 @@ import { FIXTURE, STRUCTURAL_CONTEXT, synthesisProfiles } from '../../src/synthe
 import { projectContext } from '../../src/synthesis/workspace';
 
 // Exercise the same full gate product as the offline census in the normal build.
-// Managed Blueprint provisioning avoids legacy timestamp churn; the CLI can still
-// measure every handoff mode explicitly. Each configuration is synthesized once,
-// including real CDK metadata and parent/nested templates for all quota checks.
-describe.each(synthesisProfiles('managed'))('$name deployment', profile => {
+// Each configuration is synthesized once, including real CDK metadata and
+// parent/nested templates for all quota checks.
+describe.each(synthesisProfiles())('$name deployment', profile => {
   let directory: string;
   let census: AssemblyCensus;
   let assembly: CloudAssembly;
@@ -77,7 +77,7 @@ describe.each(synthesisProfiles('managed'))('$name deployment', profile => {
   afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
   test(profile.expectedError ? 'rejects the over-budget configuration at production synthesis'
-    : 'keeps every template within budget and protects its stateful resources', () => {
+    : 'keeps every template within budget', () => {
     const audit = auditProfile(profile, directory, DEFAULT_BUDGETS, false, () => result);
     expect(audit.failures).toEqual([]);
   });
@@ -121,7 +121,7 @@ describe.each(synthesisProfiles('managed'))('$name deployment', profile => {
   test('provisions only the selected compute backends across the assembly', () => {
     const resources = census.templates.flatMap(template => template.inventory);
     const count = (type: string): number => resources.filter(resource => resource.type === type).length;
-    const backends = String(profile.context.compute_types).split(',');
+    const backends = resolveComputeBackends(profile.context.compute_types, profile.context.compute_type);
     expect(count('AWS::BedrockAgentCore::Runtime')).toBe(backends.includes('agentcore') ? 1 : 0);
     expect(count('AWS::ECS::Cluster')).toBe(backends.includes('ecs') ? 1 : 0);
     expect(count('AWS::Lambda::NetworkConnector')).toBe(backends.includes('lambda-microvm') ? 2 : 0);

@@ -19,7 +19,6 @@
 
 import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
 import { DEFAULT_BUDGETS } from './budgets';
-import type { BlueprintProvisioningMode } from '../blueprints/configuration';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../constructs/agentcore-azs';
 
 export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
@@ -79,7 +78,7 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
 }
 
 /** One profile product shared by the CLI and its coverage assertions. */
-export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode): readonly SynthesisProfile[] {
+export function synthesisProfiles(): readonly SynthesisProfile[] {
   const profiles: SynthesisProfile[] = [];
   for (const compute of ['agentcore', 'ecs', 'lambda-microvm'] as const) {
     for (const gateway of [false, true]) {
@@ -111,8 +110,8 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  // Owning the two named AgentCore log groups across backend switches pushes
-  // this two-zone MicroVM combination over budget as well (491 when managed).
+  // Keeping the named AgentCore log groups across backend switches pushes
+  // this two-zone MicroVM combination over budget as well.
   const widestInlineMicrovm = 'lambda-microvm-gw1-reg1-vault1-managed-email-fork';
   const topologies: SynthesisProfile[] = [...profiles.map(candidate => candidate.name === widestInlineMicrovm
     ? { ...candidate, expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources } }
@@ -123,12 +122,9 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
   }))];
   // Auto-pin still selects two zones. Explicit pins use every requested zone,
   // adding eight resources that the original two-zone product could not expose.
-  // Legacy/prepare provisioning adds one application resource versus adopt/managed.
-  const managedProvider = provisioningMode === 'adopt' || provisioningMode === 'managed';
   for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
     for (const networkTopology of ['inline', 'split'] as const) {
-      const overBudget = networkTopology === 'inline'
-        && (base.context.compute_types !== 'agentcore' || !managedProvider);
+      const overBudget = networkTopology === 'inline';
       topologies.push({
         ...base,
         name: `${base.name}-az3${networkTopology === 'split' ? '-split' : ''}`,
@@ -147,7 +143,8 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
   // in both topologies; the first listed backend is the repository default.
   const ALL_BACKENDS = 3;
   const additive: Array<readonly Compute[]> = [
-    ['agentcore', 'lambda-microvm'], ['agentcore', 'ecs'], ['agentcore', 'ecs', 'lambda-microvm'],
+    ['agentcore', 'lambda-microvm'], ['agentcore', 'ecs'], ['ecs', 'lambda-microvm'],
+    ['agentcore', 'ecs', 'lambda-microvm'],
   ];
   for (const backends of additive) {
     for (const wide of [false, true]) {
@@ -172,9 +169,20 @@ export function synthesisProfiles(provisioningMode?: BlueprintProvisioningMode):
       }
     }
   }
-  return provisioningMode === undefined ? topologies : topologies.map(candidate => ({
-    ...candidate, context: { ...candidate.context, blueprintProvisioning: provisioningMode },
-  }));
+  // The original selector remains additive: exercise real legacy inputs rather
+  // than relying on the equivalent explicit list to protect upgrade behavior.
+  for (const compute of ['ecs', 'lambda-microvm'] as const) {
+    const base = profile(compute, false, true, false, compute === 'lambda-microvm' ? 'managed' : 'none');
+    const { compute_types: _explicit, ...context } = base.context;
+    for (const networkTopology of ['inline', 'split'] as const) {
+      topologies.push({
+        ...base,
+        name: `legacy-${compute}-${networkTopology}`,
+        context: { ...context, compute_type: compute, networkTopology },
+      });
+    }
+  }
+  return topologies;
 }
 
 /** Never inherit deploy context, credentials, NODE_OPTIONS, or blueprint overrides. */

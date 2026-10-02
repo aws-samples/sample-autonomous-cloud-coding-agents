@@ -27,7 +27,6 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     const app = new App({
       context: {
         compute_types: backend,
-        blueprintProvisioning: 'managed',
         enableToolGateway: true,
         enableLinearIdentityVault: true,
         ...(backend === 'lambda-microvm' ? {
@@ -52,7 +51,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     template.resourceCountIs('AWS::BedrockAgentCore::Gateway', 1);
   });
 
-  test('keeps the same named AgentCore logs owned and retained across backend switches', () => {
+  test('keeps AgentCore logs owned across backend switches with the existing destroy policy', () => {
     const groups = Object.fromEntries(Object.entries(template.findResources('AWS::Logs::LogGroup'))
       .filter(([id]) => id.startsWith('RuntimeApplicationLogGroup') || id.startsWith('RuntimeUsageLogGroup'))
       .map(([id, resource]) => [id, {
@@ -65,16 +64,32 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
       RuntimeApplicationLogGroupCCD512EC: {
         name: '/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/ComputeSelection',
         retention: 90,
-        deletion: 'Retain',
-        replacement: 'Retain',
+        deletion: 'Delete',
+        replacement: 'Delete',
       },
       RuntimeUsageLogGroup3193D914: {
         name: '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ComputeSelection',
         retention: 90,
-        deletion: 'Retain',
-        replacement: 'Retain',
+        deletion: 'Delete',
+        replacement: 'Delete',
       },
     });
+  });
+
+  test('allows fixed-name logs to be cleaned up on destroy and failed creation', () => {
+    const groups = Object.values(template.findResources('AWS::Logs::LogGroup'));
+    const names = [
+      '/aws/bedrock/model-invocation-logs/ComputeSelection',
+      '/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/ComputeSelection',
+      '/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/ComputeSelection',
+      ...(backend === 'lambda-microvm' ? ['/aws/lambda-microvms/ComputeSelection-abca-agent'] : []),
+    ];
+    for (const name of names) {
+      expect(groups.find(resource => resource.Properties.LogGroupName === name)).toMatchObject({
+        DeletionPolicy: 'Delete',
+        UpdateReplacePolicy: 'Delete',
+      });
+    }
   });
 
   test('dispatch and cancellation target the selected backend', () => {
@@ -113,15 +128,18 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
 });
 
 describe.each([
-  ['compute_types list', { compute_types: 'agentcore,lambda-microvm' }],
-  ['legacy compute_type', { compute_type: 'lambda-microvm' }],
-])('additive deployment from %s', (_label, selector) => {
+  { label: 'explicit AgentCore/MicroVM', selector: { compute_types: 'agentcore,lambda-microvm' }, backends: ['agentcore', 'lambda-microvm'] },
+  { label: 'legacy MicroVM', selector: { compute_type: 'lambda-microvm' }, backends: ['agentcore', 'lambda-microvm'] },
+  { label: 'legacy ECS', selector: { compute_type: 'ecs' }, backends: ['agentcore', 'ecs'] },
+  { label: 'ECS default with AgentCore', selector: { compute_types: ['ecs', 'agentcore'] }, backends: ['ecs', 'agentcore'] },
+  { label: 'MicroVM default without AgentCore', selector: { compute_types: 'lambda-microvm,ecs' }, backends: ['lambda-microvm', 'ecs'] },
+  { label: 'all backends', selector: { compute_types: 'agentcore,ecs,lambda-microvm' }, backends: ['agentcore', 'ecs', 'lambda-microvm'] },
+])('additive deployment from $label', ({ selector, backends }) => {
   let template: Template;
   beforeAll(() => {
     const app = new App({
       context: {
         ...selector,
-        blueprintProvisioning: 'managed',
         microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test-image',
         microvm_image_version: '1',
       },
@@ -131,26 +149,46 @@ describe.each([
     }));
   });
 
-  test('provisions every listed backend and keeps AgentCore as the repository default', () => {
-    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 1);
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', 2);
-    template.resourceCountIs('AWS::ECS::Cluster', 0);
+  test('provisions every listed backend and preserves its declared default', () => {
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', backends.includes('agentcore') ? 1 : 0);
+    template.resourceCountIs('AWS::Lambda::NetworkConnector', backends.includes('lambda-microvm') ? 2 : 0);
+    template.resourceCountIs('AWS::ECS::Cluster', backends.includes('ecs') ? 1 : 0);
     // Existing CLIs parse a comma list here on non-exclusive stacks.
-    template.hasOutput('ComputeSubstrate', { Value: 'agentcore,lambda-microvm' });
-    template.hasOutput('ComputeTypes', { Value: 'agentcore,lambda-microvm' });
+    template.hasOutput('ComputeSubstrate', { Value: backends.join(',') });
+    template.hasOutput('ComputeTypes', { Value: backends.join(',') });
     template.hasOutput('ComputeDeploymentMode', { Value: 'additive' });
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
       .find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))![1];
     const env = orchestrator.Properties.Environment.Variables;
-    expect(env.DEPLOYED_COMPUTE_TYPE).toBe('agentcore,lambda-microvm');
-    expect(env.RUNTIME_ARN).toBeDefined();
+    expect(env.DEPLOYED_COMPUTE_TYPE).toBe(backends.join(','));
+    expect(!!env.RUNTIME_ARN).toBe(backends.includes('agentcore'));
+    expect(!!env.ECS_CLUSTER_ARN).toBe(backends.includes('ecs'));
   });
 
   test('session trust admits every deployed compute role', () => {
     const role = Object.entries(template.findResources('AWS::IAM::Role'))
       .find(([id]) => id.startsWith('AgentSessionRole'))![1];
     const trust = JSON.stringify(role.Properties.AssumeRolePolicyDocument);
-    expect(trust).toContain('RuntimeExecutionRole');
-    expect(trust).toContain('LambdaMicrovmComputeExecutionRole');
+    expect(trust.includes('RuntimeExecutionRole')).toBe(backends.includes('agentcore'));
+    expect(trust.includes('EcsAgentClusterTaskRole')).toBe(backends.includes('ecs'));
+    expect(trust.includes('LambdaMicrovmComputeExecutionRole')).toBe(backends.includes('lambda-microvm'));
+  });
+
+  test('grants Linear and Jira OAuth reads to every deployed compute role', () => {
+    const prefixes: Record<string, string> = {
+      'agentcore': 'RuntimeExecutionRole',
+      'ecs': 'EcsAgentClusterTaskRole',
+      'lambda-microvm': 'LambdaMicrovmComputeExecutionRole',
+    };
+    const policies = {
+      ...template.findResources('AWS::IAM::Policy'),
+      ...template.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    for (const backend of backends) {
+      const grants = JSON.stringify(Object.entries(policies).filter(([id]) => id.startsWith(prefixes[backend])));
+      expect(grants).toContain('secretsmanager:GetSecretValue');
+      expect(grants).toContain('bgagent-linear-oauth-*');
+      expect(grants).toContain('bgagent-jira-oauth-*');
+    }
   });
 });

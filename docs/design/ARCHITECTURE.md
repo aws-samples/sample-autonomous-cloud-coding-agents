@@ -39,14 +39,14 @@ For the full orchestrator design, see [ORCHESTRATOR.md](./ORCHESTRATOR.md). For 
 
 ## Deployment boundaries
 
-`AgentStack` keeps the shared Task API, its route integrations, data stores and selected compute backend together. Registry, RegistryApi, managed Blueprint provisioning and the hosted Linear consent page retain their existing nested boundaries. Network ownership is selected by `networkTopology`:
+`AgentStack` keeps the shared Task API, its route integrations, data stores and selected compute backends together. Registry, RegistryApi and the hosted Linear consent page retain their existing nested boundaries. Network ownership is selected by `networkTopology`:
 
 | Topology | Network ownership | Stack dependencies |
 |---|---|---|
 | `inline` (default) | AgentVpc and DnsFirewall inside the application stack | Existing parent/nested structure |
 | `split` | Separate `${stackName}-network` stack | Application imports network references; network has no application references |
 
-The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution, provenance tags and stateful retention. Existing deployments require an explicit ownership transfer; see [deployment guidance](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology) and [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md). Live migration has not been validated.
+The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology) and [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md). Live migration has not been validated.
 
 ## Repository onboarding
 

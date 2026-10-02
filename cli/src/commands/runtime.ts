@@ -41,11 +41,12 @@ export function makeRuntimeCommand(): Command {
       .action(async (opts) => {
         if (opts.repo) assertRepoFormat(opts.repo);
         const { region, stackName } = resolveOperatorContext(opts);
-        const [repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode] = await Promise.all([
+        const [repoTableName, platformRuntimeArn, computeSubstrate, computeDeploymentMode, computeTypes] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'ComputeSubstrate'),
           getStackOutput(region, stackName, 'ComputeDeploymentMode'),
+          getStackOutput(region, stackName, 'ComputeTypes'),
         ]);
         if (!repoTableName) {
           throw new CliError(
@@ -57,7 +58,7 @@ export function makeRuntimeCommand(): Command {
           region,
           repoTableName,
           platformRuntimeArn,
-          { repo: opts.repo, deployment: { stackName, computeSubstrate, computeDeploymentMode } },
+          { repo: opts.repo, deployment: { stackName, computeSubstrate, computeDeploymentMode, computeTypes } },
         );
 
         if (opts.output === 'json') {
@@ -70,6 +71,7 @@ export function makeRuntimeCommand(): Command {
         console.log(`Platform default compute: ${selectedComputeType}`);
         console.log(`Compute deployment mode: ${report.compute_deployment.compute_deployment_mode ?? 'legacy additive'}`);
         console.log(`ComputeSubstrate: ${report.compute_deployment.compute_substrate ?? '(stack output missing)'}`);
+        console.log(`ComputeTypes: ${report.compute_deployment.compute_types?.join(', ') ?? '(legacy stack output missing)'}`);
         if (selectedComputeType === 'agentcore') console.log(`Platform default RuntimeArn: ${platformRuntimeArn ?? '(stack output missing)'}`);
         console.log();
 

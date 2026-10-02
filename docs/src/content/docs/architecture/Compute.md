@@ -11,7 +11,7 @@ Every task runs in an isolated cloud compute environment. Nothing runs on the us
 
 ## Compute options
 
-The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. The deployment selects exactly one backend using the `compute_type` CDK context: `agentcore` (default), `ecs`, or `lambda-microvm`. The `ComputeStrategy` interface dispatches tasks to that deployed backend.
+The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. The `compute_types` CDK context selects one or more backends: `agentcore`, `ecs`, and `lambda-microvm`. Its first entry is the default for repositories; a repository can explicitly select any deployed backend. The `ComputeStrategy` interface dispatches each task to its resolved backend.
 
 | | AgentCore Runtime | ECS on Fargate | **Lambda MicroVMs** | ECS on EC2 | EKS | AWS Batch | Lambda (functions) | Custom EC2 + Firecracker |
 |---|---|---|---|---|---|---|---|---|
@@ -27,25 +27,45 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 
 > **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
 
-Repositories without a `compute_type` override inherit the deployment selection. An explicit Blueprint or RepoTable override must match the deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the `ComputeStrategy` interface.
+Repositories without a `compute_type` override inherit the first entry in the deployed list. An explicit Blueprint or RepoTable override must name a deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the `ComputeStrategy` interface.
 
 ## Selecting and changing the backend
 
-Set `compute_type` in `cdk/cdk.json` or pass `--context compute_type=ecs` (or `lambda-microvm`) to the deployment task. Invalid values fail synthesis. `ComputeSubstrate` advertises the selected backend and `ComputeDeploymentMode=exclusive` distinguishes this contract from older additive deployments. `RuntimeArn` exists only for AgentCore. The CLI uses these outputs for onboarding defaults, repository display and runtime discovery; it retains the old additive interpretation when the mode output is absent.
+Set `compute_types` in `cdk/cdk.json` as an array, or pass a comma-separated list to the deployment task:
 
-`bgagent repo show` and `bgagent runtime status` mark incompatible stored backend pins as **UNAVAILABLE** and explain how to reconcile them. JSON includes `compute_deployment`, `compute_available` and `configuration_error` (per Blueprint in the runtime report). A displayed `compute_type` records the resolved configuration; it is usable only when `compute_available` is true. Runtime status excludes incompatible repositories from backend summaries and AgentCore probes while still reporting other repositories. This checks the deployment contract, not live backend readiness.
+```bash
+# AgentCore and MicroVM, with AgentCore as the repository default.
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=agentcore,lambda-microvm
 
-**Upgrading an existing ECS or MicroVM deployment removes its previously co-deployed AgentCore Runtime**, even if the context value does not change. Treat this as a compute migration, separate from a stack-ownership move or Blueprint-controller handoff:
+# Only ECS; removing an existing backend requires the transition below.
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=ecs
+```
 
-1. Record the deployed context and templates, image identifiers, repository backend/runtime overrides, and active sessions. Pause task submissions, webhook producers and scheduled work. Let all running and suspended tasks finish, or cancel them with the existing deployment and verify compute termination.
-2. Reconcile repository overrides with the target backend. Omitted `compute_type` inherits the target; a stored incompatible value is rejected, including during CLI re-onboarding. Remove obsolete runtime overrides when leaving AgentCore. Use the updated CLI alongside this CDK version.
-3. Prepare the target image and bootstrap permissions. MicroVM requires a compatible snapshot; rebuild/repackage it from this checkout before enabling Gateway or the vault because their optional settings now travel through the shared `platform_config` contract. A MicroVM deployment without an image provisions infrastructure but cannot run tasks.
-4. Review the complete CloudFormation change set. Expect removal of the unused Runtime and its delivery resources for ECS/MicroVM. The two named AgentCore application/usage log groups remain in the application stack with their original logical IDs and both retention policies, even when another backend is selected. Keeping ownership lets a later return to AgentCore reuse the existing names. This adds two resources to ECS/MicroVM; the widest inline MicroVM combinations require split networking or fewer optional services. Install the [retention prerequisite](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stateful-retention-and-stack-decomposition) before any other resource removal or ownership transfer. VPC placement continues to use the existing AZ policy. Verify shared stateful resources keep their identities.
-5. Rehearse deployment and rollback in a disposable environment, then deploy during the submission pause. Verify the backend outputs, an ordinary task, repository-less work, cancellation, logs and enabled integrations before resuming producers. Returning to AgentCore preserves the owned log groups, but cannot resume deleted sessions or recover deleted runtime storage. The configured log retention period still expires old events.
+`compute_types` takes precedence over the legacy `compute_type` context. Empty lists, non-string entries and unsupported names fail synthesis. Duplicate names are collapsed while preserving order. Without `compute_types`, the previous deployment behavior is preserved:
 
-If an earlier experimental release already removed these log groups from the stack while retaining their physical names, reconcile that existing state before applying this version. Inventory both names and import the groups back under `RuntimeApplicationLogGroupCCD512EC` and `RuntimeUsageLogGroup3193D914` with a dedicated CloudFormation/CDK resource-import operation. Verify the imported properties and retention policies before the normal compute update. A normal deployment does not automatically import existing groups; recreating them with the same names fails with `AlreadyExists`.
+| Legacy context | Deployed backends | Repository default |
+|---|---|---|
+| Absent, or `compute_type=agentcore` | AgentCore | AgentCore |
+| `compute_type=ecs` | AgentCore and ECS | AgentCore |
+| `compute_type=lambda-microvm` | AgentCore and Lambda MicroVMs | AgentCore |
 
-Local synthesis proves resource wiring, quota headroom and template stability. It does not qualify a live backend transition or change the experimental status of Lambda MicroVMs.
+An upgrade with the same legacy context keeps AgentCore, its role and its log delivery. Selecting a single optional backend explicitly, such as `compute_types=ecs`, opts into removing AgentCore. The bootstrap `ComputeTypes` CloudFormation parameter is a separate permission allowlist; enable every backend you plan to deploy there too.
+
+`ComputeTypes` and `ComputeSubstrate` both publish the complete ordered comma list. `ComputeDeploymentMode` is `exclusive` for one backend and `additive` for several. `RuntimeArn` exists whenever AgentCore is included. The orchestrator receives the same list in `DEPLOYED_COMPUTE_TYPE`. Stack-level `compute_type` tags join the deployed names with `+`, a tag-safe separator; backend-specific resources keep their own attribution.
+
+Use the updated CLI when the first backend is not AgentCore, or the list omits AgentCore. Older CLIs assume AgentCore is present and is the default on additive stacks. The updated CLI reads `ComputeTypes` for onboarding, `repo show`, and `runtime status`. Stacks without the new outputs retain the legacy interpretation.
+
+`bgagent repo show` and `bgagent runtime status` mark incompatible stored pins as **UNAVAILABLE** and explain how to reconcile them. JSON includes the ordered `compute_deployment.compute_types` array, `default_compute_type`, `compute_available`, and `configuration_error` (per repository in runtime status). Incompatible repositories are excluded from backend summaries and AgentCore probes. This checks deployment configuration; MicroVM image readiness and live backend health remain separate checks.
+
+Before deliberately removing a backend or changing the first entry:
+
+1. Record deployed context, templates, image identifiers, repository overrides and active sessions. Pause task submissions and let running or suspended work finish, or cancel it with the existing deployment.
+2. Reconcile stored overrides with the target list. Omitted `compute_type` inherits its first entry; explicit pins to other deployed backends remain valid. Remove obsolete `runtime_arn` overrides when leaving AgentCore.
+3. Prepare images and bootstrap permissions. MicroVM needs a compatible snapshot; rebuild it from this checkout before enabling Gateway or the vault because their optional settings travel through `platform_config`. Infrastructure without an image cannot run tasks.
+4. Review the full change set. Removing AgentCore removes its Runtime and delivery resources. The two named AgentCore log groups stay owned by the application across backend switches, with their existing destroy policies and retention periods. Shared data stores keep their existing lifecycle policies. A network ownership transfer is a separate, deferred migration.
+5. Rehearse deployment and rollback, then verify a task on each backend, repository-less work, cancellation, logs and enabled integrations before resuming submissions. Re-adding a backend cannot resume deleted sessions or recover runtime storage.
+
+The resource budget applies to the complete combination. The split topology fits the sampled combinations, including all three backends; wider inline combinations fail at the 490-resource ceiling. See [Network stack topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology). Local synthesis verifies wiring and budget behavior; it does not establish a live migration guarantee or change MicroVM's experimental status.
 
 ## What runs in the session
 
@@ -99,7 +119,7 @@ See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orches
 
 ## Lambda MicroVMs backend
 
-Lambda MicroVMs are an opt-in third backend, selected for the deployment with `compute_type=lambda-microvm`. Repositories inherit it or specify a matching override; AgentCore is the default for deployments that do not select another backend. Image configuration has three states: a managed base-image ARN and version creates the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither provisions only the roles, buckets, and connectors needed for the bootstrap deploy. `cdk/scripts/package-microvm-artifact.sh` packages the agent as zip + Dockerfile, uploads it to the artifact bucket, and can create the external image. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
+Lambda MicroVMs are an opt-in third backend. Include `lambda-microvm` in `compute_types`; repositories inherit the first listed backend or choose a deployed backend through an override. Legacy `compute_type=lambda-microvm` deploys AgentCore and MicroVM, with AgentCore as the default. Image configuration has three states: a managed base-image ARN and version creates the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither provisions only the roles, buckets, and connectors needed for the bootstrap deploy. `cdk/scripts/package-microvm-artifact.sh` packages the agent as zip + Dockerfile, uploads it to the artifact bucket, and can create the external image. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
 
 Because a snapshot freezes its build-time environment, deployment-specific, non-secret identifiers travel in the `/run` hook's `platform_config` block instead. The strategy sends the canonical inline envelope or, when that envelope exceeds the verified 4,096-byte `runHookPayload` limit, an S3-pointer envelope with the configuration also merged into the uploaded payload. The agent accepts only allowlisted keys and installs them before pipeline initialization; [ADR-021 §3](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend#3-packaging-same-agent-image-source-new-build-path) defines the exact wire shapes and validation rules.
 

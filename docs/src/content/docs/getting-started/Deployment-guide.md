@@ -8,7 +8,7 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. Each deployment provisions exactly one compute backend:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
@@ -21,9 +21,9 @@ ABCA deploys from the `backgroundagent-dev` application stack with nested stacks
 
 All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
 
-AgentCore is the default. Select ECS with `mise //cdk:deploy -- --context compute_type=ecs`; select MicroVM as described below. Repositories inherit this choice unless they have an explicit matching override. Optional services such as Memory, Gateway and the Linear vault are independent of Runtime selection.
+AgentCore is the default. `compute_types` selects a comma-separated list (or a JSON array in `cdk/cdk.json`); its first entry is the repository default. For example, `-c compute_types=agentcore,ecs` deploys both, while `-c compute_types=ecs` deploys only ECS. Repository overrides can select any deployed backend. Memory, Gateway, Registry and the Linear vault remain independently configurable.
 
-Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading removes that unused Runtime and its log-delivery resources. The two named AgentCore log groups remain owned by the application stack so a later return to AgentCore can reuse them. Drain active tasks and review the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before applying this version. Keep this migration separate from Blueprint-controller handoff and stack extraction.
+Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-microvm` keeps AgentCore alongside that backend, including on upgrade. An unchanged legacy context therefore does not remove AgentCore. Use the updated CLI for lists whose default is not AgentCore or that omit AgentCore; it reads the ordered `ComputeTypes` output. See the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before deliberately removing a backend or changing the default.
 
 ### Network stack topology
 
@@ -31,28 +31,22 @@ Existing ECS/MicroVM deployments previously included AgentCore too. Upgrading re
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-With Gateway, Registry, the Linear vault, alert email and a fork Blueprint enabled, the widest managed-image MicroVM configuration reaches **491 inline resources even with two zones** and is rejected. Keeping the two named AgentCore log groups owned across backend changes accounts for two of those resources. An explicit three-zone pin adds eight network resources: the widest managed ECS and MicroVM configurations reach 493 and 499 inline resources and are rejected; AgentCore reaches 490. Legacy/prepare Blueprint provisioning adds one more application resource, so three-zone AgentCore is rejected there too. All split counterparts pass. For these combinations, select split topology for a new installation or follow the existing-deployment ownership-transfer procedure below. The budget guard does not switch topology.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint and explicit three-zone pins. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
-For a **new installation with no existing resources or repository rows**:
+For a **new installation**:
 
 ```bash
 MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all \
-  -c networkTopology=split -c blueprintProvisioning=managed
+  -c networkTopology=split -c compute_types=agentcore
 ```
 
-This can be combined with the existing `compute_type`, `stackName` and optional-service context settings. The split preserves the supported-AZ selection, HTTPS egress rules, endpoints and DNS observation mode. Configure additional Blueprint domains in `cdk/src/blueprints/definitions.ts`; both stacks consume those inputs before any repository resource is created.
+Replace the compute list as needed and supply image settings for MicroVM. Persist the selected context in `cdk/cdk.json` for subsequent synth, diff and deploy commands. The split preserves the supported-AZ policy, HTTPS egress, endpoints and DNS observation mode. Configure additional Blueprint domains in `cdk/src/blueprints/definitions.ts`; both stacks consume those inputs before repository resources are constructed.
 
-**An existing inline deployment needs an ownership transfer.** Changing the flag in an ordinary deploy creates a different VPC and removes the old resources; matching logical IDs in different stacks do not preserve physical identity. The implementation has local synthesis coverage only. No populated AWS migration or rollback rehearsal was performed.
+**Existing inline-to-split migration is deferred.** Do not flip `networkTopology` on an existing inline deployment. An ordinary deploy creates a new VPC and removes old resources; identical logical IDs in different stacks do not preserve physical identity. Keep the existing topology until a separately reviewed migration has established resource-type eligibility, source retention and cleanup behavior, an ownership mapping, physical-ID/data preservation, and rollback on a populated disposable deployment. The `cdk refactor --unstable=refactor` criterion in #852 remains open; it is not waived or satisfied by synthesis tests.
 
-For an existing deployment, prepare a migration against its actual deployed templates:
+This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
 
-1. Apply the [retention prerequisite](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stateful-retention-and-stack-decomposition) while keeping `networkTopology=inline`. Settle compute selection, Blueprint controller handoff, guardrail identity, asset normalization and provider attribution as separate updates. Record the resulting templates and configuration as the source baseline.
-2. Inventory physical IDs for the VPC, subnets, endpoints, security groups, routes, DNS associations, log groups and provider resources. Expect an ECS orchestrator Lambda version update when subnet environment references become imports. Preserve application data inventories and backups. Drain active tasks before moving network ownership.
-3. Check CloudFormation refactor/import support for each resource type and inspect the proposed mapping. `cdk refactor` requires `--unstable=refactor`; custom resources and provider changes need explicit handling. The target duplicates the shared AWS custom-resource provider and adds stack metadata, so the final template is not a move-only change. Do not assume a single refactor operation can apply it.
-4. If using retain/import, first deploy both retention policies on **every resource being transferred** in the source stack. The stateful-retention aspect protects network log groups, not every VPC/DNS resource. Resolve provider callbacks before detaching custom resources: the DNS configuration helper's Delete call changes fail-open behavior. Import eligibility and a resource-specific procedure must be established before removing source ownership.
-5. Transfer supported resources, establish network exports, then switch application consumers. Verify physical IDs and DNS/network behavior, API routes, authentication and retained data before resuming tasks. Keep source/target templates and the final mapping for recovery.
-
-Rollback requires the reverse ownership plan. CloudFormation will not remove or change exports while the application imports them. Redeploying `inline` or destroying the network stack is not an automatic rollback. These are migration requirements, not a validated migration script; the local feature can be used for fresh environments without claiming that existing-resource migration is verified.
+Stacks used to test earlier revisions with `blueprintProvisioning=prepare|adopt|managed` or the broad retention aspect require a separate recovery plan before adopting this narrowed version. Returning those stacks directly to the original Blueprint provider can overwrite or soft-delete repository rows. Synthesis rejects the removed `blueprintProvisioning` and `guardrailVersionMigration` context keys instead of silently ignoring them; removing those keys does not make an experimental stack safe to update. Preserve its deployed templates, repository data and ledger inventory; the removed experimental modes are not an upgrade path supported by this release.
 
 #### Reducing AZs in an existing split network
 
@@ -104,10 +98,10 @@ Local synthesis tests verify the import ordering and unchanged remaining subnet 
 
 > **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
 
-Selecting it is a synth-time context flag:
+Include it in the deployment's backend list, preserving any backends already in use:
 
 ```bash
-mise //cdk:deploy -- --context compute_type=lambda-microvm
+mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 ```
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
@@ -216,7 +210,7 @@ At public US East (N. Virginia) first-tier list rates verified in August 2026, t
 |---------|---------|---------------|
 | Bedrock AgentCore Runtime (MicroVMs) | Agent sessions (default) | Yes |
 | ECS Fargate (when enabled) | Agent sessions (opt-in) | Yes |
-| AWS Lambda MicroVMs (when enabled) | Agent sessions (experimental, `--context compute_type=lambda-microvm`) | Yes |
+| AWS Lambda MicroVMs (when enabled) | Agent sessions (experimental, include `lambda-microvm` in `compute_types`) | Yes |
 | Lambda (Node.js 24, ARM64) | Orchestrator, API handlers, fanout consumer, reconcilers, custom resources | Yes |
 
 ### AI/ML
@@ -399,7 +393,28 @@ aws ec2 describe-subnets --filters "Name=vpc-id,Values=<vpc-id>" \
   --query 'Subnets[].[SubnetId,AvailabilityZone,AvailabilityZoneId]' --output text
 ```
 
-Be aware that destroying a VPC whose subnets held AgentCore ENIs can take 20–40 minutes while AWS reclaims them (see the `DELETE_FAILED` note in the [quick start](./QUICK_START.mdx) troubleshooting table).
+### Teardown blocked by AgentCore network interfaces
+
+Deleting an AgentCore Runtime does not immediately release its service-managed network interfaces. The live review of [#912](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/912) observed `agentic_ai` interfaces attached by `amazon-aws` still in use after five hours. They can block RuntimeSG, subnet and VPC deletion and leave a stack in `DELETE_FAILED`. This also affects ordinary destroys from `main`; it is not a fixed 20–40 minute delay.
+
+Inspect the failed stack and its VPC before retrying:
+
+```bash
+aws cloudformation list-stack-resources --stack-name <failed-stack> \
+  --query 'StackResourceSummaries[?ResourceStatus==`DELETE_FAILED`].[LogicalResourceId,PhysicalResourceId,ResourceType]' \
+  --output table
+aws ec2 describe-network-interfaces --filters Name=vpc-id,Values=<vpc-id>
+```
+
+Let AgentCore release its interfaces; do not try to force-detach interfaces owned by `amazon-aws`. To finish deleting a stack already in `DELETE_FAILED`, inventory the blocked network resources and their dependencies, then retain those exact **logical IDs** in a deletion retry:
+
+```bash
+aws cloudformation delete-stack --stack-name <failed-stack> \
+  --retain-resources <blocked-logical-id> <dependent-logical-id>
+```
+
+For split deployments, identify whether the failed resources belong to the application or the `-network` stack and target that stack. Keep physical IDs for every retained resource and track their cost. After the service releases the ENIs, clean up retained security groups, subnets and other VPC dependencies before deleting the VPC. `--retain-resources` does not perform that later cleanup or make the resources reusable by a same-name reinstall. Reconcile any retained resources from earlier experimental builds separately.
+
 
 ### DNS Query Log Config replacement cascade (upgrading from pre-v0.5)
 

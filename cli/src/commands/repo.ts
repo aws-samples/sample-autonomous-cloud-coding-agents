@@ -124,16 +124,17 @@ export function makeRepoCommand(): Command {
         }
 
         const config = await loadRepoConfig(region, tableName, repoId);
-        const [platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode] = await Promise.all([
+        const [platformTokenArn, runtimeArn, computeSubstrate, computeDeploymentMode, computeTypes] = await Promise.all([
           getStackOutput(region, stackName, 'GitHubTokenSecretArn'),
           getStackOutput(region, stackName, 'RuntimeArn'),
           getStackOutput(region, stackName, 'ComputeSubstrate'),
           getStackOutput(region, stackName, 'ComputeDeploymentMode'),
+          getStackOutput(region, stackName, 'ComputeTypes'),
         ]);
         const display = formatRepoConfigForDisplay(config, {
           githubTokenSecretArn: platformTokenArn,
           runtimeArn,
-          deployment: { stackName, computeSubstrate, computeDeploymentMode },
+          deployment: { stackName, computeSubstrate, computeDeploymentMode, computeTypes },
         });
 
         if (opts.output === 'json') {
@@ -176,7 +177,7 @@ export function makeRepoCommand(): Command {
         const { region, stackName } = resolveOperatorContext(opts);
         const [
           tableName, platformRuntimeArn, platformGithubTokenSecretArn, computeSubstrate, deployedGeo,
-          grantedModelIds, computeDeploymentMode,
+          grantedModelIds, computeDeploymentMode, computeTypes,
         ] = await Promise.all([
           getStackOutput(region, stackName, 'RepoTableName'),
           getStackOutput(region, stackName, 'RuntimeArn'),
@@ -185,13 +186,14 @@ export function makeRepoCommand(): Command {
           getStackOutput(region, stackName, 'BedrockGeoRegion'),
           getStackOutput(region, stackName, 'BedrockModelIds'),
           getStackOutput(region, stackName, 'ComputeDeploymentMode'),
+          getStackOutput(region, stackName, 'ComputeTypes'),
         ]);
         if (!tableName) {
           throw new CliError(
             `Stack '${stackName}' is missing output 'RepoTableName'. Re-deploy the CDK stack.`,
           );
         }
-        const deployment = { stackName, computeSubstrate, computeDeploymentMode };
+        const deployment = { stackName, computeSubstrate, computeDeploymentMode, computeTypes };
         // Check explicit input early; onboardRepo also checks any stored override.
         assertComputeSubstrateDeployed({ ...deployment, computeType: opts.computeType });
 

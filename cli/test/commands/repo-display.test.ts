@@ -61,6 +61,7 @@ describe('formatRepoConfigForDisplay', () => {
         stack_name: 'backgroundagent-dev',
         compute_substrate: backend,
         compute_deployment_mode: 'exclusive',
+        compute_types: [backend],
         default_compute_type: backend,
       });
 

@@ -167,6 +167,21 @@ describe('buildApp — AgentCore AZ wiring', () => {
   });
 });
 
+describe('buildApp — deferred migration settings', () => {
+  test.each([
+    { blueprintProvisioning: 'legacy' },
+    { blueprintProvisioning: 'prepare' },
+    { blueprintProvisioning: 'adopt' },
+    { blueprintProvisioning: 'managed' },
+    { guardrailVersionMigration: { logicalId: 'ExistingVersion', configurationHash: 'a'.repeat(64) } },
+  ])('refuses to ignore experimental context %j before resolving AWS inputs', async context => {
+    const lookup = jest.fn(okZones);
+    await expect(app({ describeAzs: lookup, appProps: { context } }))
+      .rejects.toThrow('needs a separate recovery plan; do not drop this setting and deploy over it');
+    expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
 describe('buildApp — compact template output', () => {
   // Read the emitted artifact: parsing with Template.fromStack loses indentation.
   // synthesis/deployment.test.ts owns byte budgets across the full profile product.

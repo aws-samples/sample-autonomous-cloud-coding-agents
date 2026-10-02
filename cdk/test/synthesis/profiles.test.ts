@@ -26,18 +26,11 @@ describe('structural synthesis profiles', () => {
   const profiles = synthesisProfiles();
   const matrix = profiles.filter(p => /-(none|managed|external)(-split)?$/.test(p.name));
 
-  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)('measures the complete matrix in %s provisioning mode', mode => {
-    const selected = synthesisProfiles(mode);
-    expect(selected.map(profile => profile.name)).toEqual(profiles.map(profile => profile.name));
-    expect(selected.every(profile => profile.context.blueprintProvisioning === mode)).toBe(true);
-    expect(selected.filter(profile => profile.expectedError)).toHaveLength(mode === 'legacy' || mode === 'prepare' ? 8 : 7);
-  });
-
   test.each(['inline', 'split'])('enumerates the real 40-cell product for the %s topology', topology => {
     const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
     expect(matrix).toHaveLength(80);
     expect(topologyMatrix).toHaveLength(40);
-    expect(profiles).toHaveLength(108);
+    expect(profiles).toHaveLength(116);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
@@ -58,22 +51,20 @@ describe('structural synthesis profiles', () => {
     expect(matrix.filter(p => p.expectedError)).toHaveLength(0);
   });
 
-  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)(
-    'rejects the widest two-zone inline MicroVM profile while keeping its split counterpart in %s mode',
-    mode => {
-      const selected = synthesisProfiles(mode);
-      const inline = selected.find(profile => profile.name === 'lambda-microvm-gw1-reg1-vault1-managed-email-fork')!;
+  test(
+    'rejects the widest two-zone inline MicroVM profile while keeping its split counterpart',
+    () => {
+      const inline = profiles.find(profile => profile.name === 'lambda-microvm-gw1-reg1-vault1-managed-email-fork')!;
       expect(inline.expectedError).toEqual({ stackName: 'backgroundagent-dev', resourceLimit: 490 });
       expect(inline.context).not.toHaveProperty(AGENTCORE_AZS_CONTEXT_KEY);
-      expect(selected.find(profile => profile.name === `${inline.name}-split`)!.expectedError).toBeUndefined();
+      expect(profiles.find(profile => profile.name === `${inline.name}-split`)!.expectedError).toBeUndefined();
     },
   );
 
-  test.each(['legacy', 'prepare', 'adopt', 'managed'] as const)(
-    'covers three-zone pins and their budget rejections in %s mode',
-    mode => {
-      const selected = synthesisProfiles(mode);
-      const pinned = selected.filter(profile => profile.context[AGENTCORE_AZS_CONTEXT_KEY]);
+  test(
+    'covers three-zone pins and their budget rejections',
+    () => {
+      const pinned = profiles.filter(profile => profile.context[AGENTCORE_AZS_CONTEXT_KEY]);
       expect(pinned).toHaveLength(6);
       expect(FIXTURE.zones).toHaveLength(3);
       for (const zone of FIXTURE.zones) {
@@ -92,13 +83,33 @@ describe('structural synthesis profiles', () => {
             alertEmail: 'census@example.com',
             forkBlueprintRepo: 'example/census-blueprints',
           });
-          const rejects = topology === 'inline'
-            && (compute !== 'agentcore' || mode === 'legacy' || mode === 'prepare');
-          expect(!!matches[0].expectedError).toBe(rejects);
+          expect(!!matches[0].expectedError).toBe(topology === 'inline');
         }
       }
     },
   );
+
+  test('covers every additive backend set at default and widest settings in both topologies', () => {
+    const additive = profiles.filter(profile => profile.name.startsWith('additive-'));
+    expect(additive).toHaveLength(16);
+    for (const backends of ['agentcore,ecs', 'agentcore,lambda-microvm', 'ecs,lambda-microvm', 'agentcore,ecs,lambda-microvm']) {
+      expect(additive.filter(profile => profile.context.compute_types === backends)).toHaveLength(4);
+    }
+    expect(additive.filter(profile => profile.context.networkTopology === 'split')
+      .every(profile => !profile.expectedError)).toBe(true);
+  });
+
+  test('protects both legacy additive selectors without setting compute_types', () => {
+    const legacy = profiles.filter(profile => profile.name.startsWith('legacy-'));
+    expect(legacy).toHaveLength(4);
+    for (const compute of ['ecs', 'lambda-microvm']) {
+      expect(legacy.filter(profile => profile.context.compute_type === compute)).toHaveLength(2);
+    }
+    for (const profile of legacy) {
+      expect(profile.context).not.toHaveProperty('compute_types');
+      expect(profile.expectedError).toBeUndefined();
+    }
+  });
 
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_types === 'lambda-microvm' && !p.expectedError);

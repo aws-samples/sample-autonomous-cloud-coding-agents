@@ -23,7 +23,6 @@ import * as path from 'node:path';
 import { BlueprintDefinition } from '../../src/blueprints/definitions';
 import { resolveNetworkReservedAzs } from '../../src/constructs/agent-vpc';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../../src/constructs/agentcore-azs';
-import { requiresStatefulRetention } from '../../src/constructs/stateful-retention';
 import { buildApp } from '../../src/main';
 import { NetworkTopology, resolveNetworkTopology } from '../../src/stacks/network';
 import { AssemblyCensus, inspectAssembly } from '../../src/synthesis/assembly';
@@ -121,12 +120,10 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'networkTopology': topology,
           'networkReservedAzs': reservedAzs,
           'compute_types': compute,
-          'blueprintProvisioning': 'managed',
           'bedrockGeoRegion': 'global',
           'enableToolGateway': true,
           'enableAgentRegistry': true,
           'enableLinearIdentityVault': true,
-          'alertEmail': 'census@example.com',
           'github:sha': 'fixture-revision',
           ...(zones ? { [AGENTCORE_AZS_CONTEXT_KEY]: zones } : {}),
           ...(compute === 'lambda-microvm' ? {
@@ -147,6 +144,9 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
   }
 
   beforeAll(async () => {
+    // Blueprint timestamps are intentionally unchanged from main. Fix the clock
+    // only for this comparison so it isolates the network ownership change.
+    jest.useFakeTimers({ now: new Date('2026-10-02T00:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
     inline = await synthesize('inline');
     split = await synthesize('split');
     threeZones = await synthesize('split', FIXTURE.zones.map(zone => zone.zoneName));
@@ -154,7 +154,10 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     network = split.network!;
   }, 60_000);
 
-  afterAll(() => { for (const directory of directories) rmSync(directory, { recursive: true, force: true }); });
+  afterAll(() => {
+    jest.useRealTimers();
+    for (const directory of directories) rmSync(directory, { recursive: true, force: true });
+  });
 
   test('synthesizes two stacks with only application-to-network dependencies and no nag errors', () => {
     expect(inline.census.stackDependencies).toEqual({ [`${APP_NAME}.template.json`]: [] });
@@ -233,15 +236,17 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
   });
 
   test('preserves every application data resource and its lifecycle policies', () => {
-    const retained = Object.entries(inline.application.Resources as Record<string, TemplateJson>)
-      .filter(([id, resource]) => requiresStatefulRetention(resource.Type) && !isNetworkResource(id));
-    expect(retained.length).toBeGreaterThan(20);
-    for (const [id, original] of retained) {
+    const data = Object.entries(inline.application.Resources as Record<string, TemplateJson>)
+      .filter(([id, resource]) => ['AWS::DynamoDB::Table', 'AWS::S3::Bucket', 'AWS::SecretsManager::Secret',
+        'AWS::Cognito::UserPool', 'AWS::KMS::Key', 'AWS::Logs::LogGroup', 'AWS::BedrockAgentCore::Memory']
+        .includes(resource.Type) && !isNetworkResource(id));
+    expect(data.length).toBeGreaterThan(20);
+    for (const [id, original] of data) {
       expect({ [id]: split.application.Resources[id] }).toEqual({ [id]: original });
     }
     const logs = Object.values(network.Resources as Record<string, TemplateJson>).filter(resource => resource.Type === 'AWS::Logs::LogGroup');
     expect(logs).toHaveLength(2);
-    for (const resource of logs) expect(resource).toMatchObject({ DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' });
+    for (const resource of logs) expect(resource).toMatchObject({ DeletionPolicy: 'Delete', UpdateReplacePolicy: 'Delete' });
   });
 
   test('keeps shared API routes, CORS, authorizers, permissions and deployment dependencies in the application', () => {
@@ -267,11 +272,21 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     const [beforeVersionId, beforeVersion] = versionOf(inline.application);
     const [afterVersionId, afterVersion] = versionOf(split.application);
     expect(withoutMetadata(afterVersion)).toEqual(withoutMetadata(beforeVersion));
-    // CDK hashes the ECS orchestrator's subnet environment expression. Imports
-    // therefore publish a new version even when the referenced subnets are moved.
-    // Only this immutable version ID and its references may change in the app.
-    expect(beforeVersionId === afterVersionId).toBe(compute !== 'ecs');
-    const originalId = (id: string): string => id === afterVersionId ? beforeVersionId : id;
+    // The existing alpha Guardrail hashes unresolved tokens, so its version ID
+    // (and the orchestrator version consuming it) can change between syntheses.
+    // Compare their definitions before mapping only these immutable version IDs.
+    // The census stability check reports the real churn without normalization.
+    const guardrailVersion = (template: TemplateJson): [string, TemplateJson] => {
+      const versions = Object.entries(template.Resources as Record<string, TemplateJson>)
+        .filter(([, resource]) => resource.Type === 'AWS::Bedrock::GuardrailVersion');
+      expect(versions).toHaveLength(1);
+      return versions[0];
+    };
+    const [beforeGuardrailId, beforeGuardrail] = guardrailVersion(inline.application);
+    const [afterGuardrailId, afterGuardrail] = guardrailVersion(split.application);
+    expect(withoutMetadata(afterGuardrail)).toEqual(withoutMetadata(beforeGuardrail));
+    const versionIds = new Map([[afterVersionId, beforeVersionId], [afterGuardrailId, beforeGuardrailId]]);
+    const originalId = (id: string): string => versionIds.get(id) ?? id;
     function normalize(value: any): any {
       if (Array.isArray(value)) return value.map(normalize);
       if (value && typeof value === 'object') {
@@ -304,12 +319,19 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     const additional = Object.values(network.Resources as Record<string, TemplateJson>)
       .find(resource => resource.Type === 'AWS::Route53Resolver::FirewallDomainList' && resource.Properties.Name === 'blueprint-additional');
     expect(additional!.Properties.Domains).toEqual(['packages.example.com', '*.internal.example.org']);
-    const repositories = Object.values(split.application.Resources as Record<string, TemplateJson>)
-      .filter(resource => resource.Type === 'Custom::BlueprintRepoConfig');
+    const repositories = Object.entries(split.application.Resources as Record<string, TemplateJson>)
+      .filter(([id, resource]) => resource.Type === 'Custom::AWS'
+        && BLUEPRINTS.some(blueprint => id.startsWith(`${blueprint.id}RepoConfigCR`)))
+      .map(([, resource]) => {
+        const create = resource.Properties.Create;
+        const serialized = typeof create === 'string' ? create
+          : create['Fn::Join'][1].map((part: unknown) => typeof part === 'string' ? part : 'table-name').join('');
+        return JSON.parse(serialized).parameters.Item;
+      });
     expect(repositories).toHaveLength(2);
     for (const blueprint of BLUEPRINTS) {
-      const row = repositories.find(resource => resource.Properties.Repo === blueprint.repo)!;
-      expect(JSON.parse(row.Properties.Configuration).egress_allowlist).toEqual({
+      const row = repositories.find(item => item.repo.S === blueprint.repo)!;
+      expect(row.egress_allowlist).toEqual({
         L: blueprint.networking!.egressAllowlist!.map(S => ({ S })),
       });
     }

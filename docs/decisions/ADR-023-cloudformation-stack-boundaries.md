@@ -1,71 +1,60 @@
-# ADR-023: CloudFormation stack boundaries and retention before decomposition
+# ADR-023: Optional network stack and deployment budgets
 
 **Status:** proposed
 **Date:** 2026-09-21
+**Last-updated:** 2026-10-02
 **Issue:** [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
+
+Per the [ADR lifecycle](./README.md#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
 
 ## Context
 
-ABCA's application stack approaches CloudFormation's 500-resource limit. [#851](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/851) records the incident; #852 contains the measured alternatives. Template bytes are a separate limit tracked by [#735](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/735).
+The application stack approaches CloudFormation's 500-resource limit. [#851](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/851) records the incident; approved issue #852 covers resource budgets, template bytes and stack boundaries. [#735](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/735) is related byte-limit evidence, not a separate approval for this implementation.
 
-The Task API owns most resources, but its integrations share one API Gateway RestApi and deployment. The #852 proof of concept showed that moving an integration to another stack could lose deployment dependencies, CORS methods, solution attribution and tags even when synthesis succeeded. Networking has a more stable interface and a distinct deployment lifecycle.
+The Task API owns most resources, but its integrations share one API Gateway RestApi and deployment. The #852 proof of concept showed that extracting an integration can lose deployment dependencies, CORS, solution attribution and tags even when synthesis passes. Networking has a smaller interface and an independent lifecycle.
 
-Many data stores still used deletion policies that would destroy them when removed from a template. S3 adds another deletion path: retaining a bucket alone does not stop its cleanup custom resource from deleting objects. A stack move must address both resource ownership and these lifecycle callbacks.
+Live review of an earlier #912 revision found that broad retention blocks failed-create retries and same-name redeploys, while Blueprint ownership handoff can lose repository settings and orphan PITR-enabled ledger tables. Those changes are removed from this PR. The reviewed scope is the optional network stack, deployment budgets and compatible compute selection.
 
 ## Decision
 
-1. Keep the Task API, its authorizers, deployment, stage and all integrations attaching routes to that RestApi in the same application stack. A subsystem with its own API, such as RegistryApi, may keep its existing nested stack.
-2. Deploy one compute backend per environment. Shared services such as Memory, Gateway, Registry and the Linear vault remain independently configurable. Existing additive deployments require a drained transition; see [Compute](../design/COMPUTE.md#selecting-and-changing-the-backend).
-3. Install retention on stateful resources and destructive cleanup helpers before any ownership move. Preserve logical IDs, properties and helper resources while adding `DeletionPolicy: Retain` and `UpdateReplacePolicy: Retain`. Apply and verify this prerequisite on the currently deployed topology before deploying a release that removes resources.
-4. Offer a top-level `NetworkStack` as the first extraction via `networkTopology=split` (default: `inline`): AgentVpc and DnsFirewall share a network lifecycle. Resolve Blueprint egress configuration before constructing either stack, and keep references from application to network only. Propagate solution attribution, provenance tags and applicable cdk-nag suppressions to both stacks.
-5. Keep existing-resource migration explicit. Implementation continues without the populated AWS rehearsal requested in #852; it does not claim a validated migration path. Existing deployments must establish resource-type eligibility and an ownership-transfer plan using `cdk refactor --unstable=refactor` or retain/import. Compare physical IDs, data, dependencies, routes and rollback behavior before a production cutover. Changing topology in an ordinary deploy is not an ownership transfer.
-6. Keep one deployment-profile product for the census and normal build tests. Apply resource, byte, parameter, output and retention checks to every parent and nested template. The production app also sets CDK's `@aws-cdk/core:stackResourceLimit` to 490, so actual operator configurations fail synthesis above the budget even when they are outside the sampled product. A context override can tighten that ceiling but cannot raise it. The census's `--max-resources` option also permits only a tighter audit ceiling. The byte budget remains 800,000 bytes per template.
+1. Keep the Task API, authorizers, deployment, stage and route integrations together in the application stack. Preserve existing nested stacks for Registry, RegistryApi and hosted consent pages.
+2. Offer `networkTopology=split` for new installations; `inline` remains the default. Move AgentVpc and DnsFirewall into `${stackName}-network`, resolve Blueprint egress definitions before either stack is constructed, and permit application-to-network references only. Keep VPC/subnet/security-group exports present across backend changes and preserve network properties, attribution and provenance tags.
+3. Select one or more backends with `compute_types`; its first entry is the repository default. Preserve legacy `compute_type` behavior, including AgentCore alongside ECS or MicroVM. Removing a backend requires an explicit list that omits it. Publish the complete ordered list in `ComputeTypes` and `ComputeSubstrate`; the CLI and orchestrator enforce membership. Shared optional services remain independent.
+4. Enforce CDK's `@aws-cdk/core:stackResourceLimit` at 490 before constructing stacks, including nested stacks and operator configurations outside the census. Operators may tighten but cannot raise it. Share the census profile product with the normal build, checking every template against resource, byte, parameter and output budgets and preserving method-scoped API permissions. Default byte budget: 800,000.
+5. Keep current resource removal policies, Blueprint provisioning and guardrail versioning. Existing inline-to-split migration, broad retention and Blueprint controller handoff are deferred. Local template comparisons do not satisfy the populated refactor/import and rollback rehearsal required by #852.
 
-## Implementation status
+## Validation scope
 
-The branch contains exclusive compute selection, stateful retention, optional NetworkStack extraction and a 96-profile build gate covering both topologies. The original 90 profiles use two-zone auto-pin; six additional profiles pin three supported zones on the widest configuration for each backend and topology. With managed Blueprint provisioning, 93 profiles synthesize within budget and three must fail at the production resource ceiling. Legacy/prepare provisioning has four expected rejections because it adds one application resource. Expected failures must name the application stack and the 490-resource ceiling; an unrelated failure or unexpected synthesis success fails the gate. The retention aspect also covers the nested Blueprint ownership ledger, registry and consent-page resources. The standalone census measures each Blueprint handoff mode and can check repeatability in independent processes.
+The 116-profile product covers all single-backend/service/image combinations in both topologies, supplemental alert/fork/consent options, explicit three-AZ pins, every multi-backend set at default and widest settings, and legacy additive selectors. Expected over-budget profiles must fail at the production 490-resource ceiling for the application stack; an unrelated error or unexpected success fails the gate. Real CDK metadata is included. The census records per-template measurements and source provenance with bundling and asset staging disabled; it does not measure a deployed stack.
 
-The 2026-09-21 offline census established repeatability for the earlier 90-profile implementation. A subsequent review found that removing retained, named AgentCore log groups would orphan their names and prevent a later backend switch back to AgentCore. Both groups now remain owned by the application stack for every backend, with stable logical IDs and retention policies. This adds two resources to ECS and MicroVM configurations.
+Network tests compare moved logical IDs and service properties, the complete export interface, application data resources and lifecycle policies, shared API routes and permissions, attribution and one-way dependencies. Their comparisons control the clock and account for the existing alpha guardrail and orchestrator version IDs. The independent-process `--check-stability` diagnostic keeps timestamps, IDs and asset hashes intact and reports existing churn; passing budget checks does not imply deterministic synthesis.
 
-The updated 2026-09-22 boundary measurements use managed Blueprint provisioning, fixed account/AZ inputs, metadata enabled and bundling/staging disabled. For the widest configurations with two-zone auto-pin:
+`networkReservedAzs` preserves unused address slots when removing trailing AZs. Tests verify that the target application can use the old network, release the removed export, and keep every remaining subnet's properties. The [application-first procedure](../guides/DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network) is separate from moving an inline network into another stack. Physical-ID preservation and rollback in AWS still require live verification.
 
-| Backend | Inline resources | Split resources | Split headroom to 500 | Inline bytes | Split bytes |
-|---|---:|---:|---:|---:|---:|
-| AgentCore | 482 | 427 | 73 | 691,368 | 637,324 |
-| ECS | 485 | 430 | 70 | 691,663 | 637,870 |
-| Lambda MicroVMs | 491 (rejected) | 436 | 64 | — | 657,602 |
+## Deferred migration work
 
-With two zones, each split network template has 58 resources, four exports and at most 59,926 bytes. Moving networking removes 55 resources from the application and adds three across the assembly: the duplicated AWS custom-resource provider's function/role and network stack metadata. The widest MicroVM profile includes a managed image, Gateway, Registry, the Linear vault, alert email and a fork Blueprint. Its application has 54 resources of margin against the 490-resource build budget after extraction; its inline counterpart is now rejected at 491. The corresponding two-zone MicroVM profile without the supplemental email and fork still passes at 489.
+The following remain under #852 and need separate review and releases before a supported existing-stack migration:
 
-The 2026-09-22 three-zone boundary measurements expose the documented `agentcore:availabilityZones` override, which uses every requested zone even though auto-pin remains capped at two:
+- **Retention lifecycle:** use appropriate per-resource policies, including `RetainExceptOnCreate` where retaining established data is needed without orphaning a failed first create. Verify fixed-name log groups and external registries can be recovered, imported or cleaned up before a same-name reinstall. Retaining an S3 bucket alone must not leave a destructive cleanup callback active.
+- **Blueprint downgrade protection:** refuse an unsafe return from managed ownership to the legacy writer even when a context flag is omitted. Prove `max_turns`, `compute_type`, `onboarded_at` and other CLI overrides survive updates and rollback. A green deployment must not hide row replacement or tombstoning.
+- **Ownership release and re-onboarding:** adoption must have a defined release path. Removing a repository must not block legitimate re-onboarding for the tombstone TTL. Test retries, owner changes and out-of-order callbacks.
+- **Ledger lifecycle and bootstrap coverage:** establish a bounded cleanup/recovery plan for PITR-enabled ownership tables across mode changes, failures and destroy. Any future `Custom::BlueprintRepoConfig` must be represented in the bootstrap resource-action map and its coverage tests before it ships.
+- **Guardrail and image normalization:** review stable version binding and Docker build-context changes separately from network ownership. They are not prerequisites for reporting truthful census differences.
+- **Populated migration rehearsal:** verify refactor/import eligibility for each moved type and provider, preserve physical IDs and data, test networking and API behavior, and execute rollback. Retention must be installed on source resources before a transfer; an ordinary topology flag change is not a move. The criterion remains open, without an author-only waiver.
 
-| Backend, widest managed profile | Inline resources | Production synthesis | Split application resources |
-|---|---:|---|---:|
-| AgentCore | 490 | Accepted at the ceiling | 427 |
-| ECS | 493 | Rejected above 490 | 430 |
-| Lambda MicroVMs | 499 | Rejected above 490 | 436 |
-
-The third zone adds eight network resources. Every three-zone split network template has 66 resources and five exports; all split counterparts remain within budget. Legacy/prepare provisioning adds one application resource to each row, so its three-zone inline AgentCore case is rejected at 491 too. Adopt has the same resource counts as managed. Use split topology for these over-budget combinations; existing inline deployments still require the explicit ownership transfer below. The application never changes topology automatically to satisfy a budget.
-
-These are measured configurations, including the supplemental email/fork and external-consent profiles, rather than an upper bound on every possible operator override. They describe unbundled structure, not deployed resource identity or a bundled release's exact byte count. The census uses CDK's `DISABLE_ASSET_STAGING_CONTEXT`; a regression test verifies that assets are not copied into each profile directory.
-
-`networkTopology=split` creates `${stackName}-network` and leaves the application name unchanged. Pure Blueprint definitions feed DNS policy and repository provisioning before either stack exists. The network interface is limited to VPC and runtime security-group references. Explicit VPC, private-subnet and runtime-security-group exports stay present for every backend, so a backend switch does not attempt to remove an in-use export. Generated Name tags and endpoint security-group descriptions keep their inline values, avoiding replacement-sensitive property changes. Network logs retain their lifecycle protections, and solution attribution covers CDK's generic provider Lambdas as well as L2 functions. ECS subnet environment expressions change from local references to imports, so CDK publishes a new orchestrator Lambda version and updates its existing alias. JSON is compact across parent and nested templates.
-
-AZ reductions require a separate staged update. `networkReservedAzs` preserves unused address slots so removing a trailing AZ does not shift the remaining private subnet CIDRs. Deploy the target application with `--exclusively` first, verify that removed exports have no consumers, then update the network. Synthesis tests compare the old network with the target application and verify stable remaining subnet properties for AgentCore, ECS and MicroVM. The [deployment procedure](../guides/DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network) keeps AZ order and total active/reserved slots fixed; it does not establish a live migration guarantee.
-
-Local comparisons verify unchanged shared API resources, CORS, permissions and deployment dependencies; unchanged application service properties after resolving imports and the expected ECS orchestrator version references; identical moved network definitions apart from construct-path metadata; and a one-way application-to-network dependency. Live refactor/import eligibility, physical resource preservation and rollback remain **unvalidated**. No cloud deployment or physical resource move was performed.
+The [teardown guidance](../guides/DEPLOYMENT_GUIDE.md#teardown-blocked-by-agentcore-network-interfaces) covers the separately observed AgentCore ENI cleanup delay, which also occurs on `main`.
 
 ## Consequences
 
-- Retention adds no CloudFormation resources and does not change service properties. Tests compare resource identities/properties and check S3 helper retention.
-- Deleting a stack or disabling a protected optional service leaves retained resources that need explicit recovery or cleanup. TTLs and lifecycle expiry still run. Retention does not preserve running compute sessions or automatically reattach application roles.
-- Managed Blueprint deletion still soft-deletes repository rows. The controller handoff remains a separate staged migration; retaining its table is not a substitute for that process.
-- CloudFormation exports constrain later network updates. The [deployment guide](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology) distinguishes fresh split deployments from existing-resource ownership transfers and describes the remaining migration requirements.
-- Full-profile tests catch quota and retention regressions during the normal build, while the census retains reproducible evidence. Neither proves live AWS service compatibility.
+- New split installations gain application headroom without widening API Gateway permissions or changing repository ownership.
+- Existing legacy compute contexts retain AgentCore. Ordered lists let repositories choose among deployed backends; older CLIs require AgentCore to remain present and first on additive stacks.
+- Exports constrain later network changes. Application consumers must release an export before the network removes it.
+- Resource and template budgets are checked locally; live deployment, migration and rollback remain separate evidence.
 
 ## References
 
-- [Developer guide: retention and decomposition](../guides/DEVELOPER_GUIDE.md#stateful-retention-and-stack-decomposition)
+- [Developer guide: synthesis budgets](../guides/DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets)
+- [Deployment guide: network topology](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology)
+- [Compute selection](../design/COMPUTE.md#selecting-and-changing-the-backend)
 - [CDK best practices](https://docs.aws.amazon.com/cdk/v2/guide/best-practices.html)
 - [CloudFormation quotas](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cloudformation-limits.html)
-- [Issue #852: measured alternatives and migration prerequisite](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)

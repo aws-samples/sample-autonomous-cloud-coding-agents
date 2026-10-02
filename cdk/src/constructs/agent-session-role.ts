@@ -43,7 +43,7 @@ export interface AgentSessionRoleProps {
    * `{user_id, repo, task_id}` tag values from the resolved TaskConfig.
    */
   readonly assumingRoles?: iam.IRole[];
-  /** Admit the selected backend with admitComputeRole after constructing this role. */
+  /** Admit deployed backends with admitComputeRole after constructing this role. */
   readonly deferComputeRoleBinding?: boolean;
 
   /**
