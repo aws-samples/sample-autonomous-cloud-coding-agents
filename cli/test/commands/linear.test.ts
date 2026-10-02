@@ -20,6 +20,7 @@
 import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import {
   autoLinkTokenOwner,
+  chooseSetupRedirect,
   findReusableOauthAppCredentials,
   findWorkspaceRowBySlug,
   isWebhookSecretConfigured,
@@ -165,6 +166,10 @@ function redirectUriBlock(out: string): string {
   const lines = out.split('\n');
   const start = lines.findIndex((l) => l.includes('Redirect URIs'));
   const end = lines.findIndex((l, i) => i > start && l.includes('Public:'));
+  // Without these a missing label makes slice(-1, end) return '', and every
+  // not.toContain assertion against the block passes vacuously.
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
   return lines.slice(start, end).join('\n');
 }
 
@@ -197,6 +202,111 @@ describe('renderLinearAppTemplate', () => {
     const out = renderLinearAppTemplate({ appName: 'Acme Agent' });
     expect(out).not.toMatch(/GitHub username/i);
     expect(out).not.toMatch(/\[bot\]/);
+  });
+
+  /**
+   * The Redirect URIs field holds ONLY what Linear redirects to (#914).
+   *
+   * The live failure these pin: the template printed the hosted consent page as the
+   * sole Redirect URI, an operator registered exactly that, and `bgagent linear setup`
+   * still died on "Invalid redirect_uri parameter for the application" — because the
+   * consent page is AgentCore's `resourceOauth2ReturnUrl`, not Linear's `redirect_uri`.
+   * Linear redirects to the AgentCore provider callback on the vault path and to the
+   * CLI's loopback listener on the `add-workspace` path.
+   */
+  const HOSTED_CONSENT = 'https://d111111abcdef8.cloudfront.net/';
+  const VAULT_CALLBACK =
+    'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
+
+  test('on the vault path the field holds the AgentCore callback, not the consent page', () => {
+    // The bug in one assertion: on the vault path Linear redirects to the callback, so a
+    // field holding only the consent page left the URI Linear needs missing. (The consent
+    // page IS the redirect_uri on setup's Secrets-Manager fallback — see the next test.)
+    const block = redirectUriBlock(renderLinearAppTemplate({
+      hostedConsentUrl: HOSTED_CONSENT,
+      vaultCallbackUrl: VAULT_CALLBACK,
+    }));
+    expect(block).not.toContain(HOSTED_CONSENT);
+    expect(block).toContain(VAULT_CALLBACK);
+  });
+
+  test('shows the consent page as a CONDITIONAL Redirect URI, outside the field', () => {
+    // #914 review: it was labelled "nothing to paste", but on setup's Secrets-Manager
+    // fallback it is exactly the redirect_uri Linear checks. It stays out of the field —
+    // the vault path does not use it — and says when it is needed.
+    const out = renderLinearAppTemplate({ hostedConsentUrl: HOSTED_CONSENT });
+    expect(out).toContain(`Identity vault consent page: ${HOSTED_CONSENT}`);
+    expect(out).toMatch(/Add it as a Redirect URI only if setup falls back to Secrets Manager/);
+    expect(out).not.toMatch(/nothing to paste/);
+    expect(redirectUriBlock(out)).not.toContain(HOSTED_CONSENT);
+  });
+
+  test('every redirect_uri setup can send on a vault stack is one the template tells you to register', () => {
+    // The invariant blocker 1 broke: template and setup drifted apart in one file. Derive
+    // the fallback's redirect_uri from setup's own choice, not from a literal here.
+    const fallback = chooseSetupRedirect({ vaultAccessToken: undefined, consentPageUrl: HOSTED_CONSENT });
+    expect(fallback.redirectUri).toBe(HOSTED_CONSENT);
+    const out = renderLinearAppTemplate({ hostedConsentUrl: HOSTED_CONSENT, vaultCallbackUrl: VAULT_CALLBACK });
+    const lines = out.split('\n');
+    const at = lines.findIndex((l) => l.includes(fallback.redirectUri));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(lines[at + 1]).toMatch(/Add it as a Redirect URI/);
+    // And the vault leg's URI is in the field itself.
+    expect(redirectUriBlock(out)).toContain(VAULT_CALLBACK);
+  });
+
+  test('the vault leg sends no consent-page redirect', () => {
+    const vault = chooseSetupRedirect({ vaultAccessToken: 'tok', consentPageUrl: HOSTED_CONSENT });
+    expect(vault.hostedUrl).toBeUndefined();
+    expect(vault.redirectUri).toBe('http://localhost:8080/oauth/callback');
+  });
+
+  test('a failed stack lookup is SAID, rather than rendering a vault stack as no-vault', () => {
+    const out = renderLinearAppTemplate({ lookupWarning: 'Could not read stack st in us-east-1 (ExpiredToken).' });
+    expect(out).toMatch(/⚠ Could not read stack st in us-east-1 \(ExpiredToken\)\./);
+    expect(out).toMatch(/may be wrong — check credentials and --region/);
+  });
+
+  test('names the loopback for add-workspace when the vault hides it from the field', () => {
+    const out = renderLinearAppTemplate({ hostedConsentUrl: HOSTED_CONSENT });
+    expect(out).toMatch(/Using `add-workspace` instead of `setup`\? It redirects to http:\/\/localhost:8080\/oauth\/callback/);
+    // Not printed when the loopback is already the field's entry.
+    expect(renderLinearAppTemplate()).not.toMatch(/Using `add-workspace` instead/);
+  });
+
+  test('lists ONLY the AgentCore callback once the provider exists', () => {
+    // Listing the loopback beside it read as two required entries and sent vault
+    // operators to register a URI the vault path never redirects to.
+    const block = redirectUriBlock(renderLinearAppTemplate({
+      hostedConsentUrl: HOSTED_CONSENT,
+      vaultCallbackUrl: VAULT_CALLBACK,
+    }));
+    expect(block).toContain(VAULT_CALLBACK);
+    expect(block).not.toContain('http://localhost:8080/oauth/callback');
+  });
+
+  test('offers NO URI on a first vault run — the honest answer, not another flow\'s URI', () => {
+    // The callback id does not exist before setup registers the app, so there is nothing
+    // truthful to print. Printing the loopback instead gave a vault operator a URI that
+    // cannot work and no sign of the one that can.
+    const block = redirectUriBlock(renderLinearAppTemplate({ hostedConsentUrl: HOSTED_CONSENT }));
+    expect(block).not.toContain('http://localhost:8080/oauth/callback');
+    expect(block).toMatch(/Leave empty/);
+    expect(block).toMatch(/setup <slug>` prints the URI to add/);
+  });
+
+  test('every URI sits alone on its line, so no entry can wrap', () => {
+    // The traps list warns that a line-wrapped URI becomes two malformed entries, and
+    // `annotate` appends "← note" past a pad column — which on a ~100-char AgentCore
+    // callback would wrap it. So URI lines carry the URI and nothing else.
+    const block = redirectUriBlock(renderLinearAppTemplate({
+      hostedConsentUrl: HOSTED_CONSENT,
+      vaultCallbackUrl: VAULT_CALLBACK,
+    }));
+    for (const line of block.split('\n').filter((l) => l.includes('://'))) {
+      expect(line.trim()).not.toMatch(/←/);
+      expect(line.trim().split(/\s+/)).toHaveLength(1);
+    }
   });
 
   test('warns that redirect URIs match EXACTLY, including the trailing slash', () => {
@@ -286,20 +396,18 @@ describe('renderLinearAppTemplate', () => {
     expect(renderLinearAppTemplate({ appName: '   ' })).toContain('Application name:    bgagent');
   });
 
-  test('lists exactly the URIs the single setup command uses — no menu', () => {
-    // One command means one set of URIs. Listing per-command alternatives was the
-    // menu that got the wrong subset registered and produced an opaque
-    // "Invalid redirect_uri".
+  test('lists exactly the one URI Linear redirects to on the operator\'s own path', () => {
+    // Corrected with #914. On the vault path Linear redirects to the AgentCore callback, so
+    // that is the field's one entry. The loopback (add-workspace) and the consent page
+    // (setup's Secrets-Manager fallback) are named separately, each with when it applies.
     const out = renderLinearAppTemplate({
       hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/',
       vaultCallbackUrl: 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88',
     });
-    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
-    expect(out).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
-    // The loopback is NOT one of the listed URIs when a hosted page exists — setup
-    // will not redirect to it. (A trap further down may still explain that the older
-    // add-workspace command does; that is guidance, not a field value.)
-    expect(redirectUriBlock(out)).not.toContain('http://localhost:8080/oauth/callback');
+    const block = redirectUriBlock(out);
+    expect(block).toContain('https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f88');
+    expect(block).not.toContain('http://localhost:8080/oauth/callback');
+    expect(block).not.toContain('https://d111111abcdef8.cloudfront.net/');
     // And no vault-setup: that command no longer exists.
     expect(out).not.toContain('vault-setup');
   });
@@ -307,44 +415,52 @@ describe('renderLinearAppTemplate', () => {
   test('falls back to the loopback URI only when there is no hosted page', () => {
     const out = renderLinearAppTemplate();
     expect(out).toContain('http://localhost:8080/oauth/callback');
-    expect(out).toMatch(/only works when your browser runs on the/);
+    expect(out).toMatch(/needs the browser on this machine/);
     expect(out).toContain('enableLinearIdentityVault=true');
   });
 
-  test('the hosted URI REPLACES the loopback rather than joining it', () => {
-    // Two URIs for two flows was the confusion; setup picks one substrate, so the
-    // template lists one.
+  test('neither the consent page nor the loopback appears in the field on a vault first run', () => {
+    // Inverted with #914. The old behaviour put the consent page in the field as its only
+    // entry, which the vault path never sends — so registering exactly what the template
+    // printed still failed consent. Both are now named outside the field with when they apply.
     const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
-    expect(out).toContain('https://d111111abcdef8.cloudfront.net/');
-    expect(redirectUriBlock(out)).not.toContain('localhost:8080');
+    const block = redirectUriBlock(out);
+    expect(block).not.toContain('https://d111111abcdef8.cloudfront.net/');
+    expect(block).not.toContain('http://localhost:8080/oauth/callback');
   });
 
-  test('lists the hosted URI EXACTLY once, as the CLI sends it', () => {
+  test('prints the hosted consent URI EXACTLY once, with no slashless variant', () => {
     // An earlier version printed a second slashless variant as insurance against a
     // typo. Linear validates the whole Redirect URIs field on save, so an extra bad
-    // line loses the good ones with it — and the failure then reads as though it
-    // were about the line just added. One entry, matching what the CLI sends.
+    // line loses the good ones with it. Still worth pinning after #914 moved this URL
+    // out of the form: one occurrence, exactly as the stack exports it.
     const hosted = 'https://d111111abcdef8.cloudfront.net/';
     const slashless = hosted.replace(/\/$/, '');
     const out = renderLinearAppTemplate({ hostedConsentUrl: hosted });
-    // Exact equality, not a prefix test: a prefix test on a URL reads as (incomplete)
-    // sanitization to static analysis, and equality is the stronger assertion anyway —
-    // it would also catch a THIRD variant being printed.
-    const lines = out.split('\n').map((l) => l.trim());
-    expect(lines.filter((l) => l === hosted || l === slashless)).toEqual([hosted]);
+    // Count occurrences of each exact form rather than trimmed whole lines: the URL now
+    // sits inline after a label, so a line-equality test would find neither.
+    expect(out.split(hosted)).toHaveLength(2);
+    expect(out.split(`${slashless}\n`)).toHaveLength(1);
   });
 
-  test('with a hosted page but no vault callback, it says setup will print one', () => {
-    // The vault callback id does not exist until the provider is created, which
-    // `setup` does on its first run — so the template promises it rather than
-    // pretending it is unavailable.
+  test('defers to setup in ONE line — the field is the only thing it talks about', () => {
+    // The callback id does not exist until setup creates the provider, so there is nothing
+    // to paste yet. Everything else an operator might want here (why the ordering is like
+    // that, how to recover the URI for a workspace already onboarded via `--slug`) belongs
+    // to setup and to the flag's own help: a first-time reader has no workspace yet, and
+    // every extra sentence competes with the fields that ARE needed to create the app.
     const out = renderLinearAppTemplate({ hostedConsentUrl: 'https://d111111abcdef8.cloudfront.net/' });
-    expect(out).toMatch(/prints one more URI the first time it runs/);
+    expect(out).toMatch(/Leave empty — `bgagent linear setup <slug>` prints the URI to add, then stops\./);
+    // Linear's form accepts an empty field (verified live), so no placeholder is needed.
+    expect(out).not.toMatch(/If Linear will not save an empty field/);
+    // The label plus one line of guidance, and no more.
+    const block = redirectUriBlock(out).split('\n').filter((l) => l.trim());
+    expect(block).toHaveLength(2);
   });
 
   test('without a hosted URL it explains the loopback limitation and the fix', () => {
     const out = renderLinearAppTemplate();
-    expect(out).toMatch(/same machine as the CLI/);
+    expect(out).toMatch(/needs the browser on this machine/);
     expect(out).toContain('enableLinearIdentityVault=true');
   });
 
