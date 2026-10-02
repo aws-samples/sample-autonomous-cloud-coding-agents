@@ -38,12 +38,46 @@ function makeDlqAlarm(stack: Stack, id: string): cloudwatch.Alarm {
 }
 
 describe('OperationalAlerts', () => {
-  test('creates a KMS-encrypted SNS topic with key rotation', () => {
+  let template: Template;
+  let topicRef: { Ref: string };
+
+  beforeAll(() => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts');
-    const template = Template.fromStack(stack);
+    const alerts = new OperationalAlerts(stack, 'Alerts');
+    alerts.addAlarmActions(makeDlqAlarm(stack, 'One'), makeDlqAlarm(stack, 'Two'));
+    template = Template.fromStack(stack);
+    topicRef = { Ref: Object.keys(template.findResources('AWS::SNS::Topic'))[0] };
+  });
 
+  test('permits CloudWatch publishing only to this topic from regional account alarms', () => {
+    template.hasResourceProperties('AWS::SNS::TopicPolicy', {
+      Topics: [topicRef],
+      PolicyDocument: {
+        Statement: Match.arrayWith([{
+          Sid: 'AllowCloudWatchAlarmsPublish',
+          Effect: 'Allow',
+          Principal: { Service: 'cloudwatch.amazonaws.com' },
+          Action: 'sns:Publish',
+          Resource: topicRef,
+          Condition: {
+            StringEquals: { 'aws:SourceAccount': { Ref: 'AWS::AccountId' } },
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Join': ['', [
+                  'arn:', { Ref: 'AWS::Partition' },
+                  ':cloudwatch:', { Ref: 'AWS::Region' },
+                  ':', { Ref: 'AWS::AccountId' }, ':alarm:*',
+                ]],
+              },
+            },
+          },
+        }]),
+      },
+    });
+  });
+
+  test('creates a KMS-encrypted SNS topic with key rotation', () => {
     template.resourceCountIs('AWS::SNS::Topic', 1);
     template.resourceCountIs('AWS::KMS::Key', 1);
     // The topic must reference THIS construct's CMK by GetAtt — asserting
@@ -61,14 +95,8 @@ describe('OperationalAlerts', () => {
   });
 
   test('CMK key policy grants CloudWatch decrypt + generate-data-key', () => {
-    // Load-bearing: CloudWatch cannot deliver to a topic on the
-    // AWS-managed key. Without this grant the alarm action deploys but
-    // every publish fails at runtime with KMS AccessDenied.
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts');
-    const template = Template.fromStack(stack);
-
+    // Encrypted delivery needs this KMS grant in addition to the topic's
+    // SNS publish permission asserted above.
     template.hasResourceProperties('AWS::KMS::Key', {
       KeyPolicy: {
         Statement: Match.arrayWith([
@@ -82,11 +110,6 @@ describe('OperationalAlerts', () => {
   });
 
   test('enforces TLS on publish via a DenyInsecureTransport topic policy', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts');
-    const template = Template.fromStack(stack);
-
     template.hasResourceProperties('AWS::SNS::TopicPolicy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
@@ -101,23 +124,23 @@ describe('OperationalAlerts', () => {
   });
 
   test('creates no subscription when alertEmail is omitted', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts');
-    const template = Template.fromStack(stack);
-
     template.resourceCountIs('AWS::SNS::Subscription', 0);
   });
 
-  test('creates an email subscription when alertEmail is provided', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts', { alertEmail: 'ops@example.com' });
-    const template = Template.fromStack(stack);
+  describe('with email subscription', () => {
+    let emailTemplate: Template;
+    beforeAll(() => {
+      const app = new App();
+      const stack = new Stack(app, 'TestStack');
+      new OperationalAlerts(stack, 'Alerts', { alertEmail: 'ops@example.com' });
+      emailTemplate = Template.fromStack(stack);
+    });
 
-    template.hasResourceProperties('AWS::SNS::Subscription', {
-      Protocol: 'email',
-      Endpoint: 'ops@example.com',
+    test('creates the configured email subscription', () => {
+      emailTemplate.hasResourceProperties('AWS::SNS::Subscription', {
+        Protocol: 'email',
+        Endpoint: 'ops@example.com',
+      });
     });
   });
 
@@ -129,37 +152,28 @@ describe('OperationalAlerts', () => {
     ).toThrow(/not a valid email/);
   });
 
-  test('applies the removal policy to BOTH the topic and the key', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    new OperationalAlerts(stack, 'Alerts', { removalPolicy: RemovalPolicy.RETAIN });
-    const template = Template.fromStack(stack);
+  describe('with retention', () => {
+    let retainedTemplate: Template;
+    beforeAll(() => {
+      const app = new App();
+      const stack = new Stack(app, 'TestStack');
+      new OperationalAlerts(stack, 'Alerts', { removalPolicy: RemovalPolicy.RETAIN });
+      retainedTemplate = Template.fromStack(stack);
+    });
 
-    // Regression guard: removalPolicy previously reached only the key,
-    // leaving the topic on CDK's implicit default — key and topic could
-    // diverge on stack deletion.
-    template.hasResource('AWS::SNS::Topic', { DeletionPolicy: 'Retain' });
-    template.hasResource('AWS::KMS::Key', { DeletionPolicy: 'Retain' });
+    test('retains both the topic and the key', () => {
+      // Regression guard: removalPolicy previously reached only the key,
+      // leaving the topic on CDK's implicit default — key and topic could
+      // diverge on stack deletion.
+      retainedTemplate.hasResource('AWS::SNS::Topic', { DeletionPolicy: 'Retain' });
+      retainedTemplate.hasResource('AWS::KMS::Key', { DeletionPolicy: 'Retain' });
+    });
   });
 
   test('addAlarmActions wires each alarm to publish to the topic', () => {
-    const app = new App();
-    const stack = new Stack(app, 'TestStack');
-    const alerts = new OperationalAlerts(stack, 'Alerts');
-    const a1 = makeDlqAlarm(stack, 'One');
-    const a2 = makeDlqAlarm(stack, 'Two');
-    alerts.addAlarmActions(a1, a2);
-    const template = Template.fromStack(stack);
-
-    // Both alarms carry an AlarmActions entry pointing at the topic.
-    const alarms = template.findResources('AWS::CloudWatch::Alarm');
-    const withActions = Object.values(alarms).filter(
-      (r: any) => Array.isArray(r.Properties?.AlarmActions) && r.Properties.AlarmActions.length > 0,
-    );
-    expect(withActions.length).toBe(2);
-    for (const alarm of withActions) {
-      // The action references the SNS topic (Ref to the topic logical id).
-      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('AlertsTopic');
-    }
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 2);
+    template.allResourcesProperties('AWS::CloudWatch::Alarm', {
+      AlarmActions: [topicRef],
+    });
   });
 });
