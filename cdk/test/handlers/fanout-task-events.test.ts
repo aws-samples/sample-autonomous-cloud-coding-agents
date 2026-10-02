@@ -146,6 +146,22 @@ const mockUpdateIssueCommentAdf: jest.Mock = jest.fn().mockResolvedValue({ ok: t
 const mockBuildAdfDocument: jest.Mock = jest.fn(
   (paragraphs: ReadonlyArray<ReadonlyArray<{ text: string }>>) => ({ _adf: paragraphs }),
 );
+const mockIterationStatus = jest.fn();
+afterEach(() => {
+  for (const [status] of mockIterationStatus.mock.calls) {
+    expect(status).toEqual(expect.objectContaining({ terminal: true }));
+  }
+  mockIterationStatus.mockClear();
+});
+// Delivery convergence is exercised with real interleavings in jira-preview.test.ts.
+jest.mock('../../src/handlers/shared/jira-preview', () => ({
+  updateJiraIterationComment: (_ddb: unknown, _table: string, _task: string,
+    ctx: unknown, issue: string, comment: string, status: { body: unknown; terminal: boolean }) => {
+    mockIterationStatus(status);
+    return mockUpdateIssueCommentAdf(ctx, issue, comment, status.body);
+  },
+}));
+
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   postIssueCommentAdf: (
     ctx: { cloudId: string; registryTableName: string },

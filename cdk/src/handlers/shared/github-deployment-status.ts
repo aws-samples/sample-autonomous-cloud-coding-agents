@@ -38,9 +38,11 @@ import { isValidRepo } from './validation';
  *  - `deployment.environment`: provider-defined string (Vercel uses
  *    `Preview`/`Production`, Amplify uses the branch name, GitHub
  *    Actions uses whatever the workflow passes). Filtered against
- *    `SCREENSHOT_TARGET_ENVIRONMENT` env var.
+ *    `SCREENSHOT_TARGET_ENVIRONMENT` for deployment statuses only; validated
+ *    Amplify checks bypass this filter.
  *  - `deployment.sha`: the commit SHA the deploy is for (used to map
- *    back to a PR via the GitHub commit-pulls API)
+ *    back to a PR via commit-pulls for deployment statuses; Amplify checks
+ *    carry a validated PR number and verify its live head directly).
  */
 export interface GitHubDeploymentStatusPayload {
   readonly action?: string;
@@ -56,6 +58,119 @@ export interface GitHubDeploymentStatusPayload {
   };
   readonly repository?: {
     readonly full_name?: string;
+  };
+}
+
+/** Internal receiver-to-processor invocation contract. */
+export interface ProcessorEvent {
+  readonly raw_body: string;
+  /** Present only after Amplify check URL/PR/SHA validation. */
+  readonly validated_pr_number?: number;
+}
+
+/** Static diagnostic codes emitted by receiver normalization. */
+export type AmplifyCheckRejectionReason =
+  | 'invalid_payload'
+  | 'action_not_completed'
+  | 'check_not_completed'
+  | 'check_not_successful'
+  | 'unexpected_check_name'
+  | 'unexpected_app_owner'
+  | 'unexpected_app_slug'
+  | 'invalid_check_id'
+  | 'invalid_head_sha'
+  | 'invalid_details_url'
+  | 'untrusted_preview_url'
+  | 'invalid_pr_number'
+  | 'invalid_pull_requests'
+  | 'preview_pr_not_found'
+  | 'head_sha_mismatch'
+  | 'invalid_repository';
+
+/** Terminal live-PR response validation failures. */
+export type PrLookupRejectionReason =
+  | 'pr_number_mismatch'
+  | 'pr_not_open'
+  | 'live_pr_head_sha_mismatch'
+  | 'missing_head_ref'
+  | 'malformed_pr_response';
+
+/** Terminal GitHub request failures requiring operator action. */
+export type PrLookupRequestRejectionReason =
+  | 'pr_request_rejected'
+  | 'pr_not_found';
+
+export type PrLookupRetryableReason =
+  | 'fetch_failed'
+  | 'http_error'
+  | 'non_json_response'
+  | 'malformed_pr_response'
+  | 'pr_not_linked'
+  | 'budget_exhausted';
+
+/** Shared by receiver normalization and the processor's second URL check. */
+export const AMPLIFY_PREVIEW_HOST = /^pr-([1-9]\d*)\.[a-z0-9]+\.amplifyapp\.com$/;
+
+export type AmplifyPreviewCheckResult =
+  | { readonly ok: true; readonly payload: GitHubDeploymentStatusPayload; readonly prNumber: number }
+  | { readonly ok: false; readonly reason: AmplifyCheckRejectionReason };
+
+/**
+ * Normalize a signed Amplify PR preview check for capture. Rejections carry
+ * static reason codes so the receiver can diagnose skips without logging input.
+ * Keep the validated PR identity separate from the deployment-shaped payload.
+ */
+export function normalizeAmplifyPreviewCheck(value: unknown): AmplifyPreviewCheckResult {
+  const record = (input: unknown): Record<string, unknown> =>
+    input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? input as Record<string, unknown>
+      : {};
+  const reject = (reason: AmplifyCheckRejectionReason): AmplifyPreviewCheckResult => ({ ok: false, reason });
+  const raw = record(value);
+  const check = record(raw.check_run);
+  const app = record(check.app);
+  if (Object.keys(check).length === 0) return reject('invalid_payload');
+  if (raw.action !== 'completed') return reject('action_not_completed');
+  if (check.status !== 'completed') return reject('check_not_completed');
+  if (check.conclusion !== 'success') return reject('check_not_successful');
+  if (check.name !== 'AWS Amplify Console Web Preview') return reject('unexpected_check_name');
+  if (record(app.owner).login !== 'aws-amplify-console') return reject('unexpected_app_owner');
+  if (typeof app.slug !== 'string' || !/^aws-amplify-[a-z0-9-]+$/.test(app.slug)) return reject('unexpected_app_slug');
+  if (typeof check.id !== 'number' || !Number.isSafeInteger(check.id) || check.id <= 0) return reject('invalid_check_id');
+  if (typeof check.head_sha !== 'string' || !/^[0-9a-f]{40}$/i.test(check.head_sha)) return reject('invalid_head_sha');
+  if (typeof check.details_url !== 'string') return reject('invalid_details_url');
+  let url: URL;
+  try {
+    url = new URL(check.details_url);
+  } catch {
+    return reject('invalid_details_url');
+  }
+  const preview = AMPLIFY_PREVIEW_HOST.exec(url.hostname);
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !preview) {
+    return reject('untrusted_preview_url');
+  }
+  const prNumber = Number(preview[1]);
+  if (!Number.isSafeInteger(prNumber)) return reject('invalid_pr_number');
+  if (!Array.isArray(check.pull_requests)) return reject('invalid_pull_requests');
+  const previewPrs = check.pull_requests.filter((pr: unknown) => record(pr).number === prNumber);
+  if (previewPrs.length === 0) return reject('preview_pr_not_found');
+  const sha = check.head_sha.toLowerCase();
+  if (!previewPrs.some((pr: unknown) => {
+    const prSha = record(record(pr).head).sha;
+    return typeof prSha === 'string' && prSha.toLowerCase() === sha;
+  })) {
+    return reject('head_sha_mismatch');
+  }
+  const repository = record(raw.repository);
+  if (typeof repository.full_name !== 'string' || !isValidRepo(repository.full_name)) return reject('invalid_repository');
+  return {
+    ok: true,
+    prNumber,
+    payload: {
+      repository: { full_name: repository.full_name },
+      deployment: { id: check.id, sha, environment: 'Preview' },
+      deployment_status: { id: check.id, state: 'success', environment_url: check.details_url },
+    },
   };
 }
 

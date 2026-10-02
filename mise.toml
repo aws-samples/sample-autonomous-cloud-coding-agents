@@ -172,6 +172,7 @@ description = "Custom semgrep rules: silent-success masking (AI004, #257). Block
 # to test-reports/ (gitignored) so findings stay agent-routable (CA-06).
 run = [
   "semgrep test .semgrep/",
+  "node scripts/check-masking-suppression-placement.mjs",
   "mkdir -p test-reports",
   "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --sarif-output=test-reports/semgrep-silent-success-masking.sarif --error --quiet .",
 ]
@@ -191,6 +192,7 @@ description = "Masking scan ratcheted to newly-introduced findings only (per-PR 
 # run anywhere; the per-PR CI job sets SEMGREP_MASKING_BASELINE to the PR base SHA.
 run = [
   "semgrep test .semgrep/",
+  "node scripts/check-masking-suppression-placement.mjs",
   "semgrep scan --config .semgrep/silent-success-masking.yaml --exclude '.semgrep/*' --baseline-commit \"${SEMGREP_MASKING_BASELINE:-origin/main}\" --error --quiet .",
 ]
 

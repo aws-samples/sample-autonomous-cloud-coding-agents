@@ -1005,6 +1005,33 @@ describe('AgentStack', () => {
     });
   });
 
+  test('allows regional CloudWatch alarms to publish to the exported alerts topic (#925)', () => {
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    template.hasResourceProperties('AWS::SNS::TopicPolicy', {
+      Topics: [topicRef],
+      PolicyDocument: {
+        Statement: Match.arrayWith([{
+          Sid: 'AllowCloudWatchAlarmsPublish',
+          Effect: 'Allow',
+          Principal: { Service: 'cloudwatch.amazonaws.com' },
+          Action: 'sns:Publish',
+          Resource: topicRef,
+          Condition: {
+            StringEquals: { 'aws:SourceAccount': '123456789012' },
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Join': ['', [
+                  'arn:', { Ref: 'AWS::Partition' },
+                  ':cloudwatch:us-east-1:123456789012:alarm:*',
+                ]],
+              },
+            },
+          },
+        }]),
+      },
+    });
+  });
+
   test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
     // FanOut, ApprovalMetricsPublisher, and screenshot processor DLQ alarms
     // must each carry an AlarmActions entry — otherwise a
@@ -1608,7 +1635,8 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    expect(abcaLambdas.length).toBe(46);
+    // 47 = 46 on main + RemoveWorkspaceFn (DELETE /v1/linear/workspaces/{slug}).
+    expect(abcaLambdas.length).toBe(47);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas

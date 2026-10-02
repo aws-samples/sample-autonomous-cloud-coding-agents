@@ -112,6 +112,20 @@ def masked_conditional_reraise(fatal: bool) -> list:
         return []
 
 
+# Classify-then-reraise: a "not found" is a legitimate empty success, and
+# every other error reraises on the fallthrough — so the caller can still tell
+# failure from empty. The reraise comes AFTER the classified return, which is
+# what distinguishes this from masked_conditional_reraise (raise guarded first).
+def ok_classify_then_reraise(fetch, is_not_found):
+    try:
+        return fetch()
+    except Exception as exc:
+        # ok: py-silent-success-masking
+        if is_not_found(exc):
+            return None  # genuine empty success
+        raise  # everything else fails closed
+
+
 def ok_return_in_try_body(items: list) -> list:
     try:
         if not items:

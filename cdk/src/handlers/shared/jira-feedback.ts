@@ -100,7 +100,7 @@ export type AdfParagraph = ReadonlyArray<AdfTextRun>;
  * Parse the controlled Markdown emitted by ABCA's own status renderers.
  *
  * This is intentionally not a general Markdown parser. The generated comments
- * use only bold, inline code, and links; handling that exact subset avoids
+ * use bold, inline code, links, and linked preview images; handling that exact subset avoids
  * treating the whole panel as one literal ADF text node while keeping malformed
  * input harmless as plain text.
  */
@@ -124,6 +124,21 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
   };
 
   while (cursor < line.length) {
+    // External images need Atlassian media storage, so expose safe, explicit
+    // links instead. Constant labels match jiraPreviewDocument and avoid using
+    // arbitrary image alt text as operator guidance. The token boundary below
+    // includes ! so embedded images reach this branch.
+    const image = line.slice(cursor).match(/^\[?!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)(?:\]\((https?:\/\/[^)\s]+)\))?/);
+    if (image) {
+      append({ text: 'Open screenshot', href: image[2] });
+      if (image[3]) {
+        append({ text: ' · ' });
+        append({ text: 'Open live preview', href: image[3] });
+      }
+      cursor += image[0].length;
+      continue;
+    }
+
     if (line.startsWith('**', cursor)) {
       const end = line.indexOf('**', cursor + 2);
       if (end !== -1) {
@@ -157,6 +172,7 @@ export function parseMarkdownRuns(line: string): AdfParagraph {
       line.indexOf('**', cursor + 1),
       line.indexOf('`', cursor + 1),
       line.indexOf('[', cursor + 1),
+      line.indexOf('!', cursor + 1),
     ].filter((index) => index !== -1);
     const next = nextTokens.length > 0 ? Math.min(...nextTokens) : line.length;
     append({ text: line.slice(cursor, next) });
@@ -234,6 +250,7 @@ async function writeComment(
   issueIdOrKey: string,
   body: Record<string, unknown>,
   commentId?: string,
+  signal?: AbortSignal,
 ): Promise<WriteOutcome> {
   // The 3LO token (audience=api.atlassian.com) is only valid against the
   // gateway base scoped by cloudId — see JIRA_API_BASE. Posting to the raw
@@ -254,7 +271,7 @@ async function writeComment(
         'Accept': 'application/json',
       },
       body: JSON.stringify({ body }),
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
     });
     const responseBody = await resp.text();
     if (resp.ok) return { kind: 'ok', responseBody };
@@ -295,6 +312,8 @@ export interface JiraFeedbackContext {
   readonly cloudId: string;
   /** Name of JiraWorkspaceRegistryTable, from CDK stack output. */
   readonly registryTableName: string;
+  /** Optional deadline cancellation for deployment-preview delivery. */
+  readonly signal?: AbortSignal;
 }
 
 async function resolveTenantAuth(
@@ -600,7 +619,9 @@ async function postCommentWithResult(
   issueIdOrKey: string,
   body: Record<string, unknown>,
 ): Promise<JiraPostResult> {
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const resolved = await resolveTenantAuth(ctx);
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!resolved) return { ok: false, retryable: false };
 
   if (resolved.kind === 'app') {
@@ -610,11 +631,11 @@ async function postCommentWithResult(
       cloud_id: ctx.cloudId,
       issue_key: issueIdOrKey,
       body,
-    });
+    }, undefined, ctx.signal);
     return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
 
-  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body);
+  const outcome = await writeComment(resolved.accessToken, ctx.cloudId, issueIdOrKey, body, undefined, ctx.signal);
   if (outcome.kind === 'ok') {
     return createdCommentResult({
       ok: true,
@@ -630,7 +651,9 @@ async function postCommentWithResult(
     jira_cloud_id: ctx.cloudId,
     issue_id_or_key: issueIdOrKey,
   });
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const refreshed = await resolveTenantAuth(ctx, true);
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!refreshed) return { ok: false, retryable: false };
   if (refreshed.kind === 'app') {
     const appResult = await requestJiraAppActor(refreshed.appActor, {
@@ -639,7 +662,7 @@ async function postCommentWithResult(
       cloud_id: ctx.cloudId,
       issue_key: issueIdOrKey,
       body,
-    });
+    }, undefined, ctx.signal);
     return createdCommentResult(appResult, ctx, issueIdOrKey);
   }
   // If the refresh handed back the same access token, the retry can only
@@ -651,7 +674,7 @@ async function postCommentWithResult(
     });
     return { ok: false, retryable: false };
   }
-  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body);
+  const retryOutcome = await writeComment(refreshed.accessToken, ctx.cloudId, issueIdOrKey, body, undefined, ctx.signal);
   if (retryOutcome.kind === 'ok') {
     return createdCommentResult({
       ok: true,
@@ -729,7 +752,9 @@ export async function updateIssueCommentAdf(
     });
     return { ok: false, retryable: false };
   }
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const resolved = await resolveTenantAuth(ctx);
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!resolved) return { ok: false, retryable: false };
 
   if (resolved.kind === 'app') {
@@ -740,7 +765,7 @@ export async function updateIssueCommentAdf(
       issue_key: issueIdOrKey,
       comment_id: commentId,
       body,
-    });
+    }, undefined, ctx.signal);
     return appResult.ok
       ? { ok: true }
       : { ok: false, retryable: appResult.retryable };
@@ -752,6 +777,7 @@ export async function updateIssueCommentAdf(
     issueIdOrKey,
     body,
     commentId,
+    ctx.signal,
   );
   if (outcome.kind === 'ok') return { ok: true };
   if (outcome.kind === 'error') return { ok: false, retryable: outcome.retryable };
@@ -761,7 +787,9 @@ export async function updateIssueCommentAdf(
     issue_id_or_key: issueIdOrKey,
     comment_id: commentId,
   });
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   const refreshed = await resolveTenantAuth(ctx, true);
+  if (ctx.signal?.aborted) return { ok: false, retryable: true };
   if (!refreshed) return { ok: false, retryable: false };
   if (refreshed.kind === 'app') {
     const appResult = await requestJiraAppActor(refreshed.appActor, {
@@ -771,7 +799,7 @@ export async function updateIssueCommentAdf(
       issue_key: issueIdOrKey,
       comment_id: commentId,
       body,
-    });
+    }, undefined, ctx.signal);
     return appResult.ok
       ? { ok: true }
       : { ok: false, retryable: appResult.retryable };
@@ -790,6 +818,7 @@ export async function updateIssueCommentAdf(
     issueIdOrKey,
     body,
     commentId,
+    ctx.signal,
   );
   if (retryOutcome.kind === 'ok') return { ok: true };
   if (retryOutcome.kind === 'error') {
