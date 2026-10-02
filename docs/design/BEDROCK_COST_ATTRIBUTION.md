@@ -43,7 +43,7 @@ Verified Claude Code behavior (code.claude.com/docs/en/amazon-bedrock, /env-vars
 `AgentSessionRole` is *already* assumed by the compute roles with `{user_id, repo, task_id}` STS session tags, and `AGENT_SESSION_ROLE_ARN` is already injected into the container. A second "BedrockInvokeRole" would duplicate that entire trust/grant surface for an identical principal. Instead we add a single grant to it:
 
 - New optional prop `invokableModels: IBedrockInvokable[]`. For each, the construct calls `invokable.grantInvoke(this.role)` — **the same grant the compute role receives**. Reusing `grantInvoke` (rather than hand-building ARNs) is load-bearing: a cross-region inference profile fans out to the foundation-model ARN in *every routed region*; replicating that by hand would risk an `AccessDenied` on a cross-region route. No `aws:PrincipalTag` condition — the tags are for billing attribution, not access scoping.
-- `agent.ts` passes the six existing invokables (Sonnet 4.6 / Opus 4 / Haiku 4.5 models + their cross-region profiles). The ECS path reuses the same `AgentSessionRole` instance, so it is covered automatically.
+- `agent.ts` passes the invokables derived from `DEFAULT_BEDROCK_MODEL_IDS` (each model plus its cross-Region profile), so the count follows that list rather than being restated here. The ECS path reuses the same `AgentSessionRole` instance, so it is covered automatically.
 
 ### The compute role KEEPS its Bedrock grant
 

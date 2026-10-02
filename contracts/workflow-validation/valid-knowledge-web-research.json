@@ -62,6 +62,12 @@
     "terminal_outcomes": {
       "primary": "artifact"
     },
+    "convergence": {
+      "mode": "artifact_delivered",
+      "terminal_outcomes": [
+        "artifact_delivered"
+      ]
+    },
     "limits": {
       "max_turns": 25,
       "max_budget_usd": 5

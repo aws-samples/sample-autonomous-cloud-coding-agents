@@ -36,6 +36,7 @@
  */
 
 import { logger } from './logger';
+import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './lookup-result';
 import type { DagNode } from './orchestration-dag';
 
 const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
@@ -296,15 +297,20 @@ query IssueParent($issueId: String!) {
 /**
  * Fetch a sub-issue's parent issue id, for the comment trigger. A Linear
  * comment names the issue it is on (the sub-issue); to find its orchestration
- * we need the PARENT (orchestration_id is derived from the parent). Returns the
- * parent id, or null when the issue has no parent (a top-level issue — not part
- * of any orchestration) or on any fetch/auth/GraphQL failure. Never throws.
+ * we need the PARENT (orchestration_id is derived from the parent).
+ *
+ * Returns a {@link LookupResult}: ``found`` with the parent id, ``absent`` when
+ * the issue genuinely has no parent (a top-level issue — not part of any
+ * orchestration), or a failure when the fetch/auth/GraphQL call breaks. The
+ * distinction matters: a failure previously collapsed to the same ``null`` as
+ * "no parent", silently downgrading an orchestration child to the standalone
+ * path (#756 Cat 2). Never throws.
  */
 export async function fetchIssueParentId(
   accessToken: string,
   issueId: string,
   options: FetchSubIssueGraphOptions = {},
-): Promise<string | null> {
+): Promise<LookupResult<string>> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -317,20 +323,21 @@ export async function fetchIssueParentId(
     });
     if (!resp.ok) {
       logger.warn('Linear issue-parent fetch non-2xx', { status: resp.status, issue_id: issueId });
-      return null;
+      return lookupFailed(new Error(`Linear issue-parent fetch returned HTTP ${resp.status}`));
     }
     const raw = (await resp.json()) as { data?: { issue?: { parent?: { id?: string } } }; errors?: unknown };
     if (raw.errors) {
       logger.warn('Linear issue-parent fetch GraphQL errors', { issue_id: issueId, errors: raw.errors });
-      return null;
+      return lookupFailed(raw.errors);
     }
-    return raw.data?.issue?.parent?.id ?? null;
+    const parentId = raw.data?.issue?.parent?.id;
+    return typeof parentId === 'string' ? lookupFound(parentId) : LOOKUP_ABSENT;
   } catch (err) {
     logger.warn('Linear issue-parent fetch failed', {
       issue_id: issueId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   } finally {
     clearTimeout(timer);
   }

@@ -98,6 +98,35 @@ describe('documented model defaults match the agent runtime defaults', () => {
     'agent/README.md',
   ] as const;
 
+  it('models.py TaskConfig defaults match the config.py fallbacks', () => {
+    // TaskConfig is a SECOND set of literals, reached by direct construction (tests,
+    // local runs) rather than by a deployed task. It drifted to a different geography
+    // than config.py and nothing noticed, because this guard only ever read config.py.
+    const modelsPy = read('agent/src/models.py');
+    const field = (name: string) => {
+      const m = new RegExp(`${name}: str = "([^"]+)"`).exec(modelsPy);
+      if (!m) throw new Error(`models.py no longer declares ${name}`);
+      return m[1];
+    };
+    expect(field('anthropic_model')).toBe(agentDefaultFor('ANTHROPIC_MODEL'));
+    expect(field('haiku_model')).toBe(agentDefaultFor('ANTHROPIC_DEFAULT_HAIKU_MODEL'));
+  });
+
+  it('operator skills do not advertise a different geography than the platform default', () => {
+    // The skills are what an operator copies from. They recommended `us.` overrides
+    // on a stack that grants `global.`, which the CLI now rejects — so a doc that is
+    // merely stale becomes a doc that hands out a value the tooling refuses.
+    const expectedGeo = /^([a-z-]+)\./.exec(agentDefaultFor('ANTHROPIC_MODEL'))?.[1];
+    expect(expectedGeo).toBeDefined();
+    for (const skill of ['onboard-repo', 'troubleshoot']) {
+      const text = read(`docs/abca-plugin/skills/${skill}/SKILL.md`);
+      const wrong = [...text.matchAll(/\b(global|us-gov|us|eu|apac|jp|au)\.anthropic\.[a-z0-9.:-]+/g)]
+        .filter((m) => m[1] !== expectedGeo)
+        .map((m) => m[0]);
+      expect(wrong).toEqual([]);
+    }
+  });
+
   it.each(DOCS_WITH_ENV_TABLES)('%s documents the real ANTHROPIC_MODEL default', (docPath) => {
     const expected = agentDefaultFor('ANTHROPIC_MODEL');
     const documented = documentedDefaults(read(docPath), 'ANTHROPIC_MODEL');
@@ -123,7 +152,9 @@ describe('documented model defaults match the agent runtime defaults', () => {
     // (Bedrock returns ValidationException), so documenting one sends readers
     // down a dead end. Guards the specific bug fixed in agent/README.md.
     for (const envVar of ['ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL']) {
-      expect(agentDefaultFor(envVar)).toMatch(/^(us|eu|apac|global)\./);
+      // All seven geographies the CDK models, not a subset. A stale default under an
+      // omitted geography (us-gov, jp, au) passed this guard silently.
+      expect(agentDefaultFor(envVar)).toMatch(/^(global|us-gov|us|eu|apac|jp|au)\./);
     }
   });
 
@@ -160,7 +191,7 @@ describe('documented model defaults match the agent runtime defaults', () => {
     // legitimately when the docs explain WHY a bare id is not invocable, and the
     // IAM grant list in bedrock-models.ts is bare-by-contract — both out of scope
     // here and already covered by bedrock-models.test.ts.
-    const MODEL_ID = /\b(?:us|eu|apac|global)\.anthropic\.claude-[a-z0-9-]+(?::[0-9]+)?/g;
+    const MODEL_ID = /\b(?:global|us-gov|us|eu|apac|jp|au)\.anthropic\.claude-[a-z0-9-]+(?::[0-9]+)?/g;
     // Hand-authored sources plus every generated mirror that actually quotes a
     // prefixed id (enumerated from the tree, not guessed — `using/Overview.md`
     // mirrors USER_GUIDE but carries no literal, so listing it would assert

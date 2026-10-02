@@ -120,6 +120,38 @@ describe('repo onboard/offboard commands', () => {
     );
   });
 
+  test('reads BedrockGeoRegion and BedrockModelIds by their exact output names', async () => {
+    // Both new checks read stack outputs by literal name, and a typo in either makes
+    // them silent no-ops with the suite still green: `getStackOutput` returns null for
+    // an unknown key, and null means "stack does not export this — skip". So a
+    // misspelling degrades the guard to nothing rather than failing loudly.
+    //
+    // Asserted on the KEYS requested, which is the only place the literal appears.
+    const cmd = makeRepoCommand();
+    await cmd.parseAsync(['node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1']);
+
+    const keys = (getStackOutput as jest.Mock).mock.calls.map((c) => c[2]);
+    expect(keys).toContain('BedrockGeoRegion');
+    expect(keys).toContain('BedrockModelIds');
+  });
+
+  test('rejects a --model whose geography the stack does not grant', async () => {
+    // End-to-end through the command, not just the guard in isolation: proves the
+    // output value actually reaches assertModelIdUsable and that a rejection aborts
+    // before onboardRepo writes anything.
+    (getStackOutput as jest.Mock).mockImplementation(async (_r: string, _s: string, key: string) => {
+      if (key === 'RepoTableName') return 'RepoTable';
+      if (key === 'BedrockGeoRegion') return 'global';
+      return null;
+    });
+    const cmd = makeRepoCommand();
+    await expect(cmd.parseAsync([
+      'node', 'test', 'onboard', 'acme/a', '--region', 'us-east-1',
+      '--model', 'us.anthropic.claude-opus-5',
+    ])).rejects.toThrow(/grants 'global' profiles/);
+    expect(onboardRepo).not.toHaveBeenCalled();
+  });
+
   test('repo offboard invokes offboardRepo', async () => {
     const cmd = makeRepoCommand();
     await cmd.parseAsync(['node', 'test', 'offboard', 'acme/a', '--region', 'us-east-1']);

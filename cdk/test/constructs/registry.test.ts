@@ -19,7 +19,7 @@
 
 import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
-import { AgentRegistry } from '../../src/constructs/registry';
+import { AgentRegistry, AgentRegistryStack } from '../../src/constructs/registry';
 
 function createStack(): Template {
   const app = new App();
@@ -56,6 +56,31 @@ describe('AgentRegistry construct', () => {
       Runtime: 'nodejs24.x',
       Architectures: ['arm64'],
     });
+  });
+
+  test('names the Provider waiter state machine under the stack prefix (least-privilege bootstrap)', () => {
+    // The bootstrap policy allows states:CreateStateMachine only on
+    // `stateMachine:<stack>-*`; an unnamed state machine gets `<LogicalId>-<random>`
+    // from CloudFormation and is denied. Live-observed as a full rollback.
+    const template = createStack();
+    const machines = template.findResources('AWS::StepFunctions::StateMachine');
+    expect(Object.keys(machines)).toHaveLength(1);
+    const name = Object.values(machines)[0].Properties.StateMachineName;
+    expect(name).toBe('TestStack-AgentRegistryWaiter');
+    expect(name.length).toBeLessThanOrEqual(80);
+  });
+
+  test('uses the ROOT stack name for the waiter when placed in a NestedStack', () => {
+    // Inside a NestedStack, Stack.of(construct).stackName is a token for a
+    // ~100-char generated name — over the 80-char state-machine limit and, more
+    // importantly, not the prefix the bootstrap policy is scoped to.
+    const app = new App();
+    const parent = new Stack(app, 'backgroundagent-dev');
+    const nested = new AgentRegistryStack(parent, 'AgentRegistryStack', { registryName: 'abca_test' });
+    const machines = Template.fromStack(nested).findResources('AWS::StepFunctions::StateMachine');
+    expect(Object.values(machines)[0].Properties.StateMachineName).toBe(
+      'backgroundagent-dev-AgentRegistryWaiter',
+    );
   });
 
   test('registers the custom resource with the standalone Agent Registry type', () => {

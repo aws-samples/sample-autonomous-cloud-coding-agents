@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
+import { ArnFormat, RemovalPolicy, Stack, Tags } from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -63,9 +63,9 @@ export interface OperationalAlertsProps {
  * encrypted with the AWS-managed key because that key's policy can't be
  * edited to grant the ``cloudwatch.amazonaws.com`` service principal
  * ``kms:GenerateDataKey*`` / ``kms:Decrypt``. The alarm→SNS action would
- * fail silently at delivery time. The CMK below grants CloudWatch (and
- * SNS) exactly those actions so delivery works while keeping
- * encryption-at-rest. Setting a CMK also satisfies cdk-nag
+ * fail at delivery time. The CMK below grants CloudWatch those actions;
+ * the topic policy separately grants publish access. Encryption at rest
+ * is preserved. Setting a CMK also satisfies cdk-nag
  * ``AwsSolutions-SNS2`` (encryption at rest) with no suppression needed.
  *
  * The topic is intentionally stack-wide (not per-consumer) so every
@@ -103,10 +103,9 @@ export class OperationalAlerts extends Construct {
     // ``cdk/src/bootstrap/policies/observability.ts``.
     Tags.of(this.key).add('ABCA', 'operational-alerts');
 
-    // Allow CloudWatch Alarms to publish through the encrypted topic.
-    // Without these grants the alarm action resolves at deploy time but
-    // every publish fails at runtime with a KMS AccessDenied the
-    // operator never sees. The ``aws:SourceAccount`` condition closes
+    // Allow CloudWatch Alarms to use the topic's encryption key.
+    // Without these grants alarm actions fail with KMS AccessDenied,
+    // visible in CloudWatch alarm history. The ``aws:SourceAccount`` condition closes
     // the service-principal confused-deputy hole — a CloudWatch alarm in
     // another account cannot induce this key's use — matching the
     // account-pinning precedent in ``lambda-microvm-compute.ts``.
@@ -126,6 +125,27 @@ export class OperationalAlerts extends Construct {
     });
     // Key and topic share one lifecycle (see ``removalPolicy`` prop).
     this.topic.applyRemovalPolicy(removalPolicy);
+
+    // SnsAction binds the topic ARN without granting publish permission.
+    // KMS access alone does not authorize SNS: allow alarms from this
+    // account and Region to publish to this topic (#925).
+    this.topic.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowCloudWatchAlarmsPublish',
+      principals: [new iam.ServicePrincipal('cloudwatch.amazonaws.com')],
+      actions: ['sns:Publish'],
+      resources: [this.topic.topicArn],
+      conditions: {
+        StringEquals: { 'aws:SourceAccount': Stack.of(this).account },
+        ArnLike: {
+          'aws:SourceArn': Stack.of(this).formatArn({
+            service: 'cloudwatch',
+            resource: 'alarm',
+            resourceName: '*',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+          }),
+        },
+      },
+    }));
 
     // Defense-in-depth: deny any non-TLS publish. cdk-nag's SNS3 rule is
     // already satisfied by the CMK above (it short-circuits to compliant

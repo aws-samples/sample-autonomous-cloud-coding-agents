@@ -36,8 +36,11 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+import { lookupFailed, lookupFound } from '../../../src/handlers/shared/lookup-result';
 import { type IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
+// slackFetchTs now returns a LookupResult (not string|null); the transport mock
+// resolves real results so the adapter's lookupValueOr collapse is exercised.
 
 /** A Slack "issue" is a thread: channel + thread_ts, keyed by team_id. */
 const thread: IssueRef = { issueId: slackThreadRef('C123', '1700000000.001'), credentialsRef: 'T99' };
@@ -46,7 +49,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   getSlackSecretMock.mockResolvedValue('xoxb-token');
   slackFetchMock.mockResolvedValue(true);
-  slackFetchTsMock.mockResolvedValue('1700000000.002');
+  slackFetchTsMock.mockResolvedValue(lookupFound('1700000000.002'));
 });
 
 describe('Slack channel adapter — the capability-gated surface', () => {
@@ -91,7 +94,7 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   test('upsertComment EDITS the given message in place — the maturing panel', async () => {
     // Without edit-in-place a Slack epic would stream a new message per
     // transition, which is the surface this design exists to avoid.
-    slackFetchTsMock.mockResolvedValue('1700000000.005');
+    slackFetchTsMock.mockResolvedValue(lookupFound('1700000000.005'));
     const res = await ch.upsertComment(thread, 'panel v2', { commentId: '1700000000.005' });
     expect(res).toEqual({ commentId: '1700000000.005' });
     const [, method, body] = slackFetchTsMock.mock.calls[0];
@@ -197,7 +200,7 @@ describe('Slack channel adapter — the capability-gated surface', () => {
   });
 
   test('a failed Slack call reports null rather than a bogus ref', async () => {
-    slackFetchTsMock.mockResolvedValue(null);
+    slackFetchTsMock.mockResolvedValue(lookupFailed(new Error('slack down')));
     await expect(ch.postComment(thread, 'x')).resolves.toBeNull();
   });
 });

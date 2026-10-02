@@ -43,7 +43,11 @@ jest.mock('../../src/handlers/shared/linear-feedback', () => ({
 
 const updateIssueCommentMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-feedback', () => ({
-  updateIssueComment: (...args: unknown[]) => updateIssueCommentMock(...args),
+  ...jest.requireActual('../../src/handlers/shared/jira-feedback'),
+}));
+
+jest.mock('../../src/handlers/shared/jira-preview', () => ({
+  updateJiraIterationComment: (...args: unknown[]) => updateIssueCommentMock(...args),
 }));
 
 jest.mock('../../src/handlers/shared/logger', () => ({
@@ -155,10 +159,11 @@ describe('iteration heartbeat sweep', () => {
     await handler();
 
     expect(updateIssueCommentMock).toHaveBeenCalledWith(
+      expect.anything(), 'TaskTable', 'task-jira',
       { cloudId: 'cloud-1', registryTableName: 'JiraWorkspaceRegistry' },
       'ENG-42',
       'jira-reply-1',
-      expect.stringContaining('🔄 Working'),
+      { body: expect.objectContaining({ type: 'doc' }), terminal: false },
     );
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
   });

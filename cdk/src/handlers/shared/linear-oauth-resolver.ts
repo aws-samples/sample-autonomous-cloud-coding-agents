@@ -64,8 +64,32 @@ const SECRET_CACHE_TTL_MS = 60_000;
 /** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
-/** Why a registry row was latched `revoked`. */
-type LinearRevocationReason = 'refresh_token_rejected' | 'vault_consent_required';
+/**
+ * Why a registry row was latched `revoked`.
+ *
+ * The complete vocabulary, so the re-probe guard below can be read as an
+ * exhaustive statement about *every* reason a row can carry. Two members are
+ * written by this module (see the constants under it); `admin_removed` is
+ * written by `linear-remove-workspace.ts` when an operator deliberately
+ * deregisters a workspace, and is deliberately NOT
+ * `VAULT_CONSENT_REVOCATION_REASON` — that is the one reason the guard
+ * re-probes instead of refusing, so an admin removal stays terminal: no later
+ * vault probe can un-latch it. "We inferred the grant is gone" and "a human
+ * said take this workspace out" must not be the same string.
+ *
+ * Exported as a **type only** on purpose. The removal handler needs the
+ * vocabulary but must not take a value dependency on this module: a value
+ * import would pull the whole resolver (SNS alerting, DDB + Secrets Manager
+ * clients, the refresh path) into that Lambda's esbuild bundle, and it would
+ * register in the `agent.test.ts` "no Linear-minting handler is unwired"
+ * census, whose value is precisely that a new value import there is a test
+ * failure rather than a production 401. `import type` is erased, so it costs
+ * nothing at runtime and still fails the build if this union changes.
+ */
+export type LinearRevocationReason =
+  | 'refresh_token_rejected'
+  | 'vault_consent_required'
+  | 'admin_removed';
 
 /**
  * `revoked_reason` written when the vault answered with an authorization URL
@@ -79,6 +103,11 @@ const VAULT_CONSENT_REVOCATION_REASON: LinearRevocationReason = 'vault_consent_r
 
 /** `revoked_reason` written when Linear itself rejected the refresh token. */
 const REFRESH_REJECTED_REVOCATION_REASON: LinearRevocationReason = 'refresh_token_rejected';
+
+// No constant for `admin_removed`: this module never writes it. Its writer
+// declares it locally, typed by the union above, in
+// `handlers/linear-remove-workspace.ts` — see the note on the union for why
+// that direction of the dependency is type-only.
 
 /** Registry row status values. Anything else (missing, unknown
  *  string) is treated as `revoked` so a corrupt or partially-written

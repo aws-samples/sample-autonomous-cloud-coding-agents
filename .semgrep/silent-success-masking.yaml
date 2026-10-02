@@ -13,6 +13,28 @@
 # on the flagged return line (repo convention; precedent in
 # scripts/check-types-sync.ts and agent/src/config.py).
 #
+# PLACEMENT FOOTGUN: `focus-metavariable: $RET` anchors the finding on the
+# `return` statement, so the `nosemgrep` TOKEN must sit on that return line or
+# the line IMMEDIATELY above it — that is the only span semgrep scans for a
+# suppression. A multi-line justification whose FIRST line carries the token
+# and whose continuation line then abuts the return does NOT bind (the abutting
+# line lacks the token). Put the prose above and the `# nosemgrep: ...` line
+# last, directly over the return.
+#
+# CLASSIFY-THEN-RETHROW EXEMPTION (the `pattern-not` on each rule): a catch that
+# returns an empty default and THEN rethrows on the fallthrough
+# (`catch (e) { if (isNotFound(e)) return undefined; throw e; }`) is not masking —
+# the classified empty is a genuine success and every other error still reaches
+# the caller. The return-before-throw ORDER is what distinguishes it from the
+# `maskedConditionalRethrow` / `masked_conditional_reraise` fixtures (throw
+# guarded FIRST, then an unconditional masking return), which stay flagged.
+# Trade-off (deliberate): this also exempts the genuinely-ambiguous
+# `catch (e) { if (benign(e)) return null; throw e; }`, where the benign branch
+# does mask. We accept that — a per-site `nosemgrep` cannot express ordering and
+# would train contributors to annotate correctness away (#730), and the shape is
+# rare; flag such a site in review instead. Callback returns (below) are the
+# other known gap.
+#
 # Known limitation: a `return null`/`return []` inside a callback *defined
 # within* a catch block (e.g. `.map(i => ... return null ...)`) is flagged
 # even though it does not mask the outer failure. Rare in practice; use the
@@ -50,6 +72,14 @@ rules:
               try { ... } catch ($E) { ... return $RET; ... } finally { ... }
           - pattern: |
               try { ... } catch { ... return $RET; ... } finally { ... }
+      # Classify-then-rethrow is NOT masking: a classified return that is
+      # followed by a throw on the catch's fallthrough surfaces every other
+      # error, so the caller can still distinguish failure from empty success.
+      # The order is load-bearing — it is exactly what separates this shape
+      # from the `maskedConditionalRethrow` fixture (throw guarded FIRST, then
+      # an unconditional masking return), which stays flagged.
+      - pattern-not: |
+          try { ... } catch ($E) { ... return $RET; ... throw $ERR; }
       - metavariable-regex:
           metavariable: $RET
           regex: ^(null|undefined|\[\s*\]|\{\s*\}|""|''|``)$
@@ -118,6 +148,26 @@ rules:
                 return $RET
               finally:
                 ...
+      # Classify-then-reraise is NOT masking (see the TS twin above): a
+      # classified return followed by a `raise` on the fallthrough surfaces
+      # every other error. The order distinguishes it from
+      # masked_conditional_reraise (raise guarded FIRST, then a masking return).
+      - pattern-not: |
+          try:
+            ...
+          except $EXC as $E:
+            ...
+            return $RET
+            ...
+            raise
+      - pattern-not: |
+          try:
+            ...
+          except $EXC as $E:
+            ...
+            return $RET
+            ...
+            raise $ERR
       - metavariable-regex:
           metavariable: $RET
           regex: ^(None|\[\s*\]|\{\s*\}|""|''|\(\s*\)|set\(\s*\)|dict\(\s*\)|list\(\s*\)|tuple\(\s*\))$

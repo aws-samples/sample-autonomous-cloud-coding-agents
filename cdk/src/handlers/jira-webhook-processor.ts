@@ -48,6 +48,7 @@ import {
 import { resolveSoleActiveJiraTenant } from './shared/jira-tenant-registry';
 import type { SubIssueNode } from './shared/linear-subissue-fetch';
 import { logger } from './shared/logger';
+import { lookupValueOr } from './shared/lookup-result';
 import type { CommentRef } from './shared/orchestration-channel';
 import { makeJiraChannel } from './shared/orchestration-channel-jira';
 import { parseRetryIntent } from './shared/orchestration-comment-trigger';
@@ -634,7 +635,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
               discovery.orchestrationId,
             );
             if (fresh) {
-              const commentId = await upsertEpicPanel({
+              const commentId = lookupValueOr(await upsertEpicPanel({
                 channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
                 parent: {
                   issueId: issue.key,
@@ -646,7 +647,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
                 },
                 children: fresh.children,
                 labelFilter,
-              });
+              }), null);
               if (commentId) {
                 await setStatusCommentId(
                   ddb,
@@ -718,7 +719,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           try {
             // Unlike seed, extension already has a durable snapshot. Refresh the
             // panel from it even if a post-release read is temporarily unavailable.
-            const commentId = await upsertEpicPanel({
+            const commentId = lookupValueOr(await upsertEpicPanel({
               channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
               parent: {
                 issueId: issue.key,
@@ -738,7 +739,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
               children: panelSnapshot.children,
               inProgress: true,
               labelFilter,
-            });
+            }), null);
             if (commentId && !panelSnapshot.meta.status_comment_id) {
               await setStatusCommentId(
                 ddb,
@@ -1184,7 +1185,7 @@ async function handleJiraEpicRetry(
   if (WORKSPACE_REGISTRY_TABLE) {
     const refreshed = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
     if (refreshed) {
-      const panelId = await upsertEpicPanel({
+      const panelId = lookupValueOr(await upsertEpicPanel({
         channel: makeJiraChannel(WORKSPACE_REGISTRY_TABLE),
         parent: {
           issueId: parentIssueKey,
@@ -1202,7 +1203,7 @@ async function handleJiraEpicRetry(
         statusCommentId: refreshed.meta.status_comment_id,
         inProgress: true,
         labelFilter: refreshed.meta.release_context.trigger_label,
-      });
+      }), null);
       if (panelId) {
         await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, panelId);
       }

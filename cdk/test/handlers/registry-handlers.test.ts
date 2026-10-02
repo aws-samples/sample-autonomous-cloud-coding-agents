@@ -109,6 +109,18 @@ describe('registry-publish handler', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  test('400 VALIDATION_ERROR on malformed JSON body', async () => {
+    // parseBody returns null on a JSON.parse failure and the handler maps that
+    // to a 400 — the fail-closed path the nosemgrep suppression on parseBody claims.
+    const res = await publishHandler(makeEvent({
+      requestContext: { ...makeEvent().requestContext, authorizer: withGroups(['RegistryPublisher']) },
+      body: '{not json',
+    }));
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error.code).toBe('VALIDATION_ERROR');
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
   test('400 on non-exact asset_version', async () => {
     const res = await publishHandler(makeEvent({
       requestContext: { ...makeEvent().requestContext, authorizer: withGroups(['RegistryPublisher']) },

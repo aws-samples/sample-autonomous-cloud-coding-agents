@@ -50,6 +50,7 @@ import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
+import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
 import { makeLinearChannel } from './shared/orchestration-channel-linear';
 import {
@@ -74,6 +75,7 @@ import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
@@ -515,7 +517,7 @@ async function postIterationAck(
   registryTableName: string,
   issueId: string,
   replyTargetId: string,
-): Promise<string | null> {
+): Promise<LookupResult<string>> {
   try {
     const ref = await channelFor(registryTableName).upsertThreadedReply?.(
       issueRef(issueId, workspaceId),
@@ -524,12 +526,12 @@ async function postIterationAck(
     );
     // An empty id means the surface posted but can't address the reply later —
     // report "no reply to mature" rather than stamping a blank id on the task.
-    return ref?.commentId || null;
+    return ref?.commentId ? lookupFound(ref.commentId) : LOOKUP_ABSENT;
   } catch (err) {
     logger.warn('Iteration ack reply failed (non-fatal)', {
       issue_id: issueId, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 
@@ -1173,14 +1175,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             const settled = seedHadTerminalFailure && postReleaseSnapshot.children.every(
               (c) => c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
             );
-            const commentId = await upsertEpicPanel({
+            const commentId = lookupValueOr(await upsertEpicPanel({
               channel: channelFor(WORKSPACE_REGISTRY_TABLE),
               parent: issueRef(issue.id, workspaceId),
               children: postReleaseSnapshot.children,
               ...seedFailureReasons(postReleaseSnapshot.children),
               inProgress: !settled,
               mirrorParentState: true,
-            });
+            }), null);
             if (commentId) {
               await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
             }
@@ -1283,13 +1285,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           const children = fresh?.children ?? snapshot.children;
           const meta = (fresh ?? snapshot).meta;
-          const newId = await upsertEpicPanel({
+          const newId = lookupValueOr(await upsertEpicPanel({
             channel: channelFor(WORKSPACE_REGISTRY_TABLE),
             parent: issueRef(issue.id, workspaceId),
             ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
             children,
             inProgress: true, // the extend re-opened the epic
-          });
+          }), null);
           if (newId && meta.status_comment_id === undefined) {
             await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, newId);
           }
@@ -1679,13 +1681,13 @@ async function maybeRetryTerminalEpic(
         );
       }
       // Post the panel FRESH (no statusCommentId → new comment, below the note).
-      const newPanelId = await upsertEpicPanel({
+      const newPanelId = lookupValueOr(await upsertEpicPanel({
         channel,
         parent: parentRef,
         children,
         inProgress: true,
         mirrorParentState: true,
-      });
+      }), null);
       if (newPanelId) {
         await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newPanelId);
       }
@@ -1929,7 +1931,31 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // the issue may still be a plain (non-orchestration) issue that ABCA opened
   // a PR for — fall through to the standalone path, which iterates
   // on that PR with the same 👀/reply ack but no dependency cascade.
-  const parentId = await fetchIssueParentId(resolved.accessToken, commentedIssueId);
+  const parentResult = await fetchIssueParentId(resolved.accessToken, commentedIssueId);
+  if (isLookupFailure(parentResult)) {
+    // The parent lookup broke (Linear outage / GraphQL error). Do NOT fall
+    // through to the standalone path — that would silently downgrade an
+    // orchestration child (no dependency cascade) on a transient error.
+    //
+    // THROW rather than return: this processor is async-invoked
+    // (`InvocationType: 'Event'` in linear-webhook.ts), so a plain `return` is a
+    // SUCCESSFUL invocation — Lambda discards the event and the comment is
+    // dropped permanently and invisibly. Only a thrown error spends the
+    // async-invoke retry budget. And the processor's retries are the ONLY replay
+    // available: the receiver already wrote the dedup row (8h TTL) and 200'd
+    // Linear, and it rolls that row back only on *invoke* failure — so Linear's
+    // own redelivery is deduped away, and no reconciler re-drives webhook
+    // deliveries. Nothing user-visible has been posted on this path yet (the 👀
+    // is posted downstream), and everything above is a read, so a retry is safe.
+    logger.warn('Comment trigger: issue-parent lookup failed — retrying the delivery (not downgrading to standalone)', {
+      issue_id: commentedIssueId,
+      error: parentResult.error instanceof Error ? parentResult.error.message : String(parentResult.error),
+    });
+    throw parentResult.error instanceof Error
+      ? parentResult.error
+      : new Error(`Linear issue-parent lookup failed: ${String(parentResult.error)}`);
+  }
+  const parentId = lookupValueOr(parentResult, null);
   const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
   const snapshot = orchestrationId
     ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
@@ -2083,8 +2109,34 @@ async function handleParentEpicCommentTrigger(args: {
     return;
   }
 
-  const prNumber = await resolveChildPrNumber(target.child_task_id);
-  if (prNumber === null) {
+  const prNumberResult = await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id);
+  if (isLookupFailure(prNumberResult)) {
+    // The read broke — don't tell the user "no PR yet" (a distinct, misleading
+    // state), and don't iterate on a PR number we couldn't read.
+    //
+    // ANSWER rather than retry. Unlike the issue-parent site above, this path has
+    // already won the one-time ack claim and posted the 👀, and `claimCommentAck`
+    // is never released — so throwing to spend the async-invoke retry budget
+    // would land on `!won` and no-op, leaving a permanent 👀 with no reply. The
+    // only durable outcome here is a visible one: say what happened and flip
+    // 👀 → ❓ so the comment doesn't read as still-in-progress, exactly as the
+    // "no PR yet" branch below does.
+    logger.warn('Comment trigger (parent epic): sub-issue PR read failed — asked the user to re-comment', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: target.sub_issue_id,
+      child_task_id: target.child_task_id,
+      error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+    });
+    await channel.postThreadedReply?.(
+      parentRef, { commentId: replyTargetId },
+      `⚠️ I couldn't read **${nodeDisplayId(target) ?? target.sub_issue_id}**'s pull request just now `
+        + '(a transient error reading its task record), so I stopped rather than guess. Nothing was '
+        + 'started. Please comment again to retry.',
+    );
+    await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
+    return;
+  }
+  if (!prNumberResult.ok) {
     // Matched a node but it has no PR to iterate. If that node FAILED, the user
     // named it to fix it — there's nothing to iterate (no PR), so point them
     // straight at retry instead of the generic disambiguation. Observed in
@@ -2106,6 +2158,7 @@ async function handleParentEpicCommentTrigger(args: {
     });
     return;
   }
+  const prNumber = prNumberResult.value;
 
   // Resolve the FULL child row (the matcher returns a trimmed view without
   // ``repo``) so the iteration carries the sub-issue's repo.
@@ -2173,12 +2226,32 @@ async function iterateOrchestrationChild(args: {
   const subIssueId = child.sub_issue_id;
   const triggerCommentIssueId = args.triggerCommentIssueId ?? subIssueId;
 
-  const prNumber = args.prNumber ?? (child.child_task_id ? await resolveChildPrNumber(child.child_task_id) : null);
-  if (prNumber === null || prNumber === undefined) {
-    logger.warn('Comment trigger: sub-issue has no resolvable PR — cannot iterate', {
-      orchestration_id: orchestrationId, sub_issue_id: subIssueId, child_task_id: child.child_task_id,
-    });
-    return;
+  let prNumber: number;
+  if (args.prNumber !== undefined) {
+    prNumber = args.prNumber;
+  } else {
+    const prNumberResult = child.child_task_id
+      ? await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, child.child_task_id)
+      : LOOKUP_ABSENT;
+    if (!prNumberResult.ok) {
+      // Can't iterate without a PR either way, but log an outage distinctly
+      // from a genuinely-absent PR so it isn't misread as "nothing to do".
+      logger.warn(
+        isLookupFailure(prNumberResult)
+          ? 'Comment trigger: sub-issue PR read failed — cannot iterate'
+          : 'Comment trigger: sub-issue has no resolvable PR — cannot iterate',
+        {
+          orchestration_id: orchestrationId,
+          sub_issue_id: subIssueId,
+          child_task_id: child.child_task_id,
+          ...(isLookupFailure(prNumberResult) && {
+            error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+          }),
+        },
+      );
+      return;
+    }
+    prNumber = prNumberResult.value;
   }
 
   // Attribute to the orchestration's release user (the comment author may not
@@ -2198,7 +2271,7 @@ async function iterateOrchestrationChild(args: {
   // silence) and persist its id so the fanout dispatcher matures THIS reply
   // (🔄→✅/💬) instead of posting new top-level comments. The reply threads under
   // the conversation root (replyTargetId) on the issue the comment lives on.
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId), null);
 
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
@@ -2433,7 +2506,7 @@ async function handleStandaloneCommentTrigger(args: {
   await channel.reactToComment?.({ commentId }, target, 'started');
   // Immediate "👀 On it" threaded reply + persist its id so the fanout dispatcher
   // matures THIS reply instead of posting new comments.
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const channelMetadata: Record<string, string> = {
@@ -2600,7 +2673,7 @@ async function maybeStartStandaloneNewWork(args: {
   // ACK immediately (👀 reaction + threaded "On it"), same as the iteration and
   // clarify-resume paths.
   await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
   // comment doesn't spawn a second task. Distinct prefix from iterate_/clarify_.
@@ -2729,7 +2802,7 @@ async function maybeResumeClarifyHold(args: {
   const channel = channelFor(registryTableName);
   const target = issueRef(issueId, workspaceId);
   await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   const resumeDescription = buildClarifyResumeDescription(
     typeof row.task_description === 'string' ? row.task_description : undefined,
@@ -2800,27 +2873,6 @@ async function maybeResumeClarifyHold(args: {
     });
   }
   return true;
-}
-
-/** Read a child task's PR number (numeric pr_number, else parse pr_url). Null if neither. */
-async function resolveChildPrNumber(taskId: string): Promise<number | null> {
-  try {
-    const res = await ddb.send(new GetCommand({ TableName: process.env.TASK_TABLE_NAME!, Key: { task_id: taskId } }));
-    const pr = res.Item?.pr_number;
-    if (typeof pr === 'number') return pr;
-    const url = res.Item?.pr_url;
-    if (typeof url === 'string') {
-      const m = url.match(/\/pull\/(\d+)\b/);
-      if (m) return Number(m[1]);
-    }
-    return null;
-  } catch (err) {
-    logger.warn('Comment trigger: failed to read sub-issue task record for PR number', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
 }
 
 /**
