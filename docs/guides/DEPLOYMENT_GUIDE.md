@@ -140,7 +140,7 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
-This context removes the registry API and runtime wiring. After the retention prerequisite is deployed, the registry custom resource and its external records are retained when disabled; re-enabling does not automatically adopt that registry. Inventory it and plan recovery or cleanup explicitly. Older deployments without retention can delete the registry and its records. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. The optional network split preserves that lifecycle; registry retention remains deferred. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
 
 ## Bedrock inference geography
 

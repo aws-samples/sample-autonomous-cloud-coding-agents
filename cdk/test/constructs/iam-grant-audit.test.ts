@@ -25,8 +25,18 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { LinearIdentityVault } from '../../src/constructs/linear-identity-vault';
 import { ToolGateway } from '../../src/constructs/tool-gateway';
 
-function fixture(addUnrelatedWildcard: boolean) {
-  const stack = new Stack(new App(), 'Audit');
+const unscopedLinearResources = [
+  'arn:*:bedrock-agentcore:us-east-1:123456789012:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*',
+  'arn:aws:bedrock-agentcore:*:123456789012:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*',
+  'arn:aws:bedrock-agentcore:us-east-1:*:token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*',
+  'arn:*:secretsmanager:us-east-1:123456789012:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*',
+  'arn:aws:secretsmanager:*:123456789012:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*',
+  'arn:aws:secretsmanager:us-east-1:*:secret:bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*',
+];
+
+function fixture(addUnrelatedWildcard: boolean, concreteEnvironment: boolean) {
+  const stack = new Stack(new App(), 'Audit', concreteEnvironment
+    ? { env: { account: '123456789012', region: 'us-east-1' } } : {});
   const table = new dynamodb.Table(stack, 'Repos', { partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING } });
   const gateway = new ToolGateway(stack, 'Gateway', { repoTable: table });
   const vault = new LinearIdentityVault(stack, 'Vault', {
@@ -48,6 +58,12 @@ function fixture(addUnrelatedWildcard: boolean) {
       actions: ['secretsmanager:GetSecretValue'],
       resources: ['arn:aws:secretsmanager:us-east-1:123456789012:secret:unrelated-*'],
     }));
+    for (const resource of unscopedLinearResources) {
+      consumer.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: [resource.includes(':secretsmanager:') ? 'secretsmanager:GetSecretValue' : 'bedrock-agentcore:GetResourceOauth2Token'],
+        resources: [resource],
+      }));
+    }
     gateway.gateway.role.addToPrincipalPolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'], resources: ['*'],
     }));
@@ -60,12 +76,12 @@ function fixture(addUnrelatedWildcard: boolean) {
   return { template, errors };
 }
 
-describe('grant-specific IAM audit exceptions', () => {
+describe.each([false, true])('grant-specific IAM audit exceptions (concrete environment: %s)', concreteEnvironment => {
   let clean: ReturnType<typeof fixture>;
   let unrelated: ReturnType<typeof fixture>;
   beforeAll(() => {
-    clean = fixture(false);
-    unrelated = fixture(true);
+    clean = fixture(false, concreteEnvironment);
+    unrelated = fixture(true, concreteEnvironment);
   });
 
   test('known Lambda/version and Linear-prefix grants pass, including lazy overflow policies', () => {
@@ -76,8 +92,14 @@ describe('grant-specific IAM audit exceptions', () => {
   });
 
   test('the same principals still fail for unrelated wildcard resources', () => {
-    expect(unrelated.errors).toHaveLength(2);
+    expect(unrelated.errors).toHaveLength(2 + unscopedLinearResources.length);
     expect(unrelated.errors.some(error => error.includes('secret:unrelated-*'))).toBe(true);
     expect(unrelated.errors.some(error => error.includes('[Resource::*]'))).toBe(true);
+  });
+
+  test('Linear prefixes do not hide wildcard partitions, regions or accounts', () => {
+    for (const resource of unscopedLinearResources) {
+      expect(unrelated.errors.some(error => error.includes(`[Resource::${resource}]`))).toBe(true);
+    }
   });
 });

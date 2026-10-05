@@ -345,10 +345,11 @@ export class LinearIdentityVault extends Construct {
           id: 'AwsSolutions-IAM5',
           reason: 'Linear OAuth providers are created per workspace after deployment. Minting requires the Linear-only provider prefix and its service-owned OAuth secret suffix; unrelated providers and secrets remain excluded.',
           // Account/region/partition can render as literals or pseudo-parameter
-          // references. The service, full path and Linear-only prefix are fixed.
+          // references, but must not contain wildcards. Only the provider/secret
+          // suffix varies; widening the partition, account or region must fail.
           appliesTo: [
-            { regex: `/^Resource::arn:.*:bedrock-agentcore:.*:token-vault/default/oauth2credentialprovider/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
-            { regex: `/^Resource::arn:.*:secretsmanager:.*:secret:bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
+            { regex: `/^Resource::arn:[^*?]+:bedrock-agentcore:[^*?]+:token-vault/default/oauth2credentialprovider/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
+            { regex: `/^Resource::arn:[^*?]+:secretsmanager:[^*?]+:secret:bedrock-agentcore-identity!default/oauth2/${LINEAR_CREDENTIAL_PROVIDER_PREFIX}\\*$/` },
           ],
         }]);
       },
