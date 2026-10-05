@@ -505,7 +505,13 @@ describe('AgentStack', () => {
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
 
-    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    // Audit actual policy documents, including overflow, rather than cdk-nag
+    // metadata whose finding patterns also name foundation-model resources.
+    const policies = {
+      ...template.findResources('AWS::IAM::Policy'),
+      ...template.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();

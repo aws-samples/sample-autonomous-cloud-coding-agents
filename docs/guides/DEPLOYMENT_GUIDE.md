@@ -27,7 +27,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint and explicit three-zone pins. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
 For a **new installation**:
 

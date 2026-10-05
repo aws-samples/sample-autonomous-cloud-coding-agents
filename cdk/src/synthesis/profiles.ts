@@ -20,6 +20,10 @@
 import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
 import { DEFAULT_BUDGETS } from './budgets';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../constructs/agentcore-azs';
+import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
+
+/** Enough additional model grants to exercise the SessionRole's lazy policy split. */
+const EXTRA_MODEL_COUNT = 8;
 
 export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
 export type Image = 'none' | 'managed' | 'external';
@@ -134,6 +138,24 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
           [AGENTCORE_AZS_CONTEXT_KEY]: FIXTURE.zones.map(zone => zone.zoneName),
         },
         ...(overBudget ? {
+          expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
+        } : {}),
+      });
+    }
+  }
+  // Model grants can overflow IAM policies without first exceeding the resource
+  // budget. Synthetic IDs exercise policy size only, not live model availability.
+  const expandedModels = [
+    ...DEFAULT_BEDROCK_MODEL_IDS,
+    ...Array.from({ length: EXTRA_MODEL_COUNT }, (_, index) => `anthropic.claude-census-${index}-v1:0`),
+  ];
+  for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
+    for (const networkTopology of ['inline', 'split'] as const) {
+      topologies.push({
+        ...base,
+        name: `${base.name}-expanded-models${networkTopology === 'split' ? '-split' : ''}`,
+        context: { ...base.context, networkTopology, bedrockModels: expandedModels },
+        ...(networkTopology === 'inline' && base.context.compute_types === 'lambda-microvm' ? {
           expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
         } : {}),
       });

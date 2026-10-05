@@ -86,6 +86,14 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
   // the exact guard and also fails if the configuration unexpectedly synthesizes.
   if (profile.expectedError) return;
 
+  if (profile.context.bedrockModels) {
+    test('exercises the SessionRole model grants after CDK creates an overflow policy', () => {
+      const resources = census.templates.flatMap(template => template.inventory);
+      expect(resources.some(resource => resource.type === 'AWS::IAM::ManagedPolicy'
+        && resource.constructPath?.includes('/AgentSessionRole/Role/OverflowPolicy'))).toBe(true);
+    });
+  }
+
   test('keeps auto-pin at two zones and honors every explicitly pinned zone', () => {
     const override = profile.context[AGENTCORE_AZS_CONTEXT_KEY];
     const expected = Array.isArray(override) ? override

@@ -20,6 +20,7 @@
 import { readdirSync } from 'node:fs';
 import { App, AssetStaging, Stack } from 'aws-cdk-lib';
 import { AGENTCORE_AZS_CONTEXT_KEY, AGENTCORE_SUPPORTED_AZ_IDS } from '../../src/constructs/agentcore-azs';
+import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/handlers/shared/bedrock-model-constants';
 import { FIXTURE, STRUCTURAL_CONTEXT, synthesisEnvironment, synthesisProfiles } from '../../src/synthesis/profiles';
 
 describe('structural synthesis profiles', () => {
@@ -30,7 +31,7 @@ describe('structural synthesis profiles', () => {
     const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
     expect(matrix).toHaveLength(80);
     expect(topologyMatrix).toHaveLength(40);
-    expect(profiles).toHaveLength(116);
+    expect(profiles).toHaveLength(122);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
@@ -97,6 +98,28 @@ describe('structural synthesis profiles', () => {
     }
     expect(additive.filter(profile => profile.context.networkTopology === 'split')
       .every(profile => !profile.expectedError)).toBe(true);
+  });
+
+  test('covers expanded model grants on every widest backend in both topologies', () => {
+    const expanded = profiles.filter(profile => profile.context.bedrockModels);
+    expect(expanded).toHaveLength(6);
+    for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
+      for (const topology of ['inline', 'split']) {
+        const matches = expanded.filter(profile => profile.context.compute_types === compute
+          && profile.context.networkTopology === topology);
+        expect(matches).toHaveLength(1);
+        expect(matches[0].context).toMatchObject({
+          enableToolGateway: true,
+          enableAgentRegistry: true,
+          enableLinearIdentityVault: true,
+          alertEmail: 'census@example.com',
+          forkBlueprintRepo: 'example/census-blueprints',
+          bedrockModels: expect.arrayContaining([...DEFAULT_BEDROCK_MODEL_IDS]),
+        });
+        expect(matches[0].context.bedrockModels).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length + 8);
+        expect(!!matches[0].expectedError).toBe(topology === 'inline' && compute === 'lambda-microvm');
+      }
+    }
   });
 
   test('protects both legacy additive selectors without setting compute_types', () => {

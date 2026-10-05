@@ -6,7 +6,7 @@ title: Adr 023 cloudformation stack boundaries
 
 **Status:** proposed
 **Date:** 2026-09-21
-**Last-updated:** 2026-10-02
+**Last-updated:** 2026-10-05
 **Issue:** [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
 
 Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/architecture/readme#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
@@ -29,7 +29,7 @@ Live review of an earlier #912 revision found that broad retention blocks failed
 
 ## Validation scope
 
-The 116-profile product covers all single-backend/service/image combinations in both topologies, supplemental alert/fork/consent options, explicit three-AZ pins, every multi-backend set at default and widest settings, and legacy additive selectors. Expected over-budget profiles must fail at the production 490-resource ceiling for the application stack; an unrelated error or unexpected success fails the gate. Real CDK metadata is included. The census records per-template measurements and source provenance with bundling and asset staging disabled; it does not measure a deployed stack.
+The 122-profile product covers all single-backend/service/image combinations in both topologies, supplemental alert/fork/consent options, explicit three-AZ pins, expanded model grants, every multi-backend set at default and widest settings, and legacy additive selectors. The expanded-model profiles add eight synthetic model IDs to the platform defaults to exercise IAM policy overflow; they do not assert live model availability. The SessionRole's audit exceptions follow its generated overflow policies and remain scoped to tenant object prefixes and literal model grants. Expected over-budget profiles must fail at the production 490-resource ceiling for the application stack; an unrelated error or unexpected success fails the gate. Real CDK metadata is included. The census records per-template measurements and source provenance with bundling and asset staging disabled; it does not measure a deployed stack.
 
 Network tests compare moved logical IDs and service properties, the complete export interface, application data resources and lifecycle policies, shared API routes and permissions, attribution and one-way dependencies. Their comparisons control the clock and account for the existing alpha guardrail and orchestrator version IDs. The independent-process `--check-stability` diagnostic keeps timestamps, IDs and asset hashes intact and reports existing churn; passing budget checks does not imply deterministic synthesis.
 
