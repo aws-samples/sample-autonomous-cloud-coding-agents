@@ -18,12 +18,12 @@
  */
 
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { Duration } from 'aws-cdk-lib';
+import { AspectPriority, Aspects, Duration, Lazy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { NagSuppressions } from 'cdk-nag';
-import { Construct } from 'constructs';
+import { Construct, IConstruct } from 'constructs';
 import agentTaskWriteAttributes from './agent-task-write-attributes.json';
 import constants from '../../../contracts/constants.json';
 
@@ -112,7 +112,9 @@ export interface AgentSessionRoleProps {
    * scoped credentials. The agent code sources the
    * `{user_id, repo, task_id}` tag values from the resolved TaskConfig.
    */
-  readonly assumingRoles: iam.IRole[];
+  readonly assumingRoles?: iam.IRole[];
+  /** Admit deployed backends with admitComputeRole after constructing this role. */
+  readonly deferComputeRoleBinding?: boolean;
 
   /**
    * The main task table: own-task reads and attribute-scoped reporting updates.
@@ -209,11 +211,12 @@ export class AgentSessionRole extends Construct {
 
   /** The SessionRole. Assumed by the agent at task startup. */
   public readonly role: iam.Role;
+  private readonly admittedRoles = new Set<iam.IRole>();
 
   constructor(scope: Construct, id: string, props: AgentSessionRoleProps) {
     super(scope, id);
 
-    if (props.assumingRoles.length === 0) {
+    if (!props.assumingRoles?.length && !props.deferComputeRoleBinding) {
       // A SessionRole no principal can assume is dead weight and would
       // synthesize an empty/invalid trust policy. Fail at synth instead.
       throw new Error(
@@ -225,12 +228,22 @@ export class AgentSessionRole extends Construct {
       throw new Error('taskTable and approvalsTable must not appear in taskScopedTables; they require restricted writes');
     }
 
-    const [firstAssumingRole] = props.assumingRoles;
+    if (props.assumingRoles?.length && props.deferComputeRoleBinding) {
+      throw new Error('Specify assumingRoles or deferComputeRoleBinding, not both');
+    }
+    this.node.addValidation({ validate: () => this.admittedRoles.size ? [] : ['AgentSessionRole requires an admitted compute role before synthesis'] });
+    const firstAssumingRoleArn = props.assumingRoles?.[0]?.roleArn ?? Lazy.string({
+      produce: () => {
+        const first = this.admittedRoles.values().next().value;
+        if (!first) throw new Error('AgentSessionRole requires an admitted compute role before synthesis');
+        return first.roleArn;
+      },
+    });
 
     // CDK requires assumedBy; additional principals are admitted via
     // admitComputeRole so trust + grant always wire together.
     this.role = new iam.Role(this, 'Role', {
-      assumedBy: new iam.ArnPrincipal(firstAssumingRole.roleArn),
+      assumedBy: new iam.ArnPrincipal(firstAssumingRoleArn),
       description:
         'Per-task scoped credentials for ABCA agent tenant-data access '
         + '(DynamoDB task rows + S3 trace/attachment objects), constrained by '
@@ -318,31 +331,35 @@ export class AgentSessionRole extends Construct {
       invokable.grantInvoke(this.role);
     }
 
-    // The object-level prefix conditions above already constrain access to the
-    // session's own tenant prefix; the remaining wildcard is the per-object
-    // suffix (task_id/attachment_id/filename), which is the intended scope.
-    NagSuppressions.addResourceSuppressions(
-      this.role,
-      [
-        {
+    // Model-list overrides can spill these grants into managed policies created
+    // during synthesis. Visit every policy before cdk-nag, including that late
+    // overflow, and allow only the wildcard shapes this construct requires.
+    Aspects.of(this.role).add({
+      visit(node: IConstruct): void {
+        if (!(node instanceof iam.CfnRole || node instanceof iam.CfnPolicy || node instanceof iam.CfnManagedPolicy)) return;
+        NagSuppressions.addResourceSuppressions(node, [{
           id: 'AwsSolutions-IAM5',
           reason:
             'Resource wildcards are the per-object suffix under a tenant-scoped '
             + 'prefix (traces/${aws:PrincipalTag/user_id}/*, '
             + 'attachments/${aws:PrincipalTag/user_id}/*, '
             + 'continuations/${aws:PrincipalTag/task_id}/*, '
-            + 'artifacts/${aws:PrincipalTag/task_id}/*) and the DynamoDB item '
-            + 'set gated by a dynamodb:LeadingKeys = ${aws:PrincipalTag/task_id} '
-            + 'condition — narrower than the compute role this replaces. Bedrock '
-            + 'InvokeModel resources are the explicit model + inference-profile '
-            + 'ARNs from grantInvoke (cross-region profiles fan out to per-region '
-            + 'foundation-model ARNs), matching the compute role grant (#215).',
-        },
-      ],
-      true,
-    );
+            + 'artifacts/${aws:PrincipalTag/task_id}/*). Bedrock grantInvoke uses '
+            + 'InvokeModel* for synchronous/streaming invocation and a region '
+            + 'wildcard for each literal foundation-model ID routed by a '
+            + 'cross-region inference profile, matching the compute role (#215).',
+          appliesTo: [
+            // cdk-nag renders policy variables as <name> in finding IDs.
+            { regex: '/^Resource::[^*?]+/(traces|attachments)/<aws:PrincipalTag/user_id>/\\*$/' },
+            { regex: '/^Resource::[^*?]+/(artifacts|continuations)/<aws:PrincipalTag/task_id>/\\*$/' },
+            'Action::bedrock:InvokeModel*',
+            { regex: '/^Resource::arn:[^*?]+:bedrock:\\*::foundation-model/[^*?]+$/' },
+          ],
+        }]);
+      },
+    }, { priority: AspectPriority.MUTATING });
 
-    for (const computeRole of props.assumingRoles) {
+    for (const computeRole of props.assumingRoles ?? []) {
       this.admitComputeRole(computeRole);
     }
   }
@@ -353,6 +370,8 @@ export class AgentSessionRole extends Construct {
    * `sts:AssumeRole`/`sts:TagSession` on the compute role's identity policy.
    */
   public admitComputeRole(computeRole: iam.IRole): void {
+    if (this.admittedRoles.has(computeRole)) return;
+    this.admittedRoles.add(computeRole);
     this.addTrustForComputeRole(computeRole);
     this.grantAssumeToComputeRole(computeRole);
   }

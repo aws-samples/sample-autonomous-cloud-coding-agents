@@ -83,6 +83,8 @@ function rewriteDocsLinkTarget(target, sourcePath) {
   const developerGuideAnchorRoutes = {
     'repository-preparation': '/developer-guide/repository-preparation',
     'model-configuration': '/developer-guide/model-configuration',
+    // `###` subsections live inside a split page, so keep their anchor.
+    'stack-decomposition-and-synthesis-budgets': '/developer-guide/repository-preparation#stack-decomposition-and-synthesis-budgets',
   };
   if (stem === 'DEVELOPER_GUIDE' && anchor) {
     const splitRoute = developerGuideAnchorRoutes[anchor.toLowerCase()];

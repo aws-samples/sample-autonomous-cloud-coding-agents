@@ -41,9 +41,20 @@ The orchestrator and agent are deliberately separated. The orchestrator handles 
 
 For the full orchestrator design, see [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator). For the API contract, see [API_CONTRACT.md](/sample-autonomous-cloud-coding-agents/architecture/api-contract).
 
+## Deployment boundaries
+
+`AgentStack` keeps the shared Task API, its route integrations, data stores and selected compute backends together. Registry, RegistryApi and the hosted Linear consent page retain their existing nested boundaries. Network ownership is selected by `networkTopology`:
+
+| Topology | Network ownership | Stack dependencies |
+|---|---|---|
+| `inline` (default) | AgentVpc and DnsFirewall inside the application stack | Existing parent/nested structure |
+| `split` | Separate `${stackName}-network` stack | Application imports network references; network has no application references |
+
+The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) and [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries). Live migration has not been validated.
+
 ## Repository onboarding
 
-Onboarding is CDK-based. Each repository is an instance of the `Blueprint` construct in the stack. The construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time.
+Onboarding is CDK-based. Plain repository definitions in `cdk/src/blueprints/definitions.ts` feed both network egress policy and the `Blueprint` constructs in the application stack. Each construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time. Resolving configuration before stack construction keeps the optional network stack independent of repository resources.
 
 Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the full design.
 

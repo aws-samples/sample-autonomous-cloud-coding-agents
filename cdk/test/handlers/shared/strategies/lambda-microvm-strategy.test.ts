@@ -72,6 +72,9 @@ for (const optional of [
   'AWS_SDK_UA_APP_ID',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_MODEL',
+  'ABCA_TOOL_GATEWAY_URL',
+  'LINEAR_VAULT_ENABLED',
+  'LINEAR_WORKLOAD_IDENTITY_NAME',
 ]) {
   delete process.env[optional];
 }
@@ -1146,6 +1149,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
     ANTHROPIC_MODEL: 'us.anthropic.claude-opus-5',
+    ABCA_TOOL_GATEWAY_URL: 'https://gateway.example/mcp',
   };
 
   test('sources the wire key allow-list from the cross-language contract', () => {
@@ -1198,6 +1202,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       // `agent/src/config.py` — wrong on any deployment whose geography is not
       // `global`, and wrong in a way that surfaces only as AccessDenied at turn 0.
       'anthropic_model',
+      'tool_gateway_url',
     ]);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
@@ -1236,6 +1241,9 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     // a `us` deployment a missing value is not an error anywhere — it is a wrong
     // model that the IAM grant does not cover, surfacing as AccessDenied at turn 0.
     expect(config.anthropic_model).toBe('us.anthropic.claude-opus-5');
+    expect(config.tool_gateway_url).toBe('https://gateway.example/mcp');
+    expect(config.linear_vault_enabled).toBe('true');
+    expect(config.linear_workload_identity_name).toBe('abca_linear_oauth');
   });
 
   test('OMITS optional keys the orchestrator does not carry (no `undefined` placeholders)', () => {
@@ -1376,6 +1384,9 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'CONTINUATION_BUCKET_NAME',
       'JIRA_OAUTH_SECRET_ARN', 'AWS_SDK_UA_APP_ID', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_MODEL',
+      'ABCA_TOOL_GATEWAY_URL',
+      'LINEAR_VAULT_ENABLED',
+      'LINEAR_WORKLOAD_IDENTITY_NAME',
     ]) {
       delete env[optional];
     }

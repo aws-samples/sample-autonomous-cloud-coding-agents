@@ -24,7 +24,7 @@ One of two places, chosen automatically at setup time:
 | **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | AgentCore manages the OAuth grant and token refresh. ABCA retains the OAuth client credentials and workspace/webhook metadata in Secrets Manager. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The vault can be enabled with AgentCore, ECS or Lambda MicroVM compute.
+The vault can be enabled with AgentCore, ECS or Lambda MicroVM compute, alone or together. Lambda MicroVMs remains experimental; its image must include the current shared configuration contract.
 
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
@@ -38,10 +38,10 @@ When a workspace's authorization dies, ABCA records it on the registry row and p
 
 #### Using the vault with Lambda MicroVMs
 
-Deploy with `compute_type=lambda-microvm`, `enableLinearIdentityVault=true` and an explicit `microvm_nested_stack` value (`true` for new/already-nested installations; retain `false` for existing flat installations until migration). The coordinator sends the workload identity name through authenticated `platform_config`; the guest uses its compute execution role to obtain a Linear token. Credentials are not baked into the MicroVM image.
+Include `lambda-microvm` in `compute_types` (alongside AgentCore or ECS, or alone), or keep an unchanged legacy `compute_type=lambda-microvm`, which also keeps AgentCore. Set `enableLinearIdentityVault=true` and an explicit `microvm_nested_stack` value (`true` for new/already-nested installations; retain `false` for existing flat installations until migration). Use split networking when the full configuration exceeds the 490-resource budget. The coordinator sends `LINEAR_VAULT_ENABLED` and the workload identity name through authenticated `platform_config`; the guest uses its compute execution role to obtain a Linear token. Credentials are not baked into the MicroVM image.
 
 When upgrading an existing MicroVM deployment, rebuild the guest image too:
-the coordinator and guest must both support the vault configuration fields.
+the coordinator and guest must both support the vault configuration fields. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 The runtime resolves the vault in its AWS Region. A grant in another Region or under another workload identity does not automatically carry over. The old resource-count guard ([#857](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/857)) has been replaced with configuration, permission and deployment-budget checks.
 
@@ -75,7 +75,7 @@ This prints the exact field values to paste, with the URLs already resolved from
 
 Two fields deserve attention:
 
-- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries. On a stack with the Identity vault, a **first** run has nothing to paste yet: the URI Linear needs is the vault's callback, which `bgagent linear setup` creates, prints, and asks you to add before re-running. If setup instead falls back to Secrets Manager, it tells you to register the hosted consent page — the template lists that page separately for this reason.
 - **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
 Click **Create** and copy the **Client ID** and **Client Secret**.

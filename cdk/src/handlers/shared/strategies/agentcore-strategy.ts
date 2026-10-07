@@ -44,6 +44,7 @@ export class AgentCoreComputeStrategy implements ComputeStrategy {
     // AgentCore requires runtimeSessionId >= 33 chars; UUID v4 is 36 chars.
     const sessionId = randomUUID();
     const runtimeArn = input.blueprintConfig.runtime_arn;
+    if (!runtimeArn) throw new Error('AgentCore compute requires a configured runtime ARN');
 
     // `runtimeUserId` triggers AgentCore Identity's workload-access-token
     // injection: when set, AgentCore exchanges the caller's identity for

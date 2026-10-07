@@ -79,7 +79,7 @@ export class ApprovalRequestService extends NestedStack {
       },
     });
     this.api.root.addResource('tasks').addResource('{task_id}').addMethod(
-      'POST', new apigw.LambdaIntegration(this.fn),
+      'POST', new apigw.LambdaIntegration(this.fn, { allowTestInvoke: false }),
       { authorizationType: apigw.AuthorizationType.IAM },
     );
     NagSuppressions.addResourceSuppressions(this.fn, [{

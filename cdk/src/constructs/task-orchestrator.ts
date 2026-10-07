@@ -81,7 +81,12 @@ export interface TaskOrchestratorProps {
   /**
    * ARN of the AgentCore runtime.
    */
-  readonly runtimeArn: string;
+  readonly runtimeArn?: string;
+  /**
+   * Backends deployed by this stack; the first is the repository default.
+   * Omit only for legacy composition.
+   */
+  readonly deployedComputeTypes?: ReadonlyArray<'agentcore' | 'ecs' | 'lambda-microvm'>;
 
   /**
    * The DynamoDB repo config table. When provided, the orchestrator loads
@@ -285,6 +290,8 @@ export interface TaskOrchestratorProps {
      * no per-repo override failed at turn 0 with AccessDenied.
      */
     readonly anthropicModel: string;
+    /** Optional SigV4 tool gateway, forwarded to the MicroVM guest. */
+    readonly toolGatewayUrl?: string;
   };
 
   /**
@@ -401,6 +408,18 @@ export class TaskOrchestrator extends Construct {
     if (props.agentPlatformConfig && !props.agentPlatformConfig.approvalRequestsApiUrl) {
       throw new Error('agentPlatformConfig requires approvalRequestsApiUrl; deploy the matching approval service');
     }
+    if (props.deployedComputeTypes) {
+      const backends = props.deployedComputeTypes;
+      const agentcore = backends.includes('agentcore');
+      const ecs = backends.includes('ecs');
+      if (agentcore !== Boolean(props.runtimeArn)
+        || (!agentcore && props.additionalRuntimeArns?.length)
+        || ecs !== Boolean(props.ecsConfig)
+        || (!backends.includes('lambda-microvm') && props.microvmConfig)) {
+        throw new Error(`TaskOrchestrator configuration must match the deployed '${backends.join(', ')}' backends`);
+      }
+    }
+
     if (props.guardrailId && !props.guardrailVersion) {
       throw new Error('guardrailVersion is required when guardrailId is provided');
     }
@@ -468,7 +487,8 @@ export class TaskOrchestrator extends Construct {
         ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
-        RUNTIME_ARN: props.runtimeArn,
+        ...(props.runtimeArn && { RUNTIME_ARN: props.runtimeArn }),
+        ...(props.deployedComputeTypes && { DEPLOYED_COMPUTE_TYPE: props.deployedComputeTypes.join(',') }),
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),
@@ -548,6 +568,7 @@ export class TaskOrchestrator extends Construct {
           // the backend that depends on this block, and it fell back to the Python
           // literal in `agent/src/config.py` regardless of the deployed geography.
           ANTHROPIC_MODEL: props.agentPlatformConfig.anthropicModel,
+          ...(props.agentPlatformConfig.toolGatewayUrl && { ABCA_TOOL_GATEWAY_URL: props.agentPlatformConfig.toolGatewayUrl }),
         }),
       },
       bundling: orchestratorBundling,
@@ -596,16 +617,18 @@ export class TaskOrchestrator extends Construct {
     // `BedrockAgentCoreContext.get_workload_access_token()` returns
     // non-None). Without this grant, `InvokeAgentRuntimeCommand` with
     // `runtimeUserId` set fails with AccessDenied.
-    const runtimeArns = [props.runtimeArn, ...(props.additionalRuntimeArns ?? [])];
+    const runtimeArns = [...(props.runtimeArn ? [props.runtimeArn] : []), ...(props.additionalRuntimeArns ?? [])];
     const runtimeResources = runtimeArns.flatMap(arn => [arn, `${arn}/*`]);
-    this.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock-agentcore:InvokeAgentRuntime',
-        'bedrock-agentcore:InvokeAgentRuntimeForUser',
-        'bedrock-agentcore:StopRuntimeSession',
-      ],
-      resources: runtimeResources,
-    }));
+    if (runtimeResources.length) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'bedrock-agentcore:InvokeAgentRuntimeForUser',
+          'bedrock-agentcore:StopRuntimeSession',
+        ],
+        resources: runtimeResources,
+      }));
+    }
 
     // Registry (#246): read-only access so the orchestrator can resolve the
     // Blueprint's registry:// asset refs at task start. Scoped to THIS registry
