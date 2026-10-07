@@ -28,7 +28,7 @@ One of two places, chosen automatically at setup time:
 | **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
+The vault can be configured with any selected backend. Lambda MicroVMs remains experimental; its image must include the current shared configuration contract.
 
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
@@ -40,9 +40,9 @@ A workspace that started on Secrets Manager and later moves to the vault **keeps
 
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
-#### Not available with `compute_type=lambda-microvm`
+#### Using the vault with Lambda MicroVMs
 
-The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
+Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 #### One workload identity per stack
 
@@ -74,7 +74,7 @@ This prints the exact field values to paste, with the URLs already resolved from
 
 Two fields deserve attention:
 
-- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries. On a stack with the Identity vault, a **first** run has nothing to paste yet: the URI Linear needs is the vault's callback, which `bgagent linear setup` creates, prints, and asks you to add before re-running. If setup instead falls back to Secrets Manager, it tells you to register the hosted consent page — the template lists that page separately for this reason.
 - **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
 Click **Create** and copy the **Client ID** and **Client Secret**.

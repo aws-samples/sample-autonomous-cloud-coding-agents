@@ -57,7 +57,7 @@ import {
   beginVaultConsent,
   finalizeVaultConsent,
   isVaultUnavailableError,
-  lookupLinearVaultCallbackUrl,
+  probeLinearVaultCallbackUrl,
   mintLinearTokenFromVault,
   linearVaultProviderName,
   linearVaultUserId,
@@ -327,32 +327,38 @@ describe('isVaultUnavailableError', () => {
   });
 });
 
-describe('lookupLinearVaultCallbackUrl', () => {
-  // Read-only and best-effort by design: `app-template` calls it before anything
-  // exists, so every failure must read as "unknown" rather than raise. A throw here
-  // would make the command that explains onboarding the one that cannot run first.
+describe('probeLinearVaultCallbackUrl', () => {
+  // Read-only and never throws: `app-template` calls it before anything exists, so a
+  // throw would make the command that explains onboarding the one that cannot run first.
+  // But "absent" and "unreadable" must stay distinct (#914 review): the template tells an
+  // operator to leave the Redirect URIs field EMPTY when no provider exists, which is the
+  // wrong advice for one that exists but could not be read.
+  const probe = (): ReturnType<typeof probeLinearVaultCallbackUrl> =>
+    probeLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' });
+
   test('returns the callback URL of an existing provider', async () => {
     controlSend.mockResolvedValueOnce({ callbackUrl: 'https://bedrock-agentcore.../callback/uuid' });
-    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
-      .resolves.toBe('https://bedrock-agentcore.../callback/uuid');
+    await expect(probe()).resolves.toEqual({ kind: 'found', callbackUrl: 'https://bedrock-agentcore.../callback/uuid' });
   });
 
-  test('a provider that does not exist yet yields null, not an error', async () => {
+  test('a provider that does not exist yet is absent, not an error', async () => {
     controlSend.mockRejectedValueOnce(Object.assign(new Error('nope'), { name: 'ResourceNotFoundException' }));
-    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
-      .resolves.toBeNull();
+    await expect(probe()).resolves.toEqual({ kind: 'absent' });
   });
 
-  test('absent credentials or an unavailable service also yield null', async () => {
+  test('absent credentials are UNREADABLE, never absent — and still do not throw', async () => {
     controlSend.mockRejectedValueOnce(Object.assign(new Error('no creds'), { name: 'CredentialsProviderError' }));
-    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
-      .resolves.toBeNull();
+    await expect(probe()).resolves.toEqual({ kind: 'unreadable', errorName: 'CredentialsProviderError' });
   });
 
-  test('a provider without a callback URL yields null rather than an empty string', async () => {
+  test('a denied read is unreadable, not absent', async () => {
+    controlSend.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
+    await expect(probe()).resolves.toEqual({ kind: 'unreadable', errorName: 'AccessDeniedException' });
+  });
+
+  test('a provider without a callback URL is absent rather than an empty string', async () => {
     controlSend.mockResolvedValueOnce({});
-    await expect(lookupLinearVaultCallbackUrl({ region: 'us-east-1', workspaceSlug: 'acme' }))
-      .resolves.toBeNull();
+    await expect(probe()).resolves.toEqual({ kind: 'absent' });
   });
 });
 

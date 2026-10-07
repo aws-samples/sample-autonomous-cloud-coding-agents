@@ -481,3 +481,14 @@ agent/
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
 
 **Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.
+
+### MicroVM optional service configuration
+
+The shared `contracts/constants.json` allowlist transports `tool_gateway_url` →
+`ABCA_TOOL_GATEWAY_URL`, `linear_vault_enabled` → `LINEAR_VAULT_ENABLED`, and
+`linear_workload_identity_name` → `LINEAR_WORKLOAD_IDENTITY_NAME` in the MicroVM
+`platform_config` payload. These optional values come from the deployed Gateway
+and vault configuration. They contain identifiers, not credential values.
+Rebuild the MicroVM snapshot from this checkout before enabling those features;
+an older image does not recognize the new keys. AgentCore and ECS receive the
+same settings through their deployment environment.

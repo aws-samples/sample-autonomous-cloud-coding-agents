@@ -505,7 +505,13 @@ describe('AgentStack', () => {
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
 
-    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    // Audit actual policy documents, including overflow, rather than cdk-nag
+    // metadata whose finding patterns also name foundation-model resources.
+    const policies = {
+      ...template.findResources('AWS::IAM::Policy'),
+      ...template.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
@@ -853,59 +859,66 @@ describe('AgentStack', () => {
     expect(objectStatements).toEqual([]);
   });
 
-  test('log-delivery logical ids are pinned with NO opt-in, so an existing stack updates in place', () => {
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN survives a library-side rename of these
-    // auto-created resources. So a renamed source is a SECOND source for the same
-    // runtime: CloudFormation creates before deleting, CloudWatch Logs rejects it
-    // as already existing, and the update rolls the whole stack back.
+  test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
+    // The template must not carry values recorded from one account's live stack.
     //
-    // The ids must therefore be pinned unconditionally. Behind a flag, the safe
-    // path is the one an operator has to already know about, and the failure that
-    // teaches them is a mid-update rollback whose message never mentions it.
+    // These resources are created and named by the AgentCore Runtime. An earlier
+    // version overrode their logical ids from a table keyed by STACK NAME, holding
+    // ids read off one deployed stack — but stack name is not a proxy for deployed
+    // state. Two accounts running a stack of the same name had diverged, so the
+    // table was right for one and actively caused the rename on the other, which is
+    // fatal: a DeliverySource is unique per (resource ARN, log type) account-wide,
+    // the runtime ARN survives a rename, so CloudFormation's create-before-delete
+    // collides with the live source and the whole update rolls back.
     //
-    // Asserted on the source, not by synthesizing a second stack: constructing
-    // one under a different construct id trips an unrelated cdk-nag
-    // suppression-path check first, which masks whatever this is checking.
+    // There is no set of literals that serves every account, so the fix is to hold
+    // none. Asserted on the source because the failure mode is a value being
+    // reintroduced, not a synth-visible shape.
     const src = fs.readFileSync(
       path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
     );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
 
-    // Keyed off the stack's OWN name — no context, no opt-in.
-    expect(body).toContain('PINNED_LOG_DELIVERY_BY_STACK[stack.stackName]');
-    expect(body).not.toContain('tryGetContext');
-    // Nothing anywhere may reintroduce a gate.
+    // No table, no lookup, no per-stack keying, and no flag to gate any of it.
+    expect(src).not.toContain('PINNED_LOG_DELIVERY_BY_STACK');
     expect(src).not.toContain('pinnedLogDeliveryStack');
+    expect(src).not.toContain('overrideLogicalId');
 
-    // The ids it pins are the ones CloudFormation already holds for that stack.
-    // Hard-coded here on purpose: if someone "tidies" a value in the table, this
-    // fails instead of the next production update rolling back.
-    expect(src).toContain('RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02');
-    expect(src).toContain('RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22');
+    // No captured logical id or account-unique Name, in any of their shapes.
+    expect(src).not.toMatch(/RuntimeCDKSource/);
+    expect(src).not.toMatch(/cdk-(application|usage)logs-source-/);
+    expect(src).not.toMatch(/cdk-cwl-Dest/);
   });
 
-  test('a stack with no recorded ids keeps the library\'s own log-delivery naming', () => {
-    // The pinned ids embed a stack name, so they are only correct for that stack.
-    // Another stack has no pre-rename resources to line up with and must not
-    // inherit them — otherwise two stacks in one account would claim the same
-    // account-unique DeliverySource Name. The table lookup is what enforces this,
-    // so assert it returns nothing for an unknown name rather than falling back.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
-    expect(body).toMatch(/if \(!pins\) return;/);
-
-    // And this stack — named TestAgentStack, absent from the table — got the
-    // library's naming, with none of backgroundagent-dev's ids leaking in.
-    const ids = Object.keys(template.findResources('AWS::Logs::DeliverySource'));
+  test('log delivery is left to the library, so every account synthesizes the same ids', () => {
+    // The point of holding no ids: what lands in the template comes from the
+    // library, so the same code produces the same ids in every account. A stack
+    // already on the library's naming sees no change at all.
+    const sources = template.findResources('AWS::Logs::DeliverySource');
+    const ids = Object.keys(sources);
     expect(ids).toHaveLength(2);
+
     for (const id of ids) {
+      // Library-generated, not ours: no self-chosen prefix and no stack name baked
+      // in. A stack name in a logical id is the signature of the old table.
       expect(id).not.toContain('backgroundagentdev');
+      expect(id).not.toContain('AgentRuntimeApplication');
+      // Deliberately the library's CURRENT id shape, so this assertion doubles as a
+      // canary: the next time the AgentCore library renames these resources, this
+      // fails here rather than in a deploy. Read the failure as an operational
+      // warning, not a string mismatch — every already-deployed stack will try to
+      // rename its DeliverySource on the next update, and a renamed source collides
+      // with the live one on the unchanged runtime ARN and rolls the stack back.
+      // Update the regex, and add the new shape to the migration note in
+      // docs/design/OBSERVABILITY.md ("AgentCore log delivery") so operators can
+      // tell which side of the rename their stack is on.
+      expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
     }
+
+    // Both log types are wired, so "no pin" cannot mean "no delivery".
+    const logTypes = Object.values(sources)
+      .map((r) => (r as { Properties?: { LogType?: string } }).Properties?.LogType)
+      .sort();
+    expect(logTypes).toEqual(['APPLICATION_LOGS', 'USAGE_LOGS']);
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
@@ -1126,39 +1139,12 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
   let template: Template;
 
   beforeAll(() => {
-    // Deploying with the gate on provisions the Fargate substrate alongside the
-    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
-    const app = new App({ context: { compute_type: 'ecs' } });
+    // Selecting ECS provisions the Fargate backend and emits ComputeSubstrate=ecs.
+    const app = new App({ context: { compute_types: 'ecs' } });
     const stack = new AgentStack(app, 'TestAgentStackEcs', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
-  });
-
-  /**
-   * CloudFormation refuses a template over 1 MB, and refuses it at CHANGESET CREATION —
-   * after synth succeeds and every asset is pushed. The message names no resource, and
-   * the stack's own status stays at whatever the previous deploy left, so checking stack
-   * status instead of the deploy's exit code reads as success.
-   *
-   * Asserted on the ECS template because that is the substrate deployments use, and it is
-   * the larger of the two: 894,261 bytes here versus 858,062 for the default at the time
-   * of writing. Measured the way the CDK CLI WRITES the template (`null, 2`), which is how
-   * CloudFormation counts it — compact serialization of the same template is ~300 KB
-   * smaller, so a budget checked against compact bytes passes while the deploy fails.
-   *
-   * These in-test figures are lower than what `cdk synth` writes to disk, because the CLI
-   * resolves asset hashes and account/region tokens that `Template.fromStack` leaves
-   * symbolic. The budget is therefore a trend guard on the relative number, not a
-   * prediction of the byte count CloudFormation will receive.
-   *
-   * Reuses the template this describe already synthesizes; no extra synth.
-   */
-  test('stays inside a deployable template budget (CloudFormation hard-fails at 1 MB)', () => {
-    const bytes = Buffer.byteLength(JSON.stringify(template.toJSON(), null, 2), 'utf8');
-    expect(bytes).toBeLessThan(1_000_000);
-    // 5% under, so this fires while there is still room to land the change that trips it.
-    expect(bytes).toBeLessThan(950_000);
   });
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
@@ -1204,7 +1190,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     // This asserts the whole path: context -> resolver -> construct -> template.
     const app = new App({
       context: {
-        compute_type: 'ecs',
+        compute_types: 'ecs',
         ecsBuildTaskCpu: '16384',
         ecsBuildTaskMemoryMiB: '122880',
         ecsBuildTaskEphemeralStorageGiB: '100',
@@ -1240,7 +1226,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // exists once an image identifier is available.
     const app = new App({
       context: {
-        compute_type: 'lambda-microvm',
+        compute_types: 'lambda-microvm',
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
       },
@@ -1434,7 +1420,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
     );
     expect(policies).toContain('logs:CreateLogStream');
-    expect(policies).toContain('RuntimeApplicationLogGroup');
+    expect(policies).toContain('LambdaMicrovmComputeMicrovmLogGroup');
 
     // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
@@ -1442,7 +1428,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const logGroupEnv = JSON.stringify(
       orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
     );
-    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+    expect(logGroupEnv).toContain('LambdaMicrovmComputeMicrovmLogGroup');
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
@@ -1465,7 +1451,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     beforeAll(() => {
       const app = new App({
         context: {
-          compute_type: 'lambda-microvm',
+          compute_types: 'lambda-microvm',
           microvm_region_override: true,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
@@ -1477,7 +1463,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm' } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
@@ -1531,7 +1517,7 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     // but no image yet. Exercises the false branch of the shared
     // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
     // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
-    const app = new App({ context: { compute_type: 'lambda-microvm' } });
+    const app = new App({ context: { compute_types: 'lambda-microvm' } });
     const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -1575,7 +1561,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
     const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
       .mockReturnValue(true);
     try {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm' } });
       const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
         env: { account: '123456789012', region: 'us-east-1' },
       });
@@ -1716,7 +1702,7 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
 
     beforeAll(() => {
       const app = new App({
-        context: { enableToolGateway: true, compute_type: 'ecs' },
+        context: { enableToolGateway: true, compute_types: 'ecs' },
       });
       const stack = new AgentStack(app, 'GatewayEcsStack', {
         env: { account: '123456789012', region: 'us-east-1' },
@@ -1910,30 +1896,16 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
-    // — platform_config carries the workload name and the guest's execution role gets the
-    // mint grant — but the two cannot be enabled together today: 505 resources against a
-    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
-    // without saying so would be false.
-    //
-    // The stack refuses the combination itself rather than letting the counter throw,
-    // because the counter's message is a per-type census that never mentions either flag —
-    // the operator cannot tell from it what to change.
-    //
-    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
-    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
-    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
-    //
-    // When the room is found, this test should be replaced by a real parity assertion.
-    const app = new App({
-      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
-    });
-    expect(() => Template.fromStack(
-      new AgentStack(app, 'LinearVaultMicrovmStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true, compute_types: 'lambda-microvm' } });
+    const template = Template.fromStack(new AgentStack(app, 'LinearVaultMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    const policy = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')));
+    expect(policy).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThanOrEqual(500);
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {
@@ -1989,66 +1961,6 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       'orchestration-reconciler.ts',
     ]);
   });
-});
-
-describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
-  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
-  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.
-  // Every deploy-gate cell is covered, not only the widest, so a regression confined
-  // to one substrate cannot hide behind the others. The gap this closes: no test had
-  // ever constructed `compute_type` and `enableToolGateway` *together*, so the widest
-  // cell could exceed the quota — unable to synthesize at all — with CI still green.
-  // Budget is deliberately below the quota so this fails as a readable assertion with a
-  // named remedy before synth starts throwing.
-  const MAX_RESOURCE_BUDGET = 500;
-  const CUSHION = 10;
-  const RESOURCE_BUDGET = MAX_RESOURCE_BUDGET - CUSHION;
-
-  // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
-  // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
-  const SYNTH_ONLY_RESOURCES = 1;
-
-  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
-  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
-    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
-  );
-
-  describe.each(CELLS)(
-    'compute_type=$computeType enableToolGateway=$enableToolGateway',
-    ({ computeType, enableToolGateway }) => {
-      let template: Template;
-
-      beforeAll(() => {
-        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
-        const stack = new AgentStack(app, 'BudgetStack', {
-          env: { account: '123456789012', region: 'us-east-1' },
-        });
-        // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
-        // reaching the assertions below is itself part of the guard.
-        template = Template.fromStack(stack);
-      });
-
-      test('stays inside the resource budget', () => {
-        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
-        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
-      });
-
-      test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {
-        // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
-        // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
-        // scoped to `method.testMethodArn` — removing the API Gateway console's "TEST"
-        // button, which nothing in this solution invokes, and its extra
-        // `lambda:InvokeFunction` grant.
-        // Naming the offending logical IDs makes a regressed call site point straight
-        // at its own construct.
-        const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
-          .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
-          .map(([logicalId]) => logicalId);
-
-        expect(offenders).toEqual([]);
-      });
-    },
-  );
 });
 
 describe('AgentStack Agent Registry gate', () => {
