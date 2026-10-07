@@ -78,8 +78,6 @@ The last command opts into the pinned real SDK/CLI probe with a deterministic
 loopback model; it does not launch a cloud worker. Optional DynamoDB Local tests
 require their documented local service. Mocks do not establish effective AWS IAM.
 The standalone cloud acceptance harness and raw receipts remain outside this PR.
-The repository's narrower [launch, payload and replay probes](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cdk/test/live/README.md)
-have separate inspection and execution commands.
 
 ## Live acceptance for an installation
 

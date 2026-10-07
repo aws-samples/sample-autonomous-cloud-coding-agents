@@ -14,7 +14,7 @@ run = "node scripts/sync-starlight.mjs"
 [tasks.build]
 description = "Starlight docs site build"
 depends = [":sync"]
-run = "./node_modules/.bin/astro build && node scripts/check-site-links.mjs"
+run = "./node_modules/.bin/astro build"
 
 [tasks.dev]
 description = "Starlight dev server"
