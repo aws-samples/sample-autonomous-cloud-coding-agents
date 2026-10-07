@@ -40,6 +40,11 @@ run = "yarn jest --coverage=false --runInBand"
 description = "cdk synth"
 run = ["mkdir -p $TMPDIR", "yarn synth"]
 
+[tasks.census]
+description = "Measure named CDK profiles and optionally audit synthesis stability (offline, unbundled)"
+depends = [":compile"]
+run = "yarn census"
+
 [tasks."synth:quiet"]
 description = "cdk synth (quiet)"
 depends = [":compile"]
