@@ -1909,6 +1909,33 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
  * a non-orchestration comment, a missing mention, or an un-started sub-issue is
  * a clean no-op (no failure comment — comments are conversational).
  */
+/**
+ * Whether the work a comment would act on belongs to the workspace that sent it.
+ *
+ * The comment path finds its target by issue id: an orchestration (keyed on a hash of
+ * that id) or the newest task on it. Those lookups are not scoped to a workspace, and
+ * the work that follows runs on the target's repo as its original requester, so the
+ * target's recorded workspace is matched against the delivery's here. This keeps the
+ * comment path consistent with the project-mapping check in the handler.
+ *
+ * A target that records no workspace is not acted on: every orchestration and Linear
+ * task records one, so absence means the row is not one this path should act on.
+ * No reply is posted, matching the project-mapping check.
+ */
+function commentTargetBelongsToWorkspace(
+  ownerWorkspaceId: string | undefined,
+  workspaceId: string,
+  issueId: string,
+): boolean {
+  if (ownerWorkspaceId && ownerWorkspaceId === workspaceId) return true;
+  logger.warn('Comment trigger: commented issue belongs to a different workspace than this webhook — dropping', {
+    linear_issue_id: issueId,
+    event_workspace_id: workspaceId,
+    owner_workspace_id: ownerWorkspaceId,
+  });
+  return false;
+}
+
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
@@ -1988,6 +2015,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const ownOrchestrationId = deriveOrchestrationId(commentedIssueId);
   const parentSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, ownOrchestrationId);
   if (parentSnapshot && parentSnapshot.meta.parent_issue_ref === commentedIssueId) {
+    if (!commentTargetBelongsToWorkspace(parentSnapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
     await handleParentEpicCommentTrigger({
       orchestrationId: ownOrchestrationId,
       snapshot: parentSnapshot,
@@ -2037,6 +2065,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
     : null;
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
+  if (snapshot && !commentTargetBelongsToWorkspace(snapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
   if (!snapshot || !child || !child.child_task_id) {
     await handleStandaloneCommentTrigger({
       subIssueId: commentedIssueId,
@@ -2542,6 +2571,7 @@ async function handleStandaloneCommentTrigger(args: {
     return;
   }
   const task = lookup.task;
+  if (!commentTargetBelongsToWorkspace(task.linear_workspace_id, workspaceId, issueId)) return;
   const prNumber = prNumberFromTask(task);
   if (prNumber === null || !task.repo) {
     // Clarify-resume: a task with no PR MIGHT be a clarify-HOLD (a
