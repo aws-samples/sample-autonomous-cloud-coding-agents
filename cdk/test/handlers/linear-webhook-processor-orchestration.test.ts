@@ -688,7 +688,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       sub_issue_id: '#meta',
       orchestration_id: 'orch_x',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       repo: 'o/r',
       child_count: 1,
       platform_user_id: 'release-user',
@@ -700,12 +700,12 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'succeeded',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
     };
     if (opts.childTaskId) child.child_task_id = opts.childTaskId;
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
-        return { Items: opts.standalone ? [opts.standalone] : [] }; // resolveTaskByLinearIssue
+        return { Items: opts.standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...opts.standalone }] : [] }; // resolveTaskByLinearIssue
       }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
       // Comment-trigger authorization: lookupPlatformUser Gets the user-mapping
@@ -724,7 +724,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT); // no parent ⇒ not a sub-issue
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
-        return { Items: standalone ? [standalone] : [] };
+        return { Items: standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...standalone }] : [] };
       }
       // Comment-trigger authorization: the commenter resolves to a mapped user.
       if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
@@ -744,6 +744,53 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     reactToCommentMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue(true);
     upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
+  });
+
+  // A comment only acts on work recorded under the workspace the delivery came from.
+  // The other fixtures in this file are single-workspace (org-1).
+  describe('a comment cannot act on another workspace\'s work', () => {
+    function expectSilentDrop(): void {
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // No ack or reply, matching the project-mapping check.
+      expect(reactToCommentMock).not.toHaveBeenCalled();
+      expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+      expect(replyToCommentMock).not.toHaveBeenCalled();
+    }
+
+    test('a sub-issue of another workspace\'s orchestration starts no iteration', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+      await handler(eventWith(comment({ organizationId: 'org-2' })));
+      expectSilentDrop();
+    });
+
+    test('another workspace\'s parent epic starts no iteration, even naming a child', async () => {
+      // A comment on the epic itself is routed without a Linear API call, so the
+      // workspace match is checked on this path too.
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+      await handler(eventWith(comment({
+        organizationId: 'org-2',
+        data: { id: 'comment-1', body: '@bgagent sub-issue-1: change the timeout', issueId: 'PARENT' },
+      })));
+      expectSilentDrop();
+    });
+
+    test('a standalone task from another workspace starts no iteration', async () => {
+      mockStandaloneOnly({ task_id: 'task-p', user_id: 'other-user', repo: 'o2/r2', pr_number: 7 });
+      await handler(eventWith(comment({ organizationId: 'org-2' })));
+      expectSilentDrop();
+    });
+
+    test('a standalone task that records no workspace is not acted on', async () => {
+      mockStandaloneOnly({
+        task_id: 'task-p',
+        user_id: 'other-user',
+        repo: 'o2/r2',
+        pr_number: 7,
+        channel_metadata: {},
+      } as Parameters<typeof mockStandaloneOnly>[0]);
+      await handler(eventWith(comment()));
+      expectSilentDrop();
+    });
   });
 
   test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
@@ -793,7 +840,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       sub_issue_id: '#meta',
       orchestration_id: 'orch_x',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       repo: 'o/r',
       child_count: 2,
       platform_user_id: 'release-user',
@@ -807,7 +854,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'succeeded',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       child_task_id: 'task-sub-1',
     };
     const badSibling = {
@@ -817,7 +864,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'failed',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       child_task_id: 'task-bad-1',
     };
     const claimed = new Set<string>();
@@ -1129,7 +1176,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_x',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 2,
         platform_user_id: 'release-user',
@@ -1141,7 +1188,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-305',
         title: 'Add a site-wide footer',
         child_task_id: 'task-footer',
@@ -1153,7 +1200,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-306',
         title: 'Add a newsletter signup section',
         child_task_id: 'task-news',
@@ -1198,13 +1245,13 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
       };
       const meta = {
         orchestration_id: 'orch_x',
         sub_issue_id: '#meta',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 3,
         platform_user_id: 'u1',
@@ -1446,7 +1493,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_f',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 2,
         platform_user_id: 'release-user',
@@ -1459,7 +1506,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-1',
         title: 'Step A',
         child_task_id: 'task-ok',
@@ -1471,7 +1518,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'failed',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-2',
         title: 'Step B',
         child_task_id: 'task-bad-1',

@@ -128,6 +128,20 @@ bgagent linear onboard-project <project-uuid> --repo owner/repo
 
 Pass `--label <name>` to use a trigger label other than `bgagent`. Also available: `--team-id` (debug only), `--region`, `--stack-name`.
 
+`onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
+
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
+
+### Signing secrets in a multi-workspace install
+
+Every workspace must have its own webhook signing secret, read from its own Linear app. `setup` asks for it and refuses to continue without one, and records on the workspace's registry row that the secret is genuinely that workspace's.
+
+A workspace onboarded by an older release may instead be holding a copy of the first workspace's secret. Two workspaces sharing one secret means either can produce a delivery the other's signature check accepts, so **on a stack with more than one active workspace those deliveries are rejected with a 401** until each workspace has its own. Fix it per workspace with `bgagent linear update-webhook-secret <slug>`, which also records that the secret is that workspace's own — pass `--stack-name` if you are not using the default.
+
+On an existing multi-workspace stack, run `bgagent linear backfill-secret-provenance --dry-run` before deploying this change. It records ownership automatically for every workspace whose stored secret differs from the stack-wide value — which proves the secret was never copied from it, since copying is the only way a workspace ends up with someone else's — and names the ones that still need `update-webhook-secret`. `bgagent platform doctor` reports the same thing, and stays quiet on a single-workspace stack where a shared secret cannot reach another tenant.
+
+For the same reason, the stack-wide back-compat secret is only accepted on a single-workspace stack. It cannot say which workspace sent a delivery, and with two or more tenants there is no safe way to guess, so a stack-wide-signed delivery is rejected instead. Single-workspace installs are unaffected: every check here compares against the number of active workspaces first, and with one tenant none of them changes behaviour.
+
 ### 6. Test
 
 Apply the trigger label to an issue in that project. Within ~30 seconds the agent posts `🤖 Starting on this issue…`, then a PR link when it's done.
