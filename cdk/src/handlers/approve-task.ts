@@ -18,9 +18,10 @@
  */
 
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { recordDecisionPostCommit } from './shared/approval-decision';
 import { VALID_APPROVAL_SCOPE_PREFIXES, parseApprovalScope } from './shared/approval-scope';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
@@ -64,25 +65,38 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
  * @param event - API Gateway proxy event.
  * @returns API Gateway proxy result.
  */
-export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+export async function handler(
+  event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
+): Promise<APIGatewayProxyResult> {
+  return recordApprovalForUser({
+    userId: extractUserId(event), taskId: event.pathParameters?.task_id, body: event.body,
+  }, context);
+}
+
+/** Shared decision path. Callers must authenticate and map the platform user first. */
+export async function recordApprovalForUser(
+  input: { userId: string | null; taskId?: string; body?: string | null; decisionSource?: string },
+  context?: Pick<Context, 'getRemainingTimeInMillis'>,
+): Promise<APIGatewayProxyResult> {
+  const invocationStartedMs = Date.now();
   const requestId = ulid();
 
   try {
     // 1. Auth
-    const callerUserId = extractUserId(event);
+    const callerUserId = input.userId;
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
     // 2. Path + body
-    const taskId = event.pathParameters?.task_id;
+    const taskId = input.taskId;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
     let parsed: ApprovalRequest | null = null;
     try {
-      parsed = event.body ? JSON.parse(event.body) as ApprovalRequest : null;
+      parsed = input.body ? JSON.parse(input.body) as ApprovalRequest : null;
     } catch {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -122,10 +136,10 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const nowIso = new Date().toISOString();
     const nowEpoch = Math.floor(Date.now() / 1000);
 
-    // 3. Per-user per-minute rate limit. Uses a synthetic row in the
-    // approvals table keyed on `RATE#<user_id>#MINUTE#<yyyymmddhhmm>`
-    // so the existing grantReadWriteData wiring carries forward; TTL
-    // reaps the counter after ~120s.
+    // 3. Per-user per-minute rate limit, shared with deny. The approvals-table
+    // partition key is RATE#<user_id>#APPROVE; the sort key is MINUTE#<bucket>.
+    // TTL makes old counters eligible for eventual cleanup, not deletion at
+    // an exact time. Each minute uses its own counter regardless of that delay.
     const minuteBucket = formatMinuteBucket(new Date());
     try {
       await ddb.send(new UpdateCommand({
@@ -168,9 +182,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :approved, decided_at = :now, #scope = :scope',
+                'SET #status = :approved, decided_at = :now, #scope = :scope'
+                  + (input.decisionSource ? ', decision_source = :source' : ''),
               ConditionExpression:
-                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
+                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
+                  + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
               ExpressionAttributeNames: {
                 '#status': 'status',
                 '#scope': 'scope',
@@ -181,6 +197,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 ':now': nowIso,
                 ':scope': scope,
                 ':caller': callerUserId,
+                ':epoch': nowEpoch,
+                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },
@@ -209,35 +227,22 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
-    // 5. Audit event (IMPL-6). Failure to write the audit is logged
-    // but does not fail the request — the decision is already
-    // committed on TaskApprovalsTable and the agent will see it on its
-    // next poll regardless.
-    try {
-      await ddb.send(new PutCommand({
-        TableName: EVENTS_TABLE_NAME,
-        Item: {
-          task_id: taskId,
-          event_id: ulid(),
-          event_type: 'approval_decision_recorded',
-          timestamp: nowIso,
-          ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
-          metadata: {
-            request_id,
-            status: 'APPROVED',
-            scope,
-            decided_at: nowIso,
-            caller_user_id: callerUserId,
-          },
-        },
-      }));
-    } catch (auditErr) {
-      logger.warn('approval_decision_recorded audit write failed (decision already committed)', {
-        task_id: taskId,
-        request_id,
-        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-      });
-    }
+    // Audit + optional MicroVM wake are best-effort after commit (shared with
+    // deny); neither can turn an accepted human decision into an HTTP failure.
+    await recordDecisionPostCommit({
+      ddb,
+      eventsTableName: EVENTS_TABLE_NAME!,
+      taskId,
+      callerUserId,
+      requestId: request_id,
+      decision: 'APPROVED',
+      auditMetadata: { scope: scope },
+      decidedAt: nowIso,
+      nowEpoch,
+      retentionDays: AUDIT_EVENT_RETENTION_DAYS,
+      invocationStartedMs,
+      context,
+    });
 
     logger.info('Approval recorded', {
       task_id: taskId,
@@ -269,22 +274,16 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
  *
  * Per §7.1, the cancellation reasons are per-item (index 0 is the
  * approvals-row Update, index 1 is the task-row Update). We read them
- * to distinguish:
- * - approvals item cancelled:
- *    - via `attribute_exists` failure → row missing → 404
- *    - via `user_id = :caller` failure → wrong owner → 404 (no oracle)
- *    - via `status = :pending` failure → already decided → 409
+ * to classify the failed item:
+ * - approvals item cancelled → 404 for missing, wrong-owner or already-decided rows
  * - task-row item cancelled only → task not in AWAITING_APPROVAL → 409
  *
  * DDB does not return which sub-clause of the `ConditionExpression`
- * failed, so we infer from whichever row was cancelled. If ONLY the
- * approvals Update tripped, it could be any of {missing, wrong owner,
- * wrong status}; we conservatively return 404 to prevent the existence
- * oracle. The more-specific 409 ALREADY_DECIDED path requires
- * additional information we do not have from the reason array alone;
- * implementations that want the stronger distinction need to do a
- * subsequent GetItem, which re-introduces the race the transaction
- * eliminates. v1 accepts the less-granular 404 on ownership drift.
+ * failed. This transaction does not request the old item on condition failure,
+ * so an approvals-row failure cannot distinguish those three cases. It takes
+ * precedence even when the task-row condition also fails. Returning 404 for all
+ * three avoids revealing another user's approval. In particular, a late decision
+ * after an approval timeout returns REQUEST_NOT_FOUND, not ALREADY_DECIDED.
  */
 function classifyCancel(
   err: TransactionCanceledException,

@@ -39,7 +39,7 @@ interface PlainText {
 /** Section block: a single line/paragraph of mrkdwn content. */
 export interface SectionBlock {
   readonly type: 'section';
-  readonly text: MrkdwnText;
+  readonly text: MrkdwnText | PlainText;
   readonly block_id?: string;
 }
 

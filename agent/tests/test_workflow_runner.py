@@ -487,6 +487,73 @@ def _real_ctx(workflow: Workflow, **kw):
     return StepContext(workflow=workflow, config=config, **kw)
 
 
+@pytest.mark.parametrize(
+    "prepared_prompt",
+    [
+        "Recorded APPROVED. Saved proposal: "
+        '{"command": "cat marker", "description": "Read marker"}',
+        "Recorded DENIED. Do not work around this decision.",
+        "Recorded TIMED_OUT. Continue from the saved decision.",
+        "Original task with local attachment references.",
+        "",
+    ],
+)
+def test_hydration_preserves_the_prepared_prompt_sent_to_the_agent(monkeypatch, prepared_prompt):
+    from models import AgentResult, HydratedContext
+    from workflow.runner import _handle_hydrate_context, _handle_run_agent
+
+    wf = _workflow([{"kind": "hydrate_context"}, {"kind": "run_agent"}])
+    ctx = _real_ctx(
+        wf,
+        hydrated=HydratedContext(user_prompt="Original task before the human decision"),
+        user_prompt=prepared_prompt,
+        system_prompt="Saved system prompt",
+    )
+    received = []
+
+    async def capture_prompt(prompt, system_prompt, *_args, **_kwargs):
+        received.append((prompt, system_prompt))
+        return AgentResult(status="success")
+
+    monkeypatch.setattr("runner.run_agent", capture_prompt)
+    _handle_hydrate_context(wf.steps[0], ctx)
+    _handle_run_agent(wf.steps[1], ctx)
+
+    assert received == [
+        (prepared_prompt or "Original task before the human decision", "Saved system prompt")
+    ]
+
+
+def test_closed_microvm_cannot_run_delivery_steps_after_its_agent_unwinds(monkeypatch):
+    from microvm_lifecycle import register_task, unregister_task
+    from models import AgentResult
+    from workflow.runner import _handle_run_agent
+
+    wf = _workflow([{"kind": "run_agent"}, {"kind": "ensure_pr", "strategy": "create"}])
+    ctx = _real_ctx(wf, user_prompt="test", system_prompt="test")
+    lifecycle = register_task(ctx.config.task_id, "microvm-test")
+
+    async def finish(*_args, **_kwargs):
+        lifecycle.close()
+        return AgentResult(status="success")
+
+    def must_not_deliver(*_args):
+        raise AssertionError("closed worker reached its delivery step")
+
+    monkeypatch.setattr("runner.run_agent", finish)
+    try:
+        result = run_workflow(
+            wf, ctx, handlers={"run_agent": _handle_run_agent, "ensure_pr": must_not_deliver}
+        )
+        assert not result.succeeded
+        assert result.failed_step is not None
+        assert result.failed_step.error is not None
+        assert "Worker execution is closed" in result.failed_step.error
+        assert len(result.outcomes) == 1
+    finally:
+        unregister_task(lifecycle)
+
+
 class TestVerifyHandlers:
     def test_verify_build_regression_only_passes_when_broken_before(self, monkeypatch):
         from models import RepoSetup

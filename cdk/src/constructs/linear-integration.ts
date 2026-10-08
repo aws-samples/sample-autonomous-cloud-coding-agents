@@ -18,7 +18,7 @@
  */
 
 import * as path from 'path';
-import { ArnFormat, Aspects, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { ArnFormat, Aspects, Duration, Fn, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
@@ -77,6 +77,11 @@ export interface LinearIntegrationProps {
 
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
+
+  /** Enables task-owner decisions from replies to Linear approval comments. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+  readonly lambdaMicrovmImageArn?: string;
+  readonly continuationBucketName?: string;
 
   /** Monthly user/team budget configuration and spend table. */
   readonly budgetTable?: dynamodb.ITable;
@@ -159,7 +164,7 @@ export interface LinearIntegrationProps {
  *   provider name; Phase 2.0b OAuth migration). Webhook processor and
  *   orchestrator use this to look up which credential provider holds the
  *   workspace's OAuth token.
- * - LinearWebhookDedupTable (60s TTL dedup for webhook retries)
+ * - LinearWebhookDedupTable (8-hour TTL dedup for webhook retries)
  * - Lambda handlers for the webhook receiver, async processor, and account linking
  * - API Gateway routes under /linear/*
  * - Two Secrets Manager secrets (webhook signing secret + personal API token)
@@ -178,7 +183,7 @@ export class LinearIntegration extends Construct {
    */
   public readonly workspaceRegistryTable: dynamodb.Table;
 
-  /** Webhook dedup table — (issue_id, action) keys with 60s TTL. */
+  /** Webhook dedup table — data.id/action/webhookTimestamp keys with 8-hour TTL. */
   public readonly webhookDedupTable: dynamodb.Table;
 
   /** Linear webhook signing secret (placeholder — populated by `bgagent linear setup`). */
@@ -206,8 +211,7 @@ export class LinearIntegration extends Construct {
     this.userMappingTable = userMapping.table;
     this.workspaceRegistryTable = workspaceRegistry.table;
 
-    // Dedup table: linear webhook retries collapse to a single processor invoke
-    // within the 60s TTL window. Keyed on `{issue_id}#{action}`.
+    // The receiver deduplicates data.id/action/webhookTimestamp for 8 hours.
     this.webhookDedupTable = new dynamodb.Table(this, 'WebhookDedupTable', {
       partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -236,6 +240,18 @@ export class LinearIntegration extends Construct {
     // the task-orchestrator. Used by the webhook processor's PDF attachment path.
     const attachmentScreeningBundling: lambda.BundlingOptions = {
       ...commonBundling,
+      // Approval replies need the current MicroVM client and durable Invoke
+      // fields, which cannot depend on the SDK version supplied by Lambda.
+      ...(props.taskApprovalsTable && {
+        externalModules: [
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/client-ecs',
+          '@aws-sdk/client-bedrock-runtime',
+          '@aws-sdk/client-secrets-manager',
+          '@aws-sdk/lib-dynamodb',
+          '@aws-sdk/util-dynamodb',
+        ],
+      }),
       nodeModules: ['pdf-parse'],
     };
 
@@ -245,6 +261,12 @@ export class LinearIntegration extends Construct {
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
+    if (props.taskApprovalsTable) {
+      createTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
+    }
+    if (props.continuationBucketName) {
+      createTaskEnv.CONTINUATION_BUCKET_NAME = props.continuationBucketName;
+    }
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
     }
@@ -304,7 +326,7 @@ export class LinearIntegration extends Construct {
         }),
         // Throttle the seed-time root release to the free concurrency
         // budget (see prop doc). Only wired when both tables are present.
-        ...(props.orchestrationTable && props.userConcurrencyTable && {
+        ...((props.orchestrationTable || props.continuationBucketName) && props.userConcurrencyTable && {
           USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
           MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
         }),
@@ -389,6 +411,20 @@ export class LinearIntegration extends Construct {
     }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    props.taskApprovalsTable?.grantReadWriteData(webhookProcessorFn);
+    if (props.taskApprovalsTable && props.lambdaMicrovmImageArn) {
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+        resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+      }));
+    }
+    if (props.continuationBucketName && props.orchestratorFunctionArn) {
+      props.userConcurrencyTable?.grantReadWriteData(webhookProcessorFn);
+      const coordinatorArn = Fn.join(':', Array.from({ length: 7 }, (_, i) => Fn.select(i, Fn.split(':', props.orchestratorFunctionArn!))));
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
+      }));
+    }
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }

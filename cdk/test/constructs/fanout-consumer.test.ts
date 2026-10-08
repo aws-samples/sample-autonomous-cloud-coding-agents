@@ -39,6 +39,26 @@ function makeTaskEventsTable(stack: Stack): dynamodb.Table {
 }
 
 describe('FanOutConsumer', () => {
+  test('binds approval notifications to only GetItem and UpdateItem on the approvals table', () => {
+    const stack = new Stack(new App(), 'ApprovalNotifications');
+    const table = new dynamodb.Table(stack, 'Approvals', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack), taskApprovalsTable: table,
+    });
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ TASK_APPROVALS_TABLE_NAME: stack.resolve(table.tableName) }) },
+    });
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([Match.objectLike({
+          Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'], Resource: [stack.resolve(table.tableArn)],
+        })]),
+      },
+    });
+  });
   test('attaches a single DynamoEventSource on the TaskEventsTable stream', () => {
     const app = new App();
     const stack = new Stack(app, 'TestStack');

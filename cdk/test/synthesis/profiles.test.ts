@@ -53,10 +53,10 @@ describe('structural synthesis profiles', () => {
   });
 
   test(
-    'rejects the widest two-zone inline MicroVM profile while keeping its split counterpart',
+    'fits the widest two-zone inline MicroVM profile and its split counterpart',
     () => {
       const inline = profiles.find(profile => profile.name === 'lambda-microvm-gw1-reg1-vault1-managed-email-fork')!;
-      expect(inline.expectedError).toEqual({ stackName: 'backgroundagent-dev', resourceLimit: 490 });
+      expect(inline.expectedError).toBeUndefined();
       expect(inline.context).not.toHaveProperty(AGENTCORE_AZS_CONTEXT_KEY);
       expect(profiles.find(profile => profile.name === `${inline.name}-split`)!.expectedError).toBeUndefined();
     },
@@ -84,7 +84,7 @@ describe('structural synthesis profiles', () => {
             alertEmail: 'census@example.com',
             forkBlueprintRepo: 'example/census-blueprints',
           });
-          expect(!!matches[0].expectedError).toBe(topology === 'inline');
+          expect(matches[0].expectedError).toBeUndefined();
         }
       }
     },
@@ -117,7 +117,7 @@ describe('structural synthesis profiles', () => {
           bedrockModels: expect.arrayContaining([...DEFAULT_BEDROCK_MODEL_IDS]),
         });
         expect(matches[0].context.bedrockModels).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length + 8);
-        expect(!!matches[0].expectedError).toBe(topology === 'inline' && compute === 'lambda-microvm');
+        expect(matches[0].expectedError).toBeUndefined();
       }
     }
   });

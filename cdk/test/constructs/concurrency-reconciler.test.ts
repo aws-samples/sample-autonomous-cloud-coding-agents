@@ -43,8 +43,10 @@ function createStack(): Template {
 }
 
 describe('ConcurrencyReconciler construct', () => {
+  let template: Template;
+  beforeAll(() => { template = createStack(); });
+
   test('creates a Lambda function', () => {
-    const template = createStack();
     template.hasResourceProperties('AWS::Lambda::Function', {
       Runtime: 'nodejs24.x',
       Timeout: 300,
@@ -52,14 +54,12 @@ describe('ConcurrencyReconciler construct', () => {
   });
 
   test('creates an EventBridge rule with rate schedule', () => {
-    const template = createStack();
     template.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(15 minutes)',
     });
   });
 
   test('Lambda has correct environment variables', () => {
-    const template = createStack();
     template.hasResourceProperties('AWS::Lambda::Function', {
       Environment: {
         Variables: Match.objectLike({
@@ -68,5 +68,16 @@ describe('ConcurrencyReconciler construct', () => {
         }),
       },
     });
+  });
+
+  test('can read reservations and update their markers without deleting or creating tasks', () => {
+    const tableId = Object.keys(template.findResources('AWS::DynamoDB::Table')).find(id => id.startsWith('TaskTable'))!;
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement)
+      .filter(statement => JSON.stringify(statement.Resource).includes(tableId));
+    const actions = statements.flatMap(statement => [statement.Action].flat());
+    expect(actions).toEqual(expect.arrayContaining(['dynamodb:GetItem', 'dynamodb:Scan', 'dynamodb:UpdateItem']));
+    expect(actions).not.toEqual(expect.arrayContaining(['dynamodb:PutItem']));
+    expect(actions).not.toEqual(expect.arrayContaining(['dynamodb:DeleteItem']));
   });
 });

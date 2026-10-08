@@ -258,7 +258,7 @@ Returns full details of a task. Users can only access their own tasks.
 }
 ```
 
-`agent_heartbeat_at` is the agent's last in-guest liveness beat, or `null`. The agent writes it every 45 s on the `agentcore` and `lambda-microvm` backends; on `ecs` it is written once at start, because that backend runs the pipeline directly instead of serving HTTP. The orchestrator reads the same field to detect a hung agent inside a healthy compute environment ([ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#dynamodb-heartbeat-agentcore-and-lambda-microvms)), so a value that is minutes old on a `RUNNING` task is the signal, not the timestamp itself. `null` on records written before the field existed.
+`agent_heartbeat_at` is the agent's last in-guest liveness beat, or `null`. The agent writes it every 45 s on the `agentcore` and `lambda-microvm` backends; on `ecs` it is written once at start, because that backend runs the pipeline directly instead of serving HTTP. The orchestrator reads the same field to detect a hung agent inside a healthy compute environment ([ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#liveness-monitoring)), so a value that is minutes old on a `RUNNING` task is the signal, not the timestamp itself. `null` on records written before the field existed.
 
 `error_classification` is a derived field computed at response time from `error_message`. When `error_message` is `null`, `error_classification` is `null`. When present, it contains:
 
@@ -386,7 +386,7 @@ When a task pauses in `AWAITING_APPROVAL` (Cedar soft-deny gate), the owner appr
 { "data": { "task_id": "01HYX...", "request_id": "...", "status": "DENIED", "decided_at": "2025-03-15T10:35:00Z" } }
 ```
 
-**Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`, `404 REQUEST_NOT_FOUND` (collapses "row missing" and "wrong caller"), `409 REQUEST_ALREADY_DECIDED`, `409 TASK_NOT_AWAITING_APPROVAL`.
+**Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`, `404 REQUEST_NOT_FOUND` (collapses missing, inaccessible, closed or expired approval rows), `409 TASK_NOT_AWAITING_APPROVAL` (task-only state conflict).
 
 ### List pending approvals
 
@@ -612,7 +612,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `RATE_LIMIT_EXCEEDED` | 429 | Rate/concurrency gate exceeded — per-task nudge limit, the application rate limiter on approval endpoints, or the user concurrency limit on confirm-uploads |
 | `BUDGET_EXCEEDED` | 429 | A configured user or Cognito-team monthly budget reached 100% with hard stop enabled |
 | `REQUEST_NOT_FOUND` | 404 | Cedar HITL approval request not found (also returned when the caller does not own it) |
-| `REQUEST_ALREADY_DECIDED` | 409 | Cedar HITL approval request was already approved or denied |
+| `REQUEST_ALREADY_DECIDED` | 409 | Legacy error-code enum; current approve/deny handlers return `404 REQUEST_NOT_FOUND` for closed or inaccessible approval rows |
 | `TASK_NOT_AWAITING_APPROVAL` | 409 | Task is not in `AWAITING_APPROVAL`, so the approval decision does not apply |
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (retry with backoff) |

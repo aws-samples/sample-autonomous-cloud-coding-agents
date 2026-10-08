@@ -7,7 +7,7 @@ title: Vision
 This document states the long-term direction of **ABCA (Autonomous Background Coding Agents on AWS)** and the **tenets** that should guide design, implementation, and review. Use it when evaluating pull requests, RFCs, and ADRs: if a change clearly advances the vision and respects the tenets, it belongs; if it trades tenets away without an explicit, documented rationale, it needs more discussion.
 
 - **Use this doc for:** alignment checks in review — “does this fit where we are going?”
-- **Not a substitute for:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) (system shape), [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) (planned work and priorities), or [docs/decisions/](../decisions/) (specific accepted choices).
+- **Not a substitute for:** [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture) (system shape), [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) (planned work and priorities), or [docs/decisions/](/sample-autonomous-cloud-coding-agents/decisions/readme) (specific accepted choices).
 
 ## Vision
 
@@ -17,7 +17,7 @@ We are building toward **lights-sparse**, **graduated** autonomy (defined below)
 
 ### What "lights-sparse" means
 
-**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](/sample-autonomous-cloud-coding-agents/architecture/index).
+**Lights-sparse** is project vocabulary (not general industry jargon): it names the autonomy posture ABCA targets today, drawn from the **software dark factory** analogy in the [introduction](/sample-autonomous-cloud-coding-agents/).
 
 - **Lights-out** (the analogy’s end state): humans set goals, policy, and constraints; production runs without people on the floor.
 - **Lights-sparse** (where teams are now): the **implementation loop** — edit code, run tests, open pull requests — is increasingly **unattended**, while **governance, merge authority, and production release** stay **supervised**. Humans are not at the keyboard for every step; they are still accountable for what ships.
@@ -148,7 +148,7 @@ These are out of scope for the project vision. Proposals that primarily serve th
 | [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) | Threat model and controls (tenets 4–5 in depth) |
 | [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) | HITL approval gates, pre-approve scopes, graduated in-run autonomy |
 | [INTERACTIVE_AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) | Async UX, watch/nudge, notification plane, approval state machine |
-| [docs/decisions/](../decisions/) | Recorded choices when tenets conflict or ambiguity is resolved |
-| [docs/src/content/docs/index.md](/sample-autonomous-cloud-coding-agents/architecture/index) (synced intro) | Public-facing narrative including dark-factory attribute table |
+| [docs/decisions/](/sample-autonomous-cloud-coding-agents/decisions/readme) | Recorded choices when tenets conflict or ambiguity is resolved |
+| [docs/src/content/docs/index.md](/sample-autonomous-cloud-coding-agents/) (synced intro) | Public-facing narrative including dark-factory attribute table |
 
 When tenets and architecture principles overlap, **tenets win for review judgment**; **architecture and ADRs win for implementation detail** once a direction is chosen.

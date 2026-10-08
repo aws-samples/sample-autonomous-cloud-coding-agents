@@ -360,7 +360,7 @@ def _reset_circuit_breakers() -> None:
 class _ProgressWriter:
     """Write AG-UI-style progress events to the existing DynamoDB TaskEventsTable.
 
-    Fail-open: a DDB write failure is logged but never raises.  After
+    Ordinary event methods fail open: a DDB write failure is logged but never raises. After
     ``_MAX_FAILURES`` consecutive *transient* failures the task's stream
     is permanently disabled (circuit breaker).  Permanent errors
     (``ValidationException`` et al.) drop the individual event without
@@ -454,7 +454,71 @@ class _ProgressWriter:
 
     # -- core write ------------------------------------------------------------
 
+    def write_microvm_checkpoint(
+        self, *, metadata: dict, condition_checks: list[dict], client
+    ) -> None:
+        """Atomically acknowledge a pause marker and its task/gate preconditions.
+
+        Called only by the lifecycle checkpoint callback after activity drains.
+        This deliberately bypasses the best-effort event path: absent tables,
+        disabled progress, failed conditions and uncertain writes must raise.
+        A saved marker records a safe point, not proof that AWS froze the VM.
+        """
+        if not self._table_name or self._disabled:
+            raise RuntimeError("Checkpoint progress table is unavailable")
+        from boto3.dynamodb.types import TypeSerializer
+
+        now = datetime.now(UTC)
+        item = {
+            "task_id": self._task_id,
+            "event_id": _generate_ulid(),
+            "event_type": "agent_milestone",
+            "metadata": {"milestone": "microvm_suspend_checkpoint", **metadata},
+            "timestamp": now.isoformat(),
+            "ttl": int(now.timestamp()) + _TTL_SECONDS,
+            "user_id": self._user_id,
+        }
+        if self._repo:
+            item["repo"] = self._repo
+        serializer = TypeSerializer()
+        client.transact_write_items(
+            TransactItems=[
+                *({"ConditionCheck": check} for check in condition_checks),
+                {
+                    "Put": {
+                        "TableName": self._table_name,
+                        "Item": {key: serializer.serialize(value) for key, value in item.items()},
+                        "ConditionExpression": "attribute_not_exists(task_id)",
+                    }
+                },
+            ]
+        )
+
     def _put_event(self, event_type: str, metadata: dict) -> None:
+        from microvm_lifecycle import LifecycleUnavailable, get_context
+
+        lifecycle = get_context(self._task_id)
+        if lifecycle is None:
+            self._put_event_best_effort(event_type, metadata)
+            return
+        try:
+            with lifecycle.activity(checkpoint_safe=True):
+                acknowledged = False
+                try:
+                    acknowledged = self._put_event_best_effort(event_type, metadata)
+                finally:
+                    if not acknowledged:
+                        lifecycle.progress_write_failed()
+        except LifecycleUnavailable:
+            lifecycle.progress_write_failed()
+            print(
+                f"[progress] lifecycle barrier closed — event not acknowledged "
+                f"task_id={self._task_id} event_type={event_type} "
+                f"phase={lifecycle.diagnostic_snapshot()['phase']}",
+                flush=True,
+            )
+
+    def _put_event_best_effort(self, event_type: str, metadata: dict) -> bool:
         """Write a single progress event item to DynamoDB.
 
         Error handling splits three ways:
@@ -472,12 +536,12 @@ class _ProgressWriter:
           louder ERROR level so unexpected codes surface in reviews.
         """
         if not self._table_name or self._disabled:
-            return
+            return False
         try:
             self._ensure_table()
             if self._table is None:
                 self._disabled = True
-                return
+                return False
 
             now = datetime.now(UTC)
             # Correlation envelope (#245): trace_id is read per-event from the
@@ -509,6 +573,7 @@ class _ProgressWriter:
             # for the rest of the task (see ``_SharedCircuitBreaker``
             # docstring).
             _CIRCUIT_BREAKERS.record_success(self._task_id)
+            return True
 
         except ImportError:
             self._disabled = True
@@ -556,7 +621,7 @@ class _ProgressWriter:
                         f"({exc_type}: {code}); breaker NOT incremented: {e}",
                         flush=True,
                     )
-                return
+                return False
 
             if classification == "transient":
                 new_count, now_disabled = _CIRCUIT_BREAKERS.record_failure(
@@ -575,7 +640,7 @@ class _ProgressWriter:
                         f"{self._MAX_FAILURES}, transient): {exc_type}: {e}",
                         flush=True,
                     )
-                return
+                return False
 
             # Unknown: count like transient but flag loudly so operators
             # can add the new code to the classifier next release.
@@ -596,6 +661,7 @@ class _ProgressWriter:
                     f"adding {exc_type} to the classifier: {e}",
                     flush=True,
                 )
+        return False
 
     # -- public event methods --------------------------------------------------
 

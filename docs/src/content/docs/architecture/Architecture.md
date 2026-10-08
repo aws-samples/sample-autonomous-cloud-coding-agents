@@ -50,7 +50,7 @@ For the full orchestrator design, see [ORCHESTRATOR.md](/sample-autonomous-cloud
 | `inline` (default) | AgentVpc and DnsFirewall inside the application stack | Existing parent/nested structure |
 | `split` | Separate `${stackName}-network` stack | Application imports network references; network has no application references |
 
-The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) and [ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries). Live migration has not been validated.
+The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) and [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries). Live migration has not been validated.
 
 ## Repository onboarding
 

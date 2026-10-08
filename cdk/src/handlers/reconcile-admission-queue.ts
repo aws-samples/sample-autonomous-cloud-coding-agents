@@ -213,7 +213,9 @@ async function requeueAfterInvokeFailure(taskId: string): Promise<void> {
       TableName: TASK_TABLE,
       Key: { task_id: { S: taskId } },
       UpdateExpression: 'SET #s = :queued, updated_at = :now, status_created_at = :sca',
-      ConditionExpression: '#s = :submitted',
+      // A lost invoke response may hide a successful admission. Never put a
+      // task that now holds capacity back into the no-reservation queue.
+      ConditionExpression: '#s = :submitted AND attribute_not_exists(concurrency_slot)',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':queued': { S: 'QUEUED' },
