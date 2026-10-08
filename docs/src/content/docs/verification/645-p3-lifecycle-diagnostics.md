@@ -84,6 +84,13 @@ escalating; do not replace them with a generic checkpoint label.
 5. Retain UTC timestamps, task/worker identifiers, exact image/coordinator
    versions, service state reason, AWS receipts and relevant sanitized logs.
 
+A guest that cannot safely sleep answers `/suspend` with HTTP 200 and status
+`declined`; the hook log keeps the reason in `code` (for example
+`MICROVM_LIFECYCLE_UNAVAILABLE` or `MICROVM_LIFECYCLE_TIMEOUT`) with
+`http_status` 200. The following `/resume` answers `not-suspended`. A non-200
+suspend response terminates the VM, so a state reason naming a suspend-hook
+status means the guest had no registered task or a permanently closed barrier.
+
 `MICROVM_RESUME_HOOK_FAILED` identifies recognized service resume-hook failures.
 Preserve the raw service reason for diagnosis. The wording “connection was
 refused” alone does not prove a closed listener: historical guest observations

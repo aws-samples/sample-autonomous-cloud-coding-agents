@@ -70,51 +70,87 @@ async def _transition(request: Request, action: Literal["suspend", "resume"]) ->
         return response
 
 
+def _declined_suspend(code: str) -> JSONResponse | None:
+    """Answer an unsafe suspend with 200 while a guest still has work to protect.
+
+    The service terminates the MicroVM when a suspend hook returns any non-200
+    status (verified live: "Suspend lifecycle hook returned HTTP status 409").
+    Declining keeps the barrier open: the VM freezes with its memory intact, the
+    task can no longer sleep, and the supervisor wakes it outside a valid gate.
+    Without a registered task, or once the barrier is permanently closed, there
+    is nothing to protect and the non-200 answer lets the service retire it.
+    """
+    lifecycle = get_registered_context()
+    if lifecycle is None or lifecycle.barrier_unrecoverable():
+        return None
+    return JSONResponse(content={"status": "declined", "action": "suspend", "code": code})
+
+
 async def _handle_transition(
     request: Request, action: Literal["suspend", "resume"]
 ) -> JSONResponse:
     try:
-        end = time.monotonic() + LIFECYCLE_HANDLER_BUDGET_S
-        async with asyncio.timeout(LIFECYCLE_HANDLER_BUDGET_S):
-            with lifecycle_stage("body-read"):
-                microvm_id = await _microvm_id(request)
-            with lifecycle_stage("identity-check"):
-                lifecycle = get_registered_context()
-                if lifecycle is None or (microvm_id and microvm_id != lifecycle.microvm_id):
-                    raise LifecycleUnavailable("No matching MicroVM task is registered")
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("Lifecycle body consumed its budget")
-            with lifecycle_stage("controller"):
-                if action == "suspend":
-                    park = await lifecycle.suspend(checkpoint_before_suspend, budget_s=remaining)
-                else:
-                    park = await lifecycle.resume(
-                        refresh_and_reconcile_after_resume, budget_s=remaining
-                    )
-            return JSONResponse(
-                content={
-                    "status": "acknowledged",
-                    "action": action,
-                    "task_id": park.task_id,
-                    "microvm_id": park.microvm_id,
-                    "request_id": park.request_id,
-                }
-            )
+        return await _attempt_transition(request, action)
     except _InvalidBody as exc:
-        return JSONResponse(
-            status_code=exc.status, content={"code": "MICROVM_LIFECYCLE_BODY_INVALID"}
-        )
+        status, code = exc.status, "MICROVM_LIFECYCLE_BODY_INVALID"
+        content: dict = {"code": code}
     except LifecycleUnavailable:
-        return JSONResponse(status_code=409, content={"code": "MICROVM_LIFECYCLE_UNAVAILABLE"})
+        status, code = 409, "MICROVM_LIFECYCLE_UNAVAILABLE"
+        content = {"code": code}
     except TimeoutError:
-        return JSONResponse(status_code=503, content={"code": "MICROVM_LIFECYCLE_TIMEOUT"})
+        status, code = 503, "MICROVM_LIFECYCLE_TIMEOUT"
+        content = {"code": code}
     except Exception as exc:
         # Neither service-hook responses nor logs may echo AWS exception details.
         # A failed/uncertain wake stays behind the controller's closed barrier.
+        status, code = 503, "MICROVM_LIFECYCLE_FAILED"
+        content = {"code": code, "error_type": type(exc).__name__}
+    if action == "suspend" and (declined := _declined_suspend(code)) is not None:
+        return declined
+    return JSONResponse(status_code=status, content=content)
+
+
+async def _attempt_transition(
+    request: Request, action: Literal["suspend", "resume"]
+) -> JSONResponse:
+    end = time.monotonic() + LIFECYCLE_HANDLER_BUDGET_S
+    async with asyncio.timeout(LIFECYCLE_HANDLER_BUDGET_S):
+        with lifecycle_stage("body-read"):
+            microvm_id = await _microvm_id(request)
+        with lifecycle_stage("identity-check"):
+            lifecycle = get_registered_context()
+            if lifecycle is None or (microvm_id and microvm_id != lifecycle.microvm_id):
+                raise LifecycleUnavailable("No matching MicroVM task is registered")
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Lifecycle body consumed its budget")
+        with lifecycle_stage("controller"):
+            if action == "suspend":
+                park = await lifecycle.suspend(checkpoint_before_suspend, budget_s=remaining)
+            else:
+                park = await lifecycle.resume(
+                    refresh_and_reconcile_after_resume, budget_s=remaining
+                )
+        if park is None:
+            # A declined suspend never closed the barrier: the guest's work
+            # simply continues, so there is nothing to refresh or release.
+            return JSONResponse(
+                content={
+                    "status": "not-suspended",
+                    "action": action,
+                    "task_id": lifecycle.task_id,
+                    "microvm_id": lifecycle.microvm_id,
+                    "code": "MICROVM_RESUME_NOT_SUSPENDED",
+                }
+            )
         return JSONResponse(
-            status_code=503,
-            content={"code": "MICROVM_LIFECYCLE_FAILED", "error_type": type(exc).__name__},
+            content={
+                "status": "acknowledged",
+                "action": action,
+                "task_id": park.task_id,
+                "microvm_id": park.microvm_id,
+                "request_id": park.request_id,
+            }
         )
 
 

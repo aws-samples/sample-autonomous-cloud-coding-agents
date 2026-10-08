@@ -272,6 +272,7 @@ async def test_original_deadline_survives_freeze_and_expired_resume(monkeypatch)
     context = MicrovmLifecycle("task", "microvm")
     await context.tool_started("tool")
     park = context.park_approval("request", "tool", deadline)
+    assert park is not None
     await context.suspend(Mock(), budget_s=1)
     clock["wall"] += 400  # Guest monotonic clock did not advance while frozen.
     refresh = Mock()

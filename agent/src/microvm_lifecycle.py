@@ -96,6 +96,11 @@ class MicrovmLifecycle:
             raise LifecycleUnavailable("Lifecycle barrier is closed")
         return self._phase in {"active", "parked"}
 
+    def barrier_unrecoverable(self) -> bool:
+        """True once a failed wake or teardown has closed the barrier for good."""
+        with self._lock:
+            return self._phase in {"closed", "failed"}
+
     def diagnostic_snapshot(self) -> dict:
         """Read only local state; never include approval contents or tool inputs."""
         with self._lock:
@@ -394,21 +399,22 @@ class MicrovmLifecycle:
 
     async def resume(
         self, refresh_and_reconcile: Callable[[ApprovalPark], None], *, budget_s: float
-    ) -> ApprovalPark:
+    ) -> ApprovalPark | None:
         """Release the original wait only after credentials and state are safe.
 
         Callback ownership is intentionally narrow: refresh credentials and read
         the existing gate, without deciding it, changing its deadline, or calling
         leave_approval. Timeout/cancellation closes the barrier permanently; a
         late thread must not release coding. The supervisor owns termination.
+
+        Returns None when no suspend was acknowledged: a declined suspend left the
+        barrier open, so the service froze a guest that never stopped its work and
+        waking it needs no refresh or reconciliation.
         """
         end = self._budget(budget_s)
         with self._lock:
             park = self._park
-            if (
-                self._phase in {"active", "parked", "checkpoint-ready"}
-                and self._last_resume_park is not None
-            ):
+            if self._phase in {"active", "parked", "checkpoint-ready"}:
                 # A duplicate wake acknowledgment cannot renew the approval
                 # timeout or re-run credential refresh on an executing task.
                 return self._last_resume_park

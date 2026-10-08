@@ -79,10 +79,20 @@ async def park(context):
 
 @pytest.mark.anyio
 class TestLifecycleHttp:
-    @pytest.mark.parametrize("action", ["suspend", "resume"])
     @pytest.mark.parametrize(
-        ("outcome", "expected_status"),
-        [("acknowledged", 200), ("unavailable", 409), ("invalid", 400), ("failed", 503)],
+        ("action", "outcome", "expected_status"),
+        [
+            ("suspend", "acknowledged", 200),
+            ("suspend", "unavailable", 409),
+            # Any other non-200 makes the service terminate the VM, so an unsafe
+            # suspend of a registered task is declined with 200 instead.
+            ("suspend", "invalid", 200),
+            ("suspend", "failed", 200),
+            ("resume", "acknowledged", 200),
+            ("resume", "unavailable", 409),
+            ("resume", "invalid", 400),
+            ("resume", "failed", 503),
+        ],
     )
     async def test_lifecycle_responses_close_even_when_client_requests_keep_alive(
         self, context, callbacks, client, action, outcome, expected_status
@@ -234,7 +244,10 @@ class TestLifecycleHttp:
         resume.assert_called_once_with(parked)
         assert parked.deadline is deadline
         assert deadline.remaining_s() == 0
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert response.status_code == 200
+        assert response.json()["status"] == "declined"
+        suspend.assert_called_once_with(parked)
 
     async def test_new_gate_cannot_reuse_an_old_wake_acknowledgment(
         self, context, callbacks, client
@@ -247,7 +260,11 @@ class TestLifecycleHttp:
         await context.tool_started("next-tool")
         next_park = context.park_approval("next-gate", "next-tool", Deadline())
         assert next_park is not None
-        assert (await client.post(PREFIX + "/resume", json={})).status_code == 409
+        response = await client.post(PREFIX + "/resume", json={})
+        assert response.status_code == 200
+        assert response.json()["status"] == "not-suspended"
+        assert "request_id" not in response.json()
+        assert callbacks[1].call_count == 1
         assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
         response = await client.post(PREFIX + "/resume", json={})
         assert response.status_code == 200
@@ -269,16 +286,22 @@ class TestLifecycleHttp:
         self, context, callbacks, client, content, status
     ):
         await park(context)
-        assert (await client.post(PREFIX + "/suspend", content=content)).status_code == status
+        response = await client.post(PREFIX + "/suspend", content=content)
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "declined",
+            "action": "suspend",
+            "code": "MICROVM_LIFECYCLE_BODY_INVALID",
+        }
         assert (await client.post(PREFIX + "/resume", content=content)).status_code == status
         for callback in callbacks:
             callback.assert_not_called()
 
     async def test_wrong_vm_or_no_registered_task_rejects(self, context, callbacks, client):
         await park(context)
-        assert (
-            await client.post(PREFIX + "/suspend", json={"microvmId": "another-vm"})
-        ).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={"microvmId": "another-vm"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "declined"
         lifecycle.unregister_task(context)
         assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
         assert (await client.post(PREFIX + "/resume", json={})).status_code == 409
@@ -288,11 +311,14 @@ class TestLifecycleHttp:
     async def test_unparked_resume_or_parallel_tools_never_acknowledges(
         self, context, callbacks, client
     ):
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
         await park(context)
-        assert (await client.post(PREFIX + "/resume", json={})).status_code == 409
+        response = await client.post(PREFIX + "/resume", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "not-suspended")
         await context.tool_started("parallel")
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
         for callback in callbacks:
             callback.assert_not_called()
 
@@ -303,9 +329,16 @@ class TestLifecycleHttp:
         parked, _ = await park(context)
         suspend.side_effect = RuntimeError("do-not-leak-secret")
         response = await client.post(PREFIX + "/suspend", json={})
-        assert response.status_code == 503
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "declined",
+            "action": "suspend",
+            "code": "MICROVM_LIFECYCLE_FAILED",
+        }
         assert "do-not-leak-secret" not in response.text
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
+        suspend.assert_called_once()
         await context.leave_approval(parked)
 
     async def test_failed_refresh_closes_barrier_without_retrying(self, context, callbacks, client):
@@ -342,14 +375,17 @@ class TestLifecycleHttp:
         started = time.monotonic()
         try:
             response = await client.post(PREFIX + "/" + action, json={})
-            assert response.status_code == 503
+            assert response.status_code == (200 if action == "suspend" else 503)
             assert response.json()["code"] == "MICROVM_LIFECYCLE_TIMEOUT"
             assert time.monotonic() - started < 0.5
             assert entered.is_set()
         finally:
             release.set()
             assert await asyncio.to_thread(finished.wait, 1)
-        assert (await client.post(PREFIX + "/" + action, json={})).status_code == 409
+        retry = await client.post(PREFIX + "/" + action, json={})
+        assert retry.status_code == (200 if action == "suspend" else 409)
+        if action == "suspend":
+            assert retry.json()["status"] == "declined"
         if action == "resume":
             with pytest.raises(lifecycle.LifecycleUnavailable):
                 await context.wait_until_open()
@@ -424,12 +460,14 @@ class TestLifecycleHttp:
 
         request = Request({"type": "http", "method": "POST", "headers": []}, slow_receive)
         response = await microvm_http.microvm_suspend(request)
-        assert response.status_code == 503
+        assert response.status_code == 200
+        assert json.loads(bytes(response.body))["status"] == "declined"
         for callback in callbacks:
             callback.assert_not_called()
         end = diagnostic_records(capsys)[-1]
         assert end["stage"] == "body-read"
         assert end["code"] == "MICROVM_LIFECYCLE_TIMEOUT"
+        assert end["http_status"] == 200
 
     async def test_cancelled_handler_logs_cancellation_and_still_propagates_it(
         self, context, callbacks, capsys
@@ -479,11 +517,55 @@ class TestLifecycleHttp:
         _, deadline = await park(context)
         assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
         deadline.remaining = 0
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
         deadline.remaining = 60
         context.progress_write_failed()
-        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 409
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
         callbacks[0].assert_called_once()
+        # The first acknowledgment still holds: the barrier stays closed.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(context.wait_until_open(), 0.05)
+
+    async def test_declined_suspend_keeps_guest_working_and_wakes_without_refresh(
+        self, context, callbacks, client
+    ):
+        # The race the service punishes: work resumed after the orchestrator's
+        # read but before the hook. The guest must survive the freeze.
+        await context.tool_started("working")
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert (response.status_code, response.json()["status"]) == (200, "declined")
+        await context.wait_until_open()
+        response = await client.post(PREFIX + "/resume", json={})
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "not-suspended",
+            "action": "resume",
+            "task_id": "http-task",
+            "microvm_id": "http-vm",
+            "code": "MICROVM_RESUME_NOT_SUSPENDED",
+        }
+        await context.wait_until_open()
+        for callback in callbacks:
+            callback.assert_not_called()
+        # Declining for a race does not disable a later, safe sleep.
+        context.tool_finished("working")
+        parked, _ = await park(context)
+        assert (await client.post(PREFIX + "/suspend", json={})).json()["status"] == "acknowledged"
+        callbacks[0].assert_called_once_with(parked)
+
+    async def test_permanently_closed_barrier_lets_the_service_retire_the_vm(
+        self, context, callbacks, client
+    ):
+        await park(context)
+        assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
+        callbacks[1].side_effect = RuntimeError("refresh failed")
+        assert (await client.post(PREFIX + "/resume", json={})).status_code == 503
+        assert context.barrier_unrecoverable()
+        response = await client.post(PREFIX + "/suspend", json={})
+        assert response.status_code == 409
+        assert response.json()["code"] == "MICROVM_LIFECYCLE_UNAVAILABLE"
 
     async def test_validate_checks_new_routes_without_creating_aws_clients(
         self, monkeypatch, client

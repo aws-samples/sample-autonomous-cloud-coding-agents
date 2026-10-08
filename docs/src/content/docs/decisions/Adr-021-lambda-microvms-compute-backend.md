@@ -105,8 +105,10 @@ All six hooks share the FastAPI listener on port 8080. AWS hook properties accep
 | `/validate` | Check local readiness, routes and configuration contracts without AWS calls |
 | `/run` | Authenticate/install launch configuration and start the pipeline asynchronously |
 | `/terminate` | Close the local coding barrier, log and acknowledge any request body; do not join the pipeline or write terminal task status |
-| `/suspend` | Drain acknowledged progress and commit the current safe checkpoint within the hook budget |
-| `/resume` | Renew credentials and reconcile the original gate before releasing coding |
+| `/suspend` | Drain acknowledged progress and commit the current safe checkpoint within the hook budget; answer 200 `declined` when that is unsafe |
+| `/resume` | Renew credentials and reconcile the original gate before releasing coding; answer 200 `not-suspended` after a declined suspend |
+
+The service terminates a MicroVM whose `/suspend` hook returns any non-200 status, without retry (verified live: state reason “Suspend lifecycle hook returned HTTP status 409”). A refusal therefore cannot keep a worker running. The guest declines an unsafe suspend with 200 and leaves its coding barrier open: the VM freezes with memory intact, and the coordinator wakes a worker suspended outside a valid gate. A declined suspend after work has started does not disable a later sleep. Failures that occur after a suspend has begun do. Non-200 remains only where nothing is left to protect: no registered task, or a barrier permanently closed by a failed wake or teardown. A failed `/resume` after an acknowledged suspend still answers non-200, because that worker is unsafe and continuation recovery owns the task.
 
 Warm-up budgets come from `contracts/constants.json`; the total guest budget must remain below the image hook timeout. Cold-binary startup exceeded the hook budget in an earlier image; warm-up moved this work into image preparation. Historical sizes and timings are not sizing guarantees for later builds.
 
