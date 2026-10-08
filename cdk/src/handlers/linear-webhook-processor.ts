@@ -780,9 +780,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   if (mappingItem && !mappedWorkspaceId) {
     // Allowed for now: rows written before the owning workspace was recorded have
     // nothing to check against, and rejecting them would break working installs on
-    // deploy. `bgagent linear backfill-project-workspaces` fills them in and
-    // `bgagent platform doctor` reports what is left, which is what makes it safe to
-    // turn this into a rejection later.
+    // deploy. Re-running `bgagent linear onboard-project` records the owner, and
+    // `bgagent platform doctor` reports what is left (failing once more than one
+    // workspace is active), which is what makes it safe to turn this into a rejection later.
     logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
       issue_id: issue.id,
       linear_project_id: projectId,

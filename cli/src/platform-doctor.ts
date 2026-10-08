@@ -168,7 +168,7 @@ export async function runPlatformDoctor(
     linearVaultWorkloadName,
   ));
   checks.push(await checkLinearSecretProvenance(region, linearRegistryTableName));
-  checks.push(await checkLinearProjectWorkspaces(region, linearProjectMappingTableName));
+  checks.push(await checkLinearProjectWorkspaces(region, linearProjectMappingTableName, linearRegistryTableName));
   checks.push(await checkJiraAppIdentity(region, jiraRegistryTableName));
 
   return checks;
@@ -262,6 +262,34 @@ export async function checkLinearSecretProvenance(
 }
 
 /**
+ * Active rows in the Linear workspace registry, or undefined when it cannot be read —
+ * the caller then words its verdict without assuming a count either way.
+ */
+async function countActiveWorkspaces(
+  ddb: ReturnType<typeof documentClient>,
+  registryTableName: string,
+): Promise<number | undefined> {
+  try {
+    let count = 0;
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: '#status',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      count += (page.Items ?? []).filter((row) => row.status === 'active').length;
+      startKey = page.LastEvaluatedKey;
+    } while (startKey);
+    return count;
+  } catch {
+    // nosemgrep: ts-silent-success-masking -- an unreadable registry yields the neutral verdict, which names the remedy without claiming the exposure is or is not live
+    return undefined;
+  }
+}
+
+/**
  * Report project mappings that do not record which workspace owns them.
  *
  * The mapping table is keyed on the project id alone, so a row with no
@@ -273,6 +301,7 @@ export async function checkLinearSecretProvenance(
 export async function checkLinearProjectWorkspaces(
   region: string,
   mappingTableName: string | null,
+  registryTableName?: string | null,
 ): Promise<DoctorCheckResult> {
   const id = 'linear_project_workspaces';
   const label = 'Linear project → workspace binding';
@@ -322,15 +351,31 @@ export async function checkLinearProjectWorkspaces(
     const projectIds = allIds.length > NAMED_LIMIT
       ? `${allIds.slice(0, NAMED_LIMIT).join(', ')} (and ${allIds.length - NAMED_LIMIT} more)`
       : allIds.join(', ');
+    const remedy = 're-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` for each of them';
+    const unbackedSummary = `${unbacked.length} of ${active.length} active Linear project mapping(s) do not `
+      + 'record an owning workspace, so a webhook naming them cannot be checked against the workspace that '
+      + `signed it: ${projectIds}.`;
+    // How serious this is depends on how many tenants share the stack. With one, there is
+    // no other tenant to reach. With several, the webhook path admits these rows with only
+    // a warning, so any active workspace can name one and steer a task at its repository.
+    const workspaces = registryTableName ? await countActiveWorkspaces(ddb, registryTableName) : undefined;
+    if (workspaces !== undefined && workspaces > 1) {
+      return {
+        id,
+        label,
+        status: 'fail',
+        detail: `${unbackedSummary} ${workspaces} workspaces are active, so any of them can name these `
+          + `projects. Fix now: ${remedy}.`,
+      };
+    }
     return {
       id,
       label,
       status: 'warn',
-      detail: `${unbacked.length} of ${active.length} active Linear project mapping(s) do not record an `
-        + 'owning workspace, so a webhook naming them cannot be checked against the workspace that '
-        + `signed it: ${projectIds}. Harmless while one workspace is active — there is no other `
-        + 'tenant to reach — but re-run `bgagent linear onboard-project <uuid> --repo <owner/repo>` '
-        + 'for each of them before onboarding a second workspace.',
+      detail: workspaces === 1
+        ? `${unbackedSummary} Harmless while only one workspace is active — there is no other tenant to `
+          + `reach — but ${remedy} before onboarding a second workspace.`
+        : `${unbackedSummary} This matters as soon as a second workspace is active: ${remedy}.`,
     };
   } catch (err) {
     return {
@@ -914,7 +959,16 @@ async function checkLinearAuth(
         detail: `Could not assess ${unknown.length} of ${health.length} workspace(s): ${summary}`,
       };
     }
-    return { id, label, status: 'pass', detail: `${health.length} workspace(s) authorized: ${summary}` };
+    // Disabled rows (operator-disabled or admin-removed) are intentionally not authorized,
+    // so they are named but not counted as authorized.
+    const live = health.filter((w) => w.state !== 'disabled').length;
+    const disabled = health.length - live;
+    return {
+      id,
+      label,
+      status: 'pass',
+      detail: `${live} workspace(s) authorized${disabled ? `, ${disabled} disabled by design` : ''}: ${summary}`,
+    };
   } catch (err) {
     return {
       id,

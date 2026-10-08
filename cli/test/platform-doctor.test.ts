@@ -167,6 +167,44 @@ describe('doctor verdict for Linear project → workspace binding', () => {
     expect(check.detail).toContain('bgagent linear onboard-project');
   });
 
+  /** Mapping and registry scans answered separately, by table name. */
+  function tables(mapping: unknown[], registry: unknown[] | Error): void {
+    ddbSendMock.mockImplementation(async (cmd: { input: { TableName: string } }) => {
+      if (cmd.input.TableName === 'Reg') {
+        if (registry instanceof Error) throw registry;
+        return { Items: registry };
+      }
+      return { Items: mapping };
+    });
+  }
+  const UNBACKED = [{ linear_project_id: 'proj-unbacked', status: 'active' }];
+
+  test('FAILS when more than one workspace is active — the exposure is live, not hypothetical', async () => {
+    // With several tenants the webhook path admits an unowned mapping with only a warning,
+    // so any of them can name it. "Harmless while one workspace is active" was printed on
+    // a three-workspace stack.
+    tables(UNBACKED, [{ status: 'active' }, { status: 'active' }, { status: 'revoked' }]);
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING, 'Reg');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/2 workspaces are active, so any of them can name these projects/);
+    expect(check.detail).not.toMatch(/Harmless/);
+  });
+
+  test('only claims "harmless" when exactly one workspace is active', async () => {
+    tables(UNBACKED, [{ status: 'active' }, { status: 'revoked' }]);
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING, 'Reg');
+    expect(check.status).toBe('warn');
+    expect(check.detail).toMatch(/Harmless while only one workspace is active/);
+  });
+
+  test('makes no claim about the exposure when the registry cannot be read', async () => {
+    tables(UNBACKED, new Error('AccessDeniedException'));
+    const check = await checkLinearProjectWorkspaces('us-east-1', MAPPING, 'Reg');
+    expect(check.status).toBe('warn');
+    expect(check.detail).not.toMatch(/Harmless/);
+    expect(check.detail).toMatch(/matters as soon as a second workspace is active/);
+  });
+
   test('caps the named ids so a large install does not bury the rest of the report', async () => {
     ddbSendMock.mockResolvedValue({
       Items: Array.from({ length: 14 }, (_, i) => ({ linear_project_id: `proj-${i}`, status: 'active' })),
@@ -290,6 +328,13 @@ describe('doctor verdict for Linear workspace auth', () => {
     expect(check.status).toBe('warn');
     expect(check.status).not.toBe('pass');
     expect(check.detail).toContain('--verify-refresh');
+  });
+
+  test('a disabled (admin-removed) workspace passes and is not counted as authorized', async () => {
+    healthMock.mockResolvedValue([workspace('disabled', 'removed'), workspace('active', 'live')]);
+    const check = await linearCheck();
+    expect(check.status).toBe('pass');
+    expect(check.detail).toMatch(/^1 workspace\(s\) authorized, 1 disabled by design/);
   });
 
   test('a revoked workspace fails, and the detail carries its re-authorize remedy', async () => {
