@@ -20,6 +20,7 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { ComputeBackend } from './compute-backend';
 import { logger } from './logger';
+import type { GitProviderType } from './types';
 import { makeDocClient } from './ua';
 
 /**
@@ -40,6 +41,7 @@ export interface RepoConfig {
   readonly max_budget_usd?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
+  readonly provider?: GitProviderType;
   readonly poll_interval_ms?: number;
   /**
    * Per-repo build/lint verification commands (#1 build-gate fix). The agent
@@ -87,6 +89,7 @@ export interface BlueprintConfig {
   readonly max_budget_usd?: number;
   readonly system_prompt_overrides?: string;
   readonly github_token_secret_arn?: string;
+  readonly provider?: GitProviderType;
   readonly poll_interval_ms?: number;
   /** Per-repo build/lint verification commands (#1). Default mise when unset. The orchestrator threads these into the agent payload. */
   readonly build_command?: string;
