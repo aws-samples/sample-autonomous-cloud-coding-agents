@@ -97,8 +97,11 @@ PRs labeled `auto-approve` are approved automatically by the `auto-approve` work
 
 `mise run install` automatically installs [prek](https://github.com/j178/prek) git hooks. These run on every commit and push:
 
+- **commit-msg** - ADR-003 Tier 0: rejects a commit message with no issue reference (`Refs #N` / `Fixes #N` / `Closes #N`). See [ADR-003](/sample-autonomous-cloud-coding-agents/architecture/adr-003-contribution-governance).
 - **pre-commit** - Whitespace/EOF checks, gitleaks on staged changes, linters (ESLint, Ruff, astro check) for touched files.
-- **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
+- **pre-push** - ADR-003 branch-name check (branch must match `(feat|fix|chore|docs)/<issue-number>-*`; `main`, `dependabot/*`, and detached `HEAD` are exempt), security scans (`mise run hooks:pre-push:security`), and tests across all packages (`mise run hooks:pre-push:tests`).
+
+The ADR-003 governance hooks (`commit-msg`, branch-name) are plain Node scripts under `scripts/hooks/`; unit-test them with `node --test scripts/hooks/check-commit-msg.test.mjs scripts/hooks/check-branch-name.test.mjs`.
 
 If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
 
