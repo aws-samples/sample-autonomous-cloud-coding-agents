@@ -1,5 +1,12 @@
 ARG TARGETPLATFORM=linux/arm64
-ARG GH_VERSION=2.93.0
+# ``gh`` is compiled from source below (``go install …@vX``), so its vendored module
+# set is whatever this tag pins — there is no separate dep file to patch, and a
+# version bump is the only lever. 2.101.0 clears the nine fixable HIGH/CRITICAL
+# findings #897 recorded against 2.93.0: sigstore/rekor 1.5.3 (CVE-2026-48702),
+# x/crypto 0.57.0, x/mod 0.41.0, x/net 0.58.0, x/text 0.42.0, grpc 1.83.2. Its
+# ``go 1.27.0`` directive is satisfied by the pinned golang:1.27.1 builder below.
+# When bumping, confirm by re-scanning the built image, not by reading a changelog.
+ARG GH_VERSION=2.101.0
 
 # Every external image is pinned by DIGEST, not by tag.
 #
@@ -93,10 +100,65 @@ RUN npm install -g npm@latest && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \
     claude --version
 
+# Patch npm's OWN bundled dependencies (#897).
+#
+# ``npm install -g npm@latest`` above does not fix these. npm 12.0.2 — the current
+# latest — still ships brace-expansion 5.0.7 (CVE-2026-14257, CVE-2026-69152),
+# ip-address 10.2.0 (CVE-2026-69192) and tar 7.5.19 (CVE-2026-73566), each with a
+# published fix. So ``npm@latest`` is not a security control here; it was measured,
+# not assumed.
+#
+# The approach used just above for the claude-code tree (``npm --prefix <tree>
+# update …``) CANNOT be reused here. npm's published package.json declares
+# ``@npmcli/docs@^1.0.0``, a workspace-internal package that is not on the
+# registry, and Arborist resolves the whole declared graph before touching
+# anything — so every npm-native operation inside npm's own tree dies with E404
+# (verified for ``update``, ``update --omit=dev`` and ``install --no-save``).
+# npm's bundled node_modules is a build artifact, not an installable project.
+#
+# Hence a direct tarball overlay. ``npm pack`` fetches through the registry's
+# integrity check, and each package is pure JS at a patch/minor bump, so the new
+# file set supersedes what it replaces.
+#
+# The pinned version is a FLOOR, not an assignment: ``npm@latest`` floats, so a
+# later npm could bundle something newer, and overwriting blindly would silently
+# walk it backwards. npm's own bundled ``semver`` does the comparison and the
+# overlay is skipped when the shipped version already satisfies the floor.
+#
+# Both failure modes are hard-verified rather than left to degrade into a no-op:
+# a package missing from the tree fails the build (the layout is npm's internal
+# detail and may change), and the post-overlay version is asserted.
+RUN NPM_TREE="$(npm root -g)/npm" && \
+    SEMVER="${NPM_TREE}/node_modules/semver" && \
+    mkdir -p /var/tmp/npm-cve && cd /var/tmp/npm-cve && \
+    for pv in brace-expansion:5.0.9 ip-address:10.3.1 tar:7.5.21; do \
+        name="${pv%:*}"; floor="${pv#*:}"; \
+        pkg="${NPM_TREE}/node_modules/${name}/package.json"; \
+        [ -f "${pkg}" ] || { echo "FATAL: ${name} absent from npm's bundled tree; layout changed, re-check #897"; exit 1; }; \
+        cur="$(node -p "require('${pkg}').version")"; \
+        if node -e "process.exit(require('${SEMVER}').gte('${cur}','${floor}')?0:1)"; then \
+            echo "npm bundled dep ${name} ${cur} already satisfies floor ${floor}; left alone"; \
+        else \
+            tarball="$(npm pack "${name}@${floor}" --silent)"; \
+            for dir in $(find "${NPM_TREE}/node_modules" -type d -name "${name}"); do \
+                tar -xzf "/var/tmp/npm-cve/${tarball}" -C "${dir}" --strip-components=1; \
+            done; \
+            got="$(node -p "require('${pkg}').version")"; \
+            [ "${got}" = "${floor}" ] || { echo "FATAL: ${name} is ${got} after overlay, expected ${floor}"; exit 1; }; \
+            echo "npm bundled dep ${name} ${cur} -> ${got}"; \
+        fi; \
+    done && \
+    cd / && rm -rf /var/tmp/npm-cve && \
+    npm --version
+
 # Install uv (fast Python package manager) — pinned by digest, not just version:
 # a published tag can be re-pushed, and this COPY sits above the dependency sync,
 # so a silent move here invalidates it. See the digest note at the top of the file.
-COPY --from=ghcr.io/astral-sh/uv:0.11.14@sha256:1025398289b62de8269e70c45b91ffa37c373f38118d7da036fb8bb8efc85d97 /uv /usr/local/bin/uv
+# 0.12.17 vendors quinn-proto 0.11.18, clearing GHSA-4w2j-m93h-cj5j (#897). Read that
+# advisory carefully: its "fixed in 0.11.15" is *quinn-proto's* version, not uv's —
+# uv 0.11.14 happens to vendor quinn-proto 0.11.14, which makes the two look like one
+# number. The floor is therefore a uv release that vendors ≥ 0.11.15, not uv 0.11.15.
+COPY --from=ghcr.io/astral-sh/uv:0.12.17@sha256:10787c682e4184e4f290de1171fd4703dc63de99221f10fe1c99002ce7fa9acc /uv /usr/local/bin/uv
 
 # Install Python dependencies via uv. Build context is repo root (set in
 # ``cdk/src/stacks/agent.ts``) so source paths are prefixed with ``agent/``.
