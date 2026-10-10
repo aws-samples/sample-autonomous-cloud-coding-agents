@@ -93,6 +93,7 @@ PRs labeled `auto-approve` are approved automatically by the `auto-approve` work
 
 `mise run install` automatically installs [prek](https://github.com/j178/prek) git hooks. These run on every commit and push:
 
+- **both stages** - `mise run check:git-config-clean` runs first, before anything else, and fails if your repository's shared `.git/config` carries the test-fixture leak signature (`core.worktree`, `core.bare` on a checkout, or a fixture identity in `[user]`). It runs first because while that config is corrupted `git status` and `git revert` describe a *different* directory, so every later hook — and every judgement you make about your own working tree — is about a tree that is not the one on disk. See [#855](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/855); if it fires, run the remedy it prints rather than bypassing it.
 - **pre-commit** - Whitespace/EOF checks, gitleaks on staged changes, linters (ESLint, Ruff, astro check) for touched files.
 - **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
