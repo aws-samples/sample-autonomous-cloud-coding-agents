@@ -60,9 +60,9 @@ export interface TaskApprovalsTableProps {
  *
  * Schema: `task_id` (PK, ULID matching TaskTable) + `request_id` (SK,
  * ULID minted by the agent). Each row represents one human-in-the-loop
- * approval gate; the agent writes PENDING, the ApproveTaskFn /
- * DenyTaskFn Lambdas (Chunk 5) update to APPROVED / DENIED, and the
- * reconciler sweeps STRANDED rows.
+ * approval gate. The trusted approval request service creates PENDING rows;
+ * owner-authenticated decision handlers record APPROVED / DENIED. Task closure
+ * cancels unanswered requests. Workers have no direct approval-row write grant.
  *
  * A GSI (`user_id-status-index`) supports the `bgagent pending` access
  * pattern — `user_id = :caller AND status = :pending` — without
@@ -75,8 +75,9 @@ export interface TaskApprovalsTableProps {
  * streams wired into the fan-out Lambda. Enabling streams here would
  * create duplicate fan-out paths.
  *
- * TTL is sized by the agent as `created_at_epoch + timeout_s + 120s`
- * so rows never expire during the decision window (§10.1).
+ * Pending rows have no TTL, including requests with an explicit deadline.
+ * Task closure applies retention cleanup; capacity delays must never erase
+ * the recorded decision before a replacement worker consumes it.
  */
 export class TaskApprovalsTable extends Construct {
   /**
@@ -116,10 +117,9 @@ export class TaskApprovalsTable extends Construct {
 
     // GSI for GET /v1/pending — user_id PK + status SK (§10.1).
     //
-    // Projection is INCLUDE with exactly the non-key attributes the
-    // pending-list endpoint needs: keeps per-write cost small while
-    // keeping the list response small enough to render in the CLI
-    // without additional GetItem round-trips.
+    // Preserve the existing INCLUDE projection. The pending-list endpoint uses
+    // this GSI to discover candidates, then strongly reads approval/task rows
+    // before returning them; GSI results alone may contain stale decisions.
     this.table.addGlobalSecondaryIndex({
       indexName: USER_STATUS_INDEX_NAME,
       partitionKey: {
@@ -140,19 +140,8 @@ export class TaskApprovalsTable extends Construct {
         'reason',
         'created_at',
         'timeout_s',
-        // Cedar HITL: surface which rule(s) fired on the gate in the
-        // pending-list response so `bgagent pending` can show _why_
-        // without a second read against the base table. Projected
-        // because the handler reads rows through this GSI.
-        //
-        // ARCHITECTURAL NOTE: DynamoDB rejects in-place updates to
-        // ``nonKeyAttributes`` on an existing GSI. Any future field
-        // that needs to appear on the pending view must be decided
-        // here at design time — adding one post-hoc requires a
-        // destructive migration (delete + recreate the table, or
-        // create a parallel GSI under a new name with shadow
-        // backfill). Chunks that extend TaskApprovalsTable should
-        // audit this list before shipping.
+        // DynamoDB rejects in-place projection changes. New response fields
+        // can come from the existing base-table read without changing this GSI.
         'matching_rule_ids',
       ],
     });

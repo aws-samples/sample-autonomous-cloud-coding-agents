@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { classifyError, ErrorCategory, ErrorClass, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
+import { classifyError, ErrorCategory, ErrorClass, formatMicrovmTerminalFailure, isTransientError, retryGuidance, type ErrorClassification } from '../../../src/handlers/shared/error-classifier';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS } from '../../../src/handlers/shared/microvm-regions';
 import { toTaskDetail, type TaskRecord } from '../../../src/handlers/shared/types';
 
@@ -480,6 +480,16 @@ describe('classifyError', () => {
   // --- Lambda MicroVMs (ADR-021) ---
 
   describe('Lambda MicroVMs errors', () => {
+    test('an unknown start requires investigation even when its detail describes a transient failure', () => {
+      const result = classifyError(
+        'Session start failed: MICROVM_START_OUTCOME_UNKNOWN: MicroVM RunMicrovm failed: TimeoutError: response lost [auto-retried]',
+      )!;
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(retryGuidance(result, true)).toMatch(/needs your ABCA admin/);
+      expect(result.remedy).toMatch(/before submitting another task/);
+    });
+
     test('classifies regional unavailability as a non-retryable CONFIG fault with the supported-Region list', () => {
       // ADR-021: "If startSession fails because the MicroVM service is unavailable
       // in the stack region, then the orchestrator shall classify the failure with
@@ -575,8 +585,7 @@ describe('classifyError', () => {
     });
 
     test('classifies a MicroVM substrate-failure reason written by the orchestrator', () => {
-      // Must stay in lockstep with the reason string
-      // `reconcileMicrovmSubstrateState` persists.
+      // Retain classification of legacy messages persisted by the P2 reconciler.
       const result = classifyError(
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
       )!;
@@ -589,7 +598,7 @@ describe('classifyError', () => {
     // --- lifecycle-hook 4xx: non-retryable, and it must OUTRANK the generic entry ---
     //
     // The service reports a guest 4xx in `stateReason`, which
-    // `reconcileMicrovmSubstrateState` appends to the persisted message — so BOTH
+    // the P2 reconciler appended to its persisted message — so BOTH
     // the generic `MicroVM substrate terminated` string and the hook-status string
     // are present in one `error_message` and ORDER decides the answer. These tests
     // exist because the wrong order is invisible to a message-only assertion.
@@ -598,10 +607,93 @@ describe('classifyError', () => {
     const hookReason = (status: number) =>
       `Run lifecycle hook returned HTTP status ${status}. `
       + 'Please check your hook endpoint and application logs for more details.';
-    /** ...as `reconcileMicrovmSubstrateState` persists it. */
+    /** Legacy persisted form; current finalization also supplies stable MICROVM_* codes. */
     const reconciled = (reason: string) =>
       'MicroVM substrate terminated before the agent wrote a terminal status: '
       + `substrate state completed (${reason})`;
+
+    test.each([
+      'Resume lifecycle hook failed. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook connection was refused. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook timed out. Please check your hook endpoint and application logs for more details.',
+      'Resume lifecycle hook returned HTTP status 503.',
+      'Resume lifecycle hook returned HTTP status 409.',
+    ])('gives actionable wake diagnostics for %s', reason => {
+      const persisted = formatMicrovmTerminalFailure('substrate state completed', reason);
+      expect(persisted).toMatch(/^MICROVM_RESUME_HOOK_FAILED: /);
+      expect(persisted).toContain(reason);
+      for (const message of [persisted, reconciled(reason), reason]) {
+        const result = classifyError(message)!;
+        expect(result.title).toBe('The MicroVM could not wake after being paused');
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('before starting a replacement');
+        expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+      }
+    });
+
+    test('keeps unknown wording generic and honors persisted codes ahead of diagnostic words', () => {
+      expect(formatMicrovmTerminalFailure('completed', 'diagnostic: Resume lifecycle hook connection was refused.'))
+        .toMatch(/^MICROVM_SUBSTRATE_TERMINATED: /);
+      expect(classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled('Resume lifecycle hook connection was refused.')}`)!.errorClass)
+        .toBe(ErrorClass.TRANSIENT);
+      expect(classifyError('MICROVM_RESUME_HOOK_FAILED: concurrency limit; missing_secret')!.errorClass)
+        .toBe(ErrorClass.SERVICE);
+    });
+
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM capacity unavailable in this Availability Zone.',
+      'MicroVM host unavailable in this region.',
+    ])('does not mistake "%s" for an unsupported region', (reason) => {
+      for (const message of [reason, reconciled(reason)]) {
+        const result = classifyError(message)!;
+        expect(result.category).toBe(ErrorCategory.COMPUTE);
+        expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+        expect(result.retryable).toBe(true);
+        expect(retryGuidance(result)).toMatch(/reply here to try again/i);
+      }
+    });
+
+    test.each([
+      'MicroVM host unavailable.',
+      'MicroVM unavailable in this region.',
+      'INSUFFICIENT_GITHUB_REPO_PERMISSIONS',
+      'concurrency limit reached',
+      'BLOCKED[missing_secret]: diagnostic text',
+      'Run lifecycle hook returned HTTP status 400.',
+    ])('a stable terminal code cannot be reclassified by diagnostic text: %s', (reason) => {
+      const result = classifyError(`MICROVM_SUBSTRATE_TERMINATED: ${reconciled(reason)}`)!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+    });
+
+    test('a stable hook-rejection code keeps configuration guidance despite other diagnostic words', () => {
+      const result = classifyError(
+        `MICROVM_RUN_HOOK_REJECTED: ${reconciled('MicroVM host unavailable; concurrency limit')}`,
+      )!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.retryable).toBe(false);
+      expect(retryGuidance(result)).toMatch(/needs your ABCA admin/i);
+    });
+
+    test.each(['AccessDeniedException', 'UnauthorizedException'])(
+      'does not retry a marked %s when starting a MicroVM', (name) => {
+        const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: denied`)!;
+        expect(result.category).toBe(ErrorCategory.AUTH);
+        expect(result.errorClass).toBe(ErrorClass.SERVICE);
+        expect(result.retryable).toBe(false);
+      },
+    );
+
+    test.each(['ValidationException', 'InvalidParameterValueException'])('does not retry MicroVM %s', (name) => {
+      const result = classifyError(`Session start failed: MicroVM RunMicrovm failed: ${name}: invalid connector`)!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(result.retryable).toBe(false);
+    });
 
     test.each([400, 403, 404, 422, 499])(
       'classifies a lifecycle-hook %i as a NON-retryable config fault',
@@ -612,6 +704,7 @@ describe('classifyError', () => {
         // generic COMPUTE/TRANSIENT entry whose remedy is "reply here to try
         // again" — an invitation to loop forever on a version-skewed deployment.
         const result = classifyError(reconciled(hookReason(status)))!;
+        expect(classifyError(hookReason(status))).toEqual(result);
         expect(result.category).toBe(ErrorCategory.CONFIG);
         expect(result.retryable).toBe(false);
         expect(result.errorClass).toBe(ErrorClass.SERVICE);
@@ -626,7 +719,7 @@ describe('classifyError', () => {
 
     test('a lifecycle-hook 5xx stays RETRYABLE — MICROVM_RUN_PAYLOAD_UNREADABLE is a 500', () => {
       // The scoping that makes the entry above safe. The agent answers 500 for a
-      // truncated/racing S3 payload, which a retry genuinely can fix, so the 4xx
+      // failed S3 read, which a retry may fix, so the 4xx
       // pattern must not swallow the 5xx family.
       const result = classifyError(reconciled(hookReason(500)))!;
       expect(result.category).toBe(ErrorCategory.COMPUTE);
@@ -644,6 +737,35 @@ describe('classifyError', () => {
       expect(result.retryable).toBe(true);
     });
 
+    test.each(['substrate-read-failed', 'substrate-read-failed-repeatedly'])(
+      'gives operator guidance for supervisor %s without promising cleanup succeeded', (reason) => {
+        const result = classifyError(`MicroVM supervisor: ${reason}`)!;
+        expect(result).toMatchObject({
+          category: ErrorCategory.COMPUTE,
+          title: 'The MicroVM status could not be checked',
+          retryable: false,
+          errorClass: ErrorClass.SERVICE,
+        });
+        expect(result.remedy).toContain('microvm_supervisor_request_failed');
+        expect(result.remedy).toContain('AWS request ID');
+        expect(result.remedy).toContain('Confirm worker termination');
+      },
+    );
+
+    test.each([
+      'AgentCore supervisor: substrate-read-failed',
+      'Agent output mentions MicroVM supervisor: substrate-read-failed',
+      'MicroVM supervisor: substrate-read-failed-unrecognized',
+    ])('does not infer a supervisor failure from unrelated text: %s', (message) => {
+      expect(classifyError(message)!.category).toBe(ErrorCategory.UNKNOWN);
+    });
+
+    test('a persisted terminal code still takes precedence over supervisor wording', () => {
+      const result = classifyError('MICROVM_SUBSTRATE_TERMINATED: MicroVM supervisor: substrate-read-failed')!;
+      expect(result.title).toBe('The MicroVM stopped before the agent reported a result');
+      expect(result.retryable).toBe(true);
+    });
+
     test('every new MicroVM classification carries a full, non-empty guidance shape', () => {
       const messages = [
         'Session start failed: UnknownEndpoint: Inaccessible host: `lambda.eu-central-1.amazonaws.com\'',
@@ -651,6 +773,7 @@ describe('classifyError', () => {
         'MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded',
         'MicroVM RunMicrovm failed: ResourceNotFoundException: image not found',
         'MicroVM substrate terminated before the agent wrote a terminal status: substrate state completed',
+        'MicroVM supervisor: substrate-read-failed',
         reconciled(hookReason(400)),
       ];
       for (const msg of messages) {
@@ -695,6 +818,9 @@ describe('classifyError', () => {
       ['ServiceQuotaExceededException: quota exceeded'],
       ['ResourceNotFoundException: Requested resource not found'],
       ['TooManyRequestsException: slow down'],
+      ['AccessDeniedException: denied'],
+      ['UnauthorizedException: denied'],
+      ['ValidationException: invalid'],
     ])('an unmarked "%s" still classifies as UNKNOWN, exactly as before', (message) => {
       const result = classifyError(message)!;
       expect(result.category).toBe(PRE_CHANGE_UNKNOWN.category);

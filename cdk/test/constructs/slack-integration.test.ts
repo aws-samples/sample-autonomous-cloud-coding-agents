@@ -47,9 +47,34 @@ describe('SlackIntegration construct', () => {
       userPool,
       taskTable,
       taskEventsTable,
+      taskApprovalsTable: dynamodb.Table.fromTableArn(
+        stack, 'Approvals', 'arn:aws:dynamodb:us-east-1:123456789012:table/Approvals',
+      ),
     });
 
     template = Template.fromStack(stack);
+  });
+
+  test('interaction cancellation can settle approvals and publish their closure event', () => {
+    const functions = Object.entries(template.findResources('AWS::Lambda::Function'));
+    const interaction = functions.find(([id]) => id.includes('SlackInteractionsFn'))![1];
+    expect(interaction.Properties.Environment.Variables).toMatchObject({
+      TASK_APPROVALS_TABLE_NAME: 'Approvals',
+      TASK_EVENTS_TABLE_NAME: expect.anything(),
+      TASK_RETENTION_DAYS: expect.any(String),
+    });
+    const policy = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .find(([id]) => id.includes('SlackInteractionsFn'))![1];
+    expect(policy.Properties.PolicyDocument.Statement).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+        Resource: ['arn:aws:dynamodb:us-east-1:123456789012:table/Approvals'],
+      }),
+      expect.objectContaining({
+        Action: 'dynamodb:PutItem',
+        Resource: expect.arrayContaining([expect.objectContaining({ 'Fn::GetAtt': expect.arrayContaining([expect.stringContaining('TaskEventsTable')]) })]),
+      }),
+    ]));
   });
 
   test('creates three Slack DynamoDB tables (installation + user mapping + channel mapping)', () => {

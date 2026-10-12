@@ -128,7 +128,9 @@ COPY agent/prepare-commit-msg.sh /app/
 # Claude Code managed settings (#215). The highest-precedence settings layer —
 # loaded regardless of setting_sources and unoverridable by the untrusted cloned
 # repo's project .claude/settings.json. Carries awsCredentialExport so Bedrock
-# calls use session-tagged, refreshable credentials for cost attribution.
+# calls use session-tagged credentials for cost attribution. For MicroVM workers,
+# the helper returns no exported keys: the parent's scoped container provider
+# handles renewal without Claude's stale awsCredentialExport cache.
 # Placing awsCredentialExport (an arbitrary command) anywhere the target repo
 # can influence would be RCE with the compute role, so it lives ONLY here.
 COPY agent/managed-settings.json /etc/claude-code/managed-settings.json

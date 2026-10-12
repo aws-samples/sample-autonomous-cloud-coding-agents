@@ -17,16 +17,25 @@
  *  SOFTWARE.
  */
 
-import { App } from 'aws-cdk-lib';
+import { App, NestedStack, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import { AgentStack } from '../../src/stacks/agent';
 
+/** MicroVM resources live in a nested stack, so count across the whole assembly. */
+function assemblyResources(stack: Stack, type: string): Array<{ Properties?: Record<string, unknown> } & Record<string, unknown>> {
+  const templates = [stack, ...stack.node.findAll().filter(child => NestedStack.isNestedStack(child))]
+    .map(scope => Template.fromStack(scope as Stack));
+  return templates.flatMap(template => Object.values(template.findResources(type)));
+}
+
 describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment', backend => {
   let template: Template;
+  let stack: Stack;
   beforeAll(() => {
     const app = new App({
       context: {
         compute_types: backend,
+        microvm_nested_stack: true,
         enableToolGateway: true,
         enableLinearIdentityVault: true,
         ...(backend === 'lambda-microvm' ? {
@@ -35,15 +44,16 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
         } : {}),
       },
     });
-    template = Template.fromStack(new AgentStack(app, 'ComputeSelection', {
+    stack = new AgentStack(app, 'ComputeSelection', {
       env: { account: '123456789012', region: 'us-east-1' },
-    }));
+    });
+    template = Template.fromStack(stack);
   });
 
   test('provisions only the selected compute backend and advertises its default', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Runtime', backend === 'agentcore' ? 1 : 0);
     template.resourceCountIs('AWS::ECS::Cluster', backend === 'ecs' ? 1 : 0);
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', backend === 'lambda-microvm' ? 2 : 0);
+    expect(assemblyResources(stack, 'AWS::Lambda::NetworkConnector')).toHaveLength(backend === 'lambda-microvm' ? 2 : 0);
     template.hasOutput('ComputeSubstrate', { Value: backend });
     template.hasOutput('ComputeDeploymentMode', { Value: 'exclusive' });
     expect(!!template.toJSON().Outputs.RuntimeArn).toBe(backend === 'agentcore');
@@ -77,7 +87,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
   });
 
   test('allows fixed-name logs to be cleaned up on destroy and failed creation', () => {
-    const groups = Object.values(template.findResources('AWS::Logs::LogGroup'));
+    const groups = assemblyResources(stack, 'AWS::Logs::LogGroup');
     const names = [
       '/aws/bedrock/model-invocation-logs/ComputeSelection',
       '/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/ComputeSelection',
@@ -136,22 +146,25 @@ describe.each([
   { label: 'all backends', selector: { compute_types: 'agentcore,ecs,lambda-microvm' }, backends: ['agentcore', 'ecs', 'lambda-microvm'] },
 ])('additive deployment from $label', ({ selector, backends }) => {
   let template: Template;
+  let stack: Stack;
   beforeAll(() => {
     const app = new App({
       context: {
         ...selector,
+        microvm_nested_stack: true,
         microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test-image',
         microvm_image_version: '1',
       },
     });
-    template = Template.fromStack(new AgentStack(app, 'ComputeSelection', {
+    stack = new AgentStack(app, 'ComputeSelection', {
       env: { account: '123456789012', region: 'us-east-1' },
-    }));
+    });
+    template = Template.fromStack(stack);
   });
 
   test('provisions every listed backend and preserves its declared default', () => {
     template.resourceCountIs('AWS::BedrockAgentCore::Runtime', backends.includes('agentcore') ? 1 : 0);
-    template.resourceCountIs('AWS::Lambda::NetworkConnector', backends.includes('lambda-microvm') ? 2 : 0);
+    expect(assemblyResources(stack, 'AWS::Lambda::NetworkConnector')).toHaveLength(backends.includes('lambda-microvm') ? 2 : 0);
     template.resourceCountIs('AWS::ECS::Cluster', backends.includes('ecs') ? 1 : 0);
     // Existing CLIs parse a comma list here on non-exclusive stacks.
     template.hasOutput('ComputeSubstrate', { Value: backends.join(',') });

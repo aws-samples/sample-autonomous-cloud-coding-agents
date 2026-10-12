@@ -36,6 +36,9 @@ import {
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
   MAX_BUDGET_USD_MAX,
   MAX_BUDGET_USD_MIN,
+  MICROVM_SLEEP_AFTER_S_DEFAULT,
+  MICROVM_SLEEP_AFTER_S_MAX,
+  MICROVM_SLEEP_AFTER_S_MIN,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -85,8 +88,13 @@ export function makeSubmitCommand(): Command {
     .option(
       '--approval-timeout <seconds>',
       `Cedar HITL per-task default approval timeout (${APPROVAL_TIMEOUT_S_MIN}-${APPROVAL_TIMEOUT_S_MAX}s). `
-        + 'Overrides the platform default of 300s. Per-rule @approval_timeout_s still min-wins at gate-firing.',
+        + 'Default: no automatic expiry (0). Explicit per-rule timeouts still apply.',
       parseInt,
+    )
+    .option(
+      '--microvm-sleep-after <seconds|off>',
+      `Sleep while waiting for approval after this many seconds (default ${MICROVM_SLEEP_AFTER_S_DEFAULT}; `
+        + 'off keeps the worker awake). MicroVM only; requires platform sleep support and does not extend approval deadlines.',
     )
     .option(
       '--pre-approve <scope>',
@@ -141,13 +149,23 @@ export function makeSubmitCommand(): Command {
         if (
           isNaN(opts.approvalTimeout)
           || !Number.isInteger(opts.approvalTimeout)
-          || opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN
+          || (opts.approvalTimeout !== 0 && opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN)
           || opts.approvalTimeout > APPROVAL_TIMEOUT_S_MAX
         ) {
           throw new CliError(
-            `--approval-timeout must be an integer between ${APPROVAL_TIMEOUT_S_MIN} `
+            `--approval-timeout must be 0 (no expiry), or an integer between ${APPROVAL_TIMEOUT_S_MIN} `
               + `and ${APPROVAL_TIMEOUT_S_MAX} seconds.`,
           );
+        }
+      }
+      let microvmSleepAfterS: number | undefined;
+      if (opts.microvmSleepAfter !== undefined) {
+        const raw = opts.microvmSleepAfter as string;
+        microvmSleepAfterS = raw === 'off' ? 0 : /^\d+$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isSafeInteger(microvmSleepAfterS)
+          || microvmSleepAfterS < MICROVM_SLEEP_AFTER_S_MIN || microvmSleepAfterS > MICROVM_SLEEP_AFTER_S_MAX) {
+          throw new CliError('--microvm-sleep-after must be off or an integer between '
+            + `${MICROVM_SLEEP_AFTER_S_MIN} and ${MICROVM_SLEEP_AFTER_S_MAX} seconds.`);
         }
       }
       const preApproveRaw = (opts.preApprove ?? []) as readonly string[];
@@ -226,6 +244,7 @@ export function makeSubmitCommand(): Command {
         ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
         ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
+        ...(microvmSleepAfterS !== undefined && { microvm_sleep_after_s: microvmSleepAfterS }),
         ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
         ...(attachments.length > 0 && { attachments }),
       };

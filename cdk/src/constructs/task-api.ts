@@ -200,10 +200,8 @@ export interface TaskApiProps {
 
   /**
    * IAM resource ARN of the MicroVM image this deployment provisioned (ADR-021
-   * sub-decision 4). When provided, the cancel Lambda gets
-   * `lambda:TerminateMicrovm` **scoped to that one image**, so a cancelled
-   * MicroVM-backed task actually stops billing — mirroring the conditional
-   * AgentCore `RUNTIME_ARN` / `ecsClusterArn` wiring above.
+   * sub-decision 4). When provided, cancel gets TerminateMicrovm and the approval
+   * decision handlers get GetMicrovm/ResumeMicrovm, scoped to that one image.
    *
    * An ARN rather than an on/off boolean so the grant is exactly scoped. `TaskApi`
    * is constructed before `LambdaMicrovmCompute` (the cancel Lambda's ARN is
@@ -228,7 +226,7 @@ export interface TaskApiProps {
   readonly attachmentsBucket?: s3.IBucket;
 
   /**
-   * User concurrency table for admission control during confirm-uploads.
+   * User concurrency table for the advisory confirm-uploads pre-check.
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
@@ -261,6 +259,8 @@ export interface TaskApiProps {
  * - DELETE /api-keys/{key_id}    → deleteApiKey (Cognito)
  */
 export class TaskApi extends Construct {
+  private readonly approvalDecisionFunctions: lambda.NodejsFunction[] = [];
+
   /**
    * The API Gateway REST API.
    */
@@ -654,6 +654,9 @@ export class TaskApi extends Construct {
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
+    if (props.taskApprovalsTable) {
+      cancelTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
+    }
     const stopSessionArn = props.agentCoreStopSessionRuntimeArn;
     if (stopSessionArn) {
       cancelTaskEnv.RUNTIME_ARN = stopSessionArn;
@@ -669,10 +672,8 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
-      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
-      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
-      // is not enough once cold-start TLS handshakes for bedrock-agentcore
-      // are added.  15s gives comfortable headroom.
+      // Cancel reads state, atomically closes an unanswered approval, stops
+      // compute and writes an event. The state operation has its own 5s bound.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });
@@ -711,6 +712,7 @@ export class TaskApi extends Construct {
     props.taskEventsTable.grantReadWriteData(createTaskFn);
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
+    props.taskApprovalsTable?.grant(cancelTaskFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
 
     if (stopSessionArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
@@ -733,15 +735,14 @@ export class TaskApi extends Construct {
 
     // ADR-021: cancelling a `lambda-microvm` task must actively terminate the
     // MicroVM — leaving it to the 8-hour `maximumDurationInSeconds` cap would
-    // keep billing 16 vCPU and would hold account memory quota that gates
-    // admission of new tasks. Conditional for the same reason the AgentCore and
-    // ECS grants above are: a deployment without the backend gets no grant.
+    // keep running compute or retained snapshots billable. Conditional for the
+    // same reason the AgentCore and ECS grants above are: a deployment without
+    // the backend gets no grant.
     //
     // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
     // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
     // state first — so `lambda:GetMicrovm` would be a permission with no caller.
-    // (The approve/deny Lambdas get `ResumeMicrovm` + `GetMicrovm` in P3, where
-    // a state read is genuinely needed for the resume reconciliation.)
+    // The approve/deny Lambdas separately get ResumeMicrovm + GetMicrovm below.
     //
     // Resource is the MicroVM *image*, not the running instance: every MicroVM
     // lifecycle action authorizes against `microvm-image:<name>` (Service
@@ -836,7 +837,7 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
       props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
       props.attachmentsBucket.grantDelete(confirmUploadsFn);
-      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadData(confirmUploadsFn);
 
       if (props.orchestratorFunctionArn) {
         confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
@@ -999,6 +1000,10 @@ export class TaskApi extends Construct {
         ...commonEnv,
         TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
       };
+      const decisionBundling = {
+        ...commonBundling,
+        externalModules: commonBundling.externalModules?.filter(name => name !== '@aws-sdk/client-lambda'),
+      };
 
       // ApproveTaskFn — POST /tasks/{task_id}/approve
       const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
@@ -1007,7 +1012,7 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: commonBundling,
+        bundling: decisionBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
@@ -1022,13 +1027,22 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: commonBundling,
+        bundling: decisionBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
+      this.approvalDecisionFunctions.push(approveTaskFn, denyTaskFn);
+      if (props.lambdaMicrovmImageArn) {
+        for (const decisionFn of [approveTaskFn, denyTaskFn]) {
+          decisionFn.addToRolePolicy(new iam.PolicyStatement({
+            actions: ['lambda:GetMicrovm', 'lambda:ResumeMicrovm'],
+            resources: [props.lambdaMicrovmImageArn, `${props.lambdaMicrovmImageArn}:*`],
+          }));
+        }
+      }
 
       // GetPendingFn — GET /pending
       const getPendingFn = new lambda.NodejsFunction(this, 'GetPendingFn', {
@@ -1041,6 +1055,7 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(10),
         memorySize: API_HANDLER_MEMORY_MB,
       });
+      props.taskTable.grant(getPendingFn, 'dynamodb:BatchGetItem');
       // Least-privilege: GetPendingFn only reads (Query on
       // user_id-status-index for the user's pending rows) and writes
       // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
@@ -1428,7 +1443,7 @@ export class TaskApi extends Construct {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; lambda:TerminateMicrovm is scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
+          reason: 'DynamoDB index/* wildcards generated by CDK grantReadWriteData/grantReadData for GSI access; ecs:StopTask is conditioned on the cluster ARN; Lambda MicroVM cancel/wake actions (TerminateMicrovm/GetMicrovm/ResumeMicrovm) are scoped to the single platform MicroVM image ARN plus a <arn>:* version-suffix sibling (delivered as a Lazy.string because TaskApi is built before the MicroVM construct) — ADR-021',
         },
       ], true);
     }
@@ -1439,5 +1454,22 @@ export class TaskApi extends Construct {
         reason: 'AmazonAPIGatewayPushToCloudWatchLogs is the AWS-recommended managed policy for API Gateway CloudWatch logging',
       },
     ], true);
+  }
+
+  /** Wire after the coordinator and bucket exist, avoiding a construction-order cycle. */
+  public enableMicrovmContinuations(
+    bucketName: string, coordinatorArn: string, concurrencyTable: dynamodb.ITable,
+    maxConcurrentTasksPerUser: number,
+  ): void {
+    for (const fn of this.approvalDecisionFunctions) {
+      fn.addEnvironment('CONTINUATION_BUCKET_NAME', bucketName);
+      fn.addEnvironment('ORCHESTRATOR_FUNCTION_ARN', coordinatorArn);
+      fn.addEnvironment('USER_CONCURRENCY_TABLE_NAME', concurrencyTable.tableName);
+      fn.addEnvironment('MAX_CONCURRENT_TASKS_PER_USER', String(maxConcurrentTasksPerUser));
+      concurrencyTable.grantReadWriteData(fn);
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
+      }));
+    }
   }
 }

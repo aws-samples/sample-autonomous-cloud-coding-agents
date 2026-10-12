@@ -1,11 +1,349 @@
-"""Unit tests for pure functions in task_state.py."""
+"""Task persistence behavior and the agent's IAM write contract."""
 
+import ast
+import json
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 import task_state
 from task_state import TaskFetchError, _build_logs_url, _now_iso
+
+
+@pytest.mark.parametrize("writer", [task_state.write_running, task_state.write_heartbeat])
+@pytest.mark.parametrize(
+    ("reasons", "expected_warning"),
+    [
+        ([{"Code": "ConditionalCheckFailed"}, {"Code": "None"}], False),
+        ([{"Code": "None"}, {"Code": "ConditionalCheckFailed"}], True),
+        ([{"Code": "ConditionalCheckFailed"}, {"Code": "ConditionalCheckFailed"}], True),
+        ([], True),
+    ],
+)
+def test_status_race_logging_preserves_worker_fence_failures(
+    monkeypatch, writer, reasons, expected_warning
+):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(
+        task_state,
+        "_update_task",
+        MagicMock(
+            side_effect=ClientError(
+                {
+                    "Error": {
+                        "Code": "TransactionCanceledException",
+                        "Message": "transaction failed",
+                    },
+                    "CancellationReasons": reasons,
+                },
+                "TransactWriteItems",
+            )
+        ),
+    )
+    log = MagicMock()
+    monkeypatch.setattr(task_state, "log", log)
+    writer("owned-task")
+    assert any(call.args[0] == "WARN" for call in log.call_args_list) is expected_warning
+
+
+@pytest.mark.parametrize(
+    ("codes", "can_heal"),
+    [
+        (["ConditionalCheckFailed", "None"], True),
+        (["None", "ConditionalCheckFailed"], False),
+        (["ConditionalCheckFailed", "ConditionalCheckFailed"], False),
+        (["TransactionConflict", "None"], False),
+        ([], False),
+    ],
+)
+def test_terminal_transaction_heals_trace_only_when_worker_lease_passed(
+    monkeypatch, codes, can_heal
+):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    monkeypatch.setattr(task_state, "_update_task", MagicMock(side_effect=error))
+    heal = MagicMock(return_value=True)
+    report = MagicMock()
+    monkeypatch.setattr(task_state, "write_trace_uri_conditional", heal)
+    monkeypatch.setattr(task_state, "log_error_cw", report)
+    task_state.write_terminal("task", "COMPLETED", {"trace_s3_uri": "s3://bucket/trace"})
+    assert heal.called is can_heal
+    if can_heal:
+        heal.assert_called_once_with("task", "s3://bucket/trace")
+    else:
+        assert "TransactionCanceledException" in report.call_args.args[0]
+        assert "CancellationReasons" in report.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    ("codes", "benign"),
+    [
+        (["ConditionalCheckFailed", "None"], True),
+        (["None", "ConditionalCheckFailed"], False),
+        (["ConditionalCheckFailed", "ConditionalCheckFailed"], False),
+    ],
+)
+def test_trace_transaction_classifies_status_race_separately_from_lease_loss(
+    monkeypatch, codes, benign
+):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(task_state, "_update_task", MagicMock(side_effect=error))
+    report = MagicMock()
+    monkeypatch.setattr(task_state, "log", report)
+    assert not task_state.write_trace_uri_conditional("task", "s3://bucket/trace")
+    assert report.call_args.args[0] == ("INFO" if benign else "WARN")
+    if not benign:
+        assert "CancellationReasons=" in report.call_args.args[1]
+
+
+@pytest.mark.parametrize(
+    "codes", [["TransactionConflict", "None"], ["None", "TransactionConflict"]]
+)
+def test_task_transaction_retries_conflict_with_identical_ownership_fence(monkeypatch, codes):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    client = MagicMock()
+    client.transact_write_items.side_effect = [error, {"committed": True}]
+    monkeypatch.setattr(task_state.time, "sleep", MagicMock())
+    lease = {
+        "ConditionCheck": {
+            "ConditionExpression": "lease_attempt_id = :attempt",
+            "ExpressionAttributeValues": {":attempt": "original-worker"},
+        }
+    }
+    monkeypatch.setattr(task_state, "_lease_check", lambda *args, **kwargs: lease)
+    operation = {"TableName": "tasks", "Key": {"task_id": {"S": "task"}}}
+    assert task_state._update_task(client, "task", low_level=True, **operation) == {
+        "committed": True
+    }
+    assert client.transact_write_items.call_count == 2
+    for call in client.transact_write_items.call_args_list:
+        assert call.kwargs["TransactItems"] == [{"Update": operation}, lease]
+
+
+@pytest.mark.parametrize(
+    ("codes", "attempts"),
+    [
+        (["TransactionConflict", "None"], 3),
+        (["TransactionConflict", "ConditionalCheckFailed"], 1),
+        (["None", "ConditionalCheckFailed"], 1),
+        ([], 1),
+    ],
+)
+def test_transaction_retry_is_bounded_and_never_retries_ownership_denial(
+    monkeypatch, codes, attempts
+):
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+    client = MagicMock()
+    client.transact_write_items.side_effect = error
+    monkeypatch.setattr(task_state.time, "sleep", MagicMock())
+    with pytest.raises(ClientError):
+        task_state._transact_with_conflict_retry(client, [])
+    assert client.transact_write_items.call_count == attempts
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (None, task_state.TerminalWriteOutcome.WRITTEN),
+        ("ConditionalCheckFailedException", task_state.TerminalWriteOutcome.SUPERSEDED),
+        ("AccessDeniedException", task_state.TerminalWriteOutcome.FAILED),
+    ],
+)
+def test_terminal_returns_persistence_outcome(monkeypatch, failure, expected):
+    from botocore.exceptions import ClientError
+
+    monkeypatch.setattr(task_state, "_get_table", MagicMock())
+    monkeypatch.setattr(
+        task_state,
+        "_update_task",
+        MagicMock(
+            side_effect=(
+                ClientError({"Error": {"Code": failure}}, "UpdateItem") if failure else None
+            )
+        ),
+    )
+    assert task_state.write_terminal("task", "COMPLETED") is expected
+
+
+class TestAgentWriteContract:
+    def test_current_task_writers_fit_the_deployed_attribute_allowlist(self, monkeypatch):
+        """Exercise real writers; detect a new field before IAM rejects it live.
+
+        This checks request/contract compatibility, not AWS IAM enforcement.
+        """
+        table = MagicMock()
+        client = MagicMock()
+        monkeypatch.setattr(task_state, "_get_table", lambda: table)
+        monkeypatch.setenv("TASK_TABLE_NAME", "Tasks")
+        monkeypatch.setenv("TASK_APPROVALS_TABLE_NAME", "Approvals")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("LOG_GROUP_NAME", "/test")
+
+        task_state.write_running("t1")
+        task_state.write_heartbeat("t1")
+        task_state.write_terminal(
+            "t1",
+            "COMPLETED",
+            {
+                "pr_url": "https://example.com/pr/1",
+                "error": "example",
+                "cost_usd": 1,
+                "duration_s": 10,
+                "turns": 3,
+                "turns_attempted": 3,
+                "turns_completed": 2,
+                "prompt_version": "v1",
+                "memory_written": True,
+                "build_passed": True,
+                "lint_passed": True,
+                "code_changed": True,
+                "head_sha": "abc",
+                "answer_text": "done",
+                "otel_trace_id": "trace",
+                "trace_s3_uri": "s3://b/trace",
+                "artifact_uri": "s3://b/artifact",
+            },
+        )
+        assert task_state.write_trace_uri_conditional("t1", "s3://b/trace")
+        task_state.transact_write_approval_request(
+            "t1",
+            "r1",
+            {
+                "task_id": "t1",
+                "request_id": "r1",
+                "status": "PENDING",
+                "tool_name": "Bash",
+                "tool_input_preview": "example",
+                "tool_input_sha256": "a" * 64,
+                "reason": "approval required",
+                "severity": "high",
+                "matching_rule_ids": ["rule1"],
+                "created_at": "2026-09-13T00:00:00Z",
+                "timeout_s": 300,
+                "ttl": 1800000000,
+                "user_id": "u1",
+                "repo": "owner/repo",
+            },
+            client=client,
+        )
+        task_state.transact_resume_from_approval("t1", "r1", client=client)
+        assert task_state.increment_approval_gate_count_in_ddb("t1", client=client)
+
+        requests = [c.kwargs for c in table.update_item.call_args_list]
+        requests += [c.kwargs for c in client.update_item.call_args_list]
+        for call in client.transact_write_items.call_args_list:
+            for item in call.kwargs["TransactItems"]:
+                action, request = next(iter(item.items()))
+                if request["TableName"] == "Tasks":
+                    assert action == "Update"  # Never Put/Delete the task row.
+                    requests.append(request)
+        assert len(requests) == 7
+        table.put_item.assert_not_called()
+        table.delete_item.assert_not_called()
+
+        contract = Path(__file__).resolve().parents[2] / (
+            "cdk/src/constructs/agent-task-write-attributes.json"
+        )
+        allowed = set(json.loads(contract.read_text()))
+        seen: set[str] = set()
+        for request in requests:
+            # Current writers use flat attributes. Resolve aliases and ignore
+            # value placeholders/operators/functions in their DDB expressions.
+            expression = request["UpdateExpression"] + " " + request.get("ConditionExpression", "")
+            expression = re.sub(r":[A-Za-z0-9_]+", "", expression)
+            for alias, name in request.get("ExpressionAttributeNames", {}).items():
+                expression = expression.replace(alias, name)
+            names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression))
+            names -= {"SET", "REMOVE", "ADD", "IN", "AND", "attribute_not_exists"}
+            names |= set(request["Key"])
+            assert names <= allowed, (
+                f"Task writer needs a reviewed IAM contract update: {names - allowed}"
+            )
+            seen |= names
+        # No stale writable attribute may linger after its writer is removed.
+        assert seen == allowed
+
+    def test_write_inventory_requires_review_when_a_new_writer_is_added(self):
+        tree = ast.parse(Path(task_state.__file__).read_text())
+        writers = {
+            node.name
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and any(
+                isinstance(child, ast.Call)
+                and (
+                    (
+                        isinstance(child.func, ast.Attribute)
+                        and child.func.attr
+                        in {
+                            "update_item",
+                            "put_item",
+                            "delete_item",
+                            "transact_write_items",
+                            "batch_writer",
+                        }
+                    )
+                    or (
+                        isinstance(child.func, ast.Name)
+                        and child.func.id
+                        in {"_update_task", "_transact_task", "_transact_with_conflict_retry"}
+                    )
+                )
+                for child in ast.walk(node)
+            )
+        }
+        assert writers == {
+            "_transact_with_conflict_retry",
+            "_update_task",
+            "_transact_task",
+            "write_running",
+            "write_heartbeat",
+            "write_terminal",
+            "write_trace_uri_conditional",
+            "transact_write_approval_request",
+            "transact_resume_from_approval",
+            "increment_approval_gate_count_in_ddb",
+            "publish_continuation_checkpoint",
+            "consume_restored_continuation",
+            "best_effort_update_approval_status",  # Writes only the supporting approvals table.
+        }
 
 
 class TestNowIso:
@@ -95,82 +433,6 @@ class TestGetTask:
         with pytest.raises(TaskFetchError) as exc_info:
             task_state.get_task("t-throttled")
         assert "ProvisionedThroughputExceededException" in str(exc_info.value)
-
-
-class TestWriteSessionInfo:
-    """Rev-5 OBS-4: interactive path writes session_id + agent_runtime_arn."""
-
-    def test_writes_session_id_and_arn(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info(
-            "t-interactive",
-            "sess-abc123",
-            "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz",
-        )
-
-        assert len(calls) == 1
-        call = calls[0]
-        assert call["Key"] == {"task_id": "t-interactive"}
-        assert "session_id = :sid" in call["UpdateExpression"]
-        assert "agent_runtime_arn = :arn" in call["UpdateExpression"]
-        assert "compute_type = :ct" in call["UpdateExpression"]
-        assert "compute_metadata = :cm" in call["UpdateExpression"]
-        values = call["ExpressionAttributeValues"]
-        assert values[":sid"] == "sess-abc123"
-        assert values[":arn"] == "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
-        assert values[":ct"] == "agentcore"
-        assert values[":cm"] == {
-            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:123:runtime/jwt-xyz"
-        }
-
-    def test_noop_when_both_empty(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info("t-empty", "", "")
-        assert calls == []
-
-    def test_skips_silently_when_task_already_advanced(self, monkeypatch):
-        from botocore.exceptions import ClientError
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                raise ClientError(
-                    {"Error": {"Code": "ConditionalCheckFailedException"}},
-                    "UpdateItem",
-                )
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        # Must NOT raise — the conditional failure is expected when the
-        # task has already transitioned past SUBMITTED/HYDRATING.
-        task_state.write_session_info("t-raced", "sess-x", "arn:x")
-
-    def test_writes_only_session_when_arn_missing(self, monkeypatch):
-        calls: list[dict] = []
-
-        class _FakeTable:
-            def update_item(self, **kwargs):
-                calls.append(kwargs)
-
-        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
-
-        task_state.write_session_info("t-partial", "sess-only", "")
-        assert len(calls) == 1
-        assert "session_id = :sid" in calls[0]["UpdateExpression"]
-        assert "agent_runtime_arn" not in calls[0]["UpdateExpression"]
 
 
 class TestWriteRunningMaintainsStatusCreatedAt:
@@ -807,6 +1069,28 @@ class TestTransactWriteApprovalRequest:
 
 
 class TestTransactResumeFromApproval:
+    def test_resume_refreshes_heartbeat_in_the_same_conditional_write(
+        self, approval_tables_env, monkeypatch
+    ):
+        """A poll immediately after a long approval wait must see a fresh heartbeat."""
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-09-13T12:05:00Z")
+        client = MagicMock()
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        client.transact_write_items.assert_called_once()
+        updates = client.transact_write_items.call_args.kwargs["TransactItems"]
+        assert len(updates) == 1
+        update = updates[0]["Update"]
+        assert "agent_heartbeat_at = :heartbeat" in update["UpdateExpression"]
+        assert "#s = :running" in update["UpdateExpression"]
+        assert update["ExpressionAttributeValues"][":heartbeat"] == {"S": "2026-09-13T12:05:00Z"}
+        assert update["ConditionExpression"] == (
+            "#s = :awaiting AND awaiting_approval_request_id = :rid"
+        )
+        # An independent write would leave the old heartbeat visible after RUNNING.
+        client.update_item.assert_not_called()
+
     def test_env_missing_raises(self, monkeypatch):
         monkeypatch.delenv("TASK_TABLE_NAME", raising=False)
         monkeypatch.delenv("TASK_APPROVALS_TABLE_NAME", raising=False)
@@ -884,12 +1168,12 @@ class TestBestEffortUpdateApprovalStatus:
         client.update_item.return_value = {}
 
         task_state.best_effort_update_approval_status(
-            "01KTASK", "01KREQ", "DENIED", reason="no prod pushes", client=client
+            "01KTASK", "01KREQ", "TIMED_OUT", reason="polling failed", client=client
         )
 
         call = client.update_item.call_args
         assert "deny_reason = :reason" in call.kwargs["UpdateExpression"]
-        assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "no prod pushes"}
+        assert call.kwargs["ExpressionAttributeValues"][":reason"] == {"S": "polling failed"}
 
     def test_conditional_check_failed_returns_false(self, approval_tables_env):
         """IMPL-24 — this is the VM-throttle race signal the hook re-reads on."""
@@ -1045,3 +1329,52 @@ class TestCancellationHelpers:
 
     def test_extract_cancellation_reasons_none_on_plain_exception(self):
         assert task_state._extract_cancellation_reasons(RuntimeError()) == []
+
+
+class TestContinuationClaimReadback:
+    @pytest.mark.parametrize(
+        "changed", ["none", "cancelled", "worker", "record", "request", "lease"]
+    )
+    def test_lost_response_requires_exact_consumed_assignment(
+        self, approval_tables_env, monkeypatch, changed
+    ):
+        from boto3.dynamodb.types import TypeSerializer
+
+        record = {
+            "version": 1,
+            "state": "RESTORING",
+            "worker_id": "microvm-new",
+            "identity": {
+                "task_id": "task",
+                "attempt_id": "microvm-old",
+                "request_id": "request",
+                "user_id": "user",
+                "repo": "owner/repo",
+            },
+            "manifest": {"key": "exact-saved-key"},
+        }
+        consumed = {**record, "state": "CONSUMED"}
+        task = {"status": "RUNNING", "session_id": "microvm-new", "continuation": consumed}
+        if changed == "cancelled":
+            task["status"] = "CANCELLED"
+        elif changed == "worker":
+            task["session_id"] = "microvm-other"
+        elif changed == "record":
+            task["continuation"] = {**consumed, "manifest": {"key": "different"}}
+        elif changed == "request":
+            task["awaiting_approval_request_id"] = "another-request"
+        client = MagicMock()
+        client.transact_write_items.side_effect = TimeoutError("response lost after commit")
+        serialize = TypeSerializer().serialize
+        client.get_item.return_value = {"Item": {k: serialize(v) for k, v in task.items()}}
+        lease = MagicMock(side_effect=RuntimeError("lease lost") if changed == "lease" else None)
+        monkeypatch.setattr(task_state, "verify_worker_lease", lease)
+        if changed == "none":
+            task_state.consume_restored_continuation("task", "microvm-new", record, client=client)
+            lease.assert_called_once_with("task", client=client)
+        else:
+            with pytest.raises(RuntimeError):
+                task_state.consume_restored_continuation(
+                    "task", "microvm-new", record, client=client
+                )
+        assert client.get_item.call_args.kwargs["ConsistentRead"] is True

@@ -45,6 +45,7 @@ import type {
   DynamoDBRecord,
   DynamoDBStreamEvent,
 } from 'aws-lambda';
+import { APPROVAL_NOTIFICATION_EVENTS, approvalNotificationMarkdown, isApprovalNotification, loadApprovalNotification, markApprovalNotificationDelivered } from './shared/approval-notifications';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
@@ -62,7 +63,8 @@ import {
   renderJiraFinishedPointer,
   type JiraFinishedPointerKind,
 } from './shared/jira-status-comment';
-import { EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
+import { closeLinearApprovalThread, saveLinearApprovalThread } from './shared/linear-approval-thread';
+import { postIdentifiedComment, EMOJI_FAILURE, EMOJI_NEEDS_INPUT, EMOJI_SUCCESS, postIssueComment, swapCommentReaction, upsertThreadedReply } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
@@ -86,25 +88,6 @@ const TERMINAL_EVENT_TYPES = [
 ] as const;
 
 /**
- * Cedar HITL approval milestones (design §11.1 + fan-out rules in §11.2).
- *
- * - ``approval_requested`` / ``approval_stranded`` go to Slack so the
- *   user sees the gate on their phone.
- * - ``approval_requested`` (high severity only — enforced by the
- *   dispatcher, not the filter) goes to Email.
- * - Granted / denied / timed_out are user-facing UX confirmations the
- *   CLI already surfaces; routing them to Slack too would create
- *   notification fatigue. Kept out of every channel's default.
- *
- * Events are milestone names from the `agent_milestone` event_type
- * stream; the fan-out Lambda unwraps them before routing.
- */
-const APPROVAL_NOTIFICATION_EVENTS = [
-  'approval_requested',
-  'approval_stranded',
-] as const;
-
-/**
  * Per-channel default event-type subscriptions (design §6.2).
  *
  * Channels do NOT share a single filter — Slack wants interactive
@@ -114,15 +97,10 @@ const APPROVAL_NOTIFICATION_EVENTS = [
  * one user's chatty Slack settings can't spam their email, and
  * vice-versa, without any per-task config writer.
  *
- * Approval milestones (§11.2):
- *   - ``approval_requested`` / ``approval_stranded`` are the two
- *     user-facing "something needs you" signals that get fanned out.
- *     Every other ``approval_*`` milestone is internal bookkeeping
- *     (caps, clipping, late-wins) or a UX confirmation the CLI
- *     already surfaces; routing those to Slack / Email would create
- *     notification fatigue without adding value.
- *   - Per-user rate limit of 10 approval-related messages per minute
- *     is enforced in the dispatcher, not in this filter.
+ * Slack and Linear receive approval requests and recorded outcomes. Their
+ * dispatchers bind messages to saved approval state and per-request receipts.
+ * Internal gate bookkeeping (caps, clipping, late-wins) stays in the event log.
+ * Email remains a log-only stub.
  */
 export type NotificationChannel = 'slack' | 'email' | 'github' | 'linear' | 'jira';
 
@@ -174,9 +152,8 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
     ...TERMINAL_EVENT_TYPES,
     'pr_created',
   ]),
-  // Linear posts deterministic status comments on the platform tier
-  // (ADR-016: Linear is fully deterministic — the agent has no Linear MCP
-  // and posts nothing itself). Two events:
+  // Linear posts approval requests/outcomes and deterministic status comments
+  // on the platform tier (ADR-016: the agent has no Linear MCP).
   //   * ``pr_created`` — the first-run "🔗 PR opened" courtesy comment (or,
   //     for a comment-iteration, matures the threaded reply to "🔄 Working").
   //     This replaces the agent's old step-2 MCP save_comment.
@@ -185,12 +162,12 @@ export const CHANNEL_DEFAULTS: Record<NotificationChannel, ReadonlySet<string>> 
   //     OOM) before any PR, which is the motivating case: without a
   //     platform-side comment the requester gets no completion signal at all.
   //
-  // Linear's `save_comment` doesn't support edit, so each is post-once (no
-  // live updates a la GitHub edit-in-place), idempotent across partial-batch
-  // retries via per-event markers. The start "🤖 Starting" comment is posted
+  // Approval messages and first-run status comments use delivery receipts;
+  // iteration replies are edited in place. The start "🤖 Starting" comment is posted
   // even earlier, at task-admission in the webhook processor (ADR-016 P4.5).
   linear: new Set<string>([
     ...TERMINAL_EVENT_TYPES,
+    ...APPROVAL_NOTIFICATION_EVENTS,
     'pr_created',
     // Include task_timed_out so a Linear standalone iteration
     // that TIMES OUT still settles (its 👀→✅/❌ + terminal reply come through the
@@ -354,7 +331,7 @@ export function parseStreamRecord(record: DynamoDBRecord): FanOutEvent | null {
  * ``trajectory_uploaded``, ``trace_truncated``. Only ``pr_created``
  * is currently in any channel's default filter (§6.2 Slack + GitHub).
  */
-const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created']);
+const ROUTABLE_MILESTONES: ReadonlySet<string> = new Set(['pr_created', ...APPROVAL_NOTIFICATION_EVENTS]);
 
 /**
  * Unwrap ``agent_milestone`` events to their milestone name for
@@ -481,6 +458,7 @@ async function loadTaskForComment(taskId: string): Promise<TaskRecord | null> {
   const result = await ddb.send(new GetCommand({
     TableName: tableName,
     Key: { task_id: taskId },
+    ConsistentRead: true,
   }));
   return (result.Item as TaskRecord | undefined) ?? null;
 }
@@ -1177,6 +1155,45 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return;
   }
 
+  const effectiveType = effectiveEventType(event);
+  if (isApprovalNotification(effectiveType)) {
+    const notification = await loadApprovalNotification(ddb, task, effectiveType, event.metadata ?? {}, 'linear');
+    if (!notification) return;
+    const thread = {
+      workspaceId,
+      issueId,
+      taskId: task.task_id,
+      requestId: notification.requestId,
+      userId: notification.userId,
+    };
+    const ctx = { linearWorkspaceId: workspaceId, registryTableName };
+    const body = approvalNotificationMarkdown(notification);
+    if (effectiveType !== 'approval_requested') {
+      // Retention follows the saved closure even if Linear cannot receive its notice.
+      await closeLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread);
+    }
+    const result = effectiveType === 'approval_requested'
+      ? await postIdentifiedComment(ctx, {
+        id: await saveLinearApprovalThread(ddb, process.env.TASK_APPROVALS_TABLE_NAME!, thread), issueId, body,
+      })
+      : await postIssueComment(ctx, issueId, body);
+    if (!result.ok) {
+      logger.warn('Linear approval notification failed', {
+        event: 'fanout.linear.approval_post_failed',
+        task_id: task.task_id,
+        request_id: notification.requestId,
+        retryable: result.retryable,
+      });
+      if (result.retryable) throw new Error('Retryable Linear approval notification failure');
+      return;
+    }
+    await markApprovalNotificationDelivered(ddb, notification);
+    logger.info('Linear approval notification delivered', {
+      event: 'fanout.linear.approval_dispatched', task_id: task.task_id, request_id: notification.requestId,
+    });
+    return; // An approval message must never settle the task's final reply.
+  }
+
   // Iteration-UX: this task is a comment-iteration when it carries a maturing
   // reply id (set at trigger time). For those, the progress + terminal status
   // lives in that ONE edited reply, NOT in fresh top-level comments.
@@ -1264,8 +1281,8 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
     return; // milestones never post the terminal status comment
   }
 
-  // Idempotency across partial-batch retries: Linear has no comment
-  // edit API, so a re-run of this dispatcher (e.g. a sibling channel's
+  // Idempotency across partial-batch retries: a re-run of this dispatcher
+  // (e.g. a sibling channel's
   // infra rejection pushed the whole stream record into
   // ``batchItemFailures``) would post a duplicate final-status comment.
   // The marker is persisted after the first successful post below.
@@ -1943,8 +1960,7 @@ export async function routeEvent(
  * ``constructs/fanout-consumer.ts``) can honor partial-batch semantics.
  * Without a structured return, a single poisonous record would cause
  * Lambda to retry the **entire batch** from the stream checkpoint,
- * replaying every sibling event and defeating the per-task ordering
- * guarantee promised by ``ParallelizationFactor: 1`` upstream.
+ * replaying successful earlier events unnecessarily.
  *
  * Partial-failure surface (per-record try/catch below):
  *   - ``routeEvent`` wraps each dispatcher in ``Promise.allSettled``, so
@@ -1960,10 +1976,10 @@ export async function routeEvent(
  *     future refactor (e.g. a stricter ``parseStreamRecord``) from
  *     crashing the whole batch.
  *
- * On any caught throw we push ``{ itemIdentifier: record.eventID }`` so
- * Lambda retries ONLY that record, isolating the poison pill per
- * design §6 + §8.9 expectations. Successful records are NOT in
- * ``batchItemFailures`` and advance the stream checkpoint normally.
+ * Failures return the DynamoDB ``SequenceNumber``, not the opaque ``eventID``.
+ * Lambda checkpoints at the lowest failed sequence and retries that record and
+ * the following records. Successful later records can therefore be delivered
+ * again; channel delivery receipts still matter.
  *
  * Two review findings shaped this shape: the fanout handler used to return
  * ``void`` despite ``reportBatchItemFailures: true``, and a ``routeEvent``
@@ -1986,6 +2002,15 @@ export const handler = async (
   let processed = 0;
   let dispatched = 0;
   let dropped = 0;
+  const retryRecord = (record: DynamoDBRecord): void => {
+    const sequence = record.dynamodb?.SequenceNumber;
+    if (!sequence) {
+      // A malformed failed record must not acknowledge the batch or return an
+      // invalid retry cursor. Reject the invocation so Lambda retries the batch.
+      throw new Error('Failed DynamoDB record is missing its sequence number');
+    }
+    batchItemFailures.push({ itemIdentifier: sequence });
+  };
 
   // v1: no per-task override; every event uses the channel defaults.
   // Chunk K wires a DDB read here to load ``TaskRecord.notifications``.
@@ -2028,21 +2053,13 @@ export const handler = async (
       // attempt has a chance to succeed. Without this push, a transient
       // failure would be silently dropped — the regression that
       // motivated this fix.
-      if (outcome.infraRejections.length > 0 && record.eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: record.eventID });
-      }
+      if (outcome.infraRejections.length > 0) retryRecord(record);
     } catch (err) {
       // Poison-pill isolation: one record's unhandled throw must not
       // crash the batch. See the handler doc block for the full list of
       // paths that can reach here (notably AccessDeniedException from
       // ``resolveTokenSecretArn``).
       //
-      // ``eventID`` is the stream-record identifier Lambda uses for the
-      // retry cursor; on Kinesis-style event-source-mappings with
-      // ``reportBatchItemFailures: true`` the service retries all
-      // records at-or-after the lowest-sequence failure. Returning even
-      // one failed itemIdentifier is enough to preserve ordering across
-      // the whole batch for that task.
       const eventID = record.eventID;
       logger.warn('[fanout] record threw — flagging for partial-batch retry', {
         event: 'fanout.record.failed',
@@ -2050,9 +2067,7 @@ export const handler = async (
         error: err instanceof Error ? err.message : String(err),
         error_name: err instanceof Error ? err.name : undefined,
       });
-      if (eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: eventID });
-      }
+      retryRecord(record);
     }
   }
 

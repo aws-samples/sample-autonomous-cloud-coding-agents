@@ -18,9 +18,9 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 ### 2. Set up your environment
 
-Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
 
-Use **[AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/agents)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+Use **[AGENTS.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/AGENTS.md)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
@@ -32,7 +32,7 @@ Guidelines:
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match.
 - If you change docs sources (`docs/guides/`, `docs/design/`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
-- For cross-cutting or hard-to-reverse decisions, add an ADR to `docs/decisions/` (see [ADR README](/sample-autonomous-cloud-coding-agents/architecture/readme)).
+- For cross-cutting or hard-to-reverse decisions, add an ADR to `docs/decisions/` (see [ADR README](/sample-autonomous-cloud-coding-agents/decisions/readme)).
 
 ### 4. Commit
 
@@ -101,6 +101,19 @@ PRs labeled `auto-approve` are approved automatically by the `auto-approve` work
 - **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
 If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
+
+The build's transaction tests use DynamoDB Local through
+`ABCA_DDB_LOCAL_ENDPOINT` (a loopback HTTP endpoint). CI starts a Docker service
+pinned by image digest and supplies its mapped port to both CDK and Python tests;
+those tests fail if `CI=true` without an endpoint. To reproduce locally, start
+DynamoDB Local with `-inMemory -sharedDb`, bind port 8000 to loopback, and run
+`ABCA_DDB_LOCAL_ENDPOINT=http://127.0.0.1:8000 mise run build`.
+
+The pinned SDK continuation probe also runs in CI. Locally enable it with
+`ABCA_TEST_SDK_CONTINUATION=1` when running
+`agent/tests/test_continuation_sdk_probe.py`. It uses a local simulated Bedrock
+endpoint and synthetic credentials; it does not require an AWS account or model
+billing.
 
 ## Versioning
 
