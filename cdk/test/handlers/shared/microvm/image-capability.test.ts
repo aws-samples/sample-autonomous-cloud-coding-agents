@@ -19,11 +19,11 @@
 
 // SPDX-License-Identifier: MIT-0
 
-import sharedConstants from '../../../../contracts/constants.json';
+import sharedConstants from '../../../../../contracts/constants.json';
 import {
   MICROVM_IMAGE_PROTOCOL_ENV, MICROVM_LIFECYCLE_PROTOCOL, readMicrovmImageMetadata,
   supportsMicrovmLifecycle, verifyMicrovmImageLifecycle,
-} from '../../../src/handlers/shared/microvm-image-capability';
+} from '../../../../src/handlers/shared/microvm/image-capability';
 
 const identity = {
   imageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',

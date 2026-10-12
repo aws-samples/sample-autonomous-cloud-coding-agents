@@ -83,8 +83,8 @@ const mockSend = jest.fn();
 const mockClaimStart = jest.fn();
 const mockSaveHandle = jest.fn();
 const mockSaveCapability = jest.fn();
-jest.mock('../../../../src/handlers/shared/microvm-start', () => ({
-  ...jest.requireActual('../../../../src/handlers/shared/microvm-start'),
+jest.mock('../../../../src/handlers/shared/microvm/start', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/microvm/start'),
   claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
   saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
   saveMicrovmImageCapability: (...args: unknown[]) => mockSaveCapability(...args),

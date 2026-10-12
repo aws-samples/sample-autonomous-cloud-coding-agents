@@ -20,17 +20,17 @@
 import { createHash } from 'node:crypto';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { GetCommand } from '@aws-sdk/lib-dynamodb';
-import type { SessionControlOptions } from './compute-strategy';
-import { logger } from './logger';
-import type { ContinuableTask } from './microvm-continuation-retirement';
-import type { MicrovmContinuationEvent } from './microvm-continuation-runner';
-import { admitContinuation } from './microvm-continuation-start';
-import { CONTINUATION_IO_TIMEOUT_MS } from './microvm-continuation-timing';
-import { validAttemptId } from './microvm-continuation-types';
-import { microvmErrorIdentity } from './microvm-control';
-import { continuationEnabled } from './microvm-worker-lease';
-import { makeClient, makeDocClient } from './ua';
-import { TaskStatus } from '../../constructs/task-status';
+import type { SessionControlOptions } from '../compute-strategy';
+import { logger } from '../logger';
+import type { ContinuableTask } from './continuation-retirement';
+import type { MicrovmContinuationEvent } from './continuation-runner';
+import { admitContinuation } from './continuation-start';
+import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
+import { validAttemptId } from './continuation-types';
+import { microvmErrorIdentity } from './control';
+import { continuationEnabled } from './worker-lease';
+import { TaskStatus } from '../../../constructs/task-status';
+import { makeClient, makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 const MAX_VALIDATION_DETAIL_LENGTH = 512;

@@ -18,17 +18,17 @@
  */
 
 const mockSend = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
 process.env.TASK_TABLE_NAME = 'LifecycleTasks';
 process.env.TASK_APPROVALS_TABLE_NAME = 'LifecycleApprovals';
 
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import type { MicrovmObservedState } from '../../../src/handlers/shared/compute-strategy';
+import type { MicrovmObservedState } from '../../../../src/handlers/shared/compute-strategy';
 import {
   readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot,
   type MicrovmLifecycleIntent,
-} from '../../../src/handlers/shared/microvm-lifecycle';
-import { decideMicrovmLifecycle, type MicrovmLifecyclePolicyInput } from '../../../src/handlers/shared/microvm-lifecycle-policy';
+} from '../../../../src/handlers/shared/microvm/lifecycle';
+import { decideMicrovmLifecycle, type MicrovmLifecyclePolicyInput } from '../../../../src/handlers/shared/microvm/lifecycle-policy';
 
 const NOW = 1_800_000_000_000;
 const CREATED = new Date(NOW - 45_000).toISOString();

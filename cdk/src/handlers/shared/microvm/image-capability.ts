@@ -20,7 +20,7 @@
 // SPDX-License-Identifier: MIT-0
 
 import type { GetMicrovmImageVersionOutput } from '@aws-sdk/client-lambda-microvms';
-import sharedConstants from '../../../../contracts/constants.json';
+import sharedConstants from '../../../../../contracts/constants.json';
 
 export const MICROVM_LIFECYCLE_PROTOCOL = String(sharedConstants.microvm_lifecycle.protocol_version);
 export const MICROVM_IMAGE_PROTOCOL_ENV = sharedConstants.microvm_lifecycle.image_protocol_env;

@@ -24,23 +24,23 @@ const mockSave = jest.fn();
 const mockSend = jest.fn();
 const mockEmit = jest.fn();
 const mockDispatch = jest.fn();
-jest.mock('../../../src/handlers/shared/microvm-continuation-dispatch', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/continuation-dispatch', () => ({
   dispatchMicrovmContinuation: (...args: unknown[]) => mockDispatch(...args),
 }));
 const mockLogger = { warn: jest.fn(), info: jest.fn() };
-jest.mock('../../../src/handlers/shared/microvm-lifecycle', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/lifecycle', () => ({
   readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockRead(...args),
   saveMicrovmLifecycleIntent: (...args: unknown[]) => mockSave(...args),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
+jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockSend })),
   GetMicrovmCommand: jest.fn(input => ({ type: 'get', input })),
   ResumeMicrovmCommand: jest.fn(input => ({ type: 'resume', input })),
 }));
 
-import { approvalPostCommitOptions, wakeMicrovmAfterApproval } from '../../../src/handlers/shared/microvm-approval-wake';
-import type { MicrovmLifecycleSnapshot } from '../../../src/handlers/shared/microvm-lifecycle';
+import { approvalPostCommitOptions, wakeMicrovmAfterApproval } from '../../../../src/handlers/shared/microvm/approval-wake';
+import type { MicrovmLifecycleSnapshot } from '../../../../src/handlers/shared/microvm/lifecycle';
 
 const NOW = Date.parse('2026-09-15T12:00:00Z');
 let row: MicrovmLifecycleSnapshot;

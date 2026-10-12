@@ -22,14 +22,14 @@ import { Readable } from 'node:stream';
 
 const mockS3 = jest.fn();
 const mockDdb = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({
+jest.mock('../../../../src/handlers/shared/ua', () => ({
   makeClient: () => ({ send: mockS3 }),
   makeDocClient: () => ({ send: mockDdb }),
 }));
 import {
   deleteClosedTaskContinuations, loadContinuationLaunch, saveContinuationLaunch, verifyContinuationCheckpoint,
-} from '../../../src/handlers/shared/microvm-continuation-storage';
-import type { ContinuationRecord } from '../../../src/handlers/shared/microvm-continuation-types';
+} from '../../../../src/handlers/shared/microvm/continuation-storage';
+import type { ContinuationRecord } from '../../../../src/handlers/shared/microvm/continuation-types';
 
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 const payload = { task_id: 'task', user_id: 'user', prompt: 'saved instruction' };

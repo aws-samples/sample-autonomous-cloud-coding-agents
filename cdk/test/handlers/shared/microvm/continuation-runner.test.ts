@@ -27,39 +27,39 @@ const mockStop = jest.fn();
 const mockFinalize = jest.fn();
 const mockDelete = jest.fn();
 const mockSend = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
-jest.mock('../../../src/handlers/shared/orchestrator', () => ({
+jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../../../src/handlers/shared/orchestrator', () => ({
   loadTask: (...args: unknown[]) => mockLoad(...args),
   emitTaskEvent: jest.fn(),
   envelopeFor: () => ({ correlation: {}, log: { error: jest.fn() } }),
   finalizeTask: (...args: unknown[]) => mockFinalize(...args),
 }));
-jest.mock('../../../src/handlers/shared/compute-strategy', () => ({
+jest.mock('../../../../src/handlers/shared/compute-strategy', () => ({
   resolveComputeStrategy: () => ({
     startSession: mockStart, pollSession: mockWorkerPoll,
   }),
 }));
-jest.mock('../../../src/handlers/shared/microvm-continuation-storage', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/continuation-storage', () => ({
   loadContinuationLaunch: (...args: unknown[]) => mockLaunch(...args),
 }));
-jest.mock('../../../src/handlers/shared/microvm-continuation-start', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/continuation-start', () => ({
   admitContinuation: (...args: unknown[]) => mockAdmit(...args),
 }));
-jest.mock('../../../src/handlers/shared/microvm-task-poll', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/task-poll', () => ({
   pollMicrovmTask: (...args: unknown[]) => mockPoll(...args),
 }));
-jest.mock('../../../src/handlers/shared/microvm-supervisor', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/supervisor', () => ({
   stopMicrovmWithDiagnostics: (...args: unknown[]) => mockStop(...args),
 }));
-jest.mock('../../../src/handlers/shared/strategies/lambda-microvm-strategy', () => ({
+jest.mock('../../../../src/handlers/shared/strategies/lambda-microvm-strategy', () => ({
   deleteMicrovmPayload: (...args: unknown[]) => mockDelete(...args),
 }));
 
 import type { DurableContext } from '@aws/durable-execution-sdk-js';
-import type { ComputeStrategy } from '../../../src/handlers/shared/compute-strategy';
+import type { ComputeStrategy } from '../../../../src/handlers/shared/compute-strategy';
 import {
   continuationWaitStrategy, failContinuationAttempt, pollContinuationRestore, runMicrovmContinuation,
-} from '../../../src/handlers/shared/microvm-continuation-runner';
+} from '../../../../src/handlers/shared/microvm/continuation-runner';
 
 const event = { task_id: 'task', continuation_request_id: 'request', continuation_attempt_id: 'attempt-new' };
 const handle = { strategyType: 'lambda-microvm' as const, microvmId: 'vm-new', sessionId: 'vm-new', endpoint: 'https://worker.invalid' };

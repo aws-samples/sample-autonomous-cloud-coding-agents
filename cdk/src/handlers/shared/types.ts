@@ -19,7 +19,7 @@
 
 import { classifyError, type ErrorClassification } from './error-classifier';
 import { logger } from './logger';
-import type { ContinuationLaunchReceipt, ContinuationRecord } from './microvm-continuation-types';
+import type { ContinuationLaunchReceipt, ContinuationRecord } from './microvm/continuation-types';
 import { coerceNumericOrNull } from './numeric';
 import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at

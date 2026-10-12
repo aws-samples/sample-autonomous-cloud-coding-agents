@@ -22,8 +22,8 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 // --- Mocks ---
 const mockSend = jest.fn();
 const mockWake = jest.fn();
-jest.mock('../../src/handlers/shared/microvm-approval-wake', () => ({
-  ...jest.requireActual('../../src/handlers/shared/microvm-approval-wake'),
+jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm/approval-wake'),
   wakeMicrovmAfterApproval: (...args: unknown[]) => mockWake(...args),
 }));
 

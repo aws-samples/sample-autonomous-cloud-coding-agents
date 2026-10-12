@@ -18,8 +18,8 @@
  */
 
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { workerLeaseKey, type WorkerLease } from './microvm-continuation-types';
-import { makeDocClient } from './ua';
+import { workerLeaseKey, type WorkerLease } from './continuation-types';
+import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 const TABLE = process.env.TASK_TABLE_NAME!;

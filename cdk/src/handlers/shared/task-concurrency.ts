@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { workerLeaseKey } from './microvm-continuation-types';
+import { workerLeaseKey } from './microvm/continuation-types';
 import { makeDocClient } from './ua';
 import { ACTIVE_STATUSES, TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 

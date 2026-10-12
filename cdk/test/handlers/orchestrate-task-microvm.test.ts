@@ -105,8 +105,8 @@ const mockFinalizeTask = jest.fn();
 const mockPollTaskStatus = jest.fn();
 const mockReadLifecycle = jest.fn();
 const mockSaveIntent = jest.fn();
-jest.mock('../../src/handlers/shared/microvm-lifecycle', () => ({
-  ...jest.requireActual('../../src/handlers/shared/microvm-lifecycle'),
+jest.mock('../../src/handlers/shared/microvm/lifecycle', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm/lifecycle'),
   readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockReadLifecycle(...args),
   saveMicrovmLifecycleIntent: (...args: unknown[]) => mockSaveIntent(...args),
 }));
@@ -116,8 +116,8 @@ const mockClaimStart = jest.fn();
 const mockSaveHandle = jest.fn();
 const mockHydrateAndTransition = jest.fn();
 const mockLoadBlueprint = jest.fn();
-jest.mock('../../src/handlers/shared/microvm-start', () => ({
-  ...jest.requireActual('../../src/handlers/shared/microvm-start'),
+jest.mock('../../src/handlers/shared/microvm/start', () => ({
+  ...jest.requireActual('../../src/handlers/shared/microvm/start'),
   claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
   saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
 }));
@@ -166,7 +166,7 @@ process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSe
 
 import { TaskStatus } from '../../src/constructs/task-status';
 import { handler } from '../../src/handlers/orchestrate-task';
-import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm-lifecycle';
+import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm/lifecycle';
 import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 /**

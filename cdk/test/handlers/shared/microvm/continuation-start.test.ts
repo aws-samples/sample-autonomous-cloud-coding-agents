@@ -18,13 +18,13 @@
  */
 
 const mockSend = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn(input => ({ kind: 'get', input })),
   TransactWriteCommand: jest.fn(input => ({ kind: 'transact', input })),
 }));
 
-import { admitContinuation } from '../../../src/handlers/shared/microvm-continuation-start';
+import { admitContinuation } from '../../../../src/handlers/shared/microvm/continuation-start';
 
 const identity = { task_id: 'task', user_id: 'user', repo: 'owner/repo', attempt_id: 'vm-old', request_id: 'request' };
 let task: Record<string, any>;

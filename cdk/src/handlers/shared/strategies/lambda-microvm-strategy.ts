@@ -34,13 +34,13 @@ import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus, SessionStopResult } from '../compute-strategy';
 import { MicrovmStartUncertainError } from '../error-classifier';
 import { logger } from '../logger';
-import { validAttemptId } from '../microvm-continuation-types';
-import { microvmErrorIdentity, microvmRequestIdentity } from '../microvm-control';
+import { validAttemptId } from '../microvm/continuation-types';
+import { microvmErrorIdentity, microvmRequestIdentity } from '../microvm/control';
 import {
   MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, MICROVM_LIFECYCLE_PROTOCOL,
   readMicrovmImageMetadata, verifyMicrovmImageLifecycle,
-} from '../microvm-image-capability';
-import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle, saveMicrovmImageCapability } from '../microvm-start';
+} from '../microvm/image-capability';
+import { claimMicrovmStart, microvmStartRequestHash, saveMicrovmStartHandle, saveMicrovmImageCapability } from '../microvm/start';
 import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -444,7 +444,7 @@ function assertImageArn(identifier: string): void {
  * {@link LambdaMicrovmComputeStrategy.pollSession}.
  *
  * Suspend/resume submit service commands; the other two strategies return
- * explicit unsupported results. microvm-supervisor supplies gate policy,
+ * explicit unsupported results. microvm/supervisor supplies gate policy,
  * durable intent and state reconciliation. Automatic suspension additionally
  * requires compatible image hooks and enabled static/live rollout settings.
  */

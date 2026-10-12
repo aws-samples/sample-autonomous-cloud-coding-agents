@@ -58,7 +58,7 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
 }));
 
 // This suite checks strategy/metadata composition. Real bootstrap replay is
-// covered by microvm-start-recovery and orchestrate-task-microvm.
+// covered by microvm/start-recovery and orchestrate-task-microvm.
 jest.mock('../../src/handlers/shared/payload-bootstrap', () => ({
   ...jest.requireActual('../../src/handlers/shared/payload-bootstrap'),
   preparePayloadReference: jest.fn(async ({ taskId }: { taskId: string }) => ({

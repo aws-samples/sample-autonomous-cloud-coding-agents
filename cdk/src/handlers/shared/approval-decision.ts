@@ -23,8 +23,8 @@ import { PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { Context } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { logger } from './logger';
-import { APPROVAL_AUDIT_TIMEOUT_MS, approvalPostCommitOptions, wakeMicrovmAfterApproval } from './microvm-approval-wake';
-import { microvmErrorIdentity } from './microvm-control';
+import { APPROVAL_AUDIT_TIMEOUT_MS, approvalPostCommitOptions, wakeMicrovmAfterApproval } from './microvm/approval-wake';
+import { microvmErrorIdentity } from './microvm/control';
 
 export interface DecisionPostCommitInput {
   readonly ddb: DynamoDBDocumentClient;

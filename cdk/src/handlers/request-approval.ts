@@ -20,7 +20,7 @@
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
-import { workerLeaseKey } from './shared/microvm-continuation-types';
+import { workerLeaseKey } from './shared/microvm/continuation-types';
 import { errorResponse, successResponse } from './shared/response';
 import { makeDocClient } from './shared/ua';
 import constants from '../../../contracts/constants.json';

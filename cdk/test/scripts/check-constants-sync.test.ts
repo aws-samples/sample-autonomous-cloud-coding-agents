@@ -67,7 +67,7 @@ const FIXTURE_FILES = [
   'agent/src/microvm_http.py',
   'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
-  'cdk/src/handlers/shared/microvm-image-capability.ts',
+  'cdk/src/handlers/shared/microvm/image-capability.ts',
   'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
 ];
 
@@ -158,9 +158,9 @@ describe('check-constants-sync', () => {
       ['cdk/src/constructs/lambda-microvm-compute.ts', 'AGENT_HOOK_PORT', '8080'],
       ['cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts', 'MICROVM_MAX_DURATION_SECONDS', '28_800'],
       ['cdk/src/constructs/lambda-microvm-compute.ts', 'LIFECYCLE_HOOK_TIMEOUT_SECONDS', '30'],
-      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
-      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],
-      ['cdk/src/handlers/shared/microvm-image-capability.ts', 'MICROVM_IMAGE_PROTOCOL_ENV', '"ABCA_MICROVM_LIFECYCLE_PROTOCOL"'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_IMAGE_PROTOCOL_ENV', '"ABCA_MICROVM_LIFECYCLE_PROTOCOL"'],
     ])('rejects a literal %s/%s', (file, name, value) => {
       const result = runInMutatedRepo(root => {
         write(root, file, `${read(root, file)}\nexport const ${name} = ${value};\n`);

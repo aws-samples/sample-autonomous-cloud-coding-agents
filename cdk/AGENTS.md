@@ -27,10 +27,11 @@ mise //cdk:destroy          # destroy stack
 | Code | Test location |
 |------|---------------|
 | Shared handler logic | `cdk/test/handlers/shared/*.test.ts` |
+| MicroVM-only handler logic | `src/handlers/shared/microvm/`; tests in `test/handlers/shared/microvm/` |
 | Trusted approval writer | `src/handlers/request-approval.ts`, `src/constructs/approval-request-service.ts`; handler/unit, DynamoDB Local and construct tests |
 | Handler entrypoints | `cdk/test/handlers/orchestrate-task.test.ts`, `create-task.test.ts`, `webhook-create-task.test.ts` |
 | Constructs | `cdk/test/constructs/task-orchestrator.test.ts`, `task-api.test.ts` |
-| MicroVM lifecycle/capacity transactions | `test/handlers/shared/*-local.test.ts` and `test/handlers/request-approval-local.test.ts`; use a loopback DynamoDB Local endpoint in `ABCA_DDB_LOCAL_ENDPOINT` (mandatory in CI) |
+| MicroVM lifecycle/capacity transactions | `test/handlers/shared/**/*-local.test.ts` and `test/handlers/request-approval-local.test.ts`; use a loopback DynamoDB Local endpoint in `ABCA_DDB_LOCAL_ENDPOINT` (mandatory in CI) |
 
 Construct tests: synthesize each distinct stack config once in `beforeAll`, assert against cached `Template` — do not re-synth per test. Bundling is disabled globally via `test/setup/disable-bundling.ts` (see Common mistakes).
 

@@ -19,7 +19,7 @@
 
 // SPDX-License-Identifier: MIT-0
 
-import { microvmErrorIdentity, microvmRequestIdentity } from '../../../src/handlers/shared/microvm-control';
+import { microvmErrorIdentity, microvmRequestIdentity } from '../../../../src/handlers/shared/microvm/control';
 
 test.each([undefined, null, {}, { $metadata: {} }, { $metadata: { requestId: 'bad\nsecret' } }])(
   'omits absent or malformed request metadata: %j', response => {

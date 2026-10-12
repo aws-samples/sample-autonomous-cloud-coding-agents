@@ -23,9 +23,9 @@ jest.mock('@aws-sdk/client-ssm', () => ({
   SSMClient: jest.fn(() => ({ send: mockSend })),
   GetParameterCommand: jest.fn((input: unknown) => ({ input })),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({ logger: { warn: mockWarn } }));
+jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: { warn: mockWarn } }));
 
-import { readMicrovmSuspendEnabled } from '../../../src/handlers/shared/microvm-suspend-config';
+import { readMicrovmSuspendEnabled } from '../../../../src/handlers/shared/microvm/suspend-config';
 
 const parameterName = '/backgroundagent-dev/microvm-approval-suspend-enabled';
 const originalName = process.env.MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME;

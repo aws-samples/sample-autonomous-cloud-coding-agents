@@ -19,16 +19,16 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { canonicalJson } from './canonical-json';
-import type { ComputeStrategy, SessionControlOptions } from './compute-strategy';
-import { logger } from './logger';
-import { verifyContinuationCheckpoint } from './microvm-continuation-storage';
-import { CONTINUATION_RETIREMENT_TIMEOUT_MS, CONTINUATION_STOP_TIMEOUT_MS } from './microvm-continuation-timing';
-import { CONTINUATION, type ContinuationRecord, type MicrovmHandle, type WorkerLease, validateContinuation, workerLeaseKey } from './microvm-continuation-types';
-import { continuationEnabled } from './microvm-worker-lease';
-import { MICROVM_SLEEP_AFTER_S_DEFAULT, type TaskRecord } from './types';
-import { makeDocClient } from './ua';
-import { TaskStatus } from '../../constructs/task-status';
+import { canonicalJson } from '../canonical-json';
+import type { ComputeStrategy, SessionControlOptions } from '../compute-strategy';
+import { logger } from '../logger';
+import { verifyContinuationCheckpoint } from './continuation-storage';
+import { CONTINUATION_RETIREMENT_TIMEOUT_MS, CONTINUATION_STOP_TIMEOUT_MS } from './continuation-timing';
+import { CONTINUATION, type ContinuationRecord, type MicrovmHandle, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
+import { continuationEnabled } from './worker-lease';
+import { TaskStatus } from '../../../constructs/task-status';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT, type TaskRecord } from '../types';
+import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 const TABLE = process.env.TASK_TABLE_NAME!;

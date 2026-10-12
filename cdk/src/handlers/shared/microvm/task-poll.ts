@@ -18,13 +18,13 @@
  */
 
 const RETIREMENT_EVENT_TIMEOUT_MS = 3000;
-import { formatMicrovmTerminalFailure } from './error-classifier';
-import { logger } from './logger';
-import { retireCheckpointedMicrovm, type RetirementResult } from './microvm-continuation-retirement';
-import { microvmErrorIdentity } from './microvm-control';
-import { MICROVM_SUPERVISOR_CYCLE_MS, superviseMicrovm, type MicrovmSupervisorInput } from './microvm-supervisor';
-import type { PollState } from './orchestrator';
-import { TaskStatus } from '../../constructs/task-status';
+import { formatMicrovmTerminalFailure } from '../error-classifier';
+import { logger } from '../logger';
+import { retireCheckpointedMicrovm, type RetirementResult } from './continuation-retirement';
+import { microvmErrorIdentity } from './control';
+import { MICROVM_SUPERVISOR_CYCLE_MS, superviseMicrovm, type MicrovmSupervisorInput } from './supervisor';
+import { TaskStatus } from '../../../constructs/task-status';
+import type { PollState } from '../orchestrator';
 
 function retirementState(state: PollState, result: RetirementResult): PollState | undefined {
   if (result === 'not-due') return undefined;

@@ -56,7 +56,7 @@ const PYTHON_CONSUMERS = [
   POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY, MICROVM_HTTP_PY,
 ];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
-const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm-image-capability.ts');
+const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm/image-capability.ts');
 const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
 const TS_CONSUMERS = [MICROVM_COMPUTE_TS, MICROVM_IMAGE_CAPABILITY_TS, MICROVM_STRATEGY_TS];
 

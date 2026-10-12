@@ -20,18 +20,18 @@
 const mockSend = jest.fn();
 const mockVerify = jest.fn();
 const mockStopSession = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
-jest.mock('../../../src/handlers/shared/microvm-continuation-storage', () => ({
+jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../../../src/handlers/shared/microvm/continuation-storage', () => ({
   verifyContinuationCheckpoint: (...args: unknown[]) => mockVerify(...args),
 }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn(input => ({ kind: 'get', input })),
   TransactWriteCommand: jest.fn(input => ({ kind: 'transact', input })),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({ logger: { warn: jest.fn() } }));
+jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: { warn: jest.fn() } }));
 
-import type { ComputeStrategy } from '../../../src/handlers/shared/compute-strategy';
-import { retireCheckpointedMicrovm } from '../../../src/handlers/shared/microvm-continuation-retirement';
+import type { ComputeStrategy } from '../../../../src/handlers/shared/compute-strategy';
+import { retireCheckpointedMicrovm } from '../../../../src/handlers/shared/microvm/continuation-retirement';
 
 const handle = {
   strategyType: 'lambda-microvm' as const,

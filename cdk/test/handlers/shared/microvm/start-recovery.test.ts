@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { TaskStatus } from '../../../src/constructs/task-status';
+import { TaskStatus } from '../../../../src/constructs/task-status';
 
 const mockDdbSend = jest.fn();
 const mockMicrovmSend = jest.fn();
@@ -42,7 +42,7 @@ jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send, config: { credentials: async () => ({ accessKeyId: 'EXAMPLE', secretAccessKey: 'unused' }) } })),
   PutObjectCommand: jest.fn((input: unknown) => ({ kind: 'put', input })),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({
+jest.mock('../../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
@@ -60,10 +60,10 @@ Object.assign(process.env, {
   AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/session',
 });
 
-import { MicrovmStartUncertainError } from '../../../src/handlers/shared/error-classifier';
-import { claimMicrovmStart, MICROVM_START_REPLAY_WINDOW_MS, microvmStartRequestHash } from '../../../src/handlers/shared/microvm-start';
-import { startSessionWithRetry } from '../../../src/handlers/shared/session-start-retry';
-import { LambdaMicrovmComputeStrategy } from '../../../src/handlers/shared/strategies/lambda-microvm-strategy';
+import { MicrovmStartUncertainError } from '../../../../src/handlers/shared/error-classifier';
+import { claimMicrovmStart, MICROVM_START_REPLAY_WINDOW_MS, microvmStartRequestHash } from '../../../../src/handlers/shared/microvm/start';
+import { startSessionWithRetry } from '../../../../src/handlers/shared/session-start-retry';
+import { LambdaMicrovmComputeStrategy } from '../../../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
 const TASK_ID = '01K4YKCNV8P7WZBCSFDV2RNH49';
 const input = {

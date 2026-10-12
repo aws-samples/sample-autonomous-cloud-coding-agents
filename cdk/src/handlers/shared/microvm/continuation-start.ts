@@ -19,12 +19,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import type { SessionControlOptions } from './compute-strategy';
-import type { ContinuableTask } from './microvm-continuation-retirement';
-import { CONTINUATION_IO_TIMEOUT_MS } from './microvm-continuation-timing';
-import { type ContinuationRecord, type WorkerLease, validateContinuation, workerLeaseKey } from './microvm-continuation-types';
-import { makeDocClient } from './ua';
-import { TaskStatus } from '../../constructs/task-status';
+import type { SessionControlOptions } from '../compute-strategy';
+import type { ContinuableTask } from './continuation-retirement';
+import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
+import { type ContinuationRecord, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
+import { TaskStatus } from '../../../constructs/task-status';
+import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 const TABLE = process.env.TASK_TABLE_NAME!;

@@ -19,19 +19,19 @@
 
 import type { DurableContext, WaitForConditionDecision } from '@aws/durable-execution-sdk-js';
 import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { resolveComputeStrategy, type ComputeStrategy } from './compute-strategy';
-import type { ContinuableTask } from './microvm-continuation-retirement';
-import { admitContinuation } from './microvm-continuation-start';
-import { loadContinuationLaunch } from './microvm-continuation-storage';
-import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_POLL_INTERVAL_MS, CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_START_ATTEMPTS, CONTINUATION_TRANSITION_POLL_SECONDS } from './microvm-continuation-timing';
-import { type MicrovmHandle, validAttemptId, workerLeaseKey } from './microvm-continuation-types';
-import { microvmErrorIdentity } from './microvm-control';
-import { MICROVM_MAX_POLL_FAILURES, stopMicrovmWithDiagnostics } from './microvm-supervisor';
-import { pollMicrovmTask } from './microvm-task-poll';
-import { emitTaskEvent, envelopeFor, finalizeTask, loadTask, type PollState } from './orchestrator';
-import { deleteMicrovmPayload } from './strategies/lambda-microvm-strategy';
-import { makeDocClient } from './ua';
-import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
+import { resolveComputeStrategy, type ComputeStrategy } from '../compute-strategy';
+import type { ContinuableTask } from './continuation-retirement';
+import { admitContinuation } from './continuation-start';
+import { loadContinuationLaunch } from './continuation-storage';
+import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_POLL_INTERVAL_MS, CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_START_ATTEMPTS, CONTINUATION_TRANSITION_POLL_SECONDS } from './continuation-timing';
+import { type MicrovmHandle, validAttemptId, workerLeaseKey } from './continuation-types';
+import { microvmErrorIdentity } from './control';
+import { MICROVM_MAX_POLL_FAILURES, stopMicrovmWithDiagnostics } from './supervisor';
+import { pollMicrovmTask } from './task-poll';
+import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
+import { emitTaskEvent, envelopeFor, finalizeTask, loadTask, type PollState } from '../orchestrator';
+import { deleteMicrovmPayload } from '../strategies/lambda-microvm-strategy';
+import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 const TABLE = process.env.TASK_TABLE_NAME!;

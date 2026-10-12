@@ -29,7 +29,7 @@ the contract. This is the neutral location both runtimes read.
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
 | `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
-| `cdk/src/handlers/shared/microvm-image-capability.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | runtime `import` |
+| `cdk/src/handlers/shared/microvm/image-capability.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | runtime `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 

@@ -32,13 +32,13 @@ jest.mock('../../src/handlers/shared/strategies/lambda-microvm-strategy', () => 
 }));
 jest.mock('../../src/handlers/shared/close-task-approvals', () => ({ closeTaskApprovals: (...args: unknown[]) => mockClose(...args) }));
 jest.mock('../../src/handlers/shared/task-concurrency', () => ({ releaseTaskSlot: (...args: unknown[]) => mockRelease(...args) }));
-jest.mock('../../src/handlers/shared/microvm-continuation-storage', () => ({
+jest.mock('../../src/handlers/shared/microvm/continuation-storage', () => ({
   deleteClosedTaskContinuations: (...args: unknown[]) => mockDelete(...args),
 }));
-jest.mock('../../src/handlers/shared/microvm-continuation-retirement', () => ({
+jest.mock('../../src/handlers/shared/microvm/continuation-retirement', () => ({
   retireCheckpointedMicrovm: (...args: unknown[]) => mockRetire(...args),
 }));
-jest.mock('../../src/handlers/shared/microvm-continuation-dispatch', () => ({
+jest.mock('../../src/handlers/shared/microvm/continuation-dispatch', () => ({
   dispatchMicrovmContinuation: (...args: unknown[]) => mockDispatch(...args),
 }));
 jest.mock('../../src/handlers/shared/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn() } }));

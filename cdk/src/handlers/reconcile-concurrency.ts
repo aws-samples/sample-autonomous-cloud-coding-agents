@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { GetCommand, ScanCommand, type ScanCommandOutput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from '../constructs/task-status';
 import { logger } from './shared/logger';
-import { workerLeaseKey } from './shared/microvm-continuation-types';
+import { workerLeaseKey } from './shared/microvm/continuation-types';
 import { releaseTaskSlot, type ReservationTask } from './shared/task-concurrency';
 import { makeDocClient } from './shared/ua';
 

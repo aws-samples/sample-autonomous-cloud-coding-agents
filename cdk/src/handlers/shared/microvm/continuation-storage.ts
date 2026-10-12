@@ -21,17 +21,17 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { canonicalJson } from './canonical-json';
-import type { SessionControlOptions } from './compute-strategy';
-import { CONTINUATION_IO_TIMEOUT_MS } from './microvm-continuation-timing';
+import { canonicalJson } from '../canonical-json';
+import type { SessionControlOptions } from '../compute-strategy';
+import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
 import {
   CONTINUATION, type ContinuationLaunchReceipt, type ContinuationRecord, validAttemptId,
-} from './microvm-continuation-types';
-import { continuationEnabled } from './microvm-worker-lease';
-import type { BlueprintConfig } from './repo-config';
-import { makeClient, makeDocClient } from './ua';
-import constants from '../../../../contracts/constants.json';
-import { TERMINAL_STATUSES } from '../../constructs/task-status';
+} from './continuation-types';
+import { continuationEnabled } from './worker-lease';
+import constants from '../../../../../contracts/constants.json';
+import { TERMINAL_STATUSES } from '../../../constructs/task-status';
+import type { BlueprintConfig } from '../repo-config';
+import { makeClient, makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
 let s3: S3Client | undefined;

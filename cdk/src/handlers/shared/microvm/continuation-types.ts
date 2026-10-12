@@ -17,8 +17,8 @@
  *  SOFTWARE.
  */
 
-import type { SessionHandle } from './compute-strategy';
-import constants from '../../../../contracts/constants.json';
+import constants from '../../../../../contracts/constants.json';
+import type { SessionHandle } from '../compute-strategy';
 
 export const CONTINUATION = constants.microvm_continuation;
 export type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;

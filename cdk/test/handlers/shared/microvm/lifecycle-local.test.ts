@@ -33,15 +33,15 @@ const mockBeforeSend = jest.fn();
 const mockAfterSend = jest.fn();
 const mockClients: DynamoDBDocumentClient[] = [];
 const mockDeleteContinuations = jest.fn();
-jest.mock('../../../src/handlers/shared/microvm-continuation-storage', () => ({
-  ...jest.requireActual('../../../src/handlers/shared/microvm-continuation-storage'),
+jest.mock('../../../../src/handlers/shared/microvm/continuation-storage', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/microvm/continuation-storage'),
   deleteClosedTaskContinuations: (...args: unknown[]) => mockDeleteContinuations(...args),
 }));
-jest.mock('../../../src/handlers/shared/microvm-suspend-config', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/suspend-config', () => ({
   readMicrovmSuspendEnabled: async () => true,
 }));
-jest.mock('../../../src/handlers/shared/ua', () => {
-  const actual = jest.requireActual('../../../src/handlers/shared/ua');
+jest.mock('../../../../src/handlers/shared/ua', () => {
+  const actual = jest.requireActual('../../../../src/handlers/shared/ua');
   return {
     ...actual,
     makeDocClient: () => {
@@ -66,12 +66,12 @@ const suffix = randomUUID();
 const tasks = `lifecycle-tasks-${suffix}`;
 const approvals = `lifecycle-approvals-${suffix}`;
 Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals });
-import { reconcileMicrovmContinuation } from '../../../src/handlers/reconcile-microvm-continuations';
-import { failContinuationAttempt } from '../../../src/handlers/shared/microvm-continuation-runner';
-import { workerLeaseKey } from '../../../src/handlers/shared/microvm-continuation-types';
-import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../src/handlers/shared/microvm-lifecycle';
-import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../src/handlers/shared/microvm-start';
-import { superviseMicrovm, type MicrovmSupervisorState } from '../../../src/handlers/shared/microvm-supervisor';
+import { reconcileMicrovmContinuation } from '../../../../src/handlers/reconcile-microvm-continuations';
+import { failContinuationAttempt } from '../../../../src/handlers/shared/microvm/continuation-runner';
+import { workerLeaseKey } from '../../../../src/handlers/shared/microvm/continuation-types';
+import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../../src/handlers/shared/microvm/lifecycle';
+import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../../src/handlers/shared/microvm/start';
+import { superviseMicrovm, type MicrovmSupervisorState } from '../../../../src/handlers/shared/microvm/supervisor';
 
 const raw = new DynamoDBClient({
   endpoint: endpoint ?? 'http://127.0.0.1:1',
@@ -497,8 +497,8 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
   test('fresh module/client observes the saved wake without resetting age or generation', async () => {
     await saveMicrovmLifecycleIntent(await current(), 'resume');
     const saved = (await taskRow()).microvm_lifecycle;
-    let restarted: typeof import('../../../src/handlers/shared/microvm-lifecycle');
-    jest.isolateModules(() => { restarted = jest.requireActual('../../../src/handlers/shared/microvm-lifecycle'); });
+    let restarted: typeof import('../../../../src/handlers/shared/microvm/lifecycle');
+    jest.isolateModules(() => { restarted = jest.requireActual('../../../../src/handlers/shared/microvm/lifecycle'); });
     const observed = await restarted!.readMicrovmLifecycleSnapshot('task', 'user');
     expect(observed?.intent).toEqual(saved);
     expect(await restarted!.saveMicrovmLifecycleIntent(observed!, 'resume')).toEqual({ status: 'saved', intent: saved });

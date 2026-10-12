@@ -19,27 +19,27 @@
 
 // SPDX-License-Identifier: MIT-0
 
-import type { ComputeStrategy, SessionStatus } from '../../../src/handlers/shared/compute-strategy';
-import type { MicrovmLifecycleSnapshot } from '../../../src/handlers/shared/microvm-lifecycle';
+import type { ComputeStrategy, SessionStatus } from '../../../../src/handlers/shared/compute-strategy';
+import type { MicrovmLifecycleSnapshot } from '../../../../src/handlers/shared/microvm/lifecycle';
 
 const mockRead = jest.fn();
 const mockSave = jest.fn();
 const mockSuspendEnabled = jest.fn();
-jest.mock('../../../src/handlers/shared/microvm-suspend-config', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/suspend-config', () => ({
   readMicrovmSuspendEnabled: (...args: unknown[]) => mockSuspendEnabled(...args),
 }));
 const mockLogger = { warn: jest.fn(), info: jest.fn(), error: jest.fn() };
-jest.mock('../../../src/handlers/shared/microvm-lifecycle', () => ({
-  ...jest.requireActual('../../../src/handlers/shared/microvm-lifecycle'),
+jest.mock('../../../../src/handlers/shared/microvm/lifecycle', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/microvm/lifecycle'),
   readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockRead(...args),
   saveMicrovmLifecycleIntent: (...args: unknown[]) => mockSave(...args),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
+jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
 import {
   stopMicrovmWithDiagnostics, superviseMicrovm, MICROVM_RECOVERY_TIMEOUT_MS,
   type MicrovmSupervisorInput, type MicrovmSupervisorState,
-} from '../../../src/handlers/shared/microvm-supervisor';
+} from '../../../../src/handlers/shared/microvm/supervisor';
 
 const NOW = Date.parse('2026-09-15T10:00:00Z');
 const handle = {

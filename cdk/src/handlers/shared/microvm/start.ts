@@ -19,13 +19,13 @@
 
 import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { canonicalJson } from './canonical-json';
-import type { SessionHandle } from './compute-strategy';
-import type { ContinuationRecord } from './microvm-continuation-types';
-import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './microvm-image-capability';
-import { continuationEnabled, ensureWorkerLease, leaseHandleUpdate } from './microvm-worker-lease';
-import { makeDocClient } from './ua';
-import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
+import { canonicalJson } from '../canonical-json';
+import type { SessionHandle } from '../compute-strategy';
+import type { ContinuationRecord } from './continuation-types';
+import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
+import { continuationEnabled, ensureWorkerLease, leaseHandleUpdate } from './worker-lease';
+import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
+import { makeDocClient } from '../ua';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 

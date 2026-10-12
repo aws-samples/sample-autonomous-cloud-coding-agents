@@ -21,15 +21,15 @@ const mockSend = jest.fn();
 const mockInvoke = jest.fn();
 const mockAdmit = jest.fn();
 const mockWarn = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({
+jest.mock('../../../../src/handlers/shared/ua', () => ({
   makeDocClient: () => ({ send: mockSend }), makeClient: () => ({ send: mockInvoke }),
 }));
-jest.mock('../../../src/handlers/shared/microvm-continuation-start', () => ({
+jest.mock('../../../../src/handlers/shared/microvm/continuation-start', () => ({
   admitContinuation: (...args: unknown[]) => mockAdmit(...args),
 }));
-jest.mock('../../../src/handlers/shared/logger', () => ({ logger: { info: jest.fn(), warn: mockWarn } }));
+jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: { info: jest.fn(), warn: mockWarn } }));
 
-import { dispatchMicrovmContinuation } from '../../../src/handlers/shared/microvm-continuation-dispatch';
+import { dispatchMicrovmContinuation } from '../../../../src/handlers/shared/microvm/continuation-dispatch';
 
 let task: any;
 beforeEach(() => {

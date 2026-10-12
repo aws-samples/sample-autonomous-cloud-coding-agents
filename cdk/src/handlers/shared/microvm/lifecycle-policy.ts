@@ -17,11 +17,11 @@
  *  SOFTWARE.
  */
 
-import type { SessionStatus } from './compute-strategy';
-import { supportsMicrovmLifecycle } from './microvm-image-capability';
-import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './microvm-lifecycle';
-import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from './types';
-import { TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
+import type { SessionStatus } from '../compute-strategy';
+import { supportsMicrovmLifecycle } from './image-capability';
+import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './lifecycle';
+import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../types';
 
 // Initial policy values, not service limits. Live timings must validate them.
 export const MICROVM_WAKE_MARGIN_MS = 60_000;

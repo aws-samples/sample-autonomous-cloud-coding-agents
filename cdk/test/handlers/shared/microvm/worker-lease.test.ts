@@ -18,13 +18,13 @@
  */
 
 const mockSend = jest.fn();
-jest.mock('../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   GetCommand: jest.fn(input => ({ kind: 'get', input })),
   TransactWriteCommand: jest.fn(input => ({ kind: 'transact', input })),
 }));
 
-import { ensureWorkerLease, leaseHandleUpdate } from '../../../src/handlers/shared/microvm-worker-lease';
+import { ensureWorkerLease, leaseHandleUpdate } from '../../../../src/handlers/shared/microvm/worker-lease';
 
 const input = { taskId: 'task', userId: 'user', repo: 'owner/repo', attemptId: 'attempt-1', requestHash: 'hash' };
 const lease = {

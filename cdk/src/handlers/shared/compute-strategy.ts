@@ -18,7 +18,7 @@
  */
 
 import type { MicrovmState } from '@aws-sdk/client-lambda-microvms';
-import type { MicrovmImageMetadata } from './microvm-image-capability';
+import type { MicrovmImageMetadata } from './microvm/image-capability';
 import type { BlueprintConfig, ComputeType } from './repo-config';
 import { AgentCoreComputeStrategy } from './strategies/agentcore-strategy';
 import { EcsComputeStrategy } from './strategies/ecs-strategy';
