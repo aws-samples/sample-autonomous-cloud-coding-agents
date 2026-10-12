@@ -269,6 +269,19 @@ export async function checkLinearWorkspaceAuth(
     const workspaceId = row.linear_workspace_id ?? '(unknown)';
     const slug = row.workspace_slug ?? workspaceId;
 
+    // `bgagent linear remove-workspace` revokes the row with this reason. That is an
+    // admin choice, not a dead grant: reporting it as REVOKED fails doctor and tells the
+    // operator to re-authorize a workspace they deliberately removed.
+    if (row.status === 'revoked' && row.revoked_reason === 'admin_removed') {
+      out.push({
+        workspaceId,
+        workspaceSlug: slug,
+        state: 'disabled',
+        detail: `Removed by an admin at ${row.revoked_at ?? 'an unknown time'} (\`bgagent linear remove-workspace\`) `
+          + '— events for this workspace are dropped by design.',
+      });
+      continue;
+    }
     if (row.status === 'revoked') {
       // The platform itself recorded this when a refresh was rejected, which is
       // the authoritative signal — more reliable than anything this check can

@@ -213,6 +213,29 @@ describe('checkLinearWorkspaceAuth — the real function, end to end', () => {
     expect((ddbSend.mock.calls[1][0] as { input: Record<string, unknown> }).input.ExclusiveStartKey)
       .toEqual({ k: 'next' });
   });
+  test('an ADMIN-REMOVED workspace is disabled, not revoked — removal is not an outage', async () => {
+    // `bgagent linear remove-workspace` revokes the row with reason admin_removed.
+    // Reporting that as REVOKED failed doctor and told the operator to re-authorize a
+    // workspace they had just removed on purpose (seen live after offboarding one).
+    ddbSend.mockResolvedValueOnce({
+      Items: [row({ status: 'revoked', revoked_reason: 'admin_removed', revoked_at: '2026-10-08T12:31:39Z' })],
+    });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1', registryTableName: 'Reg', probe: async () => 'accepted',
+    });
+    expect(health[0].state).toBe('disabled');
+    expect(health[0].detail).toMatch(/Removed by an admin at 2026-10-08T12:31:39Z/);
+    expect(health[0].detail).not.toMatch(/re-authori/i);
+  });
+
+  test('a revocation with any OTHER reason is still revoked', async () => {
+    ddbSend.mockResolvedValueOnce({ Items: [row({ status: 'revoked', revoked_reason: 'refresh_token_rejected' })] });
+    const health = await checkLinearWorkspaceAuth({
+      region: 'us-east-1', registryTableName: 'Reg', probe: async () => 'accepted',
+    });
+    expect(health[0].state).toBe('revoked');
+  });
+
   describe('a vault-managed workspace must not be judged by an empty bundle', () => {
     // A fresh vault onboarding deliberately stores NO access token — the vault holds
     // the grant. Reading only the Secrets Manager bundle therefore reported every
