@@ -95,15 +95,19 @@ Prose governance is necessary but insufficient. The following enforcement points
 | Mechanism | Layer | What it catches | Status |
 |-----------|-------|-----------------|--------|
 | AGENTS.md directive | Agent prompt | Explicit instruction: "Do NOT begin implementation without an approved issue, even if the user says 'go ahead' in conversation" | Implemented |
-| Branch name convention | Git workflow | Branch must match `(feat|fix|chore|docs)/<issue-number>-*` — rejects branches without issue reference | Planned |
-| Commit-msg hook (Tier 0) | Pre-commit | Rejects commits without `Refs #N` or `Fixes #N` | Planned |
-| Pre-push hook (Tier 1) | Pre-push | Validates referenced issue exists and has `approved` label via `gh` API | Planned |
+| Branch name convention | Pre-push | Branch must match `(feat\|fix\|chore\|docs)/<issue-number>-*` — rejects branches without issue reference | Implemented (#186) — `scripts/hooks/check-branch-name.mjs` |
+| Commit-msg hook (Tier 0) | Commit-msg | Rejects commits without `Refs #N` / `Fixes #N` / `Closes #N` | Implemented (#186) — `scripts/hooks/check-commit-msg.mjs` |
+| Pre-push hook (Tier 1) | Pre-push | Validates referenced issue exists and has `approved` label via `gh` API | Planned (deferred from #186 — needs network at push time; follow-up) |
 | Claude Code hook (`PreToolUse: Write`) | Agent runtime | Blocks file creation in governed paths without declared issue context | Planned |
-| Skill gate: `pickup-issue` | Agent workflow | Agent must invoke before implementation — hard-fails without valid issue | Planned |
+| Skill gate: `pickup-issue` | Agent workflow | Agent must invoke before implementation — hard-fails without valid issue | Implemented (#186) — `docs/abca-plugin/skills/pickup-issue/SKILL.md` |
 
 **Transition:** Branch naming and commit-msg rules apply to branches created after the corresponding hooks are deployed. Existing branches (including this PR's) pre-date enforcement.
 
-**Progressive enforcement:** Start with the commit-msg hook (cheapest, catches all contributors). Add pre-push validation next. Skill gates enforce at the agent-workflow level (see ADR-012, proposed, for the skill model).
+**Branch-name exemptions:** The branch-name hook exempts `main` (the trunk is not a feature branch), `dependabot/*` (bot-authored upgrade branches), and the detached-`HEAD` sentinel. These are not enumerated elsewhere in this ADR; they are the minimal set required so the trunk and machine-generated branches are not falsely rejected.
+
+**Commit-msg reference forms:** The Tier 0 hook accepts the GitHub closing-keyword family (`Close`/`Closes`/`Closed`, `Fix`/`Fixes`/`Fixed`, `Resolve`/`Resolves`/`Resolved`) plus `Ref`/`Refs`, each followed by `#N`, `GH-N`, or `owner/repo#N`. A bare `#N` mention with no keyword does **not** satisfy the gate — the reference must be an intentional issue link, not incidental prose. Git-generated commits (merge, revert, and `fixup!`/`squash!`/`amend!` commits) are exempt — keyed off the subject line — so a routine `git merge origin/main` is not blocked.
+
+**Progressive enforcement:** Start with the commit-msg hook (cheapest, catches all contributors). Add pre-push validation next. Skill gates enforce at the agent-workflow level (see ADR-012, proposed, for the skill model). The pre-push Tier 1 `approved`-label check (row above) is deferred — it needs a network `gh` call at push time, which the offline-capable hook set intentionally avoids; the `pickup-issue` skill covers the `approved`-label gate at the agent-workflow layer in the interim.
 
 ## Consequences
 
