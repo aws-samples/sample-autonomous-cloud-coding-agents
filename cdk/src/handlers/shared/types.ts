@@ -34,6 +34,9 @@ import type { TaskStatusType } from '../../constructs/task-status';
  */
 export type { TaskStatusType };
 
+/** Git hosting provider. Defaults to 'github' for backward compatibility. */
+export type GitProviderType = 'github' | 'bitbucket';
+
 /**
  * A resolved workflow pin: the ``{id, version}`` produced at the create-task
  * boundary from a ``workflow_ref`` (or the resolution fallback). Replaces the
