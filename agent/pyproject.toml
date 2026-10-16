@@ -21,7 +21,7 @@ dependencies = [
     "fastapi==0.139.0", #https://pypi.org/project/fastapi/
     "uvicorn==0.50.0", #https://pypi.org/project/uvicorn/
     "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
-    "mcp==1.28.1", #https://pypi.org/project/mcp/
+    "mcp==1.30.0", #https://pypi.org/project/mcp/ (1.30.0 clears GHSA-84m7-p3x7-pcfv)
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
     # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
     # CDK Lambdas) are two language bindings over the same Cedar Rust core.
