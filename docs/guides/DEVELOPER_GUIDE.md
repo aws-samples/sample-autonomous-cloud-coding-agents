@@ -209,6 +209,7 @@ Changing the geography requires a **redeploy**, because the IAM grants are scope
 4. Update the **prefixed** ID in `agent/src/config.py` and `agent/src/models.py` too. These are the fallback a run with no env reaches (a local batch run), and the doc-drift test compares against them.
 5. **Verify the SDK price table recognizes the model.** The `max_budget_usd` guardrail is computed from a price table bundled into the Claude Agent SDK at build time, so an unrecognized model silently degrades budget enforcement. Run `agent/scripts/diagnostics/test_sdk_smoke.py` with `ANTHROPIC_MODEL` set to the new ID, divide the reported cost by the input-token count, and confirm the implied rate matches [published Bedrock pricing](https://aws.amazon.com/bedrock/pricing/). A `$0.00` or wildly-off result means the table does not know the model and budgets cannot be trusted.
 6. The doc-drift test (`cdk/test/contracts/model-default-docs-parity.test.ts`) fails until the documented defaults here and in `agent/README.md` match `config.py`. That failure is the reminder, not a nuisance — update both.
+7. **Tell operators who override `bedrockModels`.** The override REPLACES the default list, and synth fails ("omits the platform default model") if it lacks either new default. A deployment carrying `-c bedrockModels=[...]` or a `cdk.json` `context` entry must add the new bare IDs before pulling the bump — call this out in the release notes.
 
 ### Cost and model selection
 
