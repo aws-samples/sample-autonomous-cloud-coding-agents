@@ -48,7 +48,7 @@ definitions.push({
   repo: 'acme/my-service',
   compute: { runtimeArn: '...' },                    // override the default runtime ARN
   agent: {
-    modelId: 'global.anthropic.claude-opus-5',       // foundation model override
+    modelId: 'global.anthropic.claude-opus-5-5',     // foundation model override
     maxTurns: 150,                                    // default turn limit for this repo
     systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
   },

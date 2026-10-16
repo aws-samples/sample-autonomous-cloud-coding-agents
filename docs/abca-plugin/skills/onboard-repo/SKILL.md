@@ -42,7 +42,7 @@ Use AskUserQuestion to collect (only the repository is required — the rest fal
 - **Compute type** — `agentcore` (default) or `ecs`.
 - **Model** — default is the platform model (Opus 5). The geo prefix in the examples
   below (`global.`) must match the deployment's `bedrockGeoRegion`; `bgagent repo
-  onboard` rejects a mismatch at the CLI rather than letting the task fail at turn 0. If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `global.anthropic.claude-opus-5`), not a raw `anthropic.*` foundation-model ID.
+  onboard` rejects a mismatch at the CLI rather than letting the task fail at turn 0. If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `global.anthropic.claude-opus-5-5`), not a raw `anthropic.*` foundation-model ID.
 - **Max turns** — default 100 (range 1–500).
 - **Per-repo GitHub token** — only if this repo needs a different token than the platform default (provide its Secrets Manager ARN).
 
@@ -59,7 +59,7 @@ no `cdk deploy`.**
 ```bash
 bgagent repo onboard <owner/repo>
 # common overrides:
-#   --model <inference-profile-id>     e.g. global.anthropic.claude-opus-5 (must be runtime-granted)
+#   --model <inference-profile-id>     e.g. global.anthropic.claude-opus-5-5 (must be runtime-granted)
 #   --compute-type <agentcore|ecs>
 #   --max-turns <n>                    per-repo default turn limit
 #   --token-secret-arn <arn>           per-repo GitHub token (else platform default)
@@ -79,7 +79,7 @@ That's it — the repo is onboarded. Submit a task with the `submit-task` skill.
 **Pick a model that is already wired into the runtime.** With no `--model`, the repo
 uses the platform default — read it from the stack's `BedrockGeoRegion` +
 `BedrockModelIds` outputs rather than a literal here. If you pass `--model`, use a cross-Region
-**inference profile ID** (e.g. `global.anthropic.claude-opus-5`), not a raw
+**inference profile ID** (e.g. `global.anthropic.claude-opus-5-5`), not a raw
 `anthropic.*` foundation-model ID. Only models the stack has granted the runtime can
 be invoked — see "Model not yet wired into the runtime" before choosing a model the
 deployment doesn't already support.
@@ -100,7 +100,7 @@ editing the stack and redeploying.
      repoTable: repoTable.table,
      // Optional overrides:
      // computeType: 'agentcore',
-     // modelId: 'global.anthropic.claude-opus-5',
+     // modelId: 'global.anthropic.claude-opus-5-5',
      // maxTurns: 100,
      // maxBudgetUsd: 50,
      // githubTokenSecretArn: 'arn:aws:secretsmanager:...',
@@ -138,20 +138,20 @@ ids for on-demand invocation, and the IAM grant is scoped to one geography's pro
 Granting a **new** model is a deploy-time change, not a construct edit: the list is overridable via CDK context, either on the command line or in `cdk.json`. Both forms behave identically — the resolver JSON-parses the string `-c` delivers.
 
 ```bash
-cdk deploy -c bedrockModels='["anthropic.claude-opus-5","anthropic.claude-haiku-4-5-20251001-v1:0","anthropic.claude-sonnet-4-6"]'
+cdk deploy -c bedrockModels='["anthropic.claude-opus-5-5","anthropic.claude-haiku-5-5","anthropic.claude-sonnet-4-6"]'
 ```
 
-The override **REPLACES** the default list rather than adding to it, so it must include the two models the stack injects as `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` — Opus 5 and Haiku 4.5. Omitting either fails at synth, naming the missing model, because every substrate is told to invoke them regardless of this list. (`--context-file` does not work for this: it is accepted and silently ignored.)
+The override **REPLACES** the default list rather than adding to it, so it must include the two models the stack injects as `ANTHROPIC_MODEL` and `ANTHROPIC_DEFAULT_HAIKU_MODEL` — Opus 5.5 and Haiku 5.5. Omitting either fails at synth, naming the missing model, because every substrate is told to invoke them regardless of this list. (`--context-file` does not work for this: it is accepted and silently ignored.)
 
 For a persistent setting, put the same array in the `context` block of `cdk.json`:
 
 ```jsonc
 // cdk.json — this REPLACES the default list, so include the platform defaults
-// (Opus 5 + Haiku 4.5) or the stack's own defaults are ungranted
+// (Opus 5.5 + Haiku 5.5) or the stack's own defaults are ungranted
 "context": {
   "bedrockModels": [
-    "anthropic.claude-opus-5",
-    "anthropic.claude-haiku-4-5-20251001-v1:0",
+    "anthropic.claude-opus-5-5",
+    "anthropic.claude-haiku-5-5",
     "anthropic.claude-sonnet-4-6"
   ]
 }
@@ -186,7 +186,7 @@ platform default, and treat "add model X" as a separate, later change.
 |---------|---------|---------|
 | `compute_type` | Execution strategy | `agentcore` |
 | `runtime_arn` | AgentCore runtime override | Platform default |
-| `model_id` | AI model for tasks (inference profile ID) | Platform default (Opus 5, as `<BedrockGeoRegion>.anthropic.claude-opus-5`) |
+| `model_id` | AI model for tasks (inference profile ID) | Platform default (Opus 5.5, as `<BedrockGeoRegion>.anthropic.claude-opus-5-5`) |
 | `max_turns` | Turn limit per task | 100 |
 | `max_budget_usd` | Cost ceiling per task | Unlimited |
 | `system_prompt_overrides` | Custom system instructions | None |
@@ -199,6 +199,6 @@ Task-level parameters override per-repo defaults; if neither specifies a value, 
 
 - **`REPO_NOT_ONBOARDED` / 422** — the repo isn't registered. Run `bgagent repo onboard <owner/repo>` (Path A). Confirm the `owner/repo` matches exactly what you pass to `bgagent submit --repo`.
 - **Preflight failure after onboarding** — the GitHub PAT lacks access to the new repo. Ensure the token has Contents (read/write) + Pull requests (read/write) on it, or onboard with a repo-specific `--token-secret-arn`.
-- **400 "Invocation with on-demand throughput isn't supported"** — `model_id` is a raw foundation-model ID; use the inference-profile ID (e.g. `global.anthropic.claude-opus-5`).
+- **400 "Invocation with on-demand throughput isn't supported"** — `model_id` is a raw foundation-model ID; use the inference-profile ID (e.g. `global.anthropic.claude-opus-5-5`).
 - **403 "not authorized to perform bedrock:InvokeModelWithResponseStream"** — the repo's model isn't wired into the runtime. See "Model not yet wired into the runtime."
 - **Model not available / "not available on your Bedrock deployment"** — account-level Bedrock access isn't enabled for that model/Region (separate from IAM); complete [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html), then use an enabled inference-profile ID.

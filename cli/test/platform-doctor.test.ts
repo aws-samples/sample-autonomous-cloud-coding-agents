@@ -500,14 +500,14 @@ describe('doctor Bedrock inference-profile check', () => {
     const send = jest.fn().mockResolvedValue({});
     const check = await profileCheck('global', send);
     expect(check.status).toBe('pass');
-    expect(check.label).toContain('global.anthropic.claude-opus-5');
+    expect(check.label).toContain('global.anthropic.claude-opus-5-5');
 
     // The queried identifier is the geo-prefixed profile, not the bare model id.
     const queried = send.mock.calls
       .map(([c]) => (c as { _type?: string; input?: { inferenceProfileIdentifier?: string } }))
       .filter((c) => c._type === 'GetInferenceProfile')
       .map((c) => c.input?.inferenceProfileIdentifier);
-    expect(queried).toContain('global.anthropic.claude-opus-5');
+    expect(queried).toContain('global.anthropic.claude-opus-5-5');
   });
 
   it('uses the geography the stack reports, not a hardcoded one', async () => {
@@ -515,7 +515,7 @@ describe('doctor Bedrock inference-profile check', () => {
     // `us` and must be checked against `us.`, not against the current default.
     const send = jest.fn().mockResolvedValue({});
     const check = await profileCheck('us', send);
-    expect(check.label).toContain('us.anthropic.claude-opus-5');
+    expect(check.label).toContain('us.anthropic.claude-opus-5-5');
     expect(check.label).not.toContain('global.');
   });
 

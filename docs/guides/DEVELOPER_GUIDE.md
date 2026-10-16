@@ -76,7 +76,7 @@ definitions.push({
   repo: 'acme/my-service',
   compute: { runtimeArn: '...' },                    // override the default runtime ARN
   agent: {
-    modelId: 'global.anthropic.claude-opus-5',       // foundation model override
+    modelId: 'global.anthropic.claude-opus-5-5',     // foundation model override
     maxTurns: 150,                                    // default turn limit for this repo
     systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
   },
@@ -160,7 +160,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 per-task payload model_id            (layer 5)
   > blueprint agent.modelId          (layer 4, arrives as stack env ANTHROPIC_MODEL)
   > stack env ANTHROPIC_MODEL        (layer 3-adjacent / local shell)
-  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5)
+  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5-5)
 ```
 
 Every one of those is gated by the **IAM invoke allowlist** (layer 1), which is itself gated by **account-level Bedrock model access**. Both gates are silent until invocation: a model that resolves fine through precedence still fails at turn 0 with `AccessDenied` if it is not in the grant list, and fails again if your account has not completed [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for it.
@@ -178,7 +178,7 @@ throughput isn't supported. Retry your request with the ID or ARN of an inferenc
 profile that contains this model.
 ```
 
-So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5` (or whatever geo you have configured — see below).
+So: `bedrockModels` context → `anthropic.claude-opus-5-5`. Everywhere else → `global.anthropic.claude-opus-5-5` (or whatever geo you have configured — see below).
 
 ### Choosing the inference-profile geography
 
@@ -378,7 +378,7 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
+| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
 | `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
