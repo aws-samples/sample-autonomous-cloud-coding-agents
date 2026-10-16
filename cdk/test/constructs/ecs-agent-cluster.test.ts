@@ -480,7 +480,14 @@ describe('EcsAgentCluster construct', () => {
       'inference-profile/us.anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-sonnet-5-5',
     ];
-    const serialized = JSON.stringify(baseTemplate.findResources('AWS::IAM::Policy'));
+    // Inline AND managed-policy overflow, matching the AgentCore half: CDK splits a
+    // role's default policy into managed-policy chunks past the IAM size limit, and
+    // a grant that spilled over must still count here rather than vanish from view.
+    const policies = {
+      ...baseTemplate.findResources('AWS::IAM::Policy'),
+      ...baseTemplate.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
