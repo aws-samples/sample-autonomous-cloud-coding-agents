@@ -40,7 +40,7 @@ Use AskUserQuestion to collect (only the repository is required — the rest fal
 
 - **Repository** — GitHub `owner/repo`. Must match exactly what's passed to `bgagent submit --repo` later.
 - **Compute type** — `agentcore` (default) or `ecs`.
-- **Model** — default is the platform model (Opus 5). The geo prefix in the examples
+- **Model** — default is the platform model (Opus 5.5). The geo prefix in the examples
   below (`global.`) must match the deployment's `bedrockGeoRegion`; `bgagent repo
   onboard` rejects a mismatch at the CLI rather than letting the task fail at turn 0. If overriding, it must be a model **already granted to the runtime** (see "Model not yet wired into the runtime"), specified as a cross-Region **inference-profile ID** (e.g. `global.anthropic.claude-opus-5-5`), not a raw `anthropic.*` foundation-model ID.
 - **Max turns** — default 100 (range 1–500).
@@ -118,8 +118,8 @@ editing the stack and redeploying.
 
 A repo can only use a model the **runtime IAM role has `grantInvoke` for**. The granted
 set is `DEFAULT_BEDROCK_MODEL_IDS` in
-`cdk/src/handlers/shared/bedrock-model-constants.ts` — Sonnet 4.6,
-Opus 4.8, Opus 5, and Haiku 4.5 — and a deployed stack publishes it as the
+`cdk/src/handlers/shared/bedrock-model-constants.ts` — Opus 5.5 and Haiku 5.5 (the
+defaults) plus Sonnet 4.6, Opus 4.8, Opus 5, and Haiku 4.5 — and a deployed stack publishes it as the
 `BedrockModelIds` output, so read that rather than trusting this list to stay current:
 
 ```bash

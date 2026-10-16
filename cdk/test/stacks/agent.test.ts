@@ -394,8 +394,6 @@ describe('AgentStack', () => {
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5-5');
     expect(serialized).toContain('foundation-model/anthropic.claude-haiku-5-5');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-haiku-5-5');
-    expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-5-5');
-    expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-5-5');
     // REGRESSION (#744, #953): previous defaults stay granted after a bump.
     // Blueprints may pin any of them per-repo; dropping one would fail those repos
     // at turn 0. Retiring a model is a separate, announced change.
@@ -510,14 +508,12 @@ describe('AgentStack', () => {
       'foundation-model/anthropic.claude-opus-5',
       'foundation-model/anthropic.claude-opus-5-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
-      'foundation-model/anthropic.claude-sonnet-5-5',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
       'inference-profile/us.anthropic.claude-haiku-5-5',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
       'inference-profile/us.anthropic.claude-opus-5-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
-      'inference-profile/us.anthropic.claude-sonnet-5-5',
     ];
 
     // Audit actual policy documents, including overflow, rather than cdk-nag

@@ -39,7 +39,7 @@ async def smoke_test():
     if not model:
         print(
             "ERROR: ANTHROPIC_MODEL not set. Pass the geo-prefixed inference-profile "
-            "id the deployment uses, e.g. ANTHROPIC_MODEL=global.anthropic.claude-opus-5",
+            "id the deployment uses, e.g. ANTHROPIC_MODEL=global.anthropic.claude-opus-5-5",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -89,13 +89,14 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
   'anthropic.claude-opus-4-8',
   'anthropic.claude-opus-5',
   'anthropic.claude-haiku-4-5-20251001-v1:0',
-  // Claude 5.5 family (#953). Bare IDs by contract: Bedrock refuses the bare ID for
-  // on-demand invocation ("ValidationException: … isn't supported. Retry your
-  // request with the ID or ARN of an inference profile"), and the grant sites derive
-  // the geo-prefixed inference-profile ARN — the invocable one — from each entry
-  // plus `bedrockGeoRegion`. Opus 5.5 is the platform default; Haiku 5.5 the
-  // auxiliary default.
-  'anthropic.claude-sonnet-5-5',
+  // Claude Opus 5.5 (platform default) and Haiku 5.5 (auxiliary default), #953.
+  // Bare IDs by contract: Bedrock refuses the bare ID for on-demand invocation
+  // ("ValidationException: … isn't supported. Retry your request with the ID or
+  // ARN of an inference profile"), and the grant sites derive the geo-prefixed
+  // inference-profile ARN — the invocable one — from each entry plus
+  // `bedrockGeoRegion`. Sonnet 5.5 is deliberately NOT here: it has no `jp.`
+  // profile (verified 2026-10-16), so granting it would recreate the
+  // granted-but-uninvocable state described above for one geography.
   'anthropic.claude-opus-5-5',
   DEFAULT_HAIKU_MODEL_ID,
 ];
