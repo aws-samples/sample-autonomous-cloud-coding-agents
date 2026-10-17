@@ -347,7 +347,7 @@ function parsePreScreenedAttachments(raw: unknown, orchestrationId: string): Att
       orchestration_id: orchestrationId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- a corrupt stored JSON blob is PERMANENT, not transient: failing closed here would make every later read of this epic throw, so an epic mid-flight could never settle and no retry could ever clear it. The attachments are advisory context for the children; the warning above is the operator's signal
   }
 }
 

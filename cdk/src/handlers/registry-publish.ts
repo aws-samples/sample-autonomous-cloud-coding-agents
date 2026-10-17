@@ -31,6 +31,7 @@ import { REGISTRY_KINDS, RESERVED_KINDS, parseConstraint } from './shared/regist
 import { RegistryPublishIncompleteError, type PublishInput, type RuntimePayload } from './shared/registry/types';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { RegistryPublishRequest, RegistryRecordResponse } from './shared/types';
+import { parseBody } from './shared/validation';
 
 const NAMESPACE_RE = /^[a-z][a-z0-9-]*$/;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
@@ -52,7 +53,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(403, ErrorCode.FORBIDDEN, `Publishing requires the ${REGISTRY_PUBLISHER_GROUP} group.`, requestId);
     }
 
-    const body = parseBody(event.body);
+    // Shared helper, not a local copy: the duplicate this replaced had the same
+    // "missing body or invalid JSON ⇒ null" contract as the seven sibling
+    // handlers but re-implemented it without the contract's justification, so it
+    // read as an unexplained swallow (#756). One implementation, one rationale.
+    const body = parseBody<RegistryPublishRequest>(event.body);
     if (!body) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -105,16 +110,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     logger.error('registry publish failed', { requestId, error: String(err) });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to publish record.', requestId);
-  }
-}
-
-function parseBody(raw: string | null): RegistryPublishRequest | null {
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as RegistryPublishRequest;
-  } catch {
-    // nosemgrep: ts-silent-success-masking -- malformed JSON is an expected client-input class, not a swallowed fault; null IS the failure encoding and the caller turns it into a 400 VALIDATION_ERROR.
-    return null;
   }
 }
 
