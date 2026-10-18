@@ -13,6 +13,7 @@ from registry.loader import (
     apply_resolved_assets,
     build_skill_prompt_fragment,
 )
+from tests.git_env import isolated_git_env
 
 
 def _read_mcp(repo_dir) -> dict:
@@ -294,18 +295,41 @@ class TestMcpJsonNotCommittable:
     it to the PR. apply_mcp_assets marks it skip-worktree to block that (#246 B4)."""
 
     @staticmethod
-    def _git(repo, *args) -> subprocess.CompletedProcess:
-        return subprocess.run(
+    def _git(repo, *args, check=True) -> subprocess.CompletedProcess:
+        # ``env=`` is load-bearing (#855). Without it, an inherited GIT_DIR — which
+        # git exports to a hook in a linked worktree, i.e. whenever this suite runs
+        # as a pre-push gate from .worktrees/ — overrides repository discovery, so
+        # `-C <tmp_path>` is ignored and every command below operates on the REAL
+        # repository. A silent ``check=False`` is why that stayed invisible: re-initing
+        # the real repo and rewriting its config both exit 0.
+        #
+        # ``check=True`` by DEFAULT, and that is the point rather than tidiness. Every
+        # assertion in this class is of the form "the secret is NOT in the staged diff",
+        # which an empty diff satisfies — so a failed `git init` or `git commit` in setup
+        # would produce a green test that had never built the scenario it names. Raised
+        # rather than passed to ``subprocess.run(check=True)`` so the message carries
+        # git's stderr, which a CalledProcessError does not print.
+        result = subprocess.run(
             ["git", "-C", str(repo), *args],
             capture_output=True,
             text=True,
             check=False,
+            env=isolated_git_env(repo),
         )
+        if check and result.returncode != 0:
+            raise AssertionError(
+                f"setup failed: git {' '.join(args)} exited {result.returncode}: "
+                f"{result.stderr.strip() or '(no stderr)'}"
+            )
+        return result
 
     def _init_repo(self, tmp_path):
+        # No `git config user.*` here on purpose: isolated_git_env supplies the
+        # identity through GIT_AUTHOR_*/GIT_COMMITTER_*, which outrank every config
+        # file, so the commit below is attributed without any config write at all.
+        # The two writes this replaces are the literal source of #720 — `t <t@t>`
+        # was transcribed into a real repository's config and then into real commits.
         self._git(tmp_path, "init", "-q")
-        self._git(tmp_path, "config", "user.email", "t@t")
-        self._git(tmp_path, "config", "user.name", "t")
         (tmp_path / "README.md").write_text("x")
         self._git(tmp_path, "add", "README.md")
         self._git(tmp_path, "commit", "-qm", "init")
@@ -329,7 +353,14 @@ class TestMcpJsonNotCommittable:
         assert (tmp_path / ".mcp.json").exists()
         # ...but the safety-net `git add -u` (and even an explicit add) cannot stage it.
         self._git(tmp_path, "add", "-u")
-        self._git(tmp_path, "add", ".mcp.json")
+        # The ONE call here allowed to fail, and its failure is the protection rather than
+        # a tolerated error: skip-worktree makes git report the path as outside the
+        # sparse-checkout definition and refuse. Asserted, so a future git that silently
+        # succeeded would be caught here instead of only in the diff below.
+        explicit_add = self._git(tmp_path, "add", ".mcp.json", check=False)
+        assert explicit_add.returncode != 0
+        assert "sparse-checkout" in explicit_add.stderr
+
         staged = self._git(tmp_path, "diff", "--cached")
         assert "SUPERSECRET" not in staged.stdout
         assert "sk-live-abc123" not in staged.stdout
@@ -338,11 +369,25 @@ class TestMcpJsonNotCommittable:
         # The dangerous case Scott reproduced: the repo already tracks .mcp.json.
         self._init_repo(tmp_path)
         (tmp_path / ".mcp.json").write_text('{"mcpServers":{}}\n')
-        self._git(tmp_path, "add", ".mcp.json")
+        # A tracked file that SHOULD be staged, committed alongside. It is the control:
+        # `assert staged == ""` on its own is satisfied by a repo where `git add -u` never
+        # worked at all, which is indistinguishable from the protection working. With the
+        # control, the assertion becomes "add -u staged exactly the other file", so a
+        # broken setup fails loudly instead of reading as a pass.
+        (tmp_path / "control.txt").write_text("before\n")
+        self._git(tmp_path, "add", ".mcp.json", "control.txt")
         self._git(tmp_path, "commit", "-qm", "track mcp")
+
         apply_mcp_assets(str(tmp_path), [self._secret_asset()])
+        (tmp_path / "control.txt").write_text("after\n")
+
         # git add -u stages tracked-but-modified files — must skip .mcp.json now.
         self._git(tmp_path, "add", "-u")
+        staged_names = self._git(tmp_path, "diff", "--cached", "--name-only").stdout.split()
+        assert staged_names == ["control.txt"], (
+            "expected `git add -u` to stage the control file and nothing else; "
+            f"staged {staged_names!r}"
+        )
         staged = self._git(tmp_path, "diff", "--cached")
-        assert staged.stdout.strip() == ""
+        assert ".mcp.json" not in staged.stdout
         assert "SUPERSECRET" not in staged.stdout
