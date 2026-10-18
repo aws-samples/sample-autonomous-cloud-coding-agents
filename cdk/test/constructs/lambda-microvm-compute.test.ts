@@ -156,6 +156,41 @@ function build(options: BuildOptions = {}): Built {
   return { stack, construct, template: Template.fromStack(stack) };
 }
 
+describe.each(['global', 'eu', 'us', undefined])('LambdaMicrovmCompute — bedrockGeoRegion=%s', (geo) => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = build({ context: geo === undefined ? {} : { bedrockGeoRegion: geo } }).template;
+  });
+
+  test('execution role grants only the selected inference profiles and bare foundation models', () => {
+    const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole'));
+    const statements = policies.flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement)
+      .filter((statement) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return actions.includes('bedrock:InvokeModel');
+      });
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Action).toEqual([
+      'bedrock:InvokeModel',
+      'bedrock:InvokeModelWithResponseStream',
+    ]);
+    const expectedGeo = geo ?? 'us';
+    const resources = statements[0].Resource;
+    expect(resources).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
+    expect(resources).not.toContain('*');
+    const rendered = JSON.stringify(resources);
+    for (const modelId of DEFAULT_BEDROCK_MODEL_IDS) {
+      expect(rendered).toContain(`:bedrock:*::foundation-model/${modelId}`);
+      expect(rendered).toContain(`:bedrock:us-east-1:123456789012:inference-profile/${expectedGeo}.${modelId}`);
+    }
+    if (expectedGeo !== 'us') {
+      expect(rendered).not.toContain('inference-profile/us.');
+    }
+  });
+});
+
 describe('LambdaMicrovmCompute — image provisioned from a managed base image', () => {
   let built: Built;
   let template: Template;
