@@ -68,10 +68,12 @@ MIN_FREE_GB="${MIN_FREE_GB:-25}"
 FREE_GB=$(df -g / | awk 'NR==2 {print $4}')
 echo "clean:disk — ${FREE_GB}G free (threshold ${MIN_FREE_GB}G)"
 if [ "${FREE_GB:-999}" -lt "$MIN_FREE_GB" ]; then
-  echo "clean:disk — low disk, pruning uv + docker caches…"
+  # Same engine CDK builds with (CDK_DOCKER), so Finch users prune Finch, not an idle Docker.
+  ENGINE="${CDK_DOCKER:-docker}"
+  echo "clean:disk — low disk, pruning uv + $ENGINE caches…"
   uv cache prune || true
-  docker image prune -f || true
-  docker builder prune -f || true
+  "$ENGINE" image prune -f || true
+  "$ENGINE" builder prune -f || true
   df -h / | tail -1
 else
   echo "clean:disk — enough free disk, skipping uv/docker prune"
