@@ -1,0 +1,65 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useApi } from '../../app/providers/api/ApiProvider';
+import type { TaskStatusType } from '../../core/api/types';
+import { isTerminal } from '../../core/util/task-health';
+
+/** Live views poll; the API has no push channel for browsers yet. */
+const LIST_REFRESH_MS = 15_000;
+const ACTIVE_TASK_REFRESH_MS = 10_000;
+const PAGE_SIZE = 100;
+const EVENT_PAGE_SIZE = 100;
+
+const taskKeys = {
+  list: (status: readonly TaskStatusType[] | undefined) => ['tasks', 'list', status ?? 'all'] as const,
+  detail: (taskId: string) => ['tasks', 'detail', taskId] as const,
+  events: (taskId: string) => ['tasks', 'events', taskId] as const,
+};
+
+export function useTaskList(status?: readonly TaskStatusType[]) {
+  const api = useApi();
+  return useInfiniteQuery({
+    queryKey: taskKeys.list(status),
+    queryFn: ({ pageParam }) => api.listTasks({ status, limit: PAGE_SIZE, nextToken: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => (last.pagination.has_more && last.pagination.next_token ? last.pagination.next_token : undefined),
+    refetchInterval: LIST_REFRESH_MS,
+  });
+}
+
+export function useTask(taskId: string) {
+  const api = useApi();
+  return useQuery({
+    queryKey: taskKeys.detail(taskId),
+    queryFn: () => api.getTask(taskId),
+    refetchInterval: (query) => (query.state.data && isTerminal(query.state.data.status) ? false : ACTIVE_TASK_REFRESH_MS),
+  });
+}
+
+/** Most recent events first. */
+export function useTaskEvents(taskId: string, live: boolean) {
+  const api = useApi();
+  return useQuery({
+    queryKey: taskKeys.events(taskId),
+    queryFn: () => api.listTaskEvents(taskId, { desc: true, limit: EVENT_PAGE_SIZE }),
+    refetchInterval: live ? ACTIVE_TASK_REFRESH_MS : false,
+  });
+}
