@@ -53,6 +53,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | Progress events | `agent/src/progress_writer.py`, `agent/src/pipeline.py`, `agent/src/runner.py` | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` | [agent/AGENTS.md](./agent/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | User-facing / design prose | `docs/guides/`, `docs/design/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | ADRs | `docs/decisions/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
+| Deployment profiles / regional capabilities | `cdk/src/deployment/`, `contracts/deployment-capabilities.json` | **`cli/src/deployment-capabilities.ts`**, `cli/src/deployment-profile.ts`, `docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles` | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | — | — |
 
 ## Boundaries
@@ -69,6 +70,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **`prek install` fails** — Another hook manager owns `core.hooksPath`; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 - **Dropping solution UA on a new AWS client (#319)** — every outbound AWS call carries `md/uksb-wt64nei4u6#{component}` (the `app/` segment is SDK-native via `AWS_SDK_UA_APP_ID`, set by `SolutionUaAspect`). Construct clients through the attributed factory: `cdk/src/` and `cli/src/` via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` (`cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`); `agent/src/` via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed). A naked `new XxxClient({})` / `boto3.client(...)` silently loses solution attribution. Keep the three `ua` modules (`agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`) identical in id/wire-format/sanitization.
 - **Transitive npm pin applied in only one place** — `integrations/jira-forge-app` is a standalone npm project *outside* the yarn workspaces, so a root `package.json` `resolutions` bump does **not** reach it. Mirror the pin into `integrations/jira-forge-app/package.json` `overrides` and re-lock (`npm install --package-lock-only`). `mise run drift-prevention` (`check:transitive-pin-sync`) fails locally if they drift. See [#712](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/712).
+- **Optional feature read from context, or catalog edited in one place** — new optional modules belong in `DeploymentFeatures` (`cdk/src/deployment/features.ts`) and are gated in `AgentStack` from that selection, not with a fresh `tryGetContext`. Regional data lives in `contracts/deployment-capabilities.json`; mirror it into `cli/src/deployment-capabilities.ts` (parity test) and update `lastVerified`. See [ADR-024](./docs/decisions/ADR-024-deployment-profiles.md).
 - **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack

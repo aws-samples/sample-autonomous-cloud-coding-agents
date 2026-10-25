@@ -130,7 +130,7 @@ Operational notes specific to this backend:
 
 ### Optional Agent Registry
 
-AWS Agent Registry is enabled by default. In an account or region where the preview service is unavailable or prohibited, omit the registry, its REST API, IAM grants, environment wiring, and stack outputs:
+Without a [deployment profile](#deployment-profiles), AWS Agent Registry is enabled. In an account or Region where the service is unavailable or prohibited, set `agentRegistry` to `false` in `abca.deployment.json`, or use the context switch, to omit the registry, its REST API, IAM grants, environment wiring and stack outputs:
 
 ```bash
 cdk deploy --context enableAgentRegistry=false
@@ -141,6 +141,102 @@ Blueprints without `registry://` asset references continue to work. A remaining 
 The string form is case-sensitive: use lowercase `true` or `false`. Any other value fails synthesis with an actionable validation error.
 
 This context is an infrastructure switch, not a pause control. Applying it to an existing enabled deployment deletes the CloudFormation-managed registry and its records; re-enabling creates an empty registry that must be republished. The optional network split preserves that lifecycle; registry retention remains deferred. See [REGISTRY.md](../design/REGISTRY.md) for the catalog migration and runtime behavior.
+
+## Deployment profiles
+
+ABCA's core always deploys:
+- the AgentCore runtime with VPC/DNS egress controls;
+- the Task API, with Cognito and API-key authentication;
+- task state, admission and concurrency control, and budgets;
+- repository onboarding and the GitHub task/PR workflow;
+- Cedar HITL approvals and audit events;
+- attachments, reconcilers, alarms and diagnostics.
+
+Six features are optional and can be enabled independently ([ADR-024](../decisions/ADR-024-deployment-profiles.md)):
+
+| Feature (`abca.deployment.json` key) | Context switch | Root resources (enabled alone) | Region-limited by |
+|---|---|---:|---|
+| Slack (`slack`) | `enableSlack` | ~51 | — |
+| Linear (`linear`) | `enableLinear` | ~45 | — |
+| Jira (`jira`) | `enableJira` | ~35 | — |
+| Deploy-preview screenshots (`deployPreviewScreenshots`) | `enableDeployPreviewScreenshots` | ~23 | AgentCore Built-in Tools (Browser) |
+| AWS Agent Registry (`agentRegistry`) | `enableAgentRegistry` | 2 (plus nested stacks) | AWS Agent Registry |
+| Tool Gateway (`toolGateway`, experimental) | `enableToolGateway` | ~7 | AgentCore Gateway |
+
+Linear and Jira share the stranded-orchestration sweep and the iteration heartbeat, so enabling both costs slightly less than the sum. The minimal profile deploys about 317 root resources; the legacy topology deploys about 463.
+
+### Choosing features with `bgagent setup`
+
+Run the wizard from your ABCA checkout:
+
+```bash
+bgagent setup                                   # interactive
+bgagent setup --features slack,jira --yes       # scripted
+bgagent setup --features none --no-deploy       # only write the profile
+bgagent setup -c networkTopology=split          # pass the context you deploy with
+```
+
+The wizard works in this order:
+
+1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory.
+2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
+   - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
+   - It refuses to continue if the stack uses non-default compute (`ComputeTypes` output) or a `${stackName}-network` stack exists and the matching `compute_types` / `networkTopology` context is missing, because dropping that context would change more than features.
+3. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
+4. Writes the candidate profile to a temporary file and shows `cdk diff`. Nothing in the repository changes until you confirm.
+5. Requires stronger confirmation if the diff deletes, replaces or orphans state-bearing resources (DynamoDB tables, secrets, buckets, log groups, user pools, VPCs, nested stacks): type the stack name interactively, or pass `--accept-data-loss` together with `--yes`. Declining, or closing the terminal at any prompt, exits with code 130 and leaves the repository unchanged.
+6. Writes `abca.deployment.json`, deploys with `mise //cdk:deploy -- -c stackName=<name> --all`, and configures the CLI from the stack outputs.
+
+`--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
+
+Commit `abca.deployment.json`. Every synthesis reads it, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build, so local and pipeline deployments match.
+
+### Profile file and precedence
+
+```json
+{
+  "schemaVersion": 1,
+  "features": {
+    "slack": false,
+    "linear": false,
+    "jira": false,
+    "deployPreviewScreenshots": false,
+    "agentRegistry": false,
+    "toolGateway": false
+  }
+}
+```
+
+Every feature must be listed explicitly. Unknown keys, a different `schemaVersion` or a non-boolean value fail synthesis. For each feature, the first source that sets it wins:
+
+1. the per-feature context switch (for example `-c enableSlack=true`);
+2. the profile;
+3. the legacy topology.
+
+`-c deploymentProfile=<path>` selects another file; relative paths resolve against the repository root, not `cdk/`. `-c deploymentProfile=none` ignores the profile. The wizard refuses to deploy while `~/.cdk.json`, `cdk/cdk.json` or `cdk/cdk.context.json` sets a switch that contradicts your selection.
+
+**No profile means no change.** Without `abca.deployment.json`, Slack, Linear, Jira, screenshots and the Agent Registry deploy as before, and the Tool Gateway stays opt-in. The only template change for an existing stack is the new `DeploymentFeatures` output.
+
+### What disabling a feature removes
+
+A disabled feature synthesizes no API routes, WAF body-size exemptions, Lambdas, IAM grants, tables, secrets, fan-out wiring, alarms or outputs. That includes the compute roles (AgentCore, ECS, MicroVM): they can read a tracker's OAuth secrets only when that tracker is deployed. Screenshot-to-Linear or screenshot-to-Jira posting exists only when screenshots and that tracker are both enabled. The orchestration table and live reconciler remain core because the reconciler also owns per-task budget rollups. The task table keeps its `LinearIssueIndex` and `JiraIssueIndex` indexes, which do nothing while unused.
+
+Removing a feature from an existing stack **deletes its data**: Slack installations and mappings, Linear and Jira workspace registries, project and user mappings, webhook secrets, the screenshot bucket, or the Agent Registry and its records. Re-enabling it creates empty resources, and there is no import or recovery path. Rerun the feature's setup command (`bgagent slack setup`, `bgagent linear setup`, `bgagent jira setup`, `bgagent github set-webhook-secret`), and republish registry assets. Per-workspace OAuth secrets created by the CLI (`bgagent-linear-oauth-*`, `bgagent-jira-oauth-*`, `bgagent/slack/*`) are not managed by CloudFormation and survive removal. Delete them separately if you no longer need them.
+
+CLI commands for an omitted feature (for example `bgagent slack setup`) fail with a message directing you to `bgagent setup`.
+
+### Regional availability
+
+`contracts/deployment-capabilities.json` records the services each capability needs, the Regions that support it, and the source and date of the last verification. CDK synthesis enforces it for a concrete Region, so a CI or manual deploy fails before CloudFormation runs, not only in the wizard. Environment-agnostic synthesis is not checked.
+
+To update the data when AWS expands coverage:
+
+1. Check the [supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html) page.
+2. Edit `regions` and set `lastVerified` in `contracts/deployment-capabilities.json`.
+3. Mirror the change into `cli/src/deployment-capabilities.ts`.
+4. Run `mise //cdk:test` and `mise //cli:build`. The parity test fails if the mirror drifts, and the census fails if a footprint estimate drifts by more than 15%.
+
+A stale entry blocks a newly supported Region until it is updated. The check fails closed by design, and there is no context override: editing the catalog is the only way to unblock a Region. Stacks that synthesize without a concrete Region (for example CI without credentials) are not checked; synthesis fails before any AWS lookup when a Region is known.
 
 ## Bedrock inference geography
 
