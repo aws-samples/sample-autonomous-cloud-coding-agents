@@ -46,6 +46,16 @@ import {
 } from '../deployment-profile';
 import { CliError } from '../errors';
 import { DEFAULT_STACK_NAME } from '../operator-context';
+import {
+  componentForPath,
+  DeployProgress,
+  formatDuration,
+  Screen,
+  Step,
+  stripAnsi,
+  Style,
+  summarizeDiff,
+} from '../setup-ui';
 import { fetchConfigureBundleFromStack } from '../stack-outputs';
 import { CliConfig } from '../types';
 import { makeClient } from '../ua';
@@ -64,27 +74,30 @@ const FEATURE_CONTEXT_KEYS: Readonly<Record<DeploymentFeature, string>> = {
 const RESERVED_CONTEXT_KEYS = new Set(['stackName', 'deploymentProfile', ...Object.values(FEATURE_CONTEXT_KEYS)]);
 
 /** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
-const STATE_BEARING_TYPES = new Set([
-  'AWS::DynamoDB::Table',
-  'AWS::DynamoDB::GlobalTable',
-  'AWS::SecretsManager::Secret',
-  'AWS::S3::Bucket',
-  'AWS::Cognito::UserPool',
-  'AWS::KMS::Key',
-  'AWS::Logs::LogGroup',
-  'AWS::CloudFormation::Stack',
-  'AWS::BedrockAgentCore::Memory',
-  'AWS::EC2::VPC',
+const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
+  ['AWS::DynamoDB::Table', 'table'],
+  ['AWS::DynamoDB::GlobalTable', 'table'],
+  ['AWS::SecretsManager::Secret', 'secret'],
+  ['AWS::S3::Bucket', 'bucket'],
+  ['AWS::Cognito::UserPool', 'user pool'],
+  ['AWS::KMS::Key', 'encryption key'],
+  ['AWS::Logs::LogGroup', 'log group'],
+  ['AWS::CloudFormation::Stack', 'nested stack'],
+  ['AWS::BedrockAgentCore::Memory', 'agent memory'],
+  ['AWS::EC2::VPC', 'VPC'],
 ]);
 
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 const REGION_PATTERN = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
 const CONTEXT_PATTERN = /^([A-Za-z][\w:.-]*)=(.*)$/s;
-const ANSI_PATTERN = /\u001b\[[0-9;]*m/g;
-/** Width of the longest change label (`REPLACE`), so the diff summary aligns. */
-const CHANGE_LABEL_WIDTH = 'replace'.length;
 /** Exit code for a cancelled setup, like a shell interrupt. */
 export const SETUP_CANCELLED_EXIT_CODE = 130;
+/** Failures listed on the result screen; the log has the rest. */
+const MAX_FAILURES_SHOWN = 3;
+/** Width of the header's label column (`Account` plus a gap). */
+const FIELD_LABEL_WIDTH = 9;
+/** Width of the review screen's label column. */
+const REVIEW_LABEL_WIDTH = 30;
 
 export interface ExistingStack {
   readonly outputs: ReadonlyMap<string, string>;
@@ -101,6 +114,8 @@ export interface RunResult {
 export interface SetupDeps {
   readonly cwd: string;
   readonly interactive: boolean;
+  /** Where text and live progress are drawn; `tty` enables in-place redraws and colour. */
+  readonly screen: Screen;
   /** `null` when the stack does not exist; other failures throw. */
   readonly describeStack: (region: string, stackName: string) => Promise<ExistingStack | null>;
   readonly hasToolGateway: (region: string, stackName: string) => Promise<boolean>;
@@ -108,10 +123,13 @@ export interface SetupDeps {
   readonly resolveAccount: (region: string) => Promise<string | undefined>;
   /** Rejects with a cancellation CliError when input closes (EOF, Ctrl-C). */
   readonly ask: (question: string) => Promise<string>;
-  /** Streams output to the terminal; `capture` also returns it for parsing. */
-  readonly run: (args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; capture: boolean }) => Promise<RunResult>;
+  /** Runs `mise <args>` without a terminal: output goes to `logFile` and, line by line, to `onLine`. */
+  readonly run: (args: readonly string[], options: {
+    cwd: string; env: NodeJS.ProcessEnv; logFile: string; onLine?: (line: string) => void;
+  }) => Promise<RunResult>;
   readonly configureFromStack: (region: string, stackName: string) => Promise<CliConfig>;
-  readonly log: (message: string) => void;
+  /** Monotonic clock for durations. */
+  readonly now: () => number;
 }
 
 export interface SetupOptions {
@@ -143,7 +161,7 @@ export function setupCancelled(): CliError {
  */
 export function parseStateBearingChanges(diffOutput: string): StateBearingChange[] {
   const changes: StateBearingChange[] = [];
-  for (const raw of diffOutput.replace(ANSI_PATTERN, '').split('\n')) {
+  for (const raw of stripAnsi(diffOutput).split('\n')) {
     const match = /^\s*\[([-~])\]\s+(\S+)\s+(\S+)(.*)$/.exec(raw);
     if (!match || !STATE_BEARING_TYPES.has(match[2])) continue;
     const [, marker, type, id, impact] = match;
@@ -236,10 +254,6 @@ async function missingDeploymentContext(
   return missing;
 }
 
-function onOff(enabled: boolean): string {
-  return enabled ? 'on ' : 'off';
-}
-
 async function confirm(deps: SetupDeps, question: string, defaultYes: boolean): Promise<boolean> {
   const answer = (await deps.ask(`${question} ${defaultYes ? '[Y/n]' : '[y/N]'} `)).trim().toLowerCase();
   if (!answer) return defaultYes;
@@ -255,28 +269,85 @@ function unavailableIn(region: string, selection: DeploymentFeatures): string[] 
     });
 }
 
+/** Writes text lines and styles them consistently. */
+class Ui {
+  readonly style: Style;
+  constructor(private readonly deps: SetupDeps) {
+    this.style = new Style(deps.screen.tty && !process.env.NO_COLOR);
+  }
+  line(text = ''): void {
+    this.deps.screen.write(`${text}\n`);
+  }
+  title(text: string): void {
+    this.line();
+    this.line(`  ${this.style.bold(text)}`);
+    this.line(`  ${this.style.dim('─'.repeat(text.length))}`);
+  }
+  field(label: string, value: string): void {
+    this.line(`  ${this.style.dim(label.padEnd(FIELD_LABEL_WIDTH))}${value}`);
+  }
+}
+
 async function chooseInteractively(
   deps: SetupDeps,
+  ui: Ui,
   region: string,
   defaults: DeploymentFeatures,
 ): Promise<DeploymentFeatures> {
   const result: Record<DeploymentFeature, boolean> = { ...MINIMAL_DEPLOYMENT_FEATURES };
-  deps.log('\nOptional features (core governance, GitHub workflow and the Task API are always deployed):\n');
+  ui.title('Choose optional features');
+  ui.line(`  ${ui.style.dim('The core platform (Task API, agent runtime, Cedar approvals, GitHub PRs) is always deployed.')}`);
   for (const feature of DEPLOYMENT_FEATURES) {
     const capability = CAPABILITY_CATALOG.features[feature];
+    ui.line();
     if (!isAvailableIn(capability, region)) {
-      deps.log(`  ✗ ${capability.label}: unavailable in ${region} (supported: ${capability.regions?.join(', ')})`);
+      ui.line(`  ${ui.style.dim(`✗ ${capability.label} — not available in ${region}`)}`);
       continue;
     }
-    const notes = [
-      `~${capability.approximateResources} resources when enabled alone`,
-      ...(capability.maturity === 'experimental' ? ['experimental'] : []),
-      ...(capability.requiredServices.length ? [`needs ${capability.requiredServices.join(', ')}`] : []),
-    ];
-    deps.log(`  • ${capability.label}: ${capability.description} (${notes.join('; ')})`);
-    result[feature] = await confirm(deps, `    Enable ${capability.label}?`, defaults[feature]);
+    const tag = capability.maturity === 'experimental' ? ` ${ui.style.yellow('(experimental)')}` : '';
+    ui.line(`  ${ui.style.bold(capability.label)}${tag}`);
+    // Design-record references mean nothing to an operator choosing features.
+    ui.line(`  ${ui.style.dim(capability.description.replace(/\s*\(ADR-[^)]*\)/g, ''))}`);
+    result[feature] = await confirm(deps, `  Enable ${capability.label}?`, defaults[feature]);
   }
   return result;
+}
+
+function printReview(ui: Ui, selection: DeploymentFeatures, removed: readonly DeploymentFeature[]): void {
+  const { style } = ui;
+  ui.title('Review');
+  ui.line(`  ${style.green('✓')} ${'Core platform'.padEnd(REVIEW_LABEL_WIDTH)}${style.dim('always included')}`);
+  for (const feature of DEPLOYMENT_FEATURES) {
+    const { label } = CAPABILITY_CATALOG.features[feature];
+    if (removed.includes(feature)) {
+      ui.line(`  ${style.red('✗')} ${label.padEnd(REVIEW_LABEL_WIDTH)}${style.red('will be removed')}`);
+    } else if (selection[feature]) {
+      ui.line(`  ${style.green('✓')} ${label}`);
+    } else {
+      ui.line(`  ${style.dim(`✗ ${label.padEnd(REVIEW_LABEL_WIDTH)}not included`)}`);
+    }
+  }
+}
+
+/** "Slack: 3 tables and 1 secret" from state-bearing changes, grouped by component. */
+function describeDataLoss(changes: readonly StateBearingChange[], stackNames: readonly string[]): string[] {
+  const byComponent = new Map<string, Map<string, number>>();
+  for (const change of changes) {
+    const component = componentForPath(change.id, stackNames);
+    const nouns = byComponent.get(component) ?? new Map<string, number>();
+    const noun = STATE_BEARING_TYPES.get(change.type)!;
+    nouns.set(noun, (nouns.get(noun) ?? 0) + 1);
+    byComponent.set(component, nouns);
+  }
+  return [...byComponent].map(([component, nouns]) => `${component}: ${[...nouns]
+    .map(([noun, count]) => `${count} ${noun}${count === 1 ? '' : 's'}`).join(', ')}`);
+}
+
+/** The most useful lines of raw output when CloudFormation reported no reason. */
+function errorLines(output: string | readonly string[]): string[] {
+  const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output]).map(line => line.trim()).filter(Boolean);
+  const errors = lines.filter(line => /error|failed|❌|denied|not authorized|exception/i.test(line));
+  return (errors.length > 0 ? errors : lines).slice(-MAX_FAILURES_SHOWN);
 }
 
 /** Stronger gate for data loss: type the stack name, or `--yes --accept-data-loss`. */
@@ -287,11 +358,13 @@ async function confirmDataLoss(deps: SetupDeps, opts: SetupOptions, stackName: s
     }
     return true;
   }
-  return (await deps.ask(`Type the stack name (${stackName}) to confirm data loss: `)).trim() === stackName;
+  return (await deps.ask(`  Type the stack name (${stackName}) to confirm: `)).trim() === stackName;
 }
 
 /** Interactive or scripted `bgagent setup` (ADR-024). */
 export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<void> {
+  const ui = new Ui(deps);
+  const { style } = ui;
   const repoRoot = findRepoRoot(opts.repoRoot ?? deps.cwd);
   const stackName = opts.stackName ?? DEFAULT_STACK_NAME;
   if (!STACK_NAME_PATTERN.test(stackName)) throw new CliError(`Invalid stack name '${stackName}'.`);
@@ -308,7 +381,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   // 1. Region first: availability decides what may be offered.
   let region = opts.region ?? tryLoadConfig()?.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
   if (!region && deps.interactive && !opts.yes && opts.features === undefined) {
-    region = (await deps.ask('AWS Region to deploy ABCA into: ')).trim();
+    region = (await deps.ask('  AWS Region to deploy ABCA into: ')).trim();
   }
   if (!region) throw new CliError('AWS region is required. Pass --region or set AWS_REGION.');
   if (!REGION_PATTERN.test(region)) throw new CliError(`Invalid AWS Region '${region}'.`);
@@ -332,15 +405,16 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const profile = readDeploymentProfile(repoRoot);
   const defaults = deployedFeatures ?? profile ?? MINIMAL_DEPLOYMENT_FEATURES;
 
-  deps.log(`Repository: ${repoRoot}`);
-  deps.log(`Region:     ${region}`);
-  deps.log(`Account:    ${existing?.account ?? (await deps.resolveAccount(region)) ?? 'resolved by CDK from your AWS credentials'}`);
-  deps.log(`Stack:      ${stackName} (${existing ? `existing, ${existing.status}` : 'new installation'})`);
-  if (extraContext.size > 0) deps.log(`Context:    ${[...extraContext].map(([key, value]) => `${key}=${value}`).join(' ')}`);
+  ui.title('ABCA setup');
+  ui.field('Stack', `${stackName} ${style.dim(existing ? `(existing · ${existing.status})` : '(new installation)')}`);
+  ui.field('Region', region);
+  ui.field('Account', existing?.account ?? (await deps.resolveAccount(region)) ?? style.dim('from your AWS credentials'));
+  if (extraContext.size > 0) ui.field('Context', [...extraContext].map(([key, value]) => `${key}=${value}`).join(' '));
   if (deployedFeatures) {
-    deps.log(`Deployed:   ${enabledFeatures(deployedFeatures).join(', ') || 'none'}${deployed?.source === 'inferred' ? ' (inferred from stack outputs)' : ''}`);
+    const names = enabledFeatures(deployedFeatures).map(f => CAPABILITY_CATALOG.features[f].label);
+    ui.field('Deployed', `${names.join(', ') || 'core only'}${deployed?.source === 'inferred' ? style.dim(' (detected)') : ''}`);
   } else if (!profile) {
-    deps.log('Recommended: the governed minimal profile (all optional features off).');
+    ui.line(`  ${style.dim('New installation: every optional feature defaults to off (the governed minimal profile).')}`);
   }
 
   for (const feature of enabledFeatures(deployedFeatures ?? MINIMAL_DEPLOYMENT_FEATURES)) {
@@ -367,7 +441,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   if (opts.features !== undefined) {
     selection = parseFeatureList(opts.features);
   } else if (deps.interactive && !opts.yes) {
-    selection = await chooseInteractively(deps, region, defaults);
+    selection = await chooseInteractively(deps, ui, region, defaults);
   } else {
     selection = defaults;
   }
@@ -375,11 +449,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   if (unavailable.length > 0) throw new CliError(unavailable.join('\n'));
 
   const removed = enabledFeatures(deployedFeatures ?? MINIMAL_DEPLOYMENT_FEATURES).filter(f => !selection[f]);
-  deps.log('\nSelected deployment:');
-  for (const feature of DEPLOYMENT_FEATURES) {
-    const removal = removed.includes(feature) ? '  ← REMOVE (deletes its resources)' : '';
-    deps.log(`  ${onOff(selection[feature])}  ${CAPABILITY_CATALOG.features[feature].label}${removal}`);
-  }
+  printReview(ui, selection, removed);
 
   const conflicts = conflictingContextOverrides(repoRoot, selection);
   if (conflicts.length > 0) {
@@ -390,69 +460,125 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     // The next deploy (local or CI) applies the removal without this wizard's diff.
     const stateful = removed.filter(feature => CAPABILITY_CATALOG.features[feature].stateful);
     if (stateful.length > 0) {
-      deps.log(`\n⚠️  The next deploy of this profile deletes the data of: ${stateful.map(f => CAPABILITY_CATALOG.features[f].label).join(', ')}.`);
-      if (!(await confirmDataLoss(deps, opts, stackName, deps.interactive))) {
-        throw setupCancelled();
-      }
+      ui.line();
+      ui.line(`  ${style.yellow('⚠')} The next deploy deletes the data of: ${stateful.map(f => CAPABILITY_CATALOG.features[f].label).join(', ')}.`);
+      if (!(await confirmDataLoss(deps, opts, stackName, deps.interactive))) throw setupCancelled();
     }
     const file = writeDeploymentProfile(repoRoot, selection);
-    deps.log(`\nWrote ${file}. Commit it so local and CI synthesis deploy the same features.`);
-    deps.log(`Deploy later with \`bgagent setup --stack-name ${stackName} --region ${region}\`.`);
+    ui.line();
+    ui.line(`  ${style.green('✓')} Saved ${path.relative(deps.cwd, file) || file}`);
+    ui.line(`  ${style.dim('Commit it so local and CI deploys use the same features. Deploy later with `bgagent setup`.')}`);
     return;
   }
 
-  // 4. Diff against a temporary copy so cancelling leaves the repository unchanged.
+  // 4. Work out the changes against a temporary profile so cancelling leaves the repository unchanged.
   const env: NodeJS.ProcessEnv = {
-    ...process.env, MISE_EXPERIMENTAL: '1', AWS_REGION: region, AWS_DEFAULT_REGION: region, CDK_DEFAULT_REGION: region,
+    ...process.env,
+    MISE_EXPERIMENTAL: '1',
+    AWS_REGION: region,
+    AWS_DEFAULT_REGION: region,
+    CDK_DEFAULT_REGION: region,
+    FORCE_COLOR: '0',
   };
   const contextArgs = ['-c', `stackName=${stackName}`, ...[...extraContext].flatMap(([key, value]) => ['-c', `${key}=${value}`])];
+  const persistentTopology = persistentContext(repoRoot).map(({ context }) => context.networkTopology).filter(Boolean).pop();
+  const topology = extraContext.get('networkTopology') ?? persistentTopology;
+  const stackNames = topology === 'split' ? [stackName, `${stackName}-network`] : [stackName];
+  // Raw CDK output lives in the git-ignored cdk.out, next to the assembly it describes.
+  const logDir = `${repoCdkDir(repoRoot)}${path.sep}cdk.out`;
+  fs.mkdirSync(logDir, { recursive: true });
+  const diffLog = `${logDir}${path.sep}setup-changes.log`;
+  const deployLog = `${logDir}${path.sep}setup-deploy.log`;
+  ui.line();
+  const checking = new Step(deps.screen, style, 'Checking what will change');
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-setup-'));
   let diff: RunResult;
   try {
     const candidate = path.join(tempDir, DEPLOYMENT_PROFILE_FILE);
     fs.writeFileSync(candidate, serializeDeploymentProfile(selection), 'utf-8');
-    deps.log('\nComputing `cdk diff` for the selected deployment...\n');
-    diff = await deps.run(['//cdk:diff', '--', ...contextArgs, '-c', `deploymentProfile=${candidate}`], { cwd: repoRoot, env, capture: true });
+    diff = await deps.run(['//cdk:diff', '--', ...contextArgs, '-c', `deploymentProfile=${candidate}`], { cwd: repoRoot, env, logFile: diffLog });
+  } catch (err) {
+    checking.fail();
+    throw err;
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
   if (diff.code !== 0) {
-    throw new CliError(`cdk diff failed (exit ${diff.code}); nothing was written or deployed. Fix the error above and rerun setup.`);
+    checking.fail('could not compute the changes');
+    for (const line of errorLines(diff.output)) ui.line(`    ${style.red(line)}`);
+    ui.line(`    ${style.dim(`Full output: ${path.relative(deps.cwd, diffLog)}`)}`);
+    throw new CliError('Nothing was written or deployed. Fix the error above and rerun setup.');
   }
+  const summary = summarizeDiff(diff.output, stackNames);
+  const counts = [`${summary.create} to create`, `${summary.update} to update`, `${summary.remove} to remove`].join(' · ');
+  checking.succeed(summary.create + summary.update + summary.remove === 0 ? 'no changes' : counts);
+  if (summary.iamResources > 0) {
+    ui.line(`    ${style.dim(`Includes ${summary.iamResources} IAM roles and policies.`)}`);
+  }
+  ui.line(`    ${style.dim(`Full change list: ${path.relative(deps.cwd, diffLog)}`)}`);
 
   // 5. Confirmation, with a stronger gate for data loss.
   const stateBearing = parseStateBearingChanges(diff.output);
+  ui.line();
   if (stateBearing.length > 0) {
-    deps.log('\n⚠️  This deployment deletes, replaces or orphans state-bearing resources:');
-    for (const change of stateBearing) deps.log(`   ${change.change.toUpperCase().padEnd(CHANGE_LABEL_WIDTH)}  ${change.type}  ${change.id}`);
-    deps.log('   Deleted and replaced resources lose their data (installations, mappings, webhook secrets, registry records).');
-    deps.log('   Orphaned resources keep their data but leave CloudFormation management.');
-    deps.log('   Per-workspace OAuth secrets created by the CLI are not removed; revoke or delete them separately.');
-    deps.log('   Re-enabling a feature later creates empty resources; rerun its setup command to reconnect it.');
+    ui.line(`  ${style.yellow('⚠  This removes or replaces resources that hold data:')}`);
+    for (const line of describeDataLoss(stateBearing, stackNames)) ui.line(`     • ${line}`);
+    ui.line(`  ${style.dim('   Their contents (installations, mappings, secrets, records) are lost. OAuth secrets created by')}`);
+    ui.line(`  ${style.dim('   the CLI are kept; re-enabling a feature later starts empty.')}`);
     if (!(await confirmDataLoss(deps, opts, stackName, deps.interactive))) throw setupCancelled();
-  } else if (!opts.yes && !(await confirm(deps, '\nDeploy this configuration?', false))) {
+  } else if (!opts.yes && !(await confirm(deps, `  Deploy ${stackName} now?`, false))) {
     throw setupCancelled();
   }
 
   // 6. Persist, deploy the same profile through the existing mise/CDK path, configure the CLI.
   const file = writeDeploymentProfile(repoRoot, selection);
-  deps.log(`\nWrote ${file}. Commit it so CI synthesizes the same deployment.\n`);
-  const deployResult = await deps.run(
-    ['//cdk:deploy', '--', ...contextArgs, '-c', `deploymentProfile=${file}`, '--all',
-      ...(opts.yes ? ['--require-approval', 'never'] : [])],
-    { cwd: repoRoot, env, capture: false },
-  );
-  if (deployResult.code !== 0) {
-    throw new CliError(
-      `Deploy failed (exit ${deployResult.code}). ${DEPLOYMENT_PROFILE_FILE} keeps your selection; `
-      + `check the CloudFormation events for '${stackName}', fix the cause, and rerun setup.`,
+  ui.line();
+  ui.line(`  ${style.green('✓')} Saved your selection to ${path.relative(deps.cwd, file) || file}`);
+  const started = deps.now();
+  const progress = new DeployProgress(deps.screen, style, stackNames, summary.perComponent);
+  let deployResult: RunResult;
+  try {
+    deployResult = await deps.run(
+      // The wizard's confirmation replaces CDK's approval prompt, which cannot be answered without a terminal.
+      ['//cdk:deploy', '--', ...contextArgs, '-c', `deploymentProfile=${file}`, '--all', '--require-approval', 'never', '--progress', 'events'],
+      { cwd: repoRoot, env, logFile: deployLog, onLine: line => progress.handleLine(line) },
     );
+  } catch (err) {
+    progress.finish(false);
+    throw err;
   }
+  const elapsed = formatDuration(deps.now() - started);
+  const { failures, tail } = progress.finish(deployResult.code === 0);
+  ui.line();
+  if (deployResult.code !== 0) {
+    ui.line(`  ${style.red('✗')} ${style.bold(`Deployment failed after ${elapsed}`)}`);
+    ui.line();
+    if (failures.length > 0) {
+      ui.line('  Cause:');
+      for (const failure of failures.slice(0, MAX_FAILURES_SHOWN)) {
+        ui.line(`    ${style.bold(failure.component)} — ${failure.resource}`);
+        ui.line(`    ${style.red(failure.reason || failure.status)}`);
+      }
+    } else {
+      ui.line('  Cause:');
+      for (const line of errorLines(tail)) ui.line(`    ${style.red(line)}`);
+    }
+    ui.line();
+    ui.line(`  ${style.dim(`Full log: ${path.relative(deps.cwd, deployLog)}`)}`);
+    ui.line(`  ${style.dim(`Your selection is saved in ${DEPLOYMENT_PROFILE_FILE}; fix the cause and run bgagent setup again.`)}`);
+    process.exitCode = 1;
+    return;
+  }
+  ui.line(`  ${style.green('✓')} ${style.bold(`Deployment complete in ${elapsed}`)}`);
   const bundle = await deps.configureFromStack(region, stackName);
   const { registry_api_url: _stale, ...previous } = tryLoadConfig() ?? ({} as Partial<CliConfig>);
   // A removed Registry must not leave its URL behind.
   saveConfig({ ...previous, ...bundle } as CliConfig);
-  deps.log(`Deployed. CLI configured for ${stackName} in ${region}; run \`bgagent login\` next.`);
+  ui.line();
+  ui.field('API', bundle.api_url);
+  ui.field('CLI', 'configured for this stack');
+  ui.line();
+  ui.line(`  Next: ${style.cyan('bgagent admin invite-user')} to create a user, then ${style.cyan('bgagent login')}.`);
 }
 
 /* istanbul ignore next -- thin AWS/terminal adapters; runSetup is tested through SetupDeps */
@@ -463,6 +589,7 @@ function defaultDeps(): SetupDeps {
   return {
     cwd: process.cwd(),
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    screen: { tty: Boolean(process.stdout.isTTY), write: text => { process.stdout.write(text); } },
     describeStack: async (region, stackName) => {
       const cf = makeClient(CloudFormationClient, { region });
       try {
@@ -494,7 +621,7 @@ function defaultDeps(): SetupDeps {
         const identity = await makeClient(CloudFormationClient, { region }).config.credentials();
         return (identity as { accountId?: string }).accountId;
       } catch {
-        // nosemgrep: ts-silent-success-masking -- display-only best effort: the caller prints a "resolved by CDK" placeholder, and the deploy itself still fails loudly on bad credentials
+        // nosemgrep: ts-silent-success-masking -- display-only best effort: the caller prints a "from your AWS credentials" placeholder, and the deploy itself still fails loudly on bad credentials
         return undefined;
       }
     },
@@ -509,19 +636,34 @@ function defaultDeps(): SetupDeps {
       });
     }),
     run: (args, options) => new Promise((resolve, reject) => {
+      const log = fs.createWriteStream(options.logFile, { flags: 'w' });
       // Argument vector, no shell: the stack name and paths never reach a shell parser.
-      const child = spawn('mise', [...args], {
-        cwd: options.cwd, env: options.env, stdio: options.capture ? ['inherit', 'pipe', 'pipe'] : 'inherit',
-      });
+      // No stdin: nothing downstream may prompt; the wizard already asked.
+      const child = spawn('mise', [...args], { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
       let output = '';
-      // Stream while capturing so a long diff is never silent.
-      child.stdout?.on('data', chunk => { output += String(chunk); process.stdout.write(chunk); });
-      child.stderr?.on('data', chunk => { output += String(chunk); process.stderr.write(chunk); });
-      child.on('error', err => reject(new CliError(`Could not run mise (${err.message}). Install mise and run from the ABCA checkout.`)));
-      child.on('close', code => resolve({ code: code ?? 1, output }));
+      let pending = '';
+      const onData = (chunk: Buffer) => {
+        const text = String(chunk);
+        output += text;
+        log.write(text);
+        pending += text;
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? '';
+        for (const line of lines) options.onLine?.(line);
+      };
+      child.stdout.on('data', onData);
+      child.stderr.on('data', onData);
+      child.on('error', err => {
+        log.end();
+        reject(new CliError(`Could not run mise (${err.message}). Install mise and run from the ABCA checkout.`));
+      });
+      child.on('close', code => {
+        if (pending) options.onLine?.(pending);
+        log.end(() => resolve({ code: code ?? 1, output }));
+      });
     }),
     configureFromStack: fetchConfigureBundleFromStack,
-    log: message => console.log(message),
+    now: () => Date.now(),
   };
 }
 

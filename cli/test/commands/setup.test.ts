@@ -49,8 +49,13 @@ const DELETES_SLACK_TABLE = [
 
 let root: string;
 let configDir: string;
-let log: string[];
-let runs: { args: readonly string[]; env: NodeJS.ProcessEnv; capture: boolean; profileAtRun?: string }[];
+let out: string[];
+let runs: { args: readonly string[]; env: NodeJS.ProcessEnv; logFile: string; profileAtRun?: string }[];
+/** Everything the wizard printed, as plain text. */
+const text = () => out.join('');
+/** Deploy event lines in `cdk deploy --progress events` format. */
+const event = (n: number, total: number, status: string, constructPath: string, id: string, reason = '') =>
+  `backgroundagent-dev | ${n}/${total} | 1:00:00 PM | ${status.padEnd(20)} | AWS::Lambda::Function | backgroundagent-dev/${constructPath}/Resource (${id}) ${reason}`;
 
 function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE'): ExistingStack {
   return { outputs: new Map(Object.entries(outputs)), status, account: '123456789012' };
@@ -59,7 +64,9 @@ function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE'): Exi
 /** Name-aware stack lookup: only the listed stacks exist. */
 const stacks = (byName: Record<string, ExistingStack>) => async (_region: string, name: string) => byName[name] ?? null;
 
-type FakeOptions = Partial<SetupDeps> & { answers?: string[]; diff?: string; diffCode?: number; deployCode?: number };
+type FakeOptions = Partial<SetupDeps> & {
+  answers?: string[]; diff?: string; diffCode?: number; deployCode?: number; deployLines?: string[];
+};
 
 function deps(overrides: FakeOptions = {}): SetupDeps {
   const answers = [...(overrides.answers ?? [])];
@@ -83,10 +90,12 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
         expect(fs.existsSync(candidate)).toBe(true);
         return { code: overrides.diffCode ?? 0, output: overrides.diff ?? NO_CHANGES };
       }
+      for (const line of overrides.deployLines ?? []) options.onLine?.(line);
       return { code: overrides.deployCode ?? 0, output: '' };
     },
     configureFromStack: async () => BUNDLE,
-    log: message => { log.push(message); },
+    screen: { tty: false, write: chunk => { out.push(chunk); } },
+    now: (() => { let t = 0; return () => (t += 30_000); })(),
     ...overrides,
   };
 }
@@ -105,7 +114,7 @@ beforeEach(() => {
   fs.writeFileSync(path.join(root, 'mise.toml'), '');
   configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-setup-config-'));
   process.env.BGAGENT_CONFIG_DIR = configDir;
-  log = [];
+  out = [];
   runs = [];
   process.exitCode = undefined;
 });
@@ -119,7 +128,7 @@ afterEach(() => {
 describe('new installation', () => {
   test('recommends the minimal profile, diffs a candidate, then writes, deploys and configures', async () => {
     await setup({}, deps({ answers: [...ENTER_ALL, 'y'] }));
-    expect(log).toContain('Recommended: the governed minimal profile (all optional features off).');
+    expect(text()).toContain('New installation: every optional feature defaults to off (the governed minimal profile).');
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
     // Diff ran before the repository profile existed; deploy ran after, on that same file.
@@ -128,8 +137,12 @@ describe('new installation', () => {
     expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev']));
     expect(runs[1].args).toEqual([
       '//cdk:deploy', '--', '-c', 'stackName=backgroundagent-dev',
-      '-c', `deploymentProfile=${path.join(root, DEPLOYMENT_PROFILE_FILE)}`, '--all',
+      '-c', `deploymentProfile=${path.join(root, DEPLOYMENT_PROFILE_FILE)}`, '--all', '--require-approval', 'never', '--progress', 'events',
     ]);
+    // Raw CDK output goes to log files, not the terminal.
+    expect(runs.map(r => path.basename(r.logFile))).toEqual(['setup-changes.log', 'setup-deploy.log']);
+    expect(text()).toContain('Deployment complete in');
+    expect(text()).toContain(`API      ${BUNDLE.api_url}`);
     expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1', MISE_EXPERIMENTAL: '1' });
     expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual(BUNDLE);
   });
@@ -143,14 +156,14 @@ describe('new installation', () => {
     const asked: string[] = [];
     const d = deps({ answers: ['n', 'n', 'n', 'n', 'n', 'y'] });
     await runSetup({ region: 'eu-central-1' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
-    expect(log.some(line => line.includes('✗ AWS Agent Registry: unavailable in eu-central-1 (supported: us-east-1'))).toBe(true);
+    expect(text()).toContain('✗ AWS Agent Registry — not available in eu-central-1');
     expect(asked.some(q => q.includes('AWS Agent Registry'))).toBe(false);
     expect(profileOnDisk().agentRegistry).toBe(false);
   });
 
   test('shows the account the credentials resolve to', async () => {
     await setup({ features: 'none', yes: true }, deps({ resolveAccount: async () => '123456789012' }));
-    expect(log).toContain('Account:    123456789012');
+    expect(text()).toContain('Account  123456789012');
   });
 
   test('prompts for the Region when none is configured', async () => {
@@ -159,7 +172,7 @@ describe('new installation', () => {
     delete process.env.AWS_DEFAULT_REGION;
     try {
       await runSetup({}, deps({ answers: ['us-west-2', ...ENTER_ALL, 'y'] }));
-      expect(log).toContain('Region:     us-west-2');
+      expect(text()).toContain('Region   us-west-2');
     } finally {
       for (const [key, value] of Object.entries(saved)) if (value !== undefined) process.env[key] = value;
     }
@@ -175,10 +188,10 @@ describe('existing deployments', () => {
   test('preselects published features so accepting defaults removes nothing', async () => {
     const d = deps({ describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack,linear' }) }), answers: [...ENTER_ALL, 'y'] });
     await setup({}, d);
-    expect(log).toContain('Deployed:   slack, linear');
-    expect(log).toContain('Account:    123456789012');
+    expect(text()).toContain('Deployed Slack, Linear');
+    expect(text()).toContain('Account  123456789012');
     expect(profileOnDisk()).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true, linear: true });
-    expect(log.some(line => line.includes('REMOVE'))).toBe(false);
+    expect(text()).not.toContain('will be removed');
   });
 
   test('infers features on stacks that predate profiles, including the Tool Gateway', async () => {
@@ -186,7 +199,7 @@ describe('existing deployments', () => {
       SlackAppManifestJson: '{}', LinearWebhookSecretArn: 'a', JiraWebhookSecretArn: 'b', GitHubWebhookUrl: 'c', RegistryApiUrl: 'd',
     });
     await setup({ yes: true }, deps({ describeStack: stacks({ 'backgroundagent-dev': legacy }), hasToolGateway: async () => true }));
-    expect(log.some(line => line.includes('(inferred from stack outputs)'))).toBe(true);
+    expect(text()).toContain('(detected)');
     expect(profileOnDisk()).toEqual({
       slack: true, linear: true, jira: true, deployPreviewScreenshots: true, agentRegistry: true, toolGateway: true,
     });
@@ -215,8 +228,8 @@ describe('existing deployments', () => {
       answers: ['n', '', '', '', '', '', 'backgroundagent-dev'],
     });
     await setup({}, d);
-    expect(log.some(line => line.includes('off  Slack  ← REMOVE'))).toBe(true);
-    expect(log).toContain('   DELETE   AWS::DynamoDB::Table  SlackIntegration/InstallationTable');
+    expect(text()).toMatch(/✗ Slack\s+will be removed/);
+    expect(text()).toContain('• Slack: 1 table');
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
   });
@@ -323,17 +336,54 @@ describe('failures and cancellation', () => {
     expect(runs).toEqual([]);
   });
 
-  test('a failing diff writes and deploys nothing', async () => {
-    await expect(setup({ features: 'slack', yes: true }, deps({ diffCode: 1, diff: 'synth error' })))
-      .rejects.toThrow(/cdk diff failed \(exit 1\); nothing was written or deployed/);
+  test('a failing diff writes and deploys nothing and shows the error line, not the whole output', async () => {
+    const diff = 'Bundling asset...\nlots of noise\nError: Deployment profile is not deployable in us-east-1\n';
+    await expect(setup({ features: 'slack', yes: true }, deps({ diffCode: 1, diff })))
+      .rejects.toThrow(/Nothing was written or deployed/);
+    expect(text()).toContain('✗ Checking what will change  could not compute the changes');
+    expect(text()).toContain('Error: Deployment profile is not deployable in us-east-1');
+    expect(text()).not.toContain('lots of noise');
     expect(profileOnDisk()).toBeUndefined();
   });
 
-  test('a failing deploy keeps the profile and explains how to recover', async () => {
-    await expect(setup({ features: 'slack', yes: true }, deps({ deployCode: 2 })))
-      .rejects.toThrow(/Deploy failed \(exit 2\)\. abca\.deployment\.json keeps your selection/);
+  test('a failing deploy names the failed component and reason, and keeps the profile', async () => {
+    const deployLines = [
+      'Building assets...',
+      event(1, 3, 'CREATE_COMPLETE', 'TaskTable/Table', 'TaskTable1'),
+      event(2, 3, 'CREATE_FAILED', 'SlackIntegration/EventsFn', 'SlackEvents1', 'Resource handler returned message: "Code storage limit exceeded"'),
+      event(3, 3, 'CREATE_FAILED', 'TaskApi/Api', 'Api1', 'Resource creation cancelled'),
+    ];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(process.exitCode).toBe(1);
+    expect(text()).toContain('✗ Deployment failed after');
+    expect(text()).toContain('Slack — SlackIntegration/EventsFn');
+    expect(text()).toContain('Code storage limit exceeded');
+    // A cancellation is a consequence, not a cause.
+    expect(text()).not.toContain('Resource creation cancelled');
+    expect(text()).toContain('Full log: cdk/cdk.out/setup-deploy.log');
     expect(profileOnDisk()?.slack).toBe(true);
     expect(fs.existsSync(path.join(configDir, 'config.json'))).toBe(false);
+  });
+
+  test('a deploy that fails before CloudFormation shows the error from the output', async () => {
+    const deployLines = ['Building agent image', 'docker: Cannot connect to the Docker daemon', 'ERROR: failed to build asset'];
+    await setup({ features: 'slack', yes: true }, deps({ deployCode: 1, deployLines }));
+    expect(text()).toContain('✗ Preparing deployment');
+    expect(text()).toContain('ERROR: failed to build asset');
+  });
+
+  test('shows deploy progress per component and finishes every component with a check mark', async () => {
+    const diff = ['Stack backgroundagent-dev', '[+] AWS::DynamoDB::Table TaskTable/Table T1', '[+] AWS::Lambda::Function SlackIntegration/EventsFn S1'].join('\n');
+    const deployLines = [
+      event(1, 2, 'CREATE_IN_PROGRESS', 'TaskTable/Table', 'T1'),
+      event(1, 2, 'CREATE_COMPLETE', 'TaskTable/Table', 'T1'),
+      event(2, 2, 'CREATE_COMPLETE', 'SlackIntegration/EventsFn', 'S1'),
+    ];
+    await setup({ features: 'slack', yes: true }, deps({ diff, deployLines }));
+    expect(text()).toContain('✓ Checking what will change  2 to create · 0 to update · 0 to remove');
+    expect(text()).toContain('✓ Task data & storage');
+    expect(text()).toContain('✓ Slack');
+    expect(text()).toMatch(/✓ Deploying\s+█+ 100%/);
   });
 
   test('blocks CDK context that would override the confirmed selection', async () => {

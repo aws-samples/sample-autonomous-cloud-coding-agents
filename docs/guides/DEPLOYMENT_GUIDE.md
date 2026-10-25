@@ -183,9 +183,12 @@ The wizard works in this order:
    - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
    - It refuses to continue if the stack uses non-default compute (`ComputeTypes` output) or a `${stackName}-network` stack exists and the matching `compute_types` / `networkTopology` context is missing, because dropping that context would change more than features.
 3. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
-4. Writes the candidate profile to a temporary file and shows `cdk diff`. Nothing in the repository changes until you confirm.
+4. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `cdk/cdk.out/setup-changes.log`. Nothing in the repository changes until you confirm.
 5. Requires stronger confirmation if the diff deletes, replaces or orphans state-bearing resources (DynamoDB tables, secrets, buckets, log groups, user pools, VPCs, nested stacks): type the stack name interactively, or pass `--accept-data-loss` together with `--yes`. Declining, or closing the terminal at any prompt, exits with code 130 and leaves the repository unchanged.
-6. Writes `abca.deployment.json`, deploys with `mise //cdk:deploy -- -c stackName=<name> --all`, and configures the CLI from the stack outputs.
+6. Writes `abca.deployment.json` and deploys with `mise //cdk:deploy -- -c stackName=<name> --all`.
+   - While deploying, it shows a progress bar and one line per component (Networking, Task API, Agent runtime, each enabled feature), with a check mark as each finishes. Raw CDK output goes to `cdk/cdk.out/setup-deploy.log`.
+   - Your confirmation replaces CDK's own IAM approval prompt; the change summary says how many IAM roles and policies are included.
+   - On success it configures the CLI from the stack outputs. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
 
 `--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
 
