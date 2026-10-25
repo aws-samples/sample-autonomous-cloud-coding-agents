@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "lastVerified": "2026-10-25",
+  "source": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html",
+  "core": {
+    "label": "ABCA core platform",
+    "requiredServices": ["AgentCore Runtime", "AgentCore Memory"],
+    "regions": [
+      "us-east-1", "us-east-2", "us-west-2",
+      "eu-central-1", "eu-west-1", "eu-west-2", "eu-west-3", "eu-north-1",
+      "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "ap-northeast-2",
+      "ca-central-1", "sa-east-1", "us-gov-west-1"
+    ],
+    "remediation": "Deploy ABCA to a Region where both AgentCore Runtime and AgentCore Memory are available."
+  },
+  "features": {
+    "slack": {
+      "label": "Slack",
+      "description": "Slack App: /bgagent slash command, mentions, DMs and task notifications.",
+      "maturity": "stable",
+      "requiredServices": [],
+      "approximateResources": 51,
+      "stateful": true,
+      "remediation": "Slack uses only Regional services that ABCA core already requires."
+    },
+    "linear": {
+      "label": "Linear",
+      "description": "Linear webhook intake, epic orchestration and issue status updates.",
+      "maturity": "stable",
+      "requiredServices": [],
+      "approximateResources": 45,
+      "stateful": true,
+      "remediation": "Linear uses only Regional services that ABCA core already requires."
+    },
+    "jira": {
+      "label": "Jira",
+      "description": "Jira Cloud webhook intake, epic orchestration and issue status updates.",
+      "maturity": "stable",
+      "requiredServices": [],
+      "approximateResources": 35,
+      "stateful": true,
+      "remediation": "Jira uses only Regional services that ABCA core already requires."
+    },
+    "deployPreviewScreenshots": {
+      "label": "Deploy-preview screenshots",
+      "description": "GitHub deployment_status webhook that screenshots preview deploys with AgentCore Browser.",
+      "maturity": "stable",
+      "requiredServices": ["AgentCore Built-in Tools (Browser)", "Amazon CloudFront"],
+      "regions": [
+        "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+        "eu-central-1", "eu-west-1", "eu-west-2", "eu-south-1", "eu-west-3", "eu-south-2", "eu-north-1",
+        "ap-southeast-5", "ap-south-1", "ap-south-2", "ap-southeast-1", "ap-southeast-2", "ap-southeast-7",
+        "ap-northeast-1", "ap-northeast-2", "ca-central-1", "sa-east-1", "us-gov-west-1"
+      ],
+      "approximateResources": 23,
+      "stateful": true,
+      "remediation": "Choose a Region where AgentCore Built-in Tools are available, or disable deploy-preview screenshots: set features.deployPreviewScreenshots to false in abca.deployment.json, pass -c enableDeployPreviewScreenshots=false, or run bgagent setup."
+    },
+    "agentRegistry": {
+      "label": "AWS Agent Registry",
+      "description": "Central registry for Blueprint MCP servers, skills and Cedar policy modules (ADR-022).",
+      "maturity": "stable",
+      "requiredServices": ["AWS Agent Registry"],
+      "regions": ["us-east-1", "us-west-2", "eu-west-1", "ap-southeast-2", "ap-northeast-1"],
+      "approximateResources": 2,
+      "stateful": true,
+      "remediation": "Choose one of the supported Regions, or disable the Agent Registry: set features.agentRegistry to false in abca.deployment.json, pass -c enableAgentRegistry=false, or run bgagent setup."
+    },
+    "toolGateway": {
+      "label": "Tool Gateway",
+      "description": "AgentCore Gateway federating platform MCP tools to the agent (ADR-019, proposed).",
+      "maturity": "experimental",
+      "requiredServices": ["AgentCore Gateway"],
+      "regions": [
+        "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+        "eu-central-1", "eu-west-1", "eu-west-2", "eu-south-1", "eu-west-3", "eu-south-2", "eu-north-1",
+        "ap-southeast-5", "ap-south-1", "ap-south-2", "ap-southeast-1", "ap-southeast-2", "ap-southeast-7",
+        "ap-northeast-1", "ap-northeast-2", "ca-central-1", "sa-east-1", "us-gov-west-1"
+      ],
+      "approximateResources": 7,
+      "stateful": false,
+      "remediation": "Choose a Region where AgentCore Gateway is available, or disable the Tool Gateway: set features.toolGateway to false in abca.deployment.json, pass -c enableToolGateway=false, or run bgagent setup."
+    }
+  }
+}

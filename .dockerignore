@@ -25,6 +25,9 @@ agent/__pycache__/
 agent/**/__pycache__/
 agent/**/*.pyc
 
+# Deployment profile (ADR-024): infrastructure selection only; editing it must not rebuild the image
+abca.deployment.json
+
 # Git and tooling
 .git/
 .prek/

@@ -363,23 +363,23 @@ export class GitHubScreenshotIntegration extends Construct {
       // preview is captured + posted to the PR but never appended to the Linear
       // iteration reply (observed in practice — the head_sha refinement was
       // added without extending its IAM grant).
-      this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:Query'],
-        resources: [
-          Stack.of(this).formatArn({
+      // Each tracker's index only when that tracker is wired (ADR-024).
+      const issueIndexes = [
+        ...(props.linearWorkspaceRegistryTable ? ['LinearIssueIndex'] : []),
+        ...(props.jiraWorkspaceRegistryTable ? ['JiraIssueIndex'] : []),
+      ];
+      const taskTableName = props.taskTable.tableName;
+      if (issueIndexes.length > 0) {
+        this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['dynamodb:Query'],
+          resources: issueIndexes.map(indexName => Stack.of(this).formatArn({
             service: 'dynamodb',
             resource: 'table',
-            resourceName: `${props.taskTable.tableName}/index/LinearIssueIndex`,
+            resourceName: `${taskTableName}/index/${indexName}`,
             arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          }),
-          ...(props.jiraWorkspaceRegistryTable ? [Stack.of(this).formatArn({
-            service: 'dynamodb',
-            resource: 'table',
-            resourceName: `${props.taskTable.tableName}/index/JiraIssueIndex`,
-            arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
-          })] : []),
-        ],
-      }));
+          })),
+        }));
+      }
       this.webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem'],
         resources: [

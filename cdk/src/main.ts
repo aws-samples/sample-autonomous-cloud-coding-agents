@@ -27,6 +27,8 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
+import { assertCapabilitiesAvailable } from './deployment/capabilities';
+import { readDeploymentProfile, resolveDeploymentFeatures } from './deployment/features';
 import { resolveComputeBackends } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
 import { NetworkStack, resolveNetworkTopology } from './stacks/network';
@@ -52,6 +54,8 @@ export interface BuildAppOptions {
   readonly resolveCallerAccount?: ResolveCallerAccountFn;
   /** Repository configuration shared by provisioning and DNS policy. */
   readonly blueprints?: readonly BlueprintDefinition[];
+  /** Directory holding `abca.deployment.json`. @default the repository root */
+  readonly profileRoot?: string;
 }
 
 /**
@@ -100,6 +104,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
   const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
   const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
+  // One profile read for local and CI synthesis alike (ADR-024); context
+  // switches still override individual features.
+  const features = resolveDeploymentFeatures(app.node, readDeploymentProfile(app.node, options.profileRoot));
+  // Fail before any AWS lookup or network stack; AgentStack repeats the check
+  // for direct construction.
+  assertCapabilitiesAvailable(features, options.region ?? devEnv.region);
 
   const env = {
     account: options.account ?? devEnv.account,
@@ -140,6 +150,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       agentCoreAvailabilityZones: azResolution.zones,
       network,
       blueprints,
+      features,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
     },
   );

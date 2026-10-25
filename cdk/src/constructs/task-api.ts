@@ -62,6 +62,23 @@ const SCREENING_HANDLER_MEMORY_MB = 512;
 /** Memory for confirm-uploads / webhook-create attachment path (MB). */
 const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 
+/** Webhook routes that bypass the body-size rule; each is HMAC-verified in its Lambda. */
+export const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
+export type LargeBodyWebhookPath = typeof LARGE_BODY_WEBHOOK_PATHS[number];
+
+const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchString: string) => ({
+  byteMatchStatement: {
+    fieldToMatch: { uriPath: {} },
+    positionalConstraint,
+    searchString,
+    textTransformations: [{ priority: 0, type: 'NONE' }],
+  },
+});
+
+/** WAF rejects one-element OR/AND statements, so a single match is used directly. */
+const anyOf = (statements: object[]) => statements.length === 1 ? statements[0] : { orStatement: { statements } };
+const allOf = (statements: object[]) => statements.length === 1 ? statements[0] : { andStatement: { statements } };
+
 /**
  * Properties for TaskApi construct.
  */
@@ -239,6 +256,12 @@ export interface TaskApiProps {
    */
   readonly budgetTable?: dynamodb.ITable;
 
+  /**
+   * Deployed webhook routes whose payloads exceed CRS SizeRestrictions_BODY
+   * (#836). Only these are exempted, so an omitted integration leaves no WAF
+   * exemption behind. @default every large-body webhook (legacy topology)
+   */
+  readonly largeBodyWebhookPaths?: readonly LargeBodyWebhookPath[];
 }
 
 /**
@@ -340,6 +363,7 @@ export class TaskApi extends Construct {
     });
 
     // --- WAF Web ACL ---
+    const largeBodyWebhookPaths: readonly string[] = props.largeBodyWebhookPaths ?? LARGE_BODY_WEBHOOK_PATHS;
     const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
       defaultAction: { allow: {} },
       scope: 'REGIONAL',
@@ -371,57 +395,16 @@ export class TaskApi extends Construct {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
               excludedRules: [{ name: 'SizeRestrictions_BODY' }],
-              scopeDownStatement: {
-                orStatement: {
-                  statements: [
-                    {
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'STARTS_WITH',
-                        searchString: '/v1/tasks',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // Linear webhook payloads > 8 KB (HMAC-verified in Lambda,
-                      // rate-limited by priority-4 rule below).
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/linear/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // Jira issue payloads include the full issue field set.
-                      // Attachment metadata can push them over 8 KB. The
-                      // receiver HMAC-verifies the raw body and the priority-4
-                      // rule below still rate-limits this route.
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/jira/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                    {
-                      // GitHub deployment_status webhook (preview-deploy
-                      // screenshot pipeline). The full payload (workflow run
-                      // history + deploy URLs + deployment metadata) exceeds
-                      // 8 KB and trips SizeRestrictions_BODY. HMAC-verified
-                      // in Lambda. (CloudWatch BlockedRequests metric
-                      // confirmed: SizeRestrictions_BODY fired, not RFI —
-                      // GenericRFI_BODY has never blocked on this WebACL.)
-                      byteMatchStatement: {
-                        fieldToMatch: { uriPath: {} },
-                        positionalConstraint: 'EXACTLY',
-                        searchString: '/v1/github/webhook',
-                        textTransformations: [{ priority: 0, type: 'NONE' }],
-                      },
-                    },
-                  ],
-                },
-              },
+              // Linear/Jira payloads > 8 KB (issue field sets, attachment
+              // metadata); GitHub deployment_status payloads (workflow history +
+              // deploy URLs) tripped SizeRestrictions_BODY, not RFI. Each route
+              // HMAC-verifies the raw body and the priority-4 rule rate-limits it.
+              scopeDownStatement: anyOf([
+                uriPathMatch('STARTS_WITH', '/v1/tasks'),
+                ...LARGE_BODY_WEBHOOK_PATHS
+                  .filter(webhookPath => largeBodyWebhookPaths.includes(webhookPath))
+                  .map(webhookPath => uriPathMatch('EXACTLY', webhookPath)),
+              ]),
             },
           },
           visibilityConfig: {
@@ -439,60 +422,12 @@ export class TaskApi extends Construct {
             managedRuleGroupStatement: {
               vendorName: 'AWS',
               name: 'AWSManagedRulesCommonRuleSet',
-              scopeDownStatement: {
-                andStatement: {
-                  statements: [
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'STARTS_WITH',
-                            searchString: '/v1/tasks',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/jira/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/linear/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                    {
-                      notStatement: {
-                        statement: {
-                          byteMatchStatement: {
-                            fieldToMatch: { uriPath: {} },
-                            positionalConstraint: 'EXACTLY',
-                            searchString: '/v1/github/webhook',
-                            textTransformations: [{ priority: 0, type: 'NONE' }],
-                          },
-                        },
-                      },
-                    },
-                  ],
-                },
-              },
+              // Order preserved from the original rule so the legacy template is unchanged.
+              scopeDownStatement: allOf(['/v1/tasks', '/v1/jira/webhook', '/v1/linear/webhook', '/v1/github/webhook']
+                .filter(uriPath => uriPath === '/v1/tasks' || largeBodyWebhookPaths.includes(uriPath))
+                .map(uriPath => ({
+                  notStatement: { statement: uriPathMatch(uriPath === '/v1/tasks' ? 'STARTS_WITH' : 'EXACTLY', uriPath) },
+                }))),
             },
           },
           visibilityConfig: {
