@@ -33,6 +33,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
+import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
 import { generateInviteCode } from '../invite-code';
 import {
@@ -3017,7 +3018,7 @@ export function makeLinearCommand(): Command {
       }),
   );
 
-  return linear;
+  return requireDeployedFeature(linear, 'linear');
 }
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────

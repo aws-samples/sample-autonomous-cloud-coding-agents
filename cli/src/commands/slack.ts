@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { execSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
 import * as readline from 'readline';
 import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import { PutSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
@@ -27,6 +24,8 @@ import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig } from '../config';
+import { featureNotDeployedError } from '../deployment-profile';
+import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
 import { promptSecret } from '../prompt-secret';
 import { makeClient, makeDocClient } from '../ua';
@@ -68,34 +67,14 @@ export function makeSlackCommand(): Command {
         console.log('Fetching Slack App manifest from stack outputs...\n');
         let manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
 
-        if (!manifestJson) {
-          console.log('Stack has not been deployed yet.');
-          const shouldDeploy = await promptConfirm('Deploy now? (y/n) ');
-          if (shouldDeploy) {
-            console.log('\nDeploying stack (this may take a few minutes)...\n');
-            try {
-              const repoRoot = findRepoRoot();
-              console.log(`Deploying from ${repoRoot}\n`);
-              execSync('MISE_EXPERIMENTAL=1 mise run //cdk:deploy', {
-                cwd: repoRoot,
-                stdio: 'inherit',
-              });
-              console.log('');
-              manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              console.error(`\nDeploy failed: ${msg}`);
-              process.exit(1);
-            }
-          }
-        }
+        // Deploying happens through `bgagent setup`, which shows the diff and
+        // guards data loss; a bare deploy here would follow whatever the profile says.
+        if (!manifestJson) throw featureNotDeployedError('slack', opts.stackName);
 
         if (manifestJson) {
           const createUrl = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(manifestJson).replace(/%2F/g, '/')}`;
           console.log('Open this URL to create your Slack App (all settings pre-filled):');
           console.log(`  ${createUrl}\n`);
-        } else {
-          console.log('Create the app manually at https://api.slack.com/apps\n');
         }
 
         // Step 2: Fetch secret ARNs from stack outputs (CDK creates the placeholders).
@@ -212,7 +191,7 @@ export function makeSlackCommand(): Command {
       }),
   );
 
-  return slack;
+  return requireDeployedFeature(slack, 'slack');
 }
 
 /**
@@ -337,19 +316,6 @@ async function promptAndStoreCredentials(region: string, arns: SecretArns): Prom
 
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
-function promptConfirm(label: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-    });
-    rl.question(label, (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase().startsWith('y'));
-    });
-  });
-}
-
 function promptVisible(label: string): Promise<string> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({
@@ -365,27 +331,6 @@ function promptVisible(label: string): Promise<string> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function findRepoRoot(): string {
-  const startDirs = [
-    process.cwd(),
-    path.resolve(__dirname, '..', '..', '..'),
-  ];
-
-  for (const start of startDirs) {
-    let dir = start;
-    while (true) {
-      if (fs.existsSync(path.join(dir, 'mise.toml')) && fs.existsSync(path.join(dir, 'cdk', 'cdk.json'))) {
-        return dir;
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  }
-
-  throw new Error('Could not find project root. Run this command from the repository directory.');
-}
 
 async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
   try {
