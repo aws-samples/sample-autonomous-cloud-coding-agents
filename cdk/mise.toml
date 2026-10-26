@@ -106,6 +106,10 @@ description = "Migrate pre-#703 pinned log-delivery resources before deploy (no-
 # needs no dependency at all.
 run = "node --experimental-strip-types scripts/preflight-log-delivery.ts"
 
+[tasks.preflight]
+description = "Read-only: check the account's bootstrap policy bundle against this checkout (PASS/WARN/FAIL; --json for CI)"
+run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, required=false)}}"
+
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need

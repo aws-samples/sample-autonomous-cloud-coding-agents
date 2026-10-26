@@ -18,18 +18,21 @@
  */
 
 /**
- * Deploy preflight: refuse to deploy against a stale bootstrap policy bundle.
- * Decision logic and rationale: `src/bootstrap/preflight.ts`.
+ * `mise //cdk:preflight` (and the first step of `mise //cdk:deploy`): refuse to deploy
+ * against a bootstrap that cannot deploy this checkout (#126). Decision logic and
+ * rationale: `src/bootstrap/preflight.ts`. Needs only `cloudformation:DescribeStacks`.
  *
- * Usage (from `mise //cdk:deploy`, which forwards the same args to `cdk deploy`):
- *   tsx scripts/preflight-bootstrap.ts [--profile P] [--region R] [--toolkit-stack-name N] [...]
+ * Usage: tsx scripts/preflight-bootstrap.ts [--json] [--profile P] [--region R]
+ *          [--toolkit-stack-name N] [-c compute_types=...] [...other cdk args, ignored]
  *
- * Escape hatch: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1 skips entirely.
+ * Exit 0 on PASS or WARN, 1 on FAIL. Escape hatch: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.
  */
 
 import { execFileSync } from 'node:child_process';
-import { evaluateBootstrap, type CfnOutput } from '../src/bootstrap/preflight';
+import { readFileSync } from 'node:fs';
+import { evaluateBootstrap, requiredPolicySet, type BootstrapVerdict, type CfnOutput } from '../src/bootstrap/preflight';
 import { BOOTSTRAP_VERSION, computeBootstrapHash } from '../src/bootstrap/version';
+import { resolveComputeBackends } from '../src/handlers/shared/compute-backend';
 
 /** `--profile` / `--region` (space and `=` forms) as they appear in the CDK arg list. */
 function awsGlobalArgs(argv: readonly string[]): string[] {
@@ -49,6 +52,21 @@ function toolkitStackName(argv: readonly string[]): string {
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : 'CDKToolkit';
 }
 
+/** The app's `compute_types`/`compute_type` context: `-c key=value` args win over cdk.json, as in CDK. */
+function contextValue(argv: readonly string[], key: string): unknown {
+  for (let i = argv.length - 1; i >= 0; i -= 1) {
+    const a = argv[i]!;
+    const value = (a === '-c' || a === '--context') ? argv[i + 1] : a.startsWith('--context=') ? a.slice('--context='.length) : undefined;
+    if (value?.startsWith(`${key}=`)) return value.slice(key.length + 1);
+  }
+  try {
+    return (JSON.parse(readFileSync('cdk.json', 'utf8')) as { context?: Record<string, unknown> }).context?.[key];
+  } catch {
+    // nosemgrep: ts-silent-success-masking -- no cdk.json in cwd means no overrides; resolveComputeBackends applies the app's own default
+    return undefined;
+  }
+}
+
 /** CDKToolkit outputs, or null when the stack does not exist. Any other failure throws. */
 function readToolkitOutputs(argv: readonly string[]): CfnOutput[] | null {
   try {
@@ -66,26 +84,42 @@ function readToolkitOutputs(argv: readonly string[]): CfnOutput[] | null {
   }
 }
 
+function report(verdict: BootstrapVerdict, json: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(verdict));
+    return;
+  }
+  const line = `bootstrap preflight: ${verdict.status}: ${verdict.message}`;
+  if (verdict.status === 'FAIL') {
+    console.error(line);
+    console.error('To bypass at your own risk: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.');
+  } else {
+    console.log(line);
+  }
+}
+
 function main(argv: readonly string[]): number {
+  const json = argv.includes('--json');
   if (process.env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT === '1') {
-    console.log('bootstrap preflight: skipped (ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1).');
+    report({ status: 'PASS', message: 'skipped (ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1).' }, json);
     return 0;
   }
-  const verdict = evaluateBootstrap(readToolkitOutputs(argv), { version: BOOTSTRAP_VERSION, hash: computeBootstrapHash() });
-  if (verdict.ok) {
-    console.log(`bootstrap preflight: ${verdict.message}`);
-    return 0;
-  }
-  console.error(`bootstrap preflight: ${verdict.message}`);
-  console.error('To bypass at your own risk: ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.');
-  return 1;
+  const backends = resolveComputeBackends(contextValue(argv, 'compute_types'), contextValue(argv, 'compute_type'));
+  const verdict = evaluateBootstrap(readToolkitOutputs(argv), {
+    version: BOOTSTRAP_VERSION,
+    hash: computeBootstrapHash(),
+    policySet: requiredPolicySet(backends),
+  });
+  report(verdict, json);
+  return verdict.status === 'FAIL' ? 1 : 0;
 }
 
 try {
   process.exit(main(process.argv.slice(2)));
 } catch (err) {
-  console.error(`bootstrap preflight: ${err instanceof Error ? err.message : String(err)}`);
-  console.error('Aborting before deploy: the bootstrap state could not be determined (commonly: no AWS CLI on PATH, '
-    + 'or expired credentials). Fix the error above and re-run, or bypass with ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.');
+  const message = `${err instanceof Error ? err.message : String(err)} The bootstrap state could not be determined `
+    + '(commonly: no AWS CLI on PATH, or expired credentials). Fix it and re-run, or bypass with ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1.';
+  if (process.argv.includes('--json')) console.log(JSON.stringify({ status: 'FAIL', message }));
+  else console.error(`bootstrap preflight: FAIL: ${message}`);
   process.exit(1);
 }

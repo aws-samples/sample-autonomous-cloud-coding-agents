@@ -17,13 +17,15 @@
  *  SOFTWARE.
  */
 
-import { compareVersions, evaluateBootstrap } from '../../src/bootstrap/preflight';
+import { compareVersions, evaluateBootstrap, requiredPolicySet } from '../../src/bootstrap/preflight';
 
-const EXPECTED = { version: '1.7.0', hash: 'a'.repeat(64) };
-const outputs = (version?: string, hash?: string) => [
+const BASE = ['Infrastructure', 'Application', 'Observability', 'Compute-Agentcore'];
+const EXPECTED = { version: '1.7.0', hash: 'a'.repeat(64), policySet: BASE };
+const outputs = (version?: string, hash?: string, policySet: string | undefined = BASE.join(',')) => [
   { OutputKey: 'BootstrapVersion', OutputValue: '32' },
   ...(version ? [{ OutputKey: 'BootstrapPolicyVersion', OutputValue: version }] : []),
   ...(hash ? [{ OutputKey: 'BootstrapPolicyHash', OutputValue: hash }] : []),
+  ...(version && policySet !== undefined ? [{ OutputKey: 'BootstrapPolicySet', OutputValue: policySet }] : []),
 ];
 
 describe('compareVersions', () => {
@@ -34,37 +36,45 @@ describe('compareVersions', () => {
   });
 });
 
+describe('requiredPolicySet', () => {
+  it('adds the compute policy for each optional backend', () => {
+    expect(requiredPolicySet(['agentcore'])).toEqual(BASE);
+    expect(requiredPolicySet(['agentcore', 'ecs', 'lambda-microvm'])).toEqual([...BASE, 'Compute-ECS', 'Compute-LambdaMicrovms']);
+  });
+});
+
 describe('evaluateBootstrap', () => {
-  it('fails when the account was never bootstrapped', () => {
-    const verdict = evaluateBootstrap(null, EXPECTED);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.message).toMatch(/not bootstrapped/);
+  it('FAILs when the account was never bootstrapped', () => {
+    expect(evaluateBootstrap(null, EXPECTED)).toEqual({ status: 'FAIL', message: expect.stringMatching(/not bootstrapped/) });
   });
 
-  it('fails fast on an older policy bundle, naming both versions and the fix', () => {
+  it('FAILs on a default CDK bootstrap without ABCA outputs', () => {
+    expect(evaluateBootstrap(outputs(), EXPECTED)).toEqual({ status: 'FAIL', message: expect.stringMatching(/default CDK bootstrap/) });
+  });
+
+  it('FAILs fast on an older policy bundle, naming both versions and the fix', () => {
     const verdict = evaluateBootstrap(outputs('1.6.0', 'b'.repeat(64)), EXPECTED);
-    expect(verdict.ok).toBe(false);
+    expect(verdict.status).toBe('FAIL');
     expect(verdict.message).toMatch(/1\.6\.0.*1\.7\.0/);
     expect(verdict.message).toMatch(/mise \/\/cdk:bootstrap/);
   });
 
-  it('fails when the version matches but the policies differ', () => {
-    const verdict = evaluateBootstrap(outputs('1.7.0', 'b'.repeat(64)), EXPECTED);
-    expect(verdict.ok).toBe(false);
-    expect(verdict.message).toMatch(/bump BOOTSTRAP_VERSION/);
+  it('FAILs when a compute policy the app needs was not bootstrapped', () => {
+    const verdict = evaluateBootstrap(outputs('1.7.0', EXPECTED.hash), { ...EXPECTED, policySet: [...BASE, 'Compute-ECS'] });
+    expect(verdict.status).toBe('FAIL');
+    expect(verdict.message).toMatch(/Compute-ECS/);
   });
 
-  it('passes on an exact match', () => {
-    expect(evaluateBootstrap(outputs('1.7.0', EXPECTED.hash), EXPECTED)).toEqual({ ok: true, message: expect.stringMatching(/matches/) });
+  it('WARNs, without blocking, when the version matches but the policies differ', () => {
+    expect(evaluateBootstrap(outputs('1.7.0', 'b'.repeat(64)), EXPECTED).status).toBe('WARN');
   });
 
-  it('passes on a newer bundle (forward-compatible accounts)', () => {
-    expect(evaluateBootstrap(outputs('1.8.0', 'c'.repeat(64)), EXPECTED).ok).toBe(true);
+  it('PASSes on an exact match and on a newer bundle', () => {
+    expect(evaluateBootstrap(outputs('1.7.0', EXPECTED.hash), EXPECTED).status).toBe('PASS');
+    expect(evaluateBootstrap(outputs('1.8.0', 'c'.repeat(64)), EXPECTED).status).toBe('PASS');
   });
 
-  it('passes, and says why, on a plain CDK bootstrap without ABCA outputs', () => {
-    const verdict = evaluateBootstrap(outputs(), EXPECTED);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.message).toMatch(/not the ABCA least-privilege bootstrap/);
+  it('tolerates a bundle that predates the BootstrapPolicySet output', () => {
+    expect(evaluateBootstrap(outputs('1.7.0', EXPECTED.hash, undefined), EXPECTED).status).toBe('PASS');
   });
 });
