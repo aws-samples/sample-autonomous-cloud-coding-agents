@@ -50,9 +50,27 @@ describe('infrastructurePolicy', () => {
       'CloudFormationSelf',
       'IAMRolesAndPolicies',
       'IAMPassRole',
+      'NestedStackPassRole',
       'VPCNetworking',
       'Route53ResolverDNSFirewall',
     ]);
+  });
+
+  it('lets the execution role pass ONLY itself, ONLY to CloudFormation (nested stacks)', () => {
+    // CloudFormation creates nested stacks as the execution role and passes that
+    // role on to each child, which needs iam:PassRole on the role itself. Keep this
+    // narrow: it must never become a general PassRole grant.
+    const resolvedDoc = stack.resolve(doc);
+    const statements = resolvedDoc.Statement as Array<{
+      Sid: string;
+      Action: string | string[];
+      Resource: string | string[];
+      Condition?: { StringEquals?: Record<string, string | string[]> };
+    }>;
+    const nested = statements.find((st) => st.Sid === 'NestedStackPassRole')!;
+    expect(nested.Action).toEqual('iam:PassRole');
+    expect(nested.Resource).toEqual('arn:aws:iam::*:role/cdk-*-cfn-exec-role-*');
+    expect(nested.Condition?.StringEquals?.['iam:PassedToService']).toEqual('cloudformation.amazonaws.com');
   });
 
   it('has unique SIDs', () => {

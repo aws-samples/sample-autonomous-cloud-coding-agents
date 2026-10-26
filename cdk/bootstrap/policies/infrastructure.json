@@ -86,6 +86,17 @@
       "Sid": "IAMPassRole"
     },
     {
+      "Action": "iam:PassRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "cloudformation.amazonaws.com"
+        }
+      },
+      "Effect": "Allow",
+      "Resource": "arn:aws:iam::*:role/cdk-*-cfn-exec-role-*",
+      "Sid": "NestedStackPassRole"
+    },
+    {
       "Action": [
         "ec2:CreateVpc",
         "ec2:DeleteVpc",

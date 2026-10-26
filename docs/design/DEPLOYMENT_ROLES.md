@@ -188,6 +188,17 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       }
     },
     {
+      "Sid": "NestedStackPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/cdk-*-cfn-exec-role-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "cloudformation.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "VPCNetworking",
       "Effect": "Allow",
       "Action": [
@@ -281,6 +292,8 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
   ]
 }
 ```
+
+`NestedStackPassRole` (bundle 1.7.0) exists because the app contains nested stacks. CloudFormation creates them *as* the execution role and passes that same role on to each child stack, which needs `iam:PassRole` on the role itself. Without it, every deploy fails at change-set creation with `cfn-exec-role ... is not authorized to perform: iam:PassRole on resource: ...cfn-exec-role...`. The statement is limited to the CDK execution role and to `cloudformation.amazonaws.com`, so it grants nothing the role does not already hold. `test/bootstrap/policy-coverage.test.ts` synthesizes the app and fails if nested stacks are present without it; `mise //cdk:deploy` also refuses to start against an older bundle (`scripts/preflight-bootstrap.ts`).
 
 ### IaCRole-ABCA-Application
 

@@ -125,7 +125,12 @@ depends = [":clean:disk"]
 # `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
 # case, and what the guides tell operators to run) fails with a usage error instead of
 # deploying.
+#
+# The bootstrap preflight runs first: a stale bootstrap policy bundle otherwise fails
+# with an IAM AccessDenied only AFTER every asset is built and uploaded (many minutes).
+# tsx, not type stripping: it imports the policy modules, which use directory imports.
 run = [
+  "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, required=false)}}",
   "node --experimental-strip-types scripts/preflight-log-delivery.ts {{arg(name='cdkargs', var=true, required=false)}}",
   "npx cdk deploy {{arg(name='cdkargs', var=true, required=false)}}",
 ]
