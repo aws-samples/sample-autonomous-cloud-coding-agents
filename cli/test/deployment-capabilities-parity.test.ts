@@ -19,8 +19,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { REQUIRED_BOOTSTRAP_VERSION } from '../src/commands/setup';
 import { CAPABILITY_CATALOG } from '../src/deployment-capabilities';
-import { DEPLOYMENT_FEATURES } from '../src/deployment-profile';
+import { COMPUTE_BACKENDS, DEPLOYMENT_FEATURES } from '../src/deployment-profile';
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
@@ -51,5 +52,16 @@ describe('deployment capability parity', () => {
     };
     expect(Object.keys(extract(cdk))).toHaveLength(DEPLOYMENT_FEATURES.length);
     expect(extract(cli)).toEqual(extract(cdk));
+  });
+
+  test('the CLI requires the bootstrap bundle version CDK generates', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'bootstrap', 'version.ts'), 'utf-8');
+    expect(/export const BOOTSTRAP_VERSION = '([^']+)'/.exec(source)?.[1]).toBe(REQUIRED_BOOTSTRAP_VERSION);
+  });
+
+  test('the CLI compute backends match the CDK resolver', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, 'cdk', 'src', 'handlers', 'shared', 'compute-backend.ts'), 'utf-8');
+    const declared = /export type ComputeBackend = ([^;]+);/.exec(source)?.[1] ?? '';
+    expect([...declared.matchAll(/'([a-z-]+)'/g)].map(m => m[1])).toEqual([...COMPUTE_BACKENDS]);
   });
 });

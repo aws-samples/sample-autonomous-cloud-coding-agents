@@ -106,7 +106,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
   // One profile read for local and CI synthesis alike (ADR-024); context
   // switches still override individual features.
-  const features = resolveDeploymentFeatures(app.node, readDeploymentProfile(app.node, options.profileRoot));
+  const profile = readDeploymentProfile(app.node, options.profileRoot);
+  const features = resolveDeploymentFeatures(app.node, profile?.features);
+  // The profile's compute selection applies unless context chooses explicitly,
+  // so a plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed.
+  if (profile?.compute && app.node.tryGetContext('compute_types') === undefined
+    && app.node.tryGetContext('compute_type') === undefined) {
+    app.node.setContext('compute_types', profile.compute.join(','));
+  }
   // Fail before any AWS lookup or network stack; AgentStack repeats the check
   // for direct construction.
   assertCapabilitiesAvailable(features, options.region ?? devEnv.region);

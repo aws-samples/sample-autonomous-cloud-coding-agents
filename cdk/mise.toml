@@ -140,7 +140,8 @@ run = [
 [tasks.bootstrap]
 description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
-run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml"
+# Args after `--` (e.g. `aws://<account>/<region>`) pin the environment; `bgagent setup` passes one.
+run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks."bootstrap:generate"]
 description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"

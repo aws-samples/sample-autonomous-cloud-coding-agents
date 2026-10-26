@@ -208,11 +208,12 @@ Choose optional features, validate them against the target Region, and deploy fr
 ```
 bgagent setup [--region <region>] [--stack-name <name>] [--repo-root <dir>]
 bgagent setup --features slack,jira --yes          # non-interactive
+bgagent setup --compute agentcore,ecs --features none --yes   # new install on both backends
 bgagent setup --features none --no-deploy          # write abca.deployment.json only
 bgagent setup -c networkTopology=split             # extra CDK context for diff and deploy (repeatable)
 ```
 
-The wizard asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `cdk/cdk.out/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature the Region does not support fails with the supported Regions.
+For a new installation the wizard first asks where agents run (AgentCore, ECS, or both), and prepares the account (CDK bootstrap) if needed. It then asks y/n per feature, shows a review screen, summarizes the changes, asks to deploy, and then shows live per-component progress and the result (complete, or the failed component and its cause). Raw CDK output is written to `cdk/cdk.out/setup-changes.log` and `setup-deploy.log`. New stacks default to the governed minimal profile. Existing stacks preselect their deployed features. Before writing `abca.deployment.json`, the wizard shows `cdk diff` and asks for confirmation. Deleting, replacing or orphaning state-bearing resources needs the stack name typed back, or `--yes --accept-data-loss` when non-interactive. The same applies when `--no-deploy` removes a stateful feature. Cancelling exits with code 130 and leaves the repository unchanged. After deploying, it configures the CLI from the stack outputs. Features: `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. A feature the Region does not support fails with the supported Regions.
 
 Commands for a feature the stack omits (for example `bgagent slack setup`) fail and point back to `bgagent setup`.
 

@@ -57,12 +57,16 @@ const text = () => out.join('');
 const event = (n: number, total: number, status: string, constructPath: string, id: string, reason = '') =>
   `backgroundagent-dev | ${n}/${total} | 1:00:00 PM | ${status.padEnd(20)} | AWS::Lambda::Function | backgroundagent-dev/${constructPath}/Resource (${id}) ${reason}`;
 
-function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE'): ExistingStack {
-  return { outputs: new Map(Object.entries(outputs)), status, account: '123456789012' };
+function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE', parameters: Record<string, string> = {}): ExistingStack {
+  return { outputs: new Map(Object.entries(outputs)), parameters: new Map(Object.entries(parameters)), status, account: '123456789012' };
 }
 
-/** Name-aware stack lookup: only the listed stacks exist. */
-const stacks = (byName: Record<string, ExistingStack>) => async (_region: string, name: string) => byName[name] ?? null;
+/** A current ABCA bootstrap that already allows AgentCore. */
+const BOOTSTRAPPED = stack({ BootstrapPolicyVersion: '1.6.0' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
+
+/** Name-aware stack lookup: only the listed stacks (plus a current bootstrap unless overridden) exist. */
+const stacks = (byName: Record<string, ExistingStack | null>) => async (_region: string, name: string) =>
+  (name in byName ? byName[name] : name === 'CDKToolkit' ? BOOTSTRAPPED : null) ?? null;
 
 type FakeOptions = Partial<SetupDeps> & {
   answers?: string[]; diff?: string; diffCode?: number; deployCode?: number; deployLines?: string[];
@@ -73,8 +77,10 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
   return {
     cwd: root,
     interactive: true,
-    describeStack: async () => null,
+    describeStack: stacks({}),
     hasToolGateway: async () => false,
+    dockerRunning: async () => true,
+    setBootstrapComputeTypes: async () => undefined,
     resolveAccount: async () => undefined,
     // Running out of scripted answers behaves like a closed terminal.
     ask: async () => {
@@ -106,6 +112,9 @@ const profileOnDisk = () => {
 };
 const setup = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'us-east-1', ...opts }, d);
 const ENTER_ALL = ['', '', '', '', '', ''];
+/** Accept the preselected compute (AgentCore) on a new installation. */
+const COMPUTE_DEFAULT = '';
+const profileFile = () => JSON.parse(fs.readFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), 'utf-8'));
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-setup-test-'));
@@ -127,13 +136,13 @@ afterEach(() => {
 
 describe('new installation', () => {
   test('recommends the minimal profile, diffs a candidate, then writes, deploys and configures', async () => {
-    await setup({}, deps({ answers: [...ENTER_ALL, 'y'] }));
+    await setup({}, deps({ answers: [COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
     expect(text()).toContain('New installation: every optional feature defaults to off (the governed minimal profile).');
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
     // Diff ran before the repository profile existed; deploy ran after, on that same file.
     expect(runs[0].profileAtRun).toBeUndefined();
-    expect(runs[1].profileAtRun).toBe(serializeDeploymentProfile(MINIMAL_DEPLOYMENT_FEATURES));
+    expect(runs[1].profileAtRun).toBe(serializeDeploymentProfile({ features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore'] }));
     expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev']));
     expect(runs[1].args).toEqual([
       '//cdk:deploy', '--', '-c', 'stackName=backgroundagent-dev',
@@ -148,13 +157,13 @@ describe('new installation', () => {
   });
 
   test('asks about each available feature and records the answers', async () => {
-    await setup({}, deps({ answers: ['y', 'n', 'y', 'n', 'n', 'n', 'y'] }));
+    await setup({}, deps({ answers: [COMPUTE_DEFAULT, 'y', 'n', 'y', 'n', 'n', 'n', 'y'] }));
     expect(profileOnDisk()).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true, jira: true });
   });
 
   test('marks Region-unavailable features and never asks about them', async () => {
     const asked: string[] = [];
-    const d = deps({ answers: ['n', 'n', 'n', 'n', 'n', 'y'] });
+    const d = deps({ answers: [COMPUTE_DEFAULT, 'n', 'n', 'n', 'n', 'n', 'y'] });
     await runSetup({ region: 'eu-central-1' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
     expect(text()).toContain('✗ AWS Agent Registry — not available in eu-central-1');
     expect(asked.some(q => q.includes('AWS Agent Registry'))).toBe(false);
@@ -171,7 +180,7 @@ describe('new installation', () => {
     delete process.env.AWS_REGION;
     delete process.env.AWS_DEFAULT_REGION;
     try {
-      await runSetup({}, deps({ answers: ['us-west-2', ...ENTER_ALL, 'y'] }));
+      await runSetup({}, deps({ answers: ['us-west-2', COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
       expect(text()).toContain('Region   us-west-2');
     } finally {
       for (const [key, value] of Object.entries(saved)) if (value !== undefined) process.env[key] = value;
@@ -247,13 +256,22 @@ describe('existing deployments', () => {
     await expect(runSetup({ region: 'eu-central-1', yes: true }, d)).rejects.toThrow(/may be stale/);
   });
 
-  test('requires the compute context the stack was deployed with', async () => {
+  test('keeps the compute an existing stack was deployed with and records it in the profile', async () => {
     const existing = stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,ecs' });
-    await expect(setup({ yes: true }, deps({ describeStack: stacks({ 'backgroundagent-dev': existing }) })))
-      .rejects.toThrow(/--context compute_types=agentcore,ecs/);
-    await setup({ yes: true, context: ['compute_types=agentcore,ecs'] }, deps({ describeStack: stacks({ 'backgroundagent-dev': existing }) }));
-    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'compute_types=agentcore,ecs']));
-    expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'compute_types=agentcore,ecs']));
+    await setup({ yes: true }, deps({ describeStack: stacks({ 'backgroundagent-dev': existing }) }));
+    expect(profileFile().compute).toEqual(['agentcore', 'ecs']);
+    expect(text()).toContain('AgentCore Runtime + ECS Fargate (deployed)');
+  });
+
+  test('refuses to remove a deployed compute backend', async () => {
+    const existing = stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,ecs' });
+    await expect(setup({ yes: true, compute: 'agentcore' }, deps({ describeStack: stacks({ 'backgroundagent-dev': existing }) })))
+      .rejects.toThrow(/will not remove ECS Fargate/);
+    expect(runs).toEqual([]);
+  });
+
+  test('rejects compute selection through --context', () => {
+    expect(() => parseContextArgs(['compute_types=ecs'])).toThrow(/managed by setup/);
   });
 
   test('requires networkTopology=split when a network stack exists', async () => {
@@ -295,7 +313,8 @@ describe('non-interactive operation', () => {
   });
 
   test('validates a repository profile against the Region before diffing', async () => {
-    fs.writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), serializeDeploymentProfile({ ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true }));
+    const withRegistry = { ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true };
+    fs.writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), serializeDeploymentProfile({ features: withRegistry }));
     await expect(runSetup({ region: 'eu-central-1', yes: true }, deps({ interactive: false }))).rejects.toThrow(/unavailable in eu-central-1/);
     expect(runs).toEqual([]);
   });
@@ -455,5 +474,77 @@ describe('helpers', () => {
       '-c', 'alertEmail=ops@example.com', '--context', 'bedrockGeoRegion=us',
     ], { from: 'node' });
     expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'alertEmail=ops@example.com', '-c', 'bedrockGeoRegion=us', '--require-approval', 'never']));
+  });
+});
+
+describe('brand-new accounts', () => {
+  const freshAccount = (extra: FakeOptions = {}) => deps({ describeStack: stacks({ CDKToolkit: null }), ...extra });
+
+  test('asks where agents run, then prepares the account before deploying', async () => {
+    const asked: string[] = [];
+    const d = freshAccount({ answers: ['2', ...ENTER_ALL, 'y'] });
+    await setup({}, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
+    expect(asked[0]).toBe('  Choose [1]: ');
+    expect(text()).toContain('Where should agents run?');
+    expect(text()).toMatch(/Compute\s+ECS Fargate\n/);
+    expect(text()).toContain('Install the CDK bootstrap (one-time, least-privilege deploy roles)');
+    expect(text()).toContain('Allow the selected compute in the CDK bootstrap');
+    expect(profileFile().compute).toEqual(['ecs']);
+    // Bootstrap runs after confirmation and before the deploy, pinned to the account and Region.
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:bootstrap', '//cdk:deploy']);
+    expect(runs[1].args).toEqual(['//cdk:bootstrap', '--']);
+    expect(text()).toContain('✓ Preparing your AWS account (CDK bootstrap)');
+    expect(text()).toContain('✓ Allowing ECS Fargate in the CDK bootstrap');
+  });
+
+  test('keeps AgentCore in the bootstrap compute list for an ECS-only install', async () => {
+    const setBootstrapComputeTypes = jest.fn(async () => undefined);
+    await setup({ compute: 'ecs', features: 'none', yes: true }, freshAccount({ setBootstrapComputeTypes, resolveAccount: async () => '123456789012' }));
+    expect(setBootstrapComputeTypes).toHaveBeenCalledWith('us-east-1', ['agentcore', 'ecs']);
+    expect(runs[1].args).toEqual(['//cdk:bootstrap', '--', 'aws://123456789012/us-east-1']);
+  });
+
+  test('declining leaves the account and the repository untouched', async () => {
+    await expect(setup({}, freshAccount({ answers: [COMPUTE_DEFAULT, ...ENTER_ALL, 'n'] }))).rejects.toThrow(/Setup cancelled/);
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff']);
+    expect(profileOnDisk()).toBeUndefined();
+  });
+
+  test('stops before deploying when the bootstrap fails', async () => {
+    const d = freshAccount();
+    const run: SetupDeps['run'] = async (args, options) => (args[0] === '//cdk:bootstrap'
+      ? { code: 1, output: 'AccessDenied: not authorized to perform iam:CreateRole' }
+      : d.run(args, options));
+    await expect(setup({ features: 'none', yes: true }, { ...d, run })).rejects.toThrow(/could not be prepared, so nothing was deployed/);
+    expect(text()).toContain('not authorized to perform iam:CreateRole');
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff']);
+  });
+
+  test('updates an outdated ABCA bootstrap and adds ECS to an AgentCore-only one', async () => {
+    const outdated = stack({ BootstrapPolicyVersion: '1.5.2' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
+    const setBootstrapComputeTypes = jest.fn(async () => undefined);
+    await setup({ compute: 'agentcore,ecs', features: 'none', yes: true }, deps({ describeStack: stacks({ CDKToolkit: outdated }), setBootstrapComputeTypes }));
+    expect(text()).toContain('Update the CDK bootstrap to version 1.6.0');
+    expect(setBootstrapComputeTypes).toHaveBeenCalledWith('us-east-1', ['agentcore', 'ecs']);
+  });
+
+  test('never modifies a standard CDK bootstrap shared with other apps', async () => {
+    const standard = stack({ BucketName: 'cdk-assets' });
+    const setBootstrapComputeTypes = jest.fn(async () => undefined);
+    await setup({ compute: 'ecs', features: 'none', yes: true }, deps({ describeStack: stacks({ CDKToolkit: standard }), setBootstrapComputeTypes }));
+    expect(text()).toContain('uses the standard CDK bootstrap');
+    expect(setBootstrapComputeTypes).not.toHaveBeenCalled();
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('fails early when Docker is not running', async () => {
+    await expect(setup({ features: 'none', yes: true }, deps({ dockerRunning: async () => false }))).rejects.toThrow(/Docker is not running/);
+    expect(runs).toEqual([]);
+  });
+
+  test('ends with a next-steps checklist for the new stack', async () => {
+    await setup({ features: 'none', yes: true, stackName: 'forked-bgagent-dev' }, deps());
+    expect(text()).toContain('bgagent github set-token --region us-east-1 --stack-name forked-bgagent-dev');
+    expect(text()).toContain('bgagent repo onboard owner/repo --region us-east-1 --stack-name forked-bgagent-dev');
   });
 });

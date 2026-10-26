@@ -153,6 +153,30 @@ describe('buildApp consumes the repository profile', () => {
     await expect(synthOutputs()).rejects.toThrow(/AWS Agent Registry is not available in eu-central-1/);
   });
 
+  test('applies the profile compute selection unless context chooses explicitly', async () => {
+    writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify({
+      schemaVersion: 1, features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore', 'ecs'],
+    }));
+    const app = await buildApp({
+      account: '123456789012',
+      region: 'us-east-1',
+      profileRoot: root,
+      describeAzs: async () => [],
+      resolveCallerAccount: async () => '123456789012',
+      appProps: { context: { 'aws:cdk:bundling-stacks': [], 'agentcore:availabilityZones': ['us-east-1a', 'us-east-1b'] } },
+    });
+    expect(app.node.tryGetContext('compute_types')).toBe('agentcore,ecs');
+    const overridden = await buildApp({
+      account: '123456789012',
+      region: 'us-east-1',
+      profileRoot: root,
+      describeAzs: async () => [],
+      resolveCallerAccount: async () => '123456789012',
+      appProps: { context: { 'aws:cdk:bundling-stacks': [], 'agentcore:availabilityZones': ['us-east-1a', 'us-east-1b'], 'compute_types': 'agentcore' } },
+    });
+    expect(overridden.node.tryGetContext('compute_types')).toBe('agentcore');
+  }, 120_000);
+
   test('deploys the profile selection and honors context overrides on top of it', async () => {
     writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify({
       schemaVersion: 1, features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true },

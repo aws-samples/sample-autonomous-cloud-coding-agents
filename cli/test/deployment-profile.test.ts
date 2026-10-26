@@ -27,6 +27,7 @@ import {
   findRepoRoot,
   MINIMAL_DEPLOYMENT_FEATURES,
   parseDeploymentProfile,
+  parseComputeList,
   parseFeatureList,
   readDeploymentProfile,
   serializeDeploymentProfile,
@@ -41,14 +42,35 @@ afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 describe('profile parsing and serialization', () => {
   test('round-trips through the documented file format', () => {
     const features = { ...MINIMAL_DEPLOYMENT_FEATURES, slack: true, jira: true };
-    const text = serializeDeploymentProfile(features);
+    const text = serializeDeploymentProfile({ features });
     expect(JSON.parse(text)).toEqual({
       schemaVersion: 1,
       features: {
         slack: true, linear: false, jira: true, deployPreviewScreenshots: false, agentRegistry: false, toolGateway: false,
       },
     });
-    expect(parseDeploymentProfile(JSON.parse(text), 'x')).toEqual(features);
+    expect(parseDeploymentProfile(JSON.parse(text), 'x')).toEqual({ features });
+  });
+
+  test('round-trips an optional compute selection', () => {
+    const text = serializeDeploymentProfile({ features: MINIMAL_DEPLOYMENT_FEATURES, compute: ['agentcore', 'ecs'] });
+    expect(JSON.parse(text).compute).toEqual(['agentcore', 'ecs']);
+    expect(parseDeploymentProfile(JSON.parse(text), 'x').compute).toEqual(['agentcore', 'ecs']);
+  });
+
+  test.each([
+    [[], /non-empty array/],
+    [['lambda'], /unknown compute backend "lambda"/],
+    [['ecs', 'ecs'], /more than once/],
+  ])('rejects compute %j', (compute, error) => {
+    expect(() => parseDeploymentProfile({ schemaVersion: 1, features: MINIMAL_DEPLOYMENT_FEATURES, compute }, 'x')).toThrow(error);
+  });
+
+  test('parseComputeList validates backend names', () => {
+    expect(parseComputeList('agentcore, ecs')).toEqual(['agentcore', 'ecs']);
+    expect(() => parseComputeList('fargate')).toThrow(/Unknown compute backend 'fargate'/);
+    expect(() => parseComputeList('ecs,ecs')).toThrow(/more than once/);
+    expect(() => parseComputeList(' ')).toThrow(/must list/);
   });
 
   test.each([
@@ -66,10 +88,10 @@ describe('profile parsing and serialization', () => {
   });
 
   test('writes atomically and reads back', () => {
-    const file = writeDeploymentProfile(root, { ...MINIMAL_DEPLOYMENT_FEATURES, linear: true });
+    const file = writeDeploymentProfile(root, { features: { ...MINIMAL_DEPLOYMENT_FEATURES, linear: true } });
     expect(file).toBe(path.join(root, DEPLOYMENT_PROFILE_FILE));
     expect(fs.readdirSync(root)).toEqual([DEPLOYMENT_PROFILE_FILE]);
-    expect(readDeploymentProfile(root)?.linear).toBe(true);
+    expect(readDeploymentProfile(root)?.features.linear).toBe(true);
   });
 
   test('reports malformed JSON as a CliError naming the file', () => {

@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Node } from 'constructs';
+import { ComputeBackend, resolveComputeBackend } from '../handlers/shared/compute-backend';
 
 /** Optional modules selectable per deployment (#836). Core governance is never optional. */
 export const DEPLOYMENT_FEATURES = [
@@ -65,15 +66,25 @@ export const MINIMAL_DEPLOYMENT_FEATURES: DeploymentFeatures = {
 
 const REPO_ROOT = path.join(__dirname, '..', '..', '..');
 
+/** A parsed `abca.deployment.json`. */
+export interface DeploymentProfile {
+  readonly features: DeploymentFeatures;
+  /**
+   * Compute backends, first = repository default. Optional: absent keeps the
+   * `compute_types` / `compute_type` context behaviour (AgentCore by default).
+   */
+  readonly compute?: readonly ComputeBackend[];
+}
+
 /** Validate a parsed `abca.deployment.json`; unknown keys are rejected so typos fail closed. */
-export function parseDeploymentProfile(raw: unknown, source: string): DeploymentFeatures {
+export function parseDeploymentProfile(raw: unknown, source: string): DeploymentProfile {
   const fail = (detail: string): never => {
     throw new Error(`Invalid deployment profile ${source}: ${detail}`);
   };
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) fail('expected a JSON object');
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== 'schemaVersion' && key !== 'features') fail(`unknown top-level key '${key}'`);
+    if (key !== 'schemaVersion' && key !== 'features' && key !== 'compute') fail(`unknown top-level key '${key}'`);
   }
   if (record.schemaVersion !== DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
     fail(`schemaVersion must be ${DEPLOYMENT_PROFILE_SCHEMA_VERSION}, got ${JSON.stringify(record.schemaVersion)}`);
@@ -94,11 +105,23 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
     if (typeof value !== 'boolean') fail(`features.${feature} must be true or false`);
     result[feature] = value as boolean;
   }
-  return result;
+  if (record.compute === undefined) return { features: result };
+  const compute = record.compute;
+  if (!Array.isArray(compute) || compute.length === 0) fail('compute must be a non-empty array of agentcore, ecs or lambda-microvm');
+  const backends: ComputeBackend[] = [];
+  for (const value of compute as unknown[]) {
+    try {
+      backends.push(resolveComputeBackend(value));
+    } catch {
+      fail(`unknown compute backend ${JSON.stringify(value)} (expected agentcore, ecs or lambda-microvm)`);
+    }
+  }
+  if (new Set(backends).size !== backends.length) fail('compute lists a backend more than once');
+  return { features: result, compute: backends };
 }
 
 /** Read the profile named by context, or the repository-root file when present. */
-export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT): DeploymentFeatures | undefined {
+export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT): DeploymentProfile | undefined {
   const configured: unknown = node.tryGetContext(DEPLOYMENT_PROFILE_CONTEXT);
   if (configured === 'none') return undefined;
   if (configured !== undefined && (typeof configured !== 'string' || !configured.trim())) {

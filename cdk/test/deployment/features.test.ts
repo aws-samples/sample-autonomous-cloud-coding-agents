@@ -37,19 +37,32 @@ const profileJson = (features: Record<string, unknown>, extra: Record<string, un
 
 describe('parseDeploymentProfile', () => {
   test('accepts a complete schemaVersion 1 profile', () => {
-    expect(parseDeploymentProfile(profileJson({ slack: true }), 'p')).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true });
+    expect(parseDeploymentProfile(profileJson({ slack: true }), 'p')).toEqual({ features: { ...MINIMAL_DEPLOYMENT_FEATURES, slack: true } });
   });
 
   test.each([
     ['a non-object', [], /expected a JSON object/],
     ['an unknown schemaVersion', { ...profileJson({}), schemaVersion: 2 }, /schemaVersion must be 1/],
     ['a missing schemaVersion', { features: MINIMAL_DEPLOYMENT_FEATURES }, /schemaVersion must be 1/],
-    ['an unknown top-level key', profileJson({}, { compute: 'ecs' }), /unknown top-level key 'compute'/],
+    ['an unknown top-level key', profileJson({}, { network: 'split' }), /unknown top-level key 'network'/],
     ['an unknown feature (typo)', profileJson({ slak: true }), /unknown feature 'slak'/],
     ['a non-boolean feature', profileJson({ jira: 'yes' }), /features.jira must be true or false/],
     ['features as an array', { schemaVersion: 1, features: [] }, /features must be an object/],
   ])('rejects %s', (_label, raw, error) => {
     expect(() => parseDeploymentProfile(raw, 'p')).toThrow(error);
+  });
+
+  test('accepts an ordered compute selection', () => {
+    expect(parseDeploymentProfile(profileJson({}, { compute: ['ecs', 'agentcore'] }), 'p').compute).toEqual(['ecs', 'agentcore']);
+  });
+
+  test.each([
+    ['an empty compute list', [], /non-empty array/],
+    ['an unknown backend', ['lambda'], /unknown compute backend "lambda"/],
+    ['a duplicate backend', ['ecs', 'ecs'], /more than once/],
+    ['a non-array', 'ecs', /non-empty array/],
+  ])('rejects %s', (_label, compute, error) => {
+    expect(() => parseDeploymentProfile(profileJson({}, { compute }), 'p')).toThrow(error);
   });
 
   test('requires every feature explicitly so new and legacy defaults cannot be confused', () => {
@@ -71,7 +84,7 @@ describe('readDeploymentProfile', () => {
 
   test('reads the repository-root profile', () => {
     writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify(profileJson({ jira: true })));
-    expect(readDeploymentProfile(node(), root)).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, jira: true });
+    expect(readDeploymentProfile(node(), root)).toEqual({ features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true } });
   });
 
   test('ignores the repository profile under deploymentProfile=none', () => {
@@ -81,7 +94,7 @@ describe('readDeploymentProfile', () => {
 
   test('reads an explicit path relative to the repository root', () => {
     writeFileSync(path.join(root, 'ci.json'), JSON.stringify(profileJson({ slack: true })));
-    expect(readDeploymentProfile(node({ [DEPLOYMENT_PROFILE_CONTEXT]: 'ci.json' }), root)?.slack).toBe(true);
+    expect(readDeploymentProfile(node({ [DEPLOYMENT_PROFILE_CONTEXT]: 'ci.json' }), root)?.features.slack).toBe(true);
   });
 
   test('fails when an explicit profile path is missing instead of falling back', () => {

@@ -34,6 +34,16 @@ export const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
 /** Stack output listing deployed features; absent on stacks that predate profiles. */
 export const DEPLOYMENT_FEATURES_OUTPUT = 'DeploymentFeatures';
 
+/** Mirrors `ComputeBackend` in `cdk/src/handlers/shared/compute-backend.ts`. */
+export const COMPUTE_BACKENDS = ['agentcore', 'ecs', 'lambda-microvm'] as const;
+export type ComputeBackend = typeof COMPUTE_BACKENDS[number];
+
+/** A parsed `abca.deployment.json`. `compute` is optional; first entry is the repository default. */
+export interface DeploymentProfile {
+  readonly features: DeploymentFeatures;
+  readonly compute?: readonly ComputeBackend[];
+}
+
 export const MINIMAL_DEPLOYMENT_FEATURES: DeploymentFeatures = {
   slack: false,
   linear: false,
@@ -57,14 +67,14 @@ function isFeature(value: string): value is DeploymentFeature {
 }
 
 /** Same validation as CDK synthesis, so the CLI never writes a profile synthesis rejects. */
-export function parseDeploymentProfile(raw: unknown, source: string): DeploymentFeatures {
+export function parseDeploymentProfile(raw: unknown, source: string): DeploymentProfile {
   const fail = (detail: string): never => {
     throw new CliError(`Invalid deployment profile ${source}: ${detail}`);
   };
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) fail('expected a JSON object');
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== 'schemaVersion' && key !== 'features') fail(`unknown top-level key '${key}'`);
+    if (key !== 'schemaVersion' && key !== 'features' && key !== 'compute') fail(`unknown top-level key '${key}'`);
   }
   if (record.schemaVersion !== DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
     fail(`schemaVersion must be ${DEPLOYMENT_PROFILE_SCHEMA_VERSION}, got ${JSON.stringify(record.schemaVersion)}`);
@@ -81,12 +91,40 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
     if (typeof value !== 'boolean') fail(`features.${feature} must be true or false`);
     result[feature] = value as boolean;
   }
-  return result;
+  if (record.compute === undefined) return { features: result };
+  if (!Array.isArray(record.compute) || record.compute.length === 0) {
+    fail('compute must be a non-empty array of agentcore, ecs or lambda-microvm');
+  }
+  const compute = record.compute as unknown[];
+  for (const value of compute) {
+    if (!(COMPUTE_BACKENDS as readonly unknown[]).includes(value)) {
+      fail(`unknown compute backend ${JSON.stringify(value)} (expected agentcore, ecs or lambda-microvm)`);
+    }
+  }
+  if (new Set(compute).size !== compute.length) fail('compute lists a backend more than once');
+  return { features: result, compute: compute as ComputeBackend[] };
 }
 
-export function serializeDeploymentProfile(features: DeploymentFeatures): string {
-  const ordered = Object.fromEntries(DEPLOYMENT_FEATURES.map(feature => [feature, features[feature]]));
-  return `${JSON.stringify({ schemaVersion: DEPLOYMENT_PROFILE_SCHEMA_VERSION, features: ordered }, null, 2)}\n`;
+export function serializeDeploymentProfile(profile: DeploymentProfile): string {
+  const ordered = Object.fromEntries(DEPLOYMENT_FEATURES.map(feature => [feature, profile.features[feature]]));
+  return `${JSON.stringify({
+    schemaVersion: DEPLOYMENT_PROFILE_SCHEMA_VERSION,
+    features: ordered,
+    ...(profile.compute ? { compute: profile.compute } : {}),
+  }, null, 2)}\n`;
+}
+
+/** Parse `--compute agentcore,ecs` (or a `ComputeTypes` stack output). */
+export function parseComputeList(value: string): ComputeBackend[] {
+  const names = value.split(',').map(name => name.trim()).filter(Boolean);
+  if (names.length === 0) throw new CliError('--compute must list agentcore, ecs or lambda-microvm.');
+  for (const name of names) {
+    if (!(COMPUTE_BACKENDS as readonly string[]).includes(name)) {
+      throw new CliError(`Unknown compute backend '${name}'. Valid values: ${COMPUTE_BACKENDS.join(', ')}.`);
+    }
+  }
+  if (new Set(names).size !== names.length) throw new CliError('--compute lists a backend more than once.');
+  return names as ComputeBackend[];
 }
 
 /** The profile inside an operator-chosen checkout; the file name is a literal. */
@@ -95,7 +133,7 @@ export function profilePath(repoRoot: string): string {
   return path.join(repoRoot, DEPLOYMENT_PROFILE_FILE);
 }
 
-export function readDeploymentProfile(repoRoot: string): DeploymentFeatures | undefined {
+export function readDeploymentProfile(repoRoot: string): DeploymentProfile | undefined {
   const file = profilePath(repoRoot);
   let text: string;
   try {
@@ -113,11 +151,11 @@ export function readDeploymentProfile(repoRoot: string): DeploymentFeatures | un
 }
 
 /** Write atomically so an interrupted run never leaves a half-written profile for CI to synthesize. */
-export function writeDeploymentProfile(repoRoot: string, features: DeploymentFeatures): string {
+export function writeDeploymentProfile(repoRoot: string, profile: DeploymentProfile): string {
   const file = profilePath(repoRoot);
   const temp = `${file}.${process.pid}.tmp`;
   try {
-    fs.writeFileSync(temp, serializeDeploymentProfile(features), { encoding: 'utf-8', mode: 0o644 });
+    fs.writeFileSync(temp, serializeDeploymentProfile(profile), { encoding: 'utf-8', mode: 0o644 });
     fs.renameSync(temp, file);
   } finally {
     fs.rmSync(temp, { force: true });

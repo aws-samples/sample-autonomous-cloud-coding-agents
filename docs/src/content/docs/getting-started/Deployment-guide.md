@@ -182,17 +182,24 @@ bgagent setup -c networkTopology=split          # pass the context you deploy wi
 
 The wizard works in this order:
 
-1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory.
+1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. Before deploying it also checks that Docker is running, because the agent image is built locally.
 2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
    - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
    - It refuses to continue if the stack uses non-default compute (`ComputeTypes` output) or a `${stackName}-network` stack exists and the matching `compute_types` / `networkTopology` context is missing, because dropping that context would change more than features.
-3. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
-4. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `cdk/cdk.out/setup-changes.log`. Nothing in the repository changes until you confirm.
-5. Requires stronger confirmation if the diff deletes, replaces or orphans state-bearing resources (DynamoDB tables, secrets, buckets, log groups, user pools, VPCs, nested stacks): type the stack name interactively, or pass `--accept-data-loss` together with `--yes`. Declining, or closing the terminal at any prompt, exits with code 130 and leaves the repository unchanged.
-6. Writes `abca.deployment.json` and deploys with `mise //cdk:deploy -- -c stackName=<name> --all`.
+3. **New installations only:** asks where agents run: AgentCore Runtime (recommended), ECS Fargate, or both (`--compute agentcore|ecs|agentcore,ecs` when scripted). The first backend is the repository default. An existing stack keeps its deployed backends; `--compute` may add one, but setup refuses to remove one (see the [backend transition procedure](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend)). Lambda MicroVMs are experimental and are selected only with `--compute`.
+4. Marks features that the Region does not support as unavailable and does not offer them. A scripted request for one fails with the supported Regions.
+5. Plans any one-time account preparation and lists it on the review screen:
+   - **No `CDKToolkit` stack:** installs ABCA's least-privilege CDK bootstrap (`mise //cdk:bootstrap`). For ECS it also sets the bootstrap's `ComputeTypes` parameter, which `cdk bootstrap` cannot set.
+   - **An older ABCA bootstrap:** updates it to the version this CLI requires, and adds missing backends to `ComputeTypes`.
+   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it.
+
+   Preparation runs only after you confirm the deploy.
+6. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `cdk/cdk.out/setup-changes.log`. Nothing in the repository changes until you confirm.
+7. Requires stronger confirmation if the diff deletes, replaces or orphans state-bearing resources (DynamoDB tables, secrets, buckets, log groups, user pools, VPCs, nested stacks): type the stack name interactively, or pass `--accept-data-loss` together with `--yes`. Declining, or closing the terminal at any prompt, exits with code 130 and leaves the repository unchanged.
+8. Writes `abca.deployment.json`, prepares the account, and deploys with `mise //cdk:deploy -- -c stackName=<name> --all`.
    - While deploying, it shows a progress bar and one line per component (Networking, Task API, Agent runtime, each enabled feature), with a check mark as each finishes. Raw CDK output goes to `cdk/cdk.out/setup-deploy.log`.
    - Your confirmation replaces CDK's own IAM approval prompt; the change summary says how many IAM roles and policies are included.
-   - On success it configures the CLI from the stack outputs. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
+   - On success it configures the CLI from the stack outputs and prints a next-steps checklist: store a GitHub token, create a user, sign in, onboard a repository. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
 
 `--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
 
@@ -210,11 +217,12 @@ Commit `abca.deployment.json`. Every synthesis reads it, including `mise //cdk:s
     "deployPreviewScreenshots": false,
     "agentRegistry": false,
     "toolGateway": false
-  }
+  },
+  "compute": ["agentcore"]
 }
 ```
 
-Every feature must be listed explicitly. Unknown keys, a different `schemaVersion` or a non-boolean value fail synthesis. For each feature, the first source that sets it wins:
+Every feature must be listed explicitly. `compute` is optional: the ordered list of backends, first = repository default. It applies unless `compute_types` or `compute_type` context is set, so a later plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed. Without it, today's compute context rules apply. Unknown keys, a different `schemaVersion` or a non-boolean value fail synthesis. For each feature, the first source that sets it wins:
 
 1. the per-feature context switch (for example `-c enableSlack=true`);
 2. the profile;

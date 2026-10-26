@@ -33,6 +33,11 @@ Issue #836 also suggests moving substantial optional modules into nested stacks.
 
    Non-interactive runs fail on an unsupported feature, and require `--accept-data-loss` in addition to `--yes` to remove state-bearing resources. Operator subcommands for an omitted feature fail early with a pointer to `bgagent setup`.
 
+7. **First-install compute and account preparation.** Issue #836 kept compute out of the first wizard; this record extends it for new installations only, where no backend can be removed.
+   - The wizard asks where agents run (AgentCore, ECS, or both) and records the ordered list as the profile's optional `compute`. Context `compute_types` / `compute_type` still wins.
+   - On existing stacks the deployed backends are read from `ComputeTypes`. Adding one is allowed; removing one is refused in favour of the COMPUTE.md transition procedure.
+   - Before the deploy, after confirmation, it installs or updates ABCA's least-privilege CDK bootstrap and sets the bootstrap `ComputeTypes` parameter (AgentCore always included). It never modifies a standard CDK bootstrap that other apps may share.
+
 ## Consequences
 
 - (+) The minimal profile synthesizes 317 root resources against 463 for the legacy topology (−146), with the corresponding IAM, secrets and routes, and fails fast in unsupported Regions.
