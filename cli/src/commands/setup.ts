@@ -32,7 +32,7 @@ import {
 } from '@aws-sdk/client-cloudformation';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Command } from 'commander';
-import { saveConfig, tryLoadConfig } from '../config';
+import { getConfigDir, saveConfig, tryLoadConfig } from '../config';
 import { CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
 import {
   ComputeBackend,
@@ -555,6 +555,12 @@ function describeDataLoss(changes: readonly StateBearingChange[], stackNames: re
     .map(([noun, count]) => `${count} ${noun}${count === 1 ? '' : 's'}`).join(', ')}`);
 }
 
+/** `~/.bgagent/logs/x` rather than a long absolute path. */
+function displayLogPath(file: string): string {
+  const home = os.homedir();
+  return file.startsWith(`${home}${path.sep}`) ? `~${file.slice(home.length)}` : file;
+}
+
 /** The most useful lines of raw output when CloudFormation reported no reason. */
 function errorLines(output: string | readonly string[]): string[] {
   const lines = (typeof output === 'string' ? stripAnsi(output).split('\n') : [...output]).map(line => line.trim()).filter(Boolean);
@@ -765,8 +771,9 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const persistentTopology = persistentContext(repoRoot).map(({ context }) => context.networkTopology).filter(Boolean).pop();
   const topology = extraContext.get('networkTopology') ?? persistentTopology;
   const stackNames = topology === 'split' ? [stackName, `${stackName}-network`] : [stackName];
-  // Raw CDK output lives in the git-ignored cdk.out, next to the assembly it describes.
-  const logDir = `${repoCdkDir(repoRoot)}${path.sep}cdk.out`;
+  // Raw CDK output lives outside the repository: the deploy task wipes cdk.out first,
+  // and the agent image's build context fingerprints the repository root.
+  const logDir = `${getConfigDir()}${path.sep}logs${path.sep}${stackName}`;
   fs.mkdirSync(logDir, { recursive: true });
   const diffLog = `${logDir}${path.sep}setup-changes.log`;
   const deployLog = `${logDir}${path.sep}setup-deploy.log`;
@@ -788,7 +795,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   if (diff.code !== 0) {
     checking.fail('could not compute the changes');
     for (const line of errorLines(diff.output)) ui.line(`    ${style.red(line)}`);
-    ui.line(`    ${style.dim(`Full output: ${path.relative(deps.cwd, diffLog)}`)}`);
+    ui.line(`    ${style.dim(`Full output: ${displayLogPath(diffLog)}`)}`);
     throw new CliError('Nothing was written or deployed. Fix the error above and rerun setup.');
   }
   const summary = summarizeDiff(diff.output, stackNames);
@@ -797,7 +804,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   if (summary.iamResources > 0) {
     ui.line(`    ${style.dim(`Includes ${summary.iamResources} IAM ${summary.iamResources === 1 ? 'role or policy' : 'roles and policies'}.`)}`);
   }
-  ui.line(`    ${style.dim(`Full change list: ${path.relative(deps.cwd, diffLog)}`)}`);
+  ui.line(`    ${style.dim(`Full change list: ${displayLogPath(diffLog)}`)}`);
 
   // 6. Confirmation, with a stronger gate for data loss.
   const stateBearing = parseStateBearingChanges(diff.output);
@@ -834,7 +841,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     if (result.code !== 0) {
       running.fail();
       for (const line of errorLines(result.output)) ui.line(`    ${style.red(line)}`);
-      ui.line(`    ${style.dim(`Full log: ${path.relative(deps.cwd, bootstrapLog)}`)}`);
+      ui.line(`    ${style.dim(`Full log: ${displayLogPath(bootstrapLog)}`)}`);
       throw new CliError('The account could not be prepared, so nothing was deployed. Fix the error above and run bgagent setup again.');
     }
     running.succeed();
@@ -869,7 +876,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
       for (const line of errorLines(tail)) ui.line(`    ${style.red(line)}`);
     }
     ui.line();
-    ui.line(`  ${style.dim(`Full log: ${path.relative(deps.cwd, deployLog)}`)}`);
+    ui.line(`  ${style.dim(`Full log: ${displayLogPath(deployLog)}`)}`);
     ui.line(`  ${style.dim(`Your selection is saved in ${path.basename(file)}; fix the cause and run bgagent setup again.`)}`);
     process.exitCode = 1;
     return;

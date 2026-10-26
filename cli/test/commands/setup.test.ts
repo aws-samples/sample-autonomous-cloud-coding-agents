@@ -386,7 +386,9 @@ describe('failures and cancellation', () => {
     expect(text()).toContain('Code storage limit exceeded');
     // A cancellation is a consequence, not a cause.
     expect(text()).not.toContain('Resource creation cancelled');
-    expect(text()).toContain('Full log: cdk/cdk.out/setup-deploy.log');
+    expect(text()).toContain(`Full log: ${path.join(configDir, 'logs', 'backgroundagent-dev', 'setup-deploy.log')}`);
+    // Logs live outside the repository, where the deploy's cdk.out cleanup cannot remove them.
+    expect(runs.every(run => run.logFile.startsWith(configDir))).toBe(true);
     expect(profileOnDisk()?.slack).toBe(true);
     expect(fs.existsSync(path.join(configDir, 'config.json'))).toBe(false);
   });
