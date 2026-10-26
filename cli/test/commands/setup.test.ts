@@ -80,7 +80,7 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
     interactive: true,
     describeStack: stacks({}),
     hasToolGateway: async () => false,
-    dockerRunning: async () => true,
+    containerEngine: async () => 'docker',
     setBootstrapComputeTypes: async () => undefined,
     callerIdentity: async () => ({ account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/Admin/me' }),
     listDeployments: async () => [],
@@ -544,9 +544,27 @@ describe('brand-new accounts', () => {
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
   });
 
-  test('fails early when Docker is not running', async () => {
-    await expect(setup({ features: 'none', yes: true }, deps({ dockerRunning: async () => false }))).rejects.toThrow(/Docker is not running/);
+  test('fails early when no container engine is running', async () => {
+    await expect(setup({ features: 'none', yes: true }, deps({ containerEngine: async () => undefined })))
+      .rejects.toThrow(/No container engine is running.*Finch \(`finch vm start`\)/);
     expect(runs).toEqual([]);
+  });
+
+  test('builds with Finch when Docker is unavailable', async () => {
+    await setup({ features: 'none', yes: true }, deps({ containerEngine: async () => 'finch' }));
+    expect(text()).toContain('✓ Container engine Finch');
+    expect(runs.every(run => run.env.CDK_DOCKER === 'finch')).toBe(true);
+  });
+
+  test('leaves CDK_DOCKER unset for Docker', async () => {
+    const saved = process.env.CDK_DOCKER;
+    delete process.env.CDK_DOCKER;
+    try {
+      await setup({ features: 'none', yes: true }, deps());
+      expect(runs.every(run => run.env.CDK_DOCKER === undefined)).toBe(true);
+    } finally {
+      if (saved !== undefined) process.env.CDK_DOCKER = saved;
+    }
   });
 
   test('ends with a next-steps checklist for the new stack', async () => {

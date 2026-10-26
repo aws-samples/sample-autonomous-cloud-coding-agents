@@ -178,7 +178,7 @@ bgagent setup -c networkTopology=split          # pass the context you deploy wi
 
 The wizard works in this order:
 
-1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. It shows the AWS account and identity your credentials resolve to (STS `GetCallerIdentity`) and asks you to confirm it. Before deploying it also checks that Docker is running, because the agent image is built locally.
+1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. It shows the AWS account and identity your credentials resolve to (STS `GetCallerIdentity`) and asks you to confirm it. Before deploying it also checks for a running container engine, because the agent image is built locally: `CDK_DOCKER` if set, otherwise Docker, otherwise Finch (passed to CDK as `CDK_DOCKER=finch`).
    - **Which deployment:** without `--stack-name`, it lists the ABCA deployments already in the account and Region. You can update one, or create a new deployment under a name you choose (the suggestion avoids existing names). With none yet, it asks for a name (default `backgroundagent-dev`).
 2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
    - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.

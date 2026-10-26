@@ -175,8 +175,11 @@ export interface SetupDeps {
     cwd: string; env: NodeJS.ProcessEnv; logFile: string; onLine?: (line: string) => void;
   }) => Promise<RunResult>;
   readonly configureFromStack: (region: string, stackName: string) => Promise<CliConfig>;
-  /** Whether a Docker daemon answers; the deploy builds the agent image locally. */
-  readonly dockerRunning: () => Promise<boolean>;
+  /**
+   * The container engine CDK should build the agent image with: `CDK_DOCKER`
+   * when set, else Docker, else Finch; `undefined` when none is running.
+   */
+  readonly containerEngine: () => Promise<string | undefined>;
   /** Set the bootstrap stack's `ComputeTypes` parameter, keeping every other value; waits for completion. */
   readonly setBootstrapComputeTypes: (region: string, computeTypes: readonly ComputeBackend[]) => Promise<void>;
   /** Monotonic clock for durations. */
@@ -741,8 +744,12 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
 
   // 5. Work out the changes against a temporary profile so cancelling leaves the repository unchanged.
-  if (!(await deps.dockerRunning())) {
-    throw new CliError('Docker is not running. The deploy builds the agent image locally; start Docker and run bgagent setup again.');
+  const engine = await deps.containerEngine();
+  if (!engine) {
+    throw new CliError(
+      'No container engine is running. The deploy builds the agent image locally: start Docker, '
+      + 'or Finch (`finch vm start`), and run bgagent setup again.',
+    );
   }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -751,6 +758,8 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     AWS_DEFAULT_REGION: region,
     CDK_DEFAULT_REGION: region,
     FORCE_COLOR: '0',
+    // CDK shells out to `docker` unless told otherwise; Finch is a drop-in CLI.
+    ...(engine !== 'docker' ? { CDK_DOCKER: engine } : {}),
   };
   const contextArgs = ['-c', `stackName=${stackName}`, ...[...extraContext].flatMap(([key, value]) => ['-c', `${key}=${value}`])];
   const persistentTopology = persistentContext(repoRoot).map(({ context }) => context.networkTopology).filter(Boolean).pop();
@@ -762,6 +771,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const diffLog = `${logDir}${path.sep}setup-changes.log`;
   const deployLog = `${logDir}${path.sep}setup-deploy.log`;
   ui.line();
+  ui.line(`  ${style.green('✓')} Container engine ${style.dim(engine === 'docker' ? 'Docker' : engine === 'finch' ? 'Finch' : engine)}`);
   const checking = new Step(deps.screen, style, 'Checking what will change');
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-setup-'));
   let diff: RunResult;
@@ -972,11 +982,20 @@ function defaultDeps(): SetupDeps {
       });
     }),
     configureFromStack: fetchConfigureBundleFromStack,
-    dockerRunning: () => new Promise(resolve => {
-      const child = spawn('docker', ['info'], { stdio: 'ignore' });
-      child.on('error', () => resolve(false));
-      child.on('close', code => resolve(code === 0));
-    }),
+    containerEngine: async () => {
+      const answers = (command: string) => new Promise<boolean>(resolve => {
+        const child = spawn(command, ['info'], { stdio: 'ignore' });
+        child.on('error', () => resolve(false));
+        child.on('close', code => resolve(code === 0));
+      });
+      // An explicit CDK_DOCKER is the operator's choice: honour it or report it, never second-guess it.
+      const configured = process.env.CDK_DOCKER;
+      if (configured) return (await answers(configured)) ? configured : undefined;
+      for (const candidate of ['docker', 'finch']) {
+        if (await answers(candidate)) return candidate;
+      }
+      return undefined;
+    },
     setBootstrapComputeTypes: async (region, computeTypes) => {
       const cf = makeClient(CloudFormationClient, { region });
       const stack = (await cf.send(new DescribeStacksCommand({ StackName: BOOTSTRAP_STACK }))).Stacks?.[0];
