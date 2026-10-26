@@ -984,13 +984,17 @@ function defaultDeps(): SetupDeps {
     configureFromStack: fetchConfigureBundleFromStack,
     containerEngine: async () => {
       const answers = (command: string) => new Promise<boolean>(resolve => {
+        // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- command is the literal 'docker'/'finch' or the operator's own CDK_DOCKER (which CDK itself executes), validated as a plain executable path below; argument vector, no shell
         const child = spawn(command, ['info'], { stdio: 'ignore' });
         child.on('error', () => resolve(false));
         child.on('close', code => resolve(code === 0));
       });
       // An explicit CDK_DOCKER is the operator's choice: honour it or report it, never second-guess it.
       const configured = process.env.CDK_DOCKER;
-      if (configured) return (await answers(configured)) ? configured : undefined;
+      if (configured) {
+        if (!/^[\w./-]+$/.test(configured)) throw new CliError(`CDK_DOCKER must be an executable name or path, got '${configured}'.`);
+        return (await answers(configured)) ? configured : undefined;
+      }
       for (const candidate of ['docker', 'finch']) {
         if (await answers(candidate)) return candidate;
       }
