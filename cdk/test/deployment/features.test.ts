@@ -24,6 +24,7 @@ import { App } from 'aws-cdk-lib';
 import {
   DEPLOYMENT_FEATURES,
   DEPLOYMENT_PROFILE_CONTEXT,
+  deploymentProfileCandidates,
   DEPLOYMENT_PROFILE_FILE,
   LEGACY_DEPLOYMENT_FEATURES,
   MINIMAL_DEPLOYMENT_FEATURES,
@@ -85,6 +86,21 @@ describe('readDeploymentProfile', () => {
   test('reads the repository-root profile', () => {
     writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify(profileJson({ jira: true })));
     expect(readDeploymentProfile(node(), root)).toEqual({ features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true } });
+  });
+
+  test('prefers a per-stack profile for additional deployments and falls back to the shared one', () => {
+    writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify(profileJson({ jira: true })));
+    expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)?.features.jira).toBe(true);
+    writeFileSync(path.join(root, 'abca.deployment.second-dev.json'), JSON.stringify(profileJson({ slack: true })));
+    expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)?.features).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true });
+    // The default stack keeps using the shared file.
+    expect(readDeploymentProfile(node({ stackName: 'backgroundagent-dev' }), root)?.features.jira).toBe(true);
+    expect(readDeploymentProfile(node(), root)?.features.jira).toBe(true);
+  });
+
+  test('never builds a profile path from an invalid stack name', () => {
+    expect(deploymentProfileCandidates('../etc/passwd')).toEqual([DEPLOYMENT_PROFILE_FILE]);
+    expect(deploymentProfileCandidates(42)).toEqual([DEPLOYMENT_PROFILE_FILE]);
   });
 
   test('ignores the repository profile under deploymentProfile=none', () => {

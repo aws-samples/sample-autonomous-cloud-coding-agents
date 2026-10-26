@@ -38,6 +38,8 @@ Issue #836 also suggests moving substantial optional modules into nested stacks.
    - On existing stacks the deployed backends are read from `ComputeTypes`. Adding one is allowed; removing one is refused in favour of the COMPUTE.md transition procedure.
    - Before the deploy, after confirmation, it installs or updates ABCA's least-privilege CDK bootstrap and sets the bootstrap `ComputeTypes` parameter (AgentCore always included). It never modifies a standard CDK bootstrap that other apps may share.
 
+8. **Several deployments per checkout and account.** The wizard confirms the caller's account (STS), lists existing ABCA stacks in the Region and offers to update one or create a named new one. Each non-default stack reads `abca.deployment.<stackName>.json` before the shared file, so one checkout can drive several deployments without their profiles overwriting each other.
+
 ## Consequences
 
 - (+) The minimal profile synthesizes 317 root resources against 463 for the legacy topology (−146), with the corresponding IAM, secrets and routes, and fails fast in unsupported Regions.

@@ -128,20 +128,39 @@ export function parseComputeList(value: string): ComputeBackend[] {
 }
 
 /** The profile inside an operator-chosen checkout; the file name is a literal. */
-export function profilePath(repoRoot: string): string {
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoRoot is the operator's own checkout (cwd or --repo-root) and the joined segment is a literal; no privilege boundary is crossed
-  return path.join(repoRoot, DEPLOYMENT_PROFILE_FILE);
+export function profilePath(repoRoot: string, fileName: string = DEPLOYMENT_PROFILE_FILE): string {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoRoot is the operator's own checkout (cwd or --repo-root) and the file name is a literal or built from a validated stack name; no privilege boundary is crossed
+  return path.join(repoRoot, fileName);
 }
 
-export function readDeploymentProfile(repoRoot: string): DeploymentProfile | undefined {
-  const file = profilePath(repoRoot);
-  let text: string;
-  try {
-    text = fs.readFileSync(file, 'utf-8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw new CliError(`Cannot read ${file}: ${(err as Error).message}`);
+/** Stack that owns the shared `abca.deployment.json`; mirrors `DEFAULT_PROFILE_STACK_NAME` in CDK. */
+export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
+const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
+
+/**
+ * Profile files for a stack, most specific first (same rule as CDK synthesis):
+ * extra deployments from one checkout get `abca.deployment.<stack>.json`.
+ */
+export function deploymentProfileCandidates(stackName: string): string[] {
+  return stackName !== DEFAULT_PROFILE_STACK_NAME && STACK_NAME_PATTERN.test(stackName)
+    ? [`abca.deployment.${stackName}.json`, DEPLOYMENT_PROFILE_FILE]
+    : [DEPLOYMENT_PROFILE_FILE];
+}
+
+export function readDeploymentProfile(repoRoot: string, stackName: string = DEFAULT_PROFILE_STACK_NAME): DeploymentProfile | undefined {
+  let file = '';
+  let text: string | undefined;
+  for (const name of deploymentProfileCandidates(stackName)) {
+    file = profilePath(repoRoot, name);
+    try {
+      text = fs.readFileSync(file, 'utf-8');
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new CliError(`Cannot read ${file}: ${(err as Error).message}`);
+    }
   }
+  if (text === undefined) return undefined;
   try {
     return parseDeploymentProfile(JSON.parse(text), file);
   } catch (err) {
@@ -151,8 +170,13 @@ export function readDeploymentProfile(repoRoot: string): DeploymentProfile | und
 }
 
 /** Write atomically so an interrupted run never leaves a half-written profile for CI to synthesize. */
-export function writeDeploymentProfile(repoRoot: string, profile: DeploymentProfile): string {
-  const file = profilePath(repoRoot);
+/** Writes the stack's own profile file (the shared one for the default stack). */
+export function writeDeploymentProfile(
+  repoRoot: string,
+  profile: DeploymentProfile,
+  stackName: string = DEFAULT_PROFILE_STACK_NAME,
+): string {
+  const file = profilePath(repoRoot, deploymentProfileCandidates(stackName)[0]);
   const temp = `${file}.${process.pid}.tmp`;
   try {
     fs.writeFileSync(temp, serializeDeploymentProfile(profile), { encoding: 'utf-8', mode: 0o644 });

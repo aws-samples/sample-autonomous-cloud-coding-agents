@@ -120,23 +120,44 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
   return { features: result, compute: backends };
 }
 
-/** Read the profile named by context, or the repository-root file when present. */
+/** Stack the shared `abca.deployment.json` belongs to; mirrors `DEFAULT_STACK_NAME` in the CLI. */
+export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
+const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
+
+/**
+ * Profile files for a stack, most specific first. Additional deployments from
+ * one checkout each get `abca.deployment.<stackName>.json`, so deploying one
+ * never changes another's features; the shared file remains the fallback.
+ */
+export function deploymentProfileCandidates(stackName: unknown): string[] {
+  return typeof stackName === 'string' && stackName !== DEFAULT_PROFILE_STACK_NAME && STACK_NAME_PATTERN.test(stackName)
+    ? [`abca.deployment.${stackName}.json`, DEPLOYMENT_PROFILE_FILE]
+    : [DEPLOYMENT_PROFILE_FILE];
+}
+
+/** Read the profile named by context, or the stack's repository-root file when present. */
 export function readDeploymentProfile(node: Node, repoRoot: string = REPO_ROOT): DeploymentProfile | undefined {
   const configured: unknown = node.tryGetContext(DEPLOYMENT_PROFILE_CONTEXT);
   if (configured === 'none') return undefined;
   if (configured !== undefined && (typeof configured !== 'string' || !configured.trim())) {
     throw new Error(`Context '${DEPLOYMENT_PROFILE_CONTEXT}' must be a file path or 'none'`);
   }
-  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- the path comes from the operator's own CDK context at synth time; reading any file they name is the feature, and no privilege boundary is crossed
-  const file = path.resolve(repoRoot, configured ?? DEPLOYMENT_PROFILE_FILE);
-  let text: string;
-  try {
-    text = fs.readFileSync(file, 'utf-8');
-  } catch (err) {
-    // Only the implicit repository profile is optional; an explicit path must exist.
-    if (configured === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw new Error(`Cannot read deployment profile ${file}: ${(err as Error).message}`);
+  const names = configured === undefined ? deploymentProfileCandidates(node.tryGetContext('stackName')) : [configured];
+  let file = '';
+  let text: string | undefined;
+  for (const name of names) {
+    // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- the path comes from the operator's own CDK context at synth time (or a validated stack name); reading any file they name is the feature, and no privilege boundary is crossed
+    file = path.resolve(repoRoot, name);
+    try {
+      text = fs.readFileSync(file, 'utf-8');
+      break;
+    } catch (err) {
+      // Only the implicit repository profiles are optional; an explicit path must exist.
+      if (configured === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error(`Cannot read deployment profile ${file}: ${(err as Error).message}`);
+    }
   }
+  if (text === undefined) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

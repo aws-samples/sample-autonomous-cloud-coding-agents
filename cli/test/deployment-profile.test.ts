@@ -22,6 +22,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   DEPLOYMENT_PROFILE_FILE,
+  deploymentProfileCandidates,
   detectDeployedFeatures,
   featureNotDeployedError,
   findRepoRoot,
@@ -98,6 +99,22 @@ describe('profile parsing and serialization', () => {
     fs.writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), '{');
     expect(() => readDeploymentProfile(root)).toThrow(CliError);
     expect(() => readDeploymentProfile(root)).toThrow(DEPLOYMENT_PROFILE_FILE);
+  });
+});
+
+describe('per-stack profile files', () => {
+  test('mirrors the CDK lookup order', () => {
+    expect(deploymentProfileCandidates('backgroundagent-dev')).toEqual([DEPLOYMENT_PROFILE_FILE]);
+    expect(deploymentProfileCandidates('team-b')).toEqual(['abca.deployment.team-b.json', DEPLOYMENT_PROFILE_FILE]);
+    expect(deploymentProfileCandidates('../x')).toEqual([DEPLOYMENT_PROFILE_FILE]);
+  });
+
+  test('writes the stack file and reads it back before the shared one', () => {
+    writeDeploymentProfile(root, { features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true } });
+    expect(readDeploymentProfile(root, 'team-b')?.features.jira).toBe(true);
+    writeDeploymentProfile(root, { features: MINIMAL_DEPLOYMENT_FEATURES }, 'team-b');
+    expect(readDeploymentProfile(root, 'team-b')?.features.jira).toBe(false);
+    expect(readDeploymentProfile(root)?.features.jira).toBe(true);
   });
 });
 

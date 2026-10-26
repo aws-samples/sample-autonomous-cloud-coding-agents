@@ -23,6 +23,7 @@ import * as path from 'path';
 import {
   conflictingContextOverrides,
   ExistingStack,
+  identityLabel,
   makeSetupCommand,
   parseContextArgs,
   parseStateBearingChanges,
@@ -81,7 +82,8 @@ function deps(overrides: FakeOptions = {}): SetupDeps {
     hasToolGateway: async () => false,
     dockerRunning: async () => true,
     setBootstrapComputeTypes: async () => undefined,
-    resolveAccount: async () => undefined,
+    callerIdentity: async () => ({ account: '123456789012', arn: 'arn:aws:sts::123456789012:assumed-role/Admin/me' }),
+    listDeployments: async () => [],
     // Running out of scripted answers behaves like a closed terminal.
     ask: async () => {
       if (answers.length === 0) throw setupCancelled();
@@ -110,7 +112,10 @@ const profileOnDisk = () => {
   const file = path.join(root, DEPLOYMENT_PROFILE_FILE);
   return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf-8')).features : undefined;
 };
-const setup = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'us-east-1', ...opts }, d);
+/** Most tests name the stack; the picker has its own tests below. */
+const setup = (opts: SetupOptions, d: SetupDeps) => runSetup({ region: 'us-east-1', stackName: 'backgroundagent-dev', ...opts }, d);
+/** Accept the account confirmation (defaults to yes). */
+const ACCOUNT_OK = '';
 const ENTER_ALL = ['', '', '', '', '', ''];
 /** Accept the preselected compute (AgentCore) on a new installation. */
 const COMPUTE_DEFAULT = '';
@@ -136,7 +141,7 @@ afterEach(() => {
 
 describe('new installation', () => {
   test('recommends the minimal profile, diffs a candidate, then writes, deploys and configures', async () => {
-    await setup({}, deps({ answers: [COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
+    await setup({}, deps({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
     expect(text()).toContain('New installation: every optional feature defaults to off (the governed minimal profile).');
     expect(profileOnDisk()).toEqual(MINIMAL_DEPLOYMENT_FEATURES);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
@@ -157,22 +162,22 @@ describe('new installation', () => {
   });
 
   test('asks about each available feature and records the answers', async () => {
-    await setup({}, deps({ answers: [COMPUTE_DEFAULT, 'y', 'n', 'y', 'n', 'n', 'n', 'y'] }));
+    await setup({}, deps({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, 'y', 'n', 'y', 'n', 'n', 'n', 'y'] }));
     expect(profileOnDisk()).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true, jira: true });
   });
 
   test('marks Region-unavailable features and never asks about them', async () => {
     const asked: string[] = [];
-    const d = deps({ answers: [COMPUTE_DEFAULT, 'n', 'n', 'n', 'n', 'n', 'y'] });
-    await runSetup({ region: 'eu-central-1' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
+    const d = deps({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, 'n', 'n', 'n', 'n', 'n', 'y'] });
+    await runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
     expect(text()).toContain('✗ AWS Agent Registry — not available in eu-central-1');
     expect(asked.some(q => q.includes('AWS Agent Registry'))).toBe(false);
     expect(profileOnDisk().agentRegistry).toBe(false);
   });
 
-  test('shows the account the credentials resolve to', async () => {
-    await setup({ features: 'none', yes: true }, deps({ resolveAccount: async () => '123456789012' }));
-    expect(text()).toContain('Account  123456789012');
+  test('shows the account and identity the credentials resolve to', async () => {
+    await setup({ features: 'none', yes: true }, deps({ callerIdentity: async () => ({ account: '123456789012', arn: 'arn:aws:iam::123456789012:user/ops' }) }));
+    expect(text()).toContain('Account  123456789012  ops (IAM user)');
   });
 
   test('prompts for the Region when none is configured', async () => {
@@ -180,7 +185,7 @@ describe('new installation', () => {
     delete process.env.AWS_REGION;
     delete process.env.AWS_DEFAULT_REGION;
     try {
-      await runSetup({}, deps({ answers: ['us-west-2', COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
+      await runSetup({ stackName: 'backgroundagent-dev' }, deps({ answers: ['us-west-2', ACCOUNT_OK, COMPUTE_DEFAULT, ...ENTER_ALL, 'y'] }));
       expect(text()).toContain('Region   us-west-2');
     } finally {
       for (const [key, value] of Object.entries(saved)) if (value !== undefined) process.env[key] = value;
@@ -195,7 +200,7 @@ describe('new installation', () => {
 
 describe('existing deployments', () => {
   test('preselects published features so accepting defaults removes nothing', async () => {
-    const d = deps({ describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack,linear' }) }), answers: [...ENTER_ALL, 'y'] });
+    const d = deps({ describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack,linear' }) }), answers: [ACCOUNT_OK, ...ENTER_ALL, 'y'] });
     await setup({}, d);
     expect(text()).toContain('Deployed Slack, Linear');
     expect(text()).toContain('Account  123456789012');
@@ -234,7 +239,7 @@ describe('existing deployments', () => {
     const d = deps({
       describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack' }) }),
       diff: DELETES_SLACK_TABLE,
-      answers: ['n', '', '', '', '', '', 'backgroundagent-dev'],
+      answers: [ACCOUNT_OK, 'n', '', '', '', '', '', 'backgroundagent-dev'],
     });
     await setup({}, d);
     expect(text()).toMatch(/✗ Slack\s+will be removed/);
@@ -244,7 +249,9 @@ describe('existing deployments', () => {
   });
 
   test('cancels data loss on a wrong confirmation without touching the repository', async () => {
-    const d = deps({ describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack' }) }), diff: DELETES_SLACK_TABLE, answers: ['yes'] });
+    const d = deps({
+      describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack' }) }), diff: DELETES_SLACK_TABLE, answers: [ACCOUNT_OK, 'yes'],
+    });
     const error = await setup({ features: 'none' }, d).catch((err: unknown) => err);
     expect(error).toMatchObject({ message: expect.stringMatching(/Setup cancelled/), exitCode: SETUP_CANCELLED_EXIT_CODE });
     expect(profileOnDisk()).toBeUndefined();
@@ -343,7 +350,7 @@ describe('non-interactive operation', () => {
 
 describe('failures and cancellation', () => {
   test('declining the deploy leaves the repository unchanged', async () => {
-    await expect(setup({ features: 'slack' }, deps({ answers: ['n'] }))).rejects.toThrow(/Setup cancelled/);
+    await expect(setup({ features: 'slack' }, deps({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, 'n'] }))).rejects.toThrow(/Setup cancelled/);
     expect(profileOnDisk()).toBeUndefined();
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff']);
   });
@@ -482,9 +489,9 @@ describe('brand-new accounts', () => {
 
   test('asks where agents run, then prepares the account before deploying', async () => {
     const asked: string[] = [];
-    const d = freshAccount({ answers: ['2', ...ENTER_ALL, 'y'] });
+    const d = freshAccount({ answers: [ACCOUNT_OK, '2', ...ENTER_ALL, 'y'] });
     await setup({}, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
-    expect(asked[0]).toBe('  Choose [1]: ');
+    expect(asked[1]).toBe('  Choose [1]: ');
     expect(text()).toContain('Where should agents run?');
     expect(text()).toMatch(/Compute\s+ECS Fargate\n/);
     expect(text()).toContain('Install the CDK bootstrap (one-time, least-privilege deploy roles)');
@@ -492,20 +499,20 @@ describe('brand-new accounts', () => {
     expect(profileFile().compute).toEqual(['ecs']);
     // Bootstrap runs after confirmation and before the deploy, pinned to the account and Region.
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:bootstrap', '//cdk:deploy']);
-    expect(runs[1].args).toEqual(['//cdk:bootstrap', '--']);
+    expect(runs[1].args).toEqual(['//cdk:bootstrap', '--', 'aws://123456789012/us-east-1']);
     expect(text()).toContain('✓ Preparing your AWS account (CDK bootstrap)');
     expect(text()).toContain('✓ Allowing ECS Fargate in the CDK bootstrap');
   });
 
   test('keeps AgentCore in the bootstrap compute list for an ECS-only install', async () => {
     const setBootstrapComputeTypes = jest.fn(async () => undefined);
-    await setup({ compute: 'ecs', features: 'none', yes: true }, freshAccount({ setBootstrapComputeTypes, resolveAccount: async () => '123456789012' }));
+    await setup({ compute: 'ecs', features: 'none', yes: true }, freshAccount({ setBootstrapComputeTypes }));
     expect(setBootstrapComputeTypes).toHaveBeenCalledWith('us-east-1', ['agentcore', 'ecs']);
     expect(runs[1].args).toEqual(['//cdk:bootstrap', '--', 'aws://123456789012/us-east-1']);
   });
 
   test('declining leaves the account and the repository untouched', async () => {
-    await expect(setup({}, freshAccount({ answers: [COMPUTE_DEFAULT, ...ENTER_ALL, 'n'] }))).rejects.toThrow(/Setup cancelled/);
+    await expect(setup({}, freshAccount({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, ...ENTER_ALL, 'n'] }))).rejects.toThrow(/Setup cancelled/);
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff']);
     expect(profileOnDisk()).toBeUndefined();
   });
@@ -547,4 +554,76 @@ describe('brand-new accounts', () => {
     expect(text()).toContain('bgagent github set-token --region us-east-1 --stack-name forked-bgagent-dev');
     expect(text()).toContain('bgagent repo onboard owner/repo --region us-east-1 --stack-name forked-bgagent-dev');
   });
+});
+
+describe('account and deployment selection', () => {
+  const pick = (extra: FakeOptions) => (opts: SetupOptions = {}) => runSetup({ region: 'us-east-1', features: 'none', ...opts }, deps(extra));
+  const deployed = [
+    { name: 'backgroundagent-dev', status: 'UPDATE_COMPLETE', features: 'slack,linear' },
+    { name: 'team-b', status: 'CREATE_COMPLETE', features: 'none' },
+  ];
+  const existingStacks = stacks({
+    'backgroundagent-dev': stack({ DeploymentFeatures: 'slack,linear' }),
+    'team-b': stack({ DeploymentFeatures: 'none' }),
+  });
+
+  test('asks to confirm the account and stops without touching anything when declined', async () => {
+    const error = await pick({ answers: ['n'] })().catch((err: unknown) => err);
+    expect(error).toMatchObject({ exitCode: SETUP_CANCELLED_EXIT_CODE });
+    expect(text()).toContain('Account  123456789012  Admin (assumed role)');
+    expect(text()).toContain('Switch credentials');
+    expect(runs).toEqual([]);
+  });
+
+  test('explains invalid credentials instead of failing later', async () => {
+    const callerIdentity = async () => { throw new Error('ExpiredToken'); };
+    await expect(pick({ callerIdentity })({ yes: true })).rejects.toThrow(/could not be verified \(ExpiredToken\)\. Sign in/);
+  });
+
+  test('lists existing deployments and updates the chosen one', async () => {
+    await pick({ answers: [ACCOUNT_OK, '2', 'y'], listDeployments: async () => deployed, describeStack: existingStacks })();
+    expect(text()).toContain('Existing deployments in this account');
+    expect(text()).toMatch(/1\) backgroundagent-dev\s+UPDATE_COMPLETE · Slack, Linear/);
+    expect(text()).toMatch(/2\) team-b\s+CREATE_COMPLETE · core only/);
+    expect(text()).toContain('3) Create a new deployment');
+    expect(text()).toContain('Stack    team-b (existing');
+    expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'stackName=team-b']));
+    // An additional stack gets its own profile file; the shared one is untouched.
+    expect(fs.existsSync(path.join(root, 'abca.deployment.team-b.json'))).toBe(true);
+    expect(fs.existsSync(path.join(root, DEPLOYMENT_PROFILE_FILE))).toBe(false);
+  });
+
+  test('creates a new deployment under a fresh name, re-asking for taken or invalid names', async () => {
+    const answers = [ACCOUNT_OK, '3', 'team-b', 'Bad name', 'old-stack', '', COMPUTE_DEFAULT, 'y'];
+    const describeStack = stacks({ 'backgroundagent-dev': stack({}), 'team-b': stack({}), 'old-stack': stack({}) });
+    await pick({ answers, listDeployments: async () => deployed, describeStack })();
+    expect(text()).toContain("'team-b' already exists");
+    expect(text()).toContain('Use letters, numbers and hyphens');
+    // A stack the picker did not list (e.g. older) is still detected.
+    expect(text()).toContain("'old-stack' already exists");
+    expect(text()).toContain('Stack    backgroundagent-dev-2 (new installation)');
+    expect(text()).toContain('This adds a separate deployment alongside the existing one(s)');
+    expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev-2']));
+    expect(fs.existsSync(path.join(root, 'abca.deployment.backgroundagent-dev-2.json'))).toBe(true);
+  });
+
+  test('asks for a name when the account has no deployment yet', async () => {
+    const asked: string[] = [];
+    const d = deps({ answers: [ACCOUNT_OK, 'forked-bgagent-dev', COMPUTE_DEFAULT, 'y'] });
+    await runSetup({ region: 'us-east-1', features: 'none' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
+    expect(asked[1]).toBe('  Name for the new deployment [backgroundagent-dev]: ');
+    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=forked-bgagent-dev']));
+  });
+
+  test('skips the picker when --stack-name is given', async () => {
+    const listDeployments = jest.fn(async () => deployed);
+    await pick({ answers: [ACCOUNT_OK, 'y'], listDeployments, describeStack: existingStacks })({ stackName: 'team-b' });
+    expect(listDeployments).not.toHaveBeenCalled();
+  });
+});
+
+test('identityLabel names the role or user behind the credentials', () => {
+  expect(identityLabel('arn:aws:sts::123456789012:assumed-role/Admin/session')).toBe('Admin (assumed role)');
+  expect(identityLabel('arn:aws:iam::123456789012:user/ops')).toBe('ops (IAM user)');
+  expect(identityLabel('arn:aws:iam::123456789012:root')).toBe('account root');
 });

@@ -178,7 +178,8 @@ bgagent setup -c networkTopology=split          # pass the context you deploy wi
 
 The wizard works in this order:
 
-1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. Before deploying it also checks that Docker is running, because the agent image is built locally.
+1. Resolves the Region (`--region`, configured region, `AWS_REGION`) and rejects Regions without AgentCore Runtime and Memory. It shows the AWS account and identity your credentials resolve to (STS `GetCallerIdentity`) and asks you to confirm it. Before deploying it also checks that Docker is running, because the agent image is built locally.
+   - **Which deployment:** without `--stack-name`, it lists the ABCA deployments already in the account and Region. You can update one, or create a new deployment under a name you choose (the suggestion avoids existing names). With none yet, it asks for a name (default `backgroundagent-dev`).
 2. Reads the existing stack (`--stack-name`, default `backgroundagent-dev`). It preselects the features listed in the stack's `DeploymentFeatures` output, or infers them for stacks that predate profiles. Accepting the defaults never removes anything. A new stack defaults to the minimal profile.
    - The wizard passes only `stackName`, the profile and any `-c/--context key=value` you supply to CDK, alongside whatever `cdk/cdk.json` already holds.
    - It refuses to continue if the stack uses non-default compute (`ComputeTypes` output) or a `${stackName}-network` stack exists and the matching `compute_types` / `networkTopology` context is missing, because dropping that context would change more than features.
@@ -199,7 +200,9 @@ The wizard works in this order:
 
 `--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
 
-Commit `abca.deployment.json`. Every synthesis reads it, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build, so local and pipeline deployments match.
+Commit `abca.deployment.json`. Each additional deployment from the same checkout gets its own `abca.deployment.<stackName>.json`, so deploying one never changes another's features. Synthesis uses the file matching `-c stackName=…` and falls back to `abca.deployment.json`; the default stack `backgroundagent-dev` always uses the shared file.
+
+Deployments in one account share only the CDK bootstrap, with one exception: Bedrock model-invocation logging is an account-wide setting, configured by whichever deployment was deployed last. Every synthesis reads it, including `mise //cdk:synth`, `mise //cdk:deploy` and the CI build, so local and pipeline deployments match.
 
 ### Profile file and precedence
 

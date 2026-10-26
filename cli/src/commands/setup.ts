@@ -25,10 +25,12 @@ import * as readline from 'readline';
 import {
   CloudFormationClient,
   DescribeStacksCommand,
+  paginateDescribeStacks,
   paginateListStackResources,
   UpdateStackCommand,
   waitUntilStackUpdateComplete,
 } from '@aws-sdk/client-cloudformation';
+import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Command } from 'commander';
 import { saveConfig, tryLoadConfig } from '../config';
 import { CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
@@ -122,6 +124,8 @@ export const SETUP_CANCELLED_EXIT_CODE = 130;
 const MAX_FAILURES_SHOWN = 3;
 /** Width of the header's label column (`Account` plus a gap). */
 const FIELD_LABEL_WIDTH = 9;
+/** Width of the deployment picker's name column. */
+const DEPLOYMENT_NAME_WIDTH = 28;
 /** Width of the compute menu's label column. */
 const COMPUTE_LABEL_WIDTH = 20;
 /** Width of the review screen's label column. */
@@ -132,6 +136,18 @@ export interface ExistingStack {
   readonly parameters: ReadonlyMap<string, string>;
   readonly status: string;
   readonly account: string;
+}
+
+export interface CallerIdentity {
+  readonly account: string;
+  readonly arn: string;
+}
+
+export interface DeploymentSummary {
+  readonly name: string;
+  readonly status: string;
+  /** `DeploymentFeatures` output; absent on stacks that predate profiles. */
+  readonly features?: string;
 }
 
 export interface RunResult {
@@ -148,8 +164,10 @@ export interface SetupDeps {
   /** `null` when the stack does not exist; other failures throw. */
   readonly describeStack: (region: string, stackName: string) => Promise<ExistingStack | null>;
   readonly hasToolGateway: (region: string, stackName: string) => Promise<boolean>;
-  /** Best effort: the account the credentials resolve to, for new installations. */
-  readonly resolveAccount: (region: string) => Promise<string | undefined>;
+  /** The identity the AWS credentials resolve to (STS GetCallerIdentity); throws when they are invalid. */
+  readonly callerIdentity: (region: string) => Promise<CallerIdentity>;
+  /** ABCA application stacks in the Region (root stacks with the Task API outputs). */
+  readonly listDeployments: (region: string) => Promise<DeploymentSummary[]>;
   /** Rejects with a cancellation CliError when input closes (EOF, Ctrl-C). */
   readonly ask: (question: string) => Promise<string>;
   /** Runs `mise <args>` without a terminal: output goes to `logFile` and, line by line, to `onLine`. */
@@ -378,6 +396,66 @@ async function chooseCompute(deps: SetupDeps, ui: Ui, defaults: readonly Compute
   }
 }
 
+/** `arn:aws:sts::123:assumed-role/Admin/me` → `Admin (assumed role)`. */
+export function identityLabel(arn: string): string {
+  const assumed = /:assumed-role\/([^/]+)\//.exec(arn);
+  if (assumed) return `${assumed[1]} (assumed role)`;
+  const user = /:user\/(.+)$/.exec(arn);
+  if (user) return `${user[1]} (IAM user)`;
+  return arn.endsWith(':root') ? 'account root' : arn;
+}
+
+function suggestStackName(taken: ReadonlySet<string>): string {
+  if (!taken.has(DEFAULT_STACK_NAME)) return DEFAULT_STACK_NAME;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${DEFAULT_STACK_NAME}-${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
+async function askNewStackName(deps: SetupDeps, ui: Ui, region: string, taken: ReadonlySet<string>): Promise<string> {
+  const suggestion = suggestStackName(taken);
+  for (;;) {
+    const answer = (await deps.ask(`  Name for the new deployment [${suggestion}]: `)).trim() || suggestion;
+    if (!STACK_NAME_PATTERN.test(answer)) {
+      ui.line(`  ${ui.style.yellow('Use letters, numbers and hyphens, starting with a letter.')}`);
+    } else if (taken.has(answer) || (await deps.describeStack(region, answer))) {
+      ui.line(`  ${ui.style.yellow(`'${answer}' already exists; pick it from the list to update it, or choose another name.`)}`);
+    } else {
+      return answer;
+    }
+  }
+}
+
+/** Update an existing deployment, or name a new one in the same account. */
+async function chooseDeployment(
+  deps: SetupDeps,
+  ui: Ui,
+  region: string,
+  deployments: readonly DeploymentSummary[],
+): Promise<{ stackName: string; additional: boolean }> {
+  const taken = new Set(deployments.map(deployment => deployment.name));
+  if (deployments.length === 0) {
+    return { stackName: await askNewStackName(deps, ui, region, taken), additional: false };
+  }
+  ui.title('Existing deployments in this account');
+  deployments.forEach((deployment, index) => {
+    const features = deployment.features === undefined ? 'features not recorded'
+      : deployment.features === 'none' ? 'core only'
+        : deployment.features.split(',').map(f => CAPABILITY_CATALOG.features[f as DeploymentFeature]?.label ?? f).join(', ');
+    ui.line(`  ${index + 1}) ${deployment.name.padEnd(DEPLOYMENT_NAME_WIDTH)}${ui.style.dim(`${deployment.status} · ${features}`)}`);
+  });
+  const createIndex = deployments.length + 1;
+  ui.line(`  ${createIndex}) ${ui.style.bold('Create a new deployment')}`);
+  for (;;) {
+    const answer = (await deps.ask('  Update an existing deployment or create a new one? [1]: ')).trim() || '1';
+    const choice = Number.parseInt(answer, 10);
+    if (choice >= 1 && choice <= deployments.length) return { stackName: deployments[choice - 1].name, additional: false };
+    if (choice === createIndex) return { stackName: await askNewStackName(deps, ui, region, taken), additional: true };
+    ui.line(`  ${ui.style.yellow(`Enter a number from 1 to ${createIndex}.`)}`);
+  }
+}
+
 function computeLabel(compute: readonly ComputeBackend[]): string {
   return compute.map(backend => COMPUTE_LABELS[backend]).join(' + ');
 }
@@ -497,8 +575,10 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const ui = new Ui(deps);
   const { style } = ui;
   const repoRoot = findRepoRoot(opts.repoRoot ?? deps.cwd);
-  const stackName = opts.stackName ?? DEFAULT_STACK_NAME;
-  if (!STACK_NAME_PATTERN.test(stackName)) throw new CliError(`Invalid stack name '${stackName}'.`);
+  if (opts.stackName !== undefined && !STACK_NAME_PATTERN.test(opts.stackName)) {
+    throw new CliError(`Invalid stack name '${opts.stackName}'.`);
+  }
+  const prompting = deps.interactive && !opts.yes;
   const deploying = opts.deploy !== false;
   if (!deps.interactive && opts.features === undefined && !opts.yes) {
     throw new CliError('No terminal detected. Pass --features <list|none> (and --yes to deploy) for non-interactive setup.');
@@ -524,7 +604,34 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     );
   }
 
-  // 2. Existing deployment: preselect what is there so a rerun never proposes deletion.
+  // 2. Confirm the account before anything reads or writes it.
+  let identity: CallerIdentity;
+  try {
+    identity = await deps.callerIdentity(region);
+  } catch (err) {
+    throw new CliError(
+      `Your AWS credentials could not be verified (${err instanceof Error ? err.message : String(err)}). `
+      + 'Sign in (for example `aws sso login` or set AWS_PROFILE) and run bgagent setup again.',
+    );
+  }
+  const account = identity.account;
+  ui.title('ABCA setup');
+  ui.field('Account', `${account}  ${style.dim(identityLabel(identity.arn))}`);
+  ui.field('Region', region);
+  if (prompting && !(await confirm(deps, `  Deploy into AWS account ${account}?`, true))) {
+    ui.line(`  ${style.dim('Switch credentials (for example AWS_PROFILE=<profile>) and run bgagent setup again.')}`);
+    throw setupCancelled();
+  }
+
+  // 3. Which deployment: an explicit --stack-name, the picker, or the default.
+  let stackName = opts.stackName ?? DEFAULT_STACK_NAME;
+  let additional = false;
+  if (opts.stackName === undefined && prompting) {
+    const deployments = await deps.listDeployments(region);
+    ({ stackName, additional } = await chooseDeployment(deps, ui, region, deployments));
+  }
+
+  // 4. Existing deployment: preselect what is there so a rerun never proposes deletion.
   const existing = await deps.describeStack(region, stackName);
   if (existing && existing.status.endsWith('_IN_PROGRESS')) {
     throw new CliError(`Stack '${stackName}' is ${existing.status}; wait for it to finish before running setup.`);
@@ -533,16 +640,17 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const deployedFeatures = deployed?.source === 'inferred'
     ? { ...deployed.features, toolGateway: await deps.hasToolGateway(region, stackName) }
     : deployed?.features;
-  const profile = readDeploymentProfile(repoRoot);
+  const profile = readDeploymentProfile(repoRoot, stackName);
   const defaults = deployedFeatures ?? profile?.features ?? MINIMAL_DEPLOYMENT_FEATURES;
   // Every stack since #912 publishes its backends; older ones only ever had AgentCore by default.
   const deployedCompute = existing ? parseComputeList(existing.outputs.get('ComputeTypes') ?? 'agentcore') : undefined;
-  const account = existing?.account ?? (await deps.resolveAccount(region));
 
-  ui.title('ABCA setup');
+  ui.line();
   ui.field('Stack', `${stackName} ${style.dim(existing ? `(existing · ${existing.status})` : '(new installation)')}`);
-  ui.field('Region', region);
-  ui.field('Account', account ?? style.dim('from your AWS credentials'));
+  if (additional) {
+    ui.line(`  ${style.dim('This adds a separate deployment alongside the existing one(s); they share only the CDK bootstrap.')}`);
+    ui.line(`  ${style.dim('Bedrock model-invocation logging is account-wide: the most recent deployment configures it.')}`);
+  }
   if (extraContext.size > 0) ui.field('Context', [...extraContext].map(([key, value]) => `${key}=${value}`).join(' '));
   if (deployedFeatures) {
     const names = enabledFeatures(deployedFeatures).map(f => CAPABILITY_CATALOG.features[f].label);
@@ -584,7 +692,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
   } else if (deployedCompute) {
     compute = deployedCompute;
-  } else if (deps.interactive && !opts.yes && opts.features === undefined) {
+  } else if (prompting) {
     compute = await chooseCompute(deps, ui, profile?.compute ?? ['agentcore']);
   } else {
     compute = [...(profile?.compute ?? ['agentcore'])];
@@ -625,7 +733,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
       ui.line(`  ${style.yellow('⚠')} The next deploy deletes the data of: ${stateful.map(f => CAPABILITY_CATALOG.features[f].label).join(', ')}.`);
       if (!(await confirmDataLoss(deps, opts, stackName, deps.interactive))) throw setupCancelled();
     }
-    const file = writeDeploymentProfile(repoRoot, chosen);
+    const file = writeDeploymentProfile(repoRoot, chosen, stackName);
     ui.line();
     ui.line(`  ${style.green('✓')} Saved ${path.relative(deps.cwd, file) || file}`);
     ui.line(`  ${style.dim('Commit it so local and CI deploys use the same features. Deploy later with `bgagent setup`.')}`);
@@ -695,7 +803,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
 
   // 7. Persist, prepare the account, deploy the same profile through mise/CDK, configure the CLI.
-  const file = writeDeploymentProfile(repoRoot, chosen);
+  const file = writeDeploymentProfile(repoRoot, chosen, stackName);
   ui.line();
   ui.line(`  ${style.green('✓')} Saved your selection to ${path.relative(deps.cwd, file) || file}`);
   for (const step of preparation.steps) {
@@ -752,7 +860,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
     ui.line();
     ui.line(`  ${style.dim(`Full log: ${path.relative(deps.cwd, deployLog)}`)}`);
-    ui.line(`  ${style.dim(`Your selection is saved in ${DEPLOYMENT_PROFILE_FILE}; fix the cause and run bgagent setup again.`)}`);
+    ui.line(`  ${style.dim(`Your selection is saved in ${path.basename(file)}; fix the cause and run bgagent setup again.`)}`);
     process.exitCode = 1;
     return;
   }
@@ -763,7 +871,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   saveConfig({ ...previous, ...bundle } as CliConfig);
   ui.line();
   ui.field('API', bundle.api_url);
-  ui.field('CLI', 'configured for this stack');
+  ui.field('CLI', `now points at ${stackName}`);
   printNextSteps(ui, region, stackName);
 }
 
@@ -803,14 +911,28 @@ function defaultDeps(): SetupDeps {
         throw describeError(stackName, region, err);
       }
     },
-    resolveAccount: async (region) => {
+    callerIdentity: async (region) => {
+      const identity = await makeClient(STSClient, { region }).send(new GetCallerIdentityCommand({}));
+      if (!identity.Account || !identity.Arn) throw new Error('STS returned no account');
+      return { account: identity.Account, arn: identity.Arn };
+    },
+    listDeployments: async (region) => {
+      const cf = makeClient(CloudFormationClient, { region });
+      const found: DeploymentSummary[] = [];
       try {
-        const identity = await makeClient(CloudFormationClient, { region }).config.credentials();
-        return (identity as { accountId?: string }).accountId;
-      } catch {
-        // nosemgrep: ts-silent-success-masking -- display-only best effort: the caller prints a "from your AWS credentials" placeholder, and the deploy itself still fails loudly on bad credentials
-        return undefined;
+        for await (const page of paginateDescribeStacks({ client: cf }, {})) {
+          for (const stack of page.Stacks ?? []) {
+            const outputs = new Set((stack.Outputs ?? []).map(output => output.OutputKey));
+            // Root application stacks only: nested and network stacks have no Task API outputs.
+            if (stack.ParentId || !stack.StackName || !['ApiUrl', 'UserPoolId', 'AppClientId'].every(key => outputs.has(key))) continue;
+            const features = stack.Outputs?.find(output => output.OutputKey === 'DeploymentFeatures')?.OutputValue;
+            found.push({ name: stack.StackName, status: stack.StackStatus ?? 'UNKNOWN', ...(features !== undefined ? { features } : {}) });
+          }
+        }
+      } catch (err) {
+        throw new CliError(`Could not list stacks in ${region}: ${err instanceof Error ? err.message : String(err)}`);
       }
+      return found.sort((a, b) => a.name.localeCompare(b.name));
     },
     ask: question => new Promise((resolve, reject) => {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -880,7 +1002,7 @@ export function makeSetupCommand(deps: () => SetupDeps = defaultDeps): Command {
   return new Command('setup')
     .description('Choose optional features, validate Region support, and deploy ABCA (writes abca.deployment.json)')
     .option('--region <region>', 'AWS Region (defaults to configured region / AWS_REGION)')
-    .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
+    .option('--stack-name <name>', `CloudFormation stack name (default: pick or create interactively; ${DEFAULT_STACK_NAME} otherwise)`)
     .option('--features <list>', `Comma-separated features to enable (${DEPLOYMENT_FEATURES.join(', ')}) or none`)
     .option('--compute <list>', 'Compute backends for a new installation: agentcore, ecs or agentcore,ecs (first is the default)')
     .option('-c, --context <key=value>', 'Extra CDK context for diff and deploy, e.g. networkTopology=split (repeatable)', collect)
