@@ -75,6 +75,27 @@ describe('createApiClient request shape', () => {
     expect(error).toMatchObject({ status: 403, code: 'HTTP_ERROR' });
   });
 
+  it('explains a request the browser could not send (offline or blocked by CORS)', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const error = await createApiClient({ baseUrl: 'https://api.example/v1', getToken: async () => 'tok', fetchImpl })
+      .createTask({ repo: 'a/b', task_description: 'x' }, 'key-1')
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ status: 0, code: 'NETWORK_ERROR', message: expect.stringMatching(/Could not reach the ABCA API/) });
+  });
+
+  it('sends JSON bodies and the idempotency key on create', async () => {
+    const fetchImpl = vi.fn(async () => Response.json({ data: { task_id: 't1' } }, { status: 201 }));
+    await createApiClient({ baseUrl: 'https://api.example/v1', getToken: async () => 'tok', fetchImpl })
+      .createTask({ repo: 'a/b', issue_number: 3 }, 'key-1');
+    expect(fetchImpl).toHaveBeenCalledWith('https://api.example/v1/tasks', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ repo: 'a/b', issue_number: 3 }),
+      headers: expect.objectContaining({ 'Idempotency-Key': 'key-1', 'Content-Type': 'application/json' }),
+    }));
+  });
+
   it('rejects a 2xx response that is not JSON', async () => {
     const fetchImpl = vi.fn(async () => new Response('ok', { status: 200 }));
     const error = await createApiClient({ baseUrl: 'https://api.example/v1', getToken: async () => 'tok', fetchImpl })

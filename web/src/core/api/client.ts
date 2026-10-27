@@ -45,6 +45,21 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * A request that never got a response (offline, DNS, or blocked by the browser's CORS check)
+ * surfaces as a bare TypeError ("Failed to fetch"); say what that means instead.
+ */
+async function sendOrExplain(send: () => Promise<Response>): Promise<Response> {
+  try {
+    return await send();
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new ApiError(0, 'NETWORK_ERROR', 'Could not reach the ABCA API. Check your connection and try again.', '');
+    }
+    throw error;
+  }
+}
+
 interface ListTasksParams {
   readonly status?: readonly TaskStatusType[];
   readonly repo?: string;
@@ -94,16 +109,17 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     const qs = query && query.toString() ? `?${query.toString()}` : '';
     // Resolve fetch per request so instrumentation installed later (tests, mock mode) applies.
     const doFetch = fetchImpl ?? globalThis.fetch;
-    const res = await doFetch(`${root}${path}${qs}`, {
+    const token = await getToken();
+    const res = await sendOrExplain(() => doFetch(`${root}${path}${qs}`, {
       method,
       headers: {
-        Authorization: await getToken(),
+        Authorization: token,
         Accept: 'application/json',
         ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...headers,
       },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
-    });
+    }));
 
     let body: unknown;
     let parsed = true;
