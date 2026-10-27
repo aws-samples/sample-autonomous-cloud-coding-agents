@@ -6,6 +6,7 @@
   "license": "MIT-0",
   "type": "module",
   "scripts": {
+    "start": "node scripts/fetch-live-config.mjs && vite",
     "dev:mock": "vite --mode mock",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
