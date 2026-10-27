@@ -39,6 +39,12 @@ async function bootstrap(root: ReturnType<typeof createRoot>): Promise<void> {
   root.render(<StrictMode><App config={config} authAdapter={adapter} /></StrictMode>);
 }
 
+// Local dev against a deployment (`mise //web:dev:live`): Cognito accepts plain-http
+// redirects only for `localhost`, and the dev server prints a 127.0.0.1 address.
+if (import.meta.env.DEV && !__MOCK__ && window.location.hostname === '127.0.0.1') {
+  window.location.replace(window.location.href.replace('//127.0.0.1', '//localhost'));
+}
+
 const root = createRoot(document.getElementById('root') as HTMLElement);
 bootstrap(root).catch((error: unknown) => {
   root.render(
