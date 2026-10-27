@@ -60,6 +60,17 @@ describe('NewTaskPage', () => {
     await waitFor(() => expect(mockData.tasks.at(-1)).toMatchObject({ repo: 'acme/infra', issue_number: 42, task_description: null }));
   });
 
+  it('always asks for the coding workflow, so an issue-only task opens a pull request', async () => {
+    let body: unknown;
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST') body = await request.clone().json();
+    });
+    renderRoute('/tasks/new?repo=acme%2Finfra&issue=7');
+    fireEvent.click(await screen.findByRole('button', { name: 'Start task' }));
+    await waitFor(() => expect(body).toEqual({ repo: 'acme/infra', workflow_ref: 'coding/new-task-v1', issue_number: 7 }));
+    server.events.removeAllListeners();
+  });
+
   it('pre-fills from the link, e.g. "Try again"', async () => {
     renderRoute('/tasks/new?repo=acme%2Fdocs&description=Rewrite+the+guide');
     expect(await screen.findByRole('combobox', { name: 'Repository' })).toHaveValue('acme/docs');

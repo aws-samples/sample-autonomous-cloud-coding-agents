@@ -171,9 +171,17 @@ export interface GetPendingResponse {
 /** POST /v1/tasks body: the subset the console sends. */
 export interface CreateTaskRequest {
   readonly repo: string;
+  /** Always sent: an absent ref makes the server pick the repo-less `default/agent-v1` workflow. */
+  readonly workflow_ref: string;
   readonly issue_number?: number;
   readonly task_description?: string;
 }
+
+/**
+ * Clone → build → open a pull request. Mirrors `DEFAULT_CODING_WORKFLOW_ID` in the CLI,
+ * which pins it for the same reason (see cli/src/commands/submit.ts).
+ */
+export const CODING_WORKFLOW_ID = 'coding/new-task-v1';
 
 /** Mirrors `NUDGE_MAX_MESSAGE_LENGTH` in cli/src/types.ts. */
 export const NUDGE_MAX_MESSAGE_LENGTH = 2000;

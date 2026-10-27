@@ -31,6 +31,7 @@ import Textarea from '@cloudscape-design/components/textarea';
 import { useMemo, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { ApiError } from '../../core/api/client';
+import { CODING_WORKFLOW_ID } from '../../core/api/types';
 import { taskHref } from '../../core/util/format';
 import { useCreateTask, useTaskList } from './hooks';
 
@@ -89,6 +90,7 @@ export function NewTaskPage() {
     create.mutate(
       {
         repo: repo.trim(),
+        workflow_ref: CODING_WORKFLOW_ID,
         ...(mode === 'issue' ? { issue_number: Number(issue.trim()) } : {}),
         // With an issue, the text box is optional extra guidance on top of the issue.
         ...(description.trim() ? { task_description: description.trim() } : {}),

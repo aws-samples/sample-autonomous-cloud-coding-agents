@@ -214,6 +214,10 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       if (!body || typeof body.repo !== 'string' || !REPO_PATTERN.test(body.repo)) {
         return error(400, 'VALIDATION_ERROR', "Field 'repo' must be in owner/repo format.");
       }
+      // Like the server: without a ref the repo-less default workflow runs, which needs a description.
+      if (body.workflow_ref === undefined && !body.task_description?.trim()) {
+        return error(400, 'VALIDATION_ERROR', 'The "default/agent-v1" workflow requires task_description.');
+      }
       if (body.issue_number === undefined && !body.task_description?.trim()) {
         return error(400, 'VALIDATION_ERROR', 'Provide issue_number or task_description.');
       }
