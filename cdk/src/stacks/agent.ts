@@ -160,6 +160,9 @@ export interface AgentStackProps extends StackProps {
 }
 
 export class AgentStack extends Stack {
+  /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
+  public readonly taskApi: TaskApi;
+
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -460,7 +463,7 @@ export class AgentStack extends Stack {
       },
     });
     // --- Task API (REST API + Cognito + Lambda handlers) ---
-    const taskApi = new TaskApi(this, 'TaskApi', {
+    const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
