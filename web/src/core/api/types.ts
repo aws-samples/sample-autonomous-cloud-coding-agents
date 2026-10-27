@@ -168,6 +168,38 @@ export interface GetPendingResponse {
   readonly pending: readonly PendingApprovalSummary[];
 }
 
+/** POST /v1/tasks body: the subset the console sends. */
+export interface CreateTaskRequest {
+  readonly repo: string;
+  readonly issue_number?: number;
+  readonly task_description?: string;
+}
+
+/** Mirrors `NUDGE_MAX_MESSAGE_LENGTH` in cli/src/types.ts. */
+export const NUDGE_MAX_MESSAGE_LENGTH = 2000;
+
+/** POST /v1/tasks/{task_id}/nudge response (HTTP 202). */
+export interface NudgeResponse {
+  readonly task_id: string;
+  readonly nudge_id: string;
+  readonly submitted_at: string;
+}
+
+/** DELETE /v1/tasks/{task_id} response. */
+export interface CancelTaskResponse {
+  readonly task_id: string;
+  readonly status: TaskStatusType;
+  readonly cancelled_at: string;
+}
+
+/** POST /v1/tasks/{task_id}/approve and /deny responses (HTTP 202). */
+export interface DecisionResponse {
+  readonly task_id: string;
+  readonly request_id: string;
+  readonly status: string;
+  readonly decided_at: string;
+}
+
 interface Pagination {
   readonly next_token: string | null;
   readonly has_more: boolean;

@@ -23,5 +23,12 @@ import { createHandlers } from '../../src/mocks/handlers';
 
 export const TEST_API_BASE = 'https://api.test.example/v1';
 
+/** Shared with the handlers; writes (create, cancel, approve) change it, so `resetMockData` runs after each test. */
+export const mockData = buildFixtures(new Date());
+
+export function resetMockData(): void {
+  Object.assign(mockData, buildFixtures(new Date()));
+}
+
 /** The same handlers mock mode uses, so tests exercise the documented API contract. */
-export const server = setupServer(...createHandlers(TEST_API_BASE, buildFixtures(new Date())));
+export const server = setupServer(...createHandlers(TEST_API_BASE, mockData));

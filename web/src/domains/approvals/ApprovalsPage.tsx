@@ -17,60 +17,62 @@
  *  SOFTWARE.
  */
 
+import Alert from '@cloudscape-design/components/alert';
 import Box from '@cloudscape-design/components/box';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import Header from '@cloudscape-design/components/header';
-import Table from '@cloudscape-design/components/table';
-import type { PendingApprovalSummary } from '../../core/api/types';
+import SpaceBetween from '@cloudscape-design/components/space-between';
+import Spinner from '@cloudscape-design/components/spinner';
+import { useMemo, useState } from 'react';
 import { QueryError } from '../../core/components/QueryError';
-import { RouterLink } from '../../core/components/RouterLink';
-import { SeverityBadge } from '../../core/components/StatusBadge';
-import { formatRelativeTime, shortId } from '../../core/util/format';
-import { usePendingApprovals } from './hooks';
+import { taskTitle } from '../../core/util/format';
+import { useTaskList } from '../tasks/hooks';
+import { ApprovalCard, decisionMessage } from './ApprovalCard';
+import { usePendingApprovals, type Decision } from './hooks';
 
 export function ApprovalsPage() {
   const query = usePendingApprovals();
+  const tasks = useTaskList(['AWAITING_APPROVAL']);
+  const titles = useMemo(
+    () => new Map((tasks.data?.pages.flatMap((p) => p.data) ?? []).map((t) => [t.task_id, taskTitle(t)])),
+    [tasks.data],
+  );
   const items = query.data?.pending ?? [];
+  const [answered, setAnswered] = useState<Array<{ id: string; title: string; decision: Decision }>>([]);
+  const onDecided = (requestId: string, title: string) => (decision: Decision) =>
+    setAnswered((list) => [{ id: requestId, title, decision }, ...list]);
+
+  let body;
+  if (query.isError) body = <QueryError error={query.error} what="approval requests" />;
+  else if (query.isPending) body = <Spinner size="large" />;
+  else if (items.length === 0) body = <Box textAlign="center" color="inherit" padding="xxl">Nothing needs your OK right now.</Box>;
+  else {
+    body = items.map((request) => {
+      const title = titles.get(request.task_id);
+      return <ApprovalCard key={request.request_id} request={request} taskTitle={title} onDecided={onDecided(request.request_id, title ?? request.reason)} />;
+    });
+  }
 
   return (
     <ContentLayout
       header={
         <Header
           variant="h1"
-          description="Tool calls your agents paused on because a policy rule requires a human decision. Approving and denying from the console comes next; until then use `bgagent approve` or `bgagent deny`."
+          counter={query.data ? `(${items.length})` : undefined}
+          description="Agents pause and ask before risky actions. Approve to let them carry on, or say no and they try another way."
         >
-          Approvals
+          Needs your OK
         </Header>
       }
     >
-      {query.isError ? (
-        <QueryError error={query.error} what="pending approvals" />
-      ) : (
-        <Table<PendingApprovalSummary>
-          variant="full-page"
-          loading={query.isPending}
-          loadingText="Loading pending approvals"
-          items={[...items]}
-          trackBy="request_id"
-          header={<Header counter={query.data ? `(${items.length})` : undefined}>Waiting for a decision</Header>}
-          columnDefinitions={[
-            {
-              id: 'task',
-              header: 'Task',
-              cell: (p) => <RouterLink href={`/tasks/${encodeURIComponent(p.task_id)}`}>{shortId(p.task_id)}</RouterLink>,
-              isRowHeader: true,
-            },
-            { id: 'severity', header: 'Severity', cell: (p) => <SeverityBadge severity={p.severity} /> },
-            { id: 'tool', header: 'Tool', cell: (p) => p.tool_name },
-            { id: 'input', header: 'Input', cell: (p) => <code>{p.tool_input_preview}</code>, maxWidth: 360 },
-            { id: 'reason', header: 'Reason', cell: (p) => p.reason },
-            { id: 'rules', header: 'Matched rules', cell: (p) => p.matching_rule_ids.join(', ') || '-' },
-            { id: 'requested', header: 'Requested', cell: (p) => formatRelativeTime(p.created_at) },
-            { id: 'expires', header: 'Expires', cell: (p) => formatRelativeTime(p.expires_at) },
-          ]}
-          empty={<Box textAlign="center" color="inherit">Nothing is waiting for approval.</Box>}
-        />
-      )}
+      <SpaceBetween size="l">
+        {answered.map((a) => (
+          <Alert key={a.id} type="success" dismissible onDismiss={() => setAnswered((list) => list.filter((x) => x.id !== a.id))} header={a.title}>
+            {decisionMessage(a.decision)}
+          </Alert>
+        ))}
+        {body}
+      </SpaceBetween>
     </ContentLayout>
   );
 }

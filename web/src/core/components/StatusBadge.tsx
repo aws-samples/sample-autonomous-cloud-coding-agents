@@ -22,17 +22,17 @@ import StatusIndicator, { type StatusIndicatorProps } from '@cloudscape-design/c
 import type { Severity, TaskStatusType } from '../api/types';
 
 const STATUS_DISPLAY: Readonly<Record<TaskStatusType, { type: StatusIndicatorProps.Type; label: string }>> = {
-  PENDING_UPLOADS: { type: 'pending', label: 'Pending uploads' },
+  PENDING_UPLOADS: { type: 'pending', label: 'Waiting for files' },
   QUEUED: { type: 'pending', label: 'Queued' },
-  SUBMITTED: { type: 'in-progress', label: 'Submitted' },
-  HYDRATING: { type: 'in-progress', label: 'Preparing' },
-  RUNNING: { type: 'in-progress', label: 'Running' },
-  AWAITING_APPROVAL: { type: 'warning', label: 'Awaiting approval' },
-  FINALIZING: { type: 'in-progress', label: 'Finalizing' },
-  COMPLETED: { type: 'success', label: 'Completed' },
+  SUBMITTED: { type: 'in-progress', label: 'Starting' },
+  HYDRATING: { type: 'in-progress', label: 'Setting up' },
+  RUNNING: { type: 'in-progress', label: 'Working' },
+  AWAITING_APPROVAL: { type: 'warning', label: 'Needs your OK' },
+  FINALIZING: { type: 'in-progress', label: 'Wrapping up' },
+  COMPLETED: { type: 'success', label: 'Done' },
   FAILED: { type: 'error', label: 'Failed' },
   CANCELLED: { type: 'stopped', label: 'Cancelled' },
-  TIMED_OUT: { type: 'error', label: 'Timed out' },
+  TIMED_OUT: { type: 'error', label: 'Ran out of time' },
 };
 
 export function StatusBadge({ status }: { status: TaskStatusType }) {

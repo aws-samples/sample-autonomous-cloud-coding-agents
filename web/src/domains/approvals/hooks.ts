@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useApi } from '../../app/providers/api/ApiProvider';
 
 /** Approval requests time out in minutes, so the inbox refreshes faster than the task list. */
@@ -33,5 +33,21 @@ export function usePendingApprovals() {
     queryKey: approvalKeys.pending,
     queryFn: () => api.listPending(),
     refetchInterval: PENDING_REFRESH_MS,
+  });
+}
+
+export type Decision = { readonly kind: 'approve' } | { readonly kind: 'deny'; readonly reason?: string };
+
+export function useDecide(taskId: string, requestId: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (decision: Decision) => (decision.kind === 'approve'
+      ? api.approve(taskId, requestId)
+      : api.deny(taskId, requestId, decision.reason)),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: approvalKeys.pending });
+      await queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    },
   });
 }

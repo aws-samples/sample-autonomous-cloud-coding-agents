@@ -18,8 +18,12 @@
  */
 
 import type {
+  CancelTaskResponse,
+  CreateTaskRequest,
+  DecisionResponse,
   ErrorResponse,
   GetPendingResponse,
+  NudgeResponse,
   PaginatedResponse,
   SuccessResponse,
   TaskDetail,
@@ -60,6 +64,12 @@ export interface ApiClient {
   getTask(taskId: string): Promise<TaskDetail>;
   listTaskEvents(taskId: string, params?: ListTaskEventsParams): Promise<PaginatedResponse<TaskEvent>>;
   listPending(): Promise<GetPendingResponse>;
+  /** `idempotencyKey` makes a retried submit (double click, flaky network) create one task, not two. */
+  createTask(req: CreateTaskRequest, idempotencyKey: string): Promise<TaskDetail>;
+  cancelTask(taskId: string): Promise<CancelTaskResponse>;
+  nudgeTask(taskId: string, message: string): Promise<NudgeResponse>;
+  approve(taskId: string, requestId: string): Promise<DecisionResponse>;
+  deny(taskId: string, requestId: string, reason?: string): Promise<DecisionResponse>;
 }
 
 export interface ApiClientOptions {
@@ -73,13 +83,26 @@ export interface ApiClientOptions {
 export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptions): ApiClient {
   const root = baseUrl.replace(/\/+$/, '');
 
-  async function get<T>(path: string, query?: URLSearchParams): Promise<T> {
+  interface RequestOptions {
+    readonly query?: URLSearchParams;
+    readonly body?: unknown;
+    readonly headers?: Record<string, string>;
+  }
+
+  async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, options: RequestOptions = {}): Promise<T> {
+    const { query, body: payload, headers = {} } = options;
     const qs = query && query.toString() ? `?${query.toString()}` : '';
     // Resolve fetch per request so instrumentation installed later (tests, mock mode) applies.
     const doFetch = fetchImpl ?? globalThis.fetch;
     const res = await doFetch(`${root}${path}${qs}`, {
-      method: 'GET',
-      headers: { Authorization: await getToken(), Accept: 'application/json' },
+      method,
+      headers: {
+        Authorization: await getToken(),
+        Accept: 'application/json',
+        ...(payload === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...headers,
+      },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     });
 
     let body: unknown;
@@ -102,6 +125,10 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     }
     return body as T;
   }
+
+  const get = <T>(path: string, query?: URLSearchParams) => request<T>('GET', path, { query });
+  const taskPath = (taskId: string, suffix = '') => `/tasks/${encodeURIComponent(taskId)}${suffix}`;
+  const data = async <T>(promise: Promise<SuccessResponse<T>>) => (await promise).data;
 
   return {
     listTasks(params = {}) {
@@ -126,6 +153,25 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
     async listPending() {
       const res = await get<SuccessResponse<GetPendingResponse>>('/pending');
       return res.data;
+    },
+    createTask(req, idempotencyKey) {
+      return data(request<SuccessResponse<TaskDetail>>('POST', '/tasks', { body: req, headers: { 'Idempotency-Key': idempotencyKey } }));
+    },
+    cancelTask(taskId) {
+      return data(request<SuccessResponse<CancelTaskResponse>>('DELETE', taskPath(taskId)));
+    },
+    nudgeTask(taskId, message) {
+      return data(request<SuccessResponse<NudgeResponse>>('POST', taskPath(taskId, '/nudge'), { body: { message } }));
+    },
+    approve(taskId, requestId) {
+      return data(request<SuccessResponse<DecisionResponse>>('POST', taskPath(taskId, '/approve'), {
+        body: { request_id: requestId, decision: 'approve' },
+      }));
+    },
+    deny(taskId, requestId, reason) {
+      return data(request<SuccessResponse<DecisionResponse>>('POST', taskPath(taskId, '/deny'), {
+        body: { request_id: requestId, decision: 'deny', ...(reason ? { reason } : {}) },
+      }));
     },
   };
 }

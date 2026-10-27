@@ -20,31 +20,35 @@
 import { screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { shortId } from '../../../src/core/util/format';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
+import { titleOf } from '../../helpers/fixtures';
 import { renderRoute } from '../../helpers/render';
 import { server, TEST_API_BASE } from '../../helpers/server';
 
 describe('OverviewPage', () => {
-  it('counts work by state from the fixture set', async () => {
+  it('counts work by state in plain words', async () => {
     renderRoute('/');
-    // RUNNING x2, AWAITING_APPROVAL and HYDRATING are active; one task is queued.
-    expect(await screen.findByRole('link', { name: 'Active: 4' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Queued: 1' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'No agent heartbeat: 1' })).toBeInTheDocument();
-    // The timed-out task is older than 24 hours and the old completion is 3 days old.
-    expect(screen.getByRole('link', { name: 'Failed or timed out (24h): 1' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Completed (24h): 1' })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('link', { name: 'Waiting for approval: 1' })).toBeInTheDocument());
+    // RUNNING x2, AWAITING_APPROVAL and HYDRATING are working; one task is queued.
+    expect(await screen.findByRole('link', { name: 'Working now: 4' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Waiting in line: 1' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'No updates lately: 1' })).toBeInTheDocument();
+    // The budget failure and the no-changes run are recent; the timeout is older than 24 hours.
+    expect(screen.getByRole('link', { name: 'Failed (24h): 2' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Done (24h): 1' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Needs your OK: 1' })).toBeInTheDocument());
   });
 
-  it('lists exactly the tasks that need attention', async () => {
+  it('lists the tasks that need you, by title', async () => {
     renderRoute('/');
-    expect(await screen.findByRole('link', { name: shortId(MOCK_IDS.stale) })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: shortId(MOCK_IDS.awaiting) })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: shortId(MOCK_IDS.failed) })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: shortId(MOCK_IDS.running) })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: shortId(MOCK_IDS.timedOut) })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.stale) })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: titleOf(MOCK_IDS.awaiting) })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: titleOf(MOCK_IDS.failed) })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.running) })).not.toBeInTheDocument();
+  });
+
+  it('offers a New task button', async () => {
+    renderRoute('/');
+    expect(await screen.findByRole('link', { name: 'New task' })).toHaveAttribute('href', '/tasks/new');
   });
 
   it('shows the API error instead of zero counts when tasks fail to load', async () => {

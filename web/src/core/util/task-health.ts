@@ -35,10 +35,10 @@ export const RECENT_FAILURE_WINDOW_SEC = 24 * 3600;
 export type AttentionReason = 'awaiting_approval' | 'stale_heartbeat' | 'failed' | 'timed_out';
 
 export const ATTENTION_LABELS: Readonly<Record<AttentionReason, string>> = {
-  awaiting_approval: 'Waiting for approval',
-  stale_heartbeat: 'No agent heartbeat',
+  awaiting_approval: 'Needs your OK',
+  stale_heartbeat: 'No updates lately',
   failed: 'Failed',
-  timed_out: 'Timed out',
+  timed_out: 'Ran out of time',
 };
 
 export function isTerminal(status: TaskStatusType): boolean {

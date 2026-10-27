@@ -19,42 +19,54 @@
 
 import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { shortId } from '../../../src/core/util/format';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
+import { titleOf } from '../../helpers/fixtures';
 import { renderRoute } from '../../helpers/render';
 
 const ALL_IDS = Object.values(MOCK_IDS);
 
 describe('TaskListPage', () => {
-  it('lists every task visible to the caller', async () => {
+  it('lists every task by title, with its repository', async () => {
     renderRoute('/tasks');
-    expect(await screen.findByRole('link', { name: shortId(MOCK_IDS.running) })).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) })).toBeInTheDocument();
     for (const id of ALL_IDS) {
-      expect(screen.getByRole('link', { name: shortId(id) })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: titleOf(id) })).toBeInTheDocument();
     }
     expect(screen.getByText(`(${ALL_IDS.length})`)).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'acme/infra' })[0]).toHaveAttribute('href', '/repos/acme/infra');
   });
 
-  it('narrows to tasks needing attention from the URL', async () => {
+  it('names an issue-only task after the issue', async () => {
+    renderRoute('/tasks');
+    await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) });
+    expect(titleOf(MOCK_IDS.queued)).toBe('Add pagination to GET /invoices');
+  });
+
+  it('narrows to tasks that need you from the URL', async () => {
     renderRoute('/tasks?view=attention');
-    expect(await screen.findByRole('link', { name: shortId(MOCK_IDS.stale) })).toBeInTheDocument();
-    expect(screen.getByText('(3)')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: shortId(MOCK_IDS.queued) })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.stale) })).toBeInTheDocument();
+    expect(screen.getByText('(4)')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.queued) })).not.toBeInTheDocument();
   });
 
   it('asks the API for the statuses of the selected view', async () => {
     renderRoute('/tasks?view=queued');
-    expect(await screen.findByRole('link', { name: shortId(MOCK_IDS.queued) })).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.queued) })).toBeInTheDocument();
     expect(screen.getByText('(1)')).toBeInTheDocument();
   });
 
   it('filters loaded tasks by free text', async () => {
     renderRoute('/tasks');
-    await screen.findByRole('link', { name: shortId(MOCK_IDS.running) });
+    await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) });
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'web-frontend' } });
-    expect(screen.getByText('(2)')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: shortId(MOCK_IDS.completed) })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: shortId(MOCK_IDS.running) })).not.toBeInTheDocument();
+    expect(screen.getByText('(3)')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: titleOf(MOCK_IDS.completed) })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.running) })).not.toBeInTheDocument();
+  });
+
+  it('shows a stuck task as "No updates lately"', async () => {
+    renderRoute('/tasks?view=attention');
+    expect(await screen.findByText('No updates lately')).toBeInTheDocument();
   });
 
   it('links pull requests to GitHub in a new tab', async () => {

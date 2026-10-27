@@ -60,3 +60,19 @@ function formatSpan(seconds: number): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
   return `${Math.floor(seconds / 86400)}d`;
 }
+
+/** What a person would call the task: its description, else the issue it fixes. */
+export function taskTitle(task: { readonly task_description: string | null; readonly issue_number: number | null }): string {
+  const description = task.task_description?.trim();
+  if (description) return description;
+  return task.issue_number ? `Fix issue #${task.issue_number}` : 'Untitled task';
+}
+
+/** Route for a repository's page; `owner/name` maps onto two path segments. */
+export function repoHref(repo: string): string {
+  return `/repos/${repo.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+export function taskHref(taskId: string): string {
+  return `/tasks/${encodeURIComponent(taskId)}`;
+}

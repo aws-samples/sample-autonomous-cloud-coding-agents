@@ -31,7 +31,7 @@ import type { TaskSummary } from '../../core/api/types';
 import { QueryError } from '../../core/components/QueryError';
 import { RouterLink } from '../../core/components/RouterLink';
 import { StatusBadge } from '../../core/components/StatusBadge';
-import { formatRelativeTime, shortId } from '../../core/util/format';
+import { formatRelativeTime, repoHref, taskHref, taskTitle } from '../../core/util/format';
 import {
   ATTENTION_LABELS,
   RECENT_FAILURE_WINDOW_SEC,
@@ -41,6 +41,7 @@ import {
   isQueued,
 } from '../../core/util/task-health';
 import { usePendingApprovals } from '../approvals/hooks';
+import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { useTaskList } from '../tasks/hooks';
 
 interface Counter {
@@ -55,16 +56,16 @@ function recent(task: TaskSummary, now: Date): boolean {
 
 function summarize(tasks: readonly TaskSummary[], pendingApprovals: number, now: Date = new Date()): Counter[] {
   return [
-    { label: 'Active', value: tasks.filter((t) => isActive(t.status)).length, href: '/tasks?view=active' },
-    { label: 'Queued', value: tasks.filter((t) => isQueued(t.status)).length, href: '/tasks?view=queued' },
-    { label: 'Waiting for approval', value: pendingApprovals, href: '/approvals' },
-    { label: 'No agent heartbeat', value: tasks.filter((t) => hasStaleHeartbeat(t, now)).length, href: '/tasks?view=attention' },
+    { label: 'Working now', value: tasks.filter((t) => isActive(t.status)).length, href: '/tasks?view=active' },
+    { label: 'Waiting in line', value: tasks.filter((t) => isQueued(t.status)).length, href: '/tasks?view=queued' },
+    { label: 'Needs your OK', value: pendingApprovals, href: '/approvals' },
+    { label: 'No updates lately', value: tasks.filter((t) => hasStaleHeartbeat(t, now)).length, href: '/tasks?view=attention' },
     {
-      label: 'Failed or timed out (24h)',
+      label: 'Failed (24h)',
       value: tasks.filter((t) => (t.status === 'FAILED' || t.status === 'TIMED_OUT') && recent(t, now)).length,
       href: '/tasks?view=unsuccessful',
     },
-    { label: 'Completed (24h)', value: tasks.filter((t) => t.status === 'COMPLETED' && recent(t, now)).length, href: '/tasks?view=completed' },
+    { label: 'Done (24h)', value: tasks.filter((t) => t.status === 'COMPLETED' && recent(t, now)).length, href: '/tasks?view=completed' },
   ];
 }
 
@@ -81,7 +82,7 @@ export function OverviewPage() {
   return (
     <ContentLayout
       header={
-        <Header variant="h1" description="What your agents are doing and what needs a human.">
+        <Header variant="h1" description="What your agents are doing, and what needs you." actions={<NewTaskButton />}>
           Overview
         </Header>
       }
@@ -126,13 +127,14 @@ export function OverviewPage() {
           loadingText="Loading tasks"
           items={attention}
           trackBy="task_id"
-          header={<Header variant="h2" counter={tasksQuery.data ? `(${attention.length})` : undefined}>Needs attention</Header>}
+          header={<Header variant="h2" counter={tasksQuery.data ? `(${attention.length})` : undefined}>Needs you</Header>}
           columnDefinitions={[
             {
               id: 'task',
               header: 'Task',
-              cell: (t) => <RouterLink href={`/tasks/${encodeURIComponent(t.task_id)}`}>{shortId(t.task_id)}</RouterLink>,
+              cell: (t) => <RouterLink href={taskHref(t.task_id)}>{taskTitle(t)}</RouterLink>,
               isRowHeader: true,
+              maxWidth: 360,
             },
             {
               id: 'reason',
@@ -143,10 +145,10 @@ export function OverviewPage() {
               },
             },
             { id: 'status', header: 'Status', cell: (t) => <StatusBadge status={t.status} /> },
-            { id: 'repo', header: 'Repository', cell: (t) => t.repo ?? '-' },
+            { id: 'repo', header: 'Repository', cell: (t) => (t.repo ? <RouterLink href={repoHref(t.repo)}>{t.repo}</RouterLink> : '-') },
             { id: 'updated', header: 'Updated', cell: (t) => formatRelativeTime(t.updated_at) },
           ]}
-          empty={<Box textAlign="center" color="inherit">Nothing needs attention right now.</Box>}
+          empty={<Box textAlign="center" color="inherit">Nothing needs you right now.</Box>}
         />
       </SpaceBetween>
     </ContentLayout>

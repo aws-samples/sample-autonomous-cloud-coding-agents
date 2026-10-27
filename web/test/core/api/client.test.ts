@@ -37,7 +37,7 @@ describe('createApiClient against the mock API contract', () => {
 
   it('filters by status', async () => {
     const res = await client.listTasks({ status: ['FAILED', 'TIMED_OUT'] });
-    expect(res.data.map((t) => t.status).sort()).toEqual(['FAILED', 'TIMED_OUT']);
+    expect(res.data.map((t) => t.status).sort()).toEqual(['FAILED', 'FAILED', 'TIMED_OUT']);
   });
 
   it('unwraps the detail envelope', async () => {

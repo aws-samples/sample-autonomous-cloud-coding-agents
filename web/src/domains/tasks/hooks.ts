@@ -17,9 +17,10 @@
  *  SOFTWARE.
  */
 
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
 import { useApi } from '../../app/providers/api/ApiProvider';
-import type { TaskStatusType } from '../../core/api/types';
+import type { CreateTaskRequest, TaskStatusType } from '../../core/api/types';
 import { isTerminal } from '../../core/util/task-health';
 
 /** Live views poll; the API has no push channel for browsers yet. */
@@ -29,16 +30,17 @@ const PAGE_SIZE = 100;
 const EVENT_PAGE_SIZE = 100;
 
 const taskKeys = {
-  list: (status: readonly TaskStatusType[] | undefined) => ['tasks', 'list', status ?? 'all'] as const,
+  all: ['tasks'] as const,
+  list: (status: readonly TaskStatusType[] | undefined, repo?: string) => ['tasks', 'list', status ?? 'all', repo ?? 'any'] as const,
   detail: (taskId: string) => ['tasks', 'detail', taskId] as const,
   events: (taskId: string) => ['tasks', 'events', taskId] as const,
 };
 
-export function useTaskList(status?: readonly TaskStatusType[]) {
+export function useTaskList(status?: readonly TaskStatusType[], repo?: string) {
   const api = useApi();
   return useInfiniteQuery({
-    queryKey: taskKeys.list(status),
-    queryFn: ({ pageParam }) => api.listTasks({ status, limit: PAGE_SIZE, nextToken: pageParam }),
+    queryKey: taskKeys.list(status, repo),
+    queryFn: ({ pageParam }) => api.listTasks({ status, repo, limit: PAGE_SIZE, nextToken: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) => (last.pagination.has_more && last.pagination.next_token ? last.pagination.next_token : undefined),
     refetchInterval: LIST_REFRESH_MS,
@@ -61,5 +63,37 @@ export function useTaskEvents(taskId: string, live: boolean) {
     queryKey: taskKeys.events(taskId),
     queryFn: () => api.listTaskEvents(taskId, { desc: true, limit: EVENT_PAGE_SIZE }),
     refetchInterval: live ? ACTIVE_TASK_REFRESH_MS : false,
+  });
+}
+
+/**
+ * Submits a new task. One idempotency key per form instance: a double click or a
+ * retried request after a network blip creates one task, not two.
+ */
+export function useCreateTask() {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
+  return useMutation({
+    mutationFn: (req: CreateTaskRequest) => api.createTask(req, idempotencyKey),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: taskKeys.all }),
+  });
+}
+
+export function useCancelTask(taskId: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.cancelTask(taskId),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: taskKeys.all }),
+  });
+}
+
+export function useSendMessage(taskId: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (message: string) => api.nudgeTask(taskId, message),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: taskKeys.events(taskId) }),
   });
 }

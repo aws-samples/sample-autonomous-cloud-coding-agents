@@ -18,11 +18,13 @@
  */
 
 import AppLayout from '@cloudscape-design/components/app-layout';
+import Badge from '@cloudscape-design/components/badge';
 import SideNavigation, { type SideNavigationProps } from '@cloudscape-design/components/side-navigation';
 import TopNavigation from '@cloudscape-design/components/top-navigation';
 import { applyMode, Mode } from '@cloudscape-design/global-styles';
 import { useEffect, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
+import { usePendingApprovals } from '../../domains/approvals/hooks';
 import { useAuth } from '../providers/auth/AuthProvider';
 
 const THEME_KEY = 'abca-console-theme';
@@ -30,8 +32,17 @@ const THEME_KEY = 'abca-console-theme';
 const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Overview', href: '/' },
   { type: 'link', text: 'Tasks', href: '/tasks' },
-  { type: 'link', text: 'Approvals', href: '/approvals' },
+  { type: 'link', text: 'Repositories', href: '/repos' },
+  { type: 'link', text: 'Needs your OK', href: '/approvals' },
 ];
+
+/** Adds a count badge to "Needs your OK" so waiting approvals are visible from every page. */
+function withApprovalCount(items: SideNavigationProps.Item[], count: number): SideNavigationProps.Item[] {
+  if (count === 0) return items;
+  return items.map((item) => (item.type === 'link' && item.href === '/approvals'
+    ? { ...item, info: <Badge color="red">{count}</Badge> }
+    : item));
+}
 
 /** Highlights the nav entry for the current route, including nested routes like /tasks/:id. */
 function activeHref(pathname: string): string {
@@ -56,6 +67,7 @@ export function AppShell() {
   const { state, signOut } = useAuth();
   const [mode, toggleMode] = useTheme();
   const email = state.status === 'signed-in' ? state.session.user.email : '';
+  const pendingCount = usePendingApprovals().data?.pending.length ?? 0;
 
   const follow = (event: CustomEvent<{ href?: string; external?: boolean }>) => {
     const { href, external } = event.detail;
@@ -92,7 +104,7 @@ export function AppShell() {
           <SideNavigation
             header={{ href: '/', text: 'Factory' }}
             activeHref={activeHref(pathname)}
-            items={NAV_ITEMS}
+            items={withApprovalCount(NAV_ITEMS, pendingCount)}
             onFollow={follow}
           />
         }

@@ -52,7 +52,7 @@ export function EventTimeline({ taskId, live }: { taskId: string; live: boolean 
       header={
         <Header
           description="Newest first."
-          actions={<Toggle checked={verbose} onChange={({ detail }) => setVerbose(detail.checked)}>Show tool calls and turns</Toggle>}
+          actions={<Toggle checked={verbose} onChange={({ detail }) => setVerbose(detail.checked)}>Show everything</Toggle>}
         >
           Timeline
         </Header>

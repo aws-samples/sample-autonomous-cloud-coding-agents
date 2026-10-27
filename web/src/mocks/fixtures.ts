@@ -25,10 +25,22 @@
 
 import type { PendingApprovalSummary, TaskDetail, TaskEvent } from '../core/api/types';
 
+/** A change the mock backend applies once its time comes: how mock tasks "progress". */
+export interface ScheduledChange {
+  readonly taskId: string;
+  readonly dueMs: number;
+  readonly eventType?: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly patch?: Partial<TaskDetail>;
+}
+
 export interface MockData {
-  readonly tasks: TaskDetail[];
-  readonly events: Record<string, TaskEvent[]>;
-  readonly pending: PendingApprovalSummary[];
+  tasks: TaskDetail[];
+  events: Record<string, TaskEvent[]>;
+  pending: PendingApprovalSummary[];
+  scheduled: ScheduledChange[];
+  /** Idempotency-Key → task id, so a repeated submit returns the first task. */
+  idempotency: Record<string, string>;
 }
 
 /** 26-character ULID-shaped id ending in a readable suffix. */
@@ -47,6 +59,7 @@ export const MOCK_IDS = {
   timedOut: mockId('TIMEOUT1'),
   cancelled: mockId('CANCEL01'),
   completedOld: mockId('DONEOLD1'),
+  noChanges: mockId('NOCHANGE'),
 } as const;
 
 function ago(now: Date, seconds: number): string {
@@ -101,6 +114,11 @@ function task(now: Date, overrides: Partial<TaskDetail> & Pick<TaskDetail, 'task
 
 function event(taskId: string, index: number, at: string, eventType: string, metadata: Record<string, unknown> = {}): TaskEvent {
   return { event_id: `${taskId}-${String(index).padStart(4, '0')}`, event_type: eventType, timestamp: at, metadata };
+}
+
+/** Metadata for an `agent_tool_call`, with the preview in the agent's truncated dict-repr format. */
+function tool(name: string, preview: string): Record<string, unknown> {
+  return { tool_name: name, tool_input_preview: preview, turn: 1 };
 }
 
 /** Oldest-first event history; the handlers sort as the API would. */
@@ -237,6 +255,19 @@ export function buildFixtures(now: Date = new Date()): MockData {
       completed_at: ago(now, 27 * HOUR),
     }),
     task(now, {
+      task_id: MOCK_IDS.noChanges,
+      status: 'FAILED',
+      repo: 'acme/web-frontend',
+      task_description: 'Add a CODEOWNERS file to the repository root',
+      created_at: ago(now, 50 * MIN),
+      started_at: ago(now, 50 * MIN - 8),
+      completed_at: ago(now, 49 * MIN),
+      updated_at: ago(now, 49 * MIN),
+      duration_s: 69,
+      cost_usd: 0.11,
+      error_message: 'The agent finished, but none of its changes were committed to the branch and no pull request was opened.',
+    }),
+    task(now, {
       task_id: MOCK_IDS.completedOld,
       status: 'COMPLETED',
       task_description: 'Bump the AWS SDK to the latest minor version',
@@ -254,14 +285,24 @@ export function buildFixtures(now: Date = new Date()): MockData {
   ];
 
   const events: Record<string, TaskEvent[]> = {
+    [MOCK_IDS.noChanges]: lifecycle(now, MOCK_IDS.noChanges, 50 * MIN - 8, [
+      [50 * MIN - 20, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/nochange/add-a-codeowners-file build_before=True' }],
+      [50 * MIN - 21, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [50 * MIN - 28, 'agent_tool_call', tool('Bash', "{'command': 'ls -a && find . -name CODEOWNERS', 'description': 'Check whether a CODEOWNERS file already exists'}")],
+      [50 * MIN - 30, 'agent_turn', { turn: 2, text_preview: 'A CODEOWNERS file already exists at the root.' }],
+      [50 * MIN - 38, 'agent_turn', { turn: 5, text_preview: "I didn't change anything or open a PR, because the repository root already has a CODEOWNERS file. It was added in PR #5." }],
+      [50 * MIN - 39, 'agent_milestone', { milestone: 'agent_execution_complete', details: 'status=success turns=5' }],
+      [49 * MIN, 'task_failed', { final_status: 'FAILED' }],
+    ]),
     [MOCK_IDS.running]: lifecycle(now, MOCK_IDS.running, 6 * MIN, [
-      [5 * MIN, 'agent_milestone', { milestone: 'repo_cloned' }],
-      [4 * MIN, 'agent_turn', { turn: 4 }],
-      [3 * MIN, 'agent_tool_call', { tool_name: 'Bash' }],
-      [2 * MIN, 'agent_milestone', { milestone: 'reproduced_failure' }],
-      [90, 'agent_tool_call', { tool_name: 'Edit' }],
+      [5 * MIN + 50, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/running1/fix-flaky-retry-test build_before=True' }],
+      [5 * MIN + 45, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [5 * MIN, 'agent_tool_call', tool('Bash', "{'command': 'npm test -- PaymentClient --runInBand', 'description': 'Run the PaymentClient tests to see the failure'}")],
+      [4 * MIN, 'agent_turn', { turn: 4, text_preview: 'The retry test waits on a real timer, so it fails when the machine is slow. I will switch it to fake timers.' }],
+      [3 * MIN, 'agent_tool_call', tool('Read', "{'file_path': '/workspace/acme/payments-api/src/client/payment-client.test.ts'}")],
+      [90, 'agent_tool_call', tool('Edit', "{'file_path': '/workspace/acme/payments-api/src/client/payment-client.test.ts', 'old_string': 'await sleep(100)'}")],
       [60, 'agent_cost_update', { cost_usd: 0.84 }],
-      [20, 'agent_turn', { turn: 12 }],
+      [20, 'agent_tool_call', tool('Bash', "{'command': 'for i in 1 2 3 4 5; do npm test -- PaymentClient || exit 1; done', 'description': 'Run the test five times to make sure it is stable'}")],
     ]),
     [MOCK_IDS.stale]: lifecycle(now, MOCK_IDS.stale, 24 * MIN, [
       [20 * MIN, 'agent_milestone', { milestone: 'repo_cloned' }],
@@ -269,17 +310,25 @@ export function buildFixtures(now: Date = new Date()): MockData {
       [9 * MIN, 'agent_turn', { turn: 31 }],
     ]),
     [MOCK_IDS.awaiting]: lifecycle(now, MOCK_IDS.awaiting, 14 * MIN, [
-      [10 * MIN, 'agent_milestone', { milestone: 'plan_ready' }],
+      [13 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [10 * MIN, 'agent_tool_call', tool('Bash', "{'command': 'terraform plan -target=module.staging_database', 'description': 'Preview the staging database change'}")],
+      [9 * MIN, 'agent_turn', { turn: 6, text_preview: 'The plan only changes the staging database. Next I need to apply it.' }],
       [2 * MIN, 'approval_requested', { request_id: 'req-01JF3KR0APPROVE00000001', reason: 'Infrastructure changes require approval' }],
     ]),
     [MOCK_IDS.completed]: lifecycle(now, MOCK_IDS.completed, 2 * HOUR + 24 * MIN, [
-      [2 * HOUR + 20 * MIN, 'agent_milestone', { milestone: 'repo_cloned' }],
-      [2 * HOUR + 10 * MIN, 'agent_milestone', { milestone: 'tests_passing' }],
+      [2 * HOUR + 20 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/donepr01/fix-dark-mode-contrast' }],
+      [2 * HOUR + 19 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [2 * HOUR + 15 * MIN, 'agent_tool_call', tool('Edit', "{'file_path': '/workspace/acme/web-frontend/src/settings/theme.css'}")],
+      [2 * HOUR + 10 * MIN, 'agent_milestone', { milestone: 'step:build:start' }],
+      [2 * HOUR + 8 * MIN, 'agent_milestone', { milestone: 'step:build:succeeded' }],
+      [2 * HOUR + 6 * MIN, 'agent_milestone', { milestone: 'step:open_pr:start' }],
+      [2 * HOUR + 5 * MIN, 'agent_milestone', { milestone: 'pr_created' }],
       [2 * HOUR + 5 * MIN, 'pr_url', { pr_url: 'https://github.com/acme/web-frontend/pull/482' }],
       [2 * HOUR + 3 * MIN, 'task_completed'],
     ]),
     [MOCK_IDS.failed]: lifecycle(now, MOCK_IDS.failed, 4 * HOUR - 60, [
-      [3 * HOUR + 50 * MIN, 'agent_milestone', { milestone: 'repo_cloned' }],
+      [3 * HOUR + 50 * MIN, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/failed01/java-21' }],
+      [3 * HOUR + 49 * MIN, 'agent_milestone', { milestone: 'step:implement:start' }],
       [3 * HOUR + 10 * MIN, 'agent_blocked', { kind: 'build_failure', resource: 'ledger-core', remediation_hint: 'Lombok 1.18.20 does not support Java 21' }],
       [3 * HOUR, 'task_failed', { reason: 'Task exceeded max_budget_usd (5.00)' }],
     ]),
@@ -300,5 +349,5 @@ export function buildFixtures(now: Date = new Date()): MockData {
     },
   ];
 
-  return { tasks, events, pending };
+  return { tasks, events, pending, scheduled: [], idempotency: {} };
 }
