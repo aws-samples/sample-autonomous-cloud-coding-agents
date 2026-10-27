@@ -23,10 +23,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './app/App';
 import { loadRuntimeConfig } from './app/config/runtime-config';
-import { unavailableAuthAdapter, type AuthAdapter } from './app/providers/auth/AuthProvider';
-
-/** Browser sign-in for deployed stacks lands with the CDK website construct (Cognito managed login). */
-const COGNITO_NOT_WIRED = 'Browser sign-in is not enabled for this deployment yet. Use the bgagent CLI in the meantime.';
+import { createCognitoAuthAdapter } from './app/providers/auth/cognito';
 
 async function bootstrap(root: ReturnType<typeof createRoot>): Promise<void> {
   if (__MOCK__) {
@@ -37,7 +34,8 @@ async function bootstrap(root: ReturnType<typeof createRoot>): Promise<void> {
   }
 
   const config = await loadRuntimeConfig();
-  const adapter: AuthAdapter = unavailableAuthAdapter(COGNITO_NOT_WIRED);
+  if (config.auth.mode !== 'cognito') throw new Error('this build only supports Cognito sign-in');
+  const adapter = createCognitoAuthAdapter({ region: config.region, ...config.auth });
   root.render(<StrictMode><App config={config} authAdapter={adapter} /></StrictMode>);
 }
 
