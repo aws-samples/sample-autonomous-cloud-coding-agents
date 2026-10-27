@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
@@ -55,7 +56,7 @@ describe('NewTaskPage', () => {
   it('starts a task from an issue number', async () => {
     renderRoute('/tasks/new?repo=acme%2Finfra');
     fireEvent.click(await screen.findByRole('radio', { name: 'Fix a GitHub issue' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Issue number' }), { target: { value: '42' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Issue' }), { target: { value: '42' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start task' }));
     await waitFor(() => expect(mockData.tasks.at(-1)).toMatchObject({ repo: 'acme/infra', issue_number: 42, task_description: null }));
   });
@@ -69,6 +70,27 @@ describe('NewTaskPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Start task' }));
     await waitFor(() => expect(body).toEqual({ repo: 'acme/infra', workflow_ref: 'coding/new-task-v1', issue_number: 7 }));
     server.events.removeAllListeners();
+  });
+
+  it('lists the repository\'s open issues to pick from', async () => {
+    renderRoute('/tasks/new?repo=acme%2Fpayments-api');
+    fireEvent.click(await screen.findByRole('radio', { name: 'Fix a GitHub issue' }));
+    const picker = screen.getByRole('combobox', { name: 'Issue' });
+    const autosuggest = createWrapper(document.body).findAutosuggest(`[data-testid="issue-picker"]`)!;
+    autosuggest.focus();
+    fireEvent.change(picker, { target: { value: 'refund' } });
+    await waitFor(() => expect(autosuggest.findDropdown().findOptions().length).toBeGreaterThan(0));
+    autosuggest.selectSuggestionByValue('198');
+    expect(picker).toHaveValue('198');
+    expect(screen.getByText('#198: Refund webhook retries forever on 410')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }));
+    await waitFor(() => expect(mockData.tasks.at(-1)).toMatchObject({ repo: 'acme/payments-api', issue_number: 198 }));
+  });
+
+  it('falls back to typing the number when the deployment has no issue picker', async () => {
+    renderRoute('/tasks/new?repo=acme%2Fpayments-api', { consoleApi: false });
+    fireEvent.click(await screen.findByRole('radio', { name: 'Fix a GitHub issue' }));
+    expect(await screen.findByRole('textbox', { name: 'Issue number' })).toBeInTheDocument();
   });
 
   it('pre-fills from the link, e.g. "Try again"', async () => {

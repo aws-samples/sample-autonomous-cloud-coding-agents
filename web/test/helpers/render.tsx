@@ -28,9 +28,13 @@ import { routes } from '../../src/routes';
 import { TEST_API_BASE } from './server';
 
 /** Renders the full route tree at `path`, signed in, against the MSW test server. */
-export function renderRoute(path: string) {
+export function renderRoute(path: string, { consoleApi = true }: { consoleApi?: boolean } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const api = createApiClient({ baseUrl: TEST_API_BASE, getToken: async () => 'test-token' });
+  const api = createApiClient({
+    baseUrl: TEST_API_BASE,
+    ...(consoleApi ? { consoleBaseUrl: TEST_API_BASE } : {}),
+    getToken: async () => 'test-token',
+  });
   const router = createMemoryRouter(routes, { initialEntries: [path] });
   const result = render(
     <QueryClientProvider client={queryClient}>

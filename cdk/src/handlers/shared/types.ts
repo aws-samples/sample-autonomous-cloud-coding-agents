@@ -1486,6 +1486,21 @@ export interface PolicyRuleSummary {
 /**
  * `GET /v1/repos/{repo_id}/policies` response body.
  */
+/** One open issue in GET /v1/repos/{repo_id}/issues. Titles and metadata only, no body. */
+export interface RepoIssueSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly updated_at: string;
+  readonly labels: readonly string[];
+}
+
+/** GET /v1/repos/{repo_id}/issues response (console issue picker). */
+export interface ListRepoIssuesResponse {
+  readonly repo: string;
+  readonly issues: readonly RepoIssueSummary[];
+}
+
 export interface GetPoliciesResponse {
   readonly repo_id: string;
   readonly policies: {

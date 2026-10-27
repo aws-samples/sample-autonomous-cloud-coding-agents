@@ -156,7 +156,7 @@ MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true
 
 `--all` is required because the app now has more than one stack. The deploy task builds the bundle (`mise //web:bundle`) first. Open the `ConsoleUrl` stack output and sign in with the same Cognito user as the `bgagent` CLI.
 
-The static app shell is public, like any single-page app on a CDN. It holds no data or secrets. Every request for data goes to the REST API, which requires a Cognito ID token. To sign in from a local `vite` dev server against a deployed stack, add `-c operatorConsoleDevOrigins=http://localhost:5173`. Bootstrap policy bundle 1.8.0 or later is required for the managed-login domain; `mise //cdk:preflight` reports a stale bundle.
+The static app shell is public, like any single-page app on a CDN. It holds no data or secrets. Every request for data goes to the REST API, which requires a Cognito ID token. The console stack also deploys a small console-only API for the issue picker. It lists the open issues of onboarded repositories, using the stored GitHub token on the server side; the browser never receives the token. That API requires a Cognito ID token on every route, and its CORS rules allow only the console's own address. To sign in from a local `vite` dev server against a deployed stack, add `-c operatorConsoleDevOrigins=http://localhost:5173`. Bootstrap policy bundle 1.8.0 or later is required for the managed-login domain; `mise //cdk:preflight` reports a stale bundle.
 
 ## Bedrock inference geography
 

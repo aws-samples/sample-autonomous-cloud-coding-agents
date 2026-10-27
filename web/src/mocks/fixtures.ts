@@ -23,7 +23,7 @@
  * All timestamps are relative to `now` so the data always looks current.
  */
 
-import type { PendingApprovalSummary, TaskDetail, TaskEvent } from '../core/api/types';
+import type { PendingApprovalSummary, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
 
 /** A change the mock backend applies once its time comes: how mock tasks "progress". */
 export interface ScheduledChange {
@@ -41,6 +41,8 @@ export interface MockData {
   scheduled: ScheduledChange[];
   /** Idempotency-Key → task id, so a repeated submit returns the first task. */
   idempotency: Record<string, string>;
+  /** Open GitHub issues per repository, for the issue picker. */
+  issues: Record<string, RepoIssueSummary[]>;
 }
 
 /** 26-character ULID-shaped id ending in a readable suffix. */
@@ -349,5 +351,18 @@ export function buildFixtures(now: Date = new Date()): MockData {
     },
   ];
 
-  return { tasks, events, pending, scheduled: [], idempotency: {} };
+  const issue = (repo: string, number: number, title: string, labels: string[], updatedAgoS: number): RepoIssueSummary =>
+    ({ number, title, labels, url: `https://github.com/${repo}/issues/${number}`, updated_at: ago(now, updatedAgoS) });
+  const issues: Record<string, RepoIssueSummary[]> = {
+    'acme/web-frontend': [
+      issue('acme/web-frontend', 31, 'Settings page loses unsaved changes on back navigation', ['bug'], 2 * HOUR),
+      issue('acme/web-frontend', 27, 'Add keyboard shortcuts to the task list', ['enhancement'], 26 * HOUR),
+    ],
+    'acme/payments-api': [
+      issue('acme/payments-api', 214, 'Add pagination to GET /invoices', ['enhancement'], 3 * HOUR),
+      issue('acme/payments-api', 198, 'Refund webhook retries forever on 410', ['bug', 'p1'], 30 * HOUR),
+    ],
+  };
+
+  return { tasks, events, pending, scheduled: [], idempotency: {}, issues };
 }

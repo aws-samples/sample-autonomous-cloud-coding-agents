@@ -39,8 +39,8 @@ function createQueryClient(): QueryClient {
 
 function SignedInApp({ config, session }: { config: RuntimeConfig; session: AuthSession }) {
   const client = useMemo(
-    () => createApiClient({ baseUrl: config.apiBaseUrl, getToken: () => session.getToken() }),
-    [config.apiBaseUrl, session],
+    () => createApiClient({ baseUrl: config.apiBaseUrl, consoleBaseUrl: config.consoleApiBaseUrl, getToken: () => session.getToken() }),
+    [config.apiBaseUrl, config.consoleApiBaseUrl, session],
   );
   const [router] = useState(() => createBrowserRouter(routes));
   return (

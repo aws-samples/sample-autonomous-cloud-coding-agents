@@ -259,6 +259,15 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       return HttpResponse.json({ data: created }, { status: 201 });
     }),
 
+    http.get(`${base}/repos/:repoId/issues`, async ({ request, params }) => {
+      const denied = await guard(request);
+      if (denied) return denied;
+      const repo = decodeURIComponent(String(params.repoId));
+      if (!REPO_PATTERN.test(repo)) return error(400, 'VALIDATION_ERROR', 'repo_id must be in owner/repo format.');
+      if (repo === MOCK_NOT_ONBOARDED_REPO) return error(422, 'REPO_NOT_ONBOARDED', `Repository '${repo}' is not onboarded.`);
+      return HttpResponse.json({ data: { repo, issues: data.issues[repo] ?? [] } });
+    }),
+
     http.delete(`${base}/tasks/:taskId`, async ({ request, params }) => {
       const denied = await guard(request);
       if (denied) return denied;

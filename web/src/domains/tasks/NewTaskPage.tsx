@@ -33,7 +33,7 @@ import { useNavigate, useSearchParams } from 'react-router';
 import { ApiError } from '../../core/api/client';
 import { CODING_WORKFLOW_ID } from '../../core/api/types';
 import { taskHref } from '../../core/util/format';
-import { useCreateTask, useTaskList } from './hooks';
+import { useCreateTask, useRepoIssues, useTaskList } from './hooks';
 
 /** Same rule as the API (`cdk/src/handlers/shared/validation.ts`). */
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
@@ -79,6 +79,17 @@ export function NewTaskPage() {
     const repos = new Set((tasks.data?.pages.flatMap((p) => p.data) ?? []).map((t) => t.repo).filter((r): r is string => !!r));
     return [...repos].sort().map((value) => ({ value }));
   }, [tasks.data]);
+
+  const repoLooksValid = REPO_PATTERN.test(repo.trim());
+  const issues = useRepoIssues(repo.trim(), mode === 'issue' && repoLooksValid);
+  // null data: this deployment has no console API, so fall back to typing the number.
+  const pickerAvailable = issues.data !== null;
+  const issueOptions = (issues.data?.issues ?? []).map((i) => ({
+    value: String(i.number),
+    label: `#${i.number} ${i.title}`,
+    tags: [...i.labels],
+  }));
+  const chosenIssue = issues.data?.issues.find((i) => String(i.number) === issue.trim());
 
   const errors = validate(repo, mode, issue, description);
   const shown = showErrors ? errors : {};
@@ -135,11 +146,32 @@ export function NewTaskPage() {
                 />
               </FormField>
 
-              {mode === 'issue' && (
+              {mode === 'issue' && (pickerAvailable ? (
+                <FormField
+                  label="Issue"
+                  description={chosenIssue ? `#${chosenIssue.number}: ${chosenIssue.title}` : 'Pick an open issue, or type its number.'}
+                  errorText={shown.issue}
+                >
+                  <Autosuggest
+                    value={issue}
+                    options={issueOptions}
+                    placeholder={repoLooksValid ? 'Search open issues' : 'Choose a repository first'}
+                    disabled={!repoLooksValid}
+                    statusType={issues.isFetching ? 'loading' : issues.isError ? 'error' : 'finished'}
+                    loadingText="Loading open issues"
+                    errorText={issues.isError ? (issues.error instanceof Error ? issues.error.message : 'Could not load issues.') : undefined}
+                    empty="No open issues in this repository"
+                    enteredTextLabel={(value) => (/^#?\d+$/.test(value) ? `Use issue #${value.replace(/^#/, '')}` : `No issue matches "${value}"`)}
+                    onChange={({ detail }) => setIssue(detail.value.replace(/^#/, ''))}
+                    filteringType="auto"
+                    data-testid="issue-picker"
+                  />
+                </FormField>
+              ) : (
                 <FormField label="Issue number" errorText={shown.issue}>
                   <Input value={issue} inputMode="numeric" placeholder="12" onChange={({ detail }) => setIssue(detail.value)} />
                 </FormField>
-              )}
+              ))}
 
               <FormField
                 label={mode === 'issue' ? 'Anything to add? (optional)' : 'Describe the change'}

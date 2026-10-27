@@ -162,6 +162,10 @@ export interface AgentStackProps extends StackProps {
 export class AgentStack extends Stack {
   /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
   public readonly taskApi: TaskApi;
+  /** Onboarded repositories; the console's issue picker serves only these. */
+  public readonly repoTable: RepoTable;
+  /** Platform GitHub token, read server-side by the console's issue picker. */
+  public readonly githubTokenSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
@@ -220,7 +224,7 @@ export class AgentStack extends Stack {
     const budgetAlerts = new BudgetAlerts(this, 'BudgetAlerts');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
-    const repoTable = new RepoTable(this, 'RepoTable');
+    const repoTable = this.repoTable = new RepoTable(this, 'RepoTable');
 
     // Standalone Agent Registry asset registry (#246). Provisioned via a custom
     // resource because CreateRegistry is async and has no CDK L2. Enabled by
@@ -294,6 +298,7 @@ export class AgentStack extends Stack {
       description: 'GitHub personal access token for the background agent',
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    this.githubTokenSecret = githubTokenSecret;
 
     NagSuppressions.addResourceSuppressions(githubTokenSecret, [
       {

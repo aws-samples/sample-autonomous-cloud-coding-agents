@@ -165,6 +165,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       env,
       userPool: stack.taskApi.userPool,
       apiUrl: stack.taskApi.api.url,
+      repoTable: stack.repoTable.table,
+      githubTokenSecret: stack.githubTokenSecret,
       assetDirectory: options.operatorConsoleAssetDirectory,
       additionalOrigins: devOrigins,
       description: 'ABCA operator console (uksb-wt64nei4u6)',

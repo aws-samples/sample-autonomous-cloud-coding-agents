@@ -97,3 +97,15 @@ export function useSendMessage(taskId: string) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: taskKeys.events(taskId) }),
   });
 }
+
+/** Open issues for the issue picker. Disabled until the repository name looks valid. */
+export function useRepoIssues(repo: string, enabled: boolean) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ['repos', repo, 'issues'],
+    queryFn: () => api.listRepoIssues(repo),
+    enabled,
+    staleTime: 60_000,
+    retry: false,
+  });
+}

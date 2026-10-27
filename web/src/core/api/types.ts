@@ -168,6 +168,20 @@ export interface GetPendingResponse {
   readonly pending: readonly PendingApprovalSummary[];
 }
 
+/** One open issue from the console API's GET /repos/{repo_id}/issues. */
+export interface RepoIssueSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly updated_at: string;
+  readonly labels: readonly string[];
+}
+
+export interface ListRepoIssuesResponse {
+  readonly repo: string;
+  readonly issues: readonly RepoIssueSummary[];
+}
+
 /** POST /v1/tasks body: the subset the console sends. */
 export interface CreateTaskRequest {
   readonly repo: string;

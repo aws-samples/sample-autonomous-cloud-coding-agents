@@ -23,6 +23,8 @@ import * as path from 'node:path';
 import { App, Aspects, Stack } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import {
   CFN_TYPES_WITHOUT_EXEC_ROLE_IAM,
@@ -51,12 +53,16 @@ describe('OperatorConsoleStack', () => {
     const app = new App();
     const platform = new Stack(app, 'platform', { env: ENV });
     const userPool = new cognito.UserPool(platform, 'UserPool');
+    const repoTable = new dynamodb.Table(platform, 'RepoTable', { partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING } });
+    const githubTokenSecret = new secretsmanager.Secret(platform, 'GitHubToken');
     stack = new OperatorConsoleStack(app, 'backgroundagent-dev-console', {
       env: ENV,
       userPool,
       apiUrl: API_URL,
       assetDirectory: bundle,
       additionalOrigins: ['http://localhost:5173'],
+      repoTable,
+      githubTokenSecret,
     });
     Aspects.of(stack).add(new AwsSolutionsChecks({ verbose: true }));
     template = Template.fromStack(stack);
@@ -153,6 +159,47 @@ describe('OperatorConsoleStack', () => {
     expect(deployments[entryId].Properties.SystemMetadata).toEqual({ 'cache-control': 'no-cache' });
     expect(deployments[entryId].Properties.DistributionPaths).toEqual(['/*']);
     expect(deployments[entryId].DependsOn).toEqual(expect.arrayContaining([expect.stringMatching(/^Assets/)]));
+  });
+
+  test('adds a console API whose issue route requires a Cognito token', () => {
+    template.resourceCountIs('AWS::ApiGateway::RestApi', 1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'GET',
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: Match.anyValue(),
+      RequestParameters: { 'method.request.path.repo_id': true },
+    });
+    template.hasResourceProperties('AWS::ApiGateway::Authorizer', { Type: 'COGNITO_USER_POOLS' });
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method'));
+    for (const method of methods) {
+      if (method.Properties.HttpMethod !== 'OPTIONS') expect(method.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
+    }
+  });
+
+  test('the console API allows only the console\'s own origins, not "*"', () => {
+    const preflights = Object.values(template.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } }));
+    expect(preflights.length).toBeGreaterThan(0);
+    const rendered = JSON.stringify(preflights);
+    expect(rendered).toContain('http://localhost:5173');
+    expect(rendered).not.toContain("'*'");
+  });
+
+  test('the issue function reads the repo table and the token secret, nothing broader', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: { REPO_TABLE_NAME: Match.anyValue(), GITHUB_TOKEN_SECRET_ARN: Match.anyValue() } },
+    });
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+      .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(statements.filter((a) => /^dynamodb:(Put|Update|Delete|BatchWrite)/.test(a))).toEqual([]);
+    expect(statements).toContain('secretsmanager:GetSecretValue');
+  });
+
+  test('tells the bundle where the console API is', () => {
+    const entry = Object.values(template.findResources('Custom::CDKBucketDeployment'))
+      .find((d) => (d.Properties.SystemMetadata as Record<string, string>)['cache-control'] === 'no-cache');
+    // config.json's keys live in the asset; its token values (here the console API URL) are markers.
+    expect(JSON.stringify(entry?.Properties.SourceMarkers)).toMatch(/"Ref":"ConsoleApi[0-9A-F]+"/);
   });
 
   test('outputs the console URL', () => {

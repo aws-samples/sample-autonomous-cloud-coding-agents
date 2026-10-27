@@ -23,6 +23,7 @@ import type {
   DecisionResponse,
   ErrorResponse,
   GetPendingResponse,
+  ListRepoIssuesResponse,
   NudgeResponse,
   PaginatedResponse,
   SuccessResponse,
@@ -85,32 +86,38 @@ export interface ApiClient {
   nudgeTask(taskId: string, message: string): Promise<NudgeResponse>;
   approve(taskId: string, requestId: string): Promise<DecisionResponse>;
   deny(taskId: string, requestId: string, reason?: string): Promise<DecisionResponse>;
+  /** Open issues of an onboarded repository; null when this deployment has no console API. */
+  listRepoIssues(repo: string): Promise<ListRepoIssuesResponse | null>;
 }
 
 export interface ApiClientOptions {
   /** Base URL including the stage, e.g. `https://abc.execute-api.us-east-1.amazonaws.com/v1`. */
   readonly baseUrl: string;
+  /** Console-only API (issue picker); optional. */
+  readonly consoleBaseUrl?: string;
   /** Returns a current Cognito ID token. Sent raw in `Authorization`, matching the CLI. */
   readonly getToken: () => Promise<string>;
   readonly fetchImpl?: typeof fetch;
 }
 
-export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptions): ApiClient {
+export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }: ApiClientOptions): ApiClient {
   const root = baseUrl.replace(/\/+$/, '');
+  const consoleRoot = consoleBaseUrl?.replace(/\/+$/, '');
 
   interface RequestOptions {
     readonly query?: URLSearchParams;
     readonly body?: unknown;
     readonly headers?: Record<string, string>;
+    readonly base?: string;
   }
 
   async function request<T>(method: 'GET' | 'POST' | 'DELETE', path: string, options: RequestOptions = {}): Promise<T> {
-    const { query, body: payload, headers = {} } = options;
+    const { query, body: payload, headers = {}, base = root } = options;
     const qs = query && query.toString() ? `?${query.toString()}` : '';
     // Resolve fetch per request so instrumentation installed later (tests, mock mode) applies.
     const doFetch = fetchImpl ?? globalThis.fetch;
     const token = await getToken();
-    const res = await sendOrExplain(() => doFetch(`${root}${path}${qs}`, {
+    const res = await sendOrExplain(() => doFetch(`${base}${path}${qs}`, {
       method,
       headers: {
         Authorization: token,
@@ -183,6 +190,10 @@ export function createApiClient({ baseUrl, getToken, fetchImpl }: ApiClientOptio
       return data(request<SuccessResponse<DecisionResponse>>('POST', taskPath(taskId, '/approve'), {
         body: { request_id: requestId, decision: 'approve' },
       }));
+    },
+    async listRepoIssues(repo) {
+      if (!consoleRoot) return null;
+      return data(request<SuccessResponse<ListRepoIssuesResponse>>('GET', `/repos/${encodeURIComponent(repo)}/issues`, { base: consoleRoot }));
     },
     deny(taskId, requestId, reason) {
       return data(request<SuccessResponse<DecisionResponse>>('POST', taskPath(taskId, '/deny'), {

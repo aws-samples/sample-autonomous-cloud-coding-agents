@@ -39,6 +39,8 @@ interface MockAuthConfig {
 export interface RuntimeConfig {
   /** REST API base URL including the stage, e.g. `https://abc.execute-api.us-east-1.amazonaws.com/v1`. */
   readonly apiBaseUrl: string;
+  /** Console-only API (issue picker). Absent on deployments without it; the picker then stays hidden. */
+  readonly consoleApiBaseUrl?: string;
   readonly region: string;
   readonly auth: CognitoAuthConfig | MockAuthConfig;
 }
@@ -90,6 +92,7 @@ export function parseRuntimeConfig(value: unknown, allowMock: boolean = __MOCK__
     if (!allowMock) throw new RuntimeConfigError('mock sign-in is only available in local mock mode');
     return {
       apiBaseUrl: requireString(source, 'apiBaseUrl', 'config'),
+      ...(source.consoleApiBaseUrl === undefined ? {} : { consoleApiBaseUrl: requireString(source, 'consoleApiBaseUrl', 'config') }),
       region: requireString(source, 'region', 'config'),
       auth: { mode: 'mock' },
     };
@@ -99,6 +102,9 @@ export function parseRuntimeConfig(value: unknown, allowMock: boolean = __MOCK__
   }
   return {
     apiBaseUrl: requireHttpsUrl(requireString(source, 'apiBaseUrl', 'config'), 'config.apiBaseUrl'),
+    ...(source.consoleApiBaseUrl === undefined
+      ? {}
+      : { consoleApiBaseUrl: requireHttpsUrl(requireString(source, 'consoleApiBaseUrl', 'config'), 'config.consoleApiBaseUrl') }),
     region: requireString(source, 'region', 'config'),
     auth: {
       mode: 'cognito',

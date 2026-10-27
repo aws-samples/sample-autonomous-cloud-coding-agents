@@ -28,6 +28,8 @@ const MOCK_API_BASE = `${window.location.origin}/mock-api/v1`;
 
 export const MOCK_RUNTIME_CONFIG: RuntimeConfig = {
   apiBaseUrl: MOCK_API_BASE,
+  // One mock server answers both APIs.
+  consoleApiBaseUrl: MOCK_API_BASE,
   region: 'us-east-1',
   auth: { mode: 'mock' },
 };
