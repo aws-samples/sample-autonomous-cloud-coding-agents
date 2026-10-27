@@ -11,6 +11,10 @@ run = "cd .. && yarn install --check-files"
 description = "Run the console locally against the in-browser mock API (no AWS needed); http://127.0.0.1:5173"
 run = "yarn dev:mock"
 
+[tasks."dev:live"]
+description = "Run the console locally against your deployed API and sign-in (needs AWS_PROFILE/AWS_REGION); http://localhost:5173"
+run = ["node scripts/fetch-live-config.mjs", "yarn vite"]
+
 [tasks.typecheck]
 description = "Type-check the console"
 run = "yarn tsc --noEmit"

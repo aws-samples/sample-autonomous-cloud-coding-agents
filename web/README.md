@@ -5,10 +5,9 @@ working on, what is stuck, and what is waiting for a human. It is a single-page
 React app using the [Cloudscape](https://cloudscape.design/) design system and
 talks only to the existing REST API (`docs/design/API_CONTRACT.md`).
 
-> **Status: first increment, read-only, local mock mode.** Deploying the console
-> (CloudFront + private S3 + Cognito managed login) comes with the CDK website
-> construct in the next increment. Until then a production bundle refuses to
-> sign anyone in.
+Deployed by the opt-in `<stack>-console` CDK stack (CloudFront + private S3 +
+Cognito managed login); see "Optional operator console" in
+`docs/guides/DEPLOYMENT_GUIDE.md`.
 
 ## Run it locally (no AWS account needed)
 
@@ -24,6 +23,26 @@ completed with a PR, failed with a classified error, and so on. You are signed
 in as `operator@example.com`; "Sign out" returns you to the sign-in screen.
 
 The dev server binds to `127.0.0.1` only.
+
+## Run it locally against your deployment
+
+For UI work with real data and real sign-in, without redeploying: the dev server
+reloads on every save and talks to your deployed API.
+
+```bash
+# once: allow sign-in redirects to http://localhost:5173 on the console's app client
+bash scripts/abca-onboard.sh --local-dev        # or: cdk deploy ... -c operatorConsoleDevOrigins=http://localhost:5173
+
+export AWS_PROFILE=<your profile> AWS_REGION=<region>
+MISE_EXPERIMENTAL=1 mise //web:dev:live
+# open http://localhost:5173 (use "localhost", not 127.0.0.1: it must match the redirect)
+```
+
+`dev:live` downloads your console's `config.json` (public identifiers only: API
+URL, user pool and app client ids, login domain) into the git-ignored
+`web/.config.local.json`, and the dev server serves it as `/config.json`. The
+server still binds to `127.0.0.1` only. If the deployment uses
+`-c allowedCidrs`, your network must be on the list.
 
 ## Pages
 
@@ -49,6 +68,7 @@ MISE_EXPERIMENTAL=1 mise //web:build      # typecheck + test + lint + bundle (pa
 MISE_EXPERIMENTAL=1 mise //web:test       # Vitest + Testing Library against the same MSW handlers
 MISE_EXPERIMENTAL=1 mise //web:eslint     # ESLint --fix
 MISE_EXPERIMENTAL=1 mise //web:dev:mock   # local mock mode
+MISE_EXPERIMENTAL=1 mise //web:dev:live   # local dev server against your deployment
 ```
 
 ## How mock code stays out of production

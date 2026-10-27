@@ -1,5 +1,6 @@
 import react from '@vitejs/plugin-react';
 import { msw } from 'msw/vite';
+import { readFileSync } from 'node:fs';
 import type { Plugin } from 'vite';
 import { defineConfig } from 'vitest/config';
 
@@ -40,6 +41,31 @@ function contentSecurityPolicy(): Plugin {
   };
 }
 
+/**
+ * `mise //web:dev:live` only: serves `.config.local.json` (your deployment's public
+ * config, fetched by scripts/fetch-live-config.mjs) as /config.json, so the dev server
+ * talks to the real API and Cognito. Never part of a build.
+ */
+function localRuntimeConfig(): Plugin {
+  return {
+    name: 'abca-local-runtime-config',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/config.json', (_req, res) => {
+        try {
+          const body = readFileSync(new URL('./.config.local.json', import.meta.url), 'utf8');
+          res.setHeader('Content-Type', 'application/json');
+          res.setHeader('Cache-Control', 'no-store');
+          res.end(body);
+        } catch {
+          res.statusCode = 404;
+          res.end('No .config.local.json. Run `mise //web:dev:live`, or `mise //web:dev:mock` for mock data.');
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ command, mode }) => {
   const mock = mode === 'mock';
   if (command === 'build' && mock) {
@@ -47,7 +73,7 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
-    plugins: [react(), contentSecurityPolicy(), ...(mock ? [msw({ mode: 'worker-only' })] : [])],
+    plugins: [react(), contentSecurityPolicy(), ...(mock ? [msw({ mode: 'worker-only' })] : [localRuntimeConfig()])],
     define: { __MOCK__: JSON.stringify(mock) },
     // Loopback only; never expose the dev server to the network.
     server: { host: '127.0.0.1', port: 5173, strictPort: true },
