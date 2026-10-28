@@ -41,8 +41,7 @@ MISE_EXPERIMENTAL=1 mise //web:dev:live
 `dev:live` downloads your console's `config.json` (public identifiers only: API
 URL, user pool and app client ids, login domain) into the git-ignored
 `web/.config.local.json`, and the dev server serves it as `/config.json`. The
-server still binds to `127.0.0.1` only. If the deployment uses
-`-c allowedCidrs`, your network must be on the list.
+server still binds to `127.0.0.1` only.
 
 ## Pages
 

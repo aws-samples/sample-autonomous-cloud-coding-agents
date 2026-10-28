@@ -45,7 +45,7 @@ try {
 if (!consoleUrl || consoleUrl === 'None') fail(`stack ${stackName} has no ConsoleUrl output. Deploy with -c operatorConsole=true first.`);
 
 const res = await fetch(new URL('config.json', consoleUrl), { cache: 'no-store' }).catch((error) => fail(`could not reach ${consoleUrl}: ${error.message}`));
-if (!res.ok) fail(`${consoleUrl}config.json returned HTTP ${res.status}${res.status === 403 ? ' (is this network on the allowlist?)' : ''}`);
+if (!res.ok) fail(`${consoleUrl}config.json returned HTTP ${res.status}`);
 const config = await res.json();
 if (config?.auth?.mode !== 'cognito' || typeof config.apiBaseUrl !== 'string') fail('unexpected config.json shape');
 
