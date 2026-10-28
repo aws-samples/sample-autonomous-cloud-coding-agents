@@ -133,6 +133,13 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
   const redirectUri = `${env.location.origin}${CALLBACK_PATH}`;
   const issuer = `https://cognito-idp.${options.region}.amazonaws.com/${options.userPoolId}`;
   let refreshing: Promise<StoredTokens> | null = null;
+  /**
+   * The sign-in callback can only be completed once: its state and code are single-use.
+   * React StrictMode (development) calls `restore` twice on mount, so both calls must
+   * share the one attempt instead of the second failing with "does not match".
+   * Shared only while in flight; afterwards the stored tokens are the source of truth.
+   */
+  let callback: Promise<AuthSession> | null = null;
 
   function claimsOf(idToken: string, expectedNonce?: string): IdTokenClaims {
     const claims = decodeJwtPayload(idToken) as unknown as IdTokenClaims;
@@ -235,13 +242,17 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
 
   return {
     async restore() {
+      if (callback) return callback;
       if (env.location.pathname === CALLBACK_PATH) {
-        try {
-          return await completeSignIn();
-        } catch (error) {
-          env.replaceUrl('/');
-          throw error;
-        }
+        callback = completeSignIn()
+          .catch((error: unknown) => {
+            env.replaceUrl('/');
+            throw error;
+          })
+          .finally(() => {
+            callback = null;
+          });
+        return callback;
       }
       const stored = readJson<StoredTokens>(env.storage, TOKENS_KEY);
       if (!stored) return null;

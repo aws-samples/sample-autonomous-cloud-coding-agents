@@ -135,6 +135,18 @@ describe('createCognitoAuthAdapter', () => {
     await expect(session!.getToken()).resolves.toBe(idToken({ nonce: pending.nonce }));
   });
 
+  it('completes the callback once when restore runs twice (React StrictMode)', async () => {
+    const { env, storage } = environment(CALLBACK_PATH, '?code=c&state=s');
+    storage.set('abca-console-pending-sign-in', JSON.stringify({ state: 's', nonce: 'n', verifier: 'v', returnTo: '/tasks' }));
+    env.fetch.mockResolvedValueOnce(tokenResponse({ id_token: idToken({ nonce: 'n' }), refresh_token: 'r' }));
+    const adapter = createCognitoAuthAdapter(OPTIONS, env);
+    const [first, second] = await Promise.all([adapter.restore(), adapter.restore()]);
+    expect(first?.user.id).toBe('user-1');
+    expect(second).toBe(first);
+    expect(env.fetch).toHaveBeenCalledTimes(1);
+    expect(env.replaceUrl).toHaveBeenCalledWith('/tasks');
+  });
+
   it('rejects a callback whose state does not match', async () => {
     const { env, storage } = environment(CALLBACK_PATH, '?code=c&state=forged');
     storage.set('abca-console-pending-sign-in', JSON.stringify({ state: 'real', nonce: 'n', verifier: 'v', returnTo: '/' }));
