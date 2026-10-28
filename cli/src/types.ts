@@ -358,6 +358,15 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /**
+   * Estimated spend in USD (null until the agent reports one). On the summary so a
+   * cost view can total a page of tasks without one detail call per task.
+   */
+  readonly cost_usd: number | null;
+  /** When the task reached a terminal state (null while it runs). */
+  readonly completed_at: string | null;
+  /** Where the task was submitted from (console/CLI API, webhook, Slack, Linear, Jira). */
+  readonly channel_source: ChannelSource;
 }
 
 /** Authenticated caller's personal monthly budget status. */
