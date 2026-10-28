@@ -36,6 +36,6 @@ export const MOCK_RUNTIME_CONFIG: RuntimeConfig = {
 
 /** Intercepts API calls in the browser with a service worker; everything else passes through. */
 export async function startMockBackend(): Promise<void> {
-  const worker = setupWorker(...createHandlers(MOCK_API_BASE, buildFixtures(new Date()), { latencyMs: 250 }));
+  const worker = setupWorker(...createHandlers(MOCK_API_BASE, buildFixtures(new Date(), { history: true }), { latencyMs: 250 }));
   await worker.start({ onUnhandledFrame: 'bypass', quiet: true });
 }

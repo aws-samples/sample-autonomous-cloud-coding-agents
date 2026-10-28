@@ -47,6 +47,9 @@ function toSummary(task: TaskDetail): TaskSummary {
     created_at: task.created_at,
     updated_at: task.updated_at,
     agent_heartbeat_at: task.agent_heartbeat_at,
+    cost_usd: task.cost_usd,
+    completed_at: task.completed_at,
+    channel_source: task.channel_source,
   };
 }
 
@@ -166,6 +169,7 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       const denied = await guard(request);
       if (denied) return denied;
       const url = new URL(request.url);
+      if (url.searchParams.get('view') === 'budget') return HttpResponse.json({ data: data.budget });
       const limit = parseLimit(url.searchParams.get('limit'));
       if (limit === null) return error(400, 'VALIDATION_ERROR', 'limit must be an integer from 1 to 100.');
       const statuses = url.searchParams.get('status')?.split(',').filter(Boolean) as TaskStatusType[] | undefined;

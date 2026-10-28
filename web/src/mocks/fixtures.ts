@@ -23,7 +23,7 @@
  * All timestamps are relative to `now` so the data always looks current.
  */
 
-import type { PendingApprovalSummary, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
+import type { PendingApprovalSummary, PersonalBudgetStatus, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
 
 /** A change the mock backend applies once its time comes: how mock tasks "progress". */
 export interface ScheduledChange {
@@ -43,6 +43,16 @@ export interface MockData {
   idempotency: Record<string, string>;
   /** Open GitHub issues per repository, for the issue picker. */
   issues: Record<string, RepoIssueSummary[]>;
+  /** The signed-in user's monthly budget (GET /tasks?view=budget). */
+  budget: PersonalBudgetStatus;
+}
+
+export interface FixtureOptions {
+  /**
+   * Add a month of finished tasks with costs, so the Costs page has something to show
+   * in mock mode. Off for tests, which count the core fixture set.
+   */
+  readonly history?: boolean;
 }
 
 /** 26-character ULID-shaped id ending in a readable suffix. */
@@ -70,6 +80,7 @@ function ago(now: Date, seconds: number): string {
 
 const MIN = 60;
 const HOUR = 3600;
+const DAY = 24 * HOUR;
 
 function task(now: Date, overrides: Partial<TaskDetail> & Pick<TaskDetail, 'task_id' | 'status'>): TaskDetail {
   return {
@@ -134,7 +145,7 @@ function lifecycle(now: Date, taskId: string, startedAgoS: number, steps: Array<
   return [...base, ...steps].map(([agoS, type, meta], i) => event(taskId, i, ago(now, agoS), type, meta));
 }
 
-export function buildFixtures(now: Date = new Date()): MockData {
+export function buildFixtures(now: Date = new Date(), { history = false }: FixtureOptions = {}): MockData {
   const tasks: TaskDetail[] = [
     task(now, {
       task_id: MOCK_IDS.running,
@@ -364,5 +375,57 @@ export function buildFixtures(now: Date = new Date()): MockData {
     ],
   };
 
-  return { tasks, events, pending, scheduled: [], idempotency: {}, issues };
+  if (history) tasks.push(...costHistory(now));
+
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const spend = tasks
+    .filter((t) => t.completed_at && Date.parse(t.completed_at) >= monthStart)
+    .reduce((sum, t) => sum + (t.cost_usd ?? 0), 0);
+  const budget: PersonalBudgetStatus = {
+    period: new Date(monthStart).toISOString().slice(0, 7),
+    resets_at: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString(),
+    configured: true,
+    spend_usd: Number(spend.toFixed(2)),
+    monthly_limit_usd: 100,
+    remaining_usd: Number(Math.max(0, 100 - spend).toFixed(2)),
+    utilization_percent: Number(Math.min(100, spend).toFixed(1)),
+    hard_stop: false,
+    hard_stop_active: false,
+  };
+
+  return { tasks, events, pending, scheduled: [], idempotency: {}, issues, budget };
+}
+
+/** Deterministic pseudo-random tasks spread over the last 30 days. */
+function costHistory(now: Date): TaskDetail[] {
+  const repos = ['acme/payments-api', 'acme/web-frontend', 'acme/infra', 'acme/docs', 'acme/mobile-app', 'acme/data-pipeline'];
+  const sources = ['api', 'api', 'api', 'linear', 'jira', 'slack'] as const;
+  const titles = ['Fix flaky test', 'Bump dependencies', 'Add input validation', 'Improve error messages', 'Refactor config loading', 'Add pagination'];
+  let seed = 7;
+  const rand = () => {
+    seed = (seed * 16807) % 2147483647;
+    return seed / 2147483647;
+  };
+  const out: TaskDetail[] = [];
+  for (let i = 0; i < 48; i += 1) {
+    const daysAgo = Math.floor(rand() * 30);
+    const finishedAgo = daysAgo * DAY + Math.floor(rand() * 20) * HOUR + HOUR;
+    const status = rand() < 0.8 ? 'COMPLETED' : rand() < 0.6 ? 'FAILED' : 'CANCELLED';
+    const repo = repos[Math.floor(rand() * rand() * repos.length)];
+    out.push(task(now, {
+      task_id: mockId(`HIST${String(i).padStart(4, '0')}`),
+      status,
+      repo,
+      task_description: `${titles[i % titles.length]} (${repo.split('/')[1]})`,
+      channel_source: sources[Math.floor(rand() * sources.length)],
+      created_at: ago(now, finishedAgo + 20 * MIN),
+      started_at: ago(now, finishedAgo + 19 * MIN),
+      completed_at: ago(now, finishedAgo),
+      updated_at: ago(now, finishedAgo),
+      duration_s: 1140,
+      cost_usd: Number((0.2 + rand() * rand() * 4).toFixed(2)),
+      ...(status === 'COMPLETED' ? { pr_number: 500 + i, pr_url: `https://github.com/${repo}/pull/${500 + i}` } : {}),
+    }));
+  }
+  return out;
 }

@@ -34,6 +34,7 @@ const NAV_ITEMS: SideNavigationProps.Item[] = [
   { type: 'link', text: 'Tasks', href: '/tasks' },
   { type: 'link', text: 'Repositories', href: '/repos' },
   { type: 'link', text: 'Needs your OK', href: '/approvals' },
+  { type: 'link', text: 'Costs', href: '/costs' },
 ];
 
 /** Adds a count badge to "Needs your OK" so waiting approvals are visible from every page. */

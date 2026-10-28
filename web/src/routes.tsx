@@ -21,6 +21,7 @@ import type { RouteObject } from 'react-router';
 import { AppShell } from './app/layout/AppShell';
 import { NotFoundPage } from './app/pages/NotFoundPage';
 import { ApprovalsPage } from './domains/approvals/ApprovalsPage';
+import { CostsPage } from './domains/costs/CostsPage';
 import { OverviewPage } from './domains/overview/OverviewPage';
 import { RepoDetailPage } from './domains/repos/RepoDetailPage';
 import { ReposPage } from './domains/repos/ReposPage';
@@ -39,6 +40,7 @@ export const routes: RouteObject[] = [
       { path: 'repos', element: <ReposPage /> },
       { path: 'repos/:owner/:name', element: <RepoDetailPage /> },
       { path: 'approvals', element: <ApprovalsPage /> },
+      { path: 'costs', element: <CostsPage /> },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

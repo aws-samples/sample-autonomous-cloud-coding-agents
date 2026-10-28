@@ -26,6 +26,7 @@ import type {
   ListRepoIssuesResponse,
   NudgeResponse,
   PaginatedResponse,
+  PersonalBudgetStatus,
   SuccessResponse,
   TaskDetail,
   TaskEvent,
@@ -80,6 +81,8 @@ export interface ApiClient {
   getTask(taskId: string): Promise<TaskDetail>;
   listTaskEvents(taskId: string, params?: ListTaskEventsParams): Promise<PaginatedResponse<TaskEvent>>;
   listPending(): Promise<GetPendingResponse>;
+  /** The signed-in user's spend this UTC month and any limit an administrator set. */
+  getMyBudget(): Promise<PersonalBudgetStatus>;
   /** `idempotencyKey` makes a retried submit (double click, flaky network) create one task, not two. */
   createTask(req: CreateTaskRequest, idempotencyKey: string): Promise<TaskDetail>;
   cancelTask(taskId: string): Promise<CancelTaskResponse>;
@@ -172,6 +175,9 @@ export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }
       if (params.nextToken) query.set('next_token', params.nextToken);
       if (params.desc) query.set('desc', '1');
       return get<PaginatedResponse<TaskEvent>>(`/tasks/${encodeURIComponent(taskId)}/events`, query);
+    },
+    getMyBudget() {
+      return data(get<SuccessResponse<PersonalBudgetStatus>>('/tasks', new URLSearchParams({ view: 'budget' })));
     },
     async listPending() {
       const res = await get<SuccessResponse<GetPendingResponse>>('/pending');

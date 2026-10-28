@@ -42,7 +42,7 @@ export const TERMINAL_STATUSES: readonly TaskStatusType[] = ['COMPLETED', 'FAILE
 export const PRE_ACTIVE_STATUSES: readonly TaskStatusType[] = ['PENDING_UPLOADS', 'QUEUED'];
 export const ACTIVE_STATUSES: readonly TaskStatusType[] = ['SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
 
-type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
+export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 
 type ErrorCategoryType = 'auth' | 'network' | 'concurrency' | 'compute' | 'agent' | 'guardrail' | 'config' | 'timeout' | 'blocked' | 'unknown';
 
@@ -92,6 +92,25 @@ export interface TaskSummary {
   readonly created_at: string;
   readonly updated_at: string;
   readonly agent_heartbeat_at: string | null;
+  /** Estimated spend in USD; null until the agent reports one. */
+  readonly cost_usd: number | null;
+  readonly completed_at: string | null;
+  readonly channel_source: ChannelSource;
+}
+
+/** Caller's own monthly budget, from GET /v1/tasks?view=budget. */
+export interface PersonalBudgetStatus {
+  /** UTC month, `YYYY-MM`. */
+  readonly period: string;
+  readonly resets_at: string;
+  /** Whether an administrator set a monthly limit for this user. */
+  readonly configured: boolean;
+  readonly spend_usd: number;
+  readonly monthly_limit_usd: number | null;
+  readonly remaining_usd: number | null;
+  readonly utilization_percent: number | null;
+  readonly hard_stop: boolean;
+  readonly hard_stop_active: boolean;
 }
 
 /** Task detail returned by GET /v1/tasks/{task_id}. */
