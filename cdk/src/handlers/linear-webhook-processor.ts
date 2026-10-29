@@ -27,6 +27,7 @@ import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-r
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
+import { consumeStartClaim } from './shared/linear-console';
 import {
   deleteComment,
   fetchRecentComments,
@@ -88,6 +89,8 @@ const ddb = makeDocClient();
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Holds console "start" claims (see shared/linear-console.ts); optional so older wiring keeps working. */
+const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 // Sub-issue orchestration: name of OrchestrationTable. Unset until the
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
@@ -913,7 +916,12 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const platformUserId = await lookupPlatformUser(workspaceId, actorId);
+  // A label added from the operator console arrives with ABCA's own Linear app as the
+  // actor, which no ABCA user is linked to. The console left a single-use claim naming
+  // the user who clicked Start; it is consulted only when the actor is unlinked, so a
+  // linked person adding the label is always attributed to themselves.
+  const platformUserId = await lookupPlatformUser(workspaceId, actorId)
+    ?? await consumeConsoleStartClaim(issue.id, workspaceId);
   if (!platformUserId) {
     logger.warn('Linear actor has no linked platform user — skipping task creation', {
       linear_workspace_id: workspaceId,
@@ -3386,6 +3394,18 @@ function isLinearUploadsUrl(url: string): boolean {
     return host === 'uploads.linear.app' || host.endsWith('.uploads.linear.app');
   } catch {
     return false;
+  }
+}
+
+async function consumeConsoleStartClaim(issueId: string, workspaceId: string): Promise<string | null> {
+  if (!WEBHOOK_DEDUP_TABLE) return null;
+  try {
+    const user = await consumeStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, workspaceId);
+    if (user) logger.info('Linear label from the operator console attributed via start claim', { issue_id: issueId, linear_workspace_id: workspaceId });
+    return user;
+  } catch (err) {
+    logger.warn('Could not read a console start claim', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
+    return null; // nosemgrep: ts-silent-success-masking -- falls through to the existing "not linked" reply, which is the correct outcome without a claim
   }
 }
 

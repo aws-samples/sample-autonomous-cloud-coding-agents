@@ -166,6 +166,12 @@ export class AgentStack extends Stack {
   public readonly repoTable: RepoTable;
   /** Platform GitHub token, read server-side by the console's issue picker. */
   public readonly githubTokenSecret: secretsmanager.ISecret;
+  /** Linear tables and webhook wiring; the console lists and starts Linear issues through them. */
+  public readonly linearIntegration: LinearIntegration;
+  /** The task table (its Linear-issue index tells the console which issues already have a task). */
+  public readonly taskTable: TaskTable;
+  /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
+  public readonly linearIdentityVault?: LinearIdentityVault;
 
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
@@ -200,7 +206,7 @@ export class AgentStack extends Stack {
     const lambdaMicrovmEnabled = computeTypes.includes('lambda-microvm');
 
     // Task state persistence
-    const taskTable = new TaskTable(this, 'TaskTable');
+    const taskTable = this.taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
     // Parent/sub-issue orchestration DAG state.
@@ -1032,7 +1038,7 @@ export class AgentStack extends Stack {
       // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
       // enforced; F11: localhost + hosted coexist so either onboarding mode works
       // off one identity). Both are registered: the CLI picks per call.
-      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+      linearIdentityVault = this.linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
         workloadName: linearVaultWorkload,
         allowedReturnUrls: [
           'http://localhost:8080/oauth/callback',
@@ -1485,7 +1491,7 @@ export class AgentStack extends Stack {
     }
 
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
-    const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+    const linearIntegration = this.linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
       identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,

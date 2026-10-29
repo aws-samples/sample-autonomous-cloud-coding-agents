@@ -31,12 +31,13 @@
 // data comes from the REST API, which requires a Cognito token on every route.
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { Aws, CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import { ArnFormat, Aws, CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -45,6 +46,8 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import type { LinearIdentityVault } from '../constructs/linear-identity-vault';
+import { TaskTable } from '../constructs/task-table';
 
 export interface OperatorConsoleStackProps extends StackProps {
   /** The platform's user pool (from `AgentStack`); the console adds its own app client and login domain. */
@@ -69,11 +72,26 @@ export interface OperatorConsoleStackProps extends StackProps {
    */
   readonly repoTable?: dynamodb.ITable;
   readonly githubTokenSecret?: secretsmanager.ISecret;
+  /**
+   * Linear wiring from the platform stack. With it, the console API also lists the open
+   * issues of mapped Linear projects and can hand one to the agent (by adding its label).
+   */
+  readonly linear?: ConsoleLinearProps;
+}
+
+export interface ConsoleLinearProps {
+  readonly projectMappingTable: dynamodb.ITable;
+  readonly workspaceRegistryTable: dynamodb.ITable;
+  /** Holds the short-lived console "start" claims the webhook processor reads. */
+  readonly webhookDedupTable: dynamodb.ITable;
+  readonly taskTable: dynamodb.ITable;
+  readonly identityVault?: LinearIdentityVault;
 }
 
 const HANDLERS_DIR = path.join(__dirname, '..', 'handlers');
 /** Covers one GitHub call (8 s client timeout) plus a cold start. */
 const ISSUES_HANDLER_TIMEOUT_SECONDS = 15;
+const LINEAR_HANDLER_TIMEOUT_SECONDS = 20;
 
 /** Hashed bundle files never change, so browsers may cache them for a year. */
 const IMMUTABLE_CACHE = s3deploy.CacheControl.fromString('public, max-age=31536000, immutable');
@@ -160,7 +178,7 @@ export class OperatorConsoleStack extends Stack {
     });
 
     if (props.repoTable && props.githubTokenSecret) {
-      this.consoleApi = this.createConsoleApi(props.userPool, props.repoTable, props.githubTokenSecret, origins_, removalPolicy);
+      this.consoleApi = this.createConsoleApi(props.userPool, props.repoTable, props.githubTokenSecret, origins_, removalPolicy, props.linear);
     }
 
     const assets = new s3deploy.BucketDeployment(this, 'Assets', {
@@ -207,11 +225,12 @@ export class OperatorConsoleStack extends Stack {
     githubTokenSecret: secretsmanager.ISecret,
     allowedOrigins: readonly string[],
     removalPolicy: RemovalPolicy,
+    linear: ConsoleLinearProps | undefined,
   ): apigw.RestApi {
     const accessLogs = new logs.LogGroup(this, 'ConsoleApiAccessLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy });
     const api = new apigw.RestApi(this, 'ConsoleApi', {
       restApiName: 'OperatorConsoleApi',
-      description: 'Console-only routes (issue picker). Every method requires a Cognito ID token.',
+      description: 'Console-only routes (GitHub and Linear issue pickers). Every method requires a Cognito ID token.',
       // The platform stack already owns the account-level API Gateway CloudWatch role.
       cloudWatchRole: false,
       deployOptions: {
@@ -224,7 +243,7 @@ export class OperatorConsoleStack extends Stack {
       // Only the console's own origin(s), unlike the platform API's '*'.
       defaultCorsPreflightOptions: {
         allowOrigins: [...allowedOrigins],
-        allowMethods: ['GET', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'OPTIONS'],
         allowHeaders: ['Authorization', 'Content-Type'],
       },
     });
@@ -253,6 +272,8 @@ export class OperatorConsoleStack extends Stack {
       requestParameters: { 'method.request.path.repo_id': true },
     });
 
+    if (linear) this.addLinearRoutes(api, authorizer, validator, linear);
+
     new CfnOutput(this, 'ConsoleApiUrl', { value: api.url, description: 'Console-only API (issue picker)' });
 
     NagSuppressions.addResourceSuppressions(listIssues, [
@@ -262,7 +283,7 @@ export class OperatorConsoleStack extends Stack {
     NagSuppressions.addResourceSuppressions(api, [
       {
         id: 'AwsSolutions-APIG3',
-        reason: 'No WAF: one authenticated, read-only route with stage throttling (10 rps). The platform API, which serves all task data and writes, has its own WAF.',
+        reason: 'No WAF: a few authenticated routes with stage throttling (10 rps). The platform API, which serves all task data and writes, has its own WAF.',
       },
       {
         id: 'AwsSolutions-APIG6',
@@ -272,6 +293,69 @@ export class OperatorConsoleStack extends Stack {
       { id: 'AwsSolutions-COG4', reason: 'CORS preflight (OPTIONS) cannot carry a Cognito token; the GET route uses the Cognito authorizer.' },
     ], true);
     return api;
+  }
+
+  /** GET /repos/{repo_id}/linear-issues and POST /linear-issues/{issue_id}/start. */
+  private addLinearRoutes(api: apigw.RestApi, authorizer: apigw.IAuthorizer, validator: apigw.IRequestValidator, linear: ConsoleLinearProps): void {
+    const fn = new lambda.NodejsFunction(this, 'ConsoleLinearFn', {
+      entry: path.join(HANDLERS_DIR, 'console-linear.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      // A repo can map several projects; each is one token lookup plus one Linear query.
+      timeout: Duration.seconds(LINEAR_HANDLER_TIMEOUT_SECONDS),
+      environment: {
+        LINEAR_PROJECT_MAPPING_TABLE_NAME: linear.projectMappingTable.tableName,
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: linear.workspaceRegistryTable.tableName,
+        LINEAR_WEBHOOK_DEDUP_TABLE_NAME: linear.webhookDedupTable.tableName,
+        TASK_TABLE_NAME: linear.taskTable.tableName,
+        ...(linear.identityVault ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linear.identityVault.workloadName } : {}),
+      },
+      bundling: { externalModules: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-secrets-manager', '@aws-sdk/lib-dynamodb', '@aws-sdk/util-dynamodb'] },
+    });
+    linear.projectMappingTable.grantReadData(fn);
+    linear.workspaceRegistryTable.grantReadData(fn);
+    // Only which issues already have a task: Query on the Linear-issue index, nothing else.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${linear.taskTable.tableArn}/index/${TaskTable.LINEAR_ISSUE_INDEX}`],
+    }));
+    // Write a start claim, and remove it again if adding the label fails.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+      resources: [linear.webhookDedupTable.tableArn],
+    }));
+    // Per-workspace Linear OAuth tokens (created by `bgagent linear setup`). Put: the
+    // resolver writes back the rotated token when it refreshes an expiring one.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        resourceName: 'bgagent-linear-oauth-*',
+      })],
+    }));
+    linear.identityVault?.grantMintToken(fn);
+
+    const auth = { authorizer, authorizationType: apigw.AuthorizationType.COGNITO, requestValidator: validator };
+    const integration = new apigw.LambdaIntegration(fn, { allowTestInvoke: false });
+    api.root.resourceForPath('repos/{repo_id}/linear-issues').addMethod('GET', integration, {
+      ...auth,
+      requestParameters: { 'method.request.path.repo_id': true },
+    });
+    api.root.resourceForPath('linear-issues/{issue_id}/start').addMethod('POST', integration, {
+      ...auth,
+      requestParameters: { 'method.request.path.issue_id': true },
+    });
+
+    NagSuppressions.addResourceSuppressions(fn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole is the AWS-recommended managed policy for Lambda functions.' },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'index/* from grantReadData on the Linear tables, and the bgagent-linear-oauth-* prefix: per-workspace token secrets are created by the CLI at setup, so their names are not known at deploy time (same grant as the Linear webhook processor).',
+      },
+    ], true);
   }
 
   private suppressNagFindings(bucket: s3.Bucket): void {

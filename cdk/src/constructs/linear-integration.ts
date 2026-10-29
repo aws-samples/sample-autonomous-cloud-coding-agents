@@ -297,6 +297,8 @@ export class LinearIntegration extends Construct {
         LINEAR_PROJECT_MAPPING_TABLE_NAME: this.projectMappingTable.tableName,
         LINEAR_USER_MAPPING_TABLE_NAME: this.userMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // Console "start" claims live in the dedup table (shared/linear-console.ts).
+        LINEAR_WEBHOOK_DEDUP_TABLE_NAME: this.webhookDedupTable.tableName,
         // When set, enables parent/sub-issue orchestration
         // (seed DAG + release roots). Unset → orchestration path dormant.
         ...(props.orchestrationTable && {
@@ -356,6 +358,11 @@ export class LinearIntegration extends Construct {
       actions: ['dynamodb:UpdateItem'],
       // The base table only. No `index/*`: UpdateItem never targets an index.
       resources: [this.workspaceRegistryTable.tableArn],
+    }));
+    // Single-use console start claims: read-and-delete only, on the base table.
+    webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:DeleteItem'],
+      resources: [this.webhookDedupTable.tableArn],
     }));
     // Seed the orchestration DAG + release root children.
     if (props.orchestrationTable) {

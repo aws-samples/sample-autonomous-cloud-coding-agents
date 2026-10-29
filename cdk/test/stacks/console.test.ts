@@ -63,6 +63,12 @@ describe('OperatorConsoleStack', () => {
       additionalOrigins: ['http://localhost:5173'],
       repoTable,
       githubTokenSecret,
+      linear: {
+        projectMappingTable: new dynamodb.Table(platform, 'LinearProjects', { partitionKey: { name: 'linear_project_id', type: dynamodb.AttributeType.STRING } }),
+        workspaceRegistryTable: new dynamodb.Table(platform, 'LinearRegistry', { partitionKey: { name: 'linear_workspace_id', type: dynamodb.AttributeType.STRING } }),
+        webhookDedupTable: new dynamodb.Table(platform, 'LinearDedup', { partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING } }),
+        taskTable: new dynamodb.Table(platform, 'Tasks', { partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING } }),
+      },
     });
     Aspects.of(stack).add(new AwsSolutionsChecks({ verbose: true }));
     template = Template.fromStack(stack);
@@ -189,8 +195,10 @@ describe('OperatorConsoleStack', () => {
       Environment: { Variables: { REPO_TABLE_NAME: Match.anyValue(), GITHUB_TOKEN_SECRET_ARN: Match.anyValue() } },
     });
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ListRepoIssuesFn'))
       .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
       .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(statements.length).toBeGreaterThan(0);
     expect(statements.filter((a) => /^dynamodb:(Put|Update|Delete|BatchWrite)/.test(a))).toEqual([]);
     expect(statements).toContain('secretsmanager:GetSecretValue');
   });
@@ -200,6 +208,33 @@ describe('OperatorConsoleStack', () => {
       .find((d) => (d.Properties.SystemMetadata as Record<string, string>)['cache-control'] === 'no-cache');
     // config.json's keys live in the asset; its token values (here the console API URL) are markers.
     expect(JSON.stringify(entry?.Properties.SourceMarkers)).toMatch(/"Ref":"ConsoleApi[0-9A-F]+"/);
+  });
+
+  test('adds the Linear routes behind the same Cognito authorizer', () => {
+    const resources = Object.values(template.findResources('AWS::ApiGateway::Resource')).map((r) => r.Properties.PathPart);
+    expect(resources).toEqual(expect.arrayContaining(['linear-issues', 'start', '{issue_id}']));
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).filter((m) => m.Properties.HttpMethod !== 'OPTIONS');
+    expect(methods.map((m) => m.Properties.HttpMethod).sort()).toEqual(['GET', 'GET', 'POST']);
+    for (const m of methods) expect(m.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
+  });
+
+  test('the Linear function gets only what it uses', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ConsoleLinearFn'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+    const actions = statements.flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    // Task table: Query on the Linear-issue index only; no reads of task rows themselves.
+    const query = statements.find((st) => st.Action === 'dynamodb:Query');
+    expect(JSON.stringify(query?.Resource)).toContain('/index/LinearIssueIndex');
+    // Start claims: put and delete, no general writes.
+    expect(actions).toEqual(expect.arrayContaining(['dynamodb:PutItem', 'dynamodb:DeleteItem', 'secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue']));
+    expect(actions.filter((a) => /UpdateItem|BatchWriteItem/.test(a))).toEqual([]);
+    expect(JSON.stringify(statements)).toContain('bgagent-linear-oauth-*');
+  });
+
+  test('the console API allows POST for Start', () => {
+    const preflights = JSON.stringify(Object.values(template.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } })));
+    expect(preflights).toContain('GET,POST,OPTIONS');
   });
 
   test('outputs the console URL', () => {
@@ -232,6 +267,38 @@ describe('OperatorConsoleStack', () => {
       apiUrl: API_URL,
       assetDirectory: path.join(bundle, 'does-not-exist'),
     })).toThrow(/mise \/\/web:bundle.*operatorConsole=true/s);
+  });
+});
+
+describe('OperatorConsoleStack Linear identity vault wiring', () => {
+  test('mints Linear tokens through the identity vault when the platform has one', () => {
+    const bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html>');
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    const table = (id: string, key: string) => new dynamodb.Table(platform, id, { partitionKey: { name: key, type: dynamodb.AttributeType.STRING } });
+    const granted: unknown[] = [];
+    const identityVault = { workloadName: 'abca-linear', grantMintToken: (grantee: unknown) => granted.push(grantee) } as never;
+    const stack = new OperatorConsoleStack(app, 'vault-console', {
+      env: ENV,
+      userPool: new cognito.UserPool(platform, 'UserPool'),
+      apiUrl: API_URL,
+      assetDirectory: bundle,
+      repoTable: table('Repos', 'repo'),
+      githubTokenSecret: new secretsmanager.Secret(platform, 'GitHubToken'),
+      linear: {
+        projectMappingTable: table('LinearProjects', 'linear_project_id'),
+        workspaceRegistryTable: table('LinearRegistry', 'linear_workspace_id'),
+        webhookDedupTable: table('LinearDedup', 'dedup_key'),
+        taskTable: table('Tasks', 'task_id'),
+        identityVault,
+      },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: 'abca-linear' }) },
+    });
+    expect(granted).toHaveLength(1);
+    rmSync(bundle, { recursive: true, force: true });
   });
 });
 
