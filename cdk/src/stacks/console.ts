@@ -92,6 +92,7 @@ const HANDLERS_DIR = path.join(__dirname, '..', 'handlers');
 /** Covers one GitHub call (8 s client timeout) plus a cold start. */
 const ISSUES_HANDLER_TIMEOUT_SECONDS = 15;
 const LINEAR_HANDLER_TIMEOUT_SECONDS = 20;
+const LINEAR_HANDLER_MEMORY_MB = 512;
 
 /** Hashed bundle files never change, so browsers may cache them for a year. */
 const IMMUTABLE_CACHE = s3deploy.CacheControl.fromString('public, max-age=31536000, immutable');
@@ -304,6 +305,9 @@ export class OperatorConsoleStack extends Stack {
       architecture: Architecture.ARM_64,
       // A repo can map several projects; each is one token lookup plus one Linear query.
       timeout: Duration.seconds(LINEAR_HANDLER_TIMEOUT_SECONDS),
+      // The shared Linear modules load a large dependency graph; at the 128 MB default the
+      // function ran out of memory during init, before handling any request.
+      memorySize: LINEAR_HANDLER_MEMORY_MB,
       environment: {
         LINEAR_PROJECT_MAPPING_TABLE_NAME: linear.projectMappingTable.tableName,
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: linear.workspaceRegistryTable.tableName,

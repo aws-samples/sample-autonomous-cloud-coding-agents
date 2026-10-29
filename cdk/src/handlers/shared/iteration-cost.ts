@@ -19,7 +19,7 @@
 
 import { type DynamoDBDocumentClient, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { TaskTable } from '../../constructs/task-table';
+import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 /**
  * Cap on the number of task rows summed for one issue.
@@ -91,7 +91,7 @@ export async function sumIterationCostForIssue(args: {
     do {
       const listed = await ddb.send(new QueryCommand({
         TableName: taskTableName,
-        IndexName: TaskTable.LINEAR_ISSUE_INDEX,
+        IndexName: LINEAR_ISSUE_INDEX_NAME,
         KeyConditionExpression: 'linear_issue_id = :iid',
         ProjectionExpression: 'task_id',
         ExpressionAttributeValues: { ':iid': linearIssueId },

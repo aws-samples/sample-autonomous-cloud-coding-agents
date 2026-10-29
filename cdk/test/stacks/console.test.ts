@@ -218,6 +218,14 @@ describe('OperatorConsoleStack', () => {
     for (const m of methods) expect(m.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
   });
 
+  test('the Linear function has enough memory to start', () => {
+    // At the 128 MB default it ran out of memory during init in a live deploy.
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ LINEAR_WEBHOOK_DEDUP_TABLE_NAME: Match.anyValue() }) },
+      MemorySize: 512,
+    });
+  });
+
   test('the Linear function gets only what it uses', () => {
     const statements = Object.values(template.findResources('AWS::IAM::Policy'))
       .filter((p) => JSON.stringify(p.Properties.Roles).includes('ConsoleLinearFn'))

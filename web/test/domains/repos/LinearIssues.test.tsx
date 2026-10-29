@@ -66,6 +66,15 @@ describe('Linear on the repository page', () => {
     expect(await screen.findByText('Linear issues are unavailable')).toBeInTheDocument();
   });
 
+  it('says so when Linear issues cannot load, instead of hiding the panel', async () => {
+    server.use(http.get(`${TEST_API_BASE}/repos/:repo/linear-issues`, () => HttpResponse.json(
+      { error: { code: 'INTERNAL_ERROR', message: 'Internal server error', request_id: 'r' } },
+      { status: 502 },
+    )));
+    renderRoute(REPO_PAGE);
+    expect(await screen.findByText('Could not load Linear issues')).toBeInTheDocument();
+  });
+
   it('shows nothing for a repository without a Linear project', async () => {
     renderRoute('/repos/acme/infra');
     await screen.findByRole('link', { name: 'New task' });

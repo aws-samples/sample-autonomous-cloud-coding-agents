@@ -137,7 +137,15 @@ function ProjectIssues({ repo, project }: { repo: string; project: LinearProject
  */
 export function LinearIssuesPanel({ repo }: { repo: string }) {
   const query = useLinearIssues(repo);
-  if (query.isPending || query.isError || !query.data || query.data.projects.length === 0) return null;
+  if (query.isError) {
+    // Show the failure: hiding it made a broken connection look like "no Linear project".
+    return (
+      <Alert type="warning" header="Could not load Linear issues">
+        {query.error instanceof Error ? query.error.message : String(query.error)}
+      </Alert>
+    );
+  }
+  if (query.isPending || !query.data || query.data.projects.length === 0) return null;
   return (
     <SpaceBetween size="l">
       {query.data.projects.map((project) => <ProjectIssues key={project.project_id} repo={repo} project={project} />)}

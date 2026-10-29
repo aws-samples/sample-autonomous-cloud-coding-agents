@@ -126,3 +126,14 @@ describe('Linear queries', () => {
     await expect(addIssueLabel('tok', 'i1', 'l1', linear({ issueAddLabel: { success: false } }))).rejects.toThrow('did not add the label');
   });
 });
+
+describe('bundle hygiene', () => {
+  test('the Linear handler modules do not import the TaskTable construct (it bundles aws-cdk-lib)', () => {
+    const fs = jest.requireActual('fs') as typeof import('fs');
+    const path = jest.requireActual('path') as typeof import('path');
+    for (const file of ['console-linear.ts', 'shared/linear-console.ts', 'shared/linear-task-by-issue.ts']) {
+      const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'handlers', file), 'utf8');
+      expect({ file, imports: src.includes("constructs/task-table'") }).toEqual({ file, imports: false });
+    }
+  });
+});
