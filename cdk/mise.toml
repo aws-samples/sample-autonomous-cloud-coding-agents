@@ -68,10 +68,12 @@ MIN_FREE_GB="${MIN_FREE_GB:-25}"
 FREE_GB=$(df -g / | awk 'NR==2 {print $4}')
 echo "clean:disk — ${FREE_GB}G free (threshold ${MIN_FREE_GB}G)"
 if [ "${FREE_GB:-999}" -lt "$MIN_FREE_GB" ]; then
-  echo "clean:disk — low disk, pruning uv + docker caches…"
+  # Same engine CDK builds with (CDK_DOCKER), so Finch users prune Finch, not an idle Docker.
+  ENGINE="${CDK_DOCKER:-docker}"
+  echo "clean:disk — low disk, pruning uv + $ENGINE caches…"
   uv cache prune || true
-  docker image prune -f || true
-  docker builder prune -f || true
+  "$ENGINE" image prune -f || true
+  "$ENGINE" builder prune -f || true
   df -h / | tail -1
 else
   echo "clean:disk — enough free disk, skipping uv/docker prune"
@@ -104,6 +106,10 @@ description = "Migrate pre-#703 pinned log-delivery resources before deploy (no-
 # needs no dependency at all.
 run = "node --experimental-strip-types scripts/preflight-log-delivery.ts"
 
+[tasks.preflight]
+description = "Read-only: check the account's bootstrap policy bundle against this checkout (PASS/WARN/FAIL; --json for CI)"
+run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, required=false)}}"
+
 [tasks.deploy]
 description = "cdk deploy (pass args after --)"
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
@@ -123,7 +129,12 @@ depends = [":clean:disk"]
 # `required=false` is load-bearing — without it a bare `mise //cdk:deploy` (the common
 # case, and what the guides tell operators to run) fails with a usage error instead of
 # deploying.
+#
+# The bootstrap preflight runs first: a stale bootstrap policy bundle otherwise fails
+# with an IAM AccessDenied only AFTER every asset is built and uploaded (many minutes).
+# tsx, not type stripping: it imports the policy modules, which use directory imports.
 run = [
+  "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, required=false)}}",
   "node --experimental-strip-types scripts/preflight-log-delivery.ts {{arg(name='cdkargs', var=true, required=false)}}",
   "npx cdk deploy {{arg(name='cdkargs', var=true, required=false)}}",
 ]

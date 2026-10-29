@@ -188,6 +188,17 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       }
     },
     {
+      "Sid": "NestedStackPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/cdk-*-cfn-exec-role-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "cloudformation.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "VPCNetworking",
       "Effect": "Allow",
       "Action": [
@@ -281,6 +292,18 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
   ]
 }
 ```
+
+`NestedStackPassRole` (bundle 1.7.0) exists because the app contains nested stacks. CloudFormation creates them *as* the execution role and passes that same role on to each child stack, which needs `iam:PassRole` on the role itself. Without it, every deploy fails at change-set creation with `cfn-exec-role ... is not authorized to perform: iam:PassRole on resource: ...cfn-exec-role...`. The statement is limited to the CDK execution role and to `cloudformation.amazonaws.com`, so it grants nothing the role does not already hold (#865). `test/bootstrap/synth-coverage.test.ts` now walks every nested stack (#757) and pins this statement's resource and condition, which an action-level check cannot distinguish from `IAMPassRole`.
+
+Before deploying, `mise //cdk:deploy` runs the bootstrap preflight (#126; also `mise //cdk:preflight`, read-only, `--json` for CI). It compares the `CDKToolkit` outputs with the checkout and needs only `cloudformation:DescribeStacks`:
+
+| Result | When | Deploy |
+|---|---|---|
+| PASS | `BootstrapPolicyVersion` matches (or is newer) and `BootstrapPolicySet` includes every policy the app's compute backends need | continues |
+| WARN | Same version, different `BootstrapPolicyHash` (console drift, or a policy change without a version bump) | continues |
+| FAIL | No `CDKToolkit`; a default CDK bootstrap (no ABCA outputs); an older bundle; or a missing compute policy | stops, with the fix |
+
+`ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` bypasses it.
 
 ### IaCRole-ABCA-Application
 

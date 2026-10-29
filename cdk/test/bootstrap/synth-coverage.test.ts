@@ -20,6 +20,7 @@
 import { App, NestedStack, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 
+import { allPolicies } from '../../src/bootstrap/policies';
 import {
   CFN_TYPES_WITHOUT_EXEC_ROLE_IAM,
   RESOURCE_ACTION_MAP,
@@ -30,9 +31,17 @@ import {
 import { AgentRegistryStack } from '../../src/constructs/registry';
 import { AgentStack } from '../../src/stacks/agent';
 
+/** Resource types across a stack and ALL of its nested stacks, at any depth (#757). */
+function typesIncludingNested(stack: Stack): Set<string> {
+  const stacks: Stack[] = [stack, ...stack.node.findAll().filter((c): c is NestedStack => c instanceof NestedStack)];
+  return new Set(stacks.flatMap((s) =>
+    Object.values((Template.fromStack(s).toJSON().Resources ?? {}) as Record<string, { Type: string }>).map((r) => r.Type)));
+}
+
 describe('Bootstrap policy synth coverage', () => {
   let template: Template;
   let registryTemplate: Template;
+  let allTypes: Set<string>;
   let allowedActions: Set<string>;
 
   beforeAll(() => {
@@ -41,6 +50,7 @@ describe('Bootstrap policy synth coverage', () => {
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
+    allTypes = typesIncludingNested(stack);
     const registryStack = stack.node.tryFindChild('AgentRegistryStack') as
       AgentRegistryStack | undefined;
     if (!registryStack) {
@@ -63,9 +73,14 @@ describe('Bootstrap policy synth coverage', () => {
     expect(findMissingBootstrapActions(cfnType, allowedActions)).toEqual([]);
   });
 
-  it('maps every synthesized CFN type (that needs IAM) to bootstrap actions', () => {
-    const resources = template.toJSON().Resources as Record<string, { Type: string }>;
-    const typesInTemplate = new Set(Object.values(resources).map((r) => r.Type));
+  it('walks nested stacks: their resource types are not in the root template', () => {
+    const rootTypes = new Set(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type));
+    expect(rootTypes.has('AWS::CloudFormation::Stack')).toBe(true);
+    expect([...allTypes].some((t) => !rootTypes.has(t))).toBe(true);
+  });
+
+  it('maps every synthesized CFN type (that needs IAM) to bootstrap actions, root and nested stacks alike', () => {
+    const typesInTemplate = allTypes;
 
     const unmapped: string[] = [];
     const missingByType: Record<string, string[]> = {};
@@ -184,5 +199,23 @@ describe('Bootstrap policy synth coverage', () => {
       const missing = findMissingBootstrapActions(cfnType, allowedActions);
       expect(missing).toEqual([]);
     }
+  });
+
+  it('lets the execution role pass itself to CloudFormation when nested stacks are present (#865)', () => {
+    // Action-level coverage above cannot see this: `iam:PassRole` is already granted
+    // by IAMPassRole, but only for application roles and other services. Creating a
+    // nested stack passes the cfn-exec-role ITSELF to cloudformation.amazonaws.com.
+    expect(allTypes.has('AWS::CloudFormation::Stack')).toBe(true);
+    type Stmt = { Effect: string; Action: string | string[]; Resource?: string | string[]; Condition?: Record<string, Record<string, string | string[]>> };
+    const list = (v: string | string[] | undefined) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+    const resolver = new Stack();
+    const statements = allPolicies().flatMap((doc) => (resolver.resolve(doc) as { Statement: Stmt[] }).Statement);
+    const covered = statements.some((st) =>
+      st.Effect === 'Allow'
+      && list(st.Action).includes('iam:PassRole')
+      && list(st.Resource).some((r) => r.includes('cfn-exec-role'))
+      // Exact service-principal match (an array element compare, not a URL substring check).
+      && list(st.Condition?.StringEquals?.['iam:PassedToService']).some((svc) => svc === 'cloudformation.amazonaws.com'));
+    expect(covered).toBe(true);
   });
 });

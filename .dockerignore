@@ -59,6 +59,19 @@ coverage/
 **/.coverage
 **/.coverage.*
 
+# Caches and reports other build steps write WHILE the CDK suite fingerprints this
+# tree for the agent image asset (same race as the coverage files above): jest's own
+# cache, ruff's cache, JUnit reports and TypeScript incremental build info. If one
+# changes between the two synths of a test, the image hash differs and the test fails.
+.jest-cache/
+**/.jest-cache/
+.ruff_cache/
+**/.ruff_cache/
+test-reports/
+**/test-reports/
+*.tsbuildinfo
+**/*.tsbuildinfo
+
 # IDE / OS
 .idea/
 .vscode/

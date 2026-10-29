@@ -121,6 +121,22 @@ export function infrastructurePolicy(): iam.PolicyDocument {
         },
       }),
 
+      // Nested stacks (registry, registry API, ...) are created by CloudFormation
+      // acting AS this execution role, and CloudFormation hands the same role on to
+      // each child stack. Without this, change-set creation fails with
+      // "cfn-exec-role ... is not authorized to perform: iam:PassRole on resource:
+      // ...cfn-exec-role...". Scoped to the CDK execution role itself and to
+      // CloudFormation only, so it grants nothing the role does not already hold.
+      new iam.PolicyStatement({
+        sid: 'NestedStackPassRole',
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:PassRole'],
+        resources: ['arn:aws:iam::*:role/cdk-*-cfn-exec-role-*'],
+        conditions: {
+          StringEquals: { 'iam:PassedToService': 'cloudformation.amazonaws.com' },
+        },
+      }),
+
       new iam.PolicyStatement({
         sid: 'VPCNetworking',
         effect: iam.Effect.ALLOW,
