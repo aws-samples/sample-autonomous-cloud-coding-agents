@@ -21,6 +21,7 @@ import Autosuggest from '@cloudscape-design/components/autosuggest';
 import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
+import ExpandableSection from '@cloudscape-design/components/expandable-section';
 import Form from '@cloudscape-design/components/form';
 import FormField from '@cloudscape-design/components/form-field';
 import Header from '@cloudscape-design/components/header';
@@ -31,7 +32,7 @@ import Textarea from '@cloudscape-design/components/textarea';
 import { useMemo, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { ApiError } from '../../core/api/client';
-import { CODING_WORKFLOW_ID } from '../../core/api/types';
+import { BUDGET_LIMIT_USD, CODING_WORKFLOW_ID, TURN_LIMIT } from '../../core/api/types';
 import { repoHref, taskHref } from '../../core/util/format';
 import { useCreateTask, useLinearIssues, useRepoIssues, useStartLinearIssue, useTaskList } from './hooks';
 
@@ -45,6 +46,8 @@ interface Errors {
   readonly repo?: string;
   readonly issue?: string;
   readonly description?: string;
+  readonly maxTurns?: string;
+  readonly maxBudget?: string;
 }
 
 /** Linear issue the form will hand over: its id plus the project it belongs to. */
@@ -54,14 +57,38 @@ interface LinearChoice {
   readonly label: string;
 }
 
-function validate(repo: string, mode: Mode, issue: string, description: string, linearIssue: string): Errors {
-  const errors: { repo?: string; issue?: string; description?: string } = {};
+/** Blank means "use the repository's setting"; otherwise the number the API will accept, or NaN. */
+function parseLimit(value: string, integer: boolean): number | undefined {
+  const text = value.trim().replace(/^\$/, '');
+  if (!text) return undefined;
+  if (!(integer ? /^\d+$/ : /^\d+(\.\d{1,2})?$|^\.\d{1,2}$/).test(text)) return Number.NaN;
+  return Number(text);
+}
+
+function validate(repo: string, mode: Mode, issue: string, description: string, linearIssue: string, maxTurns: string, maxBudget: string): Errors {
+  const errors: { repo?: string; issue?: string; description?: string; maxTurns?: string; maxBudget?: string } = {};
   if (!REPO_PATTERN.test(repo.trim())) errors.repo = 'Enter the repository as owner/name, for example acme/website.';
   if (mode === 'issue' && !/^[1-9]\d*$/.test(issue.trim())) errors.issue = 'Enter the issue number, for example 12.';
   if (mode === 'describe' && !description.trim()) errors.description = 'Describe the change you want.';
   if (mode === 'linear' && !linearIssue) errors.issue = 'Pick a Linear issue.';
   if (description.length > MAX_DESCRIPTION_LENGTH) errors.description = `Keep it under ${MAX_DESCRIPTION_LENGTH.toLocaleString()} characters.`;
+  if (mode !== 'linear') {
+    const turns = parseLimit(maxTurns, true);
+    if (turns !== undefined && !(turns >= TURN_LIMIT.min && turns <= TURN_LIMIT.max)) {
+      errors.maxTurns = `Enter a whole number from ${TURN_LIMIT.min} to ${TURN_LIMIT.max}, or leave it empty.`;
+    }
+    const budget = parseLimit(maxBudget, false);
+    if (budget !== undefined && !(budget >= BUDGET_LIMIT_USD.min && budget <= BUDGET_LIMIT_USD.max)) {
+      errors.maxBudget = `Enter an amount from $${BUDGET_LIMIT_USD.min} to $${BUDGET_LIMIT_USD.max}, or leave it empty.`;
+    }
+  }
   return errors;
+}
+
+function limitFields(maxTurns: string, maxBudget: string): { max_turns?: number; max_budget_usd?: number } {
+  const turns = parseLimit(maxTurns, true);
+  const budget = parseLimit(maxBudget, false);
+  return { ...(turns !== undefined && { max_turns: turns }), ...(budget !== undefined && { max_budget_usd: budget }) };
 }
 
 function submitError(error: unknown): string {
@@ -81,6 +108,8 @@ export function NewTaskPage() {
   const [mode, setMode] = useState<Mode>(params.get('issue') ? 'issue' : 'describe');
   const [issue, setIssue] = useState(params.get('issue') ?? '');
   const [description, setDescription] = useState(params.get('description') ?? '');
+  const [maxTurns, setMaxTurns] = useState(params.get('max_turns') ?? '');
+  const [maxBudget, setMaxBudget] = useState(params.get('max_budget_usd') ?? '');
   const [showErrors, setShowErrors] = useState(false);
 
   const knownRepos = useMemo(() => {
@@ -108,7 +137,7 @@ export function NewTaskPage() {
   const linearConnected = (linear.data?.projects.length ?? 0) > 0;
   const chosenLinear = linearChoices.find((c) => c.label === linearIssue);
 
-  const errors = validate(repo, mode, issue, description, chosenLinear ? chosenLinear.issueId : '');
+  const errors = validate(repo, mode, issue, description, chosenLinear ? chosenLinear.issueId : '', maxTurns, maxBudget);
   const shown = showErrors ? errors : {};
 
   const submit = (event: FormEvent) => {
@@ -128,6 +157,7 @@ export function NewTaskPage() {
         ...(mode === 'issue' ? { issue_number: Number(issue.trim()) } : {}),
         // With an issue, the text box is optional extra guidance on top of the issue.
         ...(description.trim() ? { task_description: description.trim() } : {}),
+        ...limitFields(maxTurns, maxBudget),
       },
       { onSuccess: (task) => navigate(taskHref(task.task_id)) },
     );
@@ -235,6 +265,31 @@ export function NewTaskPage() {
                   onChange={({ detail }) => setDescription(detail.value)}
                 />
               </FormField>}
+
+              {mode !== 'linear' && (
+                <ExpandableSection
+                  headerText="Limits (optional)"
+                  headerDescription="Leave empty to use the repository's settings."
+                  defaultExpanded={!!(maxTurns || maxBudget)}
+                >
+                  <SpaceBetween size="m">
+                    <FormField
+                      label="Turn limit"
+                      description={`How many steps the agent may take before it stops, ${TURN_LIMIT.min}–${TURN_LIMIT.max}. Large changes need more. Usually ${TURN_LIMIT.default}.`}
+                      errorText={shown.maxTurns}
+                    >
+                      <Input value={maxTurns} inputMode="numeric" placeholder="Repository default" onChange={({ detail }) => setMaxTurns(detail.value)} />
+                    </FormField>
+                    <FormField
+                      label="Spending limit (USD)"
+                      description={`The agent stops once the task has cost this much, $${BUDGET_LIMIT_USD.min}–$${BUDGET_LIMIT_USD.max}.`}
+                      errorText={shown.maxBudget}
+                    >
+                      <Input value={maxBudget} inputMode="decimal" placeholder="Repository default" onChange={({ detail }) => setMaxBudget(detail.value)} />
+                    </FormField>
+                  </SpaceBetween>
+                </ExpandableSection>
+              )}
             </SpaceBetween>
           </Container>
         </Form>

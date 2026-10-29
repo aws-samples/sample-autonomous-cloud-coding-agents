@@ -205,7 +205,7 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
     task(now, {
       task_id: MOCK_IDS.queued,
       status: 'QUEUED',
-      task_description: 'Add pagination to GET /invoices',
+      task_description: 'Use cursor pagination, 50 per page',
       issue_number: 214,
       issue_title: 'Add pagination to GET /invoices',
       created_at: ago(now, 2 * MIN),

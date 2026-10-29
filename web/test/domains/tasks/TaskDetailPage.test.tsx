@@ -54,9 +54,29 @@ describe('TaskDetailPage', () => {
     expect(screen.getByText(/What to do: Raise the per-repository or per-task budget/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Try again' })).toHaveAttribute(
       'href',
-      '/tasks/new?repo=acme%2Fpayments-api&description=Migrate+the+ledger+service+to+Java+21',
+      '/tasks/new?repo=acme%2Fpayments-api&description=Migrate+the+ledger+service+to+Java+21&max_turns=60&max_budget_usd=5',
     );
     expect(screen.getByLabelText('Working: stopped here')).toBeInTheDocument();
+  });
+
+  it('shows what the task was started with, including its limits', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.queued}`);
+    await screen.findByRole('heading', { name: 'Request' });
+    const request = screen;
+    expect(request.getByText('#214 Add pagination to GET /invoices')).toBeInTheDocument();
+    expect(request.getByText('60')).toBeInTheDocument();
+    expect(request.getByText('$5.00')).toBeInTheDocument();
+    expect(request.getByText('Extra guidance')).toBeInTheDocument();
+    expect(request.getByText('Use cursor pagination, 50 per page')).toBeInTheDocument();
+    expect(request.getByText('Console or CLI')).toBeInTheDocument();
+  });
+
+  it('says when a limit is left to the repository', async () => {
+    const task = mockData.tasks.find((t) => t.task_id === MOCK_IDS.running)!;
+    Object.assign(task, { max_turns: null, max_budget_usd: null });
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    await screen.findByRole('heading', { name: 'Request' });
+    expect(screen.getAllByText('Repository default')).toHaveLength(2);
   });
 
   it('reports "nothing to change" as that, not as a failure', async () => {

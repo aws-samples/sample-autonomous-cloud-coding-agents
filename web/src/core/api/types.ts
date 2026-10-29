@@ -254,7 +254,17 @@ export interface CreateTaskRequest {
   readonly workflow_ref: string;
   readonly issue_number?: number;
   readonly task_description?: string;
+  /** Omitted: the repository's setting, else {@link TURN_LIMIT}`.default`. */
+  readonly max_turns?: number;
+  /** Omitted: the repository's setting, else no spending limit. */
+  readonly max_budget_usd?: number;
 }
+
+/** Mirrors `MIN_MAX_TURNS` / `MAX_MAX_TURNS` / `DEFAULT_MAX_TURNS` in cdk/src/handlers/shared/validation.ts. */
+export const TURN_LIMIT = { min: 1, max: 500, default: 100 } as const;
+
+/** Mirrors `max_budget_usd` in contracts/constants.json. */
+export const BUDGET_LIMIT_USD = { min: 0.01, max: 100 } as const;
 
 /**
  * Clone → build → open a pull request. Mirrors `DEFAULT_CODING_WORKFLOW_ID` in the CLI,

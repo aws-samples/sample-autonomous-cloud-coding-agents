@@ -81,7 +81,13 @@ function CancelTask({ task }: { task: TaskDetail }) {
 }
 
 function retryPrefill(task: TaskDetail) {
-  return { repo: task.repo, issue: task.issue_number, description: task.task_description };
+  return {
+    repo: task.repo,
+    issue: task.issue_number,
+    description: task.task_description,
+    maxTurns: task.max_turns,
+    maxBudgetUsd: task.max_budget_usd,
+  };
 }
 
 function OutcomeBanner({ task, outcome, onMessage }: { task: TaskDetail; outcome: Outcome; onMessage: () => void }) {
@@ -100,18 +106,62 @@ function OutcomeBanner({ task, outcome, onMessage }: { task: TaskDetail; outcome
   );
 }
 
+const REPO_DEFAULT = 'Repository default';
+
+const SOURCE_LABEL: Readonly<Record<TaskDetail['channel_source'], string>> = {
+  api: 'Console or CLI',
+  webhook: 'Webhook',
+  slack: 'Slack',
+  linear: 'Linear',
+  jira: 'Jira',
+};
+
+/** What the task was started with, as chosen; unset limits fall back to the repository's. */
+function TaskRequest({ task }: { task: TaskDetail }) {
+  const issueUrl = task.issue_number && task.repo ? `https://github.com/${task.repo}/issues/${task.issue_number}` : null;
+  return (
+    <Container header={<Header variant="h2">Request</Header>}>
+      <SpaceBetween size="l">
+        <KeyValuePairs
+          columns={3}
+          items={[
+            { label: 'Repository', value: task.repo ? <RouterLink href={repoHref(task.repo)}>{task.repo}</RouterLink> : '-' },
+            {
+              label: 'Issue',
+              value: issueUrl
+                ? <ExternalLink href={issueUrl}>{`#${task.issue_number}${task.issue_title ? ` ${task.issue_title}` : ''}`}</ExternalLink>
+                : '-',
+            },
+            { label: 'Started from', value: SOURCE_LABEL[task.channel_source] ?? task.channel_source },
+            { label: 'Turn limit', value: task.max_turns ? String(task.max_turns) : REPO_DEFAULT },
+            { label: 'Spending limit', value: task.max_budget_usd ? formatCost(task.max_budget_usd) : REPO_DEFAULT },
+            { label: 'Workflow', value: task.resolved_workflow ? <Box variant="code">{`${task.resolved_workflow.id}@${task.resolved_workflow.version}`}</Box> : '-' },
+          ]}
+        />
+        {task.task_description && (
+          <KeyValuePairs
+            items={[{
+              label: task.issue_number ? 'Extra guidance' : 'Instructions',
+              value: <span style={{ whiteSpace: 'pre-wrap' }}>{task.task_description}</span>,
+            }]}
+          />
+        )}
+      </SpaceBetween>
+    </Container>
+  );
+}
+
 function TaskDetails({ task }: { task: TaskDetail }) {
   return (
     <ExpandableSection headerText="Details" variant="container">
       <KeyValuePairs
         columns={3}
         items={[
-          { label: 'Repository', value: task.repo ? <RouterLink href={repoHref(task.repo)}>{task.repo}</RouterLink> : '-' },
-          { label: 'Issue', value: task.issue_number && task.repo ? <ExternalLink href={`https://github.com/${task.repo}/issues/${task.issue_number}`}>#{task.issue_number}</ExternalLink> : '-' },
           { label: 'Pull request', value: task.pr_url ? <ExternalLink href={task.pr_url}>#{task.pr_number ?? 'PR'}</ExternalLink> : '-' },
           { label: 'Branch', value: task.branch_name || '-' },
           { label: 'Cost', value: formatCost(task.cost_usd) },
           { label: 'Time taken', value: formatDuration(task.duration_s) },
+          { label: 'Turns used', value: task.turns_completed === null ? '-' : String(task.turns_completed) },
           { label: 'Started', value: formatTimestamp(task.started_at ?? task.created_at) },
           { label: 'Finished', value: formatTimestamp(task.completed_at) },
           { label: 'Task ID', value: <Box variant="code">{task.task_id}</Box> },
@@ -159,6 +209,7 @@ function TaskBody({ task, events, eventsLoading, moreEvents }: {
         </Container>
         <MessagePanel ref={messageBox} taskId={task.task_id} events={events} open={live} />
       </Grid>
+      <TaskRequest task={task} />
       <TaskDetails task={task} />
       <ExpandableSection headerText="Full log" variant="container" headerDescription="Every raw event, for troubleshooting.">
         <EventTimeline taskId={task.task_id} live={live} />

@@ -154,7 +154,13 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | nul
 /** Adds a new task that then runs on its own (see {@link simulatedRun}). */
 function createSimulatedTask(
   data: MockData,
-  req: { readonly repo: string; readonly issue_number: number | null; readonly task_description: string | null },
+  req: {
+    readonly repo: string;
+    readonly issue_number: number | null;
+    readonly task_description: string | null;
+    readonly max_turns?: number;
+    readonly max_budget_usd?: number;
+  },
   channel: TaskDetail['channel_source'],
   now: Date,
 ): TaskDetail {
@@ -168,6 +174,8 @@ function createSimulatedTask(
     // The real platform stores the title once it reads the issue; the mock knows it at once.
     issue_title: data.issues[req.repo]?.find((i) => i.number === req.issue_number)?.title ?? null,
     task_description: req.task_description,
+    max_turns: req.max_turns ?? null,
+    max_budget_usd: req.max_budget_usd ?? null,
     branch_name: `bgagent/${taskId}/${slug(req.task_description ?? `issue-${req.issue_number}`)}`,
     pr_number: null,
     pr_url: null,
@@ -298,7 +306,13 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
         return error(422, 'REPO_NOT_ONBOARDED', `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`);
       }
       const now = new Date();
-      const created = createSimulatedTask(data, { repo: body.repo, issue_number: body.issue_number ?? null, task_description: body.task_description ?? null }, 'api', now);
+      const created = createSimulatedTask(data, {
+        repo: body.repo,
+        issue_number: body.issue_number ?? null,
+        task_description: body.task_description ?? null,
+        ...(body.max_turns !== undefined && { max_turns: body.max_turns }),
+        ...(body.max_budget_usd !== undefined && { max_budget_usd: body.max_budget_usd }),
+      }, 'api', now);
       if (key) data.idempotency[key] = created.task_id;
       return HttpResponse.json({ data: created }, { status: 201 });
     }),

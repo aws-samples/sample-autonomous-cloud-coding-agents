@@ -93,6 +93,38 @@ describe('NewTaskPage', () => {
     expect(await screen.findByRole('textbox', { name: 'Issue number' })).toBeInTheDocument();
   });
 
+  it('sends the turn and spending limits when set', async () => {
+    let body: unknown;
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST') body = await request.clone().json();
+    });
+    renderRoute('/tasks/new?repo=acme%2Finfra&issue=7');
+    fireEvent.click(await screen.findByText('Limits (optional)'));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Turn limit' }), { target: { value: '500' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Spending limit (USD)' }), { target: { value: '$50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' }));
+    await waitFor(() => expect(body).toEqual({
+      repo: 'acme/infra', workflow_ref: 'coding/new-task-v1', issue_number: 7, max_turns: 500, max_budget_usd: 50,
+    }));
+    expect(mockData.tasks.at(-1)).toMatchObject({ max_turns: 500, max_budget_usd: 50 });
+    server.events.removeAllListeners();
+  });
+
+  it('rejects limits the API would refuse', async () => {
+    renderRoute('/tasks/new?repo=acme%2Finfra&issue=7&max_turns=900&max_budget_usd=0');
+    fireEvent.click(await screen.findByRole('button', { name: 'Start task' }));
+    expect(await screen.findByText(/Enter a whole number from 1 to 500/)).toBeInTheDocument();
+    expect(screen.getByText(/Enter an amount from \$0.01 to \$100/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Turn limit' }), { target: { value: '12.5' } });
+    expect(screen.getByText(/Enter a whole number from 1 to 500/)).toBeInTheDocument();
+  });
+
+  it('pre-fills the limits from a "Try again" link, opened', async () => {
+    renderRoute('/tasks/new?repo=acme%2Finfra&issue=7&max_turns=60&max_budget_usd=5');
+    expect(await screen.findByRole('textbox', { name: 'Turn limit' })).toHaveValue('60');
+    expect(screen.getByRole('textbox', { name: 'Spending limit (USD)' })).toHaveValue('5');
+  });
+
   it('pre-fills from the link, e.g. "Try again"', async () => {
     renderRoute('/tasks/new?repo=acme%2Fdocs&description=Rewrite+the+guide');
     expect(await screen.findByRole('combobox', { name: 'Repository' })).toHaveValue('acme/docs');
