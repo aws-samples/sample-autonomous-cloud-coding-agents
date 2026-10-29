@@ -23,7 +23,7 @@
  * All timestamps are relative to `now` so the data always looks current.
  */
 
-import type { PendingApprovalSummary, PersonalBudgetStatus, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
+import type { LinearIssueSummary, PendingApprovalSummary, PersonalBudgetStatus, RepoIssueSummary, TaskDetail, TaskEvent } from '../core/api/types';
 
 /** A change the mock backend applies once its time comes: how mock tasks "progress". */
 export interface ScheduledChange {
@@ -45,6 +45,23 @@ export interface MockData {
   issues: Record<string, RepoIssueSummary[]>;
   /** The signed-in user's monthly budget (GET /tasks?view=budget). */
   budget: PersonalBudgetStatus;
+  /** Linear projects mapped to each repository, with their open issues. */
+  linear: Record<string, MockLinearProject[]>;
+}
+
+/** A Linear issue in mock mode; the agent state is derived from its labels and task. */
+export type MockLinearIssue = Omit<LinearIssueSummary, 'agent' | 'labels'> & {
+  labels: string[];
+  /** Set when Start was clicked; the mock "webhook" creates the task a few seconds later. */
+  started_at_ms?: number;
+  task_id?: string;
+};
+
+export interface MockLinearProject {
+  readonly project_id: string;
+  readonly repo: string;
+  readonly trigger_label: string;
+  readonly issues: MockLinearIssue[];
 }
 
 export interface FixtureOptions {
@@ -393,7 +410,33 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
     hard_stop_active: false,
   };
 
-  return { tasks, events, pending, scheduled: [], idempotency: {}, issues, budget };
+  const linearIssue = (n: number, title: string, state: string, priority: string, updatedAgoS: number, labels: string[] = []): MockLinearIssue => ({
+    id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
+    identifier: `WEB-${n}`,
+    title,
+    url: `https://linear.app/acme/issue/WEB-${n}`,
+    state,
+    state_type: state === 'In Progress' ? 'started' : 'unstarted',
+    priority_label: priority,
+    labels,
+    assignee: null,
+    updated_at: ago(now, updatedAgoS),
+  });
+  const linear: Record<string, MockLinearProject[]> = {
+    'acme/web-frontend': [{
+      project_id: '11111111-2222-4333-8444-5555aaaa5555',
+      repo: 'acme/web-frontend',
+      trigger_label: 'bgagent',
+      issues: [
+        linearIssue(12, 'Add a loading skeleton to the dashboard', 'Todo', 'High', 3 * HOUR, ['enhancement']),
+        linearIssue(11, 'Date picker ignores the user\'s locale', 'Todo', 'Medium', 6 * HOUR, ['bug']),
+        linearIssue(9, 'Keyboard shortcut for search', 'Backlog', 'Low', 2 * DAY),
+        { ...linearIssue(8, 'Fix dark-mode contrast on the settings page', 'In Progress', 'High', 2 * HOUR, ['bgagent']), task_id: MOCK_IDS.completed },
+      ],
+    }],
+  };
+
+  return { tasks, events, pending, scheduled: [], idempotency: {}, issues, budget, linear };
 }
 
 /** Deterministic pseudo-random tasks spread over the last 30 days. */

@@ -23,10 +23,12 @@ import type {
   DecisionResponse,
   ErrorResponse,
   GetPendingResponse,
+  ListLinearIssuesResponse,
   ListRepoIssuesResponse,
   NudgeResponse,
   PaginatedResponse,
   PersonalBudgetStatus,
+  StartLinearIssueResponse,
   SuccessResponse,
   TaskDetail,
   TaskEvent,
@@ -91,6 +93,10 @@ export interface ApiClient {
   deny(taskId: string, requestId: string, reason?: string): Promise<DecisionResponse>;
   /** Open issues of an onboarded repository; null when this deployment has no console API. */
   listRepoIssues(repo: string): Promise<ListRepoIssuesResponse | null>;
+  /** Open Linear issues of the projects mapped to a repo; null without a console API. */
+  listLinearIssues(repo: string): Promise<ListLinearIssuesResponse | null>;
+  /** Hands a Linear issue to the agent by adding its trigger label in Linear. */
+  startLinearIssue(issueId: string, projectId: string): Promise<StartLinearIssueResponse>;
 }
 
 export interface ApiClientOptions {
@@ -200,6 +206,17 @@ export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }
     async listRepoIssues(repo) {
       if (!consoleRoot) return null;
       return data(request<SuccessResponse<ListRepoIssuesResponse>>('GET', `/repos/${encodeURIComponent(repo)}/issues`, { base: consoleRoot }));
+    },
+    async listLinearIssues(repo) {
+      if (!consoleRoot) return null;
+      return data(request<SuccessResponse<ListLinearIssuesResponse>>('GET', `/repos/${encodeURIComponent(repo)}/linear-issues`, { base: consoleRoot }));
+    },
+    startLinearIssue(issueId, projectId) {
+      if (!consoleRoot) return Promise.reject(new ApiError(0, 'NOT_CONFIGURED', 'Linear is not available on this deployment.', ''));
+      return data(request<SuccessResponse<StartLinearIssueResponse>>('POST', `/linear-issues/${encodeURIComponent(issueId)}/start`, {
+        base: consoleRoot,
+        body: { project_id: projectId },
+      }));
     },
     deny(taskId, requestId, reason) {
       return data(request<SuccessResponse<DecisionResponse>>('POST', taskPath(taskId, '/deny'), {

@@ -19,6 +19,7 @@
 
 import BreadcrumbGroup from '@cloudscape-design/components/breadcrumb-group';
 import ContentLayout from '@cloudscape-design/components/content-layout';
+import SpaceBetween from '@cloudscape-design/components/space-between';
 import Header from '@cloudscape-design/components/header';
 import { useNavigate, useParams } from 'react-router';
 import { QueryError } from '../../core/components/QueryError';
@@ -27,6 +28,7 @@ import { repoHref } from '../../core/util/format';
 import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { TaskTable } from '../tasks/components/TaskTable';
 import { useTaskList } from '../tasks/hooks';
+import { LinearIssuesPanel } from './LinearIssuesPanel';
 
 export function RepoDetailPage() {
   const { owner = '', name = '' } = useParams();
@@ -56,6 +58,8 @@ export function RepoDetailPage() {
         </Header>
       }
     >
+      <SpaceBetween size="l">
+      <LinearIssuesPanel repo={repo} />
       {query.isError ? (
         <QueryError error={query.error} what="tasks" />
       ) : (
@@ -69,6 +73,7 @@ export function RepoDetailPage() {
           onLoadMore={() => query.fetchNextPage()}
         />
       )}
+      </SpaceBetween>
     </ContentLayout>
   );
 }

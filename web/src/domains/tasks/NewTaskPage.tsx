@@ -32,14 +32,14 @@ import { useMemo, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { ApiError } from '../../core/api/client';
 import { CODING_WORKFLOW_ID } from '../../core/api/types';
-import { taskHref } from '../../core/util/format';
-import { useCreateTask, useRepoIssues, useTaskList } from './hooks';
+import { repoHref, taskHref } from '../../core/util/format';
+import { useCreateTask, useLinearIssues, useRepoIssues, useStartLinearIssue, useTaskList } from './hooks';
 
 /** Same rule as the API (`cdk/src/handlers/shared/validation.ts`). */
 const REPO_PATTERN = /^(?!\.+\/)[a-zA-Z0-9._-]+\/(?!\.+$)[a-zA-Z0-9._-]+$/;
 const MAX_DESCRIPTION_LENGTH = 10_000;
 
-type Mode = 'describe' | 'issue';
+type Mode = 'describe' | 'issue' | 'linear';
 
 interface Errors {
   readonly repo?: string;
@@ -47,11 +47,19 @@ interface Errors {
   readonly description?: string;
 }
 
-function validate(repo: string, mode: Mode, issue: string, description: string): Errors {
+/** Linear issue the form will hand over: its id plus the project it belongs to. */
+interface LinearChoice {
+  readonly issueId: string;
+  readonly projectId: string;
+  readonly label: string;
+}
+
+function validate(repo: string, mode: Mode, issue: string, description: string, linearIssue: string): Errors {
   const errors: { repo?: string; issue?: string; description?: string } = {};
   if (!REPO_PATTERN.test(repo.trim())) errors.repo = 'Enter the repository as owner/name, for example acme/website.';
   if (mode === 'issue' && !/^[1-9]\d*$/.test(issue.trim())) errors.issue = 'Enter the issue number, for example 12.';
   if (mode === 'describe' && !description.trim()) errors.description = 'Describe the change you want.';
+  if (mode === 'linear' && !linearIssue) errors.issue = 'Pick a Linear issue.';
   if (description.length > MAX_DESCRIPTION_LENGTH) errors.description = `Keep it under ${MAX_DESCRIPTION_LENGTH.toLocaleString()} characters.`;
   return errors;
 }
@@ -91,13 +99,28 @@ export function NewTaskPage() {
   }));
   const chosenIssue = issues.data?.issues.find((i) => String(i.number) === issue.trim());
 
-  const errors = validate(repo, mode, issue, description);
+  const linear = useLinearIssues(repo.trim(), repoLooksValid);
+  const startLinear = useStartLinearIssue(repo.trim());
+  const [linearIssue, setLinearIssue] = useState('');
+  const linearChoices: LinearChoice[] = (linear.data?.projects ?? []).flatMap((p) => p.issues
+    .filter((i) => i.agent.kind === 'available')
+    .map((i) => ({ issueId: i.id, projectId: p.project_id, label: `${i.identifier} ${i.title}` })));
+  const linearConnected = (linear.data?.projects.length ?? 0) > 0;
+  const chosenLinear = linearChoices.find((c) => c.label === linearIssue);
+
+  const errors = validate(repo, mode, issue, description, chosenLinear ? chosenLinear.issueId : '');
   const shown = showErrors ? errors : {};
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setShowErrors(true);
-    if (Object.keys(errors).length > 0 || create.isPending) return;
+    if (Object.keys(errors).length > 0 || create.isPending || startLinear.isPending) return;
+    if (mode === 'linear' && chosenLinear) {
+      // Same path as adding the label in Linear: the agent comments there, and the task
+      // appears on the repository page once Linear's webhook arrives.
+      startLinear.mutate({ issueId: chosenLinear.issueId, projectId: chosenLinear.projectId }, { onSuccess: () => navigate(repoHref(repo.trim())) });
+      return;
+    }
     create.mutate(
       {
         repo: repo.trim(),
@@ -117,10 +140,10 @@ export function NewTaskPage() {
           actions={
             <SpaceBetween direction="horizontal" size="xs">
               <Button variant="link" formAction="none" onClick={() => navigate(-1)}>Cancel</Button>
-              <Button variant="primary" loading={create.isPending}>Start task</Button>
+              <Button variant="primary" loading={create.isPending || startLinear.isPending}>Start task</Button>
             </SpaceBetween>
           }
-          errorText={create.isError ? submitError(create.error) : undefined}
+          errorText={create.isError ? submitError(create.error) : startLinear.isError ? submitError(startLinear.error) : undefined}
         >
           <Container>
             <SpaceBetween size="l">
@@ -142,6 +165,11 @@ export function NewTaskPage() {
                   items={[
                     { value: 'describe', label: 'Describe the change' },
                     { value: 'issue', label: 'Fix a GitHub issue' },
+                    ...(linearConnected ? [{
+                      value: 'linear',
+                      label: 'Hand over a Linear issue',
+                      description: 'Adds the agent label in Linear, so it comments there as it works.',
+                    }] : []),
                   ]}
                 />
               </FormField>
@@ -173,7 +201,27 @@ export function NewTaskPage() {
                 </FormField>
               ))}
 
-              <FormField
+              {mode === 'linear' && (
+                <FormField
+                  label="Linear issue"
+                  description={chosenLinear ? 'Add any extra detail as a comment on the issue in Linear; the agent reads it.' : 'Open issues the agent has not picked up yet.'}
+                  errorText={shown.issue}
+                >
+                  <Autosuggest
+                    value={linearIssue}
+                    options={linearChoices.map((c) => ({ value: c.label }))}
+                    placeholder="Search Linear issues"
+                    statusType={linear.isFetching ? 'loading' : 'finished'}
+                    loadingText="Loading Linear issues"
+                    empty="Every open issue is already with the agent"
+                    onChange={({ detail }) => setLinearIssue(detail.value)}
+                    filteringType="auto"
+                    data-testid="linear-picker"
+                  />
+                </FormField>
+              )}
+
+              {mode !== 'linear' && <FormField
                 label={mode === 'issue' ? 'Anything to add? (optional)' : 'Describe the change'}
                 description={mode === 'issue'
                   ? 'Extra guidance on top of what the issue says.'
@@ -186,7 +234,7 @@ export function NewTaskPage() {
                   placeholder={mode === 'issue' ? '' : 'Fix the off-by-one error in inBounds() and add a test for the map edge.'}
                   onChange={({ detail }) => setDescription(detail.value)}
                 />
-              </FormField>
+              </FormField>}
             </SpaceBetween>
           </Container>
         </Form>

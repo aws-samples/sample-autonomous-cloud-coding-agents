@@ -24,9 +24,9 @@
  */
 
 import { delay, http, HttpResponse } from 'msw';
-import type { CreateTaskRequest, TaskDetail, TaskStatusType, TaskSummary } from '../core/api/types';
+import type { CreateTaskRequest, LinearAgentState, TaskDetail, TaskStatusType, TaskSummary } from '../core/api/types';
 import { TERMINAL_STATUSES } from '../core/api/types';
-import type { MockData, ScheduledChange } from './fixtures';
+import type { MockData, MockLinearIssue, ScheduledChange } from './fixtures';
 
 function error(status: number, code: string, message: string) {
   return HttpResponse.json({ error: { code, message, request_id: 'mock-request' } }, { status });
@@ -150,6 +150,71 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | nul
   }
 }
 
+/** Adds a new task that then runs on its own (see {@link simulatedRun}). */
+function createSimulatedTask(
+  data: MockData,
+  req: { readonly repo: string; readonly issue_number: number | null; readonly task_description: string | null },
+  channel: TaskDetail['channel_source'],
+  now: Date,
+): TaskDetail {
+  const taskId = newTaskId();
+  const created: TaskDetail = {
+    ...data.tasks[0],
+    task_id: taskId,
+    status: 'SUBMITTED',
+    repo: req.repo,
+    issue_number: req.issue_number,
+    task_description: req.task_description,
+    branch_name: `bgagent/${taskId}/${slug(req.task_description ?? `issue-${req.issue_number}`)}`,
+    pr_number: null,
+    pr_url: null,
+    error_message: null,
+    error_classification: null,
+    channel_source: channel,
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    started_at: null,
+    completed_at: null,
+    agent_heartbeat_at: null,
+    duration_s: null,
+    cost_usd: null,
+    build_passed: null,
+    lint_passed: null,
+    awaiting_approval_request_id: null,
+    queue_position: null,
+    estimated_wait_s: null,
+  };
+  data.tasks.push(created);
+  addEvent(data, taskId, 'task_created', { channel_source: channel, repo: req.repo }, now);
+  data.scheduled.push(...simulatedRun(created, now.getTime()));
+  return created;
+}
+
+/** How long a mock Linear webhook takes to turn a Start into a task. */
+const MOCK_LINEAR_WEBHOOK_DELAY_MS = 4000;
+
+function linearAgentState(data: MockData, issue: MockLinearIssue, label: string): LinearAgentState {
+  if (!issue.labels.some((l) => l.toLowerCase() === label.toLowerCase())) return { kind: 'available' };
+  const task = issue.task_id ? data.tasks.find((t) => t.task_id === issue.task_id) : undefined;
+  if (!task) return { kind: 'starting' };
+  return { kind: 'task', task_id: task.task_id, status: task.status, pr_url: task.pr_url, mine: true };
+}
+
+/** Plays the part of Linear's webhook: a labeled issue becomes a task after a short delay. */
+function advanceLinear(data: MockData, nowMs: number) {
+  for (const project of Object.values(data.linear).flat()) {
+    for (const issue of project.issues) {
+      if (issue.started_at_ms && !issue.task_id && nowMs - issue.started_at_ms >= MOCK_LINEAR_WEBHOOK_DELAY_MS) {
+        issue.task_id = createSimulatedTask(data, {
+          repo: project.repo,
+          issue_number: null,
+          task_description: `${issue.identifier}: ${issue.title}`,
+        }, 'linear', new Date(nowMs)).task_id;
+      }
+    }
+  }
+}
+
 export interface MockHandlerOptions {
   /** Simulated network latency per request; keeps loading states visible in mock mode. */
   readonly latencyMs?: number;
@@ -161,6 +226,7 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
   async function guard(request: Request) {
     if (latencyMs) await delay(latencyMs);
     advance(data, Date.now());
+    advanceLinear(data, Date.now());
     return request.headers.get('Authorization') ? null : error(401, 'UNAUTHORIZED', 'Missing or invalid authentication token.');
   }
 
@@ -229,37 +295,8 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
         return error(422, 'REPO_NOT_ONBOARDED', `Repository '${body.repo}' is not onboarded. Register it with a Blueprint before submitting tasks.`);
       }
       const now = new Date();
-      const taskId = newTaskId();
-      const created: TaskDetail = {
-        ...data.tasks[0],
-        task_id: taskId,
-        status: 'SUBMITTED',
-        repo: body.repo,
-        issue_number: body.issue_number ?? null,
-        task_description: body.task_description ?? null,
-        branch_name: `bgagent/${taskId}/${slug(body.task_description ?? `issue-${body.issue_number}`)}`,
-        pr_number: null,
-        pr_url: null,
-        error_message: null,
-        error_classification: null,
-        channel_source: 'api',
-        created_at: now.toISOString(),
-        updated_at: now.toISOString(),
-        started_at: null,
-        completed_at: null,
-        agent_heartbeat_at: null,
-        duration_s: null,
-        cost_usd: null,
-        build_passed: null,
-        lint_passed: null,
-        awaiting_approval_request_id: null,
-        queue_position: null,
-        estimated_wait_s: null,
-      };
-      data.tasks.push(created);
-      if (key) data.idempotency[key] = taskId;
-      addEvent(data, taskId, 'task_created', { channel_source: 'api', repo: body.repo }, now);
-      data.scheduled.push(...simulatedRun(created, now.getTime()));
+      const created = createSimulatedTask(data, { repo: body.repo, issue_number: body.issue_number ?? null, task_description: body.task_description ?? null }, 'api', now);
+      if (key) data.idempotency[key] = created.task_id;
       return HttpResponse.json({ data: created }, { status: 201 });
     }),
 
@@ -270,6 +307,41 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       if (!REPO_PATTERN.test(repo)) return error(400, 'VALIDATION_ERROR', 'repo_id must be in owner/repo format.');
       if (repo === MOCK_NOT_ONBOARDED_REPO) return error(422, 'REPO_NOT_ONBOARDED', `Repository '${repo}' is not onboarded.`);
       return HttpResponse.json({ data: { repo, issues: data.issues[repo] ?? [] } });
+    }),
+
+
+    http.get(`${base}/repos/:repoId/linear-issues`, async ({ request, params }) => {
+      const denied = await guard(request);
+      if (denied) return denied;
+      const repo = decodeURIComponent(String(params.repoId));
+      if (!REPO_PATTERN.test(repo)) return error(400, 'VALIDATION_ERROR', 'repo_id must be in owner/repo format.');
+      const projects = (data.linear[repo] ?? []).map((p) => ({
+        project_id: p.project_id,
+        trigger_label: p.trigger_label,
+        // Mock-only bookkeeping (start time, task id) stays out of the response, like the real API.
+        issues: p.issues.map((i) => ({
+          id: i.id, identifier: i.identifier, title: i.title, url: i.url, state: i.state, state_type: i.state_type,
+          priority_label: i.priority_label, labels: i.labels, assignee: i.assignee, updated_at: i.updated_at,
+          agent: linearAgentState(data, i, p.trigger_label),
+        })),
+      }));
+      return HttpResponse.json({ data: { repo, projects } });
+    }),
+
+    http.post(`${base}/linear-issues/:issueId/start`, async ({ request, params }) => {
+      const denied = await guard(request);
+      if (denied) return denied;
+      const projectId = (await jsonBody(request))?.project_id;
+      const project = Object.values(data.linear).flat().find((p) => p.project_id === projectId);
+      if (!project) return error(422, 'REPO_NOT_ONBOARDED', 'This Linear project is not connected to a repository.');
+      const issue = project.issues.find((i) => i.id === params.issueId);
+      if (!issue) return error(404, 'VALIDATION_ERROR', 'That issue is not in this Linear project.');
+      if (issue.labels.some((l) => l.toLowerCase() === project.trigger_label)) {
+        return error(409, 'DUPLICATE_TASK', `${issue.identifier} is already handed to the agent.`);
+      }
+      issue.labels = [...issue.labels, project.trigger_label];
+      issue.started_at_ms = Date.now();
+      return HttpResponse.json({ data: { issue_id: issue.id, identifier: issue.identifier, repo: project.repo } }, { status: 202 });
     }),
 
     http.delete(`${base}/tasks/:taskId`, async ({ request, params }) => {

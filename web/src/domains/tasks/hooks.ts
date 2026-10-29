@@ -109,3 +109,32 @@ export function useRepoIssues(repo: string, enabled: boolean) {
     retry: false,
   });
 }
+
+/** While the agent is picking issues up, refresh often so "Starting…" turns into a task link. */
+const LINEAR_STARTING_REFRESH_MS = 5_000;
+const LINEAR_REFRESH_MS = 60_000;
+
+export function useLinearIssues(repo: string, enabled = true) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ['repos', repo, 'linear-issues'],
+    queryFn: () => api.listLinearIssues(repo),
+    enabled,
+    retry: false,
+    refetchInterval: (query) => (query.state.data?.projects.some((p) => p.issues.some((i) => i.agent.kind === 'starting'))
+      ? LINEAR_STARTING_REFRESH_MS
+      : LINEAR_REFRESH_MS),
+  });
+}
+
+export function useStartLinearIssue(repo: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ issueId, projectId }: { issueId: string; projectId: string }) => api.startLinearIssue(issueId, projectId),
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['repos', repo, 'linear-issues'] });
+      await queryClient.invalidateQueries({ queryKey: taskKeys.all });
+    },
+  });
+}

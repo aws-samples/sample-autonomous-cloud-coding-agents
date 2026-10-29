@@ -201,6 +201,50 @@ export interface ListRepoIssuesResponse {
   readonly issues: readonly RepoIssueSummary[];
 }
 
+/** What the agent is doing with a Linear issue (console API). */
+export type LinearAgentState =
+  | { readonly kind: 'available' }
+  /** Labeled for the agent, task not created yet (the Linear webhook is on its way). */
+  | { readonly kind: 'starting' }
+  /** `task_id` is null when the task belongs to someone else. */
+  | { readonly kind: 'task'; readonly task_id: string | null; readonly status: TaskStatusType | null; readonly pr_url: string | null; readonly mine: boolean };
+
+export interface LinearIssueSummary {
+  readonly id: string;
+  /** Linear's key, e.g. `MON-4`. */
+  readonly identifier: string;
+  readonly title: string;
+  readonly url: string;
+  readonly state: string;
+  readonly state_type: string;
+  readonly priority_label: string;
+  readonly labels: readonly string[];
+  readonly assignee: string | null;
+  readonly updated_at: string;
+  readonly agent: LinearAgentState;
+}
+
+export interface LinearProjectIssues {
+  readonly project_id: string;
+  readonly trigger_label: string;
+  /** Set when the project's issues could not be loaded; explains what to do. */
+  readonly problem?: string;
+  readonly issues: readonly LinearIssueSummary[];
+}
+
+/** GET /repos/{repo_id}/linear-issues (console API). */
+export interface ListLinearIssuesResponse {
+  readonly repo: string;
+  readonly projects: readonly LinearProjectIssues[];
+}
+
+/** POST /linear-issues/{issue_id}/start (console API, HTTP 202). */
+export interface StartLinearIssueResponse {
+  readonly issue_id: string;
+  readonly identifier: string;
+  readonly repo: string;
+}
+
 /** POST /v1/tasks body: the subset the console sends. */
 export interface CreateTaskRequest {
   readonly repo: string;
