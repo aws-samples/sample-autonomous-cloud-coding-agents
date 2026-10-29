@@ -15,12 +15,12 @@
     "jest": "^30.4.2",
     "jest-junit": "^17",
     "markdown-link-check": "^3.13.6",
-    "retire": "^5.4.3"
+    "retire": "^6.1.0"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
     "@astrojs/starlight": "^0.41.2",
-    "astro": "7.2.8",
+    "astro": "7.3.3",
     "remark-gfm": "^4.0.1",
     "typescript": "^6.0.3"
   },
