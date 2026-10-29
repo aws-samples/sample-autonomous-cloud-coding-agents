@@ -36,7 +36,7 @@
     "@aws-sdk/s3-presigned-post": "^3.1078.0",
     "@aws-sdk/s3-request-presigner": "^3.1078.0",
     "@aws/durable-execution-sdk-js": "^2.0.0",
-    "@cedar-policy/cedar-wasm": "4.8.2",
+    "@cedar-policy/cedar-wasm": "4.11.1",
     "@smithy/protocol-http": "^5.5.5",
     "@smithy/signature-v4": "^5.6.1",
     "aws-cdk-lib": "^2.260.0",
