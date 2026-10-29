@@ -17,6 +17,8 @@
 #   --email EMAIL       Cognito user to create for yourself (default: ask)
 #   --container-engine finch|docker   builds the agent image (default: Finch if installed, else Docker)
 #   --no-console        skip the operator web console stack (<stack-name>-console)
+#   --full-build        run the full CI build (lint + every test + synth) instead of compile-only;
+#                       the deploy itself is the same either way
 #   --yes               answer routine questions with their default so a re-run needs no typing (also
 #                       ABCA_AUTO_YES=1). Still asks: warnings that something is wrong, a deploy to an
 #                       account other than the last one, and anything with no remembered answer.
@@ -47,6 +49,7 @@ TARGET_REPO=""
 EMAIL=""
 CONTAINER_ENGINE=""     # finch | docker; empty = auto-detect
 VERBOSE=0
+FULL_BUILD=0            # --full-build; default compiles only (tests are CI's job, not a deploy prerequisite)
 DRY_RUN=0
 NO_AWS=0
 TEARDOWN=0
@@ -203,6 +206,7 @@ while [ $# -gt 0 ]; do
     --email)      EMAIL="$2"; shift 2 ;;
     --container-engine) CONTAINER_ENGINE="$2"; shift 2 ;;
     --verbose)    VERBOSE=1; shift ;;
+    --full-build) FULL_BUILD=1; shift ;;
     --dry-run)    DRY_RUN=1; shift ;;
     --no-aws)     NO_AWS=1; shift ;;
     --teardown)   TEARDOWN=1; shift ;;
@@ -670,8 +674,16 @@ choose_repo() {
 
 # ---------- 5. build, bootstrap, diff, deploy ----------
 build_all() {
-  step "Build (includes CDK synth against your account)"
-  run_logged build mise run build
+  if [ "$FULL_BUILD" = 1 ]; then
+    step "Full build (compile, lint, all tests, synth)"
+    run_logged build mise run build
+    return
+  fi
+  # Deploying needs compiled code, not the test suite (~4 min). The deploy synthesizes and
+  # cdk-nag-checks the app either way; --full-build runs what CI runs.
+  step "Build (compile; --full-build also runs lint and tests)"
+  run_logged cdk-compile mise //cdk:compile
+  run_logged cli-compile mise //cli:compile
 }
 
 compile_only() {
@@ -750,7 +762,14 @@ deploy() {
     *IN_PROGRESS*)     die "stack $STACK_NAME is $status. Wait for it to finish, then re-run." ;;
   esac
   printf '  Current stack status: %s\n' "$status"
-  run_logged diff mise //cdk:diff -- "${CDK_ARGS[@]}"
+  # Synthesize ONCE: the diff, the security review and the deploy all use this assembly, so
+  # what you review is exactly what gets deployed (and the app is not built three times).
+  ASSEMBLY="$STATE_DIR/assembly"
+  rm -rf "$ASSEMBLY"
+  local synth_args=() a
+  for a in "${CDK_ARGS[@]}"; do [ "$a" = --all ] || synth_args+=("$a"); done
+  run_logged synth mise //cdk:synth -- --quiet -o "$ASSEMBLY" "${synth_args[@]}"
+  run_logged diff mise //cdk:diff -- --app "$ASSEMBLY" "${CDK_ARGS[@]}"
   [ "$DRY_RUN" = 1 ] || printf '  Review the full diff: %s\n' "$LOG_DIR/$RUN_ID-diff.log"
 
   cost_and_exposure_warning
@@ -770,7 +789,7 @@ deploy() {
   # runs with --require-approval never after you approve exactly these changes.
   local seclog="$LOG_DIR/$RUN_ID-security-diff.log"
   printf '  computing the security changes (cdk diff --security-only, ~1-2 min)...\n'
-  (cd cdk && mise exec -- npx cdk diff --security-only "${CDK_ARGS[@]}") >"$seclog" 2>&1 \
+  (cd cdk && mise exec -- npx cdk diff --security-only --app "$ASSEMBLY" "${CDK_ARGS[@]}") >"$seclog" 2>&1 \
     || die "could not compute the security changes — see $seclog"
   if grep -q -E 'IAM Statement Changes|IAM Policy Changes|Security Group Changes' "$seclog"; then
     # A first deploy adds hundreds of rows; summarise, and show the full tables only on request.
@@ -794,7 +813,7 @@ deploy() {
   local scratch; scratch="$(mktemp -d "${TMPDIR:-/tmp}/abca-deploy.XXXXXX")"
   local log="$LOG_DIR/$RUN_ID-deploy.log"
   printf '  log: %s\n' "$log"
-  if ! TMPDIR="$scratch" mise //cdk:deploy -- "${CDK_ARGS[@]}" --require-approval never 2>&1 | tee "$log"; then
+  if ! TMPDIR="$scratch" mise //cdk:deploy -- --app "$ASSEMBLY" "${CDK_ARGS[@]}" --require-approval never 2>&1 | tee "$log"; then
     case "$(stack_status)" in
       UPDATE_ROLLBACK_COMPLETE)
         die "deploy failed and CloudFormation rolled it back — see $log. Nothing is broken: the stack is still running its previous version. Fix the error shown above and re-run." ;;
@@ -1034,7 +1053,8 @@ main() {
   choose_repo
   save_settings
   bootstrap  # before the build: a bootstrap problem should surface in seconds, not after it
-  if resume_step build; then ok "skipped build (unchanged since it last succeeded)"; else build_all; mark_done build; fi
+  # Keyed on the build kind too: a compile-only success must not skip a requested --full-build.
+  if resume_step build "full=$FULL_BUILD"; then ok "skipped build (unchanged since it last succeeded)"; else build_all; mark_done build "full=$FULL_BUILD"; fi
   add_local_dev_args
   case "$(stack_status)" in
     CREATE_COMPLETE|UPDATE_COMPLETE)
