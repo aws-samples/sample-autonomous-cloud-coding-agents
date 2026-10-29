@@ -386,7 +386,11 @@ describe('failures and cancellation', () => {
     expect(text()).toContain('Code storage limit exceeded');
     // A cancellation is a consequence, not a cause.
     expect(text()).not.toContain('Resource creation cancelled');
-    expect(text()).toContain(`Full log: ${path.join(configDir, 'logs', 'backgroundagent-dev', 'setup-deploy.log')}`);
+    // The CLI abbreviates paths under $HOME to `~`; on CI runners os.tmpdir() lives under $HOME.
+    const deployLog = path.join(configDir, 'logs', 'backgroundagent-dev', 'setup-deploy.log');
+    const home = os.homedir();
+    const shownLog = deployLog.startsWith(`${home}${path.sep}`) ? `~${deployLog.slice(home.length)}` : deployLog;
+    expect(text()).toContain(`Full log: ${shownLog}`);
     // Logs live outside the repository, where the deploy's cdk.out cleanup cannot remove them.
     expect(runs.every(run => run.logFile.startsWith(configDir))).toBe(true);
     expect(profileOnDisk()?.slack).toBe(true);
