@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { formatCost, formatDuration, formatRelativeTime, shortId } from '../../../src/core/util/format';
+import { formatCost, formatDuration, formatRelativeTime, shortId, taskTitle } from '../../../src/core/util/format';
 
 const NOW = new Date('2026-10-23T12:00:00.000Z');
 
@@ -63,5 +63,26 @@ describe('formatCost and shortId', () => {
   it('keeps the last eight characters of long ids', () => {
     expect(shortId('01JF3KQZ8X00000000RUNNING1')).toBe('RUNNING1');
     expect(shortId('abc')).toBe('abc');
+  });
+});
+
+describe('taskTitle', () => {
+  const base = { task_description: null, issue_number: null, issue_title: null };
+
+  it('names an issue task after the issue, even when it has extra guidance', () => {
+    expect(taskTitle({ ...base, issue_number: 3, issue_title: 'Encounter and catch monsters' })).toBe('Encounter and catch monsters');
+    expect(taskTitle({ ...base, issue_number: 3, issue_title: 'Encounter and catch monsters', task_description: 'Keep it small' }))
+      .toBe('Encounter and catch monsters');
+  });
+
+  it('falls back to the description, then the issue number', () => {
+    expect(taskTitle({ ...base, issue_number: 3, issue_title: '  ', task_description: 'Keep it small' })).toBe('Keep it small');
+    expect(taskTitle({ ...base, issue_number: 3 })).toBe('Fix issue #3');
+    expect(taskTitle({ ...base, task_description: 'Add a README' })).toBe('Add a README');
+    expect(taskTitle(base)).toBe('Untitled task');
+  });
+
+  it('ignores an issue title without an issue number', () => {
+    expect(taskTitle({ ...base, issue_title: 'Stale', task_description: 'Add a README' })).toBe('Add a README');
   });
 });

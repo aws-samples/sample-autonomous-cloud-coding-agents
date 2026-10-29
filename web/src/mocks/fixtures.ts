@@ -103,6 +103,7 @@ function task(now: Date, overrides: Partial<TaskDetail> & Pick<TaskDetail, 'task
   return {
     repo: 'acme/payments-api',
     issue_number: null,
+    issue_title: null,
     resolved_workflow: { id: 'coding/new-task-v1', version: '1' },
     resolved_assets: null,
     pr_number: null,
@@ -206,6 +207,7 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
       status: 'QUEUED',
       task_description: 'Add pagination to GET /invoices',
       issue_number: 214,
+      issue_title: 'Add pagination to GET /invoices',
       created_at: ago(now, 2 * MIN),
       updated_at: ago(now, 2 * MIN),
       queued_at: ago(now, 2 * MIN),

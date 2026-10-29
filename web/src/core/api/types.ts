@@ -83,6 +83,7 @@ export interface TaskSummary {
   readonly status: TaskStatusType;
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;
@@ -119,6 +120,7 @@ export interface TaskDetail {
   readonly status: TaskStatusType;
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   readonly resolved_assets: ResolvedAssetTriple[] | null;
   readonly pr_number: number | null;

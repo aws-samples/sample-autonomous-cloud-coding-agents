@@ -172,6 +172,7 @@ export interface TaskDetail {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -334,6 +335,7 @@ export interface TaskSummary {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;

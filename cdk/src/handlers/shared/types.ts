@@ -169,6 +169,9 @@ export interface TaskRecord {
    *  repo-less workflow (``requires_repo: false``) runs with no repo. */
   readonly repo?: string;
   readonly issue_number?: number;
+  /** GitHub issue title, stored when the issue is read at hydration so lists can
+   *  name the task. Display only; never fed back into the prompt. */
+  readonly issue_title?: string;
   /** The ref the caller supplied (if any); resolution may fall back to a
    *  default when absent. Persisted for audit alongside ``resolved_workflow``. */
   readonly workflow_ref?: string;
@@ -451,6 +454,7 @@ export interface TaskDetail {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -555,6 +559,7 @@ export interface TaskSummary {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -983,6 +988,7 @@ export function toTaskDetail(
     status: record.status,
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
+    issue_title: record.issue_title ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
@@ -1259,6 +1265,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     status: record.status,
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
+    issue_title: record.issue_title ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,

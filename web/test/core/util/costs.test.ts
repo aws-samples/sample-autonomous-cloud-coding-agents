@@ -37,7 +37,7 @@ const NOW = new Date('2026-10-28T15:00:00Z');
 
 function t(id: string, cost: number | null, finished: string, overrides: Partial<TaskSummary> = {}): TaskSummary {
   return {
-    task_id: id, status: 'COMPLETED', repo: 'acme/app', issue_number: null, resolved_workflow: null, resolved_assets: null,
+    task_id: id, status: 'COMPLETED', repo: 'acme/app', issue_number: null, issue_title: null, resolved_workflow: null, resolved_assets: null,
     pr_number: null, task_description: id, branch_name: 'b', pr_url: null, created_at: finished, updated_at: finished,
     agent_heartbeat_at: null, cost_usd: cost, completed_at: finished, channel_source: 'api', ...overrides,
   };

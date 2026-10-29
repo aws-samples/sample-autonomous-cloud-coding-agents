@@ -61,8 +61,17 @@ function formatSpan(seconds: number): string {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
-/** What a person would call the task: its description, else the issue it fixes. */
-export function taskTitle(task: { readonly task_description: string | null; readonly issue_number: number | null }): string {
+/**
+ * What a person would call the task: the issue's title, else its description, else
+ * the issue number. With an issue, the description is only extra guidance.
+ */
+export function taskTitle(task: {
+  readonly task_description: string | null;
+  readonly issue_number: number | null;
+  readonly issue_title?: string | null;
+}): string {
+  const issueTitle = task.issue_title?.trim();
+  if (task.issue_number && issueTitle) return issueTitle;
   const description = task.task_description?.trim();
   if (description) return description;
   return task.issue_number ? `Fix issue #${task.issue_number}` : 'Untitled task';

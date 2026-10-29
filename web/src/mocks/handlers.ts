@@ -38,6 +38,7 @@ function toSummary(task: TaskDetail): TaskSummary {
     status: task.status,
     repo: task.repo,
     issue_number: task.issue_number,
+    issue_title: task.issue_title,
     resolved_workflow: task.resolved_workflow,
     resolved_assets: task.resolved_assets,
     pr_number: task.pr_number,
@@ -164,6 +165,8 @@ function createSimulatedTask(
     status: 'SUBMITTED',
     repo: req.repo,
     issue_number: req.issue_number,
+    // The real platform stores the title once it reads the issue; the mock knows it at once.
+    issue_title: data.issues[req.repo]?.find((i) => i.number === req.issue_number)?.title ?? null,
     task_description: req.task_description,
     branch_name: `bgagent/${taskId}/${slug(req.task_description ?? `issue-${req.issue_number}`)}`,
     pr_number: null,

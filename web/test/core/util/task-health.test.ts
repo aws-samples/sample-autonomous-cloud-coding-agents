@@ -35,6 +35,7 @@ function summary(overrides: Partial<TaskSummary>): TaskSummary {
     status: 'RUNNING',
     repo: 'acme/app',
     issue_number: null,
+    issue_title: null,
     resolved_workflow: null,
     resolved_assets: null,
     pr_number: null,
