@@ -63,7 +63,7 @@ class TestWorkflowResolution:
             github_token="ghp_test123",
             aws_region="us-east-1",
         )
-        assert config.haiku_model == "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        assert config.haiku_model == "global.anthropic.claude-haiku-5-5"
 
     def test_haiku_model_resolves_from_env(self, monkeypatch):
         # The deployed ANTHROPIC_DEFAULT_HAIKU_MODEL (set by agent.ts) flows

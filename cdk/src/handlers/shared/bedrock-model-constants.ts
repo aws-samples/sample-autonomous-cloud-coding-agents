@@ -60,7 +60,7 @@
  * that list means the granted model and the delivered model id cannot drift — a
  * mismatch would AccessDenied every Haiku call at run time while synth stayed green.
  */
-export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
+export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-5-5';
 
 /**
  * Single source of truth for the Bedrock **foundation-model IDs** the agent runtime
@@ -81,16 +81,23 @@ export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0'
  * and was removed; `bgagent platform doctor` now checks the whole set for it.
  */
 export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
+  // Previous-generation models stay granted after a default bump (#744, #953):
+  // blueprints may pin any of them per-repo, so removing one would fail those
+  // repos at turn 0. Retiring a model is a separate, announced change — never a
+  // side effect of adding a newer one.
   'anthropic.claude-sonnet-4-6',
-  // Claude Opus 4.8. Blueprints may pin it per-repo, so removing it would fail those
-  // repos at turn 0.
   'anthropic.claude-opus-4-8',
-  // Claude Opus 5 — the platform default. Bare ID by contract: Bedrock refuses the
-  // bare ID for on-demand invocation ("ValidationException: … isn't supported. Retry
-  // your request with the ID or ARN of an inference profile"), and the grant sites
-  // derive the geo-prefixed inference-profile ARN — the invocable one — from this
-  // entry plus `bedrockGeoRegion`.
   'anthropic.claude-opus-5',
+  'anthropic.claude-haiku-4-5-20251001-v1:0',
+  // Claude Opus 5.5 (platform default) and Haiku 5.5 (auxiliary default), #953.
+  // Bare IDs by contract: Bedrock refuses the bare ID for on-demand invocation
+  // ("ValidationException: … isn't supported. Retry your request with the ID or
+  // ARN of an inference profile"), and the grant sites derive the geo-prefixed
+  // inference-profile ARN — the invocable one — from each entry plus
+  // `bedrockGeoRegion`. Sonnet 5.5 is deliberately NOT here: it has no `jp.`
+  // profile (verified 2026-10-16), so granting it would recreate the
+  // granted-but-uninvocable state described above for one geography.
+  'anthropic.claude-opus-5-5',
   DEFAULT_HAIKU_MODEL_ID,
 ];
 
@@ -106,7 +113,7 @@ export const DEFAULT_BEDROCK_MODEL_IDS: readonly string[] = [
  * The auxiliary default is an ALIAS of {@link DEFAULT_HAIKU_MODEL_ID}, not a second
  * copy of the string: they must name the same model, and two literals could drift.
  */
-export const PLATFORM_DEFAULT_MODEL_ID = 'anthropic.claude-opus-5';
+export const PLATFORM_DEFAULT_MODEL_ID = 'anthropic.claude-opus-5-5';
 export const PLATFORM_DEFAULT_AUX_MODEL_ID = DEFAULT_HAIKU_MODEL_ID;
 
 /**

@@ -443,8 +443,16 @@ describe('EcsAgentCluster construct', () => {
     // on-demand invocable, so the `us.` profile is the one actually called.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
-    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5 — blueprints may
-    // pin it per-repo, so dropping it would fail those repos at turn 0.
+    // Claude 5.5 family (#953) — the platform default (Opus 5.5) and auxiliary
+    // default (Haiku 5.5). Both ARNs each: the bare id is not on-demand invocable,
+    // so the `us.`-prefixed inference profile is the one actually called.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5-5');
+    expect(serialized).toContain('foundation-model/anthropic.claude-haiku-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-haiku-5-5');
+    // REGRESSION (#744, #953): previous defaults stay granted after a bump.
+    // Blueprints may pin any of them per-repo; dropping one would fail those repos
+    // at turn 0.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
@@ -464,15 +472,26 @@ describe('EcsAgentCluster construct', () => {
   test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
     const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-haiku-5-5',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-opus-5-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-haiku-5-5',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-opus-5-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
-    const serialized = JSON.stringify(baseTemplate.findResources('AWS::IAM::Policy'));
+    // Inline AND managed-policy overflow, matching the AgentCore half: CDK splits a
+    // role's default policy into managed-policy chunks past the IAM size limit, and
+    // a grant that spilled over must still count here rather than vanish from view.
+    const policies = {
+      ...baseTemplate.findResources('AWS::IAM::Policy'),
+      ...baseTemplate.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
@@ -505,9 +524,9 @@ describe('EcsAgentCluster construct', () => {
       expect(containers.length).toBeGreaterThan(0);
       for (const c of containers) {
         const env = Object.fromEntries((c.Environment ?? []).map((e) => [e.Name, e.Value]));
-        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5`);
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5-5`);
         expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
       }
     }
   });

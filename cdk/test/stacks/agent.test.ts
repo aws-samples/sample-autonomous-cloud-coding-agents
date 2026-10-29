@@ -319,7 +319,7 @@ describe('AgentStack', () => {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
       expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-5-5`);
     }
   });
 
@@ -440,9 +440,16 @@ describe('AgentStack', () => {
     // must be present or the agent gets AccessDenied at turn 0.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
-    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5. Blueprints may
-    // pin 4.8 per-repo; dropping it would fail those repos at turn 0. Retiring
-    // 4.8 is a separate, announced change — not a side effect of adding 5.
+    // Claude 5.5 family (#953) — the platform default (Opus 5.5) and auxiliary
+    // default (Haiku 5.5). Both ARNs each: the bare id is not on-demand invocable,
+    // so the `us.`-prefixed inference profile is the one actually called.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5-5');
+    expect(serialized).toContain('foundation-model/anthropic.claude-haiku-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-haiku-5-5');
+    // REGRESSION (#744, #953): previous defaults stay granted after a bump.
+    // Blueprints may pin any of them per-repo; dropping one would fail those repos
+    // at turn 0. Retiring a model is a separate, announced change.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
@@ -460,8 +467,8 @@ describe('AgentStack', () => {
       context: {
         bedrockModels: [
           'anthropic.claude-opus-4-8',
-          'anthropic.claude-opus-5',
-          'anthropic.claude-haiku-4-5-20251001-v1:0',
+          'anthropic.claude-opus-5-5',
+          'anthropic.claude-haiku-5-5',
         ],
       },
     });
@@ -549,12 +556,16 @@ describe('AgentStack', () => {
     // added, dropped, or re-prefixed without failing here.
     const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
+      'foundation-model/anthropic.claude-haiku-5-5',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-opus-5-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
+      'inference-profile/us.anthropic.claude-haiku-5-5',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-opus-5-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
 
@@ -581,7 +592,7 @@ describe('AgentStack', () => {
       Properties?: { EnvironmentVariables?: Record<string, unknown> };
     }).Properties?.EnvironmentVariables ?? {};
     expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-      .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+      .toBe('us.anthropic.claude-haiku-5-5');
     expect(DEFAULT_BEDROCK_GEO_REGION).toBe('us');
   });
 
@@ -619,9 +630,9 @@ describe('AgentStack', () => {
       );
       expect(envs.length).toBeGreaterThan(0);
       for (const env of envs) {
-        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5`);
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5-5`);
         expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
       }
     });
 
@@ -664,7 +675,7 @@ describe('AgentStack', () => {
         const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
           .Properties?.EnvironmentVariables ?? {};
         expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
       }
     });
   });
@@ -1147,7 +1158,7 @@ describe('AgentStack', () => {
  * independent of `bedrockModels`, so a narrowing override made the two disagree with
  * nothing to catch it. Verified before fixing: `-c
  * bedrockModels='["anthropic.claude-sonnet-4-6"]'` synthesized clean while granting only
- * Sonnet and injecting `global.anthropic.claude-opus-5`.
+ * Sonnet and injecting `global.anthropic.claude-opus-5-5`.
  */
 describe('AgentStack platform-default / grant-list coherence', () => {
   const synth = (bedrockModels?: string[]) => () => {
@@ -1162,8 +1173,8 @@ describe('AgentStack platform-default / grant-list coherence', () => {
     const t = synth(['anthropic.claude-sonnet-4-6']);
     expect(t).toThrow(/omits the platform default model/);
     // Names every missing default, not just the first one found.
-    expect(t).toThrow(/anthropic\.claude-opus-5/);
-    expect(t).toThrow(/claude-haiku-4-5/);
+    expect(t).toThrow(/anthropic\.claude-opus-5-5/);
+    expect(t).toThrow(/claude-haiku-5-5/);
     // And says WHY, because the override looks self-consistent on its own.
     expect(t).toThrow(/told to invoke them regardless/);
   });
@@ -1171,14 +1182,14 @@ describe('AgentStack platform-default / grant-list coherence', () => {
   test('fails when only the AUXILIARY default is omitted', () => {
     // The easy one to miss: adding a model while dropping Haiku breaks only the
     // auxiliary path (WebFetch summarisation), which no task-level failure names.
-    expect(synth(['anthropic.claude-opus-5', 'anthropic.claude-sonnet-4-6']))
-      .toThrow(/claude-haiku-4-5/);
+    expect(synth(['anthropic.claude-opus-5-5', 'anthropic.claude-sonnet-4-6']))
+      .toThrow(/claude-haiku-5-5/);
   });
 
   test('accepts an override that keeps both defaults', () => {
     expect(synth([
-      'anthropic.claude-opus-5',
-      'anthropic.claude-haiku-4-5-20251001-v1:0',
+      'anthropic.claude-opus-5-5',
+      'anthropic.claude-haiku-5-5',
       'anthropic.claude-sonnet-4-6',
     ])).not.toThrow();
   });

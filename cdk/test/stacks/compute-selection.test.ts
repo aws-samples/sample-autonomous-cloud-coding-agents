@@ -131,7 +131,14 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
     expect(trust.includes('LambdaMicrovmComputeExecutionRole')).toBe(backend === 'lambda-microvm');
     expect(trust).toContain('sts:TagSession');
     const prefix = backend === 'agentcore' ? 'RuntimeExecutionRole' : backend === 'ecs' ? 'EcsAgentClusterTaskRole' : 'LambdaMicrovmComputeExecutionRole';
-    const policies = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy')).filter(([id]) => id.startsWith(prefix)));
+    // Audit the role's inline policy AND its managed-policy overflow. CDK splits a
+    // role's default policy into `AWS::IAM::ManagedPolicy` chunks once the inline
+    // document exceeds the IAM size limit; the Bedrock grant list (#953) pushed the
+    // AgentCore runtime role past it, so a statement can legitimately live in either.
+    const policies = JSON.stringify([
+      ...Object.entries(template.findResources('AWS::IAM::Policy')),
+      ...Object.entries(template.findResources('AWS::IAM::ManagedPolicy')),
+    ].filter(([id]) => id.startsWith(prefix)));
     expect(policies).toContain('bedrock-agentcore:InvokeGateway');
     expect(policies).toContain('bedrock-agentcore:GetResourceOauth2Token');
   });
