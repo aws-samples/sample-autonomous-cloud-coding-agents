@@ -140,7 +140,8 @@ run = [
 [tasks.bootstrap]
 description = "Bootstrap CDK with least-privilege policies (ComputeTypes=agentcore; for ECS set the ComputeTypes CFN param on CDKToolkit — see comment above the task)"
 depends = [":install", ":bootstrap:generate"]
-run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml"
+# Args after `--` (e.g. `aws://<account>/<region>`) pin the environment; `bgagent setup` passes one.
+run = "npx cdk bootstrap --template bootstrap/bootstrap-template.yaml {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks."bootstrap:generate"]
 description = "Regenerate all bootstrap artifacts (policies JSON, template YAML, version/hash files)"
@@ -152,8 +153,8 @@ description = "cdk destroy"
 run = "npx cdk destroy"
 
 [tasks.diff]
-description = "cdk diff"
-run = "npx cdk diff"
+description = "cdk diff (pass args after --)"
+run = "npx cdk diff {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks.integ]
 description = "CDK deploy-then-verify integration tests (integ-runner). Needs AWS creds for the shared integ account."

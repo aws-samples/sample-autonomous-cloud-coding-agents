@@ -187,6 +187,8 @@ mise //cdk:bootstrap
 mise //cdk:deploy -- --require-approval never
 ```
 
+To choose optional integrations (Slack, Linear, Jira, preview screenshots, Agent Registry, Tool Gateway) instead of deploying the legacy default set, run `bgagent setup` after building the CLI. It recommends the minimal profile, validates Region support, shows `cdk diff`, and then deploys. See [Deployment profiles](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles).
+
 CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes — most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
 
 :::caution[Building on an x86 host? Register arm64 emulation first.]
