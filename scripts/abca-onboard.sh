@@ -17,6 +17,10 @@
 #   --email EMAIL       Cognito user to create for yourself (default: ask)
 #   --container-engine finch|docker   builds the agent image (default: Finch if installed, else Docker)
 #   --no-console        skip the operator web console stack (<stack-name>-console)
+#   --yes               answer routine questions with their default so a re-run needs no typing (also
+#                       ABCA_AUTO_YES=1). Still asks: warnings that something is wrong, a deploy to an
+#                       account other than the last one, and anything with no remembered answer.
+#                       Skips the smoke test. Every automatic answer is printed.
 #   --local-dev         also allow console sign-in from a local dev server (http://localhost:5173,
 #                       for `mise //web:dev:live`); remembered until --no-local-dev
 #   --verbose           stream every step's full output live (and answer any prompt yourself)
@@ -48,12 +52,13 @@ NO_AWS=0
 TEARDOWN=0
 CONSOLE=1               # --no-console; deploys the operator web console as <stack>-console
 LOCAL_DEV=""            # --local-dev / --no-local-dev; empty = as last time (default off)
+AUTO_YES="${ABCA_AUTO_YES:-0}"  # --yes
 
 STATE_DIR="$HOME/.abca-onboard"
 LOG_DIR="$STATE_DIR/logs"
 SETTINGS_FILE="$STATE_DIR/settings"
 PROGRESS_FILE="$STATE_DIR/progress"   # lines: step|code-fingerprint|epoch
-SAVED_PROFILE=""; SAVED_REGION=""; SAVED_DEPLOY_DIR=""
+SAVED_PROFILE=""; SAVED_REGION=""; SAVED_DEPLOY_DIR=""; SAVED_ACCOUNT_ID=""
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 
 # ---------- output helpers ----------
@@ -86,22 +91,40 @@ action() {
 TODO_FILE=""  # filled in once LOG_DIR exists; one line per queued to-do
 todo() { [ -n "$TODO_FILE" ] && printf '%s\n' "$*" >>"$TODO_FILE"; }
 
+auto_answer() {  # auto_answer "question" "answer" → prints what --yes chose
+  printf '  %s %s(--yes: %s)%s\n' "$1" "$C" "$2" "$N"
+}
+
 confirm() {  # confirm "question" → 0 if yes
+  local ans
+  [ "$AUTO_YES" = 1 ] && { auto_answer "$1" yes; return 0; }
+  read -r -p "  $1 [y/N] " ans </dev/tty || return 1
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+confirm_no() {  # default-no question where "no" is harmless; --yes takes the default (no)
+  [ "$AUTO_YES" = 1 ] && { auto_answer "$1" no; return 1; }
+  confirm "$@"
+}
+
+# A question asked because something is WRONG ("continue anyway?"). Never auto-answered.
+confirm_warning() {
   local ans
   read -r -p "  $1 [y/N] " ans </dev/tty || return 1
   case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
-confirm_no() { confirm "$@"; }  # default-no question where "no" is harmless (readability alias)
-
 confirm_yes() {  # like confirm, but Enter means yes — only for non-billable, reversible choices
   local ans
+  [ "$AUTO_YES" = 1 ] && { auto_answer "$1" yes; return 0; }
   read -r -p "  $1 [Y/n] " ans </dev/tty || return 1
   case "$ans" in n|N|no|NO) return 1 ;; *) return 0 ;; esac
 }
 
 ask() {  # ask "prompt" default → echoes answer
   local ans
+  # --yes keeps a remembered/suggested answer; with no default there is nothing to assume.
+  if [ "$AUTO_YES" = 1 ] && [ -n "${2:-}" ]; then auto_answer "$1" "$2" >&2; printf '%s' "$2"; return; fi
   read -r -p "  $1${2:+ [$2]}: " ans </dev/tty || true
   printf '%s' "${ans:-$2}"
 }
@@ -186,6 +209,7 @@ while [ $# -gt 0 ]; do
     --no-console) CONSOLE=0; shift ;;
     --local-dev)  LOCAL_DEV=1; shift ;;
     --no-local-dev) LOCAL_DEV=0; shift ;;
+    --yes|-y)     AUTO_YES=1; shift ;;
     -h|--help)    sed -n '2,25p' "$0"; exit 0 ;;
     *)            die "unknown option: $1 (see --help)" ;;
   esac
@@ -220,14 +244,15 @@ load_settings() {  # parsed, not sourced: only known keys are read
       EMAIL)       [ -n "$EMAIL" ] || EMAIL="$val" ;;
       LOCAL_DEV)   [ -n "$LOCAL_DEV" ] || LOCAL_DEV="$val" ;;
       LAST_DEPLOY_DIR) SAVED_DEPLOY_DIR="$val" ;;
+      LAST_ACCOUNT_ID) SAVED_ACCOUNT_ID="$val" ;;
     esac
   done <"$SETTINGS_FILE"
 }
 
 save_settings() {
   [ "$DRY_RUN" = 1 ] && return 0
-  (umask 077; printf 'PROFILE=%s\nREGION=%s\nTARGET_REPO=%s\nEMAIL=%s\nLOCAL_DEV=%s\nLAST_DEPLOY_DIR=%s\n' \
-    "$PROFILE" "$REGION" "$TARGET_REPO" "$EMAIL" "$LOCAL_DEV" "$SAVED_DEPLOY_DIR" >"$SETTINGS_FILE")
+  (umask 077; printf 'PROFILE=%s\nREGION=%s\nTARGET_REPO=%s\nEMAIL=%s\nLOCAL_DEV=%s\nLAST_DEPLOY_DIR=%s\nLAST_ACCOUNT_ID=%s\n' \
+    "$PROFILE" "$REGION" "$TARGET_REPO" "$EMAIL" "$LOCAL_DEV" "$SAVED_DEPLOY_DIR" "$SAVED_ACCOUNT_ID" >"$SETTINGS_FILE")
 }
 load_settings
 
@@ -387,7 +412,7 @@ check_container_engine() {
   if [ "${free_gb:-0}" -lt "$MIN_FREE_GB" ]; then
     warn "only ${free_gb}G free on / (recommend ≥${MIN_FREE_GB}G for the image build and CDK assets)"
     warn "the deploy task will prune container images and build cache when disk is low"
-    confirm "Continue anyway?" || die "free up disk space and re-run"
+    confirm_warning "Continue anyway?" || die "free up disk space and re-run"
   else
     ok "${free_gb}G free disk"
   fi
@@ -605,7 +630,7 @@ check_bedrock() {
   if [ "$failed" = 1 ]; then
     warn "Tasks will fail at their first turn until this works. In the Bedrock console for $REGION,"
     warn "enable Anthropic Claude (Model catalog → first-time use form), then re-run this script."
-    confirm "Continue deploying anyway?" || die "fix Bedrock model access, then re-run (your answers are saved)"
+    confirm_warning "Continue deploying anyway?" || die "fix Bedrock model access, then re-run (your answers are saved)"
   fi
 }
 
@@ -730,7 +755,13 @@ deploy() {
 
   cost_and_exposure_warning
   [ "$DRY_RUN" = 1 ] && { printf '  %s[dry-run]%s would ask you to type the account ID, then deploy\n' "$Y" "$N"; return; }
-  local typed; typed="$(ask "Type the account ID ($ACCOUNT_ID) to deploy, or anything else to stop" "")"
+  local typed
+  if [ "$AUTO_YES" = 1 ] && [ -n "$SAVED_ACCOUNT_ID" ] && [ "$SAVED_ACCOUNT_ID" = "$ACCOUNT_ID" ]; then
+    # Only the account this machine last deployed to successfully; a new one is always typed.
+    typed="$ACCOUNT_ID"; auto_answer "Deploy to account $ACCOUNT_ID (the one you deployed to last time)?" yes
+  else
+    typed="$(AUTO_YES=0 ask "Type the account ID ($ACCOUNT_ID) to deploy, or anything else to stop" "")"
+  fi
   [ "$typed" = "$ACCOUNT_ID" ] || die "deploy cancelled; nothing was created by this step"
 
   step "Security changes in this deploy (IAM and security groups)"
@@ -774,7 +805,7 @@ deploy() {
     esac
   fi
   rmdir "$scratch" 2>/dev/null || true
-  SAVED_DEPLOY_DIR="$DIR"; save_settings
+  SAVED_DEPLOY_DIR="$DIR"; SAVED_ACCOUNT_ID="$ACCOUNT_ID"; save_settings
   ok "stack $STACK_NAME deployed$([ "$CONSOLE" = 1 ] && printf ' (+ %s)' "$CONSOLE_STACK")"
 }
 
@@ -795,7 +826,7 @@ verify_api_gate() {
   else
     fail "anonymous GET /tasks returned $code ($(head -c 120 "$body")), not the authorizer's 401"
     warn "could not confirm the Cognito gate. Don't share the API URL until you have checked it."
-    confirm "Continue with setup anyway?" || { rm -f "$body"; die "stopped after deploy; the stack is still running (teardown: $0 --teardown)"; }
+    confirm_warning "Continue with setup anyway?" || { rm -f "$body"; die "stopped after deploy; the stack is still running (teardown: $0 --teardown)"; }
   fi
   rm -f "$body"
 }
@@ -898,6 +929,8 @@ create_user_and_login() {
 smoke_test() {
   step "Smoke test"
   printf '  Submits one small task to %s; it should open a PR in 2-5 minutes (small Bedrock cost).\n' "$TARGET_REPO"
+  # --yes skips it: the smoke task asks for the same change every run.
+  if [ "$AUTO_YES" = 1 ]; then auto_answer "Run the smoke test now?" no; return; fi
   confirm_yes "Run the smoke test now?" || { warn "skipped"; return; }
   local task="Add a CODEOWNERS file to the repository root" out pr
   if [ "$DRY_RUN" = 1 ]; then run bgagent submit --repo "$TARGET_REPO" --task "$task" --wait --output json; return; fi
@@ -987,6 +1020,11 @@ main() {
   if [ "$NO_AWS" = 1 ]; then compile_only; exit 0; fi
 
   aws_identity
+  if [ "$AUTO_YES" = 1 ] && [ "$SAVED_ACCOUNT_ID" != "$ACCOUNT_ID" ]; then
+    # --yes repeats a known setup; a new account gets every question.
+    warn "--yes is off for this run: account $ACCOUNT_ID is not the one you last deployed to${SAVED_ACCOUNT_ID:+ ($SAVED_ACCOUNT_ID)}"
+    AUTO_YES=0
+  fi
   confirm "Use account $ACCOUNT_ID ${ACCOUNT_ALIAS:+($ACCOUNT_ALIAS) }in $REGION for ABCA?" \
     || { printf '\n'; warn "Stopped: you answered no to using account $ACCOUNT_ID in $REGION. Nothing was deployed or changed in AWS."
          warn "To deploy, re-run and answer y. To use another account or Region, re-run with --profile/--region."
