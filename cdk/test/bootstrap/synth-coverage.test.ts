@@ -214,7 +214,8 @@ describe('Bootstrap policy synth coverage', () => {
       st.Effect === 'Allow'
       && list(st.Action).includes('iam:PassRole')
       && list(st.Resource).some((r) => r.includes('cfn-exec-role'))
-      && list(st.Condition?.StringEquals?.['iam:PassedToService']).includes('cloudformation.amazonaws.com'));
+      // Exact service-principal match (an array element compare, not a URL substring check).
+      && list(st.Condition?.StringEquals?.['iam:PassedToService']).some((svc) => svc === 'cloudformation.amazonaws.com'));
     expect(covered).toBe(true);
   });
 });
