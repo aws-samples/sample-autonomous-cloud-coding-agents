@@ -107,7 +107,7 @@ Comments are advisory and best-effort: network/auth failures are logged and swal
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
 > and cannot connect from a headless agent. Forge provides the supported app
 > actor through `api.asApp().requestJira(...)`. See
-> [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration).
+> [ADR-015](/sample-autonomous-cloud-coding-agents/decisions/adr-015-jira-integration).
 
 Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. Ordinary **terminal** status comments are delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`). For comment-triggered iterations, fan-out matures standalone status comments while the orchestration reconciler matures child-iteration comments before restacking dependents.
 

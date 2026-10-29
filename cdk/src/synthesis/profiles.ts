@@ -18,7 +18,6 @@
  */
 
 import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
-import { DEFAULT_BUDGETS } from './budgets';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../constructs/agentcore-azs';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
 
@@ -56,6 +55,9 @@ export const STRUCTURAL_CONTEXT: Context = {
   [`availability-zones:account=${FIXTURE.account}:region=${FIXTURE.region}`]: FIXTURE.zones.map(zone => zone.zoneName),
 };
 
+/** A syntactically valid placeholder digest; census synthesis never builds the image. */
+const CENSUS_ARTIFACT_SHA256 = 'a'.repeat(64); // eslint-disable-line @typescript-eslint/no-magic-numbers
+
 function profile(compute: Compute, gateway: boolean, registry: boolean, vault: boolean, image: Image): SynthesisProfile {
   return {
     name: `${compute}-gw${+gateway}-reg${+registry}-vault${+vault}-${image}`,
@@ -69,9 +71,12 @@ function profile(compute: Compute, gateway: boolean, registry: boolean, vault: b
       enableToolGateway: gateway,
       enableAgentRegistry: registry,
       enableLinearIdentityVault: vault,
+      // MicroVM synthesis requires an explicit layout; census measures new installs.
+      microvm_nested_stack: true,
       ...(image === 'managed' ? {
         microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
         microvm_base_image_version: '1',
+        microvm_artifact_sha256: CENSUS_ARTIFACT_SHA256,
       } : {}),
       ...(image === 'external' ? {
         microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:census-image',
@@ -114,12 +119,9 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
     name: `${externalConsent.name}-external-consent`,
     context: { ...externalConsent.context, linearVaultHostedReturnUrl: 'https://example.com/consent' },
   });
-  // Keeping the named AgentCore log groups across backend switches pushes
-  // this two-zone MicroVM combination over budget as well.
-  const widestInlineMicrovm = 'lambda-microvm-gw1-reg1-vault1-managed-email-fork';
-  const topologies: SynthesisProfile[] = [...profiles.map(candidate => candidate.name === widestInlineMicrovm
-    ? { ...candidate, expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources } }
-    : candidate), ...profiles.map(candidate => ({
+  // With the approval, maintenance and MicroVM subsystems nested, every inline
+  // profile below fits the application budget; no rejection is expected.
+  const topologies: SynthesisProfile[] = [...profiles, ...profiles.map(candidate => ({
     ...candidate,
     name: `${candidate.name}-split`,
     context: { ...candidate.context, networkTopology: 'split' },
@@ -128,7 +130,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
   // adding eight resources that the original two-zone product could not expose.
   for (const base of supplemental.filter(candidate => candidate.context.enableToolGateway)) {
     for (const networkTopology of ['inline', 'split'] as const) {
-      const overBudget = networkTopology === 'inline';
       topologies.push({
         ...base,
         name: `${base.name}-az3${networkTopology === 'split' ? '-split' : ''}`,
@@ -137,9 +138,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
           networkTopology,
           [AGENTCORE_AZS_CONTEXT_KEY]: FIXTURE.zones.map(zone => zone.zoneName),
         },
-        ...(overBudget ? {
-          expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
-        } : {}),
       });
     }
   }
@@ -155,15 +153,11 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
         ...base,
         name: `${base.name}-expanded-models${networkTopology === 'split' ? '-split' : ''}`,
         context: { ...base.context, networkTopology, bedrockModels: expandedModels },
-        ...(networkTopology === 'inline' && base.context.compute_types === 'lambda-microvm' ? {
-          expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
-        } : {}),
       });
     }
   }
   // Additive probes: several backends in one stack (`compute_types`). Measured
   // in both topologies; the first listed backend is the repository default.
-  const ALL_BACKENDS = 3;
   const additive: Array<readonly Compute[]> = [
     ['agentcore', 'lambda-microvm'], ['agentcore', 'ecs'], ['ecs', 'lambda-microvm'],
     ['agentcore', 'ecs', 'lambda-microvm'],
@@ -173,8 +167,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
       const microvm = backends.includes('lambda-microvm');
       const base = profile(microvm ? 'lambda-microvm' : backends[backends.length - 1], wide, true, wide, microvm ? 'managed' : 'none');
       for (const networkTopology of ['inline', 'split'] as const) {
-        // Inline, only the lighter two-backend stacks fit; split fits every combination.
-        const overBudget = networkTopology === 'inline' && (wide || backends.length === ALL_BACKENDS);
         topologies.push({
           ...base,
           name: `additive-${backends.join('+')}-${wide ? 'widest' : 'default'}-${networkTopology}`,
@@ -184,9 +176,6 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
             networkTopology,
             ...(wide ? { alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' } : {}),
           },
-          ...(overBudget ? {
-            expectedError: { stackName: 'backgroundagent-dev', resourceLimit: DEFAULT_BUDGETS.resources },
-          } : {}),
         });
       }
     }

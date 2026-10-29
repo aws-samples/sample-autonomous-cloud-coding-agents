@@ -672,6 +672,20 @@ def _merge_predecessor_branch(repo_dir: str, pred_branch: str, notes: list[str])
     log("SETUP", f"Predecessor merge conflicted, aborted: {pred_branch}")
 
 
+def prepare_restored_repo(repo_dir: str) -> None:
+    """Recreate trusted tools/hooks without cloning or replacing saved build baselines."""
+    run_cmd(
+        ["git", "config", "--global", "--add", "safe.directory", repo_dir],
+        label="safe-directory",
+    )
+    for cfg in [repo_dir, *_find_mise_configs(repo_dir)]:
+        run_cmd(["mise", "trust", cfg], label="mise-trust-restored", cwd=repo_dir, check=False)
+    result = run_cmd(["mise", "install"], label="mise-install-restored", cwd=repo_dir, check=False)
+    if result.returncode != 0:
+        log("WARN", f"Restored workspace mise install failed (exit {result.returncode})")
+    _install_commit_hook(repo_dir)
+
+
 def _install_commit_hook(repo_dir: str) -> None:
     """Install the prepare-commit-msg git hook for Task-Id/Prompt-Version trailers."""
     try:

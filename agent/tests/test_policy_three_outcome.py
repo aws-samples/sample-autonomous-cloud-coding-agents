@@ -443,19 +443,18 @@ class TestThreeOutcomePipeline:
         d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin feature"})
         assert d.outcome == Outcome.REQUIRE_APPROVAL
         assert "force_push_any" in d.matching_rule_ids
-        assert d.timeout_s == 300
+        assert d.timeout_s == 0
         assert d.severity == "medium"
 
     def test_soft_deny_multi_match_merges_annotations(self):
-        # force_push_any (300s, medium) + force_push_main (600s, high) both
-        # match "git push --force origin main". Merge picks min(300, 600)=300s
-        # and max(medium, high)=high. §6.3.
+        # Both built-in rules have no automatic expiry. Their merged severity
+        # is max(medium, high)=high.
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
         d = engine.evaluate_tool_use("Bash", {"command": "git push --force origin main"})
         assert d.outcome == Outcome.REQUIRE_APPROVAL
         assert "force_push_any" in d.matching_rule_ids
         assert "force_push_main" in d.matching_rule_ids
-        assert d.timeout_s == 300  # min across rules + task default
+        assert d.timeout_s == 0  # neither rule supplies a positive deadline
         assert d.severity == "high"  # max across rules
 
     def test_default_allow_on_no_match(self):
@@ -543,7 +542,7 @@ class TestRecentDecisionCacheIntegration:
         engine.recent_decisions.record("Bash", sha, "DENIED", "user said force-push is too risky")
         d = engine.evaluate_tool_use("Bash", tool_input)
         assert d.outcome == Outcome.DENY
-        assert "Recent DENIED" in d.reason
+        assert "Recorded DENIED" in d.reason
 
     def test_cache_does_not_shadow_hard_deny(self):
         engine = PolicyEngine(task_type="new_task", repo="owner/repo")
@@ -605,7 +604,7 @@ class TestRecentDecisionCacheIntegration:
             "Bash", {"command": "git push --force origin some-other-branch"}
         )
         assert d.outcome == Outcome.DENY
-        assert "Recent DENIED on rule 'force_push_any'" in d.reason
+        assert "Recorded DENIED on rule 'force_push_any'" in d.reason
         assert d.cache_hit_metadata is not None
         assert d.cache_hit_metadata["matched_rule_id"] == "force_push_any"
         assert d.cache_hit_metadata["cached_decision"] == "DENIED"

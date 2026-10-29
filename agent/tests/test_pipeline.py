@@ -1,6 +1,7 @@
 """Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
 import os
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2340,3 +2341,139 @@ class TestEarlyAckOrdering:
         _args, kwargs = m_finished.call_args
         assert kwargs.get("success") is False
         assert kwargs.get("started_reaction_id") == "reaction-42"
+
+
+def test_finished_pipeline_cannot_report_success_without_committing_result(monkeypatch):
+    import task_state
+    from pipeline import _persist_finished_task
+
+    monkeypatch.setattr(
+        task_state,
+        "write_terminal",
+        MagicMock(return_value=task_state.TerminalWriteOutcome.FAILED),
+    )
+    with pytest.raises(task_state.TerminalWriteError, match="Task result was not committed"):
+        _persist_finished_task("task", "COMPLETED", {"status": "success"})
+
+
+@pytest.mark.parametrize("outcome", ["written", "disabled", "superseded"])
+def test_finished_pipeline_accepts_persistence_local_run_or_supersession(monkeypatch, outcome):
+    import task_state
+    from pipeline import _persist_finished_task
+
+    monkeypatch.setattr(
+        task_state,
+        "write_terminal",
+        MagicMock(return_value=task_state.TerminalWriteOutcome(outcome)),
+    )
+    _persist_finished_task("task", "COMPLETED", {"status": "success"})
+
+
+@pytest.mark.parametrize("repo_url", ["owner/repo", ""])
+@pytest.mark.parametrize("outcome", ["failed", "superseded"])
+def test_terminal_persistence_through_task_entry_point(monkeypatch, repo_url, outcome):
+    """Both actual pipeline paths must distinguish storage failure from cancellation."""
+    import task_state
+    from pipeline import run_task
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+
+    async def agent_result(*args, **kwargs):
+        return AgentResult(
+            status="success", turns=1, num_turns=1, result_text="The README describes the app."
+        )
+
+    finished = MagicMock()
+    terminal = MagicMock(return_value=task_state.TerminalWriteOutcome(outcome))
+    with ExitStack() as stack:
+        for context in (
+            patch("runner.run_agent", side_effect=agent_result),
+            patch(
+                "repo.setup_repo", return_value=RepoSetup(repo_dir="/workspace/repo", branch="test")
+            ),
+            patch("pipeline.task_span"),
+            patch("pipeline.discover_project_config"),
+            patch("pipeline.build_system_prompt"),
+            patch("pipeline.resolve_linear_api_token"),
+            patch("pipeline.configure_channel_mcp"),
+            patch("pipeline.react_task_started", return_value="started-reaction"),
+            patch("pipeline.comment_task_started"),
+            patch("pipeline.transition_task_started"),
+            patch("pipeline.react_task_finished", finished),
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/owner/repo/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("aws_session.tenant_client", return_value=MagicMock()),
+            patch.object(task_state, "write_running"),
+            patch.object(task_state, "write_terminal", terminal),
+        ):
+            stack.enter_context(context)
+
+        def execute():
+            return run_task(
+                repo_url=repo_url,
+                task_description="Read the README",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="terminal-race",
+                channel_source="linear",
+                channel_metadata=_LINEAR_META,
+                resolved_workflow=None
+                if repo_url
+                else {"id": "default/agent-v1", "version": "1.0.0"},
+            )
+
+        if outcome == "failed":
+            with pytest.raises(
+                task_state.TerminalWriteError, match="Task result was not committed"
+            ):
+                execute()
+        else:
+            result = execute()
+            assert result["status"] == "success"
+            terminal.assert_called_once()
+            assert not any(call.kwargs.get("success") is False for call in finished.call_args_list)
+        assert terminal.call_args_list[0].args[1] == "COMPLETED"
+
+
+def test_normal_terminal_writes_cannot_bypass_outcome_handling():
+    """Direct best-effort writes are reserved for the existing crash handler."""
+    import ast
+    from pathlib import Path
+
+    import pipeline
+
+    class TerminalCalls(ast.NodeVisitor):
+        function = ""
+        in_exception = False
+
+        def visit_FunctionDef(self, node):
+            previous = self.function
+            self.function = node.name
+            self.generic_visit(node)
+            self.function = previous
+
+        def visit_ExceptHandler(self, node):
+            previous = self.in_exception
+            self.in_exception = True
+            self.generic_visit(node)
+            self.in_exception = previous
+
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "task_state"
+                and node.func.attr == "write_terminal"
+            ):
+                assert self.function == "_persist_finished_task" or (
+                    self.function == "run_task" and self.in_exception
+                ), f"Unchecked terminal outcome at pipeline.py:{node.lineno}"
+            self.generic_visit(node)
+
+    TerminalCalls().visit(ast.parse(Path(pipeline.__file__).read_text()))

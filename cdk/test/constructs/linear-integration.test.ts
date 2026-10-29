@@ -404,3 +404,54 @@ describe('revoked-authorization recording (#812)', () => {
     expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
   });
 });
+
+describe('Linear approval decision permissions', () => {
+  let template: Template;
+  beforeAll(() => {
+    const app = new App();
+    const stack = new Stack(app, 'ApprovalStack');
+    const table = (id: string) => new dynamodb.Table(stack, id, {
+      partitionKey: { name: 'id', type: dynamodb.AttributeType.STRING },
+    });
+    new LinearIntegration(stack, 'Linear', {
+      api: new apigw.RestApi(stack, 'Api'),
+      userPool: new cognito.UserPool(stack, 'Users'),
+      taskTable: table('Tasks'),
+      taskEventsTable: table('Events'),
+      taskApprovalsTable: table('Approvals'),
+      userConcurrencyTable: table('Counters'),
+      continuationBucketName: 'continuations',
+      orchestratorFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:coordinator:live',
+      lambdaMicrovmImageArn: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+    });
+    template = Template.fromStack(stack);
+  });
+  test('configures the processor even without orchestration', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          TASK_APPROVALS_TABLE_NAME: Match.anyValue(),
+          USER_CONCURRENCY_TABLE_NAME: Match.anyValue(),
+          CONTINUATION_BUCKET_NAME: 'continuations',
+        }),
+      },
+    });
+  });
+  test('grants wake only for the configured image and continuation dispatch for its coordinator', () => {
+    const functions = template.findResources('AWS::Lambda::Function');
+    const processor = Object.values(functions).find(fn => fn.Properties.Environment?.Variables?.TASK_APPROVALS_TABLE_NAME);
+    const role = processor!.Properties.Role['Fn::GetAtt'][0];
+    const policies = Object.values(template.findResources('AWS::IAM::Policy'))
+      .filter(p => p.Properties.Roles?.some((r: { Ref?: string }) => r.Ref === role));
+    const statements = policies.flatMap(p => p.Properties.PolicyDocument.Statement);
+    const wake = statements.find(s => Array.isArray(s.Action) && s.Action.includes('lambda:ResumeMicrovm'));
+    expect(wake.Action).toEqual(['lambda:GetMicrovm', 'lambda:ResumeMicrovm']);
+    expect(wake.Resource).toEqual(['arn:aws:lambda:us-east-1:123456789012:microvm-image:test',
+      'arn:aws:lambda:us-east-1:123456789012:microvm-image:test:*']);
+    expect(statements).toContainEqual(expect.objectContaining({
+      Action: 'lambda:InvokeFunction', Resource: 'arn:aws:lambda:us-east-1:123456789012:function:coordinator:*',
+    }));
+    expect(statements.some(s => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes('dynamodb:UpdateItem')
+      && JSON.stringify(s.Resource).includes('Counters'))).toBe(true);
+  });
+});

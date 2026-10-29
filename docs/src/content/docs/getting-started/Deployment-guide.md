@@ -4,22 +4,22 @@ title: Deployment guide
 
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 
 ## Architecture overview
 
-ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems, including registry infrastructure. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
 | **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers | AWS Lambda MicroVMs |
-| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM | 8 GB baseline / 32 GB peak memory |
+| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | Build: 4 vCPU / 16 GiB; planning: 2 vCPU / 8 GiB (configurable) | 8 GiB baseline / 32 GiB peak memory |
 | **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` | Same durable Lambda via `ComputeStrategy` |
 | **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) | FastAPI server (lifecycle hooks) |
 | **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) | ~6s to `RUNNING` (live-measured) |
 | **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) | 8 hours (`maximumDurationInSeconds`) |
 
-All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
+All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. Task orchestration does not use Step Functions; other platform features may use them.
 
 AgentCore is the default. `compute_types` selects a comma-separated list (or a JSON array in `cdk/cdk.json`); its first entry is the repository default. For example, `-c compute_types=agentcore,ecs` deploys both, while `-c compute_types=ecs` deploys only ECS. Repository overrides can select any deployed backend. Memory, Gateway, Registry and the Linear vault remain independently configurable.
 
@@ -31,7 +31,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest, all three backends with every option, is 484); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
 For a **new installation**:
 
@@ -44,7 +44,7 @@ Replace the compute list as needed and supply image settings for MicroVM. Persis
 
 **Existing inline-to-split migration is deferred.** Do not flip `networkTopology` on an existing inline deployment. An ordinary deploy creates a new VPC and removes old resources; identical logical IDs in different stacks do not preserve physical identity. Keep the existing topology until a separately reviewed migration has established resource-type eligibility, source retention and cleanup behavior, an ownership mapping, physical-ID/data preservation, and rollback on a populated disposable deployment. The `cdk refactor --unstable=refactor` criterion in #852 remains open; it is not waived or satisfied by synthesis tests.
 
-This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
+This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
 
 Stacks used to test earlier revisions with `blueprintProvisioning=prepare|adopt|managed` or the broad retention aspect require a separate recovery plan before adopting this narrowed version. Returning those stacks directly to the original Blueprint provider can overwrite or soft-delete repository rows. Synthesis rejects the removed `blueprintProvisioning` and `guardrailVersionMigration` context keys instead of silently ignoring them; removing those keys does not make an experimental stack safe to update. Preserve its deployed templates, repository data and ledger inventory; the removed experimental modes are not an upgrade path supported by this release.
 
@@ -96,13 +96,16 @@ Local synthesis tests verify the import ordering and unchanged remaining subnet 
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend).
 
-Include it in the deployment's backend list, preserving any backends already in use:
+Include it in the deployment's backend list, preserving any backends already in use. A new installation also selects the nested layout:
 
 ```bash
-mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
+mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm --context microvm_nested_stack=true
 ```
+
+Existing flat installations must retain `microvm_nested_stack=false` until
+completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
 
@@ -128,9 +131,11 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 
 Operational notes specific to this backend:
 
-- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
+- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
-- **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
+- **Deployment identifiers are not baked into the image.** Current table names, secret ARNs and session-role ARN arrive through the v2 IAM-authenticated manifest and signed task document. Old unsigned envelopes are refused. Deploy matching coordinator code, worker images and IAM with admissions paused and old tasks drained; the repository runbook `docs/verification/645-payload-bootstrap.md` records the procedure and pending live checks.
+- **Registry tools share the runtime network restriction.** Remote HTTP/SSE MCP assets need reachable HTTPS/443 endpoints. AgentCore and ECS defaults also block remote non-443 ports. `stdio` programs run locally but their outbound calls remain restricted; resolution does not test connectivity. The image builder's 80/443 access does not widen runtime egress. See [REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry).
+- **Logging failures have a fallback record.** Debug/warn CloudWatch failures emit `cloudwatch_write_failed` to stdout with writer/task/error class, without another AWS call or sensitive log text. This is not a configured metric/alarm; verify collection in the guest log stream while the VM is running.
 
 ### Optional Agent Registry
 
@@ -316,6 +321,67 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
+### Upgrading approval permissions
+
+Worker approval creation and timeout writes now use an IAM-authenticated
+service. Deploy the matching agent image and CDK together: old workers write
+directly to DynamoDB and cannot create new gates after those permissions are removed.
+
+1. Pause submissions from the CLI, integrations and schedules during the upgrade.
+   Let existing tasks finish, or have their owners cancel them. Include tasks
+   awaiting approval, suspended MicroVMs and retained continuations; an empty
+   running-container list does not prove the deployment has drained.
+2. Build the agent from the same revision as the CDK. For an externally managed
+   MicroVM image, publish that build and select its new version before resuming
+   submissions. A suspended VM keeps its old code.
+3. Deploy the stack. Check that the SessionRole has approval-table reads and
+   condition checks only, plus `execute-api:Invoke` restricted to its task tag.
+   CDK supplies `APPROVAL_REQUESTS_API_URL` to all three compute backends.
+   Custom ECS constructs must provide both the SessionRole and service URL;
+   approval wiring without them is rejected before deployment. A MicroVM
+   manifest missing the URL is rejected before the worker starts.
+   If an AgentCore environment was edited to remove the URL, the worker reports
+   `APPROVAL_REQUESTS_API_URL is required for cloud approval requests` at its
+   next gate rather than attempting a direct DynamoDB write. Redeploy the
+   matching stack and image.
+4. Submit a test task that triggers a known approval rule on each enabled backend.
+   Verify that the request appears, an owner decision resumes it, and an explicit
+   deadline records `TIMED_OUT` without overwriting a human decision. Then resume
+   normal submissions.
+
+If an old worker survives the upgrade, its next approval write fails closed.
+Existing rows remain readable; do not restore direct writes to work around a stale
+image. Roll forward with the matching image. Rolling back IAM restores the original
+approval-record vulnerability and requires a deliberate operator decision.
+
+### Scheduled maintenance stack
+
+Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
+cleanup run in the `ConcurrencyMaintenance` nested stack. MicroVM continuation
+recovery also runs there when an image is configured. An upgrade recreates the
+stateless functions, roles and schedules; their task tables and storage stay in
+the parent stack. This applies to every compute backend, including AgentCore,
+and replaces roughly twenty resources, depending on enabled features.
+CloudFormation creates the new schedules before deleting the old ones, so both
+can fire during the update. Task mutations and the continuation scan cursor use
+conditional writes to tolerate that overlap. The drain above is required for
+the approval permission/image upgrade, not a scheduling gap.
+
+Review the replacements in the change set. Existing Lambda log groups remain
+under their old generated names; use the new function's log group for post-upgrade
+invocations and retain the old groups when investigating earlier runs.
+Both flat and nested MicroVM layouts support the optional
+tool gateway and Linear Identity vault without exceeding the template budget.
+
+New MicroVM installations must explicitly select `microvm_nested_stack=true`
+(bootstrap bundle 1.9.0).
+Before upgrading an existing flat MicroVM deployment, save
+`"microvm_nested_stack": false` in its CDK context or pass
+`--context microvm_nested_stack=false` on every deploy. Keep this escape hatch
+until completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
+Omitting the setting fails synthesis. Selecting `true` does not migrate existing flat resources.
+
+
 ### Log-delivery rename on upgrade (pin-table removal, #703)
 
 **Affects:** any stack — **whatever its name** — whose live `AWS::Logs::Delivery*` logical ids contain `CDKSource` or `CdkLogGroup`. In practice that is any stack last deployed before the CDK library switch in #339 (2026-06-13), plus any stack deployed while the pin table held those ids. The legacy names come from the *previous library version*, not from the pin table, so a custom stack name confers no immunity. A currently-working deployment is **not** evidence of being unaffected: the failure only appears on the first deploy after upgrading past the pin removal.
@@ -477,11 +543,11 @@ For users without AWS CLI access.
 
 ## Related docs
 
-- [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
+- [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) -- Local development, testing, repository onboarding.
 - [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
 - [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.
-- [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.
+- [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.

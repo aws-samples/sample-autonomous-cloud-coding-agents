@@ -226,9 +226,8 @@ describe('confirm-uploads handler', () => {
       switch (ddbCallCount) {
         case 1: return Promise.resolve({ Item: PENDING_TASK }); // GetCommand (task)
         case 2: return Promise.resolve({ Item: { active_count: 1 } }); // GetCommand (concurrency pre-check)
-        case 3: return Promise.resolve({}); // UpdateCommand (checkConcurrency)
-        case 4: return Promise.resolve({}); // UpdateCommand (status transition)
-        case 5: return Promise.resolve({}); // PutCommand (event)
+        case 3: return Promise.resolve({}); // UpdateCommand (status transition)
+        case 4: return Promise.resolve({}); // PutCommand (event)
         default: return Promise.resolve({});
       }
     });
@@ -265,6 +264,9 @@ describe('confirm-uploads handler', () => {
     const body = JSON.parse(result.body);
     expect(body.data.status).toBe('SUBMITTED');
     expect(lambdaSend).toHaveBeenCalled();
+    const capacityCalls = ddbSend.mock.calls.filter(([command]) => command.input.TableName === 'Concurrency');
+    expect(capacityCalls).toHaveLength(1);
+    expect(capacityCalls[0][0]._type).toBe('Get');
   });
 
   test('returns 429 when concurrency pre-check fails', async () => {

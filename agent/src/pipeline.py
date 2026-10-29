@@ -214,6 +214,9 @@ def _execute_agent_step(
     hydrated,
     trajectory,
     progress,
+    *,
+    continuation=None,
+    started_reaction_id=None,
 ):
     """Run the agentic step through the workflow step runner.
 
@@ -249,7 +252,22 @@ def _execute_agent_step(
     # and post-hooks stay on the inline path. only_kinds keeps the runner from
     # re-running the deterministic steps the pipeline already owns (double clone
     # / double PR).
-    result = run_workflow(wf, ctx, only_kinds={"run_agent"})
+    from continuation_runtime import bind_runtime, create_runtime
+    from continuation_storage import ContinuationContext
+
+    runtime = continuation or create_runtime(
+        ContinuationContext(
+            setup,
+            prompt,
+            system_prompt,
+            wf.id,
+            wf.version,
+            started_reaction_id=started_reaction_id,
+        ),
+        config.task_id,
+    )
+    with bind_runtime(runtime):
+        result = run_workflow(wf, ctx, only_kinds={"run_agent"})
 
     if ctx.agent_result is None:
         # The run_agent step did not produce a result — i.e. its handler raised
@@ -299,6 +317,21 @@ def _run_repoless_task(
     workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
+    from continuation_runtime import bind_runtime, prepare_repoless_runtime
+    from microvm_lifecycle import get_context as get_microvm_context
+
+    continuation = prepare_repoless_runtime(
+        config,
+        user_prompt=prompt,
+        system_prompt=system_prompt,
+        workflow_id=wf.id,
+        workflow_version=wf.version,
+    )
+    if continuation is not None and continuation.restored is not None:
+        if continuation.resume_prompt is None:
+            raise RuntimeError("Restored continuation has no recorded decision prompt")
+        prompt = continuation.resume_prompt
+        system_prompt = continuation.context.system_prompt
 
     ctx = StepContext(
         workflow=wf,
@@ -306,7 +339,7 @@ def _run_repoless_task(
         hydrated=hc,
         progress=progress,
         trajectory=trajectory,
-        setup=None,  # repo-less: no RepoSetup
+        setup=continuation.context.setup if continuation is not None else None,
         system_prompt=system_prompt,
         user_prompt=prompt,
     )
@@ -314,8 +347,12 @@ def _run_repoless_task(
     # deliver_artifact. The deliverer uploads the agent's result text to
     # artifacts/{task_id}/ (and/or surfaces it as a comment), so the declared
     # terminal outcome is actually produced (#248 Phase 3).
-    with task_span("task.agent_execution"):
+    with bind_runtime(continuation), task_span("task.agent_execution"):
         wf_result = run_workflow(wf, ctx)
+    lifecycle = get_microvm_context(config.task_id)
+    if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+        log("TASK", "Worker execution is closed; coordinator owns continuation or cleanup.")
+        return {"task_id": config.task_id, "status": "parked"}
 
     agent_result = ctx.agent_result
     if agent_result is None:
@@ -429,8 +466,19 @@ def _run_repoless_task(
 
     print_metrics(result_dict)
     terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
-    task_state.write_terminal(config.task_id, terminal_status, result_dict)
+    _persist_finished_task(config.task_id, terminal_status, result_dict)
     return result_dict
+
+
+def _persist_finished_task(task_id: str, status: str, result: dict) -> None:
+    outcome = task_state.write_terminal(task_id, status, result)
+    if outcome == task_state.TerminalWriteOutcome.FAILED:
+        raise task_state.TerminalWriteError(
+            f"Task result was not committed ({outcome.value}); "
+            "inspect the task record and worker lease"
+        )
+    # A cancel or another terminal writer won the status race. Its result stays
+    # authoritative; this is not a worker crash and must not emit a failure reaction.
 
 
 def _apply_post_hook_gates(
@@ -903,6 +951,7 @@ def run_task(
         repo=config.repo_url,
         task_id=config.task_id,
     )
+    task_state.verify_worker_lease(config.task_id)
     # Surface the credential-scoping posture once per task so every task's logs
     # state plainly whether tenant-data isolation was active. is_scoped()
     # resolves the session; if scoping was requested but unbuildable it raises
@@ -1058,6 +1107,9 @@ def run_task(
             os.environ["GIT_COMMITTER_EMAIL"] = "bgagent@noreply.github.com"
             os.environ["GITHUB_TOKEN"] = config.github_token
             os.environ["GH_TOKEN"] = config.github_token
+            from continuation_runtime import restore_for_task
+
+            continuation = restore_for_task(config)
 
             # Set env vars for the prepare-commit-msg hook BEFORE setup_repo()
             # so the hook has access to TASK_ID/PROMPT_VERSION from the start.
@@ -1094,17 +1146,23 @@ def run_task(
             # pr-review) never transition — the orchestration panel owns the
             # parent's state, and a planning run shouldn't advance the issue.
             linear_transition_state = not config.read_only
-            linear_eyes_reaction_id = react_task_started(
-                config.channel_source,
-                config.channel_metadata,
-                transition_state=linear_transition_state,
+            linear_eyes_reaction_id = (
+                continuation.context.started_reaction_id
+                if continuation is not None
+                else react_task_started(
+                    config.channel_source,
+                    config.channel_metadata,
+                    transition_state=linear_transition_state,
+                )
             )
 
             # "Starting" comment on the Jira issue through the Forge app actor
             # (or legacy OAuth fallback). No-op for non-Jira tasks.
             # Best-effort; failures are logged, never block.
             workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
-            if _should_post_start_comment(config.channel_source, workflow_id):
+            if continuation is None and _should_post_start_comment(
+                config.channel_source, workflow_id
+            ):
                 comment_task_started(
                     config.channel_source,
                     config.channel_metadata,
@@ -1116,10 +1174,11 @@ def run_task(
             # Part of the Early-ACK block (moved before setup_repo with the 👀
             # and start comment) so board state updates immediately, not after
             # the multi-minute baseline build.
-            transition_task_started(
-                config.channel_source,
-                config.channel_metadata,
-            )
+            if continuation is None:
+                transition_task_started(
+                    config.channel_source,
+                    config.channel_metadata,
+                )
 
             # Setup repo (deterministic pre-hooks). A failure/timeout/OOM in the
             # pre-agent baseline build raises here; it needs no local handler —
@@ -1130,7 +1189,13 @@ def run_task(
             # with no visible signal; posting the 👀 earlier is what makes the
             # outer handler's ❌-swap actually visible for setup failures.
             with task_span("task.repo_setup") as setup_span:
-                setup = setup_repo(config, progress=progress)
+                if continuation is None:
+                    setup = setup_repo(config, progress=progress)
+                else:
+                    from repo import prepare_restored_repo
+
+                    setup = continuation.context.setup
+                    prepare_restored_repo(setup.repo_dir)
                 setup_span.set_attribute("build.before", setup.build_before)
             progress.write_agent_milestone(
                 "repo_setup_complete",
@@ -1178,9 +1243,11 @@ def run_task(
                         "asset (ADR-016 — the agent must have no Linear tools)",
                     )
 
-            # Download attachments from S3 (version-pinned, integrity-verified)
+            # Recovery already restored .attachments and the prompt's exact
+            # references. Re-downloading would depend on the original attachment
+            # bucket's shorter retention and could overwrite saved local work.
             prepared_attachments: list = []
-            if config.attachments:
+            if config.attachments and continuation is None:
                 from attachments import download_attachments
 
                 try:
@@ -1221,6 +1288,17 @@ def run_task(
             if prepared_attachments:
                 prompt = _inject_attachment_context(prompt, prepared_attachments)
 
+            if continuation is not None:
+                if continuation.resume_prompt is None:
+                    raise RuntimeError("Restored continuation has no recorded decision prompt")
+                prompt = continuation.resume_prompt
+                system_prompt = continuation.context.system_prompt
+                progress.write_agent_milestone(
+                    "continuation_restored",
+                    "Saved conversation and workspace restored; "
+                    "continuing the recorded human decision.",
+                )
+
             # Run agent
             disk_before = get_disk_usage(AGENT_WORKSPACE)
             start_time = time.time()
@@ -1247,6 +1325,8 @@ def run_task(
                         hc,
                         trajectory,
                         progress,
+                        continuation=continuation,
+                        started_reaction_id=linear_eyes_reaction_id,
                     )
                 except Exception as e:
                     # Fatal agent error: mirror to APPLICATION_LOGS so
@@ -1259,6 +1339,15 @@ def run_task(
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
+            from microvm_lifecycle import get_context as get_microvm_context
+
+            lifecycle = get_microvm_context(config.task_id)
+            if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+                # A transferred/cancelled worker may finish unwinding its SDK.
+                # It must not run deterministic commit/PR/channel post-hooks.
+                log("TASK", "Worker execution is closed; coordinator owns continuation or cleanup.")
+                return {"task_id": config.task_id, "status": "parked"}
+
             progress.write_agent_milestone(
                 "agent_execution_complete",
                 f"status={agent_result.status} turns={agent_result.turns}",
@@ -1746,7 +1835,7 @@ def run_task(
 
             # Persist terminal state to DynamoDB
             terminal_status = "COMPLETED" if overall_status == "success" else "FAILED"
-            task_state.write_terminal(config.task_id, terminal_status, result_dict)
+            _persist_finished_task(config.task_id, terminal_status, result_dict)
 
             return result_dict
 

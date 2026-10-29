@@ -422,6 +422,28 @@ describe('submit command', () => {
   });
 
   describe('Cedar HITL extensions', () => {
+    test.each([['off', 0], ['0', 0], ['30', 30], ['600', 600], ['3600', 3600]])(
+      'forwards MicroVM sleep delay %s without changing approval timeout', async (value, expected) => {
+        mockCreateTask.mockResolvedValue({ task_id: 't-sleep', status: 'SUBMITTED' });
+        await makeSubmitCommand().parseAsync([
+          'node', 'test', '--repo', 'owner/repo', '--task', 'ok', '--microvm-sleep-after', String(value),
+        ]);
+        const [body] = mockCreateTask.mock.calls[0];
+        expect(body.microvm_sleep_after_s).toBe(expected);
+        expect(body).not.toHaveProperty('approval_timeout_s');
+      },
+    );
+    test.each(['-1', '3601', '1.5', '30seconds', '1e2', '', ' ', 'NaN'])('rejects malformed MicroVM delay %j', async value => {
+      await expect(makeSubmitCommand().parseAsync([
+        'node', 'test', '--repo', 'owner/repo', '--task', 'ok', '--microvm-sleep-after', value,
+      ])).rejects.toThrow(/--microvm-sleep-after must be off or an integer/);
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+    test('omits the sleep override so the server captures its default', async () => {
+      mockCreateTask.mockResolvedValue({ task_id: 't-sleep', status: 'SUBMITTED' });
+      await makeSubmitCommand().parseAsync(['node', 'test', '--repo', 'owner/repo', '--task', 'ok']);
+      expect(mockCreateTask.mock.calls[0][0]).not.toHaveProperty('microvm_sleep_after_s');
+    });
     // --approval-timeout ------------------------------------------------------
 
     test('forwards --approval-timeout as approval_timeout_s', async () => {
