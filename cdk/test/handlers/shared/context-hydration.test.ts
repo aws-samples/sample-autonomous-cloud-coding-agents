@@ -1477,6 +1477,76 @@ describe('hydrateContext — guardrail screening', () => {
     expect(result.sources).toContain('issue');
   });
 
+  function screenedText(): string {
+    const cmd = mockBedrockSend.mock.calls[0][0] as { input: { content: Array<{ text: { text: string } }> } };
+    return cmd.input.content.map(c => c.text.text).join('\n');
+  }
+
+  function mockIssueFetchWithComment(): void {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ number: 42, title: 'Add a battle screen', body: 'Acceptance criteria: the menu opens.', comments: 1 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([{ id: 7, user: { login: 'alice' }, body: 'Please also add a store.' }]),
+      });
+  }
+
+  test('screens only the issue content, not the platform wrapper text', async () => {
+    mockIssueFetchWithComment();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const { task_description: _omit, ...taskWithoutDescription } = baseNewTask;
+    const result = await hydrateContext({ ...taskWithoutDescription, issue_number: 42 } as any);
+
+    expect(result.user_prompt).toContain('Resolve the GitHub issue described above');
+    expect(mockBedrockSend).toHaveBeenCalledTimes(1);
+    const text = screenedText();
+    expect(text).toContain('Add a battle screen');
+    expect(text).toContain('Acceptance criteria: the menu opens.');
+    expect(text).toContain('Please also add a store.');
+    expect(text).not.toContain('Resolve the GitHub issue');
+    expect(text).not.toContain('system instructions');
+    expect(text).not.toContain('Task ID:');
+    expect(text).not.toContain('Repository:');
+  });
+
+  test('still blocks the task when the issue content is blocked', async () => {
+    mockIssueFetchWithComment();
+    mockBedrockSend.mockResolvedValueOnce({
+      action: 'GUARDRAIL_INTERVENED',
+      assessments: [{
+        contentPolicy: {
+          filters: [{ type: 'PROMPT_ATTACK', confidence: 'MEDIUM', action: 'BLOCKED' }],
+        },
+      }],
+    });
+
+    const { task_description: _omit, ...taskWithoutDescription } = baseNewTask;
+    const result = await hydrateContext({ ...taskWithoutDescription, issue_number: 42 } as any);
+    expect(result.guardrail_blocked).toBe('Task context blocked by content policy: CONTENT/PROMPT_ATTACK (MEDIUM)');
+  });
+
+  test('screens only the PR content, not the platform wrapper text', async () => {
+    mockPrFetch();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const result = await hydrateContext(basePrTask as any);
+
+    expect(result.user_prompt).toContain('Address the review feedback');
+    const text = screenedText();
+    expect(text).toContain('Test PR');
+    expect(text).toContain('body');
+    expect(text).not.toContain('Address the review feedback');
+    expect(text).not.toContain('system instructions');
+    expect(text).not.toContain('Task ID:');
+    expect(text).not.toContain('Repository:');
+    expect(text).not.toContain('Head branch:');
+  });
+
   test('throws when guardrail screening fails for new_task (fail-closed)', async () => {
     mockIssueFetch();
     mockBedrockSend.mockRejectedValueOnce(new Error('Bedrock timeout'));
