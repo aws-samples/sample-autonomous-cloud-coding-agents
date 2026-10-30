@@ -32,6 +32,15 @@ describe('TaskDetailPage', () => {
     expect(within(progress).getByLabelText('Pull request: not started')).toBeInTheDocument();
   });
 
+  it('joins the steps with a line: solid up to the current step, dashed after', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    const progress = await screen.findByRole('list', { name: 'Progress' });
+    const lines = within(progress).getAllByTestId('progress-connector');
+    expect(lines.map((l) => [l.dataset.state, l.style.borderTopStyle])).toEqual([
+      ['done', 'solid'], ['current', 'solid'], ['todo', 'dashed'], ['todo', 'dashed'],
+    ]);
+  });
+
   it('tells you what it is doing in plain words, without bookkeeping', async () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     const feed = await screen.findByRole('list', { name: 'Activity' });

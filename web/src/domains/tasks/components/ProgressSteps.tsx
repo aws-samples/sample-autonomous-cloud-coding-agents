@@ -19,6 +19,7 @@
 
 import Box from '@cloudscape-design/components/box';
 import StatusIndicator, { type StatusIndicatorProps } from '@cloudscape-design/components/status-indicator';
+import type { CSSProperties } from 'react';
 import { PROGRESS_STEPS, type StepState } from '../../../core/util/progress';
 
 const INDICATOR: Readonly<Record<StepState, StatusIndicatorProps.Type>> = {
@@ -37,14 +38,30 @@ const STATE_LABEL: Readonly<Record<StepState, string>> = {
   skipped: 'skipped',
 };
 
-/** Queued → Setting up → Working → Checking → Pull request, with the current step highlighted. */
+/** Colour of the line leading into a step: travelled, stopped there, or still ahead. */
+function connectorStyle(state: StepState): CSSProperties {
+  const base: CSSProperties = { flex: '1 1 24px', minWidth: 16, height: 0, margin: '0 10px', borderTopWidth: 2 };
+  if (state === 'todo' || state === 'skipped') return { ...base, borderTopStyle: 'dashed', borderTopColor: 'rgba(127, 127, 127, 0.45)' };
+  return { ...base, borderTopStyle: 'solid', borderTopColor: state === 'stopped' ? '#d13212' : '#2ea043' };
+}
+
+/**
+ * Queued → Setting up → Working → Checking → Pull request, joined by a line like a
+ * timeline: solid up to the current step, dashed for what is still ahead.
+ */
 export function ProgressSteps({ states }: { states: readonly StepState[] }) {
   return (
-    <ol aria-label="Progress" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 20px', listStyle: 'none', margin: 0, padding: 0 }}>
+    <ol aria-label="Progress" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', rowGap: 8, listStyle: 'none', margin: 0, padding: 0 }}>
       {PROGRESS_STEPS.map((label, i) => {
         const state = states[i];
         return (
-          <li key={label} aria-current={state === 'current' ? 'step' : undefined} aria-label={`${label}: ${STATE_LABEL[state]}`}>
+          <li
+            key={label}
+            aria-current={state === 'current' ? 'step' : undefined}
+            aria-label={`${label}: ${STATE_LABEL[state]}`}
+            style={{ display: 'flex', alignItems: 'center', flex: i === 0 ? '0 0 auto' : '1 1 auto' }}
+          >
+            {i > 0 && <span aria-hidden="true" data-testid="progress-connector" data-state={state} style={connectorStyle(state)} />}
             <StatusIndicator type={INDICATOR[state]} colorOverride={state === 'todo' ? 'grey' : undefined}>
               <Box
                 variant="span"
