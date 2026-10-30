@@ -30,13 +30,13 @@ const first = (name: string | RegExp) => screen.getAllByRole('button', { name, h
 describe('AppShell', () => {
   afterEach(() => localStorage.clear());
 
-  it('has no "Needs your OK" page in the menu; a bell lists what is waiting instead', async () => {
+  it('has no approvals page in the menu; the notifications bell lists approval requests instead', async () => {
     const { router } = renderRoute('/tasks');
     await screen.findByRole('heading', { name: 'Tasks', level: 1 });
-    expect(screen.queryByRole('link', { name: /Needs your OK/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Approval/ })).not.toBeInTheDocument();
 
-    await waitFor(() => expect(first('Approvals: 1 waiting')).toBeInTheDocument());
-    fireEvent.click(first('Approvals: 1 waiting'));
+    await waitFor(() => expect(first('Notifications: 1 approval request')).toBeInTheDocument());
+    fireEvent.click(first('Notifications: 1 approval request'));
     const item = await screen.findByText('Infrastructure changes require approval');
     fireEvent.click(item);
     await waitFor(() => expect(router.state.location.pathname).toBe(`/tasks/${MOCK_IDS.awaiting}`));
@@ -45,7 +45,7 @@ describe('AppShell', () => {
   it('says so when nothing is waiting', async () => {
     server.use(http.get(`${TEST_API_BASE}/pending`, () => HttpResponse.json({ data: { pending: [] } })));
     renderRoute('/');
-    await waitFor(() => expect(first('Approvals: none waiting')).toBeInTheDocument());
+    await waitFor(() => expect(first('Notifications: none')).toBeInTheDocument());
   });
 
   it('switches theme with a moon in light mode and a sun in dark mode', async () => {

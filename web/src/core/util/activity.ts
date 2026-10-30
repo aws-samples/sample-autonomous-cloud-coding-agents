@@ -125,7 +125,7 @@ function milestone(meta: Record<string, unknown>): Pick<ActivityLine, 'text' | '
     const message = /\):\s*(.*)$/s.exec(details)?.[1];
     return { kind: 'message', text: message ? `Read your message: "${shorten(message, 80)}"` : 'Read your message' };
   }
-  if (name === 'approval_granted') return { kind: 'step', text: 'Got your OK and carried on' };
+  if (name === 'approval_granted') return { kind: 'step', text: 'Your approval came through, so it carried on' };
   if (name === 'approval_denied') return { kind: 'problem', text: 'You said no, so it skipped that action' };
   if (name === 'approval_timed_out') return { kind: 'problem', text: 'Nobody answered the approval request in time' };
 
@@ -177,7 +177,7 @@ export function describeEvent(event: TaskEvent, repo?: string | null, step?: Too
     case 'agent_blocked':
       return { ...base, kind: 'problem', text: str(meta, 'remediation_hint') ?? 'It got stuck and could not continue' };
     case 'approval_requested':
-      return { ...base, kind: 'problem', text: `Asked for your OK: ${str(meta, 'reason') ?? 'an action needs approval'}` };
+      return { ...base, kind: 'problem', text: `Asked for approval: ${str(meta, 'reason') ?? 'an action needs approval'}` };
     case 'task_failed':
       return { ...base, kind: 'problem', text: str(meta, 'reason') ? `Stopped: ${str(meta, 'reason')}` : 'Stopped with an error' };
     case 'task_completed':

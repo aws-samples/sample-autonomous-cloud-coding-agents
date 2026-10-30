@@ -58,7 +58,7 @@ function summarize(tasks: readonly TaskSummary[], pendingApprovals: number, now:
   return [
     { label: 'Working now', value: tasks.filter((t) => isActive(t.status)).length, href: '/tasks?view=active' },
     { label: 'Waiting in line', value: tasks.filter((t) => isQueued(t.status)).length, href: '/tasks?view=queued' },
-    { label: 'Needs your OK', value: pendingApprovals, href: '/approvals' },
+    { label: 'Approval requests', value: pendingApprovals, href: '/approvals' },
     { label: 'No updates lately', value: tasks.filter((t) => hasStaleHeartbeat(t, now)).length, href: '/tasks?view=attention' },
     {
       label: 'Failed (24h)',

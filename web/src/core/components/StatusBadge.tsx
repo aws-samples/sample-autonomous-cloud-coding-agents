@@ -27,7 +27,7 @@ const STATUS_DISPLAY: Readonly<Record<TaskStatusType, { type: StatusIndicatorPro
   SUBMITTED: { type: 'in-progress', label: 'Starting' },
   HYDRATING: { type: 'in-progress', label: 'Setting up' },
   RUNNING: { type: 'in-progress', label: 'Working' },
-  AWAITING_APPROVAL: { type: 'warning', label: 'Needs your OK' },
+  AWAITING_APPROVAL: { type: 'warning', label: 'Waiting for approval' },
   FINALIZING: { type: 'in-progress', label: 'Wrapping up' },
   COMPLETED: { type: 'success', label: 'Done' },
   FAILED: { type: 'error', label: 'Failed' },

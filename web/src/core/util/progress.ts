@@ -107,7 +107,7 @@ function minutesSince(iso: string | null, now: Date): number | null {
 export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: Date = new Date()): Outcome | null {
   switch (task.status) {
     case 'AWAITING_APPROVAL':
-      return { type: 'warning', title: 'Needs your OK', text: 'The agent paused before an action that needs a person to approve it.', offer: 'approval' };
+      return { type: 'warning', title: 'Waiting for your approval', text: 'The agent paused before an action that a person has to approve. Approve or deny it below.', offer: 'approval' };
     case 'QUEUED':
     case 'PENDING_UPLOADS':
       return {

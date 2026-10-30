@@ -35,7 +35,7 @@ export const RECENT_FAILURE_WINDOW_SEC = 24 * 3600;
 export type AttentionReason = 'awaiting_approval' | 'stale_heartbeat' | 'failed' | 'timed_out';
 
 export const ATTENTION_LABELS: Readonly<Record<AttentionReason, string>> = {
-  awaiting_approval: 'Needs your OK',
+  awaiting_approval: 'Waiting for approval',
   stale_heartbeat: 'No updates lately',
   failed: 'Failed',
   timed_out: 'Ran out of time',

@@ -58,6 +58,6 @@ describe('ApprovalsPage', () => {
   it('says so when nothing is waiting', async () => {
     server.use(http.get(`${TEST_API_BASE}/pending`, () => HttpResponse.json({ data: { pending: [] } })));
     renderRoute('/approvals');
-    expect(await screen.findByText('Nothing needs your OK right now.')).toBeInTheDocument();
+    expect(await screen.findByText('No approval requests right now.')).toBeInTheDocument();
   });
 });

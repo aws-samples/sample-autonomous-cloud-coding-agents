@@ -55,7 +55,7 @@ export function ApprovalCard({ request, taskTitle, onDecided }: {
           actions={<SeverityBadge severity={request.severity} />}
           description={taskTitle ? <RouterLink href={taskHref(request.task_id)}>{taskTitle}</RouterLink> : undefined}
         >
-          {request.reason || 'The agent wants to do something that needs your OK'}
+          {request.reason || 'The agent wants to do something that needs approval'}
         </Header>
       }
     >

@@ -59,13 +59,13 @@ function shortReason(reason: string): string {
 }
 
 /**
- * The bell in the top bar: a dot when something waits for approval, and a list
- * of what is waiting. It takes the place of a "Needs your OK" page in the menu.
+ * The bell in the top bar: notifications, which today are approval requests. A dot
+ * shows when one is waiting; each opens its task, and the approvals page lists them all.
  */
 function approvalsMenu(pending: readonly PendingApprovalSummary[]): TopNavigationProps.MenuDropdownUtility {
   const count = pending.length;
   const items: TopNavigationProps.MenuDropdownUtility['items'] = count === 0
-    ? [{ id: 'none', text: 'Nothing needs your OK', disabled: true }]
+    ? [{ id: 'none', text: 'No notifications', disabled: true }]
     : [
       ...pending.map((p) => ({
         id: `approval:${p.request_id}`,
@@ -73,13 +73,13 @@ function approvalsMenu(pending: readonly PendingApprovalSummary[]): TopNavigatio
         secondaryText: `${p.tool_name} · asked ${formatRelativeTime(p.created_at)}`,
         href: taskHref(p.task_id),
       })),
-      { id: 'all', text: count === 1 ? 'Open approvals' : `See all ${count}`, href: '/approvals' },
+      { id: 'all', text: count === 1 ? 'Open approval requests' : `See all ${count} approval requests`, href: '/approvals' },
     ];
   return {
     type: 'menu-dropdown',
     iconName: 'notification',
-    ariaLabel: count === 0 ? 'Approvals: none waiting' : `Approvals: ${count} waiting`,
-    title: count === 0 ? 'Nothing needs your OK' : `${count} ${count === 1 ? 'action needs' : 'actions need'} your OK`,
+    ariaLabel: count === 0 ? 'Notifications: none' : `Notifications: ${count} approval ${count === 1 ? 'request' : 'requests'}`,
+    title: count === 0 ? 'Notifications' : `Approval ${count === 1 ? 'request' : 'requests'} (${count})`,
     badge: count > 0,
     items,
   };

@@ -68,10 +68,21 @@ describe('TaskDetailPage', () => {
     expect(screen.getAllByText(/Timeout - Async callback was not invoked/).length).toBeGreaterThan(0);
   });
 
+  it('explains each section and number with an info icon', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    await screen.findByRole('heading', { name: 'Progress' });
+    for (const about of ['progress', 'turns', 'cost', 'pull request', 'activity', 'messages', 'settings and details', 'full log']) {
+      expect(screen.getAllByRole('button', { name: `About ${about}` }).length).toBeGreaterThan(0);
+    }
+    fireEvent.click(screen.getAllByRole('button', { name: 'About turns' })[0]);
+    expect(await screen.findByText(/A turn is one round of work/)).toBeInTheDocument();
+  });
+
   it('counts turns the way the turn limit does', async () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     // Seven messages, five of which asked for tools; the fifth tool turn is still running.
-    expect(await screen.findByText('Turn 5 of 60')).toBeInTheDocument();
+    expect(await screen.findByText('5 of 60')).toBeInTheDocument();
+    expect(screen.getByText('$0.84 (limit $5.00)')).toBeInTheDocument();
   });
 
   it('opens a step in the activity to show the command and what came back', async () => {
@@ -108,7 +119,7 @@ describe('TaskDetailPage', () => {
 
   it('shows what the task was started with, including its limits', async () => {
     renderRoute(`/tasks/${MOCK_IDS.queued}`);
-    await screen.findByRole('heading', { name: 'Request' });
+    fireEvent.click(await screen.findByRole('button', { name: /Settings and details/ }));
     const request = screen;
     expect(request.getByText('#214 Add pagination to GET /invoices')).toBeInTheDocument();
     expect(request.getByText('60')).toBeInTheDocument();
@@ -123,7 +134,7 @@ describe('TaskDetailPage', () => {
     const task = mockData.tasks.find((t) => t.task_id === MOCK_IDS.running)!;
     Object.assign(task, { max_turns: null, max_budget_usd: null });
     renderRoute(`/tasks/${MOCK_IDS.running}`);
-    await screen.findByRole('heading', { name: 'Request' });
+    fireEvent.click(await screen.findByRole('button', { name: /Settings and details/ }));
     expect(screen.getAllByText('Repository default')).toHaveLength(2);
   });
 
@@ -143,9 +154,9 @@ describe('TaskDetailPage', () => {
 
   it('lets you approve a paused task right on the page', async () => {
     renderRoute(`/tasks/${MOCK_IDS.awaiting}`);
-    expect(await screen.findByText(/paused before an action that needs a person to approve it/)).toBeInTheDocument();
+    expect(await screen.findByText(/paused before an action that a person has to approve/)).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
-    expect(await screen.findByText('Got your OK and carried on')).toBeInTheDocument();
+    expect(await screen.findByText('Your approval came through, so it carried on')).toBeInTheDocument();
     expect(mockData.pending).toHaveLength(0);
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument());
   });
@@ -176,7 +187,7 @@ describe('TaskDetailPage', () => {
 
   it('does not take messages once the task has finished', async () => {
     renderRoute(`/tasks/${MOCK_IDS.completed}`);
-    expect(await screen.findByText(/This task has finished, so it can't read messages/)).toBeInTheDocument();
+    expect(await screen.findByText('Done: pull request #482 is ready for review')).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
     expect(screen.getByText('Done: pull request #482 is ready for review')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View pull request' })).toHaveAttribute('href', 'https://github.com/acme/web-frontend/pull/482');

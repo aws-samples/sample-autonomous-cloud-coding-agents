@@ -45,7 +45,7 @@ export function ApprovalsPage() {
   let body;
   if (query.isError) body = <QueryError error={query.error} what="approval requests" />;
   else if (query.isPending) body = <Spinner size="large" />;
-  else if (items.length === 0) body = <Box textAlign="center" color="inherit" padding="xxl">Nothing needs your OK right now.</Box>;
+  else if (items.length === 0) body = <Box textAlign="center" color="inherit" padding="xxl">No approval requests right now.</Box>;
   else {
     body = items.map((request) => {
       const title = titles.get(request.task_id);
@@ -61,7 +61,7 @@ export function ApprovalsPage() {
           counter={query.data ? `(${items.length})` : undefined}
           description="Agents pause and ask before risky actions. Approve to let them carry on, or say no and they try another way."
         >
-          Needs your OK
+          Approval requests
         </Header>
       }
     >

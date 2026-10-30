@@ -24,7 +24,6 @@ import Button from '@cloudscape-design/components/button';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import ExpandableSection from '@cloudscape-design/components/expandable-section';
-import Grid from '@cloudscape-design/components/grid';
 import Header from '@cloudscape-design/components/header';
 import KeyValuePairs from '@cloudscape-design/components/key-value-pairs';
 import Modal from '@cloudscape-design/components/modal';
@@ -35,7 +34,9 @@ import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { ApiError } from '../../core/api/client';
 import type { TaskDetail, TaskEvent } from '../../core/api/types';
+import { InfoTip } from '../../core/components/InfoTip';
 import { QueryError } from '../../core/components/QueryError';
+import { StatusBadge } from '../../core/components/StatusBadge';
 import { ExternalLink, RouterLink } from '../../core/components/RouterLink';
 import { activityFeed } from '../../core/util/activity';
 import { formatCost, formatDuration, formatRelativeTime, formatTimestamp, repoHref, SOURCE_LABEL, taskTitle } from '../../core/util/format';
@@ -110,29 +111,113 @@ function OutcomeBanner({ task, outcome, onMessage }: { task: TaskDetail; outcome
 
 const REPO_DEFAULT = 'Repository default';
 
-/** What the task was started with, as chosen; unset limits fall back to the repository's. */
-function TaskRequest({ task }: { task: TaskDetail }) {
-  const issueUrl = task.issue_number && task.repo ? `https://github.com/${task.repo}/issues/${task.issue_number}` : null;
+/** "5 of 60" while it runs; the platform's own count once it has finished. */
+function turnsValue(task: TaskDetail, turnsSoFar: number): string {
+  const turns = isTerminal(task.status) && task.turns_completed !== null ? task.turns_completed : turnsSoFar;
+  if (turns === 0) return '-';
+  return task.max_turns ? `${turns} of ${task.max_turns}` : String(turns);
+}
+
+function costValue(task: TaskDetail, live: boolean): string {
+  const limit = task.max_budget_usd ? ` (limit ${formatCost(task.max_budget_usd)})` : '';
+  if (task.cost_usd !== null) return `${formatCost(task.cost_usd)}${limit}`;
+  return live ? `Shown when it finishes${limit}` : '-';
+}
+
+function timeValue(task: TaskDetail, now: Date): string {
+  if (task.duration_s !== null) return formatDuration(task.duration_s);
+  const started = task.started_at ? Date.parse(task.started_at) : NaN;
+  return Number.isNaN(started) || isTerminal(task.status) ? '-' : formatDuration(Math.max(0, Math.round((now.getTime() - started) / 1000)));
+}
+
+/** Where it is and the numbers people check first. */
+function TaskProgress({ task, events, live }: { task: TaskDetail; events: readonly TaskEvent[]; live: boolean }) {
+  const states = useMemo(() => stepStates(task, events), [task, events]);
+  const turnCount = useMemo(() => buildTurns(events).length, [events]);
+  const latest = useMemo(() => activityFeed(events, task.repo).at(-1), [events, task.repo]);
   return (
-    <Container header={<Header variant="h2">Request</Header>}>
+    <Container
+      header={(
+        <Header
+          variant="h2"
+          info={(
+            <InfoTip about="Progress">
+              Every task goes through the same five stages: waiting in line, setting up a copy of the repository, working on
+              the change, checking that it builds and its tests pass, and opening a pull request. The line shows how far it
+              has got.
+            </InfoTip>
+          )}
+        >
+          Progress
+        </Header>
+      )}
+    >
       <SpaceBetween size="l">
+        <SpaceBetween size="s">
+          <ProgressSteps states={states} />
+          {live && latest && (
+            <Box color="text-body-secondary">
+              Right now: {latest.text} <Box variant="span" color="text-status-inactive">· {formatRelativeTime(latest.at)}</Box>
+            </Box>
+          )}
+        </SpaceBetween>
         <KeyValuePairs
-          columns={3}
+          columns={4}
           items={[
-            { label: 'Repository', value: task.repo ? <RouterLink href={repoHref(task.repo)}>{task.repo}</RouterLink> : '-' },
             {
-              label: 'Issue',
-              value: issueUrl
-                ? <ExternalLink href={issueUrl}>{`#${task.issue_number}${task.issue_title ? ` ${task.issue_title}` : ''}`}</ExternalLink>
-                : '-',
+              label: 'Turns',
+              value: turnsValue(task, turnCount),
+              info: (
+                <InfoTip about="Turns">
+                  A turn is one round of work: the AI looks at what happened so far, decides what to do, and runs a tool
+                  such as a command or a file edit. The task stops when it reaches its turn limit.
+                </InfoTip>
+              ),
             },
-            { label: 'Started from', value: SOURCE_LABEL[task.channel_source] ?? task.channel_source },
-            { label: 'Turn limit', value: task.max_turns ? String(task.max_turns) : REPO_DEFAULT },
-            { label: 'Spending limit', value: task.max_budget_usd ? formatCost(task.max_budget_usd) : REPO_DEFAULT },
-            { label: 'Full details', value: task.trace ? 'On: keeps up to 4 KB of each command and output' : 'Off: keeps 200 characters' },
-            { label: 'Workflow', value: task.resolved_workflow ? <Box variant="code">{`${task.resolved_workflow.id}@${task.resolved_workflow.version}`}</Box> : '-' },
+            {
+              label: 'Cost',
+              value: costValue(task, live),
+              info: (
+                <InfoTip about="Cost">
+                  An estimate of what the AI model has cost for this task, reported by the agent when it finishes. With a
+                  spending limit, the agent stops once it goes over, after finishing the step it is on.
+                </InfoTip>
+              ),
+            },
+            { label: isTerminal(task.status) ? 'Time taken' : 'Running for', value: timeValue(task, new Date()) },
+            {
+              label: 'Pull request',
+              value: task.pr_url ? <ExternalLink href={task.pr_url}>#{task.pr_number ?? 'PR'}</ExternalLink> : live ? 'Not yet' : 'None',
+              info: (
+                <InfoTip about="Pull request">
+                  When the agent is done it opens a pull request in the repository. Review it and merge it there; nothing
+                  changes in the repository until you do.
+                </InfoTip>
+              ),
+            },
           ]}
         />
+      </SpaceBetween>
+    </Container>
+  );
+}
+
+/** What it was asked to do, the limits it ran under, and the identifiers to look it up by. */
+function TaskSettings({ task }: { task: TaskDetail }) {
+  const issueUrl = task.issue_number && task.repo ? `https://github.com/${task.repo}/issues/${task.issue_number}` : null;
+  return (
+    <ExpandableSection
+      variant="container"
+      headerText="Settings and details"
+      headerDescription="What it was asked to do, its limits, and where it worked."
+      headerInfo={(
+        <InfoTip about="Settings and details">
+          Everything the task was started with. Limits left empty when starting show as "Repository default": the
+          repository's own settings apply.
+        </InfoTip>
+      )}
+    >
+      <SpaceBetween size="l">
         {task.task_description && (
           <KeyValuePairs
             items={[{
@@ -141,36 +226,52 @@ function TaskRequest({ task }: { task: TaskDetail }) {
             }]}
           />
         )}
+        <KeyValuePairs
+          columns={3}
+          items={[
+            {
+              label: 'Issue',
+              value: issueUrl
+                ? <ExternalLink href={issueUrl}>{`#${task.issue_number}${task.issue_title ? ` ${task.issue_title}` : ''}`}</ExternalLink>
+                : '-',
+            },
+            { label: 'Repository', value: task.repo ? <RouterLink href={repoHref(task.repo)}>{task.repo}</RouterLink> : '-' },
+            { label: 'Started from', value: SOURCE_LABEL[task.channel_source] ?? task.channel_source },
+            { label: 'Turn limit', value: task.max_turns ? String(task.max_turns) : REPO_DEFAULT },
+            { label: 'Spending limit', value: task.max_budget_usd ? formatCost(task.max_budget_usd) : REPO_DEFAULT },
+            {
+              label: 'Full details',
+              value: task.trace ? 'On: keeps up to 4 KB of each command and output' : 'Off: keeps 200 characters',
+              info: (
+                <InfoTip about="Full details">
+                  How much of each command and its output the platform keeps for the activity list. Turn on "Keep full
+                  details" when starting a task to keep up to 4 KB instead of the first 200 characters.
+                </InfoTip>
+              ),
+            },
+            { label: 'Branch', value: task.branch_name ? <Box variant="code">{task.branch_name}</Box> : '-' },
+            {
+              label: 'Workflow',
+              value: task.resolved_workflow ? <Box variant="code">{`${task.resolved_workflow.id}@${task.resolved_workflow.version}`}</Box> : '-',
+              info: (
+                <InfoTip about="Workflow">
+                  The recipe the platform followed for this task, for example: copy the repository, make the change, check
+                  the build and tests, open a pull request.
+                </InfoTip>
+              ),
+            },
+            {
+              label: 'Task ID',
+              value: <Box variant="code">{task.task_id}</Box>,
+              info: <InfoTip about="Task ID">Use this to find the task with the bgagent command line, or when asking for help.</InfoTip>,
+            },
+            { label: 'Started', value: formatTimestamp(task.started_at ?? task.created_at) },
+            { label: 'Finished', value: formatTimestamp(task.completed_at) },
+          ]}
+        />
       </SpaceBetween>
-    </Container>
-  );
-}
-
-function TaskDetails({ task }: { task: TaskDetail }) {
-  return (
-    <ExpandableSection headerText="Details" variant="container">
-      <KeyValuePairs
-        columns={3}
-        items={[
-          { label: 'Pull request', value: task.pr_url ? <ExternalLink href={task.pr_url}>#{task.pr_number ?? 'PR'}</ExternalLink> : '-' },
-          { label: 'Branch', value: task.branch_name || '-' },
-          { label: 'Cost', value: formatCost(task.cost_usd) },
-          { label: 'Time taken', value: formatDuration(task.duration_s) },
-          { label: 'Turns used', value: task.turns_completed === null ? '-' : String(task.turns_completed) },
-          { label: 'Started', value: formatTimestamp(task.started_at ?? task.created_at) },
-          { label: 'Finished', value: formatTimestamp(task.completed_at) },
-          { label: 'Task ID', value: <Box variant="code">{task.task_id}</Box> },
-        ]}
-      />
     </ExpandableSection>
   );
-}
-
-/** "Turn 67 of 500" while it runs; the platform's own count once it has finished. */
-function turnLabel(task: TaskDetail, turnsSoFar: number): string | null {
-  const turns = isTerminal(task.status) && task.turns_completed !== null ? task.turns_completed : turnsSoFar;
-  if (turns === 0) return null;
-  return task.max_turns ? `Turn ${turns} of ${task.max_turns}` : `Turn ${turns}`;
 }
 
 function TaskBody({ task, events, eventsLoading }: {
@@ -181,42 +282,43 @@ function TaskBody({ task, events, eventsLoading }: {
   const live = !isTerminal(task.status);
   const messageBox = useRef<TextareaProps.Ref>(null);
   const lines = useMemo(() => activityFeed(events, task.repo), [events, task.repo]);
-  const turnCount = useMemo(() => buildTurns(events).length, [events]);
-  const turns = turnLabel(task, turnCount);
-  const states = useMemo(() => stepStates(task, events), [task, events]);
   const outcome = outcomeOf(task, events);
-  const latest = lines.at(-1);
 
   return (
     <SpaceBetween size="l">
       {outcome && <OutcomeBanner task={task} outcome={outcome} onMessage={() => messageBox.current?.focus()} />}
-      <Container>
-        <SpaceBetween size="s">
-          <ProgressSteps states={states} />
-          {(turns || (live && latest)) && (
-            <Box color="text-body-secondary">
-              {turns && <Box variant="span" fontWeight="bold">{turns}</Box>}
-              {turns && live && latest && ' · '}
-              {live && latest && <>Right now: {latest.text} <Box variant="span" color="text-status-inactive">· {formatRelativeTime(latest.at)}</Box></>}
-            </Box>
-          )}
-        </SpaceBetween>
+      <TaskProgress task={task} events={events} live={live} />
+      <Container
+        header={(
+          <Header
+            variant="h2"
+            description="Click a step to see what ran and what came back."
+            info={(
+              <InfoTip about="Activity">
+                What the agent did, in plain words and oldest first. Steps with an arrow open to show the exact command or
+                file and what came back. Quoted lines are what the agent said along the way.
+              </InfoTip>
+            )}
+          >
+            {live ? "What it's doing" : 'What it did'}
+          </Header>
+        )}
+        footer={live ? <MessagePanel ref={messageBox} taskId={task.task_id} events={events} open={live} /> : undefined}
+      >
+        <ActivityFeed lines={lines} loading={eventsLoading} live={live} trace={task.trace} />
       </Container>
-      <Grid gridDefinition={[{ colspan: { default: 12, m: 8 } }, { colspan: { default: 12, m: 4 } }]}>
-        <Container
-          header={
-            <Header variant="h2" description="Click a step to see what ran and what came back.">
-              {live ? "What it's doing" : 'What it did'}
-            </Header>
-          }
-        >
-          <ActivityFeed lines={lines} loading={eventsLoading} live={live} trace={task.trace} />
-        </Container>
-        <MessagePanel ref={messageBox} taskId={task.task_id} events={events} open={live} />
-      </Grid>
-      <TaskRequest task={task} />
-      <TaskDetails task={task} />
-      <ExpandableSection headerText="Full log" variant="container" headerDescription="Every turn with its commands and output, or every raw event.">
+      <TaskSettings task={task} />
+      <ExpandableSection
+        variant="container"
+        headerText="Full log"
+        headerDescription="For troubleshooting."
+        headerInfo={(
+          <InfoTip about="Full log">
+            The complete record. "By turn" lists every turn with each command and its full output. "Every event" is the
+            raw list the platform stored, newest first.
+          </InfoTip>
+        )}
+      >
         <EventTimeline taskId={task.task_id} live={live} repo={task.repo} trace={task.trace} />
       </ExpandableSection>
     </SpaceBetween>
@@ -263,10 +365,10 @@ export function TaskDetailPage() {
   );
 
   const description = task && (
-    <SpaceBetween direction="horizontal" size="xs">
+    <SpaceBetween direction="horizontal" size="s" alignItems="center">
+      <StatusBadge status={task.status} />
       {task.repo && <RouterLink href={repoHref(task.repo)}>{task.repo}</RouterLink>}
       <span>Started {formatRelativeTime(task.started_at ?? task.created_at)}</span>
-      {task.cost_usd !== null && <span>{isTerminal(task.status) ? 'Cost' : 'Cost so far'} {formatCost(task.cost_usd)}</span>}
     </SpaceBetween>
   );
 

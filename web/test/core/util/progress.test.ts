@@ -64,7 +64,7 @@ describe('outcomeOf', () => {
   });
 
   it('asks for approval', () => {
-    expect(outcomeOf(task(MOCK_IDS.awaiting), [], NOW)).toMatchObject({ title: 'Needs your OK', offer: 'approval' });
+    expect(outcomeOf(task(MOCK_IDS.awaiting), [], NOW)).toMatchObject({ title: 'Waiting for your approval', offer: 'approval' });
   });
 
   it('shows the place in line', () => {

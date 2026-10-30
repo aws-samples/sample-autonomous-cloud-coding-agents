@@ -35,7 +35,7 @@ describe('OverviewPage', () => {
     // The budget failure and the no-changes run are recent; the timeout is older than 24 hours.
     expect(screen.getByRole('link', { name: 'Failed (24h): 2' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Done (24h): 1' })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole('link', { name: 'Needs your OK: 1' })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Approval requests: 1' })).toBeInTheDocument());
   });
 
   it('lists the tasks that need you, by title', async () => {
