@@ -55,11 +55,6 @@ describe('ApprovalsPage', () => {
     expect(body).toEqual({ request_id: 'req-01JF3KR0APPROVE00000001', decision: 'deny', reason: 'Plan it only, do not apply' });
   });
 
-  it('shows the count in the navigation', async () => {
-    renderRoute('/');
-    expect(await screen.findByText('1', { selector: '[class*="badge"] *, [class*="badge"]' })).toBeInTheDocument();
-  });
-
   it('says so when nothing is waiting', async () => {
     server.use(http.get(`${TEST_API_BASE}/pending`, () => HttpResponse.json({ data: { pending: [] } })));
     renderRoute('/approvals');

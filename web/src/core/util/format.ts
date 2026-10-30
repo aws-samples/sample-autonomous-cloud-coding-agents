@@ -77,6 +77,15 @@ export function taskTitle(task: {
   return task.issue_number ? `Fix issue #${task.issue_number}` : 'Untitled task';
 }
 
+/** Where a task was started, in words. */
+export const SOURCE_LABEL: Readonly<Record<'api' | 'webhook' | 'slack' | 'linear' | 'jira', string>> = {
+  api: 'Console or CLI',
+  webhook: 'Webhook',
+  slack: 'Slack',
+  linear: 'Linear',
+  jira: 'Jira',
+};
+
 /** Route for a repository's page; `owner/name` maps onto two path segments. */
 export function repoHref(repo: string): string {
   return `/repos/${repo.split('/').map(encodeURIComponent).join('/')}`;

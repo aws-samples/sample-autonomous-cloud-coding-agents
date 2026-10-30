@@ -38,7 +38,7 @@ import type { TaskDetail, TaskEvent } from '../../core/api/types';
 import { QueryError } from '../../core/components/QueryError';
 import { ExternalLink, RouterLink } from '../../core/components/RouterLink';
 import { activityFeed } from '../../core/util/activity';
-import { formatCost, formatDuration, formatRelativeTime, formatTimestamp, repoHref, taskTitle } from '../../core/util/format';
+import { formatCost, formatDuration, formatRelativeTime, formatTimestamp, repoHref, SOURCE_LABEL, taskTitle } from '../../core/util/format';
 import { outcomeOf, stepStates, type Outcome } from '../../core/util/progress';
 import { isTerminal } from '../../core/util/task-health';
 import { buildTurns } from '../../core/util/turns';
@@ -109,14 +109,6 @@ function OutcomeBanner({ task, outcome, onMessage }: { task: TaskDetail; outcome
 }
 
 const REPO_DEFAULT = 'Repository default';
-
-const SOURCE_LABEL: Readonly<Record<TaskDetail['channel_source'], string>> = {
-  api: 'Console or CLI',
-  webhook: 'Webhook',
-  slack: 'Slack',
-  linear: 'Linear',
-  jira: 'Jira',
-};
 
 /** What the task was started with, as chosen; unset limits fall back to the repository's. */
 function TaskRequest({ task }: { task: TaskDetail }) {

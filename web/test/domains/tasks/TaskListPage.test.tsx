@@ -20,6 +20,7 @@
 import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
+import { mockData } from '../../helpers/server';
 import { titleOf } from '../../helpers/fixtures';
 import { renderRoute } from '../../helpers/render';
 
@@ -62,6 +63,37 @@ describe('TaskListPage', () => {
     expect(screen.getByText('(3)')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: titleOf(MOCK_IDS.completed) })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.running) })).not.toBeInTheDocument();
+  });
+
+  it('narrows to one repository from the URL, asking the API for it', async () => {
+    renderRoute('/tasks?repo=acme%2Fweb-frontend');
+    expect(await screen.findByRole('link', { name: titleOf(MOCK_IDS.completed) })).toBeInTheDocument();
+    expect(screen.getByText('(3)')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.running) })).not.toBeInTheDocument();
+  });
+
+  it('narrows to where tasks were started, and clears every filter at once', async () => {
+    const fromSlack = mockData.tasks.filter((t) => t.channel_source === 'slack');
+    renderRoute('/tasks?source=slack');
+    expect(await screen.findByRole('link', { name: titleOf(fromSlack[0].task_id) })).toBeInTheDocument();
+    expect(screen.getByText(`(${fromSlack.length})`)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(await screen.findByText(`(${ALL_IDS.length})`)).toBeInTheDocument();
+  });
+
+  it('sorts by a column when its header is clicked, with empty values last', async () => {
+    renderRoute('/tasks');
+    await screen.findByRole('link', { name: titleOf(MOCK_IDS.running) });
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent);
+    const column = headers.findIndex((h) => h === 'Cost');
+    const costs = () => [...document.querySelectorAll('tbody tr')]
+      .map((row) => row.querySelectorAll('td, th')[column]?.textContent ?? '');
+    fireEvent.click(screen.getByText('Cost', { selector: 'th *' }));
+    const ascending = costs();
+    const amounts = ascending.filter((c) => c.startsWith('$')).map((c) => Number(c.slice(1)));
+    expect(amounts.length).toBeGreaterThan(5);
+    expect(amounts).toEqual([...amounts].sort((a, b) => a - b));
+    expect(ascending.slice(amounts.length).every((c) => !c.startsWith('$'))).toBe(true);
   });
 
   it('shows a stuck task as "No updates lately"', async () => {
