@@ -21,7 +21,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tansta
 import { useState } from 'react';
 import { useApi } from '../../app/providers/api/ApiProvider';
 import type { ApiClient } from '../../core/api/client';
-import type { CreateTaskRequest, TaskEvent, TaskStatusType } from '../../core/api/types';
+import { CODING_WORKFLOW_ID, type CreateTaskRequest, type TaskEvent, type TaskStatusType } from '../../core/api/types';
 import { isTerminal } from '../../core/util/task-health';
 
 /** Live views poll; the API has no push channel for browsers yet. */
@@ -165,6 +165,19 @@ export function useLinearIssues(repo: string, enabled = true) {
     refetchInterval: (query) => (query.state.data?.projects.some((p) => p.issues.some((i) => i.agent.kind === 'starting'))
       ? LINEAR_STARTING_REFRESH_MS
       : LINEAR_REFRESH_MS),
+  });
+}
+
+/**
+ * Starts the agent on one GitHub issue, from a list of issues. Each start is a new
+ * request with its own idempotency key; the caller disables Start while one is pending.
+ */
+export function useStartGitHubIssue(repo: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (issueNumber: number) => api.createTask({ repo, workflow_ref: CODING_WORKFLOW_ID, issue_number: issueNumber }, crypto.randomUUID()),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: taskKeys.all }),
   });
 }
 

@@ -49,6 +49,6 @@ describe('RepoDetailPage', () => {
     expect(screen.getByRole('link', { name: titleOf(MOCK_IDS.timedOut) })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: titleOf(MOCK_IDS.running) })).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'New task' })).toHaveAttribute('href', '/tasks/new?repo=acme%2Finfra');
-    expect(within(screen.getByRole('table')).queryByText('Repository')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: /^Tasks/ })).queryByText('Repository')).not.toBeInTheDocument();
   });
 });

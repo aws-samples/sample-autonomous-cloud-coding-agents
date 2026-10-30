@@ -21,25 +21,52 @@ import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
-import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { renderRoute } from '../../helpers/render';
 import { mockData, server, TEST_API_BASE } from '../../helpers/server';
 
 const REPO_PAGE = '/repos/acme/web-frontend';
 
-describe('Linear on the repository page', () => {
-  it('lists open Linear issues with what the agent is doing', async () => {
+const openLinearTab = async () => fireEvent.click(await screen.findByRole('tab', { name: /^Linear/ }));
+
+describe('Not started yet, on the repository page', () => {
+  it('lists open GitHub issues without a task, each with Start', async () => {
     renderRoute(REPO_PAGE);
-    const table = await screen.findByRole('table', { name: /From Linear/ });
-    expect(within(table).getByRole('link', { name: 'Add a loading skeleton to the dashboard' })).toHaveAttribute('href', 'https://linear.app/acme/issue/WEB-12');
-    expect(within(table).getByRole('button', { name: 'Start WEB-12' })).toBeInTheDocument();
-    // WEB-8 already has a task: no Start button, a link to the task instead.
-    expect(within(table).queryByRole('button', { name: 'Start WEB-8' })).not.toBeInTheDocument();
-    expect(within(table).getByRole('link', { name: 'View task' })).toHaveAttribute('href', `/tasks/${MOCK_IDS.completed}`);
+    const table = await screen.findByRole('table', { name: 'GitHub issues not started' });
+    expect(within(table).getByRole('link', { name: 'Settings page loses unsaved changes on back navigation' })).toBeInTheDocument();
+    expect(within(table).getByRole('button', { name: 'Start issue #31' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'GitHub issues (2)' })).toBeInTheDocument();
   });
 
-  it('starts an issue by labeling it, and says what happens next', async () => {
+  it('leaves out issues that already have a task', async () => {
+    renderRoute('/repos/acme/payments-api');
+    const table = await screen.findByRole('table', { name: 'GitHub issues not started' });
+    // #214 has a queued task, so only #198 is left to start.
+    expect(within(table).queryByRole('button', { name: 'Start issue #214' })).not.toBeInTheDocument();
+    expect(within(table).getByRole('button', { name: 'Start issue #198' })).toBeInTheDocument();
+  });
+
+  it('starts a GitHub issue in one click; it moves from the list to the tasks', async () => {
     renderRoute(REPO_PAGE);
+    fireEvent.click(await screen.findByRole('button', { name: 'Start issue #31' }));
+    expect(await screen.findByText('Issue #31 is with the agent')).toBeInTheDocument();
+    expect(mockData.tasks.at(-1)).toMatchObject({ repo: 'acme/web-frontend', issue_number: 31 });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Start issue #31' })).not.toBeInTheDocument());
+    expect(screen.getByRole('link', { name: 'Follow its progress' })).toHaveAttribute('href', `/tasks/${mockData.tasks.at(-1)!.task_id}`);
+  });
+
+  it('lists Linear issues the agent has not picked up, and leaves out ones it has', async () => {
+    renderRoute(REPO_PAGE);
+    await openLinearTab();
+    const table = await screen.findByRole('table', { name: 'Linear issues not started' });
+    expect(within(table).getByRole('link', { name: 'Add a loading skeleton to the dashboard' })).toHaveAttribute('href', 'https://linear.app/acme/issue/WEB-12');
+    expect(within(table).getByRole('button', { name: 'Start WEB-12' })).toBeInTheDocument();
+    // WEB-8 already has a task: it shows under Tasks, not here.
+    expect(within(table).queryByText('Fix dark-mode contrast on the settings page')).not.toBeInTheDocument();
+  });
+
+  it('starts a Linear issue by labeling it, and says what happens next', async () => {
+    renderRoute(REPO_PAGE);
+    await openLinearTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Start WEB-11' }));
     expect(await screen.findByText('WEB-11 is with the agent')).toBeInTheDocument();
     expect(screen.getByText(/comment on the issue in Linear/)).toBeInTheDocument();
@@ -54,6 +81,7 @@ describe('Linear on the repository page', () => {
       { status: 422 },
     )));
     renderRoute(REPO_PAGE);
+    await openLinearTab();
     fireEvent.click(await screen.findByRole('button', { name: 'Start WEB-12' }));
     expect(await screen.findByText(/Create it in Linear/)).toBeInTheDocument();
   });
@@ -63,22 +91,30 @@ describe('Linear on the repository page', () => {
       data: { repo: 'acme/web-frontend', projects: [{ project_id: 'p', trigger_label: 'bgagent', problem: 'ABCA cannot reach this Linear workspace. Re-run `bgagent linear setup` to re-authorize it.', issues: [] }] },
     })));
     renderRoute(REPO_PAGE);
+    await openLinearTab();
     expect(await screen.findByText('Linear issues are unavailable')).toBeInTheDocument();
   });
 
-  it('says so when Linear issues cannot load, instead of hiding the panel', async () => {
+  it('says so when Linear issues cannot load, instead of hiding them', async () => {
     server.use(http.get(`${TEST_API_BASE}/repos/:repo/linear-issues`, () => HttpResponse.json(
       { error: { code: 'INTERNAL_ERROR', message: 'Internal server error', request_id: 'r' } },
       { status: 502 },
     )));
     renderRoute(REPO_PAGE);
+    await openLinearTab();
     expect(await screen.findByText('Could not load Linear issues')).toBeInTheDocument();
   });
 
-  it('shows nothing for a repository without a Linear project', async () => {
+  it('has no Linear tab for a repository without a Linear project', async () => {
     renderRoute('/repos/acme/infra');
+    await screen.findByRole('heading', { name: 'Not started yet' });
+    expect(screen.queryByRole('tab', { name: /^Linear/ })).not.toBeInTheDocument();
+  });
+
+  it('is hidden on a deployment without the console API', async () => {
+    renderRoute(REPO_PAGE, { consoleApi: false });
     await screen.findByRole('link', { name: 'New task' });
-    expect(screen.queryByRole('table', { name: /From Linear/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Not started yet' })).not.toBeInTheDocument());
   });
 });
 

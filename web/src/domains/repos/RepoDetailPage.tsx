@@ -22,13 +22,14 @@ import ContentLayout from '@cloudscape-design/components/content-layout';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import Header from '@cloudscape-design/components/header';
 import { useNavigate, useParams } from 'react-router';
+import { InfoTip } from '../../core/components/InfoTip';
 import { QueryError } from '../../core/components/QueryError';
 import { ExternalLink } from '../../core/components/RouterLink';
 import { repoHref } from '../../core/util/format';
 import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { TaskTable } from '../tasks/components/TaskTable';
 import { useTaskList } from '../tasks/hooks';
-import { LinearIssuesPanel } from './LinearIssuesPanel';
+import { NotStartedPanel } from './NotStartedPanel';
 
 export function RepoDetailPage() {
   const { owner = '', name = '' } = useParams();
@@ -59,7 +60,7 @@ export function RepoDetailPage() {
       }
     >
       <SpaceBetween size="l">
-      <LinearIssuesPanel repo={repo} />
+      <NotStartedPanel repo={repo} tasks={items} />
       {query.isError ? (
         <QueryError error={query.error} what="tasks" />
       ) : (
@@ -67,7 +68,20 @@ export function RepoDetailPage() {
           loading={query.isPending}
           items={items}
           showRepo={false}
-          header={<Header counter={query.data ? `(${items.length}${query.hasNextPage ? '+' : ''})` : undefined}>Tasks</Header>}
+          header={(
+            <Header
+              counter={query.data ? `(${items.length}${query.hasNextPage ? '+' : ''})` : undefined}
+              description="Everything the agent has started in this repository, newest first."
+              info={(
+                <InfoTip about="Tasks">
+                  A task is one piece of work the agent took on, from an issue or from a description. Open one to follow it
+                  or see what it did.
+                </InfoTip>
+              )}
+            >
+              Tasks
+            </Header>
+          )}
           hasMore={query.hasNextPage}
           loadingMore={query.isFetchingNextPage}
           onLoadMore={() => query.fetchNextPage()}
