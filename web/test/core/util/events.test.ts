@@ -32,7 +32,10 @@ describe('summarizeEvent', () => {
   it('reads the same fields as the CLI status view', () => {
     expect(summarizeEvent(ev('agent_milestone', { milestone: 'repo_cloned' }))).toBe('repo_cloned');
     expect(summarizeEvent(ev('agent_tool_call', { tool_name: 'Bash' }))).toBe('Bash');
-    expect(summarizeEvent(ev('agent_turn', { turn: 7 }))).toBe('Turn 7');
+    expect(summarizeEvent(ev('agent_turn', { turn: 7 }))).toBe('Message 7');
+    expect(summarizeEvent(ev('agent_turn', { turn: 7, text_preview: 'Done.' }))).toBe('Said: Done.');
+    expect(summarizeEvent(ev('agent_tool_call', { tool_name: 'Bash', tool_input_preview: "{'command': 'ls'}" }))).toBe("Bash: {'command': 'ls'}");
+    expect(summarizeEvent(ev('agent_tool_result', { content_preview: 'boom', is_error: true }))).toBe('Error: boom');
     expect(summarizeEvent(ev('agent_cost_update', { cost_usd: 1.5 }))).toBe('$1.50 so far');
   });
 

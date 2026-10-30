@@ -20,7 +20,8 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useApi } from '../../app/providers/api/ApiProvider';
-import type { CreateTaskRequest, TaskStatusType } from '../../core/api/types';
+import type { ApiClient } from '../../core/api/client';
+import type { CreateTaskRequest, TaskEvent, TaskStatusType } from '../../core/api/types';
 import { isTerminal } from '../../core/util/task-health';
 
 /** Live views poll; the API has no push channel for browsers yet. */
@@ -28,6 +29,13 @@ const LIST_REFRESH_MS = 15_000;
 const ACTIVE_TASK_REFRESH_MS = 10_000;
 const PAGE_SIZE = 100;
 const EVENT_PAGE_SIZE = 100;
+/** Stop loading a task's history past this many events; a 500-turn task writes about 1,500. */
+export const MAX_TASK_EVENTS = 5_000;
+/**
+ * Each refresh asks again for the last few events it already has, so an event
+ * written a moment late (with an id just before the newest) is not skipped.
+ */
+const EVENT_REFRESH_OVERLAP = 20;
 
 const taskKeys = {
   all: ['tasks'] as const,
@@ -56,12 +64,45 @@ export function useTask(taskId: string) {
   });
 }
 
-/** Most recent events first. */
+/** A task's events, oldest first. `truncated` when the history is longer than {@link MAX_TASK_EVENTS}. */
+export interface TaskEventLog {
+  readonly events: readonly TaskEvent[];
+  readonly truncated: boolean;
+}
+
+/**
+ * Loads the whole history once, then only what is new: each refresh continues
+ * from the newest event already loaded.
+ */
+export async function loadTaskEvents(api: ApiClient, taskId: string, previous: TaskEventLog | undefined): Promise<TaskEventLog> {
+  // Past the cap the page shows what it has; refreshing would only drop the newest events.
+  if (previous?.truncated) return previous;
+  const known = previous?.events ?? [];
+  const byId = new Map(known.map((e) => [e.event_id, e]));
+  let after = known.length > 0 ? known[Math.max(0, known.length - EVENT_REFRESH_OVERLAP)].event_id : undefined;
+  // The first event itself is only re-read when the overlap reaches back to it.
+  if (after !== undefined && known.length <= EVENT_REFRESH_OVERLAP) after = undefined;
+  let nextToken: string | undefined;
+  for (;;) {
+    const page = await api.listTaskEvents(taskId, { limit: EVENT_PAGE_SIZE, ...(after ? { after } : {}), ...(nextToken ? { nextToken } : {}) });
+    for (const event of page.data) byId.set(event.event_id, event);
+    if (byId.size >= MAX_TASK_EVENTS) break;
+    if (page.data.length < EVENT_PAGE_SIZE || !page.pagination.has_more) break;
+    // `after` and `next_token` are alternatives; continue with whichever started the walk.
+    if (after) after = page.data[page.data.length - 1].event_id;
+    else if (page.pagination.next_token) nextToken = page.pagination.next_token;
+    else break;
+  }
+  const events = [...byId.values()].sort((a, b) => a.event_id.localeCompare(b.event_id));
+  return { events: events.slice(0, MAX_TASK_EVENTS), truncated: events.length >= MAX_TASK_EVENTS };
+}
+
 export function useTaskEvents(taskId: string, live: boolean) {
   const api = useApi();
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: taskKeys.events(taskId),
-    queryFn: () => api.listTaskEvents(taskId, { desc: true, limit: EVENT_PAGE_SIZE }),
+    queryFn: () => loadTaskEvents(api, taskId, queryClient.getQueryData<TaskEventLog>(taskKeys.events(taskId))),
     refetchInterval: live ? ACTIVE_TASK_REFRESH_MS : false,
   });
 }

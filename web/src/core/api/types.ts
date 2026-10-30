@@ -258,6 +258,8 @@ export interface CreateTaskRequest {
   readonly max_turns?: number;
   /** Omitted: the repository's setting, else no spending limit. */
   readonly max_budget_usd?: number;
+  /** Keep up to 4 KB of each command and its output instead of 200 characters. */
+  readonly trace?: boolean;
 }
 
 /** Mirrors `MIN_MAX_TURNS` / `MAX_MAX_TURNS` / `DEFAULT_MAX_TURNS` in cdk/src/handlers/shared/validation.ts. */

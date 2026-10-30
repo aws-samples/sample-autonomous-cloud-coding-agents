@@ -29,6 +29,13 @@ function num(meta: Record<string, unknown>, key: string): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+const ONE_LINE_LENGTH = 160;
+
+function oneLine(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > ONE_LINE_LENGTH ? `${flat.slice(0, ONE_LINE_LENGTH - 1)}…` : flat;
+}
+
 /** "agent_tool_call" -> "Agent tool call". */
 export function eventTypeLabel(eventType: string): string {
   const words = eventType.replace(/_/g, ' ');
@@ -45,11 +52,22 @@ export function summarizeEvent(event: TaskEvent): string {
   switch (event.event_type) {
     case 'agent_milestone':
       return str(meta, 'milestone') ?? '';
-    case 'agent_tool_call':
-      return str(meta, 'tool_name') ?? 'tool';
+    case 'agent_tool_call': {
+      const tool = str(meta, 'tool_name') ?? 'tool';
+      const input = str(meta, 'tool_input_preview');
+      return input ? `${tool}: ${oneLine(input)}` : tool;
+    }
+    case 'agent_tool_result': {
+      const output = str(meta, 'content_preview');
+      const prefix = meta.is_error === true ? 'Error: ' : '';
+      return output ? `${prefix}${oneLine(output)}` : `${prefix}(no output)`;
+    }
     case 'agent_turn': {
-      const turn = num(meta, 'turn');
-      return turn === null ? '' : `Turn ${turn}`;
+      // The agent numbers messages; a turn (what the turn limit counts) is usually two of them.
+      const message = num(meta, 'turn');
+      const said = str(meta, 'text_preview');
+      if (said) return `Said: ${oneLine(said)}`;
+      return message === null ? '' : `Message ${message}`;
     }
     case 'agent_cost_update': {
       const cost = num(meta, 'cost_usd');

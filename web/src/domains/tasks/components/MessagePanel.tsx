@@ -84,7 +84,7 @@ export const MessagePanel = forwardRef<TextareaProps.Ref, MessagePanelProps>(fun
   };
 
   return (
-    <Container header={<Header variant="h2" description="It reads your message before its next step.">Message the agent</Header>}>
+    <Container header={<Header variant="h2" description="It reads your message when it next pauses, usually once it thinks it is done. It cannot stop a step that is already running.">Message the agent</Header>}>
       <SpaceBetween size="s">
         {sent.length === 0 && open && <Box color="text-status-inactive">Change of plan? Tell it here, like you would a teammate.</Box>}
         {sent.map((m) => (

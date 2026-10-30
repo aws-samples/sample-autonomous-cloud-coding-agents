@@ -26,6 +26,7 @@ export interface NewTaskPrefill {
   readonly description?: string | null;
   readonly maxTurns?: number | null;
   readonly maxBudgetUsd?: number | null;
+  readonly trace?: boolean;
 }
 
 /** `/tasks/new` with the form pre-filled, e.g. from a repository page or "Try again". */
@@ -36,6 +37,7 @@ function newTaskHref(prefill: NewTaskPrefill = {}): string {
   if (prefill.description) query.set('description', prefill.description);
   if (prefill.maxTurns) query.set('max_turns', String(prefill.maxTurns));
   if (prefill.maxBudgetUsd) query.set('max_budget_usd', String(prefill.maxBudgetUsd));
+  if (prefill.trace) query.set('trace', '1');
   const qs = query.toString();
   return `/tasks/new${qs ? `?${qs}` : ''}`;
 }

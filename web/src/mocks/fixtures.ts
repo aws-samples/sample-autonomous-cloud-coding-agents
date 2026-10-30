@@ -152,6 +152,11 @@ function tool(name: string, preview: string): Record<string, unknown> {
   return { tool_name: name, tool_input_preview: preview, turn: 1 };
 }
 
+/** Metadata for an `agent_tool_result`: the first part of what the tool printed. */
+function result(name: string, output: string, isError = false): Record<string, unknown> {
+  return { tool_name: name, content_preview: output, is_error: isError, turn: 1 };
+}
+
 /** Oldest-first event history; the handlers sort as the API would. */
 function lifecycle(now: Date, taskId: string, startedAgoS: number, steps: Array<[number, string, Record<string, unknown>?]>): TaskEvent[] {
   const base: Array<[number, string, Record<string, unknown>?]> = [
@@ -329,11 +334,22 @@ export function buildFixtures(now: Date = new Date(), { history = false }: Fixtu
     [MOCK_IDS.running]: lifecycle(now, MOCK_IDS.running, 6 * MIN, [
       [5 * MIN + 50, 'agent_milestone', { milestone: 'repo_setup_complete', details: 'branch=bgagent/running1/fix-flaky-retry-test build_before=True' }],
       [5 * MIN + 45, 'agent_milestone', { milestone: 'step:implement:start' }],
+      [5 * MIN + 2, 'agent_turn', { turn: 1, text_preview: '', tool_calls_count: 0 }],
+      [5 * MIN + 1, 'agent_turn', { turn: 2, text_preview: '', tool_calls_count: 1 }],
       [5 * MIN, 'agent_tool_call', tool('Bash', "{'command': 'npm test -- PaymentClient --runInBand', 'description': 'Run the PaymentClient tests to see the failure'}")],
-      [4 * MIN, 'agent_turn', { turn: 4, text_preview: 'The retry test waits on a real timer, so it fails when the machine is slow. I will switch it to fake timers.' }],
+      [4 * MIN + 50, 'agent_tool_result', result('Bash', 'FAIL src/client/payment-client.test.ts\n  ● retries a failed charge\n    Timeout - Async callback was not invoked within 5000 ms\n\nTests: 1 failed, 11 passed, 12 total', true)],
+      [4 * MIN, 'agent_turn', { turn: 3, text_preview: 'The retry test waits on a real timer, so it fails when the machine is slow. I will switch it to fake timers.', tool_calls_count: 0 }],
+      [3 * MIN + 1, 'agent_turn', { turn: 4, text_preview: '', tool_calls_count: 1 }],
       [3 * MIN, 'agent_tool_call', tool('Read', "{'file_path': '/workspace/acme/payments-api/src/client/payment-client.test.ts'}")],
-      [90, 'agent_tool_call', tool('Edit', "{'file_path': '/workspace/acme/payments-api/src/client/payment-client.test.ts', 'old_string': 'await sleep(100)'}")],
+      [3 * MIN - 1, 'agent_tool_result', result('Read', "import { PaymentClient } from './payment-client';\n\ndescribe('PaymentClient', () => {\n  it('retries a failed charge', async () => {\n    await sleep(100);")],
+      [91, 'agent_turn', { turn: 5, text_preview: '', tool_calls_count: 1 }],
+      [90, 'agent_tool_call', tool('Edit', "{'file_path': '/workspace/acme/payments-api/src/client/payment-client.test.ts', 'old_string': 'await sleep(100)', 'new_string': 'await jest.advanceTimersByTimeAsync(100)'}")],
+      [89, 'agent_tool_result', result('Edit', 'The file /workspace/acme/payments-api/src/client/payment-client.test.ts has been updated.')],
       [60, 'agent_cost_update', { cost_usd: 0.84 }],
+      [41, 'agent_turn', { turn: 6, text_preview: '', tool_calls_count: 1 }],
+      [40, 'agent_tool_call', tool('Bash', "{'command': 'cat > scripts/stress-test.sh <<\\'EOF\\'\\n#!/usr/bin/env bash\\nset -euo pipefail\\nfor i in $(seq 1 20); do\\n  npm test -- PaymentClient --runInBand --silent || { echo \"failed on run $i\"; exit 1; }\\ndone\\nEOF\\nchmod +x scripts/stress...")],
+      [39, 'agent_tool_result', result('Bash', '')],
+      [21, 'agent_turn', { turn: 7, text_preview: '', tool_calls_count: 1 }],
       [20, 'agent_tool_call', tool('Bash', "{'command': 'for i in 1 2 3 4 5; do npm test -- PaymentClient || exit 1; done', 'description': 'Run the test five times to make sure it is stable'}")],
     ]),
     [MOCK_IDS.stale]: lifecycle(now, MOCK_IDS.stale, 24 * MIN, [

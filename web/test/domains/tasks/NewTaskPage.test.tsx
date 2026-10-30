@@ -99,14 +99,15 @@ describe('NewTaskPage', () => {
       if (request.method === 'POST') body = await request.clone().json();
     });
     renderRoute('/tasks/new?repo=acme%2Finfra&issue=7');
-    fireEvent.click(await screen.findByText('Limits (optional)'));
+    fireEvent.click(await screen.findByText('Limits and details (optional)'));
     fireEvent.change(screen.getByRole('textbox', { name: 'Turn limit' }), { target: { value: '500' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Spending limit (USD)' }), { target: { value: '$50' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: /Keep full details/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start task' }));
     await waitFor(() => expect(body).toEqual({
-      repo: 'acme/infra', workflow_ref: 'coding/new-task-v1', issue_number: 7, max_turns: 500, max_budget_usd: 50,
+      repo: 'acme/infra', workflow_ref: 'coding/new-task-v1', issue_number: 7, max_turns: 500, max_budget_usd: 50, trace: true,
     }));
-    expect(mockData.tasks.at(-1)).toMatchObject({ max_turns: 500, max_budget_usd: 50 });
+    expect(mockData.tasks.at(-1)).toMatchObject({ max_turns: 500, max_budget_usd: 50, trace: true });
     server.events.removeAllListeners();
   });
 

@@ -160,6 +160,7 @@ function createSimulatedTask(
     readonly task_description: string | null;
     readonly max_turns?: number;
     readonly max_budget_usd?: number;
+    readonly trace?: boolean;
   },
   channel: TaskDetail['channel_source'],
   now: Date,
@@ -176,6 +177,7 @@ function createSimulatedTask(
     task_description: req.task_description,
     max_turns: req.max_turns ?? null,
     max_budget_usd: req.max_budget_usd ?? null,
+    trace: req.trace === true,
     branch_name: `bgagent/${taskId}/${slug(req.task_description ?? `issue-${req.issue_number}`)}`,
     pr_number: null,
     pr_url: null,
@@ -274,7 +276,11 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
       const url = new URL(request.url);
       const limit = parseLimit(url.searchParams.get('limit'));
       if (limit === null) return error(400, 'VALIDATION_ERROR', 'limit must be an integer from 1 to 100.');
-      const ordered = [...(data.events[taskId] ?? [])].sort((a, b) => a.event_id.localeCompare(b.event_id));
+      const after = url.searchParams.get('after');
+      if (after && url.searchParams.get('desc') === '1') return error(400, 'VALIDATION_ERROR', 'after and desc cannot be combined.');
+      const ordered = [...(data.events[taskId] ?? [])]
+        .sort((a, b) => a.event_id.localeCompare(b.event_id))
+        .filter((e) => !after || e.event_id > after);
       if (url.searchParams.get('desc') === '1') ordered.reverse();
       return HttpResponse.json(page(ordered, limit, url.searchParams.get('next_token')));
     }),
@@ -312,6 +318,7 @@ export function createHandlers(baseUrl: string, data: MockData, { latencyMs = 0 
         task_description: body.task_description ?? null,
         ...(body.max_turns !== undefined && { max_turns: body.max_turns }),
         ...(body.max_budget_usd !== undefined && { max_budget_usd: body.max_budget_usd }),
+        ...(body.trace === true && { trace: true }),
       }, 'api', now);
       if (key) data.idempotency[key] = created.task_id;
       return HttpResponse.json({ data: created }, { status: 201 });

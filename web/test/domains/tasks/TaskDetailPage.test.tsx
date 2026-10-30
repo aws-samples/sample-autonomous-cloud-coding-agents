@@ -45,7 +45,45 @@ describe('TaskDetailPage', () => {
   it('keeps the raw events in the full log', async () => {
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     fireEvent.click(await screen.findByRole('button', { name: /Full log/ }));
+    fireEvent.click(await screen.findByText('Every event'));
     expect(await screen.findByText('Session started')).toBeInTheDocument();
+  });
+
+  it('lists every turn in the full log, each opening to its commands and output', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    fireEvent.click(await screen.findByRole('button', { name: /Full log/ }));
+    const turn = await screen.findByRole('button', { name: /Turn 1: Run the PaymentClient tests to see the failure/ });
+    expect(screen.getByRole('button', { name: /Turn 2: Read src\/client\/payment-client.test.ts/ })).toBeInTheDocument();
+    fireEvent.click(turn);
+    expect(await screen.findAllByText('npm test -- PaymentClient --runInBand')).not.toHaveLength(0);
+    expect(screen.getAllByText(/Timeout - Async callback was not invoked/).length).toBeGreaterThan(0);
+  });
+
+  it('counts turns the way the turn limit does', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    // Seven messages, five of which asked for tools; the fifth tool turn is still running.
+    expect(await screen.findByText('Turn 5 of 60')).toBeInTheDocument();
+  });
+
+  it('opens a step in the activity to show the command and what came back', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    const feed = await screen.findByRole('list', { name: 'Activity' });
+    const step = within(feed).getByRole('button', { name: /Run the PaymentClient tests to see the failure/ });
+    expect(step).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(step);
+    expect(step).toHaveAttribute('aria-expanded', 'true');
+    expect(within(feed).getByText('Failed')).toBeInTheDocument();
+    expect(within(feed).getByText(/Tests: 1 failed, 11 passed/)).toBeInTheDocument();
+  });
+
+  it('shows a shortened command as far as it was kept, with its line breaks', async () => {
+    renderRoute(`/tasks/${MOCK_IDS.running}`);
+    const feed = await screen.findByRole('list', { name: 'Activity' });
+    const step = within(feed).getByRole('button', { name: /Ran a command.*stress-test\.sh/ });
+    fireEvent.click(step);
+    const command = within(feed).getByText((_, el) => el?.tagName === 'PRE' && (el.textContent ?? '').startsWith("cat > scripts/stress-test.sh <<'EOF'\n#!/usr/bin/env bash"));
+    expect(command.textContent).toContain('chmod +x scripts/stress');
+    expect(within(feed).getByText(/the platform keeps the first 200 characters/)).toBeInTheDocument();
   });
 
   it('explains a failure in plain words and offers to try again', async () => {
@@ -69,6 +107,7 @@ describe('TaskDetailPage', () => {
     expect(request.getByText('Extra guidance')).toBeInTheDocument();
     expect(request.getByText('Use cursor pagination, 50 per page')).toBeInTheDocument();
     expect(request.getByText('Console or CLI')).toBeInTheDocument();
+    expect(request.getByText('Off: keeps 200 characters')).toBeInTheDocument();
   });
 
   it('says when a limit is left to the repository', async () => {

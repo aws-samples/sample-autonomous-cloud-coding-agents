@@ -19,6 +19,7 @@
 
 import Autosuggest from '@cloudscape-design/components/autosuggest';
 import Button from '@cloudscape-design/components/button';
+import Checkbox from '@cloudscape-design/components/checkbox';
 import Container from '@cloudscape-design/components/container';
 import ContentLayout from '@cloudscape-design/components/content-layout';
 import ExpandableSection from '@cloudscape-design/components/expandable-section';
@@ -110,6 +111,7 @@ export function NewTaskPage() {
   const [description, setDescription] = useState(params.get('description') ?? '');
   const [maxTurns, setMaxTurns] = useState(params.get('max_turns') ?? '');
   const [maxBudget, setMaxBudget] = useState(params.get('max_budget_usd') ?? '');
+  const [fullDetails, setFullDetails] = useState(params.get('trace') === '1');
   const [showErrors, setShowErrors] = useState(false);
 
   const knownRepos = useMemo(() => {
@@ -158,6 +160,7 @@ export function NewTaskPage() {
         // With an issue, the text box is optional extra guidance on top of the issue.
         ...(description.trim() ? { task_description: description.trim() } : {}),
         ...limitFields(maxTurns, maxBudget),
+        ...(fullDetails && { trace: true }),
       },
       { onSuccess: (task) => navigate(taskHref(task.task_id)) },
     );
@@ -268,9 +271,9 @@ export function NewTaskPage() {
 
               {mode !== 'linear' && (
                 <ExpandableSection
-                  headerText="Limits (optional)"
+                  headerText="Limits and details (optional)"
                   headerDescription="Leave empty to use the repository's settings."
-                  defaultExpanded={!!(maxTurns || maxBudget)}
+                  defaultExpanded={!!(maxTurns || maxBudget || fullDetails)}
                 >
                   <SpaceBetween size="m">
                     <FormField
@@ -287,6 +290,13 @@ export function NewTaskPage() {
                     >
                       <Input value={maxBudget} inputMode="decimal" placeholder="Repository default" onChange={({ detail }) => setMaxBudget(detail.value)} />
                     </FormField>
+                    <Checkbox
+                      checked={fullDetails}
+                      onChange={({ detail }) => setFullDetails(detail.checked)}
+                      description="Shows up to 4 KB of each command and its output on the task page, instead of the first 200 characters. Output can contain whatever the commands print, so keep it off for sensitive repositories."
+                    >
+                      Keep full details
+                    </Checkbox>
                   </SpaceBetween>
                 </ExpandableSection>
               )}

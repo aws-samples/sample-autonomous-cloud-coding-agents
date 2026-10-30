@@ -76,6 +76,8 @@ interface ListTaskEventsParams {
   readonly nextToken?: string;
   /** Newest first. */
   readonly desc?: boolean;
+  /** Only events after this event id, oldest first. */
+  readonly after?: string;
 }
 
 export interface ApiClient {
@@ -180,6 +182,7 @@ export function createApiClient({ baseUrl, consoleBaseUrl, getToken, fetchImpl }
       if (params.limit) query.set('limit', String(params.limit));
       if (params.nextToken) query.set('next_token', params.nextToken);
       if (params.desc) query.set('desc', '1');
+      if (params.after) query.set('after', params.after);
       return get<PaginatedResponse<TaskEvent>>(`/tasks/${encodeURIComponent(taskId)}/events`, query);
     },
     getMyBudget() {

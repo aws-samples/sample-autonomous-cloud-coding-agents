@@ -18,6 +18,10 @@
  */
 
 import type { TaskEvent } from '../api/types';
+import { previewField } from './tool-input';
+import { buildTurns, stepsById, type ToolStep } from './turns';
+
+export { previewField } from './tool-input';
 
 /**
  * Turns raw task events into short, plain-English lines ("Edited src/app.ts").
@@ -34,52 +38,13 @@ export interface ActivityLine {
   readonly text: string;
   /** Optional code-ish detail shown in monospace, e.g. the command that ran. */
   readonly detail?: string;
+  /** For tool calls: the full call and its output, shown when the line is opened. */
+  readonly step?: ToolStep;
 }
 
 function str(meta: Record<string, unknown>, key: string): string | null {
   const v = meta[key];
   return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
-}
-
-/**
- * Reads one field from a tool-input preview. Previews are a truncated Python-style
- * dict repr (`{'command': "ls -a", 'description': 'List files'}`), so this is a
- * best-effort match that tolerates either quote style and a cut-off tail.
- */
-export function previewField(preview: string | null, key: string): string | null {
-  if (!preview) return null;
-  for (const quote of ["'", '"']) {
-    let at = preview.indexOf(`${quote}${key}${quote}`);
-    while (at >= 0) {
-      let i = at + key.length + 2;
-      while (preview[i] === ' ') i += 1;
-      if (preview[i] === ':') {
-        i += 1;
-        while (preview[i] === ' ') i += 1;
-        const open = preview[i];
-        if (open === "'" || open === '"') return readQuoted(preview, i + 1, open);
-      }
-      at = preview.indexOf(`${quote}${key}${quote}`, at + 1);
-    }
-  }
-  return null;
-}
-
-/** Reads a quoted value starting after its opening quote; null when the preview was cut off first. */
-function readQuoted(text: string, start: number, quote: string): string | null {
-  let out = '';
-  for (let i = start; i < text.length; i += 1) {
-    const ch = text[i];
-    if (ch === '\\' && i + 1 < text.length) {
-      out += text[i + 1];
-      i += 1;
-    } else if (ch === quote) {
-      return out;
-    } else {
-      out += ch;
-    }
-  }
-  return null;
 }
 
 /** Shows a path relative to the repository when possible: `/workspace/acme/api/src/a.ts` → `src/a.ts`. */
@@ -110,7 +75,7 @@ function toolAction(meta: Record<string, unknown>, repo?: string | null): Pick<A
   switch (tool) {
     case 'Bash': {
       const description = previewField(preview, 'description');
-      const command = previewField(preview, 'command');
+      const command = previewField(preview, 'command', { partial: true });
       if (description) return { text: sentence(description), ...(command ? { detail: shorten(command, 120) } : {}) };
       return { text: 'Ran a command', ...(command ? { detail: shorten(command, 120) } : {}) };
     }
@@ -136,6 +101,11 @@ function toolAction(meta: Record<string, unknown>, repo?: string | null): Pick<A
     default:
       return { text: `Used ${tool}` };
   }
+}
+
+/** The feed's wording for one tool call, e.g. "Edited src/a.ts". */
+export function describeStep(step: ToolStep, repo?: string | null): Pick<ActivityLine, 'text' | 'detail'> {
+  return toolAction({ tool_name: step.tool, tool_input_preview: step.rawInput ?? '' }, repo) ?? { text: `Used ${step.tool}` };
 }
 
 /** Short, recognizable tail of a nudge id, matching what the agent reports back (`ids=…a1b2c3d4`). */
@@ -186,7 +156,7 @@ export function stepArea(stepName: string): StepArea {
   return 'working';
 }
 
-export function describeEvent(event: TaskEvent, repo?: string | null): ActivityLine | null {
+export function describeEvent(event: TaskEvent, repo?: string | null, step?: ToolStep): ActivityLine | null {
   const meta = event.metadata ?? {};
   const base = { id: event.event_id, at: event.timestamp };
   switch (event.event_type) {
@@ -198,7 +168,7 @@ export function describeEvent(event: TaskEvent, repo?: string | null): ActivityL
     }
     case 'agent_tool_call': {
       const line = toolAction(meta, repo);
-      return line ? { ...base, kind: 'action', ...line } : null;
+      return line ? { ...base, kind: 'action', ...line, ...(step && { step }) } : null;
     }
     case 'agent_turn': {
       const said = str(meta, 'text_preview');
@@ -221,8 +191,9 @@ export function describeEvent(event: TaskEvent, repo?: string | null): ActivityL
 
 /** Oldest first, bookkeeping removed. Accepts events in any order. */
 export function activityFeed(events: readonly TaskEvent[], repo?: string | null): ActivityLine[] {
+  const steps = stepsById(buildTurns(events));
   return [...events]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.event_id.localeCompare(b.event_id))
-    .map((e) => describeEvent(e, repo))
+    .map((e) => describeEvent(e, repo, steps.get(e.event_id)))
     .filter((line): line is ActivityLine => line !== null);
 }

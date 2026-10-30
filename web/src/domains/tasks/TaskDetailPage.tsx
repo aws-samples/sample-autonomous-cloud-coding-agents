@@ -41,6 +41,7 @@ import { activityFeed } from '../../core/util/activity';
 import { formatCost, formatDuration, formatRelativeTime, formatTimestamp, repoHref, taskTitle } from '../../core/util/format';
 import { outcomeOf, stepStates, type Outcome } from '../../core/util/progress';
 import { isTerminal } from '../../core/util/task-health';
+import { buildTurns } from '../../core/util/turns';
 import { ApprovalCard } from '../approvals/ApprovalCard';
 import { usePendingApprovals } from '../approvals/hooks';
 import { ActivityFeed } from './components/ActivityFeed';
@@ -87,6 +88,7 @@ function retryPrefill(task: TaskDetail) {
     description: task.task_description,
     maxTurns: task.max_turns,
     maxBudgetUsd: task.max_budget_usd,
+    trace: task.trace,
   };
 }
 
@@ -135,6 +137,7 @@ function TaskRequest({ task }: { task: TaskDetail }) {
             { label: 'Started from', value: SOURCE_LABEL[task.channel_source] ?? task.channel_source },
             { label: 'Turn limit', value: task.max_turns ? String(task.max_turns) : REPO_DEFAULT },
             { label: 'Spending limit', value: task.max_budget_usd ? formatCost(task.max_budget_usd) : REPO_DEFAULT },
+            { label: 'Full details', value: task.trace ? 'On: keeps up to 4 KB of each command and output' : 'Off: keeps 200 characters' },
             { label: 'Workflow', value: task.resolved_workflow ? <Box variant="code">{`${task.resolved_workflow.id}@${task.resolved_workflow.version}`}</Box> : '-' },
           ]}
         />
@@ -171,15 +174,23 @@ function TaskDetails({ task }: { task: TaskDetail }) {
   );
 }
 
-function TaskBody({ task, events, eventsLoading, moreEvents }: {
+/** "Turn 67 of 500" while it runs; the platform's own count once it has finished. */
+function turnLabel(task: TaskDetail, turnsSoFar: number): string | null {
+  const turns = isTerminal(task.status) && task.turns_completed !== null ? task.turns_completed : turnsSoFar;
+  if (turns === 0) return null;
+  return task.max_turns ? `Turn ${turns} of ${task.max_turns}` : `Turn ${turns}`;
+}
+
+function TaskBody({ task, events, eventsLoading }: {
   task: TaskDetail;
   events: readonly TaskEvent[];
   eventsLoading: boolean;
-  moreEvents: boolean;
 }) {
   const live = !isTerminal(task.status);
   const messageBox = useRef<TextareaProps.Ref>(null);
   const lines = useMemo(() => activityFeed(events, task.repo), [events, task.repo]);
+  const turnCount = useMemo(() => buildTurns(events).length, [events]);
+  const turns = turnLabel(task, turnCount);
   const states = useMemo(() => stepStates(task, events), [task, events]);
   const outcome = outcomeOf(task, events);
   const latest = lines.at(-1);
@@ -190,9 +201,11 @@ function TaskBody({ task, events, eventsLoading, moreEvents }: {
       <Container>
         <SpaceBetween size="s">
           <ProgressSteps states={states} />
-          {live && latest && (
+          {(turns || (live && latest)) && (
             <Box color="text-body-secondary">
-              Right now: {latest.text} <Box variant="span" color="text-status-inactive">· {formatRelativeTime(latest.at)}</Box>
+              {turns && <Box variant="span" fontWeight="bold">{turns}</Box>}
+              {turns && live && latest && ' · '}
+              {live && latest && <>Right now: {latest.text} <Box variant="span" color="text-status-inactive">· {formatRelativeTime(latest.at)}</Box></>}
             </Box>
           )}
         </SpaceBetween>
@@ -200,19 +213,19 @@ function TaskBody({ task, events, eventsLoading, moreEvents }: {
       <Grid gridDefinition={[{ colspan: { default: 12, m: 8 } }, { colspan: { default: 12, m: 4 } }]}>
         <Container
           header={
-            <Header variant="h2" description={moreEvents ? 'Showing the latest 100 updates.' : undefined}>
+            <Header variant="h2" description="Click a step to see what ran and what came back.">
               {live ? "What it's doing" : 'What it did'}
             </Header>
           }
         >
-          <ActivityFeed lines={lines} loading={eventsLoading} live={live} />
+          <ActivityFeed lines={lines} loading={eventsLoading} live={live} trace={task.trace} />
         </Container>
         <MessagePanel ref={messageBox} taskId={task.task_id} events={events} open={live} />
       </Grid>
       <TaskRequest task={task} />
       <TaskDetails task={task} />
-      <ExpandableSection headerText="Full log" variant="container" headerDescription="Every raw event, for troubleshooting.">
-        <EventTimeline taskId={task.task_id} live={live} />
+      <ExpandableSection headerText="Full log" variant="container" headerDescription="Every turn with its commands and output, or every raw event.">
+        <EventTimeline taskId={task.task_id} live={live} repo={task.repo} trace={task.trace} />
       </ExpandableSection>
     </SpaceBetween>
   );
@@ -224,7 +237,7 @@ export function TaskDetailPage() {
   const query = useTask(taskId);
   const task = query.data;
   const eventsQuery = useTaskEvents(taskId, !task || !isTerminal(task.status));
-  const events = eventsQuery.data?.data ?? [];
+  const events = eventsQuery.data?.events ?? [];
 
   const breadcrumbs = (
     <BreadcrumbGroup
@@ -247,7 +260,7 @@ export function TaskDetailPage() {
       ? <Alert type="info" header="Task not found">It may belong to someone else, or no longer exist.</Alert>
       : <QueryError error={query.error} what="the task" />;
   } else if (task) {
-    body = <TaskBody task={task} events={events} eventsLoading={eventsQuery.isPending} moreEvents={eventsQuery.data?.pagination.has_more ?? false} />;
+    body = <TaskBody task={task} events={events} eventsLoading={eventsQuery.isPending} />;
   }
 
   const actions = task && (
