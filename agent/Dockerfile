@@ -22,7 +22,7 @@ ARG GH_VERSION=2.93.0
 FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:df5adf538c92d86f9807e738c7c7a9b32a1ae06edf441ede141333e3fe6a2cd9 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS gh-builder
+FROM --platform=$TARGETPLATFORM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
