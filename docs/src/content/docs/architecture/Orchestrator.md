@@ -201,7 +201,7 @@ Assembles the agent's user prompt and transitions the task to `HYDRATING`. The i
 
 **PR workflows (`coding/pr-iteration-v1` / `coding/pr-review-v1`):** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
 
-Regardless of workflow, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
+Regardless of workflow, the external GitHub content (issue or PR title, body, comments, and diff) is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
 
 ### Step 4: Session start
 
