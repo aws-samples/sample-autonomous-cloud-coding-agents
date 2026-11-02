@@ -124,7 +124,7 @@ function readJson<T>(storage: Storage, key: string): T | null {
     return JSON.parse(raw) as T;
   } catch {
     storage.removeItem(key);
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- unreadable stored state is cleared and treated as absent: the user signs in again
   }
 }
 
@@ -260,7 +260,7 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
         return sessionFor(await currentTokens());
       } catch {
         env.storage.removeItem(TOKENS_KEY);
-        return null;
+        return null; // nosemgrep: ts-silent-success-masking -- a failed token refresh fails closed: tokens are cleared and the user is signed out
       }
     },
 

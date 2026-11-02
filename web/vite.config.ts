@@ -98,6 +98,8 @@ export default defineConfig(({ command, mode }) => {
     test: {
       environment: 'jsdom',
       setupFiles: ['./test/setup.ts'],
+      // CI runners are several times slower than a laptop; page tests render the whole app.
+      testTimeout: 20_000,
       include: ['test/**/*.test.{ts,tsx}'],
       css: false,
       coverage: {

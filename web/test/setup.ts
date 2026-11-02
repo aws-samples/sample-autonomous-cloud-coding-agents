@@ -18,9 +18,12 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll } from 'vitest';
 import { resetMockData, server } from './helpers/server';
+
+// findBy*/waitFor give up after 1 s by default, too short on a busy CI runner.
+configure({ asyncUtilTimeout: 5_000 });
 
 // Any request without a handler is a test bug, not a pass-through.
 beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));

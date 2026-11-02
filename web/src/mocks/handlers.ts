@@ -147,7 +147,7 @@ async function jsonBody(request: Request): Promise<Record<string, unknown> | nul
     const body: unknown = await request.json();
     return typeof body === 'object' && body !== null ? (body as Record<string, unknown>) : null;
   } catch {
-    return null;
+    return null; // nosemgrep: ts-silent-success-masking -- callers answer a null body with a 400 VALIDATION_ERROR, as the API does
   }
 }
 

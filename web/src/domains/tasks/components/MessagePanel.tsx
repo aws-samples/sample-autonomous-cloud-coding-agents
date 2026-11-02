@@ -43,7 +43,7 @@ function loadSent(taskId: string): SentMessage[] {
     const parsed: unknown = JSON.parse(sessionStorage.getItem(storageKey(taskId)) ?? '[]');
     return Array.isArray(parsed) ? (parsed as SentMessage[]) : [];
   } catch {
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- display-only memory of sent messages; unreadable storage just shows none
   }
 }
 
