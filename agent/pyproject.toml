@@ -33,14 +33,15 @@ dependencies = [
     # in cdk/package.json AND refresh the parity fixtures, in the same
     # commit. See docs/design/CEDAR_HITL_GATES.md §15.6 (decision #23) and
     # the parity-contract banner in mise.toml.
-    # EXACT pin (no ^/~). The binding version (4.8.4) is the cedarpy package
-    # release, NOT the Cedar Rust core version — it differs from the TypeScript
-    # binding @cedar-policy/cedar-wasm (pinned at 4.8.2 in cdk/package.json).
+    # EXACT pin (no ^/~). The binding version (4.12.2) is the cedarpy package
+    # release, NOT the Cedar Rust core version (cedarpy 4.12.2 builds on
+    # cedar-policy 4.12.0, the same core as @cedar-policy/cedar-wasm 4.12.0
+    # pinned in cdk/package.json).
     # Matching binding version *strings* across languages is neither necessary
     # nor sufficient for behavioral parity; parity is established empirically by
     # the contracts/cedar-parity/ golden fixtures in CI, which assert identical
     # (decision, matching_rule_ids) for both bindings on the same (policy, input).
-    "cedarpy==4.8.4", #https://github.com/k9securityio/cedar-py
+    "cedarpy==4.12.2", #https://github.com/k9securityio/cedar-py
     # Workflow-driven tasks (#248): the step runner loads YAML workflow files
     # and validates them against agent/workflows/schema/workflow.schema.json.
     # Both were previously only transitively present; declared directly so the
