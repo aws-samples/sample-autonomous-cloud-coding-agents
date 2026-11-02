@@ -24,7 +24,7 @@ One of two places, chosen automatically at setup time:
 | **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
+The vault can be configured with any selected backend. Lambda MicroVMs remains experimental; its image must include the current shared configuration contract.
 
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
@@ -36,9 +36,9 @@ A workspace that started on Secrets Manager and later moves to the vault **keeps
 
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
-#### Not available with `compute_type=lambda-microvm`
+#### Using the vault with Lambda MicroVMs
 
-The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
+Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 #### One workload identity per stack
 
@@ -70,7 +70,7 @@ This prints the exact field values to paste, with the URLs already resolved from
 
 Two fields deserve attention:
 
-- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries. On a stack with the Identity vault, a **first** run has nothing to paste yet: the URI Linear needs is the vault's callback, which `bgagent linear setup` creates, prints, and asks you to add before re-running. If setup instead falls back to Secrets Manager, it tells you to register the hosted consent page — the template lists that page separately for this reason.
 - **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
 Click **Create** and copy the **Client ID** and **Client Secret**.
@@ -127,6 +127,20 @@ bgagent linear onboard-project <project-uuid> --repo owner/repo
 ```
 
 Pass `--label <name>` to use a trigger label other than `bgagent`. Also available: `--team-id` (debug only), `--region`, `--stack-name`.
+
+`onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
+
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
+
+### Signing secrets in a multi-workspace install
+
+Every workspace must have its own webhook signing secret, read from its own Linear app. `setup` asks for it and refuses to continue without one, and records on the workspace's registry row that the secret is genuinely that workspace's.
+
+A workspace onboarded by an older release may instead be holding a copy of the first workspace's secret. Two workspaces sharing one secret means either can produce a delivery the other's signature check accepts, so **on a stack with more than one active workspace those deliveries are rejected with a 401** until each workspace has its own. Fix it per workspace with `bgagent linear update-webhook-secret <slug>`, which also records that the secret is that workspace's own — pass `--stack-name` if you are not using the default.
+
+On an existing multi-workspace stack, run `bgagent linear backfill-secret-provenance --dry-run` before deploying this change. It records ownership automatically for every workspace whose stored secret differs from the stack-wide value — which proves the secret was never copied from it, since copying is the only way a workspace ends up with someone else's — and names the ones that still need `update-webhook-secret`. `bgagent platform doctor` reports the same thing, and stays quiet on a single-workspace stack where a shared secret cannot reach another tenant.
+
+For the same reason, the stack-wide back-compat secret is only accepted on a single-workspace stack. It cannot say which workspace sent a delivery, and with two or more tenants there is no safe way to guess, so a stack-wide-signed delivery is rejected instead. Single-workspace installs are unaffected: every check here compares against the number of active workspaces first, and with one tenant none of them changes behaviour.
 
 ### 6. Test
 

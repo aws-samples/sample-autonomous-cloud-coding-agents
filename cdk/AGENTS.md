@@ -91,6 +91,7 @@ beforeAll(() => {
 
 ## Common mistakes
 
+- **API Gateway Lambda permission growth** — Pass `allowTestInvoke: false` on every new `LambdaIntegration` and keep `scopePermissionToMethod` at its default `true`. `test/synthesis/deployment.test.ts` checks permissions and template budgets across the full deployment profile product, including nested stacks.
 - **Lambda bundling in unit tests** — `Template.fromStack()` synths the stack but bundling is disabled via `CDK_CONTEXT_JSON`. Do not re-enable globally; opt in per-test with `postCliContext` only when asserting on bundle output. Details: `test/setup/disable-bundling.ts`, #366.
 - **Cedar engine drift** — `@cedar-policy/cedar-wasm` and `cedarpy` share a Rust core. Bump both + parity fixtures in one commit. See `docs/design/CEDAR_HITL_GATES.md` §15.6 and `mise.toml` parity banner.
 - **Types out of sync** — `cdk/src/handlers/shared/types.ts` and `cli/src/types.ts` must match; CI runs `check-types-sync`.

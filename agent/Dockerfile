@@ -73,10 +73,13 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
-# Pinned 2.1.191 to match the CLI bundled by claude-agent-sdk 0.2.110 (see
+# Pinned 2.1.301 to match the CLI bundled by claude-agent-sdk 0.2.168 (see
 # agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
-# protocol. This version also has the awsCredentialExport behavior #215 needs:
-# returned creds are cached until 5 min before the JSON's `Expiration`, so an
+# protocol. The Claude 5.5 models the platform defaults to (#953) are rejected
+# by CLI builds older than 2.1.280 ("does not support this model"), so this pin
+# is also what makes the default model invocable at all. It also keeps the
+# awsCredentialExport behavior #215 needs (present since 2.1.176): returned
+# creds are cached until 5 min before the JSON's `Expiration`, so an
 # 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
 # only refreshed hourly on a timer, racing the role-chaining cap.
 # claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
@@ -87,7 +90,7 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # after the install so the native binary is placed at build time, and hard-verify
 # it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.191 && \
+    npm install -g @anthropic-ai/claude-code@2.1.301 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \

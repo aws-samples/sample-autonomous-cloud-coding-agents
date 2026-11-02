@@ -1,0 +1,371 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { BlueprintDefinition } from '../../src/blueprints/definitions';
+import { resolveNetworkReservedAzs } from '../../src/constructs/agent-vpc';
+import { AGENTCORE_AZS_CONTEXT_KEY } from '../../src/constructs/agentcore-azs';
+import { buildApp } from '../../src/main';
+import { NetworkTopology, resolveNetworkTopology } from '../../src/stacks/network';
+import { AssemblyCensus, inspectAssembly } from '../../src/synthesis/assembly';
+import { FIXTURE, STRUCTURAL_CONTEXT } from '../../src/synthesis/profiles';
+
+const APP_NAME = 'backgroundagent-dev';
+const NETWORK_NAME = `${APP_NAME}-network`;
+const BLUEPRINTS: readonly BlueprintDefinition[] = [
+  { id: 'AgentPluginsBlueprint', repo: 'example/plugins', networking: { egressAllowlist: ['packages.example.com'] } },
+  {
+    id: 'ForkBlueprint',
+    repo: 'example/fork',
+    networking: { egressAllowlist: ['packages.example.com', '*.internal.example.org'] },
+  },
+];
+
+type TemplateJson = Record<string, any>;
+interface Deployment {
+  readonly directory: string;
+  readonly census: AssemblyCensus;
+  readonly application: TemplateJson;
+  readonly network?: TemplateJson;
+}
+
+function withoutMetadata(resource: TemplateJson): TemplateJson {
+  const { Metadata: _metadata, ...definition } = resource;
+  return definition;
+}
+
+function isNetworkResource(id: string): boolean {
+  return id.startsWith('AgentVpc') || id.startsWith('DnsFirewall');
+}
+
+function importedExports(template: TemplateJson): Set<string> {
+  const imports = new Set<string>();
+  function visit(value: any): void {
+    if (!value || typeof value !== 'object') return;
+    if (typeof value['Fn::ImportValue'] === 'string') imports.add(value['Fn::ImportValue']);
+    for (const child of Object.values(value)) visit(child);
+  }
+  visit(template);
+  return imports;
+}
+
+describe('network topology selection', () => {
+  test('defaults to the existing inline ownership', () => {
+    expect(resolveNetworkTopology(undefined)).toBe('inline');
+    expect(resolveNetworkTopology('inline')).toBe('inline');
+    expect(resolveNetworkTopology('split')).toBe('split');
+  });
+
+  test.each([[undefined, 0], [0, 0], ['0', 0], [1, 1], ['1', 1], [6, 6]])(
+    'accepts reserved AZ slots %p as %p',
+    (value, expected) => { expect(resolveNetworkReservedAzs(value)).toBe(expected); },
+  );
+
+  test.each(['', ' ', 'typo', true, false, null, -1, 0.5, 7, Infinity])(
+    'rejects invalid reserved AZ slots %p',
+    value => { expect(() => resolveNetworkReservedAzs(value)).toThrow('networkReservedAzs must be an integer from 0 to 6'); },
+  );
+
+  test.each(['', 'typo', true, false, null, 1])('rejects invalid topology %p before an AWS lookup', async value => {
+    const describeAzs = jest.fn();
+    const resolveCallerAccount = jest.fn();
+    await expect(buildApp({
+      appProps: { context: { networkTopology: value } }, describeAzs, resolveCallerAccount,
+    })).rejects.toThrow('networkTopology must be inline or split');
+    expect(describeAzs).not.toHaveBeenCalled();
+    expect(resolveCallerAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extraction', compute => {
+  const directories: string[] = [];
+  let inline: Deployment;
+  let split: Deployment;
+  let threeZones: Deployment;
+  let reducedZones: Deployment;
+  let network: TemplateJson;
+
+  async function synthesize(topology: NetworkTopology, zones?: readonly string[], reservedAzs = '0'): Promise<Deployment> {
+    const directory = mkdtempSync(path.join(tmpdir(), 'network-extraction-'));
+    directories.push(directory);
+    const app = await buildApp({
+      account: FIXTURE.account,
+      region: FIXTURE.region,
+      describeAzs: async () => [...FIXTURE.zones],
+      resolveCallerAccount: async () => FIXTURE.account,
+      blueprints: BLUEPRINTS,
+      appProps: {
+        outdir: directory,
+        autoSynth: false,
+        context: {
+          'stackName': APP_NAME,
+          'networkTopology': topology,
+          'networkReservedAzs': reservedAzs,
+          'compute_types': compute,
+          'bedrockGeoRegion': 'global',
+          'enableToolGateway': true,
+          'enableAgentRegistry': true,
+          'enableLinearIdentityVault': true,
+          'github:sha': 'fixture-revision',
+          ...(zones ? { [AGENTCORE_AZS_CONTEXT_KEY]: zones } : {}),
+          ...(compute === 'lambda-microvm' ? {
+            microvm_image_identifier: 'arn:aws:lambda:us-east-1:123456789012:microvm-image:fixture-image',
+            microvm_image_version: '1',
+          } : {}),
+        },
+        postCliContext: STRUCTURAL_CONTEXT,
+      },
+    });
+    const assembly = app.synth();
+    return {
+      directory,
+      census: inspectAssembly(directory),
+      application: assembly.getStackByName(APP_NAME).template,
+      ...(topology === 'split' ? { network: assembly.getStackByName(NETWORK_NAME).template } : {}),
+    };
+  }
+
+  beforeAll(async () => {
+    // Blueprint timestamps are intentionally unchanged from main. Fix the clock
+    // only for this comparison so it isolates the network ownership change.
+    jest.useFakeTimers({ now: new Date('2026-10-02T00:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
+    inline = await synthesize('inline');
+    split = await synthesize('split');
+    threeZones = await synthesize('split', FIXTURE.zones.map(zone => zone.zoneName));
+    reducedZones = await synthesize('split', FIXTURE.zones.slice(0, 2).map(zone => zone.zoneName), '1');
+    network = split.network!;
+  }, 60_000);
+
+  afterAll(() => {
+    jest.useRealTimers();
+    for (const directory of directories) rmSync(directory, { recursive: true, force: true });
+  });
+
+  test('synthesizes two stacks with only application-to-network dependencies and no nag errors', () => {
+    expect(inline.census.stackDependencies).toEqual({ [`${APP_NAME}.template.json`]: [] });
+    expect(split.census.stackDependencies).toEqual({
+      [`${APP_NAME}.template.json`]: [`${NETWORK_NAME}.template.json`],
+      [`${NETWORK_NAME}.template.json`]: [],
+    });
+    expect(inline.census.errors).toEqual([]);
+    expect(split.census.errors).toEqual([]);
+    expect(JSON.stringify(network)).not.toContain('Fn::ImportValue');
+    expect(JSON.stringify(split.application)).toContain('Fn::ImportValue');
+    expect(Object.keys(split.application.Resources).length).toBeLessThan(Object.keys(inline.application.Resources).length - 45);
+  });
+
+  test('exports the complete network interface even when this backend leaves a value unused', () => {
+    const resources = Object.entries(network.Resources as Record<string, TemplateJson>);
+    const vpc = resources.find(([, resource]) => resource.Type === 'AWS::EC2::VPC')!;
+    const runtimeGroup = resources.find(([, resource]) => resource.Type === 'AWS::EC2::SecurityGroup'
+      && resource.Properties.GroupDescription === 'AgentCore Runtime - egress TCP 443 only')!;
+    const privateSubnets = resources.filter(([, resource]) => resource.Type === 'AWS::EC2::Subnet'
+      && resource.Properties.Tags.some((tag: { Key: string; Value: string }) => tag.Key === 'aws-cdk:subnet-type' && tag.Value === 'Private'));
+    expect(privateSubnets).toHaveLength(2);
+    const expected = [
+      { Ref: vpc[0] },
+      { 'Fn::GetAtt': [runtimeGroup[0], 'GroupId'] },
+      ...privateSubnets.map(([id]) => ({ Ref: id })),
+    ];
+    const outputs = Object.values(network.Outputs as Record<string, TemplateJson>);
+    expect(outputs.map(output => JSON.stringify(output.Value)).sort()).toEqual(expected.map(value => JSON.stringify(value)).sort());
+    for (const output of outputs) expect(output.Export.Name).toMatch(`${NETWORK_NAME}:ExportsOutput`);
+  });
+
+  test('can release the third subnet export by deploying only the two-zone application first', () => {
+    const oldExports = new Map(Object.values(threeZones.network!.Outputs as Record<string, TemplateJson>)
+      .map(output => [output.Export.Name, output.Value]));
+    const reducedNetwork = reducedZones.network!;
+    const newExports = new Map(Object.values(reducedNetwork.Outputs as Record<string, TemplateJson>)
+      .map(output => [output.Export.Name, output.Value]));
+    const removed = [...oldExports.keys()].filter(name => !newExports.has(name));
+    expect(removed).toHaveLength(1);
+    expect(importedExports(threeZones.application).has(removed[0])).toBe(true);
+
+    // Stage one: every import in the target application still resolves in the
+    // deployed three-zone network. --exclusively keeps that network unchanged.
+    const targetImports = importedExports(reducedZones.application);
+    expect(targetImports.has(removed[0])).toBe(false);
+    for (const name of targetImports) expect(oldExports.get(name)).toEqual(newExports.get(name));
+
+    // Stage two: the network can drop the unused export and subnet. Remaining
+    // exported resources keep their identities and service properties.
+    const removedSubnetId = oldExports.get(removed[0]).Ref;
+    expect(threeZones.network!.Resources[removedSubnetId].Type).toBe('AWS::EC2::Subnet');
+    expect(reducedNetwork.Resources).not.toHaveProperty(removedSubnetId);
+    for (const [name, reference] of newExports) {
+      expect(oldExports.get(name)).toEqual(reference);
+      const resourceId = reference.Ref ?? reference['Fn::GetAtt'][0];
+      expect(withoutMetadata(reducedNetwork.Resources[resourceId]))
+        .toEqual(withoutMetadata(threeZones.network!.Resources[resourceId]));
+    }
+    const subnets = Object.entries(reducedNetwork.Resources as Record<string, TemplateJson>)
+      .filter(([, resource]) => resource.Type === 'AWS::EC2::Subnet');
+    expect(subnets).toHaveLength(4);
+    for (const [id, subnet] of subnets) {
+      expect(subnet.Properties).toEqual(threeZones.network!.Resources[id].Properties);
+    }
+    expect(reducedZones.census.errors).toEqual([]);
+  });
+
+  test('moves the VPC and DNS definitions with the same logical IDs and service properties', () => {
+    const moved = Object.entries(inline.application.Resources).filter(([id]) => isNetworkResource(id));
+    expect(moved.length).toBeGreaterThan(45);
+    for (const [id, original] of moved) {
+      expect(split.application.Resources).not.toHaveProperty(id);
+      expect({ [id]: withoutMetadata(network.Resources[id]) }).toEqual({ [id]: withoutMetadata(original as TemplateJson) });
+    }
+  });
+
+  test('preserves every application data resource and its lifecycle policies', () => {
+    const data = Object.entries(inline.application.Resources as Record<string, TemplateJson>)
+      .filter(([id, resource]) => ['AWS::DynamoDB::Table', 'AWS::S3::Bucket', 'AWS::SecretsManager::Secret',
+        'AWS::Cognito::UserPool', 'AWS::KMS::Key', 'AWS::Logs::LogGroup', 'AWS::BedrockAgentCore::Memory']
+        .includes(resource.Type) && !isNetworkResource(id));
+    expect(data.length).toBeGreaterThan(20);
+    for (const [id, original] of data) {
+      expect({ [id]: split.application.Resources[id] }).toEqual({ [id]: original });
+    }
+    const logs = Object.values(network.Resources as Record<string, TemplateJson>).filter(resource => resource.Type === 'AWS::Logs::LogGroup');
+    expect(logs).toHaveLength(2);
+    for (const resource of logs) expect(resource).toMatchObject({ DeletionPolicy: 'Delete', UpdateReplacePolicy: 'Delete' });
+  });
+
+  test('keeps shared API routes, CORS, authorizers, permissions and deployment dependencies in the application', () => {
+    const apiResources = (template: TemplateJson): TemplateJson => Object.fromEntries(
+      Object.entries(template.Resources as Record<string, TemplateJson>)
+        .filter(([, resource]) => resource.Type.startsWith('AWS::ApiGateway::') || resource.Type === 'AWS::Lambda::Permission'),
+    );
+    expect(apiResources(split.application)).toEqual(apiResources(inline.application));
+    expect(apiResources(network)).toEqual({});
+    expect(split.application.Outputs).toEqual(inline.application.Outputs);
+  });
+
+  test('resolves network imports to the same references without changing application service properties', () => {
+    const exports = new Map(Object.values(network.Outputs as Record<string, TemplateJson>)
+      .map(output => [JSON.stringify(output.Export.Name), output.Value]));
+    const imports = new Set<string>();
+    const versionOf = (template: TemplateJson): [string, TemplateJson] => {
+      const versions = Object.entries(template.Resources as Record<string, TemplateJson>)
+        .filter(([id, resource]) => resource.Type === 'AWS::Lambda::Version' && id.startsWith('TaskOrchestratorOrchestratorFnCurrentVersion'));
+      expect(versions).toHaveLength(1);
+      return versions[0];
+    };
+    const [beforeVersionId, beforeVersion] = versionOf(inline.application);
+    const [afterVersionId, afterVersion] = versionOf(split.application);
+    expect(withoutMetadata(afterVersion)).toEqual(withoutMetadata(beforeVersion));
+    // The existing alpha Guardrail hashes unresolved tokens, so its version ID
+    // (and the orchestrator version consuming it) can change between syntheses.
+    // Compare their definitions before mapping only these immutable version IDs.
+    // The census stability check reports the real churn without normalization.
+    const guardrailVersion = (template: TemplateJson): [string, TemplateJson] => {
+      const versions = Object.entries(template.Resources as Record<string, TemplateJson>)
+        .filter(([, resource]) => resource.Type === 'AWS::Bedrock::GuardrailVersion');
+      expect(versions).toHaveLength(1);
+      return versions[0];
+    };
+    const [beforeGuardrailId, beforeGuardrail] = guardrailVersion(inline.application);
+    const [afterGuardrailId, afterGuardrail] = guardrailVersion(split.application);
+    expect(withoutMetadata(afterGuardrail)).toEqual(withoutMetadata(beforeGuardrail));
+    const versionIds = new Map([[afterVersionId, beforeVersionId], [afterGuardrailId, beforeGuardrailId]]);
+    const originalId = (id: string): string => versionIds.get(id) ?? id;
+    function normalize(value: any): any {
+      if (Array.isArray(value)) return value.map(normalize);
+      if (value && typeof value === 'object') {
+        if (Object.hasOwn(value, 'Fn::ImportValue')) {
+          const name = JSON.stringify(value['Fn::ImportValue']);
+          expect(exports.has(name)).toBe(true);
+          imports.add(name);
+          return exports.get(name);
+        }
+        return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'Metadata')
+          .map(([key, child]) => [key, normalize(child)]));
+      }
+      return typeof value === 'string' ? originalId(value) : value;
+    }
+    for (const [id, resource] of Object.entries(split.application.Resources as Record<string, TemplateJson>)
+      .filter(([, value]) => value.Type !== 'AWS::CDK::Metadata')) {
+      const key = originalId(id);
+      expect({ [key]: normalize(resource) }).toEqual({ [key]: normalize(inline.application.Resources[key]) });
+    }
+    expect(imports.size).toBeGreaterThan(0);
+    expect(imports.size).toBeLessThanOrEqual(exports.size);
+    const applicationIds = new Set(Object.keys(split.application.Resources).map(originalId));
+    for (const [id, resource] of Object.entries(inline.application.Resources as Record<string, TemplateJson>)
+      .filter(([key]) => !applicationIds.has(key))) {
+      expect({ [id]: withoutMetadata(network.Resources[id]) }).toEqual({ [id]: withoutMetadata(resource) });
+    }
+  });
+
+  test('feeds the same Blueprint domain configuration into DNS and repository provisioning', () => {
+    const additional = Object.values(network.Resources as Record<string, TemplateJson>)
+      .find(resource => resource.Type === 'AWS::Route53Resolver::FirewallDomainList' && resource.Properties.Name === 'blueprint-additional');
+    expect(additional!.Properties.Domains).toEqual(['packages.example.com', '*.internal.example.org']);
+    const repositories = Object.entries(split.application.Resources as Record<string, TemplateJson>)
+      .filter(([id, resource]) => resource.Type === 'Custom::AWS'
+        && BLUEPRINTS.some(blueprint => id.startsWith(`${blueprint.id}RepoConfigCR`)))
+      .map(([, resource]) => {
+        const create = resource.Properties.Create;
+        const serialized = typeof create === 'string' ? create
+          : create['Fn::Join'][1].map((part: unknown) => typeof part === 'string' ? part : 'table-name').join('');
+        return JSON.parse(serialized).parameters.Item;
+      });
+    expect(repositories).toHaveLength(2);
+    for (const blueprint of BLUEPRINTS) {
+      const row = repositories.find(item => item.repo.S === blueprint.repo)!;
+      expect(row.egress_allowlist).toEqual({
+        L: blueprint.networking!.egressAllowlist!.map(S => ({ S })),
+      });
+    }
+  });
+
+  test('keeps deployment attribution on both stacks without tagging replacement-sensitive DNS logging resources', () => {
+    for (const template of [split.application, network]) {
+      const functions = Object.entries(template.Resources as Record<string, TemplateJson>)
+        .filter(([, resource]) => resource.Type === 'AWS::Lambda::Function');
+      for (const [id, fn] of functions) {
+        expect(fn.Properties.Environment?.Variables?.AWS_SDK_UA_APP_ID).toBe(`uksb-wt64nei4u6#${APP_NAME}`);
+        // Core CDK providers use generic CfnResource without a TagManager;
+        // require parity with their existing tags as well as attributed SDK calls.
+        expect(fn.Properties.Tags).toEqual(inline.application.Resources[id].Properties.Tags);
+      }
+      const tagged = functions.filter(([, fn]) => fn.Properties.Tags);
+      expect(tagged.length).toBeGreaterThan(0);
+      for (const [, fn] of tagged) {
+        expect(fn.Properties.Tags).toEqual(expect.arrayContaining([
+          { Key: 'github:sha', Value: 'fixture-revision' },
+          { Key: 'compute_type', Value: compute },
+        ]));
+      }
+    }
+    for (const resource of Object.values(network.Resources as Record<string, TemplateJson>)
+      .filter(candidate => ['AWS::Route53Resolver::ResolverQueryLoggingConfig',
+        'AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation'].includes(candidate.Type))) {
+      expect(resource.Properties).not.toHaveProperty('Tags');
+    }
+  });
+
+  test('emits compact JSON for both top-level stacks and every nested template', () => {
+    for (const template of split.census.templates) {
+      expect(readFileSync(path.join(split.directory, template.file), 'utf8')).not.toContain('\n  ');
+    }
+  });
+});

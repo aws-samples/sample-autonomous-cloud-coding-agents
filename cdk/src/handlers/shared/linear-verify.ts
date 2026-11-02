@@ -19,6 +19,7 @@
 
 import * as crypto from 'crypto';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { isUsableHmacSecret } from './hmac-secret';
 import { getOauthSecretStrict, getRegistryRowStrict } from './linear-oauth-resolver';
 import { logger } from './logger';
@@ -34,6 +35,72 @@ const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
 
 /** Maximum age of a Linear webhookTimestamp (ms) before it is rejected (replay protection). */
 export const MAX_WEBHOOK_TIMESTAMP_AGE_MS = 60 * 1000;
+
+/**
+ * Cached count of active workspaces, capped at 2.
+ *
+ * Capped because nothing needs the true total — every decision that reads it only asks
+ * "is there more than one tenant on this stack", so the Scan can stop at the second hit.
+ *
+ * Cached separately from `secretCache` because it is not keyed by anything: it is one
+ * table-wide fact, re-derived by a Scan that would otherwise run on every delivery.
+ * A short TTL is the tradeoff — onboarding a second workspace takes up to this long to
+ * start being enforced, which is acceptable because the CLI refuses to create the
+ * shared-secret state in the first place.
+ */
+let activeWorkspaceCountCache: { count: number; expiresAt: number } | undefined;
+
+/**
+ * How many active Linear workspaces this stack has, saturating at 2.
+ *
+ * The distinction that matters is one tenant versus more than one. With a single
+ * workspace a secret that is not bound to a tenant still identifies the only tenant
+ * there is, so neither the stack-wide fallback nor a shared secret can cross a
+ * boundary. With two or more, both can.
+ *
+ * Returns 1 when the registry cannot be read, and says so in the log. That is the
+ * permissive answer, chosen deliberately: a DynamoDB throttle must not start rejecting
+ * every delivery on a healthy single-workspace install. The callers that act on this
+ * are hardening an already-verified signature, not standing in for one.
+ */
+export async function countActiveLinearWorkspaces(registryTableName: string | undefined): Promise<number> {
+  if (!registryTableName) return 1;
+  const now = Date.now();
+  if (activeWorkspaceCountCache && activeWorkspaceCountCache.expiresAt > now) {
+    return activeWorkspaceCountCache.count;
+  }
+
+  try {
+    let count = 0;
+    let lastKey: Record<string, unknown> | undefined;
+    do {
+      const page = await ddb.send(new ScanCommand({
+        TableName: registryTableName,
+        ProjectionExpression: 'linear_workspace_id, #s',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExclusiveStartKey: lastKey,
+      }));
+      for (const item of page.Items ?? []) {
+        if (item.status === 'active') count += 1;
+      }
+      lastKey = page.LastEvaluatedKey;
+      if (count > 1) break;
+    } while (lastKey);
+
+    activeWorkspaceCountCache = { count, expiresAt: now + CACHE_TTL_MS };
+    return count;
+  } catch (err) {
+    logger.warn('Could not count active Linear workspaces — assuming a single-workspace stack', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return 1;
+  }
+}
+
+/** Drop the cached workspace count. Exported for tests. */
+export function _resetActiveWorkspaceCountCache(): void {
+  activeWorkspaceCountCache = undefined;
+}
 
 /**
  * Fetch a secret from Secrets Manager with in-memory caching.
@@ -220,7 +287,7 @@ export async function verifyLinearRequestForWorkspace(
   linearWorkspaceId: string,
   signature: string,
   body: string,
-): Promise<'verified' | 'mismatch' | 'revoked' | 'no-per-workspace-secret'> {
+): Promise<'verified' | 'mismatch' | 'revoked' | 'no-per-workspace-secret' | 'shared-secret'> {
   const row = await getRegistryRowStrict(ddb, registryTableName, linearWorkspaceId);
   if (!row) {
     return 'no-per-workspace-secret';
@@ -232,7 +299,19 @@ export async function verifyLinearRequestForWorkspace(
   if (!stored || !stored.webhook_signing_secret) {
     return 'no-per-workspace-secret';
   }
-  return verifyLinearSignature(stored.webhook_signing_secret, signature, body)
-    ? 'verified'
-    : 'mismatch';
+  if (!verifyLinearSignature(stored.webhook_signing_secret, signature, body)) {
+    return 'mismatch';
+  }
+
+  // The signature matched — but matching a secret this workspace does not exclusively
+  // hold proves only that the sender knows a secret SOME workspace on this stack holds.
+  // A workspace onboarded by an older release can be carrying a copy of the first
+  // workspace's secret, and the routing values in the body are read from whichever
+  // workspace the sender names. Checked only when another tenant exists to impersonate,
+  // so a single-workspace install — where the same secret cannot cross a boundary and
+  // where an unrecorded provenance is the normal state — is untouched.
+  if (row.webhook_secret_owned !== true && await countActiveLinearWorkspaces(registryTableName) > 1) {
+    return 'shared-secret';
+  }
+  return 'verified';
 }

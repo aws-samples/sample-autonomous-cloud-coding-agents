@@ -33,6 +33,11 @@ export interface LinearIssueTask {
   readonly pr_url?: string;
   readonly pr_number?: number;
   readonly status?: string;
+  /**
+   * The Linear workspace the task was created for, from its `channel_metadata`.
+   * Callers acting on a webhook match this against the delivery's workspace.
+   */
+  readonly linear_workspace_id?: string;
 }
 
 /**
@@ -91,6 +96,9 @@ export async function lookupTaskByLinearIssue(
         ...(item.pr_url !== undefined && { pr_url: item.pr_url as string }),
         ...(item.pr_number !== undefined && { pr_number: item.pr_number as number }),
         ...(item.status !== undefined && { status: item.status as string }),
+        ...(typeof item.channel_metadata?.linear_workspace_id === 'string' && {
+          linear_workspace_id: item.channel_metadata.linear_workspace_id as string,
+        }),
       },
     };
   } catch (err) {

@@ -330,7 +330,7 @@ Two networking facts the construct has to encode, both established live:
 
 `lambda:CreateMicrovmAuthToken` is granted to no role in P1–P3 (no JWE consumer exists; see sub-decision 3).
 
-**Cost attribution.** `cdk/src/main.ts` currently tags the whole stack with a single `compute_type` context value (default `agentcore`) — already imprecise with two backends, wrong with three. P1 must add backend-identifying cost-allocation tags on the MicroVM-specific resources (images, payload/artifact bucket wiring, log groups) and revisit the stack-level tag semantics (e.g. a `compute_types` list), keeping attribution consistent with [#645](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/645)'s cost/attribution acceptance criterion.
+**Cost attribution update (#852).** The `compute_types` context selects an ordered backend list; legacy `compute_type` retains its additive meaning. The stack-level `compute_type` tag records all deployed names separated by `+` (for example, `agentcore+lambda-microvm`), which is valid in AWS tag values. MicroVM-specific resources retain their `abca:compute-backend` tags. Shared optional services remain independent of the compute selection. An unchanged legacy context preserves AgentCore; deliberate backend removal requires a drained transition; see [Compute](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend).
 
 - Where a deployment enables the `lambda-microvm` backend, MicroVM-specific resources shall carry backend-identifying cost-allocation tags.
 

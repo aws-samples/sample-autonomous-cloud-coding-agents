@@ -44,7 +44,7 @@ jest.mock('@aws-sdk/client-cloudformation', () => {
 });
 jest.mock('../../src/linear-vault');
 
-const lookupVaultCallback = jest.mocked(linearVault.lookupLinearVaultCallbackUrl);
+const lookupVaultCallback = jest.mocked(linearVault.probeLinearVaultCallbackUrl);
 
 const HOSTED = 'https://d111111abcdef8.cloudfront.net/';
 const VAULT = 'https://bedrock-agentcore.us-east-1.amazonaws.com/identities/oauth2/callback/f8804c1b';
@@ -67,14 +67,14 @@ beforeEach(() => {
   jest.restoreAllMocks();
   cfnSend.mockReset();
   lookupVaultCallback.mockReset();
-  lookupVaultCallback.mockResolvedValue(null);
+  lookupVaultCallback.mockResolvedValue({ kind: 'absent' });
   jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-east-1' } as never);
 });
 
 describe('app-template callback discovery', () => {
   test('resolves BOTH URLs so the operator has to look up neither', async () => {
     stackServingConsentUrl();
-    lookupVaultCallback.mockResolvedValue(VAULT);
+    lookupVaultCallback.mockResolvedValue({ kind: 'found', callbackUrl: VAULT });
     await expect(resolveTemplateCallbackUrls({ stackName: 'backgroundagent-dev', slug: 'acme' }))
       .resolves.toEqual({ hostedConsentUrl: HOSTED, vaultCallbackUrl: VAULT });
   });
@@ -138,14 +138,31 @@ describe('app-template callback discovery', () => {
     await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' })).resolves.toEqual({});
   });
 
-  test('an AUTH failure also degrades to no URL — a template must render without credentials', async () => {
-    // getStackOutput deliberately rethrows non-"does not exist" errors; this command
-    // is the one caller that must not propagate them, or `app-template` would be
-    // unusable before `aws configure`.
+  test('an AUTH failure renders, but SAYS it could not read the stack', async () => {
+    // getStackOutput rethrows non-"does not exist" errors. This command must not
+    // propagate them — `app-template` has to work before `aws configure` — but it used to
+    // swallow them silently, which rendered a VAULT stack as a no-vault one (#914 review).
     cfnSend.mockRejectedValue(Object.assign(new Error('Unable to locate credentials'), {
       name: 'CredentialsProviderError',
     }));
-    await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' })).resolves.toEqual({});
+    const out = await resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' });
+    expect(out.hostedConsentUrl).toBeUndefined();
+    expect(out.lookupWarning).toMatch(/Could not read stack st in us-east-1 \(CredentialsProviderError\)/);
+  });
+
+  test('an UNREADABLE provider is a warning, not "no provider" — leave-empty would be wrong', async () => {
+    stackServingConsentUrl();
+    lookupVaultCallback.mockResolvedValue({ kind: 'unreadable', errorName: 'AccessDeniedException' });
+    const out = await resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' });
+    expect(out.vaultCallbackUrl).toBeUndefined();
+    expect(out.lookupWarning).toMatch(/vault provider for 'acme' \(AccessDeniedException\)/);
+  });
+
+  test('a genuinely absent provider raises no warning — that is the ordinary first run', async () => {
+    stackServingConsentUrl();
+    lookupVaultCallback.mockResolvedValue({ kind: 'absent' });
+    const out = await resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' });
+    expect(out.lookupWarning).toBeUndefined();
   });
 
   test('a stack without the vault output yields no hosted URL (flag-off deploy)', async () => {
@@ -163,14 +180,14 @@ describe('app-template callback discovery', () => {
   test('a not-yet-created provider yields no vault URL while still returning the hosted one', async () => {
     // The ordinary first run: the hosted page exists, the provider does not.
     stackServingConsentUrl();
-    lookupVaultCallback.mockResolvedValue(null);
+    lookupVaultCallback.mockResolvedValue({ kind: 'absent' });
     await expect(resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' }))
       .resolves.toEqual({ hostedConsentUrl: HOSTED });
   });
 
   test('looks the provider up by the slug it was given', async () => {
     stackWithoutConsentUrl();
-    lookupVaultCallback.mockResolvedValue(VAULT);
+    lookupVaultCallback.mockResolvedValue({ kind: 'found', callbackUrl: VAULT });
     await resolveTemplateCallbackUrls({ stackName: 'st', slug: 'acme' });
     expect(lookupVaultCallback).toHaveBeenCalledWith({ region: 'us-east-1', workspaceSlug: 'acme' });
   });
