@@ -72,6 +72,7 @@
     "jest-junit": "^17",
     "ts-jest": "^29.4.11",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   },
   "resolutions": {},
