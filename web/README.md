@@ -31,7 +31,7 @@ reloads on every save and talks to your deployed API.
 
 ```bash
 # once: allow sign-in redirects to http://localhost:5173 on the console's app client
-bash scripts/abca-onboard.sh --local-dev        # or: cdk deploy ... -c operatorConsoleDevOrigins=http://localhost:5173
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true -c operatorConsoleDevOrigins=http://localhost:5173
 
 export AWS_PROFILE=<your profile> AWS_REGION=<region>
 MISE_EXPERIMENTAL=1 mise //web:dev:live
