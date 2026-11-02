@@ -16,7 +16,8 @@
 #   --repo OWNER/REPO   GitHub repo the agent may work on (default: ask; suggests a fork of awslabs/agent-plugins)
 #   --email EMAIL       Cognito user to create for yourself (default: ask)
 #   --container-engine finch|docker   builds the agent image (default: Finch if installed, else Docker)
-#   --no-console        skip the operator web console stack (<stack-name>-console)
+#   --no-console        skip the operator web console stack (<stack-name>-console); it is
+#                       skipped anyway in checkouts that do not include it
 #   --full-build        run the full CI build (lint + every test + synth) instead of compile-only;
 #                       the deploy itself is the same either way
 #   --yes               answer routine questions with their default so a re-run needs no typing (also
@@ -719,8 +720,19 @@ bootstrap() {
   fi
 }
 
+# The operator console stack only exists in checkouts that include it (cdk/src/stacks/console.ts);
+# older ones deploy without it instead of reporting a console that was never created.
+detect_console() {
+  if [ "$CONSOLE" = 1 ] && [ ! -f "$DIR/cdk/src/stacks/console.ts" ]; then
+    CONSOLE=0
+    CDK_ARGS=(--all)
+    ok "this checkout has no operator web console; deploying the platform stack only"
+  fi
+}
+
 # Local dev sign-in (`--local-dev`, remembered): lets `mise //web:dev:live` sign in at http://localhost:5173.
 add_local_dev_args() {
+  detect_console
   if [ "$LOCAL_DEV" = 1 ] && [ "$CONSOLE" = 1 ]; then
     CDK_ARGS+=(-c operatorConsoleDevOrigins=http://localhost:5173)
     ok "console sign-in also allowed from a local dev server (http://localhost:5173); turn off with --no-local-dev"
