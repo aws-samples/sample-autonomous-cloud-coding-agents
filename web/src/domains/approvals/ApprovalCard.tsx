@@ -42,10 +42,10 @@ export function ApprovalCard({ request, taskTitle, onDecided }: {
   /** Called once the API accepted the answer; the request then leaves the pending list. */
   onDecided?: (decision: Decision) => void;
 }) {
-  const decide = useDecide(request.task_id, request.request_id);
+  const decide = useDecide(request.task_id, request.request_id, onDecided);
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState('');
-  const answer = (decision: Decision) => decide.mutate(decision, { onSuccess: () => onDecided?.(decision) });
+  const answer = (decision: Decision) => decide.mutate(decision);
 
   return (
     <Container

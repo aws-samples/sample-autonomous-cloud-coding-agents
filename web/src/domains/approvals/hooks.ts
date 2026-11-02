@@ -38,13 +38,19 @@ export function usePendingApprovals() {
 
 export type Decision = { readonly kind: 'approve' } | { readonly kind: 'deny'; readonly reason?: string };
 
-export function useDecide(taskId: string, requestId: string) {
+/**
+ * Approves or denies one request. `onDecided` runs from the hook, not from `mutate`:
+ * refreshing the pending list removes the card that asked, and React Query skips
+ * `mutate` callbacks once their component has unmounted.
+ */
+export function useDecide(taskId: string, requestId: string, onDecided?: (decision: Decision) => void) {
   const api = useApi();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (decision: Decision) => (decision.kind === 'approve'
       ? api.approve(taskId, requestId)
       : api.deny(taskId, requestId, decision.reason)),
+    onSuccess: (_result, decision) => onDecided?.(decision),
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: approvalKeys.pending });
       await queryClient.invalidateQueries({ queryKey: ['tasks'] });

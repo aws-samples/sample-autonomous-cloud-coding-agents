@@ -18,10 +18,11 @@
  */
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { renderRoute } from '../../helpers/render';
-import { mockData } from '../../helpers/server';
+import { mockData, server, TEST_API_BASE } from '../../helpers/server';
 
 describe('TaskDetailPage', () => {
   it('shows the five steps with the current one marked', async () => {
@@ -162,6 +163,12 @@ describe('TaskDetailPage', () => {
   });
 
   it('sends a message and shows it until the agent reads it', async () => {
+    // The mock agent reads messages after 5 s; a slow runner can pass that before the
+    // assertion, so this answer schedules no read.
+    server.use(http.post(`${TEST_API_BASE}/tasks/:taskId/nudge`, ({ params }) => HttpResponse.json(
+      { data: { task_id: String(params.taskId), nudge_id: 'nudge-test00000001', submitted_at: new Date().toISOString() } },
+      { status: 202 },
+    )));
     renderRoute(`/tasks/${MOCK_IDS.running}`);
     const box = await screen.findByRole('textbox', { name: 'Message' });
     fireEvent.change(box, { target: { value: 'Also cover the timeout path' } });
