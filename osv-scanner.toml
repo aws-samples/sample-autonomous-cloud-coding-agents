@@ -6,3 +6,8 @@
 id = "GHSA-gcqx-w48m-w2h4"
 ignoreUntil = 2026-11-28
 reason = "deepmerge 4.3.1 prototype poisoning: no fixed release exists. Reached only via jest-config (test tooling), never deployed."
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2026-12-02
+reason = "minimatch globparts DoS (fixed in 11.0.1). Every copy that works with 11.x is resolved to it; three cannot move. 10.2.5 is bundled inside aws-cdk-lib (bundleDependencies, which resolutions cannot replace; 2.275.0, the latest, still bundles ^10.2.6) and matches only repository-controlled patterns at synth time. eslint-plugin-import-x (lint-time only) imports makeRe, which minimatch 11 removed; 4.17.1, the latest, still requires ^9 || ^10. 3.1.5 is required by test-exclude 6 (jest coverage, test tooling only), which calls the CommonJS default export that minimatch dropped in 9.0."

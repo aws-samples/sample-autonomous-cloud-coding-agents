@@ -41,6 +41,12 @@
     "source-map-js": "^1.2.2",
     "undici": "^7.30.1",
     "yaml": "^2.8.3",
-    "zod": "^4.6.6"
+    "zod": "^4.6.6",
+    "**/@jest/reporters/glob": "^14.0.2",
+    "**/jest-config/glob": "^14.0.2",
+    "**/jest-runtime/glob": "^14.0.2",
+    "**/eslint/minimatch": "^11.0.1",
+    "**/@eslint/config-array/minimatch": "^11.0.1",
+    "**/@typescript-eslint/typescript-estree/minimatch": "^11.0.1"
   }
 }
