@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.13"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -170,7 +170,7 @@ requires-dist = [
     { name = "aws-opentelemetry-distro", specifier = "==0.18.0" },
     { name = "bedrock-agentcore", specifier = "==1.18.1" },
     { name = "boto3", specifier = "==1.43.78" },
-    { name = "cedarpy", specifier = "==4.8.4" },
+    { name = "cedarpy", specifier = "==4.12.2" },
     { name = "claude-agent-sdk", specifier = "==0.2.168" },
     { name = "fastapi", specifier = "==0.139.0" },
     { name = "jsonschema", specifier = "==4.26.0" },
@@ -249,31 +249,33 @@ wheels = [
 
 [[package]]
 name = "cedarpy"
-version = "4.8.4"
+version = "4.12.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c1/f5/7ab2cbf080253d81c9704a6ab04c3dc93759f0ae688b1e5e28ae8fdb2bf9/cedarpy-4.8.4.tar.gz", hash = "sha256:213ac129fe3b7f8aee437af656b1ecdab6c37414f9403ecaa47013b06574052a", size = 366525, upload-time = "2026-05-29T21:06:56.216Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/38/d0faf97857eee89d1825b6d335d319a3d0504c9e763103e9a1dff2840ddb/cedarpy-4.12.2.tar.gz", hash = "sha256:38941ae12f187e00896ce31036d436fc3190fd0f1501daea6265006aea018e4a", size = 3328016, upload-time = "2026-10-14T15:34:09.531Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/e4/b2ca95245e25c09798bc4e509d08f34e487abe337ca5d2c0821860231997/cedarpy-4.8.4-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:cdda294f3b2599ddf0dcea0e5f6b27bfaf2d6875c8a9039292a3668b2eb7dd90", size = 4045645, upload-time = "2026-05-29T21:06:53.3Z" },
-    { url = "https://files.pythonhosted.org/packages/be/4d/a38e3ecf2fd36e5482cd86a544c3b62c67c62a30d0ebbe87f68df675153e/cedarpy-4.8.4-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:04f002ae537336d6f1b2dde81c735faa7107a86b7a47ad2ae44a90549178ec28", size = 3930623, upload-time = "2026-05-29T21:06:47.834Z" },
-    { url = "https://files.pythonhosted.org/packages/be/ed/6bc25db8b6171708bfc2d7ba566a156a090d2ef18a720fb6fa9d83778125/cedarpy-4.8.4-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:72a5e99c128da885acaa9ea27053a2134c4e350ec1e7adca8b97022b46307a51", size = 4361522, upload-time = "2026-05-29T21:06:26.422Z" },
-    { url = "https://files.pythonhosted.org/packages/79/54/5be373dd19d09d6d1753047d05d5437d35e1329fa6c29b4202912e653ca2/cedarpy-4.8.4-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5d3ff0c87e680d8e41687f7d2346b035e2fddefab66e607554907ecdb189b714", size = 4447497, upload-time = "2026-05-29T21:06:39.179Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/01/17e208f9cc41bfe3b16e84d359116f1263933ef63e3e66858eca8003ec21/cedarpy-4.8.4-cp313-cp313-win_amd64.whl", hash = "sha256:547cbec6355a0b78ae4f587ed61ac90fb36e462eb6114d6447b100b5132d7e84", size = 3841997, upload-time = "2026-05-29T21:07:01.842Z" },
-    { url = "https://files.pythonhosted.org/packages/cf/fe/a51a9806d4b169d71297f5cddc7d1479c052de0c7f86566f5e08ef8d7e92/cedarpy-4.8.4-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9deb8778d12300cebfc793d9dcfbc392e9abf997baf57d337dfe73882441781d", size = 4360872, upload-time = "2026-05-29T21:06:27.816Z" },
-    { url = "https://files.pythonhosted.org/packages/4d/a8/0f33ad32bc2d1f2ff2cb34d7a7887afe4a117fa474f5feee14daf1151126/cedarpy-4.8.4-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:7ca32c9894f6f557a8f83843061f243a49cbe233e41006f381b35dbc1c171332", size = 4045673, upload-time = "2026-05-29T21:06:54.748Z" },
-    { url = "https://files.pythonhosted.org/packages/46/fc/1ce4992850b68f90622a42efdbb0eeea173b9346b1d0803e06686dfbd334/cedarpy-4.8.4-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:1e1e41d45fd8303b08d7c656df08edc3813d51227b914f07d3ed9ba3b95df5d7", size = 3928228, upload-time = "2026-05-29T21:06:49.177Z" },
-    { url = "https://files.pythonhosted.org/packages/44/bb/0b41c674136c7da58c6d02c9a97dca1c0f17730637d73b3582cd4dcf6476/cedarpy-4.8.4-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c0b561c3d7f28c29fc409abd202ceb2f2de18371f615cbefe708dc800247fd76", size = 4360952, upload-time = "2026-05-29T21:06:29.111Z" },
-    { url = "https://files.pythonhosted.org/packages/c9/dd/5480f0e4d8ec579a9a698b9e85b2304dc8700ff226b79fdb619380d710b9/cedarpy-4.8.4-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:142442b6cab2f193d93c966f4ae09f95709b2a60a1028e5b7eeb61573555b07f", size = 4447872, upload-time = "2026-05-29T21:06:40.629Z" },
-    { url = "https://files.pythonhosted.org/packages/28/f3/520c45d9a4dce78b49089f80b9bfcca8435c4e1050fc5d911dd12155cbff/cedarpy-4.8.4-cp314-cp314-win_amd64.whl", hash = "sha256:21f74d4dbdb85ec81468219bbd33006ceedefd2973012d27981a7034b74d43e9", size = 3842222, upload-time = "2026-05-29T21:07:03.538Z" },
-    { url = "https://files.pythonhosted.org/packages/93/7c/25d99b911863046a8091e817619c33a7df945e63b05924a56f7254c8f4de/cedarpy-4.8.4-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3c252d69084d0e13fc4a49afa0e34e41a5087a1a65bc435c9169b34010ef9bf6", size = 4360186, upload-time = "2026-05-29T21:06:30.769Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/84/03b0d05ce85ae463a664a0c95412f655cbd4840591995c4791ed2ed4fd01/cedarpy-4.12.2-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:5f85dc340b97e7057ca5ab8249659ced6d69a13bcb01a248c1d8c9544f34a0c6", size = 4490776, upload-time = "2026-10-14T15:34:05.944Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/e5/b6d0b4003887d4a92c21a58021ea2607caf668d34da584fc272f88d548ff/cedarpy-4.12.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a38d8d3318cf5067d1240c56e8f76cd3882b048ed1580fdd9794d1d793d5e0eb", size = 4356262, upload-time = "2026-10-14T15:33:59.865Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/f8/bba7d0df69aea893ff0f4cdda125bf19107a0dddd6bd57662a95d0034ae4/cedarpy-4.12.2-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:48bac292e79f88740b90d0a5abde2e2c61a77ca7876e1048da1379a901e8373f", size = 4928325, upload-time = "2026-10-14T15:33:35.757Z" },
+    { url = "https://files.pythonhosted.org/packages/49/6a/c9c62c6d905f4e9515afc7760392e158fef357a88b3b853660522e99ce17/cedarpy-4.12.2-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:61e49baf4d075189c068a028a01f6e2f5bb91f1877a2039c55b4fb8709659a07", size = 4906830, upload-time = "2026-10-14T15:33:47.549Z" },
+    { url = "https://files.pythonhosted.org/packages/ad/52/5c75294d13d04e05a23917ad69dc324c4e43d6b8c2207d317fda6a061ef3/cedarpy-4.12.2-cp313-cp313-win_amd64.whl", hash = "sha256:82ed87e561db7f468c9262993a41ce20ffcfecdc8c9e98f20619f31d01400ac5", size = 4288906, upload-time = "2026-10-14T15:34:15.635Z" },
+    { url = "https://files.pythonhosted.org/packages/81/8b/36da6d2339e57e820785ed38f09a69e2de1ca3ae91ddced02733de48743e/cedarpy-4.12.2-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:fdbb1ef908bad76d8fa1fa2d774377bf4763e238a2ca6ac2f1cc15b93a389748", size = 4491926, upload-time = "2026-10-14T15:34:07.938Z" },
+    { url = "https://files.pythonhosted.org/packages/91/c2/a980bb72ad37a1eebb3d60bea2091a43faa49d4760121b2d9c84723d8f9a/cedarpy-4.12.2-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:e1b7d93a1b47d9afacb9cdb809576bf9fafa61b266c9f7a587cc2cf80034c489", size = 4358475, upload-time = "2026-10-14T15:34:01.255Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/08/bfbeebe4bde443817b14c5cd94c17836c0251741b2f809833d4429c9d0dc/cedarpy-4.12.2-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:310afe5d97fc82238592e760e2cef8f25dbb193c6abede93c6c5cc6564842433", size = 4927545, upload-time = "2026-10-14T15:33:37.497Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/12/8fa82b5b167a855243a7ff397e492bd79ad7bd78251cc0138c93b37d70cc/cedarpy-4.12.2-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1b793721d6ffa49a4a94863404332d7da8fe140dc9e97b83217143bfec2a26fe", size = 4908177, upload-time = "2026-10-14T15:33:49.096Z" },
+    { url = "https://files.pythonhosted.org/packages/95/bc/5a7f31114b48152db1a93d7e6b971b3502085c41c59c5ce77d66e91f5be6/cedarpy-4.12.2-cp314-cp314-win_amd64.whl", hash = "sha256:b5545f575fad6667560b3ca6910b879250dc320095b4eb10d183e09ae5da99dd", size = 4289612, upload-time = "2026-10-14T15:34:17.45Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/64/53841c5678bc3308778031aa3131b0e7ccf04ef6213a4d208f147dca305d/cedarpy-4.12.2-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:35bf1028237cc3aeb0717d8d1c129c355caf8440ec007e6a1309457be94a86b4", size = 4925854, upload-time = "2026-10-14T15:33:38.807Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/7e/9bea06b3575ec205cd900876406cf1630700f6185388862807d09efe52a7/cedarpy-4.12.2-cp314-cp314t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:9e902ab0faafbe1109cea456daba1b0cabd309eaef8b2e6f517949522c24daa3", size = 4905562, upload-time = "2026-10-14T15:33:50.452Z" },
+    { url = "https://files.pythonhosted.org/packages/21/b1/55e2ba47f0124d82dd248a1fd4bb5ed75dd43ad717cc768ea1e82381fcaf/cedarpy-4.12.2-cp315-cp315-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0626f2c55e3982b89423402fe6d91334ef2a780c2951c81408676e9ea2f21ac4", size = 4907309, upload-time = "2026-10-14T15:33:52.365Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/4c/31a779df13496b41dc4412c93f05aae9caf3f2c9d88e7878b4b4e5b43a1e/cedarpy-4.12.2-cp315-cp315t-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:651e25541c43ce1efbf0c58da6af70a312f6138f56e248522365660031202571", size = 4906850, upload-time = "2026-10-14T15:33:53.891Z" },
 ]
 
 [[package]]
 name = "certifi"
-version = "2026.6.17"
+version = "2026.10.23"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c9/c7/424b75da314c1045981bd9777432fad05a9e0c69daa4ed7e308bbaffe405/certifi-2026.6.17.tar.gz", hash = "sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432", size = 134594, upload-time = "2026-06-17T10:31:07.894Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fd/11/b524cbd9bbdaca58608e4cf4053fd463417549e1959fa8d3aa18319f9555/certifi-2026.10.23.tar.gz", hash = "sha256:a9895e6e2758b371e0545e321a3a8fd1fcfd9829ada8824a936dfb16aaaf36cd", size = 136225, upload-time = "2026-10-23T11:36:16.478Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/2f/c5464532e965badff2f4c4c1a3a83f5697f0d7c407ed0cda44aaa99bb451/certifi-2026.6.17-py3-none-any.whl", hash = "sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db", size = 133289, upload-time = "2026-06-17T10:31:06.348Z" },
+    { url = "https://files.pythonhosted.org/packages/32/d1/a3652fe2c19134d0d15922177821d863cbd7e842d53a21bbe7e8e3a1b5ac/certifi-2026.10.23-py3-none-any.whl", hash = "sha256:e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1", size = 135082, upload-time = "2026-10-23T11:36:14.763Z" },
 ]
 
 [[package]]

@@ -549,7 +549,7 @@ Per the sentinel trick (see §6.2), `invoke_tool` matches on the real tool-name 
 
 Because `CreateTaskFn` needs to validate `rule:<id>` pre-approvals against the target repo's actual policy set, we ship a **shared policy-parsing library** used in both places:
 
-- `cdk/src/handlers/shared/cedar-policy.ts` — thin wrapper around `@cedar-policy/cedar-wasm@4.10.0` for TypeScript
+- `cdk/src/handlers/shared/cedar-policy.ts` — thin wrapper around `@cedar-policy/cedar-wasm@4.12.0` for TypeScript
 - `agent/src/policy.py` — the full engine, using `cedarpy`
 
 Both consume the blueprint's `security.cedarPolicies` section. `CreateTaskFn` loads the target repo's blueprint (via the existing `RepoTable` store), concatenates with the built-in policies, parses via `cedar.policyToJson()` (TypeScript; §15.6), and extracts `rule_id` + `tier` annotations. `--pre-approve rule:X` is validated:

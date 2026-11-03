@@ -34,8 +34,11 @@ import { allPolicies } from './policies';
  * nested-stack actions — the registry's own control-plane calls run under the
  * custom resource's Lambda execution role), 1.5.0 → 1.6.0 adds the
  * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
- * P2r2-F9). Adding policies to the bundle is a minor bump — that is the
- * precedent `compute-ecs` set.
+ * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
+ * `NestedStackPassRole` statement (CloudFormation passes the execution role to
+ * nested stacks; without it a fresh-account deploy fails at change-set creation).
+ * Adding policies to the bundle is a minor bump — that is the precedent
+ * `compute-ecs` set.
  *
  * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
  * and it is still a MINOR bump for the reason 1.2.0 was — **an operator must
@@ -61,8 +64,14 @@ import { allPolicies } from './policies';
  *
  * 1.8.0 → 1.9.0 admits the exact nested MicroVM build/operator role names to
  * the backend-specific PassRole statement. Re-bootstrap before the nested split.
+ *
+ * 1.9.0 → 1.10.0 merges `main`'s 1.7.0 (#976), whose number collided with this
+ * branch's 1.7.0: the `infrastructure` policy gains its `NestedStackPassRole`
+ * statement for least-privilege fresh-account deploys. It overlaps the exact-self
+ * `PassSelfToCloudFormation` inline policy above; both remain until one is
+ * retired. Re-bootstrap: an account on 1.9.0 lacks the new statement.
  */
-export const BOOTSTRAP_VERSION = '1.9.0';
+export const BOOTSTRAP_VERSION = '1.10.0';
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);

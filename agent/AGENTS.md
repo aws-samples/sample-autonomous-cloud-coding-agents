@@ -91,7 +91,7 @@ def test_a():
 
 ## Common mistakes
 
-- **Cedar parity** — `cedarpy==4.8.4` (agent) and `@cedar-policy/cedar-wasm` 4.8.2 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
+- **Cedar parity** — `cedarpy==4.12.2` (agent) and `@cedar-policy/cedar-wasm` 4.12.0 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
 - **Forgotten consumer** — Progress event schema changes need `cli/src/commands/watch.ts` and `test_progress_writer.py` updates.
 - **Image bundle** — CDK deploys this tree; root `mise run build` always runs agent quality.
 - **Continuation compatibility** — the SDK pin must match `contracts/constants.json` → `microvm_continuation.verified_sdk_version`. Verify real SDK session recovery before updating both. Persisted checkpoint identities are versioned wire data; renaming a Python field can invalidate existing checkpoints.

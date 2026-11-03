@@ -21,7 +21,7 @@
  * Cedar-HITL Day-1 spike: cedar-wasm parse + annotation extraction contract.
  *
  * Locks the assumption (decision #22 / §15.6 of
- * docs/design/CEDAR_HITL_GATES.md) that @cedar-policy/cedar-wasm@4.10.0
+ * docs/design/CEDAR_HITL_GATES.md) that @cedar-policy/cedar-wasm@4.12.0
  * preserves the five HITL annotations (@rule_id, @tier, @approval_timeout_s,
  * @severity, @category) verbatim as a string → string Record under
  * ``policyToJson(text).json.annotations``.
