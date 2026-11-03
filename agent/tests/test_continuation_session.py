@@ -180,6 +180,58 @@ class TestSessionMirror:
 
         asyncio.run(scenario())
 
+    def test_incremental_size_matches_full_encoding(self, monkeypatch):
+        """The running total must equal the real encoded transcript size."""
+
+        def exact(store) -> int:
+            return len(checkpoint._encode(store._entries))
+
+        def accounted(store) -> int:
+            count = len(store._entries)
+            return 2 + store._entry_bytes + max(count - 1, 0)
+
+        async def scenario():
+            store = checkpoint.CheckpointSessionStore(PROJECT)
+            await store.append(KEY, [assistant(), {"type": "mode"}])
+            assert accounted(store) == exact(store)
+            # Replace an existing entry, then repeat a new UUID within one batch.
+            await store.append(
+                KEY,
+                [
+                    assistant(message={"role": "assistant", "content": "longer replacement"}),
+                    assistant(uuid="entry-2"),
+                    assistant(uuid="entry-2", message={"role": "assistant", "content": "x"}),
+                ],
+            )
+            assert [entry.get("uuid") for entry in store._entries] == [
+                "entry-1",
+                None,
+                "entry-2",
+            ]
+            assert store._entries[2]["message"]["content"] == "x"
+            assert accounted(store) == exact(store)
+
+            before = checkpoint._copy(store._entries)
+            monkeypatch.setattr(checkpoint, "MAX_CHECKPOINT_BYTES", exact(store))
+            with pytest.raises(checkpoint.ContinuationCheckpointError, match="limits"):
+                await store.append(KEY, [{"type": "mode"}])
+            assert store._entries == before
+            assert accounted(store) == exact(store)
+
+        asyncio.run(scenario())
+
+    def test_restored_store_keeps_accounting_for_later_frames(self, body):
+        async def scenario():
+            restored = checkpoint.CheckpointSessionStore.restore(body, IDENTITY)
+            await restored.append(KEY, [assistant(), {"type": "user", "uuid": "reply"}])
+            assert [entry.get("uuid") for entry in restored._entries] == ["entry-1", "reply"]
+            count = len(restored._entries)
+            assert 2 + restored._entry_bytes + max(count - 1, 0) == len(
+                checkpoint._encode(restored._entries)
+            )
+
+        asyncio.run(scenario())
+
     def test_cancelled_checkpoint_wait_propagates_cancellation(self):
         async def scenario():
             task = asyncio.create_task(capture(checkpoint.CheckpointSessionStore(PROJECT)))

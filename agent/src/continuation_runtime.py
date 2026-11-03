@@ -64,6 +64,38 @@ def create_runtime(context: ContinuationContext, task_id: str) -> ContinuationRu
     return ContinuationRuntime(context, S3ContinuationStorage(bucket))
 
 
+def _normalized_scope(scope: str) -> str | None:
+    from policy import ApprovalAllowlist
+
+    try:
+        normalized = ApprovalAllowlist([scope]).snapshot_scopes()
+    except ValueError:
+        return None
+    return normalized[0] if len(normalized) == 1 else None
+
+
+def _verified_scopes(
+    saved: tuple[str, ...], granted: list[str], *, task_id: str
+) -> tuple[str, ...]:
+    """Keep only manifest grants backed by submit-time or human-approved scopes.
+
+    The manifest is worker-written, so its session grants are re-derived from
+    control-plane records on restore. An unbacked grant is dropped rather than
+    failing the task: the gate simply asks again for that action.
+    """
+    allowed = {scope for scope in map(_normalized_scope, granted) if scope}
+    kept = tuple(scope for scope in saved if _normalized_scope(scope) in allowed)
+    if len(kept) != len(saved):
+        from shell import log
+
+        log(
+            "WARN",
+            f"Continuation restore dropped {len(saved) - len(kept)} session approval scope(s) "
+            f"not backed by an approval record for task {task_id}",
+        )
+    return kept
+
+
 def restore_for_task(config: TaskConfig) -> ContinuationRuntime | None:
     """Read a coordinator-owned replacement assignment; payloads do not choose S3 keys."""
     import task_state
@@ -137,6 +169,17 @@ def restore_for_task(config: TaskConfig) -> ContinuationRuntime | None:
         decision=approval["status"], reason=approval.get("deny_reason") or ""
     )
     runtime.human_decision = approval
+    runtime.context = replace(
+        runtime.context,
+        approval_scopes=_verified_scopes(
+            runtime.context.approval_scopes,
+            [
+                *(config.initial_approvals or []),
+                *task_state.list_approved_scopes(config.task_id, config.user_id),
+            ],
+            task_id=config.task_id,
+        ),
+    )
     config.initial_approval_gate_count = max(
         int(task.get("approval_gate_count", 0)), runtime.context.approval_gate_count
     )

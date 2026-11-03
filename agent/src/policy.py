@@ -88,6 +88,8 @@ APPROVAL_GATE_CAP_MAX: int = int(_AGC["max"])
 _ATS = _SHARED_CONSTANTS["approval_timeout_s"]
 FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this at load
 DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
+# A timeout equal to this sentinel means "no automatic expiry" (contract field).
+NO_DEADLINE_TIMEOUT_S: int = int(_ATS["no_deadline_sentinel"])
 
 
 def _validate_constants() -> None:
@@ -96,7 +98,12 @@ def _validate_constants() -> None:
         raise ValueError(
             f"contracts/constants.json: approval_timeout_s.min must be > 0, got {FLOOR_TIMEOUT_S}"
         )
-    if DEFAULT_TASK_TIMEOUT_S != 0 and DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
+    if NO_DEADLINE_TIMEOUT_S != 0:
+        raise ValueError(
+            "contracts/constants.json: approval_timeout_s.no_deadline_sentinel must be 0, "
+            f"got {NO_DEADLINE_TIMEOUT_S}"
+        )
+    if DEFAULT_TASK_TIMEOUT_S != NO_DEADLINE_TIMEOUT_S and DEFAULT_TASK_TIMEOUT_S < FLOOR_TIMEOUT_S:
         raise ValueError(
             f"contracts/constants.json: approval_timeout_s.default ({DEFAULT_TASK_TIMEOUT_S}) "
             f"must be >= min ({FLOOR_TIMEOUT_S})"

@@ -57,6 +57,17 @@ class VersionedS3:
             raise TimeoutError("reply lost after commit")
         return {"VersionId": "1"}
 
+    def head_object(self, **kwargs):
+        self.calls.append(("head", kwargs))
+        assert kwargs["ChecksumMode"] == "ENABLED"
+        body = self.versions[kwargs["Key"]][-1]
+        return {
+            "VersionId": str(len(self.versions[kwargs["Key"]])),
+            "ContentLength": len(body),
+            "ChecksumSHA256": base64.b64encode(hashlib.sha256(body).digest()).decode(),
+            **{k: v for k, v in self.read_override.items() if k != "Body"},
+        }
+
     def get_object(self, **kwargs):
         self.calls.append(("get", kwargs))
         bodies = self.versions[kwargs["Key"]]
@@ -162,7 +173,14 @@ class TestPinnedFiles:
         client.read_override = override
         with pytest.raises(storage.ContinuationStorageError, match="retain the worker"):
             adapter.save_workspace(source, IDENTITY)
-        assert client.streams[-1].closed
+        assert [call for call, _ in client.calls] == ["put", "head"]
+
+    def test_upload_verification_does_not_download_the_object(self, prepared):
+        source, client, adapter = prepared
+        receipt = adapter.save_workspace(source, IDENTITY)
+        assert receipt.version_id == "1"
+        assert [call for call, _ in client.calls] == ["put", "head"]
+        assert not client.streams
 
     @pytest.mark.parametrize("payload", [b"short", b"x" * 2_880_000])
     def test_corrupt_or_truncated_stream_leaves_no_destination(self, prepared, tmp_path, payload):

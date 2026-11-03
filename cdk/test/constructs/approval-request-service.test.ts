@@ -64,3 +64,21 @@ test('keeps the trusted writer and API infrastructure out of the parent resource
   child.resourceCountIs('AWS::Lambda::Function', 1);
   child.resourceCountIs('AWS::DynamoDB::Table', 0);
 });
+
+test('denies the writer delete, scan and whole-table reach, and exposes no unauthenticated route', () => {
+  const statements = Object.values(child.findResources('AWS::IAM::Policy'))
+    .flatMap(policy => policy.Properties.PolicyDocument.Statement);
+  const actions = statements.flatMap(statement => [statement.Action].flat());
+  expect(actions.length).toBeGreaterThan(0);
+  for (const forbidden of ['dynamodb:DeleteItem', 'dynamodb:BatchWriteItem', 'dynamodb:Scan', 'dynamodb:Query', 'dynamodb:*']) {
+    expect(actions).not.toContain(forbidden);
+  }
+  // Table ARNs only: no index, stream or wildcard resource.
+  for (const statement of statements) {
+    expect(JSON.stringify(statement.Resource)).not.toMatch(/\*|\/index\/|\/stream\//);
+  }
+  for (const method of Object.values(child.findResources('AWS::ApiGateway::Method'))) {
+    expect(method.Properties.AuthorizationType).toBe('AWS_IAM');
+    expect(method.Properties.ApiKeyRequired).not.toBe(true);
+  }
+});

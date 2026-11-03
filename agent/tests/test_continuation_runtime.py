@@ -262,8 +262,17 @@ class TestCompleteRecovery:
         assert not (tmp_path / "another").exists()
 
 
+SAVED_SCOPES = ("tool_type:Read", "rule:approved-rule", "bash_pattern:git *")
+
+
 @pytest.fixture
-def replacement(ready, monkeypatch):
+def approved_scopes():
+    """Scopes the stubbed approvals-table query reports as human-approved."""
+    return ["tool_type:Read", "rule:approved-rule", "bash_pattern:git *"]
+
+
+@pytest.fixture
+def replacement(ready, monkeypatch, approved_scopes):
     from continuation_session import decode_checkpoint
 
     workspace, runtime = ready
@@ -271,7 +280,12 @@ def replacement(ready, monkeypatch):
     async def save():
         lifecycle, park, tool_input = await park_runtime(runtime)
         result = await runtime.capture(
-            lifecycle, park, session_id=SESSION, tool_name="Read", tool_input=tool_input
+            lifecycle,
+            park,
+            session_id=SESSION,
+            tool_name="Read",
+            tool_input=tool_input,
+            approval_scopes=SAVED_SCOPES,
         )
         lifecycle.close()
         return result
@@ -312,6 +326,9 @@ def replacement(ready, monkeypatch):
     consume = MagicMock()
     monkeypatch.setattr("task_state.get_task", get_task)
     monkeypatch.setattr("task_state.get_approval_row", lambda *_args, **_kw: approval)
+    monkeypatch.setattr(
+        "task_state.list_approved_scopes", lambda task_id, user_id: list(approved_scopes)
+    )
     monkeypatch.setattr("task_state.consume_restored_continuation", consume)
     config = TaskConfig(
         task_id="task",
@@ -324,6 +341,35 @@ def replacement(ready, monkeypatch):
     shutil.rmtree(workspace)
     yield config, task, approval, consume, get_task, workspace
     lifecycle.close()
+
+
+def test_restore_keeps_session_scopes_backed_by_approval_records(replacement):
+    config, *_ = replacement
+    runtime = restore_for_task(config)
+    assert runtime is not None
+    assert set(runtime.context.approval_scopes) == set(SAVED_SCOPES)
+
+
+def test_restore_drops_session_scopes_without_an_approval_record(replacement, approved_scopes):
+    config, *_ = replacement
+    approved_scopes[:] = ["tool_type:Read"]
+    runtime = restore_for_task(config)
+    assert runtime is not None
+    assert runtime.context.approval_scopes == ("tool_type:Read",)
+    from policy import PolicyEngine
+
+    engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+    runtime.seed_policy(engine)
+    assert "rule:approved-rule" not in engine.allowlist.snapshot_scopes()
+
+
+def test_restore_accepts_submit_time_scopes_after_normalization(replacement, approved_scopes):
+    config, *_ = replacement
+    approved_scopes.clear()
+    config.initial_approvals = [" tool_type: Read ", "rule:approved-rule", "bash_pattern:git *"]
+    runtime = restore_for_task(config)
+    assert runtime is not None
+    assert set(runtime.context.approval_scopes) == set(SAVED_SCOPES)
 
 
 @pytest.mark.parametrize("decision", ["APPROVED", "DENIED", "TIMED_OUT"])
@@ -405,6 +451,7 @@ def test_repository_free_microvm_restores_its_private_scratch_files_without_a_re
     monkeypatch.setattr("microvm_lifecycle.get_context", lambda _: lifecycle)
     task = {"task_id": "task", "user_id": "user", "status": "RUNNING"}
     monkeypatch.setattr("task_state.get_task", lambda *_args, **_kw: task)
+    monkeypatch.setattr("task_state.list_approved_scopes", lambda *_args, **_kw: [])
     config = TaskConfig(
         task_id="task",
         user_id="user",

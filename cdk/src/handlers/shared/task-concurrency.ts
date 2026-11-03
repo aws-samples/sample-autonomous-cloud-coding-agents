@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { workerLeaseKey } from './microvm/continuation-types';
+import { type MicrovmStartReceipt, workerLeaseKey } from './microvm/continuation-types';
 import { makeDocClient } from './ua';
 import { ACTIVE_STATUSES, TaskStatus, TERMINAL_STATUSES } from '../../constructs/task-status';
 
@@ -31,7 +31,7 @@ export interface ReservationTask {
   readonly user_id: string;
   readonly status: string;
   readonly continuation_launch?: unknown;
-  readonly microvm_start?: { readonly clientToken: string };
+  readonly microvm_start?: Pick<MicrovmStartReceipt, 'clientToken'>;
   readonly concurrency_slot?: {
     readonly state: 'held' | 'released';
     readonly acquired_at: string;

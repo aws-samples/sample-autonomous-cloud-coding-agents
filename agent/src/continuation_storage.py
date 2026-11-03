@@ -273,6 +273,23 @@ class ContinuationManifest:
             ) from exc
 
 
+def _verified_version(response: dict, receipt: FileReceipt, *, current: bool) -> str:
+    """Return the stored S3 version only when its size and SHA-256 match the receipt."""
+    version = response.get("VersionId")
+    if (
+        not isinstance(version, str)
+        or not version
+        or version == "null"
+        or (not current and version != receipt.version_id)
+        or type(response.get("ContentLength")) is not int
+        or response["ContentLength"] != receipt.size_bytes
+        or response.get("ChecksumSHA256")
+        != base64.b64encode(bytes.fromhex(receipt.sha256)).decode()
+    ):
+        raise ContinuationStorageError("integrity_failed", "Stored continuation metadata differs")
+    return version
+
+
 def _stamp(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
@@ -322,20 +339,7 @@ class S3ContinuationStorage:
         )
         stream = response["Body"]
         try:
-            version = response.get("VersionId")
-            if (
-                not isinstance(version, str)
-                or not version
-                or version == "null"
-                or (not current and version != receipt.version_id)
-                or type(response.get("ContentLength")) is not int
-                or response["ContentLength"] != receipt.size_bytes
-                or response.get("ChecksumSHA256")
-                != base64.b64encode(bytes.fromhex(receipt.sha256)).decode()
-            ):
-                raise ContinuationStorageError(
-                    "integrity_failed", "Stored continuation metadata differs"
-                )
+            version = _verified_version(response, receipt, current=current)
             digest = hashlib.sha256()
             count = 0
             while True:
@@ -362,6 +366,27 @@ class S3ContinuationStorage:
             return verified
         finally:
             stream.close()
+
+    def _head(
+        self, receipt: FileReceipt, identity: CheckpointIdentity, *, deadline: float
+    ) -> FileReceipt:
+        """Learn the committed version without downloading what was just uploaded.
+
+        S3 validated the body against ChecksumSHA256 at PutObject, so matching
+        size and full-object checksum on the current version prove the same
+        bytes, including after a lost PutObject reply.
+        """
+        receipt.validate(identity, self.limits)
+        _time_left(deadline)
+        response = self.client.head_object(
+            Bucket=self.bucket, Key=receipt.key, ChecksumMode="ENABLED"
+        )
+        version = _verified_version(response, receipt, current=True)
+        verified = FileReceipt(
+            receipt.kind, receipt.key, version, receipt.sha256, receipt.size_bytes
+        )
+        verified.validate(identity, self.limits)
+        return verified
 
     def _save(
         self, source: BinaryIO, identity: CheckpointIdentity, kind: str, size: int
@@ -402,7 +427,7 @@ class S3ContinuationStorage:
         except Exception as exc:
             write_error = exc
         try:
-            return self._read(provisional, identity, None, deadline=deadline, current=True)
+            return self._head(provisional, identity, deadline=deadline)
         except Exception as exc:
             raise ContinuationStorageError(
                 "unverified_upload", "Continuation upload could not be verified; retain the worker"

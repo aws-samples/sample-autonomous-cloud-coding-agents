@@ -23,6 +23,19 @@ import type { SessionHandle } from '../compute-strategy';
 export const CONTINUATION = constants.microvm_continuation;
 export type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 
+/**
+ * Internal TaskTable `microvm_start` attribute, deliberately not part of the
+ * task API. Each authorized worker attempt owns one logical start. Only a
+ * coordinator continuation assignment may replace it; retries reuse the token.
+ */
+export interface MicrovmStartReceipt {
+  readonly clientToken: string;
+  readonly requestHash: string;
+  readonly createdAt: string;
+  readonly expiresAt: number;
+  readonly handle?: MicrovmHandle;
+}
+
 export interface ContinuationIdentity {
   readonly task_id: string;
   /** Physical worker that captured the source checkpoint. */

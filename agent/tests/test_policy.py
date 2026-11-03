@@ -312,6 +312,13 @@ class TestConstantsSemanticValidation:
         ):
             _validate_constants()
 
+    def test_rejects_nonzero_no_deadline_sentinel(self):
+        with (
+            patch.object(policy, "NO_DEADLINE_TIMEOUT_S", 30),
+            pytest.raises(ValueError, match=r"no_deadline_sentinel must be 0"),
+        ):
+            _validate_constants()
+
     def test_rejects_approval_timeout_max_below_default(self):
         with (
             patch.object(policy, "FLOOR_TIMEOUT_S", 30),

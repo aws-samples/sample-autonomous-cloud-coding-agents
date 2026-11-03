@@ -1573,6 +1573,10 @@ export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
 
+/** `approval_timeout_s` value meaning "no automatic expiry" (below the floor).
+ *  Sourced from ``contracts/constants.json`` (S9). */
+export const APPROVAL_TIMEOUT_S_NO_DEADLINE = sharedConstants.approval_timeout_s.no_deadline_sentinel;
+
 /** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
 export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
 export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;

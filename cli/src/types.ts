@@ -847,6 +847,9 @@ export const APPROVAL_TIMEOUT_S_MAX = 3600;
 /** Default approval_timeout_s when the submit payload omits it. */
 export const APPROVAL_TIMEOUT_S_DEFAULT = 0;
 
+/** approval_timeout_s value meaning "no automatic expiry" (below the floor). */
+export const APPROVAL_TIMEOUT_S_NO_DEADLINE = 0;
+
 /** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
 export const MICROVM_SLEEP_AFTER_S_MIN = 0;
 export const MICROVM_SLEEP_AFTER_S_MAX = 3600;

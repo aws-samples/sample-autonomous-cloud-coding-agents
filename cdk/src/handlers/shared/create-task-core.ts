@@ -42,6 +42,7 @@ import {
   APPROVAL_GATE_CAP_MIN,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
+  APPROVAL_TIMEOUT_S_NO_DEADLINE,
   type AttachmentRecord,
   type AttachmentUploadInstruction,
   type ChannelSource,
@@ -325,7 +326,7 @@ export async function createTaskCore(
         requestId,
       );
     }
-    if ((body.approval_timeout_s !== 0 && body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN)
+    if ((body.approval_timeout_s !== APPROVAL_TIMEOUT_S_NO_DEADLINE && body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN)
         || body.approval_timeout_s > APPROVAL_TIMEOUT_S_MAX) {
       return errorResponse(
         400,

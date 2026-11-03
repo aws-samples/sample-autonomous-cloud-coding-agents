@@ -1129,6 +1129,40 @@ def get_approval_row(
     return {k: _ddb_attr_to_py(v) for k, v in item.items()}
 
 
+def list_approved_scopes(task_id: str, user_id: str, *, client=None) -> list[str]:
+    """Return the session scopes this task's owner granted on APPROVED rows.
+
+    Strongly consistent and paginated. ``this_call`` grants are excluded: they
+    authorize one action and never become a session allowlist entry.
+    """
+    _, approvals_table = _require_tables()
+    ddb = _get_ddb_client(client=client)
+    scopes: list[str] = []
+    start_key = None
+    while True:
+        resp = ddb.query(
+            TableName=approvals_table,
+            KeyConditionExpression="task_id = :task",
+            ExpressionAttributeValues={":task": {"S": task_id}},
+            ConsistentRead=True,
+            **({"ExclusiveStartKey": start_key} if start_key else {}),
+        )
+        for item in resp.get("Items", []):
+            row = {k: _ddb_attr_to_py(v) for k, v in item.items()}
+            scope = row.get("scope")
+            if (
+                row.get("status") == "APPROVED"
+                and row.get("user_id") == user_id
+                and isinstance(scope, str)
+                and scope
+                and scope != "this_call"
+            ):
+                scopes.append(scope)
+        start_key = resp.get("LastEvaluatedKey")
+        if not start_key:
+            return scopes
+
+
 def increment_approval_gate_count_in_ddb(
     task_id: str,
     *,

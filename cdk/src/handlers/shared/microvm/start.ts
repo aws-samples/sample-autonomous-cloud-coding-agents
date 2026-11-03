@@ -20,27 +20,11 @@
 import { createHash } from 'node:crypto';
 import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { canonicalJson } from '../canonical-json';
-import type { SessionHandle } from '../compute-strategy';
-import type { ContinuationRecord } from './continuation-types';
+import type { ContinuationRecord, MicrovmHandle, MicrovmStartReceipt } from './continuation-types';
 import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
 import { continuationEnabled, ensureWorkerLease, leaseHandleUpdate } from './worker-lease';
 import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
 import { makeDocClient } from '../ua';
-
-type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
-
-/**
- * Internal TaskTable attribute, deliberately not part of the task API.
- * Each authorized worker attempt owns one logical start. Only a coordinator
- * continuation assignment may replace it; retries reuse the existing token.
- */
-interface StartReceipt {
-  readonly clientToken: string;
-  readonly requestHash: string;
-  readonly createdAt: string;
-  readonly expiresAt: number;
-  readonly handle?: MicrovmHandle;
-}
 
 interface StartRecord {
   readonly user_id: string;
@@ -48,7 +32,7 @@ interface StartRecord {
   readonly session_id?: string;
   readonly compute_type?: string;
   readonly compute_metadata?: Record<string, string>;
-  readonly microvm_start?: StartReceipt;
+  readonly microvm_start?: MicrovmStartReceipt;
   readonly repo?: string;
   readonly continuation?: ContinuationRecord;
 }
@@ -151,7 +135,7 @@ export async function claimMicrovmStart(
       throw new Error('MICROVM_START_STATE_INVALID: active task has no recoverable start receipt or handle');
     }
     const now = Date.now();
-    const receiptToSave: StartReceipt = {
+    const receiptToSave: MicrovmStartReceipt = {
       clientToken: attemptId,
       requestHash,
       createdAt: new Date(now).toISOString(),

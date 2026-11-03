@@ -128,6 +128,23 @@ function patchContract(root: string, mutate: (json: Record<string, any>) => void
 }
 
 describe('check-constants-sync', () => {
+  describe('approval timeout no-deadline sentinel', () => {
+    test.each([1, 30])('rejects no_deadline_sentinel=%s', sentinel => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.approval_timeout_s.no_deadline_sentinel = sentinel;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('no_deadline_sentinel must be 0');
+    });
+    test('requires the sentinel field', () => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        delete json.approval_timeout_s.no_deadline_sentinel;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('approval_timeout_s.{min,max,default,no_deadline_sentinel}');
+    });
+  });
+
   test('rejects an SDK upgrade without checkpoint compatibility verification', () => {
     const result = runInMutatedRepo(root => {
       write(root, 'agent/pyproject.toml', read(root, 'agent/pyproject.toml')

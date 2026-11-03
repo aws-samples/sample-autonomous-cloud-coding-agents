@@ -19,6 +19,7 @@
 
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { workerLeaseKey, type WorkerLease } from './continuation-types';
+import { TaskStatus } from '../../../constructs/task-status';
 import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
@@ -54,8 +55,8 @@ export async function ensureWorkerLease(input: {
               ':user': input.userId,
               ':attempt': input.attemptId,
               ':hash': input.requestHash,
-              ':hydrating': 'HYDRATING',
-              ':awaiting': 'AWAITING_APPROVAL',
+              ':hydrating': TaskStatus.HYDRATING,
+              ':awaiting': TaskStatus.AWAITING_APPROVAL,
             },
           },
         },

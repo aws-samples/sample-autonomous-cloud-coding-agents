@@ -24,7 +24,7 @@ import type { ComputeStrategy, SessionControlOptions } from '../compute-strategy
 import { logger } from '../logger';
 import { verifyContinuationCheckpoint } from './continuation-storage';
 import { CONTINUATION_RETIREMENT_TIMEOUT_MS, CONTINUATION_STOP_TIMEOUT_MS } from './continuation-timing';
-import { CONTINUATION, type ContinuationRecord, type MicrovmHandle, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
+import { CONTINUATION, type ContinuationRecord, type MicrovmHandle, type MicrovmStartReceipt, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
 import { continuationEnabled } from './worker-lease';
 import { TaskStatus } from '../../../constructs/task-status';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, type TaskRecord } from '../types';
@@ -44,7 +44,7 @@ interface HeldSlot {
 
 export type ContinuableTask = TaskRecord & {
   readonly concurrency_slot?: HeldSlot;
-  readonly microvm_start?: { readonly clientToken: string; readonly handle?: MicrovmHandle; readonly createdAt?: string };
+  readonly microvm_start?: Pick<MicrovmStartReceipt, 'clientToken' | 'handle'> & Partial<Pick<MicrovmStartReceipt, 'createdAt'>>;
 };
 
 export type RetirementResult = 'not-due' | 'stopping' | 'parked' | 'ownership-lost';

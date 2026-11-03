@@ -207,7 +207,7 @@ function main(): number {
   // Sanity: confirm the JSON is parseable and shaped as expected.
   let json: {
     approval_gate_cap?: { min: number; max: number; default: number };
-    approval_timeout_s?: { min: number; max: number; default: number };
+    approval_timeout_s?: { min: number; max: number; default: number; no_deadline_sentinel: number };
     jira_app_actor?: { min_secret_length: number; forge_webtrigger_suffix: string };
     microvm_platform_config?: {
       env_by_key: Record<string, string>;
@@ -263,8 +263,9 @@ function main(): number {
   }
 
   const ats = json.approval_timeout_s;
-  if (!ats || typeof ats.min !== 'number' || typeof ats.max !== 'number' || typeof ats.default !== 'number') {
-    console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default}`);
+  if (!ats || typeof ats.min !== 'number' || typeof ats.max !== 'number' || typeof ats.default !== 'number'
+    || typeof ats.no_deadline_sentinel !== 'number') {
+    console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default,no_deadline_sentinel}`);
     return 1;
   }
   const jiraAppActor = json.jira_app_actor;
@@ -286,7 +287,12 @@ function main(): number {
   if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');
   if (agc.max < agc.default) invariantErrors.push('approval_gate_cap.max must be >= default');
   if (ats.min <= 0) invariantErrors.push('approval_timeout_s.min must be > 0');
-  if (ats.default !== 0 && ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be 0 or >= min');
+  // The sentinel means "no automatic expiry". Consumers test for it before the
+  // min/max range, so it must sit below the floor and is pinned to 0 on the wire.
+  if (ats.no_deadline_sentinel !== 0) invariantErrors.push('approval_timeout_s.no_deadline_sentinel must be 0');
+  if (ats.default !== ats.no_deadline_sentinel && ats.default < ats.min) {
+    invariantErrors.push('approval_timeout_s.default must be no_deadline_sentinel or >= min');
+  }
   if (ats.max < ats.default) invariantErrors.push('approval_timeout_s.max must be >= default');
   if (jiraAppActor.min_secret_length < 32) {
     invariantErrors.push('jira_app_actor.min_secret_length must be >= 32');

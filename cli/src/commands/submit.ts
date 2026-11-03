@@ -26,6 +26,7 @@ import { formatJson, formatTaskDetail } from '../format';
 import {
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
+  APPROVAL_TIMEOUT_S_NO_DEADLINE,
   ApprovalScope,
   Attachment,
   AttachmentType,
@@ -149,7 +150,7 @@ export function makeSubmitCommand(): Command {
         if (
           isNaN(opts.approvalTimeout)
           || !Number.isInteger(opts.approvalTimeout)
-          || (opts.approvalTimeout !== 0 && opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN)
+          || (opts.approvalTimeout !== APPROVAL_TIMEOUT_S_NO_DEADLINE && opts.approvalTimeout < APPROVAL_TIMEOUT_S_MIN)
           || opts.approvalTimeout > APPROVAL_TIMEOUT_S_MAX
         ) {
           throw new CliError(

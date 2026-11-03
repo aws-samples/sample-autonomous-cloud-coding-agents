@@ -1195,6 +1195,50 @@ class TestBestEffortUpdateApprovalStatus:
             )
 
 
+class TestListApprovedScopes:
+    @staticmethod
+    def _row(request_id, status, user_id, scope=None):
+        item = {
+            "task_id": {"S": "01KTASK"},
+            "request_id": {"S": request_id},
+            "status": {"S": status},
+            "user_id": {"S": user_id},
+        }
+        if scope is not None:
+            item["scope"] = {"S": scope}
+        return item
+
+    def test_paginates_and_keeps_only_owner_session_grants(self, approval_tables_env):
+        client = MagicMock()
+        client.query.side_effect = [
+            {
+                "Items": [
+                    self._row("r1", "APPROVED", "user", "tool_type:Read"),
+                    self._row("r2", "APPROVED", "user", "this_call"),
+                    self._row("r3", "DENIED", "user", "rule:denied"),
+                ],
+                "LastEvaluatedKey": {"task_id": {"S": "01KTASK"}, "request_id": {"S": "r3"}},
+            },
+            {
+                "Items": [
+                    self._row("r4", "APPROVED", "someone-else", "all_session"),
+                    self._row("r5", "APPROVED", "user"),
+                    self._row("r6", "APPROVED", "user", "rule:approved-rule"),
+                ]
+            },
+        ]
+
+        scopes = task_state.list_approved_scopes("01KTASK", "user", client=client)
+
+        assert scopes == ["tool_type:Read", "rule:approved-rule"]
+        first, second = client.query.call_args_list
+        assert first.kwargs["ConsistentRead"] is True
+        assert first.kwargs["TableName"] == "approvals-table"
+        assert first.kwargs["ExpressionAttributeValues"] == {":task": {"S": "01KTASK"}}
+        assert "ExclusiveStartKey" not in first.kwargs
+        assert second.kwargs["ExclusiveStartKey"]["request_id"] == {"S": "r3"}
+
+
 class TestGetApprovalRow:
     def test_consistent_read_default(self, approval_tables_env):
         client = MagicMock()

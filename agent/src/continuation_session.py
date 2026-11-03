@@ -232,6 +232,12 @@ class CheckpointSessionStore(SessionStore):
         self.project_key = project_key
         self._session: str | None = None
         self._entries: list[dict] = []
+        # Per-entry encoded sizes and UUID positions let each SDK frame be
+        # checked against the checkpoint limits without re-encoding the whole
+        # transcript (the JSON array is "[" + ",".join(entries) + "]").
+        self._sizes: list[int] = []
+        self._positions: dict[str, int] = {}
+        self._entry_bytes = 0
         self._changed = asyncio.Condition()
         self._failure: str | None = None
 
@@ -255,22 +261,47 @@ class CheckpointSessionStore(SessionStore):
                     "sessionId" in entry and entry["sessionId"] != session for entry in incoming
                 ):
                     raise ContinuationCheckpointError("Transcript contains another SDK session")
-                updated = _copy(self._entries)
-                positions = {entry["uuid"]: i for i, entry in enumerate(updated) if "uuid" in entry}
+                replaced: dict[int, tuple[dict, int]] = {}
+                appended: list[tuple[dict, int]] = []
+                new_positions: dict[str, int] = {}
+                total = self._entry_bytes
                 for entry in incoming:
+                    size = len(_encode(entry))
                     entry_id = entry.get("uuid")
-                    if entry_id in positions:
-                        updated[positions[entry_id]] = entry
-                    else:
+                    index = (
+                        self._positions.get(entry_id, new_positions.get(entry_id))
+                        if entry_id is not None
+                        else None
+                    )
+                    if index is None:
                         if entry_id is not None:
-                            positions[entry_id] = len(updated)
-                        updated.append(entry)
+                            new_positions[entry_id] = len(self._entries) + len(appended)
+                        appended.append((entry, size))
+                        total += size
+                    elif index < len(self._entries):
+                        previous = replaced.get(index, (None, self._sizes[index]))[1]
+                        replaced[index] = (entry, size)
+                        total += size - previous
+                    else:
+                        slot = index - len(self._entries)
+                        total += size - appended[slot][1]
+                        appended[slot] = (entry, size)
+                count = len(self._entries) + len(appended)
                 if (
-                    len(updated) > MAX_CHECKPOINT_ENTRIES
-                    or len(_encode(updated)) > MAX_CHECKPOINT_BYTES
+                    count > MAX_CHECKPOINT_ENTRIES
+                    or 2 + total + max(count - 1, 0) > MAX_CHECKPOINT_BYTES
                 ):
                     raise ContinuationCheckpointError("SDK transcript exceeds checkpoint limits")
-                self._session, self._entries = session, updated
+                # Commit only after every limit passed, so a rejected batch
+                # leaves the mirrored transcript unchanged.
+                for index, (entry, size) in replaced.items():
+                    self._entries[index], self._sizes[index] = entry, size
+                for entry, size in appended:
+                    self._entries.append(entry)
+                    self._sizes.append(size)
+                self._positions.update(new_positions)
+                self._entry_bytes = total
+                self._session = session
             except ContinuationCheckpointError as exc:
                 # The SDK can continue after a dropped mirror batch. Once a gap
                 # is possible, no later matching action may certify completeness.
@@ -346,6 +377,11 @@ class CheckpointSessionStore(SessionStore):
         store = cls(envelope["project_key"])
         store._session = envelope["session_id"]
         store._entries = envelope["entries"]
+        store._sizes = [len(_encode(entry)) for entry in store._entries]
+        store._positions = {
+            entry["uuid"]: index for index, entry in enumerate(store._entries) if "uuid" in entry
+        }
+        store._entry_bytes = sum(store._sizes)
         return store
 
 

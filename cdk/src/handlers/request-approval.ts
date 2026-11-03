@@ -69,7 +69,7 @@ function validateRequest(input: RequestInput, task: Record<string, any>): Record
     || typeof row.created_at !== 'string' || !Number.isFinite(Date.parse(row.created_at))
     || typeof row.timeout_s !== 'number' || !Number.isInteger(row.timeout_s)
     || row.timeout_s < 0 || row.timeout_s > constants.approval_timeout_s.max
-    || (row.timeout_s === 0 ? row.deadline_epoch !== undefined
+    || (row.timeout_s === constants.approval_timeout_s.no_deadline_sentinel ? row.deadline_epoch !== undefined
       : row.deadline_epoch !== Math.floor(Date.parse(row.created_at) / 1000) + row.timeout_s)) {
     throw new Error('APPROVAL_REQUEST_INVALID');
   }
