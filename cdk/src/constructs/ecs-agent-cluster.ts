@@ -322,6 +322,7 @@ export class EcsAgentCluster extends Construct {
   public readonly securityGroup: ec2.SecurityGroup;
   public readonly containerName: string;
   public readonly taskRoleArn: string;
+  public readonly logGroup: logs.LogGroup;
   public readonly executionRoleArn: string;
 
   constructor(scope: Construct, id: string, props: EcsAgentClusterProps) {
@@ -349,7 +350,7 @@ export class EcsAgentCluster extends Construct {
     );
 
     // CloudWatch log group for agent task output
-    const logGroup = new logs.LogGroup(this, 'TaskLogGroup', {
+    const logGroup = this.logGroup = new logs.LogGroup(this, 'TaskLogGroup', {
       retention: logs.RetentionDays.THREE_MONTHS,
       removalPolicy: RemovalPolicy.DESTROY,
     });

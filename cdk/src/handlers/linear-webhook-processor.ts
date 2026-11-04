@@ -27,6 +27,7 @@ import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-r
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
+import { readStartClaim, releaseStartClaim } from './shared/linear-console';
 import {
   deleteComment,
   fetchRecentComments,
@@ -46,7 +47,7 @@ import {
   renderTaskLookupFailedNudge,
   renderWrongMentionNudge,
 } from './shared/linear-notes';
-import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
@@ -88,6 +89,8 @@ const ddb = makeDocClient();
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Holds console "start" claims (see shared/linear-console.ts); optional so older wiring keeps working. */
+const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 // Sub-issue orchestration: name of OrchestrationTable. Unset until the
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
@@ -623,6 +626,16 @@ interface LinearCommentEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /**
+   * Whether the stack-wide secret — bound to no workspace — is what verified this
+   * delivery, as reported by the receiver.
+   *
+   * On that path the body's `organizationId` is claimed rather than attested, so it must
+   * not be used to select a tenant. Absent is read as `false`, which is correct for the
+   * per-workspace path and is also what an in-flight invocation from a previous version
+   * looks like during a deploy.
+   */
+  readonly verified_via_stack_wide?: boolean;
 }
 
 /**
@@ -645,10 +658,11 @@ interface ProcessorEvent {
  * workspace does not have: no reactions and no state transitions, on work that
  * otherwise succeeded.
  *
- * Two checks guard it, because they fail for different reasons. The source-level one
- * (in the test file) catches a builder nobody exercised, but keys off the object-literal
- * form and cannot see a builder that assigns onto an existing object; the behavioural
- * one asserts the fields actually reach `channel_metadata`.
+ * Three checks guard it, because they fail for different reasons. Two source-level ones
+ * (in the test file) catch a builder nobody exercised — one keys off the object-literal
+ * form, the other off the assignment form, so a builder that writes onto an existing
+ * object is covered too (#879). The behavioural one asserts the fields actually reach
+ * `channel_metadata`.
  */
 function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
   return {
@@ -689,6 +703,33 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
+  // A delivery verified by the stack-wide secret carries no proof of WHICH workspace
+  // sent it — that secret is bound to none of them — so the body's `organizationId`
+  // is a claim. Replace it with the only workspace it could mean, and drop the delivery
+  // when there is no single answer.
+  //
+  // Rewritten on the payload rather than threaded as a parameter because the workspace
+  // id is read from ~6 places downstream (task attribution, feedback, the comment path).
+  // Passing it alongside would leave every one of those a site where the claimed value
+  // could still be picked up by mistake; overwriting the untrusted field means the
+  // attested value is the only one reachable.
+  if (event.verified_via_stack_wide) {
+    const bound = await resolveSoleActiveLinearWorkspace(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (!bound) {
+      logger.warn('Dropping stack-wide-verified Linear delivery: cannot determine the sending workspace', {
+        claimed_workspace_id: payload.organizationId,
+      });
+      return;
+    }
+    if (payload.organizationId && payload.organizationId !== bound) {
+      logger.warn('Ignoring body organizationId on a stack-wide-verified delivery; binding to the sole active workspace', {
+        claimed_workspace_id: payload.organizationId,
+        bound_workspace_id: bound,
+      });
+    }
+    (payload as { organizationId?: string }).organizationId = bound;
+  }
+
   // A Comment with an @bgagent mention on an orchestrated sub-issue
   // re-iterates that sub-issue's PR (the reconciler then cascades the
   // re-stack). Handled on a separate path from Issue → task creation.
@@ -720,6 +761,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       mappingItem = mapping.Item;
     }
   }
+
+  // The mapping table is keyed on the project id alone, so `projectId` selects a
+  // repository on its own — and it arrives in the request body. Check the mapping
+  // against the workspace the delivery claims to be from, so naming another
+  // workspace's project cannot steer a task at that workspace's repository.
+  //
+  // Drop rather than reply. The reply would go to the sender's own workspace, and
+  // "that project belongs to someone else" both confirms the project exists and tells
+  // a prober the attempt was seen. The log line is the diagnostic surface instead.
+  const mappedWorkspaceId = mappingItem?.linear_workspace_id as string | undefined;
+  if (mappingItem && mappedWorkspaceId && mappedWorkspaceId !== payload.organizationId) {
+    logger.warn('Linear project is mapped to a different workspace than this webhook — dropping', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+      mapped_workspace_id: mappedWorkspaceId,
+    });
+    return;
+  }
+  if (mappingItem && !mappedWorkspaceId) {
+    // Allowed for now: rows written before the owning workspace was recorded have
+    // nothing to check against, and rejecting them would break working installs on
+    // deploy. Re-running `bgagent linear onboard-project` records the owner, and
+    // `bgagent platform doctor` reports what is left (failing once more than one
+    // workspace is active), which is what makes it safe to turn this into a rejection later.
+    logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+    });
+  }
+
   const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do
@@ -843,7 +916,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const platformUserId = await lookupPlatformUser(workspaceId, actorId);
+  // A label added from the operator console arrives with ABCA's own Linear app as the
+  // actor, which no ABCA user is linked to. The console left a single-use claim naming
+  // the user who clicked Start; it is consulted only when the actor is unlinked, so a
+  // linked person adding the label is always attributed to themselves.
+  const linkedUser = await lookupPlatformUser(workspaceId, actorId);
+  const claimUser = linkedUser ? null : await readConsoleStartClaim(issue.id, workspaceId);
+  const platformUserId = linkedUser ?? claimUser;
+  // The claim is released only once the work is dispatched, so a retried delivery after
+  // a failure below can still attribute the task; the claim's TTL covers the rest.
+  const releaseClaim = async () => {
+    if (claimUser) await releaseConsoleStartClaim(issue.id, claimUser);
+  };
   if (!platformUserId) {
     logger.warn('Linear actor has no linked platform user — skipping task creation', {
       linear_workspace_id: workspaceId,
@@ -858,7 +942,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const channelMetadata: Record<string, string> = {
+  // `let` because the vault branch below re-derives it by spread rather than mutating
+  // it in place; see the comment there for why spread and not `Object.assign` (#879).
+  let channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
     linear_project_id: projectId,
@@ -916,16 +1002,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
     // agent stays on the Secrets-Manager path.
     if (resolved.providerName) {
-      // Through the shared helper, not hand-rolled. This builder assigns onto an
-      // existing object rather than constructing a literal, which is what hid it from
-      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
-      // that guard keys off the literal
-      // form, so the ONE path it was written for was the one path it never covered.
-      // The subject inside the helper is recorded rather than derived from the
-      // workspace id, so a single consent can onboard a workspace whose org UUID is
-      // not yet known; absent ⇒ the agent derives the legacy form.
-      channelMetadata.linear_workspace_id = workspaceId;
-      Object.assign(channelMetadata, vaultMetadata(resolved));
+      // Spread the helper rather than restating its fields: `vaultMetadata` is the one
+      // place that says which vault fields a task carries, so a builder that hand-rolls
+      // them drops whatever field is added there next. (The subject it emits is the
+      // recorded one, not derived from the workspace id, so a single consent can onboard
+      // a workspace whose org UUID is not yet known; absent ⇒ the agent derives the
+      // legacy form.)
+      //
+      // SPREAD, not `Object.assign` — a security property, not a style choice.
+      // `Object.assign` copies via [[Set]], which invokes the `__proto__` setter, so a
+      // source carrying that key would repoint this object's prototype; spread defines
+      // own properties, where the same key lands inert. Unreachable today (the helper
+      // returns a literal with two hard-coded keys), but the capability is what semgrep
+      // rates Blocking. Guard history and the pre-push consequence: #879.
+      channelMetadata = { ...channelMetadata, ...vaultMetadata(resolved) };
     }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
@@ -1197,6 +1287,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.
+      await releaseClaim();
       return;
     }
     if (discovery.kind === 'extended') {
@@ -1216,6 +1307,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
+        await releaseClaim();
         return;
       }
       let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
@@ -1303,6 +1395,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           });
         }
       }
+      await releaseClaim();
       return;
     }
     // discovery.kind === 'single_task' → the issue had no sub-issues, so fall
@@ -1435,6 +1528,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+  await releaseClaim();
 
   // ADR-016 P4.5: post the first-run "🤖 Starting" courtesy comment from the
   // Lambda tier. This used to be the agent's own `mcp__linear-server__save_comment`
@@ -1833,6 +1927,33 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
  * a non-orchestration comment, a missing mention, or an un-started sub-issue is
  * a clean no-op (no failure comment — comments are conversational).
  */
+/**
+ * Whether the work a comment would act on belongs to the workspace that sent it.
+ *
+ * The comment path finds its target by issue id: an orchestration (keyed on a hash of
+ * that id) or the newest task on it. Those lookups are not scoped to a workspace, and
+ * the work that follows runs on the target's repo as its original requester, so the
+ * target's recorded workspace is matched against the delivery's here. This keeps the
+ * comment path consistent with the project-mapping check in the handler.
+ *
+ * A target that records no workspace is not acted on: every orchestration and Linear
+ * task records one, so absence means the row is not one this path should act on.
+ * No reply is posted, matching the project-mapping check.
+ */
+function commentTargetBelongsToWorkspace(
+  ownerWorkspaceId: string | undefined,
+  workspaceId: string,
+  issueId: string,
+): boolean {
+  if (ownerWorkspaceId && ownerWorkspaceId === workspaceId) return true;
+  logger.warn('Comment trigger: commented issue belongs to a different workspace than this webhook — dropping', {
+    linear_issue_id: issueId,
+    event_workspace_id: workspaceId,
+    owner_workspace_id: ownerWorkspaceId,
+  });
+  return false;
+}
+
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
@@ -1912,6 +2033,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const ownOrchestrationId = deriveOrchestrationId(commentedIssueId);
   const parentSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, ownOrchestrationId);
   if (parentSnapshot && parentSnapshot.meta.parent_issue_ref === commentedIssueId) {
+    if (!commentTargetBelongsToWorkspace(parentSnapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
     await handleParentEpicCommentTrigger({
       orchestrationId: ownOrchestrationId,
       snapshot: parentSnapshot,
@@ -1961,6 +2083,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
     : null;
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
+  if (snapshot && !commentTargetBelongsToWorkspace(snapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
   if (!snapshot || !child || !child.child_task_id) {
     await handleStandaloneCommentTrigger({
       subIssueId: commentedIssueId,
@@ -2466,6 +2589,7 @@ async function handleStandaloneCommentTrigger(args: {
     return;
   }
   const task = lookup.task;
+  if (!commentTargetBelongsToWorkspace(task.linear_workspace_id, workspaceId, issueId)) return;
   const prNumber = prNumberFromTask(task);
   if (prNumber === null || !task.repo) {
     // Clarify-resume: a task with no PR MIGHT be a clarify-HOLD (a
@@ -3280,6 +3404,28 @@ function isLinearUploadsUrl(url: string): boolean {
     return host === 'uploads.linear.app' || host.endsWith('.uploads.linear.app');
   } catch {
     return false;
+  }
+}
+
+async function readConsoleStartClaim(issueId: string, workspaceId: string): Promise<string | null> {
+  if (!WEBHOOK_DEDUP_TABLE) return null;
+  try {
+    const user = await readStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, workspaceId);
+    if (user) logger.info('Linear label from the operator console attributed via start claim', { issue_id: issueId, linear_workspace_id: workspaceId });
+    return user;
+  } catch (err) {
+    logger.warn('Could not read a console start claim', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
+    return null; // nosemgrep: ts-silent-success-masking -- falls through to the existing "not linked" reply, which is the correct outcome without a claim
+  }
+}
+
+/** Best-effort: the work is already dispatched, and an unreleased claim expires on its own. */
+async function releaseConsoleStartClaim(issueId: string, platformUserId: string): Promise<void> {
+  if (!WEBHOOK_DEDUP_TABLE) return;
+  try {
+    await releaseStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, platformUserId);
+  } catch (err) {
+    logger.warn('Could not release a console start claim (it expires on its own)', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

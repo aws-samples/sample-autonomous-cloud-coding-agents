@@ -145,6 +145,15 @@ describe('get-task handler', () => {
     expect(body.data.agent_heartbeat_at).toBeNull();
   });
 
+  test('surfaces the stored issue title, and null before hydration stores it', async () => {
+    expect(JSON.parse((await handler(makeEvent())).body).data.issue_title).toBeNull();
+
+    mockSend.mockReset();
+    mockSend.mockResolvedValueOnce({ Item: { ...TASK_RECORD, issue_number: 3, issue_title: 'Encounter and catch monsters' } });
+    const body = JSON.parse((await handler(makeEvent())).body);
+    expect(body.data.issue_title).toBe('Encounter and catch monsters');
+  });
+
   test('surfaces channel_source=webhook for tasks created via the webhook path', async () => {
     mockSend.mockReset();
     mockSend.mockResolvedValueOnce({

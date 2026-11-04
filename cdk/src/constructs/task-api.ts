@@ -336,6 +336,10 @@ export class TaskApi extends Construct {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
+        // Browsers send only the request headers listed here. `POST /tasks` takes an
+        // `Idempotency-Key`; without it in the list the browser blocks the request
+        // before it is sent (the CLI is not a browser, so it never hit this).
+        allowHeaders: [...apigw.Cors.DEFAULT_HEADERS, 'Idempotency-Key'],
       },
     });
 
@@ -868,8 +872,8 @@ export class TaskApi extends Construct {
     // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
     // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
     // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
-    // `test/stacks/agent.test.ts` asserts no `test-invoke-stage` permission is ever
-    // emitted.
+    // `test/synthesis/deployment.test.ts` checks method-scoped permissions and
+    // rejects `test-invoke-stage` grants in every parent/nested deployment template.
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');

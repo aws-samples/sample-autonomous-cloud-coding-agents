@@ -83,6 +83,7 @@ import {
   failTask,
   finalizeTask,
   hydrateAndTransition,
+  ISSUE_TITLE_MAX_LENGTH,
   loadBlueprintConfig,
   loadTask,
   pollTaskStatus,
@@ -1566,6 +1567,45 @@ describe('hydrateAndTransition — memory and prompt version', () => {
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0][0].input.ExpressionAttributeValues[':pv']).toBe('abc123def456');
   });
+
+  const issueTitleUpdates = () => mockDdbSend.mock.calls.filter(
+    (call: any[]) => call[0]._type === 'Update' && call[0].input?.ExpressionAttributeNames?.['#it'] === 'issue_title',
+  );
+
+  test('stores the hydrated issue title on the task record, trimmed and capped', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce({
+      ...mockHydratedContextBase,
+      issue: { number: 3, title: `  Encounter and catch monsters${'!'.repeat(400)}  `, body: '', comments: [] },
+    });
+    await hydrateAndTransition(baseTask as any);
+
+    const updates = issueTitleUpdates();
+    expect(updates).toHaveLength(1);
+    const stored = updates[0][0].input.ExpressionAttributeValues[':it'];
+    expect(stored.startsWith('Encounter and catch monsters')).toBe(true);
+    expect(stored).toHaveLength(ISSUE_TITLE_MAX_LENGTH);
+  });
+
+  test('writes no issue title when the task has no issue', async () => {
+    mockDdbSend.mockResolvedValue({});
+    mockHydrateContext.mockResolvedValueOnce(mockHydratedContextBase);
+    await hydrateAndTransition(baseTask as any);
+    expect(issueTitleUpdates()).toHaveLength(0);
+  });
+
+  test('carries on when storing the issue title fails', async () => {
+    mockDdbSend.mockImplementation(async (cmd: any) => {
+      if (cmd.input?.ExpressionAttributeNames?.['#it'] === 'issue_title') throw new Error('throttled');
+      return {};
+    });
+    mockHydrateContext.mockResolvedValueOnce({
+      ...mockHydratedContextBase,
+      issue: { number: 3, title: 'Encounter and catch monsters', body: '', comments: [] },
+    });
+    await expect(hydrateAndTransition(baseTask as any)).resolves.toBeDefined();
+    expect(issueTitleUpdates()).toHaveLength(1);
+  });
 });
 
 describe('finalizeTask — memory fallback', () => {
@@ -1623,5 +1663,23 @@ describe('finalizeTask — memory fallback', () => {
     // Should complete without throwing
     await finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123');
     expect(mockWriteMinimalEpisode).toHaveBeenCalled();
+  });
+});
+
+describe('exclusive deployment routing', () => {
+  const original = process.env.DEPLOYED_COMPUTE_TYPE;
+  afterEach(() => {
+    if (original === undefined) delete process.env.DEPLOYED_COMPUTE_TYPE;
+    else process.env.DEPLOYED_COMPUTE_TYPE = original;
+  });
+  test.each(['agentcore', 'ecs', 'lambda-microvm'])('inherits %s for unpinned and repo-less tasks', async backend => {
+    process.env.DEPLOYED_COMPUTE_TYPE = backend;
+    expect((await loadBlueprintConfig(baseTask as any)).compute_type).toBe(backend);
+    expect((await loadBlueprintConfig({ ...baseTask, repo: undefined } as any)).compute_type).toBe(backend);
+  });
+  test('rejects a stored backend override that is no longer deployed', async () => {
+    process.env.DEPLOYED_COMPUTE_TYPE = 'ecs';
+    mockLoadRepoConfig.mockResolvedValueOnce({ compute_type: 'agentcore' });
+    await expect(loadBlueprintConfig(baseTask as any)).rejects.toThrow(/is not deployed/);
   });
 });

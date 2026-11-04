@@ -154,7 +154,7 @@ class TaskConfig(BaseModel):
     task_description: str = ""
     github_token: str = ""
     aws_region: str
-    anthropic_model: str = "global.anthropic.claude-opus-5"
+    anthropic_model: str = "global.anthropic.claude-opus-5-5"
     # The "small/fast" model Claude Code uses for auxiliary work (e.g. WebFetch
     # page summarization). Must be a cross-region INFERENCE-PROFILE id (geo
     # prefix), not a bare foundation-model id — Claude 4.x cannot be invoked
@@ -164,7 +164,7 @@ class TaskConfig(BaseModel):
     # vars from its resolved bedrockGeoRegion. It applies to direct construction
     # (tests, local runs), so it must name the same geography as the deployment or
     # those paths silently exercise a different one.
-    haiku_model: str = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+    haiku_model: str = "global.anthropic.claude-haiku-5-5"
     dry_run: bool = False
     max_turns: int = 10
     max_budget_usd: float | None = None

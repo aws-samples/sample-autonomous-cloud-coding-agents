@@ -19,7 +19,7 @@
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { TaskTable } from '../../constructs/task-table';
+import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 /**
  * The fields the standalone comment trigger needs from the newest
@@ -33,6 +33,11 @@ export interface LinearIssueTask {
   readonly pr_url?: string;
   readonly pr_number?: number;
   readonly status?: string;
+  /**
+   * The Linear workspace the task was created for, from its `channel_metadata`.
+   * Callers acting on a webhook match this against the delivery's workspace.
+   */
+  readonly linear_workspace_id?: string;
 }
 
 /**
@@ -74,7 +79,7 @@ export async function lookupTaskByLinearIssue(
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: taskTableName,
-      IndexName: TaskTable.LINEAR_ISSUE_INDEX,
+      IndexName: LINEAR_ISSUE_INDEX_NAME,
       KeyConditionExpression: 'linear_issue_id = :iid',
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest created_at first
@@ -91,6 +96,9 @@ export async function lookupTaskByLinearIssue(
         ...(item.pr_url !== undefined && { pr_url: item.pr_url as string }),
         ...(item.pr_number !== undefined && { pr_number: item.pr_number as number }),
         ...(item.status !== undefined && { status: item.status as string }),
+        ...(typeof item.channel_metadata?.linear_workspace_id === 'string' && {
+          linear_workspace_id: item.channel_metadata.linear_workspace_id as string,
+        }),
       },
     };
   } catch (err) {

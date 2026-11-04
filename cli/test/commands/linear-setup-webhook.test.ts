@@ -297,5 +297,59 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       .map((c) => c[0])
       .find((cmd) => cmd instanceof PutCommand && cmd.input.TableName === 'registry-table');
     expect(registryPut).toBeDefined();
+
+    // Provenance: this workspace kept a `lin_wh_` secret that differs from the
+    // stack-wide value, which is what proves the secret is its own. Recording it is
+    // what later lets verification tell this workspace from one carrying an inherited
+    // copy — and the flag must be a literal `true`, since the reader accepts nothing
+    // else as proof.
+    expect((registryPut as InstanceType<typeof PutCommand>).input.Item?.webhook_secret_owned).toBe(true);
+  });
+
+  test('records ownership when the operator supplies this workspace\'s own secret', async () => {
+    // The other reachable provenance path: nothing stored, operator pastes the secret
+    // read off the app being onboarded. Ownership is proven by where the value came
+    // from, so it must be recorded here too — otherwise a first install looks
+    // indistinguishable from one that inherited its secret.
+    smSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetSecretValueCommand) {
+        const id = (cmd as GetSecretValueCommand).input.SecretId;
+        if (id === WEBHOOK_ARN) return Promise.resolve({ SecretString: OTHER_WS_SECRET });
+        return Promise.reject(new ResourceNotFoundException({ message: 'no', $metadata: {} }));
+      }
+      if (cmd instanceof CreateSecretCommand) {
+        return Promise.reject(new ResourceExistsException({ message: 'exists', $metadata: {} }));
+      }
+      if (cmd instanceof PutSecretValueCommand) return Promise.resolve({ ARN: 'arn:x' });
+      return Promise.resolve({});
+    });
+
+    const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue(
+      { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
+    );
+    const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(
+      { id_token: FAKE_ID_TOKEN } as ReturnType<typeof configMod.loadCredentials>,
+    );
+    const logSpy = jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      const line = args.map(String).join(' ');
+      const m = line.match(/[?&]state=([^&\s]+)/);
+      if (m) capturedState = decodeURIComponent(m[1]);
+    });
+    try {
+      await makeLinearCommand().parseAsync([
+        'node', 'bgagent', 'setup', 'demo',
+        '--client-id', 'cid', '--client-secret', 'csecret',
+        '--webhook-secret', 'lin_wh_suppliedByOperator', '--no-browser',
+      ]);
+    } finally {
+      cfgSpy.mockRestore();
+      credSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+
+    const registryPut = ddbSend.mock.calls
+      .map((c) => c[0])
+      .find((cmd) => cmd instanceof PutCommand && cmd.input.TableName === 'registry-table');
+    expect((registryPut as InstanceType<typeof PutCommand>).input.Item?.webhook_secret_owned).toBe(true);
   });
 });

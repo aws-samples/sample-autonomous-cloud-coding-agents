@@ -90,7 +90,7 @@ Set via the process env (not project settings) so the untrusted repo can't alter
 
 ## Version alignment
 
-The agent runs Claude Code two ways that must agree on the control protocol: the `claude-agent-sdk` Python wheel **bundles** a CLI, and the Dockerfile also installs the CLI via npm. Both are pinned in lockstep — `claude-agent-sdk==0.2.110` (bundles CLI 2.1.191) and npm `@anthropic-ai/claude-code@2.1.191`. 2.1.191 also satisfies the ≥2.1.176 `awsCredentialExport`-with-`Expiration` requirement.
+The agent runs Claude Code two ways that must agree on the control protocol: the `claude-agent-sdk` Python wheel **bundles** a CLI, and the Dockerfile also installs the CLI via npm. Both are pinned in lockstep — `claude-agent-sdk==0.2.168` (bundles CLI 2.1.301) and npm `@anthropic-ai/claude-code@2.1.301`. 2.1.301 also satisfies the ≥2.1.176 `awsCredentialExport`-with-`Expiration` requirement and the ≥2.1.280 floor the Claude 5.5 default models need.
 
 ## Track 3 — operator documentation
 

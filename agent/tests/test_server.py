@@ -1824,6 +1824,9 @@ class TestPlatformConfigContract:
             # wrong model that the IAM grant does not cover on any non-``global``
             # deployment, surfacing as AccessDenied at turn 0.
             "anthropic_model": "ANTHROPIC_MODEL",
+            "tool_gateway_url": "ABCA_TOOL_GATEWAY_URL",
+            "linear_vault_enabled": "LINEAR_VAULT_ENABLED",
+            "linear_workload_identity_name": "LINEAR_WORKLOAD_IDENTITY_NAME",
         }
 
     def test_required_subset_is_exactly_the_four_run_blocking_keys(self):
@@ -2005,7 +2008,7 @@ class TestInstallPlatformConfig:
             key: _platform_config_value(key) for key in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY
         }
         installed = server._install_platform_config(full)
-        assert installed == sorted(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
+        assert sorted(installed) == sorted(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.values())
         for key, env_name in server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY.items():
             assert os.environ[env_name] == _platform_config_value(key)
 

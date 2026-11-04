@@ -28,7 +28,7 @@ title: Model configuration
 per-task payload model_id            (layer 5)
   > blueprint agent.modelId          (layer 4, arrives as stack env ANTHROPIC_MODEL)
   > stack env ANTHROPIC_MODEL        (layer 3-adjacent / local shell)
-  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5)
+  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5-5)
 ```
 
 Every one of those is gated by the **IAM invoke allowlist** (layer 1), which is itself gated by **account-level Bedrock model access**. Both gates are silent until invocation: a model that resolves fine through precedence still fails at turn 0 with `AccessDenied` if it is not in the grant list, and fails again if your account has not completed [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for it.
@@ -46,7 +46,7 @@ throughput isn't supported. Retry your request with the ID or ARN of an inferenc
 profile that contains this model.
 ```
 
-So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5` (or whatever geo you have configured — see below).
+So: `bedrockModels` context → `anthropic.claude-opus-5-5`. Everywhere else → `global.anthropic.claude-opus-5-5` (or whatever geo you have configured — see below).
 
 ### Choosing the inference-profile geography
 
@@ -77,6 +77,7 @@ Changing the geography requires a **redeploy**, because the IAM grants are scope
 4. Update the **prefixed** ID in `agent/src/config.py` and `agent/src/models.py` too. These are the fallback a run with no env reaches (a local batch run), and the doc-drift test compares against them.
 5. **Verify the SDK price table recognizes the model.** The `max_budget_usd` guardrail is computed from a price table bundled into the Claude Agent SDK at build time, so an unrecognized model silently degrades budget enforcement. Run `agent/scripts/diagnostics/test_sdk_smoke.py` with `ANTHROPIC_MODEL` set to the new ID, divide the reported cost by the input-token count, and confirm the implied rate matches [published Bedrock pricing](https://aws.amazon.com/bedrock/pricing/). A `$0.00` or wildly-off result means the table does not know the model and budgets cannot be trusted.
 6. The doc-drift test (`cdk/test/contracts/model-default-docs-parity.test.ts`) fails until the documented defaults here and in `agent/README.md` match `config.py`. That failure is the reminder, not a nuisance — update both.
+7. **Tell operators who override `bedrockModels`.** The override REPLACES the default list, and synth fails ("omits the platform default model") if it lacks either new default. A deployment carrying `-c bedrockModels=[...]` or a `cdk.json` `context` entry must add the new bare IDs before pulling the bump — call this out in the release notes.
 
 ### Cost and model selection
 

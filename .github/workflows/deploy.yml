@@ -189,6 +189,49 @@ jobs:
             echo "No security-relevant changes detected." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Log-delivery migration state, surfaced BEFORE the approval gate.
+      #
+      # `mise //cdk:deploy` runs this preflight automatically, but this pipeline calls
+      # `npx cdk deploy` directly (see the Deploy job) and so inherits none of that task's
+      # steps. Without this, a pipeline stack still on the pre-#339 library's delivery
+      # logical ids would roll back mid-update with `AlreadyExists` and nothing anywhere
+      # would have said why — and the approver would have had no way to know.
+      #
+      # --check-only NEVER deletes; it reports and exits 2 when a migration is needed.
+      # continue-on-error because this is information for the approver, not a gate: the
+      # job holds the read-only diff role, and a missing `cloudformation:ListStackResources`
+      # on it must not block the diff that the approval decision depends on.
+      - name: Log-delivery migration check (read-only)
+        continue-on-error: true
+        env:
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        run: |
+          echo "## Log-delivery migration (\`$COMPUTE_TYPE\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          node --experimental-strip-types cdk/scripts/preflight-log-delivery.ts \
+            --check-only 2>&1 | tee preflight-log-delivery.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat preflight-log-delivery.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" = "2" ]; then
+            {
+              echo ""
+              echo "> [!WARNING]"
+              echo "> This stack needs the one-time log-delivery migration. Deploying without"
+              echo "> it fails mid-update with \`AlreadyExists\` and rolls back. This pipeline"
+              echo "> does **not** migrate automatically — run the documented step first:"
+              echo "> \`STACK_NAME=<stack> mise //cdk:deploy\`, or the manual sequence in"
+              echo "> docs/design/OBSERVABILITY.md (\"AgentCore log delivery\")."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" != "0" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Could not determine migration state (exit $status) — see the step log._" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload diff artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -196,6 +239,7 @@ jobs:
           path: |
             cdk-diff-full.txt
             cdk-diff-security.txt
+            preflight-log-delivery.txt
 
   deploy:
     needs: [resolve-targets, diff]
