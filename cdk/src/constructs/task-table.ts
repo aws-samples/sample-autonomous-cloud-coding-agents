@@ -20,9 +20,9 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
-import { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
+import { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
-export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
+export { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Properties for TaskTable construct.
@@ -90,7 +90,7 @@ export class TaskTable extends Construct {
    * standalone ``@bgagent`` comment trigger on a plain (non-orchestration)
    * issue, where no orchestration row records the issue→PR link.
    */
-  public static readonly LINEAR_ISSUE_INDEX = 'LinearIssueIndex';
+  public static readonly LINEAR_ISSUE_INDEX = LINEAR_ISSUE_INDEX_NAME;
 
   /**
    * GSI for resolving a tenant-scoped Jira issue to its newest ABCA task.

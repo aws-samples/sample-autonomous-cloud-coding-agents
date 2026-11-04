@@ -1,0 +1,409 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+// The operator console (`web/`): a static single-page app served by CloudFront from
+// a private S3 bucket, signing users in against the platform's existing Cognito user
+// pool with Cognito managed login (authorization code + PKCE).
+//
+// Its own top-level stack rather than part of `AgentStack`: the application stack runs
+// close to CloudFormation's 500-resource limit, and the console has an independent
+// lifecycle (UI releases should not touch the platform's resources).
+//
+// Exposure: the app shell (HTML/JS/CSS) is public, like any SPA served from a CDN. It
+// contains no data or secrets; the only values it learns at runtime (`config.json`:
+// API URL, user pool and public client ids, login domain) are public identifiers. All
+// data comes from the REST API, which requires a Cognito token on every route.
+import { existsSync, readFileSync } from 'node:fs';
+import * as path from 'node:path';
+import { ArnFormat, Aws, CfnOutput, Duration, Fn, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { NagSuppressions } from 'cdk-nag';
+import { Construct } from 'constructs';
+import type { LinearIdentityVault } from '../constructs/linear-identity-vault';
+import { TaskTable } from '../constructs/task-table';
+
+export interface OperatorConsoleStackProps extends StackProps {
+  /** The platform's user pool (from `AgentStack`); the console adds its own app client and login domain. */
+  readonly userPool: cognito.IUserPool;
+  /** REST API base URL including the stage, e.g. `https://abc.execute-api.us-east-1.amazonaws.com/v1/`. */
+  readonly apiUrl: string;
+  /** Directory with the built console (`web/dist`, produced by `mise //web:bundle`). */
+  readonly assetDirectory: string;
+  /**
+   * Cognito managed-login domain prefix (globally unique per Region).
+   * @default `abca-<account>-<stack name>`
+   */
+  readonly loginDomainPrefix?: string;
+  /** Extra sign-in redirect origins, e.g. `http://localhost:5173` for local development against a deployed stack. */
+  readonly additionalOrigins?: readonly string[];
+  readonly removalPolicy?: RemovalPolicy;
+  /**
+   * Onboarded repositories and the platform GitHub token. With both, the stack adds a
+   * small console API (`GET /repos/{repo_id}/issues`) for the issue picker. It lives
+   * here, not on the platform API, so console features never spend the platform
+   * stack's resource budget.
+   */
+  readonly repoTable?: dynamodb.ITable;
+  readonly githubTokenSecret?: secretsmanager.ISecret;
+  /**
+   * Per-repository GitHub token secrets (Blueprint `credentials.githubTokenSecretArn`).
+   * The issue list reads a repository's own token when it has one, so it needs these too.
+   */
+  readonly repoGithubTokenSecretArns?: readonly string[];
+  /**
+   * Linear wiring from the platform stack. With it, the console API also lists the open
+   * issues of mapped Linear projects and can hand one to the agent (by adding its label).
+   */
+  readonly linear?: ConsoleLinearProps;
+}
+
+export interface ConsoleLinearProps {
+  readonly projectMappingTable: dynamodb.ITable;
+  readonly workspaceRegistryTable: dynamodb.ITable;
+  /** Holds the short-lived console "start" claims the webhook processor reads. */
+  readonly webhookDedupTable: dynamodb.ITable;
+  readonly taskTable: dynamodb.ITable;
+  readonly identityVault?: LinearIdentityVault;
+}
+
+const HANDLERS_DIR = path.join(__dirname, '..', 'handlers');
+/** Covers one GitHub call (8 s client timeout) plus a cold start. */
+const ISSUES_HANDLER_TIMEOUT_SECONDS = 15;
+const LINEAR_HANDLER_TIMEOUT_SECONDS = 20;
+const LINEAR_HANDLER_MEMORY_MB = 512;
+
+/** Hashed bundle files never change, so browsers may cache them for a year. */
+const IMMUTABLE_CACHE = s3deploy.CacheControl.fromString('public, max-age=31536000, immutable');
+/** index.html and config.json must be fetched fresh, or a release would not reach browsers. */
+const NO_CACHE = s3deploy.CacheControl.fromString('no-cache');
+/** How long a console sign-in lasts before the user must sign in again (a working day). */
+const SESSION_HOURS = 12;
+
+export class OperatorConsoleStack extends Stack {
+  public readonly distribution: cloudfront.Distribution;
+  public readonly appClient: cognito.UserPoolClient;
+  /** `https://<distribution>.cloudfront.net/` */
+  public readonly consoleUrl: string;
+  /** Console-only API (issue picker); undefined without `repoTable` and `githubTokenSecret`. */
+  public readonly consoleApi?: apigw.RestApi;
+
+  constructor(scope: Construct, id: string, props: OperatorConsoleStackProps) {
+    super(scope, id, props);
+    const removalPolicy = props.removalPolicy ?? RemovalPolicy.DESTROY;
+    const indexHtml = path.join(props.assetDirectory, 'index.html');
+    if (!existsSync(indexHtml)) {
+      throw new Error(`Operator console bundle not found at ${props.assetDirectory}. Run \`mise //web:bundle\` first, `
+        + 'or deploy without the console by dropping `-c operatorConsole=true`.');
+    }
+
+    const bucket = new s3.Bucket(this, 'Bucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy,
+      autoDeleteObjects: removalPolicy === RemovalPolicy.DESTROY,
+    });
+
+    this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+      defaultRootObject: 'index.html',
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        // AWS-managed: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy.
+        // The Content-Security-Policy ships in index.html, so no custom policy resource is needed.
+        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+      },
+      // Client-side routes (/tasks/…) have no object in S3; OAC reports a missing key as 403.
+      errorResponses: [403, 404].map((httpStatus) => ({
+        httpStatus,
+        responseHttpStatus: 200,
+        responsePagePath: '/index.html',
+        ttl: Duration.seconds(0),
+      })),
+      enableLogging: false,
+      comment: 'ABCA operator console',
+    });
+    const origin = `https://${this.distribution.distributionDomainName}`;
+    this.consoleUrl = `${origin}/`;
+
+    const loginDomain = new cognito.UserPoolDomain(this, 'LoginDomain', {
+      userPool: props.userPool,
+      cognitoDomain: {
+        domainPrefix: props.loginDomainPrefix
+          ?? Fn.join('-', ['abca', Aws.ACCOUNT_ID, this.stackName.toLowerCase()]),
+      },
+    });
+
+    const origins_ = [origin, ...(props.additionalOrigins ?? [])];
+    this.appClient = new cognito.UserPoolClient(this, 'ConsoleClient', {
+      userPool: props.userPool,
+      // A browser app cannot keep a secret: public client, authorization code + PKCE.
+      generateSecret: false,
+      authFlows: {},
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls: origins_.map((o) => `${o}/auth/callback`),
+        logoutUrls: origins_.map((o) => `${o}/`),
+      },
+      supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
+      preventUserExistenceErrors: true,
+      enableTokenRevocation: true,
+      idTokenValidity: Duration.hours(1),
+      accessTokenValidity: Duration.hours(1),
+      refreshTokenValidity: Duration.hours(SESSION_HOURS),
+    });
+
+    if (props.repoTable && props.githubTokenSecret) {
+      this.consoleApi = this.createConsoleApi(
+        props.userPool, props.repoTable, props.githubTokenSecret, props.repoGithubTokenSecretArns ?? [], origins_, removalPolicy, props.linear,
+      );
+    }
+
+    const assets = new s3deploy.BucketDeployment(this, 'Assets', {
+      destinationBucket: bucket,
+      sources: [s3deploy.Source.asset(props.assetDirectory, { exclude: ['index.html'] })],
+      cacheControl: [IMMUTABLE_CACHE],
+      // Keep earlier hashed bundles: browsers mid-session still reference them.
+      prune: false,
+    });
+
+    const entry = new s3deploy.BucketDeployment(this, 'Entry', {
+      destinationBucket: bucket,
+      sources: [
+        s3deploy.Source.data('index.html', readFileSync(indexHtml, 'utf8')),
+        s3deploy.Source.jsonData('config.json', {
+          apiBaseUrl: props.apiUrl,
+          ...(this.consoleApi ? { consoleApiBaseUrl: this.consoleApi.url } : {}),
+          region: Aws.REGION,
+          auth: {
+            mode: 'cognito',
+            userPoolId: props.userPool.userPoolId,
+            userPoolClientId: this.appClient.userPoolClientId,
+            domain: loginDomain.baseUrl(),
+          },
+        }),
+      ],
+      cacheControl: [NO_CACHE],
+      prune: false,
+      distribution: this.distribution,
+      distributionPaths: ['/*'],
+    });
+    // The new index.html must only appear once the bundle it references is in place.
+    entry.node.addDependency(assets);
+
+    new CfnOutput(this, 'ConsoleUrl', { value: this.consoleUrl, description: 'Operator console URL' });
+
+    this.suppressNagFindings(bucket);
+  }
+
+  /** `GET /repos/{repo_id}/issues` behind the platform's Cognito user pool. */
+  private createConsoleApi(
+    userPool: cognito.IUserPool,
+    repoTable: dynamodb.ITable,
+    githubTokenSecret: secretsmanager.ISecret,
+    repoGithubTokenSecretArns: readonly string[],
+    allowedOrigins: readonly string[],
+    removalPolicy: RemovalPolicy,
+    linear: ConsoleLinearProps | undefined,
+  ): apigw.RestApi {
+    const accessLogs = new logs.LogGroup(this, 'ConsoleApiAccessLogs', { retention: logs.RetentionDays.ONE_MONTH, removalPolicy });
+    const api = new apigw.RestApi(this, 'ConsoleApi', {
+      restApiName: 'OperatorConsoleApi',
+      description: 'Console-only routes (GitHub and Linear issue pickers). Every method requires a Cognito ID token.',
+      // The platform stack already owns the account-level API Gateway CloudWatch role.
+      cloudWatchRole: false,
+      deployOptions: {
+        stageName: 'v1',
+        throttlingRateLimit: 10,
+        throttlingBurstLimit: 20,
+        accessLogDestination: new apigw.LogGroupLogDestination(accessLogs),
+        accessLogFormat: apigw.AccessLogFormat.jsonWithStandardFields(),
+      },
+      // Only the console's own origin(s), unlike the platform API's '*'.
+      defaultCorsPreflightOptions: {
+        allowOrigins: [...allowedOrigins],
+        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowHeaders: ['Authorization', 'Content-Type'],
+      },
+    });
+    const authorizer = new apigw.CognitoUserPoolsAuthorizer(this, 'ConsoleApiAuthorizer', { cognitoUserPools: [userPool] });
+    const validator = new apigw.RequestValidator(this, 'ConsoleApiValidator', { restApi: api, validateRequestParameters: true, validateRequestBody: true });
+
+    const listIssues = new lambda.NodejsFunction(this, 'ListRepoIssuesFn', {
+      entry: path.join(HANDLERS_DIR, 'list-repo-issues.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      timeout: Duration.seconds(ISSUES_HANDLER_TIMEOUT_SECONDS),
+      environment: {
+        REPO_TABLE_NAME: repoTable.tableName,
+        GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
+      },
+      bundling: { externalModules: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-secrets-manager', '@aws-sdk/lib-dynamodb', '@aws-sdk/util-dynamodb'] },
+    });
+    repoTable.grantReadData(listIssues);
+    githubTokenSecret.grantRead(listIssues);
+    for (const [index, arn] of [...new Set(repoGithubTokenSecretArns)].entries()) {
+      secretsmanager.Secret.fromSecretCompleteArn(this, `RepoGitHubToken${index}`, arn).grantRead(listIssues);
+    }
+
+    api.root.resourceForPath('repos/{repo_id}/issues').addMethod('GET', new apigw.LambdaIntegration(listIssues, { allowTestInvoke: false }), {
+      authorizer,
+      authorizationType: apigw.AuthorizationType.COGNITO,
+      requestValidator: validator,
+      requestParameters: { 'method.request.path.repo_id': true },
+    });
+
+    if (linear) this.addLinearRoutes(api, authorizer, validator, linear);
+
+    new CfnOutput(this, 'ConsoleApiUrl', { value: api.url, description: 'Console-only API (issue picker)' });
+
+    NagSuppressions.addResourceSuppressions(listIssues, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole is the AWS-recommended managed policy for Lambda functions.' },
+      { id: 'AwsSolutions-IAM5', reason: 'DynamoDB index/* wildcard generated by CDK grantReadData on the repo table.' },
+    ], true);
+    NagSuppressions.addResourceSuppressions(api, [
+      {
+        id: 'AwsSolutions-APIG3',
+        reason: 'No WAF: a few authenticated routes with stage throttling (10 rps). The platform API, which serves all task data and writes, has its own WAF.',
+      },
+      {
+        id: 'AwsSolutions-APIG6',
+        reason: 'Access logs are on; execution logging needs the account-level CloudWatch role, which this opt-in stack does not own (the platform stack does).',
+      },
+      { id: 'AwsSolutions-APIG4', reason: 'CORS preflight (OPTIONS) is unauthenticated by design; the GET route requires a Cognito token.' },
+      { id: 'AwsSolutions-COG4', reason: 'CORS preflight (OPTIONS) cannot carry a Cognito token; the GET route uses the Cognito authorizer.' },
+    ], true);
+    return api;
+  }
+
+  /** GET /repos/{repo_id}/linear-issues and POST /linear-issues/{issue_id}/start. */
+  private addLinearRoutes(api: apigw.RestApi, authorizer: apigw.IAuthorizer, validator: apigw.IRequestValidator, linear: ConsoleLinearProps): void {
+    const fn = new lambda.NodejsFunction(this, 'ConsoleLinearFn', {
+      entry: path.join(HANDLERS_DIR, 'console-linear.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_24_X,
+      architecture: Architecture.ARM_64,
+      // A repo can map several projects; each is one token lookup plus one Linear query.
+      timeout: Duration.seconds(LINEAR_HANDLER_TIMEOUT_SECONDS),
+      // The shared Linear modules load a large dependency graph; at the 128 MB default the
+      // function ran out of memory during init, before handling any request.
+      memorySize: LINEAR_HANDLER_MEMORY_MB,
+      environment: {
+        LINEAR_PROJECT_MAPPING_TABLE_NAME: linear.projectMappingTable.tableName,
+        LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: linear.workspaceRegistryTable.tableName,
+        LINEAR_WEBHOOK_DEDUP_TABLE_NAME: linear.webhookDedupTable.tableName,
+        TASK_TABLE_NAME: linear.taskTable.tableName,
+        ...(linear.identityVault ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linear.identityVault.workloadName } : {}),
+      },
+      bundling: { externalModules: ['@aws-sdk/client-dynamodb', '@aws-sdk/client-secrets-manager', '@aws-sdk/lib-dynamodb', '@aws-sdk/util-dynamodb'] },
+    });
+    linear.projectMappingTable.grantReadData(fn);
+    linear.workspaceRegistryTable.grantReadData(fn);
+    // Only which issues already have a task: Query on the Linear-issue index, nothing else.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${linear.taskTable.tableArn}/index/${TaskTable.LINEAR_ISSUE_INDEX}`],
+    }));
+    // Write a start claim, and remove it again if adding the label fails.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+      resources: [linear.webhookDedupTable.tableArn],
+    }));
+    // Per-workspace Linear OAuth tokens (created by `bgagent linear setup`). Put: the
+    // resolver writes back the rotated token when it refreshes an expiring one.
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
+      resources: [Stack.of(this).formatArn({
+        service: 'secretsmanager',
+        resource: 'secret',
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+        resourceName: 'bgagent-linear-oauth-*',
+      })],
+    }));
+    linear.identityVault?.grantMintToken(fn);
+
+    const auth = { authorizer, authorizationType: apigw.AuthorizationType.COGNITO, requestValidator: validator };
+    const integration = new apigw.LambdaIntegration(fn, { allowTestInvoke: false });
+    api.root.resourceForPath('repos/{repo_id}/linear-issues').addMethod('GET', integration, {
+      ...auth,
+      requestParameters: { 'method.request.path.repo_id': true },
+    });
+    api.root.resourceForPath('linear-issues/{issue_id}/start').addMethod('POST', integration, {
+      ...auth,
+      requestParameters: { 'method.request.path.issue_id': true },
+    });
+
+    NagSuppressions.addResourceSuppressions(fn, [
+      { id: 'AwsSolutions-IAM4', reason: 'AWSLambdaBasicExecutionRole is the AWS-recommended managed policy for Lambda functions.' },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'index/* from grantReadData on the Linear tables, and the bgagent-linear-oauth-* prefix: per-workspace token secrets are created by the CLI at setup, so their names are not known at deploy time (same grant as the Linear webhook processor).',
+      },
+    ], true);
+  }
+
+  private suppressNagFindings(bucket: s3.Bucket): void {
+    NagSuppressions.addResourceSuppressions(bucket, [
+      {
+        id: 'AwsSolutions-S1',
+        reason: 'Server access logs are not enabled. The bucket holds only the public console bundle (no user data); every data access is logged by the authenticated REST API instead.',
+      },
+    ], true);
+
+    NagSuppressions.addResourceSuppressions(this.distribution, [
+      { id: 'AwsSolutions-CFR1', reason: 'No geo restriction: operators sign in from anywhere; access control is Cognito authentication on the API.' },
+      {
+        id: 'AwsSolutions-CFR2',
+        reason: 'No WAF on the distribution: it serves only the static console bundle with no server-side logic. The REST API that serves all data has its own WAF. A CloudFront-scoped web ACL must also live in us-east-1, which this Region-agnostic stack cannot assume.',
+      },
+      { id: 'AwsSolutions-CFR3', reason: 'Distribution access logs are not enabled: static public bundle only; data access is logged by the API.' },
+      { id: 'AwsSolutions-CFR4', reason: 'Uses the default *.cloudfront.net certificate; no custom domain, so no minimum-TLS-version override applies.' },
+      { id: 'AwsSolutions-CFR7', reason: 'OAC is in use (`S3BucketOrigin.withOriginAccessControl`); cdk-nag misclassifies the L2 helper as an OAI deployment.' },
+    ], true);
+
+    // Same CDK-managed singletons as LinearVaultConsentPage: found by id prefix so a
+    // CDK upgrade that changes their hash does not silently drop the suppression.
+    for (const child of this.node.children) {
+      if (!child.node.id.startsWith('Custom::CDKBucketDeployment') && !child.node.id.startsWith('Custom::S3AutoDeleteObjects')) continue;
+      NagSuppressions.addResourceSuppressions(child, [
+        { id: 'AwsSolutions-IAM4', reason: 'CDK-managed singleton Lambda uses the AWS managed AWSLambdaBasicExecutionRole — required by the framework.' },
+        { id: 'AwsSolutions-IAM5', reason: 'CDK-managed singleton grants wildcard object access on the CDK assets bucket and the console bucket; generated by the framework, not authored here.' },
+        { id: 'AwsSolutions-L1', reason: 'CDK-managed singleton Lambda runtime is chosen by the framework.' },
+      ], true);
+    }
+  }
+}
+
+/** Where `mise //web:bundle` writes the console, relative to this file (`cdk/src/stacks`). */
+export const DEFAULT_CONSOLE_ASSET_DIRECTORY = path.join(__dirname, '..', '..', '..', 'web', 'dist');

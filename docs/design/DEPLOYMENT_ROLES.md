@@ -105,7 +105,7 @@ that deployed permissions match source.
 
 ## IaCRole-ABCA
 
-For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
+For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure. The operator console (`backgroundagent-dev-console`: S3 bucket, CloudFront distribution, Cognito app client and managed-login domain) is an optional separate stack (`-c operatorConsole=true`, deployed with `--all`) under the same roles.
 
 > **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (four always applied, including AgentCore, plus optional ECS and MicroVM policies). The separate inline self-role grant is described above. They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
@@ -454,9 +454,18 @@ deployment replaces the provider's waiter state machine.
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
-        "cognito-idp:GetUserPoolMfaConfig"
+        "cognito-idp:GetUserPoolMfaConfig",
+        "cognito-idp:CreateUserPoolDomain",
+        "cognito-idp:UpdateUserPoolDomain",
+        "cognito-idp:DeleteUserPoolDomain"
       ],
       "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "CognitoDomainRead",
+      "Effect": "Allow",
+      "Action": "cognito-idp:DescribeUserPoolDomain",
+      "Resource": "*"
     },
     {
       "Sid": "WAFv2",

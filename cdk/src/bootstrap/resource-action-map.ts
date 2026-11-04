@@ -80,6 +80,8 @@ export const RESOURCE_ACTION_MAP: Record<string, readonly string[]> = {
   'AWS::Cognito::UserPoolClient': ['cognito-idp:CreateUserPoolClient'],
   // RegistryPublisher / RegistryApprover groups (#246).
   'AWS::Cognito::UserPoolGroup': ['cognito-idp:CreateGroup'],
+  // Operator console managed-login domain.
+  'AWS::Cognito::UserPoolDomain': ['cognito-idp:CreateUserPoolDomain', 'cognito-idp:DescribeUserPoolDomain'],
   'AWS::DynamoDB::Table': ['dynamodb:CreateTable'],
   'AWS::EC2::EIP': ['ec2:AllocateAddress'],
   'AWS::EC2::FlowLog': ['ec2:CreateFlowLogs'],

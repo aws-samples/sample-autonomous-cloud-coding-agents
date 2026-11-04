@@ -103,10 +103,11 @@ const GEO_PREFIX_RE = new RegExp(`^(?:${GEO_ALTERNATION})\\.`);
  * redeploy, to move the deployment's inference profiles to another geography —
  * no construct edits needed.
  *
- * Both grant sites derive their inference-profile ARNs from this one value (the
+ * All three grant sites derive their inference-profile ARNs from this one value (the
  * AgentCore runtime in `stacks/agent.ts` via
- * `CrossRegionInferenceProfile.fromConfig`, the ECS task role in
- * `constructs/ecs-agent-cluster.ts` via the `<geo>.<modelId>` ARN resource
+ * `CrossRegionInferenceProfile.fromConfig`, and the ECS task role in
+ * `constructs/ecs-agent-cluster.ts` and MicroVM execution role in
+ * `constructs/lambda-microvm-compute.ts` via the `<geo>.<modelId>` ARN resource
  * name), and the agent's auxiliary-model env var (`ANTHROPIC_DEFAULT_HAIKU_MODEL`)
  * takes the same prefix via {@link inferenceProfileId} — so the main and
  * auxiliary models can never route through different geographies.
@@ -138,7 +139,7 @@ export function resolveBedrockGeoRegion(node: Node): CrossRegionInferenceProfile
  * a model the runtime may invoke — no construct edits needed.
  *
  * **Use the bare foundation-model ID (`anthropic.claude-…`), NOT a
- * geo-prefixed inference-profile ID.** Both grant sites derive the
+ * geo-prefixed inference-profile ID.** All three grant sites derive the
  * inference-profile ARN by prefixing the geography from
  * {@link resolveBedrockGeoRegion} (`bedrockGeoRegion` — `global` in the shipped cdk.json, `us` absent any context), so passing
  * `us.anthropic.…` here would produce an invalid `us.us.anthropic.…` ARN. The

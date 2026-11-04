@@ -36,7 +36,7 @@ import { allPolicies } from './policies';
  * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
  * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
  * `NestedStackPassRole` statement (CloudFormation passes the execution role to
- * nested stacks; without it a fresh-account deploy fails at change-set creation).
+ * nested stacks; without it a fresh-account deploy fails at change-set creation),
  * Adding policies to the bundle is a minor bump — that is the precedent
  * `compute-ecs` set.
  *
@@ -70,8 +70,12 @@ import { allPolicies } from './policies';
  * statement for least-privilege fresh-account deploys. It overlaps the exact-self
  * `PassSelfToCloudFormation` inline policy above; both remain until one is
  * retired. Re-bootstrap: an account on 1.9.0 lacks the new statement.
+ *
+ * 1.10.0 → 1.11.0 merges `main`'s 1.8.0 (#987), whose number collided again: it
+ * grants the operator console stack's Cognito managed-login domain
+ * (`cognito-idp:*UserPoolDomain`). Re-bootstrap: an account on 1.10.0 lacks it.
  */
-export const BOOTSTRAP_VERSION = '1.10.0';
+export const BOOTSTRAP_VERSION = '1.11.0';
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
