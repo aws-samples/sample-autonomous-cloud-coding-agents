@@ -997,9 +997,11 @@ export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Ro
   const principal = new iam.ServicePrincipal('lambda.amazonaws.com');
   const role = new iam.Role(scope, id, {
     assumedBy: principal,
+    // Keep this text byte-stable: the least-privilege bootstrap grants no
+    // iam:UpdateRoleDescription, so any change fails the deploy and its rollback.
     description:
       'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
-      + 'lifecycle hooks; writes logs and reads task payloads.',
+      + 'lifecycle hooks; writes logs and reads deployment bootstrap manifests.',
   });
   grantTagSession(role, principal);
   Tags.of(role).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
