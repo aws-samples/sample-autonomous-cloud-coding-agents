@@ -38,6 +38,8 @@ run = "yarn jest --coverage=false --runInBand"
 
 [tasks.synth]
 description = "cdk synth"
+# The app includes the operator console stack, which packages web/dist.
+depends = ["//web:bundle"]
 run = ["mkdir -p $TMPDIR", "yarn synth"]
 
 [tasks.census]
@@ -47,7 +49,7 @@ run = "yarn census"
 
 [tasks."synth:quiet"]
 description = "cdk synth (quiet)"
-depends = [":compile"]
+depends = [":compile", "//web:bundle"]
 run = ["mkdir -p $TMPDIR", "yarn synth:quiet"]
 
 # Reclaim regenerable build artifacts that otherwise grow unbounded and fill the
@@ -114,7 +116,8 @@ run = "npx tsx scripts/preflight-bootstrap.ts {{arg(name='cdkargs', var=true, re
 description = "cdk deploy (pass args after --)"
 # Reclaim disk first — the agent-image Docker build + CDK asset bundling need
 # several GB of working space, and uv/Docker caches accumulate across runs.
-depends = [":clean:disk"]
+# The operator console stack packages web/dist, so bundle it first.
+depends = [":clean:disk", "//web:bundle"]
 # The log-delivery preflight runs as the FIRST command of this task rather than as a
 # `depends`, so that the arguments after `--` reach BOTH it and `cdk deploy`. As a
 # `depends` it could not see them: mise forwards `--` args only to the invoked task's own
@@ -165,6 +168,7 @@ run = "npx cdk destroy"
 
 [tasks.diff]
 description = "cdk diff (pass args after --)"
+depends = ["//web:bundle"]
 run = "npx cdk diff {{arg(name='cdkargs', var=true, required=false)}}"
 
 [tasks.integ]

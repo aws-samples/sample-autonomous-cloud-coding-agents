@@ -16,6 +16,10 @@ docs/dist/
 docs/node_modules/
 docs/.astro/
 
+# Operator console: never part of the agent image. Excluded whole because its
+# build rewrites web/dist/ while the parallel CDK suite fingerprints this context.
+web/
+
 # Shared node_modules
 node_modules/
 

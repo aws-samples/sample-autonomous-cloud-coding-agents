@@ -2,7 +2,7 @@
 
 Context for AI coding assistants (Cursor, Claude Code, GitHub Copilot, etc.) working in this repository.
 
-**Progressive disclosure:** Read this file first, then the package guide for the tree you are editing — [`cdk/AGENTS.md`](./cdk/AGENTS.md), [`cli/AGENTS.md`](./cli/AGENTS.md), [`agent/AGENTS.md`](./agent/AGENTS.md), or [`docs/AGENTS.md`](./docs/AGENTS.md).
+**Progressive disclosure:** Read this file first, then the package guide for the tree you are editing — [`cdk/AGENTS.md`](./cdk/AGENTS.md), [`cli/AGENTS.md`](./cli/AGENTS.md), [`web/AGENTS.md`](./web/AGENTS.md), [`agent/AGENTS.md`](./agent/AGENTS.md), or [`docs/AGENTS.md`](./docs/AGENTS.md).
 
 ## Your role
 
@@ -49,6 +49,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | REST API, Lambdas, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | `cdk/test/` | [cdk/AGENTS.md](./cdk/AGENTS.md) |
 | Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | `bgagent` CLI | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API changes | [cli/AGENTS.md](./cli/AGENTS.md) |
+| Operator web console | `web/src/`, `web/test/` | `web/src/core/api/types.ts` if API changes | [web/AGENTS.md](./web/AGENTS.md) |
 | Agent runtime | `agent/src/` | `agent/tests/`, `agent/README.md` | [agent/AGENTS.md](./agent/AGENTS.md) |
 | Progress events | `agent/src/progress_writer.py`, `agent/src/pipeline.py`, `agent/src/runner.py` | `agent/tests/test_progress_writer.py`; `cli/src/commands/watch.ts` | [agent/AGENTS.md](./agent/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | User-facing / design prose | `docs/guides/`, `docs/design/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
@@ -58,7 +59,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 ## Boundaries
 
-- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, or `docs/`)
+- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, `web/`, or `docs/`)
 - ⚠️ **Ask first:** New CDK stacks or constructs, agent contract changes, new dependencies, major refactors, CI workflow edits
 - 🚫 **Never:** Edit on `main`; edit `docs/src/content/docs/` by hand; commit secrets; implement without an `approved` issue (conversational "go ahead" is not approval); run raw `jest`/`tsc`/`cdk` when a mise task exists
 
@@ -87,7 +88,8 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 |------|------|
 | `cdk/` | CDK app (`@abca/cdk`) — [cdk/AGENTS.md](./cdk/AGENTS.md) |
 | `cli/` | `bgagent` CLI — [cli/AGENTS.md](./cli/AGENTS.md) |
+| `web/` | Operator console (React + Cloudscape) — [web/AGENTS.md](./web/AGENTS.md) |
 | `agent/` | Python runtime (bundled into CDK image) — [agent/AGENTS.md](./agent/AGENTS.md) |
 | `docs/` | Guides, design, Starlight site — [docs/AGENTS.md](./docs/AGENTS.md) |
-| `mise.toml` | Monorepo tasks; `config_roots`: cdk, agent, cli, docs |
+| `mise.toml` | Monorepo tasks; `config_roots`: cdk, agent, cli, docs, web |
 | `CONTRIBUTING.md` | Contribution guidelines |

@@ -168,6 +168,20 @@ export interface AgentStackProps extends StackProps {
 }
 
 export class AgentStack extends Stack {
+  /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
+  public readonly taskApi: TaskApi;
+  /** Onboarded repositories; the console's issue picker serves only these. */
+  public readonly repoTable: RepoTable;
+  /** Platform GitHub token, read server-side by the console's issue picker. */
+  public readonly githubTokenSecret: secretsmanager.ISecret;
+  /** Linear tables and webhook wiring; the console lists and starts Linear issues through them. */
+  /** Undefined when the deployment profile omits Linear (ADR-024). */
+  public readonly linearIntegration?: LinearIntegration;
+  /** The task table (its Linear-issue index tells the console which issues already have a task). */
+  public readonly taskTable: TaskTable;
+  /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
+  public readonly linearIdentityVault?: LinearIdentityVault;
+
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -194,7 +208,7 @@ export class AgentStack extends Stack {
     const lambdaMicrovmEnabled = computeTypes.includes('lambda-microvm');
 
     // Task state persistence
-    const taskTable = new TaskTable(this, 'TaskTable');
+    const taskTable = this.taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
     // Parent/sub-issue orchestration DAG state.
@@ -218,7 +232,7 @@ export class AgentStack extends Stack {
     const budgetAlerts = new BudgetAlerts(this, 'BudgetAlerts');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
-    const repoTable = new RepoTable(this, 'RepoTable');
+    const repoTable = this.repoTable = new RepoTable(this, 'RepoTable');
 
     // Standalone Agent Registry asset registry (#246). Provisioned via a custom
     // resource because CreateRegistry is async and has no CDK L2. Enabled by
@@ -292,6 +306,7 @@ export class AgentStack extends Stack {
       description: 'GitHub personal access token for the background agent',
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    this.githubTokenSecret = githubTokenSecret;
 
     NagSuppressions.addResourceSuppressions(githubTokenSecret, [
       {
@@ -462,7 +477,7 @@ export class AgentStack extends Stack {
       },
     });
     // --- Task API (REST API + Cognito + Lambda handlers) ---
-    const taskApi = new TaskApi(this, 'TaskApi', {
+    const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
@@ -1031,7 +1046,7 @@ export class AgentStack extends Stack {
       // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
       // enforced; F11: localhost + hosted coexist so either onboarding mode works
       // off one identity). Both are registered: the CLI picks per call.
-      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+      linearIdentityVault = this.linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
         workloadName: linearVaultWorkload,
         allowedReturnUrls: [
           'http://localhost:8080/oauth/callback',
@@ -1488,7 +1503,7 @@ export class AgentStack extends Stack {
     }
 
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
-    const linearIntegration = features.linear ? new LinearIntegration(this, 'LinearIntegration', {
+    const linearIntegration = this.linearIntegration = features.linear ? new LinearIntegration(this, 'LinearIntegration', {
       identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,

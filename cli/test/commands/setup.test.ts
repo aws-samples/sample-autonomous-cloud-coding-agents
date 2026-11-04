@@ -63,7 +63,7 @@ function stack(outputs: Record<string, string>, status = 'UPDATE_COMPLETE', para
 }
 
 /** A current ABCA bootstrap that already allows AgentCore. */
-const BOOTSTRAPPED = stack({ BootstrapPolicyVersion: '1.7.0' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
+const BOOTSTRAPPED = stack({ BootstrapPolicyVersion: '1.8.0' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
 
 /** Name-aware stack lookup: only the listed stacks (plus a current bootstrap unless overridden) exist. */
 const stacks = (byName: Record<string, ExistingStack | null>) => async (_region: string, name: string) =>
@@ -537,7 +537,7 @@ describe('brand-new accounts', () => {
     const outdated = stack({ BootstrapPolicyVersion: '1.5.2' }, 'UPDATE_COMPLETE', { ComputeTypes: 'agentcore' });
     const setBootstrapComputeTypes = jest.fn(async () => undefined);
     await setup({ compute: 'agentcore,ecs', features: 'none', yes: true }, deps({ describeStack: stacks({ CDKToolkit: outdated }), setBootstrapComputeTypes }));
-    expect(text()).toContain('Update the CDK bootstrap to version 1.7.0');
+    expect(text()).toContain('Update the CDK bootstrap to version 1.8.0');
     expect(setBootstrapComputeTypes).toHaveBeenCalledWith('us-east-1', ['agentcore', 'ecs']);
   });
 

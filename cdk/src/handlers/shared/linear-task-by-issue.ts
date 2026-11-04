@@ -19,7 +19,7 @@
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { logger } from './logger';
-import { TaskTable } from '../../constructs/task-table';
+import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 /**
  * The fields the standalone comment trigger needs from the newest
@@ -79,7 +79,7 @@ export async function lookupTaskByLinearIssue(
   try {
     const res = await ddb.send(new QueryCommand({
       TableName: taskTableName,
-      IndexName: TaskTable.LINEAR_ISSUE_INDEX,
+      IndexName: LINEAR_ISSUE_INDEX_NAME,
       KeyConditionExpression: 'linear_issue_id = :iid',
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest created_at first

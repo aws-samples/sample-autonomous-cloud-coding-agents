@@ -256,6 +256,18 @@ To update the data when AWS expands coverage:
 
 A stale entry blocks a newly supported Region until it is updated. The check fails closed by design, and there is no context override: editing the catalog is the only way to unblock a Region. Stacks that synthesize without a concrete Region (for example CI without credentials) are not checked; synthesis fails before any AWS lookup when a Region is known.
 
+### Optional operator console
+
+The operator console is a read-only web UI for tasks, approvals and agent health. It deploys as a separate stack, `${stackName}-console`: a private S3 bucket served through CloudFront, plus a Cognito app client and managed-login domain on the platform's existing user pool. Enable it with:
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --all -c operatorConsole=true
+```
+
+`--all` is required because the app now has more than one stack. The deploy task builds the bundle (`mise //web:bundle`) first. Open the `ConsoleUrl` stack output and sign in with the same Cognito user as the `bgagent` CLI.
+
+The static app shell is public, like any single-page app on a CDN. It holds no data or secrets. Every request for data goes to the REST API, which requires a Cognito ID token. The console stack also deploys a small console-only API for the issue picker. It lists the open issues of onboarded repositories, using the stored GitHub token on the server side; the browser never receives the token. That API requires a Cognito ID token on every route, and its CORS rules allow only the console's own address. To sign in from a local `vite` dev server against a deployed stack, add `-c operatorConsoleDevOrigins=http://localhost:5173`. Bootstrap policy bundle 1.8.0 or later is required for the managed-login domain; `mise //cdk:preflight` reports a stale bundle.
+
 ## Bedrock inference geography
 
 The shipped `cdk/cdk.json` sets `bedrockGeoRegion: "global"`, so inference routes to

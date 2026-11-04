@@ -88,7 +88,7 @@ const BOOTSTRAP_STACK = 'CDKToolkit';
  * Minimum ABCA bootstrap bundle this CLI deploys against. Mirrors
  * `BOOTSTRAP_VERSION` in `cdk/src/bootstrap/version.ts` (parity-tested).
  */
-export const REQUIRED_BOOTSTRAP_VERSION = '1.7.0';
+export const REQUIRED_BOOTSTRAP_VERSION = '1.8.0';
 
 const COMPUTE_LABELS: Readonly<Record<ComputeBackend, string>> = {
   'agentcore': 'AgentCore Runtime',
