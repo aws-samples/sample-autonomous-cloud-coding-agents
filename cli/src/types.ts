@@ -172,6 +172,7 @@ export interface TaskDetail {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -334,6 +335,7 @@ export interface TaskSummary {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -358,6 +360,15 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /**
+   * Estimated spend in USD (null until the agent reports one). On the summary so a
+   * cost view can total a page of tasks without one detail call per task.
+   */
+  readonly cost_usd: number | null;
+  /** When the task reached a terminal state (null while it runs). */
+  readonly completed_at: string | null;
+  /** Where the task was submitted from (console/CLI API, webhook, Slack, Linear, Jira). */
+  readonly channel_source: ChannelSource;
 }
 
 /** Authenticated caller's personal monthly budget status. */

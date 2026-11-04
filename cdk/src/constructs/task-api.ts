@@ -336,6 +336,10 @@ export class TaskApi extends Construct {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
+        // Browsers send only the request headers listed here. `POST /tasks` takes an
+        // `Idempotency-Key`; without it in the list the browser blocks the request
+        // before it is sent (the CLI is not a browser, so it never hit this).
+        allowHeaders: [...apigw.Cors.DEFAULT_HEADERS, 'Idempotency-Key'],
       },
     });
 

@@ -100,6 +100,10 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // neither of which the CLI ever sees (CLI uses ApiKeyDetail).
   'ApiKeyRecord',
   'ApprovalDecisionRecordedEvent',
+  // Console-API-only (GET /repos/{repo_id}/issues on the operator console stack's
+  // own API, consumed by web/, never by the CLI; mirrored in web/src/core/api/types.ts):
+  'RepoIssueSummary',
+  'ListRepoIssuesResponse',
   // Server-side helper / internal contracts:
   'TaskNotificationsConfig',
   'NotificationChannelConfig',

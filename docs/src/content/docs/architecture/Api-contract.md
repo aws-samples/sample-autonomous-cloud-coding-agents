@@ -238,6 +238,7 @@ Returns full details of a task. Users can only access their own tasks.
     "repo": "org/myapp",
     "resolved_workflow": { "id": "coding/new-task-v1", "version": "1.0.0" },
     "issue_number": 42,
+    "issue_title": "Login fails after password reset",
     "task_description": "Fix the authentication bug in the login flow",
     "branch_name": "bgagent/01HYX.../fix-auth-bug",
     "session_id": "sess-uuid",
@@ -257,6 +258,8 @@ Returns full details of a task. Users can only access their own tasks.
   }
 }
 ```
+
+`issue_title` is the GitHub issue's title, stored when the issue is read at hydration (at most 256 characters). It is `null` until then, for tasks without an issue, and on records written before the field existed. It is for display only.
 
 `agent_heartbeat_at` is the agent's last in-guest liveness beat, or `null`. The agent writes it every 45 s on the `agentcore` and `lambda-microvm` backends; on `ecs` it is written once at start, because that backend runs the pipeline directly instead of serving HTTP. The orchestrator reads the same field to detect a hung agent inside a healthy compute environment ([ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#dynamodb-heartbeat-agentcore-and-lambda-microvms)), so a value that is minutes old on a `RUNNING` task is the signal, not the timestamp itself. `null` on records written before the field existed.
 
