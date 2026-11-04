@@ -161,8 +161,21 @@ export function applicationPolicy(): iam.PolicyDocument {
           'cognito-idp:UntagResource',
           'cognito-idp:ListTagsForResource',
           'cognito-idp:GetUserPoolMfaConfig',
+          // Managed-login domain for the operator console stack.
+          'cognito-idp:CreateUserPoolDomain',
+          'cognito-idp:UpdateUserPoolDomain',
+          'cognito-idp:DeleteUserPoolDomain',
         ],
         resources: ['arn:aws:cognito-idp:*:*:userpool/*'],
+      }),
+
+      // DescribeUserPoolDomain supports no resource-level scoping (IAM requires "*").
+      // CloudFormation polls it while a UserPoolDomain is created or deleted. Read-only.
+      new iam.PolicyStatement({
+        sid: 'CognitoDomainRead',
+        effect: iam.Effect.ALLOW,
+        actions: ['cognito-idp:DescribeUserPoolDomain'],
+        resources: ['*'],
       }),
 
       new iam.PolicyStatement({

@@ -61,6 +61,8 @@ const TASK_ITEMS = [
     status_created_at: 'COMPLETED#2025-03-14T10:00:00Z',
     created_at: '2025-03-14T10:00:00Z',
     updated_at: '2025-03-14T12:00:00Z',
+    completed_at: '2025-03-14T11:58:00Z',
+    cost_usd: 1.25,
   },
 ];
 
@@ -183,6 +185,13 @@ describe('list-tasks handler', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('summaries carry cost, completion time and source, for cost views', async () => {
+    const body = JSON.parse((await handler(makeEvent())).body);
+    expect(body.data[1]).toMatchObject({ cost_usd: 1.25, completed_at: '2025-03-14T11:58:00Z', channel_source: 'api' });
+    // Not finished or no cost reported yet: explicit nulls, not missing keys.
+    expect(body.data[0]).toMatchObject({ cost_usd: null, completed_at: null, channel_source: 'api' });
   });
 
   test('returns pagination token when more results exist', async () => {

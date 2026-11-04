@@ -145,6 +145,7 @@ describe('IaCRole-ABCA-Application', () => {
       'LambdaEventSourceMappings',
       'APIGateway',
       'Cognito',
+      'CognitoDomainRead',
       'WAFv2',
       'EventBridge',
       'SQS',

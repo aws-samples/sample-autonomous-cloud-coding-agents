@@ -10,7 +10,8 @@
   "workspaces": [
     "cdk",
     "cli",
-    "docs"
+    "docs",
+    "web"
   ],
   "scripts": {
     "install:all": "MISE_EXPERIMENTAL=1 mise run install",
