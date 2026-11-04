@@ -176,7 +176,7 @@ scenario_expiry() {
   local final; final=$(finished "$id") || final=TIMEOUT
   local raw; raw=$(bg events "$id" --all --output json 2>/dev/null)
   local timed_out wrote
-  timed_out=$(jq -r '[.. | objects | select((.event_type? // "") | test("timed_out|timeout")) or ((.metadata.milestone? // "") | test("timed_out|timeout"))] | length' <<<"$raw")
+  timed_out=$(jq -r '[.. | objects | select(((.event_type? // "") | test("timed_out|timeout")) or ((.metadata.milestone? // "") | test("timed_out|timeout")))] | length' <<<"$raw")
   wrote=$(jq -r --arg f "accept-$RUN-expiry.env" '[.. | objects | select(.event_type? == "agent_tool_result") | select((.metadata | tostring) | contains($f) and contains("successfully"))] | length' <<<"$raw")
   [[ $final != TIMEOUT && $timed_out -gt 0 && $wrote -eq 0 ]] \
     && record expiry PASS "$id" "gate timed out while asleep, gated .env write never ran, task $final" \
