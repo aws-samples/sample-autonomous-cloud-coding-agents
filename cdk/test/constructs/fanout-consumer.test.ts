@@ -228,6 +228,26 @@ describe('FanOutConsumer', () => {
     }
   });
 
+  test('sets LINEAR_AGENT_SESSIONS_ENABLED only when linearAgentSessionsEnabled is true (ADR-018 Phase 2)', () => {
+    const synth = (enabled?: boolean) => {
+      const stack = new Stack(new App(), 'TestStack');
+      new FanOutConsumer(stack, 'FanOut', {
+        taskEventsTable: makeTaskEventsTable(stack),
+        ...(enabled !== undefined && { linearAgentSessionsEnabled: enabled }),
+      });
+      return Template.fromStack(stack);
+    };
+    synth(true).hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ LINEAR_AGENT_SESSIONS_ENABLED: 'true' }) },
+    });
+    for (const off of [synth(false), synth()]) {
+      for (const fn of Object.values(off.findResources('AWS::Lambda::Function'))) {
+        const vars = (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {};
+        expect(vars).not.toHaveProperty('LINEAR_AGENT_SESSIONS_ENABLED');
+      }
+    }
+  });
+
   test('passes TASK_TABLE_NAME env var when taskTable is provided', () => {
     // The Slack dispatcher requires this env var (review #3); the
     // construct must wire it from the prop. Its absence triggers the

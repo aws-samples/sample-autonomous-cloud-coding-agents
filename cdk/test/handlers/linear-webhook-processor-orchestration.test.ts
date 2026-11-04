@@ -1092,6 +1092,38 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
     });
 
+    // ADR-018 Phase 2: with the agent-session channel on, Linear opens a session
+    // for this same mention and the session path answers it — acting here too
+    // would start a second task.
+    test('agent sessions enabled → the standalone mention yields to the session path', async () => {
+      process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+      try {
+        mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+        await handler(eventWith(comment()));
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+        expect(reactToCommentMock).not.toHaveBeenCalled();
+        expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.LINEAR_AGENT_SESSIONS_ENABLED;
+      }
+    });
+
+    test('agent sessions enabled → an unlinked commenter gets no comment-path reply (the session tells them)', async () => {
+      process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+      try {
+        mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+        const base = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) =>
+          ((cmd.input.Key as { linear_identity?: string } | undefined)?.linear_identity ? {} : base(cmd)));
+        await handler(eventWith(comment()));
+        expect(reactToCommentMock).not.toHaveBeenCalled();
+        expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+      } finally {
+        delete process.env.LINEAR_AGENT_SESSIONS_ENABLED;
+      }
+    });
+
     test('plain issue resolves PR from pr_url when pr_number absent', async () => {
       mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_url: 'https://github.com/o/r/pull/123' });
       await handler(eventWith(comment()));

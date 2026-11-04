@@ -324,3 +324,83 @@ describe('linear-webhook handler', () => {
     expect(result.statusCode).toBe(400);
   });
 });
+
+describe('linear-webhook handler — agent-session channel (ADR-018 Phase 2)', () => {
+  function sessionPayload(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      action: 'created',
+      type: 'AgentSessionEvent',
+      webhookTimestamp: Date.now(),
+      webhookId: 'wh-1',
+      organizationId: 'org-1',
+      agentSession: { id: 'session-1', issueId: 'issue-1' },
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    lambdaSend.mockReset();
+    smSend.mockReset();
+    invalidateLinearSecretCache(process.env.LINEAR_WEBHOOK_SECRET_ARN!);
+    smSend.mockResolvedValue({ SecretString: WEBHOOK_SECRET });
+    ddbSend.mockResolvedValue({});
+    lambdaSend.mockResolvedValue({});
+  });
+  afterEach(() => {
+    delete process.env.LINEAR_AGENT_SESSIONS_ENABLED;
+  });
+
+  test('flag off: AgentSessionEvent is acked and never forwarded', async () => {
+    const body = sessionPayload();
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test.each(['created', 'prompted'])('flag on: %s is deduped on the session id and forwarded verbatim', async (action) => {
+    process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+    const body = sessionPayload({ action });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    const put = ddbSend.mock.calls.find((c) => c[0]._type === 'Put')![0];
+    expect(put.input.Item.dedup_key).toMatch(new RegExp(`^session-1#${action}#\\d+$`));
+    const invoked = JSON.parse(new TextDecoder().decode(lambdaSend.mock.calls[0][0].input.Payload));
+    expect(invoked.raw_body).toBe(body);
+  });
+
+  test('flag on: an unhandled session action is acked without dispatch', async () => {
+    process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+    const body = sessionPayload({ action: 'updated' });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('flag on: a session delivery without agentSession.id is a 400', async () => {
+    process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+    const body = sessionPayload({ agentSession: {} });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(400);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('flag on: other agent-mode types are still ignored', async () => {
+    process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+    const warnSpy = jest.spyOn(logger, 'warn');
+    const body = sessionPayload({ type: 'AppUserNotification' });
+    const result = await handler(makeEvent(body, sign(body)));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('agent-mode'), expect.anything());
+    warnSpy.mockRestore();
+  });
+
+  test('flag on: still verifies the signature before anything else', async () => {
+    process.env.LINEAR_AGENT_SESSIONS_ENABLED = 'true';
+    const body = sessionPayload();
+    const result = await handler(makeEvent(body, 'deadbeef'));
+    expect(result.statusCode).toBe(401);
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+});

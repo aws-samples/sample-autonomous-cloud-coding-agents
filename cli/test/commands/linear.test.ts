@@ -355,6 +355,8 @@ describe('renderLinearAppTemplate', () => {
   test('says to leave App events OFF, and why', () => {
     const out = renderLinearAppTemplate();
     expect(out).toMatch(/App events \(agent session/);
+    // The opt-in native agent-session channel (ADR-018 Phase 2) is the one exception.
+    expect(out).toContain('enableLinearAgentSessions=true');
     expect(out).toMatch(/OFF/);
     expect(out).toMatch(/comment thread/);
   });

@@ -105,7 +105,13 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
   ].map(base => ({
     ...base,
     name: `${base.name}-email-fork`,
-    context: { ...base.context, alertEmail: 'census@example.com', forkBlueprintRepo: 'example/census-blueprints' },
+    context: {
+      ...base.context,
+      alertEmail: 'census@example.com',
+      forkBlueprintRepo: 'example/census-blueprints',
+      // Adds a processor IAM statement + env (no resources); probed on the widest profiles.
+      enableLinearAgentSessions: true,
+    },
   }));
   profiles.push(...supplemental);
   const externalConsent = profile('ecs', true, true, true, 'none');
