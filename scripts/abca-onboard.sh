@@ -215,14 +215,53 @@ while [ $# -gt 0 ]; do
     --local-dev)  LOCAL_DEV=1; shift ;;
     --no-local-dev) LOCAL_DEV=0; shift ;;
     --yes|-y)     AUTO_YES=1; shift ;;
-    -h|--help)    sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help)    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *)            die "unknown option: $1 (see --help)" ;;
   esac
 done
 mkdir -p "$LOG_DIR"
+
+# One run at a time: two runs would share the assembly, the progress file and the stack.
+# The lock is a symlink whose target is the holder's pid: `ln -s` creates it and records the
+# pid in one atomic step, so there is no moment where the lock exists without an owner.
+LOCK_FILE="$STATE_DIR/lock"
+lock_holder_alive() {  # lock_holder_alive PID → 0 if PID is a running copy of this script
+  [ -n "$1" ] && ps -p "$1" -o command= 2>/dev/null | grep -q 'abca-onboard'
+}
+take_lock() {
+  if ! ln -s "$$" "$LOCK_FILE" 2>/dev/null; then
+    local holder; holder="$(readlink "$LOCK_FILE" 2>/dev/null || true)"
+    if lock_holder_alive "$holder"; then
+      die "another run of this script is in progress (pid $holder). Wait for it to finish, or stop it first."
+    fi
+    # The previous run ended without cleaning up (killed, or the Mac restarted). Move its lock
+    # aside under a name only we use, and check it is still the stale one we looked at: if
+    # another run took over in between, we moved *its* lock, so put it back and stop.
+    local aside="$LOCK_FILE.stale.$$"
+    mv "$LOCK_FILE" "$aside" 2>/dev/null || die "another run of this script is starting; try again in a moment"
+    if [ "$(readlink "$aside" 2>/dev/null || true)" != "$holder" ]; then
+      mv "$aside" "$LOCK_FILE" 2>/dev/null || true
+      die "another run of this script is starting; try again in a moment"
+    fi
+    rm -f "$aside"
+    ln -s "$$" "$LOCK_FILE" 2>/dev/null || die "another run of this script is starting; try again in a moment"
+  fi
+  trap '[ "$(readlink "$LOCK_FILE" 2>/dev/null)" = "$$" ] && rm -f "$LOCK_FILE"' EXIT
+}
+[ -d "$STATE_DIR/lock" ] && rm -rf "$STATE_DIR/lock"  # the directory lock of earlier versions of this script
+
 # Every cdk command selects all stacks (app + console) with the same context, so they always agree.
-CDK_ARGS=(--all)
-[ "$CONSOLE" = 1 ] && CDK_ARGS+=(-c operatorConsole=true)
+# The app reads its stack name only from context, so --stack-name must be passed on, or CDK would
+# work on backgroundagent-dev while this script checks and tears down another stack.
+set_cdk_args() {  # the one place CDK_ARGS is built, from STACK_NAME, CONSOLE and LOCAL_DEV
+  CDK_ARGS=(--all -c "stackName=$STACK_NAME")
+  if [ "$CONSOLE" = 1 ]; then
+    CDK_ARGS+=(-c operatorConsole=true)
+    [ "$LOCAL_DEV" = 1 ] && CDK_ARGS+=(-c operatorConsoleDevOrigins=http://localhost:5173)
+  fi
+  return 0
+}
+set_cdk_args
 CONSOLE_STACK="$STACK_NAME-console"
 TODO_FILE="$LOG_DIR/$RUN_ID-todo.txt"
 
@@ -300,8 +339,11 @@ ensure_brew() {
   warn "Homebrew not found (needed to install missing tools)"
   confirm "Install Homebrew from https://brew.sh ?" || die "Homebrew is required to install missing tools"
   run /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  [ -x /opt/homebrew/bin/brew ] && eval "$(/opt/homebrew/bin/brew shellenv)"
-  [ -x /usr/local/bin/brew ] && eval "$(/usr/local/bin/brew shellenv)"
+  # `if`, not `&&`: under set -e a failed test on the last line would end the script silently.
+  if [ -x /opt/homebrew/bin/brew ]; then eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [ -x /usr/local/bin/brew ]; then eval "$(/usr/local/bin/brew shellenv)"
+  fi
+  [ "$DRY_RUN" = 1 ] || have brew || die "Homebrew was installed but is not on PATH; open a new terminal and re-run"
 }
 
 ensure_tool() {  # ensure_tool command brew-formula [--cask]
@@ -448,12 +490,15 @@ checkout() {
     [ -f "$DIR/cdk/cdk.json" ] && [ -d "$DIR/agent" ] \
       || die "$DIR is a git checkout, but not of ABCA (no cdk/cdk.json). Pass --dir with an ABCA checkout or a new folder; nothing was changed."
     ok "existing checkout: $DIR ($(git -C "$DIR" rev-parse --abbrev-ref HEAD) @ $(git -C "$DIR" rev-parse --short HEAD))"
-    if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
+    # cdk/cdk.json carries this script's own blueprintRepo setting; it alone does not block a pull.
+    # --autostash sets it aside for the pull and re-applies it, even when upstream changed cdk.json.
+    if [ -n "$(git -C "$DIR" status --porcelain -- . ':(exclude)cdk/cdk.json')" ]; then
       warn "checkout has local changes; not pulling updates"
     elif ! git -C "$DIR" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
       ok "branch has no upstream to pull from; deploying it as it is"
     elif confirm "Pull the latest upstream changes?"; then
-      run git -C "$DIR" pull --ff-only
+      run git -C "$DIR" pull --ff-only --autostash \
+        || die "could not pull the latest changes (see above). If cdk/cdk.json has a conflict, keep upstream's version and re-run: git -C $DIR checkout -- cdk/cdk.json"
     fi
   elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     die "$DIR already exists and is not a git checkout. Pass --dir with a new or empty folder, or an existing ABCA checkout; nothing was changed."
@@ -569,9 +614,11 @@ aws_identity() {
 
   local haystack
   haystack="$(printf '%s %s %s' "$ACCOUNT_ALIAS" "$CALLER_ARN" "${AWS_PROFILE:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$haystack" in
-    *prod*|*prd*) die "this looks like a PRODUCTION account or role (matched 'prod'/'prd'). Use a dedicated sandbox account." ;;
-  esac
+  # "prod" or "prd" anywhere (ProdAdmin, acme-prod, teamprod), except as part of "product"
+  # (ProductEngineer, product-team). When unsure, this errs towards stopping.
+  if printf '%s' "$haystack" | sed 's/product//g' | grep -Eq 'prod|prd'; then
+    die "this looks like a PRODUCTION account or role (matched 'prod'/'prd'/'production'). Use a dedicated sandbox account."
+  fi
   case "$haystack" in
     *dev*|*test*|*sandbox*|*beta*|*staging*|*alpha*) ok "account/role name suggests a non-production environment" ;;
     *) warn "cannot tell whether this account is non-production — treat it as production unless you are sure" ;;
@@ -665,10 +712,16 @@ choose_repo() {
   if [ "$current" = "$TARGET_REPO" ]; then
     ok "cdk/cdk.json already targets $TARGET_REPO"
   else
+    # Edit the one key in place instead of re-serialising the file, so the rest keeps the
+    # project's formatting and the diff against upstream stays one line.
     run node -e '
-      const fs=require("fs"),p="cdk/cdk.json",c=JSON.parse(fs.readFileSync(p,"utf8"));
-      c.context=c.context||{}; c.context.blueprintRepo=process.argv[1];
-      fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");' "$TARGET_REPO"
+      const fs=require("fs"),p="cdk/cdk.json",text=fs.readFileSync(p,"utf8"),repo=JSON.stringify(process.argv[1]);
+      let out;
+      if (/"blueprintRepo"\s*:/.test(text)) out=text.replace(/("blueprintRepo"\s*:\s*)"[^"]*"/, (_m, k) => k + repo);
+      else out=text.replace(/("context"\s*:\s*\{)(\s*)/, (_m, open, ws) => open + ws + "\"blueprintRepo\": " + repo + "," + ws);
+      let ok=false; try { ok = JSON.parse(out).context.blueprintRepo === process.argv[1]; } catch {}
+      if (!ok) { const c=JSON.parse(text); c.context=c.context||{}; c.context.blueprintRepo=process.argv[1]; out=JSON.stringify(c,null,2)+"\n"; }
+      fs.writeFileSync(p, out);' "$TARGET_REPO"
     ok "set blueprintRepo=$TARGET_REPO in cdk/cdk.json (a local change in your checkout)"
   fi
 }
@@ -687,6 +740,13 @@ build_all() {
   run_logged cli-compile mise //cli:compile
 }
 
+# The console stack uploads web/dist and refuses to synthesize without it. Deploys get it from
+# //cdk:synth, which depends on //web:bundle; //cdk:destroy does not, so teardown calls this.
+bundle_console() {
+  [ "$CONSOLE" = 1 ] || return 0
+  run_logged web-bundle mise //web:bundle
+}
+
 compile_only() {
   step "Compile without AWS (CDK app + CLI)"
   run_logged cdk-compile mise //cdk:compile
@@ -702,12 +762,22 @@ bootstrap() {
     # An existing bootstrap can be older than this checkout needs; deploying would then fail with an
     # IAM AccessDenied only after every asset is uploaded. Checkouts that ship the check can tell us now.
     if [ -f cdk/scripts/preflight-bootstrap.ts ]; then
-      local verdict
-      if verdict="$(cd cdk && mise exec -- npx tsx scripts/preflight-bootstrap.ts 2>&1)"; then
-        verdict="$(printf '%s' "$verdict" | sed -n 's/^bootstrap preflight: //p' | head -n 1)"
+      local out verdict status=0 log="$LOG_DIR/$RUN_ID-preflight.log"
+      if grep -q '^\[tasks.preflight\]' cdk/mise.toml 2>/dev/null; then
+        out="$(mise //cdk:preflight 2>&1)" || status=$?
+      else
+        out="$(cd cdk && mise exec -- npx tsx scripts/preflight-bootstrap.ts 2>&1)" || status=$?
+      fi
+      printf '%s\n' "$out" >"$log"
+      verdict="$(printf '%s' "$out" | sed -n 's/^bootstrap preflight: //p' | head -n 1)"
+      if [ -z "$verdict" ]; then
+        # The check itself did not run (e.g. dependencies not installed yet): that says nothing
+        # about the bootstrap, so don't offer to change it. The deploy reports a real mismatch.
+        warn "could not run the bootstrap check; continuing (details: $log)"
+      elif [ "$status" = 0 ]; then
         case "$verdict" in WARN:*) warn "$verdict" ;; *) ok "$verdict" ;; esac
       else
-        warn "$(printf '%s' "$verdict" | sed -n 's/^bootstrap preflight: //p' | head -n 1)"
+        warn "$verdict"
         confirm "Update the CDKToolkit stack's bootstrap policies in $ACCOUNT_ID/$REGION now?" \
           || die "the existing bootstrap is out of date; deploying would fail. Re-run and accept the update."
         run_logged bootstrap mise //cdk:bootstrap
@@ -723,18 +793,17 @@ bootstrap() {
 # The operator console stack only exists in checkouts that include it (cdk/src/stacks/console.ts);
 # older ones deploy without it instead of reporting a console that was never created.
 detect_console() {
-  if [ "$CONSOLE" = 1 ] && [ ! -f "$DIR/cdk/src/stacks/console.ts" ]; then
+  if [ "$CONSOLE" = 1 ] && { [ ! -f "$DIR/cdk/src/stacks/console.ts" ] || [ ! -f "$DIR/web/mise.toml" ]; }; then
     CONSOLE=0
-    CDK_ARGS=(--all)
+    set_cdk_args
     ok "this checkout has no operator web console; deploying the platform stack only"
   fi
 }
 
 # Local dev sign-in (`--local-dev`, remembered): lets `mise //web:dev:live` sign in at http://localhost:5173.
 add_local_dev_args() {
-  detect_console
   if [ "$LOCAL_DEV" = 1 ] && [ "$CONSOLE" = 1 ]; then
-    CDK_ARGS+=(-c operatorConsoleDevOrigins=http://localhost:5173)
+    set_cdk_args
     ok "console sign-in also allowed from a local dev server (http://localhost:5173); turn off with --no-local-dev"
   fi
   save_settings
@@ -750,7 +819,7 @@ confirm_deploy_source() {
   if [ -n "$SAVED_DEPLOY_DIR" ] && [ "$SAVED_DEPLOY_DIR" != "$DIR" ]; then
     warn "last time you deployed from $SAVED_DEPLOY_DIR"
     warn "deploying a different checkout replaces the stack with that checkout's code; features it lacks are removed"
-    confirm "Deploy from $DIR anyway?" \
+    confirm_warning "Deploy from $DIR anyway?" \
       || die "deploy cancelled; re-run from the checkout you meant (cd there, then run this script)"
   fi
 }
@@ -780,7 +849,8 @@ deploy() {
   rm -rf "$ASSEMBLY"
   local synth_args=() a
   for a in "${CDK_ARGS[@]}"; do [ "$a" = --all ] || synth_args+=("$a"); done
-  run_logged synth mise //cdk:synth -- --quiet -o "$ASSEMBLY" "${synth_args[@]}"
+  # ${a[@]+...}: bash 3.2 (macOS) treats an empty array as unbound under set -u.
+  run_logged synth mise //cdk:synth -- --quiet -o "$ASSEMBLY" ${synth_args[@]+"${synth_args[@]}"}
   run_logged diff mise //cdk:diff -- --app "$ASSEMBLY" "${CDK_ARGS[@]}"
   [ "$DRY_RUN" = 1 ] || printf '  Review the full diff: %s\n' "$LOG_DIR/$RUN_ID-diff.log"
 
@@ -799,19 +869,20 @@ deploy() {
   # CDK's own approval prompt needs a terminal, and the deploy below runs with its output captured
   # (logged), so CDK cannot ask. Show the same tables CDK would and ask here instead; the deploy only
   # runs with --require-approval never after you approve exactly these changes.
+  # The diff above already printed these tables; read them from its log instead of diffing again.
   local seclog="$LOG_DIR/$RUN_ID-security-diff.log"
-  printf '  computing the security changes (cdk diff --security-only, ~1-2 min)...\n'
-  (cd cdk && mise exec -- npx cdk diff --security-only --app "$ASSEMBLY" "${CDK_ARGS[@]}") >"$seclog" 2>&1 \
-    || die "could not compute the security changes — see $seclog"
+  [ -s "$LOG_DIR/$RUN_ID-diff.log" ] || die "the diff log is missing; cannot show the security changes"
+  sed $'s/\033\[[0-9;]*m//g' "$LOG_DIR/$RUN_ID-diff.log" >"$seclog"
   if grep -q -E 'IAM Statement Changes|IAM Policy Changes|Security Group Changes' "$seclog"; then
     # A first deploy adds hundreds of rows; summarise, and show the full tables only on request.
+    # Each stack (app, console) has its own tables, each ending at CDK's NOTE line.
     awk '/IAM Statement Changes/{s="IAM policy statements"} /IAM Policy Changes/{s="managed-policy attachments"}
-         /Security Group Changes/{s="security-group rules"} /^\(NOTE: There may be security-related changes/{exit}
+         /Security Group Changes/{s="security-group rules"} /^\(NOTE: There may be security-related changes/{s=""}
          s && /^│ [+-] │/{ if ($2 == "+") add[s]++; else rem[s]++ }
          END{ for (k in add) printf "    %-28s %4d added, %d removed\n", k, add[k], rem[k] + 0 }' "$seclog"
     printf '  Full tables: %s\n' "$seclog"
     if confirm_no "Show the full tables here?"; then
-      awk '/IAM Statement Changes|IAM Policy Changes|Security Group Changes/{show=1} show{print} /^\(NOTE: There may be security-related changes/{exit}' "$seclog"
+      awk '/IAM Statement Changes|IAM Policy Changes|Security Group Changes/{show=1} show{print} /^\(NOTE: There may be security-related changes/{show=0}' "$seclog"
     fi
     confirm "Approve these IAM and security-group changes?" \
       || die "deploy cancelled at the security review; nothing was changed by this step"
@@ -905,24 +976,54 @@ set_github_token() {
   run bgagent github set-token --region "$REGION" --stack-name "$STACK_NAME"
 }
 
+user_status() {  # user_status EMAIL → prints the Cognito UserStatus; fails if the pool has no such user
+  local pool; pool="$(stack_output UserPoolId 2>/dev/null || true)"
+  [ -n "$pool" ] && [ "$pool" != None ] || return 1
+  aws cognito-idp admin-get-user --user-pool-id "$pool" --username "$1" --region "$REGION" \
+    --query UserStatus --output text 2>/dev/null
+}
+
 create_user_and_login() {
   step "Your ABCA user (Cognito)"
   [ -n "$EMAIL" ] || EMAIL="$(ask "Email for your ABCA login" "$(git config user.email 2>/dev/null || true)")"
   [ -n "$EMAIL" ] || die "an email is required"
   save_settings
-  local invite="$HOME/.bgagent/invites/$EMAIL.txt"
+  # Same file name the CLI writes (cli: credentialsFilePath), so a special character in the
+  # address doesn't make us miss the invite and send a second one.
+  local invite
+  invite="$HOME/.bgagent/invites/$(printf '%s' "$EMAIL" | sed 's/[^a-zA-Z0-9.@_-]/_/g').txt"
+  local existing="" status reset=""
   if [ -f "$invite" ]; then
     ok "invite already exists: $invite"
+  elif [ "$DRY_RUN" != 1 ] && status="$(user_status "$EMAIL")"; then
+    if [ "$status" = FORCE_CHANGE_PASSWORD ]; then
+      # Invited before (another Mac, or the file was deleted) but never signed in: the one-time
+      # password is lost, so set a new one. It lands in the same file, so the steps below apply.
+      warn "$EMAIL was invited but never signed in, and its one-time password file is gone"
+      confirm "Set a new password for $EMAIL (written to $invite, never printed)?" \
+        || { todo "Set a password:  cd $DIR/cli && node lib/bin/bgagent.js admin reset-password $EMAIL --region $REGION --stack-name $STACK_NAME"; return 1; }
+      run bgagent admin reset-password "$EMAIL" --region "$REGION" --stack-name "$STACK_NAME"
+      reset=1
+    else
+      existing=1
+      ok "$EMAIL already has an ABCA user in this stack; signing in with your password"
+    fi
   else
     run bgagent admin invite-user "$EMAIL" --region "$REGION" --stack-name "$STACK_NAME"
   fi
   run bgagent configure --region "$REGION" --stack-name "$STACK_NAME"
   [ "$DRY_RUN" = 1 ] && { run bgagent login --username "$EMAIL"; return; }
+  if [ -n "$existing" ]; then
+    bgagent login --username "$EMAIL" && { ok "signed in as $EMAIL"; return 0; }
+    todo "Finish signing in:  cd $DIR/cli && node lib/bin/bgagent.js login --username $EMAIL  (forgot it? an admin can reset it: aws cognito-idp admin-reset-user-password)"
+    return 1
+  fi
 
   # The pool requires a temporary password on admin-created users; you replace it on first sign-in.
   local copied=""
-  if [ -f "$invite" ] && have pbcopy && grep -q '^temp password:' "$invite"; then
-    sed -n 's/^temp password:[[:space:]]*//p' "$invite" | tr -d '\n' | pbcopy && copied=1
+  # Invites write "temp password:"; reset-password writes "password:" (a permanent one).
+  if [ -f "$invite" ] && have pbcopy && grep -Eq '^(temp )?password:' "$invite"; then
+    sed -En 's/^(temp )?password:[[:space:]]*//p' "$invite" | head -n 1 | tr -d '\n' | pbcopy && copied=1
   fi
   local paste_step
   if [ -n "$copied" ]; then
@@ -930,18 +1031,27 @@ create_user_and_login() {
   else
     paste_step="At the Password prompt below, paste your one-time password, shown by:"
   fi
-  action "sign in for the first time and choose your password" \
-    "$paste_step" \
-    "\$ grep 'temp password' $invite" \
-    "When asked for a New password, choose one with at least 12 characters, including upper- and lower-case letters, a number and a symbol (for example: Monster-Catch-2026!)" \
-    "Type it again to confirm. Nothing is shown while you type; that is normal."
+  if [ -n "$reset" ]; then
+    action "sign in with your new password" \
+      "${paste_step/one-time password/new password}" \
+      "\$ grep 'password:' $invite" \
+      "This password is permanent: keep it in your password manager, then delete the file."
+  else
+    action "sign in for the first time and choose your password" \
+      "$paste_step" \
+      "\$ grep 'temp password' $invite" \
+      "When asked for a New password, choose one with at least 12 characters, including upper- and lower-case letters, a number and a symbol (for example: Monster-Catch-2026!)" \
+      "Type it again to confirm. Nothing is shown while you type; that is normal."
+  fi
 
   local attempt
   for attempt in 1 2 3 4 5; do
     if bgagent login --username "$EMAIL"; then
       ok "signed in as $EMAIL"
       [ -n "$copied" ] && printf '' | pbcopy  # clear the clipboard
-      if [ -f "$invite" ] && confirm_yes "Delete $invite now? (it held only the one-time password, which no longer works)"; then
+      if [ -n "$reset" ]; then
+        todo "Once your password is in your password manager, delete the file:  rm $invite"
+      elif [ -f "$invite" ] && confirm_yes "Delete $invite now? (it held only the one-time password, which no longer works)"; then
         rm -f "$invite" && ok "deleted the one-time password file"
       elif [ -f "$invite" ]; then
         todo "Delete the one-time password file:  rm $invite"
@@ -1031,9 +1141,18 @@ teardown() {
   Deleting can stall 20-40 min while AWS releases AgentCore network interfaces; just re-run if it fails.
 
 EOF
+  # Whatever --no-console says, a console stack deployed earlier must go too, so --all has to see
+  # it; and when there is none, deleting the platform must not depend on building the console.
+  if aws cloudformation describe-stacks --stack-name "$CONSOLE_STACK" --region "$REGION" >/dev/null 2>&1; then
+    CONSOLE=1
+  else
+    CONSOLE=0
+  fi
+  set_cdk_args; detect_console
   [ "$DRY_RUN" = 1 ] && { printf '  %s[dry-run]%s mise //cdk:destroy -- %s\n' "$Y" "$N" "${CDK_ARGS[*]}"; exit 0; }
   local typed; typed="$(ask "Type the stack name ($STACK_NAME) to delete it" "")"
   [ "$typed" = "$STACK_NAME" ] || die "teardown cancelled; nothing was deleted"
+  [ "$CONSOLE" = 0 ] || [ -f web/dist/index.html ] || bundle_console
   # --all removes the console stack first (it depends on the app stack's user pool and API).
   mise //cdk:destroy -- "${CDK_ARGS[@]}" 2>&1 | tee "$LOG_DIR/$RUN_ID-destroy.log"
   ok "destroy finished. Check for leftovers: aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION"
@@ -1042,6 +1161,7 @@ EOF
 # ---------- main ----------
 main() {
   printf '%sABCA onboarding%s  (log dir: %s)%s\n' "$B" "$N" "$LOG_DIR" "$([ "$DRY_RUN" = 1 ] && printf '  [DRY RUN]')"
+  take_lock
   if [ "$TEARDOWN" = 1 ]; then teardown; exit 0; fi
 
   check_deps
@@ -1067,12 +1187,16 @@ main() {
   bootstrap  # before the build: a bootstrap problem should surface in seconds, not after it
   # Keyed on the build kind too: a compile-only success must not skip a requested --full-build.
   if resume_step build "full=$FULL_BUILD"; then ok "skipped build (unchanged since it last succeeded)"; else build_all; mark_done build "full=$FULL_BUILD"; fi
+  detect_console
   add_local_dev_args
+  # The account and Region are part of the key: the same code and flags deployed to another
+  # account or Region is a different deployment, not a skip. (The stack name is in CDK_ARGS.)
+  local deploy_key="${CDK_ARGS[*]}|$ACCOUNT_ID|$REGION"
   case "$(stack_status)" in
     CREATE_COMPLETE|UPDATE_COMPLETE)
-      if resume_step deploy "${CDK_ARGS[*]}"; then ok "skipped deploy (stack $STACK_NAME is already deployed from this exact code and settings)"
-      else deploy; mark_done deploy "${CDK_ARGS[*]}"; fi ;;
-    *) deploy; mark_done deploy "${CDK_ARGS[*]}" ;;
+      if resume_step deploy "$deploy_key"; then ok "skipped deploy (stack $STACK_NAME is already deployed from this exact code and settings)"
+      else deploy; mark_done deploy "$deploy_key"; fi ;;
+    *) deploy; mark_done deploy "$deploy_key" ;;
   esac
   [ "$DRY_RUN" = 1 ] && { next_steps; exit 0; }
   verify_api_gate
