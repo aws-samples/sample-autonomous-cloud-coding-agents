@@ -25,6 +25,10 @@
     "integrations/jira-forge-app": {
       "entry": ["src/index.js!", "test/**/*.test.js"],
       "project": ["src/**/*.js!", "test/**/*.js"]
+    },
+    "web": {
+      "entry": ["test/**/*.test.{ts,tsx}"],
+      "project": ["src/**/*.{ts,tsx}!", "test/**/*.{ts,tsx}"]
     }
   }
 }

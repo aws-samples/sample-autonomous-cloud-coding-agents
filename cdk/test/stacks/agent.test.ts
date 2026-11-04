@@ -1961,8 +1961,11 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
 
     // linear-webhook is the RECEIVER: it imports the resolver file for
     // getOauthSecretStrict (signature verification) and never mints, so it needs no
-    // grant. Everything else here must be wired above.
+    // grant. Everything else here must be wired above, except console-linear, which runs
+    // in the operator console stack and is wired there (test/stacks/console.test.ts,
+    // "mints Linear tokens through the identity vault when the platform has one").
     expect(reaching).toEqual([
+      'console-linear.ts',
       'fanout-task-events.ts',
       'github-webhook-processor.ts',
       'iteration-heartbeat-sweep.ts',

@@ -48,6 +48,9 @@ const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const MEMORY_ID = process.env.MEMORY_ID;
 const ATTACHMENTS_BUCKET_NAME = process.env.ATTACHMENTS_BUCKET_NAME;
 
+/** GitHub caps issue titles at 256 characters; store no more than that. */
+export const ISSUE_TITLE_MAX_LENGTH = 256;
+
 /** Conservative fallback token count for images where metadata could not be read. */
 const MAX_IMAGE_TOKENS_FALLBACK = 1568;
 
@@ -761,6 +764,24 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     } catch (err) {
       log.error('Failed to update branch_name from PR head_ref — task record will show stale placeholder', {
         resolved_branch: hydratedContext.resolved_branch_name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Keep the issue title on the record so task lists can name the task.
+  const issueTitle = hydratedContext.issue?.title.trim().slice(0, ISSUE_TITLE_MAX_LENGTH);
+  if (issueTitle) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { task_id: task.task_id },
+        UpdateExpression: 'SET #it = :it, #ua = :now',
+        ExpressionAttributeNames: { '#it': 'issue_title', '#ua': 'updated_at' },
+        ExpressionAttributeValues: { ':it': issueTitle, ':now': new Date().toISOString() },
+      }));
+    } catch (err) {
+      log.warn('Failed to store issue_title on task record', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

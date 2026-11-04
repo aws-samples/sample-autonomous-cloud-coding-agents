@@ -1,0 +1,37 @@
+min_version = "2026.7.11"
+
+[tools]
+node = "22"
+
+[tasks.install]
+description = "Install from monorepo root (Yarn workspaces)"
+run = "cd .. && yarn install --check-files"
+
+[tasks."dev:mock"]
+description = "Run the console locally against the in-browser mock API (no AWS needed); http://127.0.0.1:5173"
+run = "yarn dev:mock"
+
+[tasks."dev:live"]
+description = "Run the console locally against your deployed API and sign-in (needs AWS_PROFILE/AWS_REGION); http://localhost:5173"
+run = ["node scripts/fetch-live-config.mjs", "yarn vite"]
+
+[tasks.typecheck]
+description = "Type-check the console"
+run = "yarn tsc --noEmit"
+
+[tasks.test]
+description = "Run Vitest component and unit tests"
+run = "yarn vitest run"
+
+[tasks.eslint]
+description = "Run ESLint with --fix"
+run = "yarn eslint --fix src test"
+
+[tasks.bundle]
+description = "Production bundle into web/dist (mock code is compiled out)"
+run = "yarn vite build"
+
+[tasks.build]
+description = "Type-check, test, lint and bundle the console"
+depends = [":typecheck", ":test", ":eslint"]
+run = "yarn vite build"
