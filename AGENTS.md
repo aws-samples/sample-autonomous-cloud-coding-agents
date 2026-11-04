@@ -78,7 +78,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **Node** 22 (mise) · **TypeScript** 6.x · **Python** ≥3.13 (agent, uv)
 - **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
 - **Test / lint** — Jest 30, ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`), Ruff (agent)
-- **Cedar** — `@cedar-policy/cedar-wasm` 4.8.2 (cdk) + `cedarpy==4.8.4` (agent); must bump together
+- **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together
 - **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
 
 ## Repository structure

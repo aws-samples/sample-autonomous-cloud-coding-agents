@@ -11,7 +11,7 @@
     "cdk": {
       "entry": ["src/main.ts!", "src/handlers/*.ts!"],
       "project": ["src/**/*.ts!"],
-      "ignoreDependencies": ["esbuild", "ts-node", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
+      "ignoreDependencies": ["esbuild", "ts-node", "tsx", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
     },
     "cli": {
       "entry": ["src/bin/bgagent.ts!", "src/index.ts!"],

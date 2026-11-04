@@ -33,8 +33,11 @@ import { allPolicies } from './policies';
  * nested-stack actions — the registry's own control-plane calls run under the
  * custom resource's Lambda execution role), 1.5.0 → 1.6.0 adds the
  * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
- * P2r2-F9). Adding policies to the bundle is a minor bump — that is the
- * precedent `compute-ecs` set.
+ * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
+ * `NestedStackPassRole` statement (CloudFormation passes the execution role to
+ * nested stacks; without it a fresh-account deploy fails at change-set creation).
+ * Adding policies to the bundle is a minor bump — that is the precedent
+ * `compute-ecs` set.
  *
  * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
  * and it is still a MINOR bump for the reason 1.2.0 was — **an operator must
@@ -50,7 +53,7 @@ import { allPolicies } from './policies';
  * version would make two different bundles indistinguishable to the `>=` check
  * operators are told to run.
  */
-export const BOOTSTRAP_VERSION = '1.6.0';
+export const BOOTSTRAP_VERSION = '1.7.0';
 
 /**
  * Computes a SHA-256 hash over all bootstrap policies.
