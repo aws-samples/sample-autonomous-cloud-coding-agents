@@ -35,8 +35,9 @@ import { allPolicies } from './policies';
  * `compute-lambda-microvm` policy's `MicrovmPassRoles` statement (#645, ADR-021
  * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
  * `NestedStackPassRole` statement (CloudFormation passes the execution role to
- * nested stacks; without it a fresh-account deploy fails at change-set creation).
- * Adding policies to the bundle is a minor bump — that is the precedent
+ * nested stacks; without it a fresh-account deploy fails at change-set creation),
+ * 1.7.0 → 1.8.0 grants the operator console stack's Cognito managed-login domain
+ * (`cognito-idp:*UserPoolDomain`). Adding policies to the bundle is a minor bump — that is the precedent
  * `compute-ecs` set.
  *
  * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
@@ -53,7 +54,7 @@ import { allPolicies } from './policies';
  * version would make two different bundles indistinguishable to the `>=` check
  * operators are told to run.
  */
-export const BOOTSTRAP_VERSION = '1.7.0';
+export const BOOTSTRAP_VERSION = '1.8.0';
 
 /**
  * Computes a SHA-256 hash over all bootstrap policies.

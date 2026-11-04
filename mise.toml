@@ -31,7 +31,7 @@ osv-scanner = "latest"
 "aqua:zizmorcore/zizmor" = "latest"
 
 [monorepo]
-config_roots = ["cdk", "agent", "cli", "docs"]
+config_roots = ["cdk", "agent", "cli", "docs", "web"]
 
 ##################
 ###### CORE ######
@@ -76,6 +76,7 @@ depends = ["//agent:quality"]
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
   "MISE_EXPERIMENTAL=1 mise //cli:eslint",
+  "MISE_EXPERIMENTAL=1 mise //web:eslint",
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
 
@@ -257,6 +258,7 @@ description = "Pre-push tests in cdk/cli/agent"
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:test",
   "MISE_EXPERIMENTAL=1 mise //cli:test",
+  "MISE_EXPERIMENTAL=1 mise //web:test",
   "cd agent && mise run test",
 ]
 
@@ -274,11 +276,12 @@ run = [
 # All packages run in parallel via DAG. Each resolves its own internal dependencies.
 # Agent quality runs alongside CDK/CLI/docs — no sequential bottleneck.
 [tasks.build]
-description = "Monorepo build (agent, cdk, cli, docs in parallel)"
+description = "Monorepo build (agent, cdk, cli, web, docs in parallel)"
 depends = [
   "//agent:quality",
   "//cdk:build",
   "//cli:build",
+  "//web:build",
   "//docs:build",
   ":test:jira-forge-app",
   ":drift-prevention"
