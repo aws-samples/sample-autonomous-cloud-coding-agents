@@ -58,7 +58,7 @@ Each task follows a **workflow** — a declarative definition (see [`agent/workf
 
 Beyond single tasks:
 
-- **Sub-issue orchestration** — a Linear parent issue with sub-issues runs as a dependency graph, releasing each child task in order.
+- **Sub-issue orchestration** — a Linear parent issue or Jira ticket with sub-issues runs as a dependency graph, releasing each child task in order.
 - **Operator console** — an optional web console ([`web/`](./web/README.md)) shows running tasks, stuck tasks, and pending approvals.
 - **Agent Registry** — versioned MCP servers, Cedar policy modules, and skills that tasks can load at runtime ([REGISTRY.md](./docs/design/REGISTRY.md)).
 
