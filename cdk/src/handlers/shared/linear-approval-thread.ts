@@ -19,9 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-
-const RETENTION_DAYS = 90;
-const RETENTION_SECONDS = RETENTION_DAYS * 24 * 60 * 60;
+import { computeTtlEpoch } from './validation';
 
 export interface LinearApprovalThread {
   readonly workspaceId: string;
@@ -85,7 +83,7 @@ export async function closeLinearApprovalThread(
       UpdateExpression: 'SET #ttl = if_not_exists(#ttl, :ttl)',
       ConditionExpression: 'attribute_exists(task_id)',
       ExpressionAttributeNames: { '#ttl': 'ttl' },
-      ExpressionAttributeValues: { ':ttl': Math.floor(Date.now() / 1000) + RETENTION_SECONDS },
+      ExpressionAttributeValues: { ':ttl': computeTtlEpoch(Number(process.env.TASK_RETENTION_DAYS ?? '90')) },
     }));
   } catch (error) {
     if ((error as { name?: string }).name !== 'ConditionalCheckFailedException') throw error;

@@ -20,17 +20,17 @@
 import { GetCommand, ScanCommand, UpdateCommand, type ScanCommandOutput } from '@aws-sdk/lib-dynamodb';
 import type { Context } from 'aws-lambda';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
-import { closeTaskApprovals } from './shared/close-task-approvals';
 import { logger } from './shared/logger';
 import { dispatchMicrovmContinuation } from './shared/microvm/continuation-dispatch';
 import { retireCheckpointedMicrovm, type ContinuableTask } from './shared/microvm/continuation-retirement';
 import { deleteClosedTaskContinuations } from './shared/microvm/continuation-storage';
-import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_RETIREMENT_TIMEOUT_MS } from './shared/microvm/continuation-timing';
-import { workerLeaseKey, type MicrovmHandle } from './shared/microvm/continuation-types';
+import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_RETIREMENT_TIMEOUT_MS, workerLeaseKey, type MicrovmHandle } from './shared/microvm/continuation-types';
 import { microvmErrorIdentity } from './shared/microvm/control';
 import { LambdaMicrovmComputeStrategy, MICROVM_MAX_DURATION_SECONDS } from './shared/strategies/lambda-microvm-strategy';
+import { closeTaskApprovals } from './shared/task-cancellation';
 import { releaseTaskSlot } from './shared/task-concurrency';
 import { makeDocClient } from './shared/ua';
+import { computeTtlEpoch } from './shared/validation';
 
 const ddb = makeDocClient();
 const strategy = new LambdaMicrovmComputeStrategy();
@@ -106,7 +106,7 @@ export async function reconcileMicrovmContinuation(task: ContinuableTask): Promi
         ':closed': 'CLOSED',
         ':attempt': attempt ?? task.task_id,
         ...(withoutStart ? { ':observedState': leaseState ?? 'CLOSED' } : {}),
-        ':ttl': Math.floor(Date.now() / 1000) + Number(process.env.TASK_RETENTION_DAYS ?? '90') * 86400,
+        ':ttl': computeTtlEpoch(Number(process.env.TASK_RETENTION_DAYS ?? '90')),
       },
     }), options);
     await releaseTaskSlot(task.task_id, task.user_id);

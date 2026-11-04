@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionControlOptions, SessionHandle } from '../compute-strategy';
 import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
-import { TaskStatus, type TaskStatusType } from '../../../constructs/task-status';
+import { APPROVAL_STATUSES, ApprovalStatusValue, TaskStatus, type TaskStatusType } from '../../../constructs/task-status';
 import type { ApprovalStatus } from '../types';
 import { makeDocClient } from '../ua';
 
@@ -77,7 +77,6 @@ export const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
 const ddb = makeDocClient();
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME!;
-const APPROVAL_STATUSES: readonly ApprovalStatus[] = ['PENDING', 'APPROVED', 'DENIED', 'CANCELLED', 'TIMED_OUT', 'STRANDED'];
 const LIVE_TASK_STATUSES: readonly TaskStatusType[] = [TaskStatus.HYDRATING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL];
 
 function storeSignal(options?: SessionControlOptions): AbortSignal {
@@ -279,7 +278,7 @@ export async function saveMicrovmLifecycleIntent(
           ConditionExpression: '#status = :pending AND user_id = :user AND created_at = :created AND timeout_s = :timeout',
           ExpressionAttributeNames: { '#status': 'status' },
           ExpressionAttributeValues: {
-            ':pending': 'PENDING', ':user': snapshot.userId, ':created': snapshot.approval.created_at, ':timeout': snapshot.approval.timeout_s,
+            ':pending': ApprovalStatusValue.PENDING, ':user': snapshot.userId, ':created': snapshot.approval.created_at, ':timeout': snapshot.approval.timeout_s,
           },
         },
       }] : []),

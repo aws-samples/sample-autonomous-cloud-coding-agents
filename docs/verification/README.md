@@ -66,7 +66,7 @@ For focused worker checks:
 ```bash
 cd agent
 uv run pytest tests/test_microvm_*.py tests/test_continuation_*.py \
-  tests/test_approval_retention.py tests/test_payload_bootstrap.py --no-cov
+  tests/test_poll_for_decision.py tests/test_payload_bootstrap.py --no-cov
 ABCA_TEST_SDK_CONTINUATION=1 uv run pytest tests/test_continuation_sdk_probe.py --no-cov
 ```
 
@@ -76,6 +76,12 @@ require their documented local service. Mocks do not establish effective AWS IAM
 The standalone cloud acceptance harness and raw receipts remain outside this PR.
 
 ## Live acceptance for an installation
+
+`scripts/microvm-acceptance.sh` runs the core exercises below against a
+deployed stack and records PASS/FAIL with evidence: normal task, approve and
+deny after sleep, cancel while suspended, a declined suspend on a working
+guest, worker replacement and a concurrent burst. Set `ABCA_ACCEPT_REPO` to an
+owned test repository onboarded for `lambda-microvm`.
 
 Record source commit, image ARN/version, coordinator version, configuration and
 UTC test window. Use an owned test repository and identity. Enable suspension

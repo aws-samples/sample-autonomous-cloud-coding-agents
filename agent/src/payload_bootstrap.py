@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
 
+from microvm_lifecycle import LAMBDA_MICROVM
 from shared_constants import SHARED_CONSTANTS
 
 CONTRACT = SHARED_CONSTANTS["payload_bootstrap"]
@@ -164,7 +165,7 @@ def resolve_payload_reference(reference: Any, backend: str) -> tuple[dict, dict]
         or (
             attempt_id is not None
             and (
-                backend != "lambda-microvm"
+                backend != LAMBDA_MICROVM
                 or not isinstance(attempt_id, str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt_id)
             )

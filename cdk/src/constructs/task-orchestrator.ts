@@ -52,7 +52,7 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
-import type { ContinuationBucket } from './continuation-bucket';
+import type { ContinuationBucket } from './microvm-continuation-manager';
 import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
 
 /**

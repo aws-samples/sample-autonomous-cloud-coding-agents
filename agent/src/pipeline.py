@@ -318,7 +318,7 @@ def _run_repoless_task(
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
     from continuation_runtime import bind_runtime, prepare_repoless_runtime
-    from microvm_lifecycle import get_context as get_microvm_context
+    from microvm_lifecycle import worker_closed as microvm_worker_closed
 
     continuation = prepare_repoless_runtime(
         config,
@@ -349,8 +349,7 @@ def _run_repoless_task(
     # terminal outcome is actually produced (#248 Phase 3).
     with bind_runtime(continuation), task_span("task.agent_execution"):
         wf_result = run_workflow(wf, ctx)
-    lifecycle = get_microvm_context(config.task_id)
-    if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+    if microvm_worker_closed(config.task_id):
         log("TASK", "Worker execution is closed; coordinator owns continuation or cleanup.")
         return {"task_id": config.task_id, "status": "parked"}
 
@@ -1339,10 +1338,9 @@ def run_task(
                     agent_span.set_status(StatusCode.ERROR, str(e))
                     agent_span.record_exception(e)
                     agent_result = AgentResult(status="error", error=str(e))
-            from microvm_lifecycle import get_context as get_microvm_context
+            from microvm_lifecycle import worker_closed as microvm_worker_closed
 
-            lifecycle = get_microvm_context(config.task_id)
-            if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+            if microvm_worker_closed(config.task_id):
                 # A transferred/cancelled worker may finish unwinding its SDK.
                 # It must not run deterministic commit/PR/channel post-hooks.
                 log("TASK", "Worker execution is closed; coordinator owns continuation or cleanup.")

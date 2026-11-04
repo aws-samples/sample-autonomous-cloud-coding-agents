@@ -24,6 +24,7 @@ import { workerLeaseKey } from './shared/microvm/continuation-types';
 import { errorResponse, successResponse } from './shared/response';
 import { makeDocClient } from './shared/ua';
 import constants from '../../../contracts/constants.json';
+import { TaskStatus, ApprovalStatusValue } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 const TASKS = process.env.TASK_TABLE_NAME!;
@@ -119,8 +120,8 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
             ConditionExpression: '#status = :running AND user_id = :user',
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
-              ':awaiting': 'AWAITING_APPROVAL',
-              ':running': 'RUNNING',
+              ':awaiting': TaskStatus.AWAITING_APPROVAL,
+              ':running': TaskStatus.RUNNING,
               ':request': input.request_id,
               ':user': task.user_id,
             },
@@ -144,8 +145,8 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
             ConditionExpression: '#status = :pending AND user_id = :user',
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
-              ':timeout': 'TIMED_OUT',
-              ':pending': 'PENDING',
+              ':timeout': ApprovalStatusValue.TIMED_OUT,
+              ':pending': ApprovalStatusValue.PENDING,
               ':user': task.user_id,
               ':now': new Date().toISOString(),
               ...(input.reason !== undefined ? { ':reason': input.reason } : {}),
@@ -157,7 +158,7 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
             Key: { task_id: input.task_id },
             ConditionExpression: '#status = :awaiting AND awaiting_approval_request_id = :request AND user_id = :user',
             ExpressionAttributeNames: { '#status': 'status' },
-            ExpressionAttributeValues: { ':awaiting': 'AWAITING_APPROVAL', ':request': input.request_id, ':user': task.user_id },
+            ExpressionAttributeValues: { ':awaiting': TaskStatus.AWAITING_APPROVAL, ':request': input.request_id, ':user': task.user_id },
           },
         }, ...lease],
       }));

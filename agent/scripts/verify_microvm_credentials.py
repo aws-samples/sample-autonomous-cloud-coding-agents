@@ -130,6 +130,7 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from bedrock_creds_helper import MICROVM_CREDENTIAL_BROKER_ENV
     from microvm_credentials import ScopedCredentialBroker
     from microvm_lifecycle import MicrovmLifecycle
 
@@ -261,7 +262,7 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
                 "AWS_CONTAINER_CREDENTIALS_FULL_URI": endpoint + "/credentials"
                 if ambient_fallback or mode.startswith("broker")
                 else "",
-                "ABCA_MICROVM_CREDENTIAL_BROKER": "1" if mode.startswith("broker") else "",
+                MICROVM_CREDENTIAL_BROKER_ENV: "1" if mode.startswith("broker") else "",
                 "AWS_METADATA_SERVICE_TIMEOUT": "1",
                 "AWS_METADATA_SERVICE_NUM_ATTEMPTS": "1",
                 "AWS_MAX_ATTEMPTS": "1",

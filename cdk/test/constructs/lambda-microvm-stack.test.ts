@@ -29,8 +29,8 @@ import {
   createMicrovmExecutionRole,
   LambdaMicrovmCompute,
   type LambdaMicrovmImageInputs,
+  LambdaMicrovmStack,
 } from '../../src/constructs/lambda-microvm-compute';
-import { LambdaMicrovmStack } from '../../src/constructs/lambda-microvm-stack';
 
 const ENV = { account: '123456789012', region: 'us-east-1' };
 const IMAGE_INPUTS: Array<[string, LambdaMicrovmImageInputs]> = [

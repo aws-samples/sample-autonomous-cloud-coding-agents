@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
 
 from aws_session import export_microvm_credentials
+from bedrock_creds_helper import MICROVM_CREDENTIAL_BROKER_ENV
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -122,7 +123,7 @@ class ScopedCredentialBroker:
                 "AWS_BEARER_TOKEN_BEDROCK": "",
                 "ANTHROPIC_API_KEY": "",
                 "ANTHROPIC_AUTH_TOKEN": "",
-                "ABCA_MICROVM_CREDENTIAL_BROKER": "1",
+                MICROVM_CREDENTIAL_BROKER_ENV: "1",
             }
         )
         self._thread.start()

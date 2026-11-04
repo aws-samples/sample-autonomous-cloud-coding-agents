@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { GetCommand, ScanCommand, type ScanCommandOutput, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES } from '../constructs/task-status';
 import { logger } from './shared/logger';
-import { workerLeaseKey } from './shared/microvm/continuation-types';
+import { leaseMatches, workerLeaseKey } from './shared/microvm/continuation-types';
 import { releaseTaskSlot, type ReservationTask } from './shared/task-concurrency';
 import { makeDocClient } from './shared/ua';
 
@@ -85,10 +85,13 @@ export async function handler(): Promise<void> {
         const saved = await ddb.send(new GetCommand({
           TableName: TASK_TABLE, Key: workerLeaseKey(task.task_id), ConsistentRead: true,
         }));
-        parked = saved.Item?.lease_state === 'PARKED'
-          && saved.Item.lease_attempt_id === row.microvm_start?.clientToken
-          && saved.Item.lease_user_id === task.user_id && saved.Item.lease_repo === (row.repo ?? '')
-          && saved.Item.lease_microvm_id === row.session_id;
+        parked = leaseMatches(saved.Item, {
+          state: 'PARKED',
+          attemptId: row.microvm_start?.clientToken,
+          userId: task.user_id,
+          repo: row.repo,
+          microvmId: row.session_id,
+        });
       }
       if (task.concurrency_slot?.state === 'held') {
         // Terminal tasks still own their seat until release commits. Repair

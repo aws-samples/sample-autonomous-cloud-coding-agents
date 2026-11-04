@@ -21,7 +21,7 @@
 const mockDdbSend = jest.fn();
 const mockRelease = jest.fn();
 const mockCloseApprovals = jest.fn();
-jest.mock('../../src/handlers/shared/close-task-approvals', () => ({
+jest.mock('../../src/handlers/shared/task-cancellation', () => ({
   closeTaskApprovals: (...args: unknown[]) => mockCloseApprovals(...args),
 }));
 jest.mock('../../src/handlers/shared/task-concurrency', () => ({

@@ -30,7 +30,7 @@ jest.mock('../../src/handlers/shared/strategies/lambda-microvm-strategy', () => 
   LambdaMicrovmComputeStrategy: jest.fn(() => ({ stopSession: mockStop, pollSession: mockPoll })),
   MICROVM_MAX_DURATION_SECONDS: 28800,
 }));
-jest.mock('../../src/handlers/shared/close-task-approvals', () => ({ closeTaskApprovals: (...args: unknown[]) => mockClose(...args) }));
+jest.mock('../../src/handlers/shared/task-cancellation', () => ({ closeTaskApprovals: (...args: unknown[]) => mockClose(...args) }));
 jest.mock('../../src/handlers/shared/task-concurrency', () => ({ releaseTaskSlot: (...args: unknown[]) => mockRelease(...args) }));
 jest.mock('../../src/handlers/shared/microvm/continuation-storage', () => ({
   deleteClosedTaskContinuations: (...args: unknown[]) => mockDelete(...args),

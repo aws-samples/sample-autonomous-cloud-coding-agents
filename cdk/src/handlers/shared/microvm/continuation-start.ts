@@ -21,9 +21,8 @@ import { randomUUID } from 'node:crypto';
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionControlOptions } from '../compute-strategy';
 import type { ContinuableTask } from './continuation-retirement';
-import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
-import { type ContinuationRecord, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
-import { TaskStatus } from '../../../constructs/task-status';
+import { CONTINUATION_IO_TIMEOUT_MS, type ContinuationRecord, type WorkerLease, validateContinuation, leaseMatches, workerLeaseKey } from './continuation-types';
+import { TaskStatus, ApprovalStatusValue } from '../../../constructs/task-status';
 import { makeDocClient } from '../ua';
 
 const ddb = makeDocClient();
@@ -53,8 +52,7 @@ async function readActiveAssignment(task: ContinuableTask, options: SessionContr
   const lease = result.Item as WorkerLease | undefined;
   if (record.state === 'RESTORING' && (!task.session_id || record.worker_id !== task.session_id
     || lease?.lease_microvm_id !== task.session_id)) return false;
-  return lease?.lease_state === 'ACTIVE' && lease.lease_attempt_id === record.attempt_id
-    && lease.lease_user_id === task.user_id && lease.lease_repo === (task.repo ?? '');
+  return leaseMatches(lease, { state: 'ACTIVE', attemptId: record.attempt_id, userId: task.user_id, repo: task.repo });
 }
 
 /**
@@ -162,8 +160,8 @@ export async function admitContinuation(
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
               ':user': userId,
-              ':pending': 'PENDING',
-              ':timedout': 'TIMED_OUT',
+              ':pending': ApprovalStatusValue.PENDING,
+              ':timedout': ApprovalStatusValue.TIMED_OUT,
               ':now': now,
               ':created': approval.Item!.created_at,
               ':timeout': approval.Item!.timeout_s,
@@ -176,7 +174,7 @@ export async function admitContinuation(
             ConditionExpression: 'user_id = :user AND #status IN (:approved, :denied, :timedout)',
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
-              ':user': userId, ':approved': 'APPROVED', ':denied': 'DENIED', ':timedout': 'TIMED_OUT',
+              ':user': userId, ':approved': ApprovalStatusValue.APPROVED, ':denied': ApprovalStatusValue.DENIED, ':timedout': ApprovalStatusValue.TIMED_OUT,
             },
           },
         },

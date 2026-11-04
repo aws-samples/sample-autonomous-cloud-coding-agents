@@ -90,6 +90,23 @@ FLOOR_TIMEOUT_S: int = int(_ATS["min"])  # §6 decision #6: rejected below this 
 DEFAULT_TASK_TIMEOUT_S: int = int(_ATS["default"])  # §6 decision #6 default
 # A timeout equal to this sentinel means "no automatic expiry" (contract field).
 NO_DEADLINE_TIMEOUT_S: int = int(_ATS["no_deadline_sentinel"])
+#: Canonical ``created_at`` format of approval rows (UTC, whole seconds).
+APPROVAL_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def approval_deadline_epoch(created_at: str, timeout_s: int) -> int | None:
+    """Wall-clock expiry (epoch seconds) of an approval row, or None if it never expires.
+
+    The single definition shared by the gate that writes ``deadline_epoch``, the
+    in-process wait and the MicroVM suspend/resume identity check, so all three
+    agree with the coordinator. Raises ValueError for a non-canonical timestamp.
+    """
+    if timeout_s == NO_DEADLINE_TIMEOUT_S:
+        return None
+    created = datetime.strptime(created_at, APPROVAL_TIMESTAMP_FORMAT).replace(tzinfo=UTC)
+    if created.strftime(APPROVAL_TIMESTAMP_FORMAT) != created_at:
+        raise ValueError("Approval timestamp is not canonical")
+    return int(created.timestamp()) + timeout_s
 
 
 def _validate_constants() -> None:

@@ -25,12 +25,11 @@ import { logger } from '../logger';
 import type { ContinuableTask } from './continuation-retirement';
 import type { MicrovmContinuationEvent } from './continuation-runner';
 import { admitContinuation } from './continuation-start';
-import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
-import { validAttemptId } from './continuation-types';
-import { microvmErrorIdentity } from './control';
+import { CONTINUATION_IO_TIMEOUT_MS, validAttemptId } from './continuation-types';
 import { continuationEnabled } from './worker-lease';
 import { TaskStatus } from '../../../constructs/task-status';
 import { makeClient, makeDocClient } from '../ua';
+import { microvmErrorIdentity } from './control';
 
 const ddb = makeDocClient();
 const MAX_VALIDATION_DETAIL_LENGTH = 512;

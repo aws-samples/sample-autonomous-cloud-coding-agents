@@ -165,9 +165,13 @@ process.env.GITHUB_TOKEN_SECRET_ARN =
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
 
 import { TaskStatus } from '../../src/constructs/task-status';
-import { handler } from '../../src/handlers/orchestrate-task';
+import { handler as durableHandler } from '../../src/handlers/orchestrate-task';
 import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm/lifecycle';
 import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
+
+/** The durable wrapper's input type omits the orchestrator event; tests pass it directly. */
+const handler = (event: { task_id: string }, context: never) =>
+  durableHandler(event as never, context);
 
 /**
  * Minimal stand-in for the durable-execution context: `step` runs its body

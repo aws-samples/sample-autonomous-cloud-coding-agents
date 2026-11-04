@@ -35,7 +35,7 @@ import task_state
 from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
 from output_scanner import scan_tool_output
-from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome
+from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome, approval_deadline_epoch
 from progress_writer import _generate_ulid
 from shared_constants import SHARED_CONSTANTS
 from shell import log, log_error_cw
@@ -78,12 +78,10 @@ class _ApprovalDeadline:
 
     @classmethod
     def from_recorded(cls, created_at: str, timeout_s: int) -> _ApprovalDeadline:
-        if timeout_s == 0:
+        deadline = approval_deadline_epoch(created_at, timeout_s)
+        if deadline is None:
             return cls(float("inf"), float("inf"))
-        created_epoch = (
-            datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
-        )
-        wall_deadline = created_epoch + timeout_s
+        wall_deadline = float(deadline)
         remaining = max(0.0, min(timeout_s, wall_deadline - time.time()))
         return cls(wall_deadline, time.monotonic() + remaining)
 
@@ -691,15 +689,9 @@ async def _handle_require_approval(
         "user_id": user_id or "",
         "repo": engine.repo,
     }
-    if effective_timeout > 0:
-        row["deadline_epoch"] = (
-            int(
-                datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%SZ")
-                .replace(tzinfo=UTC)
-                .timestamp()
-            )
-            + effective_timeout
-        )
+    deadline_epoch = approval_deadline_epoch(row["created_at"], effective_timeout)
+    if deadline_epoch is not None:
+        row["deadline_epoch"] = deadline_epoch
     deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on

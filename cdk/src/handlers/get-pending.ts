@@ -26,6 +26,7 @@ import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-li
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
 import type { GetPendingResponse, PendingApprovalSummary, Severity } from './shared/types';
 import { makeDocClient } from './shared/ua';
+import { ApprovalStatusValue } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 const TASK_APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
@@ -164,7 +165,7 @@ async function readLivePendingRows(userId: string): Promise<{
       IndexName: USER_STATUS_INDEX_NAME,
       KeyConditionExpression: 'user_id = :user AND #status = :pending',
       ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':user': userId, ':pending': 'PENDING' },
+      ExpressionAttributeValues: { ':user': userId, ':pending': ApprovalStatusValue.PENDING },
       Limit: PENDING_LIST_LIMIT - liveItems.length,
       ...(lastKey && { ExclusiveStartKey: lastKey }),
     }), { abortSignal });

@@ -43,10 +43,11 @@ import {
   PutItemCommand,
 } from '@aws-sdk/client-dynamodb';
 import { ulid } from 'ulid';
-import { closeTaskApprovals } from './shared/close-task-approvals';
 import { logger } from './shared/logger';
+import { closeTaskApprovals } from './shared/task-cancellation';
 import { releaseTaskSlot } from './shared/task-concurrency';
 import { makeClient } from './shared/ua';
+import constants from '../../../contracts/constants.json';
 
 const ddb = makeClient(DynamoDBClient);
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
@@ -66,8 +67,10 @@ const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
  * eight-hour lifetime plus 30 minutes for its coordinator to close the task.
  * Approval records do not expire merely because their worker stopped.
  */
+const APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS = 1800;
 const APPROVAL_STRANDED_TIMEOUT_SECONDS = Number(
-  process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS ?? '30600',
+  process.env.APPROVAL_STRANDED_TIMEOUT_SECONDS
+    ?? constants.microvm_lifecycle.maximum_duration_seconds + APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS,
 );
 
 interface StrandedCandidate {

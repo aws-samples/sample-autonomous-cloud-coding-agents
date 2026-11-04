@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { Annotations, ArnFormat, Duration, RemovalPolicy, Stack, Tags, Token } from 'aws-cdk-lib';
+import { Annotations, ArnFormat, Duration, NestedStack, RemovalPolicy, Stack, Tags, Token } from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -1029,4 +1029,58 @@ function sanitizeImageName(candidate: string): string {
     .replace(/[^A-Za-z0-9-_]/g, '-')
     .slice(0, MAX_NAME_LENGTH)
     .replace(/-+$/, '');
+}
+
+// ---------------------------------------------------------------------------
+// Nested-stack layout
+// ---------------------------------------------------------------------------
+
+export interface LambdaMicrovmStackProps extends Omit<
+  LambdaMicrovmComputeProps, 'buildRoleName' | 'connectorOperatorRoleName'
+> {
+  readonly deploymentName: string;
+  readonly executionRole: iam.Role;
+  /** Distinct image/connector/log names for an overlapping flat-to-nested migration. */
+  readonly resourceNamePrefix?: string;
+}
+
+/** Child deployment for MicroVM resources; shared runtime trust stays in the parent. */
+export class LambdaMicrovmStack extends NestedStack {
+  public readonly compute: LambdaMicrovmCompute;
+
+  constructor(scope: Construct, id: string, props: LambdaMicrovmStackProps) {
+    super(scope, id, {
+      description: 'ABCA Lambda MicroVM image, storage, build roles and network connectors',
+    });
+    if (Stack.of(props.executionRole) !== this.nestedStackParent) {
+      throw new Error('LambdaMicrovmStack executionRole must be owned by its parent stack');
+    }
+    if (props.resourceNamePrefix !== undefined
+      && (Token.isUnresolved(props.resourceNamePrefix)
+        || !/^[A-Za-z0-9][A-Za-z0-9-]{0,39}$/.test(props.resourceNamePrefix))) {
+      throw new Error('microvm_resource_name_prefix must be 1–40 letters, digits or hyphens and start with a letter or digit');
+    }
+    // CDK creates bucket-cleanup providers at stack scope, outside Compute.
+    // Those providers are also MicroVM-specific in this child.
+    Tags.of(this).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);
+    // Automatic IAM names include the generated nested-stack name and can lose
+    // their discriminating role suffix to truncation. Explicit parent names keep
+    // the bootstrap's unconditioned PassRole grant limited to these two roles.
+    const roleName = (suffix: string): string => {
+      const name = `${props.deploymentName}-${suffix}`;
+      if (Token.isUnresolved(name) || !/^[A-Za-z0-9+=,.@_-]{1,64}$/.test(name)) {
+        throw new Error(`Nested MicroVM role name must be concrete and at most 64 characters: ${suffix}`);
+      }
+      return name;
+    };
+    this.compute = new LambdaMicrovmCompute(this, 'Compute', {
+      ...props,
+      // Keep bootstrap-authorized IAM role names tied to the parent deployment.
+      // Only service names change; the old and new image may coexist during a
+      // reviewed migration without moving the shared execution role.
+      deploymentName: props.resourceNamePrefix ?? props.deploymentName,
+      buildRoleName: roleName('MicrovmBuildRole'),
+      connectorOperatorRoleName: roleName('MicrovmConnectorRole'),
+    });
+  }
 }

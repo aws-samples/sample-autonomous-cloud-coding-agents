@@ -14,8 +14,12 @@ from fastapi import Request  # noqa: TC002 — FastAPI resolves this annotation 
 from fastapi.responses import JSONResponse
 
 from microvm_checkpoint import checkpoint_before_suspend, refresh_and_reconcile_after_resume
-from microvm_diagnostics import hook_diagnostics, lifecycle_stage
-from microvm_lifecycle import LifecycleUnavailable, get_registered_context
+from microvm_lifecycle import (
+    LifecycleUnavailable,
+    get_registered_context,
+    hook_diagnostics,
+    lifecycle_stage,
+)
 from shared_constants import SHARED_CONSTANTS
 
 _BUDGETS = SHARED_CONSTANTS["microvm_hook_budgets"]

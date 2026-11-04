@@ -478,10 +478,9 @@ def _handle_run_agent(step: Step, ctx: StepContext) -> StepOutcome:
         )
     )
     ctx.agent_result = result
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import worker_closed
 
-    lifecycle = get_context(ctx.config.task_id)
-    if lifecycle and lifecycle.diagnostic_snapshot()["phase"] in {"closed", "failed"}:
+    if worker_closed(ctx.config.task_id):
         raise RuntimeError("Worker execution is closed; remaining workflow steps must not run")
     # The agent loop "failing" is not a step failure here: pipeline's
     # _resolve_overall_task_status owns success inference. The step succeeds if

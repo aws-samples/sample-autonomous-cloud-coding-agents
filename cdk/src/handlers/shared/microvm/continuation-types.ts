@@ -89,6 +89,16 @@ export function workerLeaseKey(taskId: string): { task_id: string } {
   return { task_id: CONTINUATION.lease_key_prefix + taskId };
 }
 
+/** True when a stored lease is exactly this worker's: state, attempt, owner, repo and (if given) MicroVM. */
+export function leaseMatches(lease: Partial<WorkerLease> | undefined, expected: {
+  state: WorkerLease['lease_state']; attemptId: string | undefined; userId: string; repo: string | undefined; microvmId?: string;
+}): boolean {
+  return lease?.lease_state === expected.state
+    && lease.lease_attempt_id !== undefined && lease.lease_attempt_id === expected.attemptId
+    && lease.lease_user_id === expected.userId && lease.lease_repo === (expected.repo ?? '')
+    && (!('microvmId' in expected) || lease.lease_microvm_id === expected.microvmId);
+}
+
 export function validAttemptId(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 }
@@ -110,3 +120,16 @@ export function validateContinuation(record: ContinuationRecord, task: {
     throw new Error('MICROVM_CONTINUATION_INVALID: checkpoint identity or receipt does not match the pending request');
   }
 }
+
+/** Transport limits fit inside a durable Lambda's 60-second invocation budget. */
+export const CONTINUATION_IO_TIMEOUT_MS = 10_000;
+export const CONTINUATION_RETIREMENT_TIMEOUT_MS = 40_000;
+/** Bounds one stop-and-confirm of a MicroVM worker: supervisor cleanup and continuation retirement. */
+export const MICROVM_STOP_TIMEOUT_MS = 25_000;
+export const CONTINUATION_POLL_INTERVAL_MS = 30_000;
+/** Poll cadence while a MicroVM is changing state (suspending, resuming, stopping). */
+export const MICROVM_TRANSITION_POLL_MS = 5_000;
+export const CONTINUATION_TRANSITION_POLL_SECONDS = MICROVM_TRANSITION_POLL_MS / 1000;
+export const CONTINUATION_RETRY_POLL_SECONDS = 30;
+export const CONTINUATION_START_ATTEMPTS = 4;
+export const CONTINUATION_START_RETRY_SECONDS = 10;

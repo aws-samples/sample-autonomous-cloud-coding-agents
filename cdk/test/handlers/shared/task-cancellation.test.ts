@@ -21,7 +21,7 @@
 
 import { GetCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { TaskStatus } from '../../../src/constructs/task-status';
-import { cancelTaskState } from '../../../src/handlers/shared/task-cancellation';
+import { cancelTaskState, closeTaskApprovals } from '../../../src/handlers/shared/task-cancellation';
 import type { TaskRecord } from '../../../src/handlers/shared/types';
 
 const mockSend = jest.fn();
@@ -141,4 +141,56 @@ test('fails before mutating an approval wait when required tables are not wired'
   await expect(cancelTaskState(task, { ...options, approvalsTable: undefined }))
     .rejects.toThrow('requires approvals and events tables');
   expect(mockSend).not.toHaveBeenCalled();
+});
+
+describe('closeTaskApprovals', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.TASK_APPROVALS_TABLE_NAME = 'approvals';
+  });
+  afterEach(() => { delete process.env.TASK_APPROVALS_TABLE_NAME; });
+
+  test('a parked task keeps its unanswered requests and has no retention timer', async () => {
+    mockSend.mockResolvedValue({ Item: { user_id: 'user', status: 'AWAITING_APPROVAL' } });
+    await closeTaskApprovals('task', 'user');
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('task closure cancels unanswered requests, preserves answers, and stamps history retention', async () => {
+    mockSend.mockResolvedValueOnce({ Item: { user_id: 'user', status: 'FAILED' } })
+      .mockResolvedValueOnce({
+        Items: [
+          { user_id: 'user', request_id: 'pending', status: 'PENDING' },
+          { user_id: 'user', request_id: 'approved', status: 'APPROVED' },
+          { user_id: 'other', request_id: 'wrong-owner', status: 'PENDING' },
+        ],
+      }).mockResolvedValue({});
+    await closeTaskApprovals('task', 'user');
+    const updates = mockSend.mock.calls.slice(2).map(([command]) => command.input);
+    expect(updates).toHaveLength(2);
+    expect(updates[0].ExpressionAttributeValues).toMatchObject({
+      ':cancelled': 'CANCELLED', ':observed': 'PENDING', ':reason': 'Owning task is failed.',
+    });
+    expect(updates[0].ExpressionAttributeValues[':ttl']).toBeGreaterThan(Date.now() / 1000 + 86400);
+    expect(updates[1].UpdateExpression).toBe('SET #ttl = if_not_exists(#ttl, :ttl)');
+    expect(updates[1].ExpressionAttributeValues[':cancelled']).toBeUndefined();
+  });
+
+  test('a mismatched task owner cannot close another user’s approvals', async () => {
+    mockSend.mockResolvedValue({ Item: { user_id: 'other', status: 'CANCELLED' } });
+    await closeTaskApprovals('task', 'user');
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('an answer racing task closure keeps its decision and still receives retention', async () => {
+    mockSend.mockResolvedValueOnce({ Item: { user_id: 'user', status: 'CANCELLED' } })
+      .mockResolvedValueOnce({ Items: [{ user_id: 'user', request_id: 'request', status: 'PENDING' }] })
+      .mockRejectedValueOnce(Object.assign(new Error('answered'), { name: 'ConditionalCheckFailedException' }))
+      .mockResolvedValue({});
+    await closeTaskApprovals('task', 'user');
+    expect(mockSend.mock.calls[3][0].input).toMatchObject({
+      UpdateExpression: 'SET #ttl = if_not_exists(#ttl, :ttl)',
+      ConditionExpression: 'user_id = :user AND #status <> :pending',
+    });
+  });
 });

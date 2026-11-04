@@ -45,6 +45,9 @@ import os
 import sys
 from typing import Any
 
+#: Set to "1" by the MicroVM credential broker for its Claude child process.
+MICROVM_CREDENTIAL_BROKER_ENV = "ABCA_MICROVM_CREDENTIAL_BROKER"
+
 # Fixed path the agent writes (0600) and this helper reads. A fixed path is
 # required because the managed-settings ``awsCredentialExport`` command is
 # static (baked into the image) and cannot carry per-task arguments.
@@ -132,7 +135,7 @@ def resolve_credentials() -> dict[str, str]:
     # credential sources from the MicroVM Claude child. Exporting even those
     # scoped credentials here would reintroduce Claude's stale export cache.
     # Do not read the attribution file or initialize boto3 in this branch.
-    if os.environ.get("ABCA_MICROVM_CREDENTIAL_BROKER") == "1":
+    if os.environ.get(MICROVM_CREDENTIAL_BROKER_ENV) == "1":
         return {}
     path = attribution_file_path()
     try:

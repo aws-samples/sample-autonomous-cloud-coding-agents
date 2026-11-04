@@ -26,12 +26,17 @@ import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
+import constants from '../../../contracts/constants.json';
 
 /** Default stranded-timeout (seconds; 20 minutes). */
 const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 
-/** Backstop for approval waits without a checkpoint (eight hours plus 30 minutes). */
-const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 30600;
+/** Time the coordinator gets to close a task after its worker's lifetime ends. */
+const APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS = 1800;
+
+/** Backstop for approval waits without a checkpoint: the worker lifetime plus the close margin. */
+const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS =
+  constants.microvm_lifecycle.maximum_duration_seconds + APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS;
 
 /** Default task-record retention used for event TTL (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;

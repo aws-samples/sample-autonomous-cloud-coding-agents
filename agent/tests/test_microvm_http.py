@@ -20,7 +20,7 @@ from fastapi import Request
 import microvm_http
 import microvm_lifecycle as lifecycle
 import server
-from microvm_diagnostics import lifecycle_stage
+from microvm_lifecycle import lifecycle_stage
 
 PREFIX = server.MICROVM_HOOK_PREFIX
 
@@ -181,7 +181,7 @@ class TestLifecycleHttp:
     ):
         await park(context)
         monkeypatch.setattr(
-            "microvm_diagnostics.print", MagicMock(side_effect=OSError("closed")), raising=False
+            "microvm_lifecycle.print", MagicMock(side_effect=OSError("closed")), raising=False
         )
         assert (await client.post(PREFIX + "/suspend", json={})).status_code == 200
         assert (await client.post(PREFIX + "/resume", json={})).status_code == 200

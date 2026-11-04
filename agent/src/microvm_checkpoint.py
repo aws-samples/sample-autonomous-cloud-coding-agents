@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from microvm_diagnostics import lifecycle_stage
-from microvm_lifecycle import ApprovalPark, LifecycleUnavailable
+from microvm_lifecycle import LAMBDA_MICROVM, ApprovalPark, LifecycleUnavailable, lifecycle_stage
 from progress_writer import _ProgressWriter
 
 if TYPE_CHECKING:
@@ -36,15 +34,13 @@ def _record(park: ApprovalPark) -> tuple[ApprovalRecord, int | None]:
         or not _integer(record.timeout_s)
     ):
         raise LifecycleUnavailable("Original approval identity is unavailable")
+    from policy import approval_deadline_epoch
+
     try:
-        created = datetime.strptime(record.created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        deadline = approval_deadline_epoch(record.created_at, record.timeout_s)
     except (TypeError, ValueError) as exc:
         raise LifecycleUnavailable("Original approval timestamp is invalid") from exc
-    if created.strftime("%Y-%m-%dT%H:%M:%SZ") != record.created_at:
-        raise LifecycleUnavailable("Original approval timestamp is not canonical")
-    deadline_ms = (
-        int(created.timestamp() * 1000) + record.timeout_s * 1000 if record.timeout_s > 0 else None
-    )
+    deadline_ms = deadline * 1000 if deadline is not None else None
     return record, deadline_ms
 
 
@@ -53,19 +49,20 @@ def _read(
 ) -> tuple[Any, str, str, dict, int | None]:
     """Read current task/gate identity strongly; absence and mismatch fail closed."""
     from boto3.dynamodb.types import TypeDeserializer
-    from botocore.config import Config
 
-    from aws_session import tenant_client
+    from aws_session import fast_fail_config, tenant_client
 
     record, deadline_ms = _record(park)
-    task_table = os.environ.get("TASK_TABLE_NAME", "").strip()
-    approvals_table = os.environ.get("TASK_APPROVALS_TABLE_NAME", "").strip()
+    from task_state import TASK_APPROVALS_TABLE_ENV, TASK_TABLE_ENV
+
+    task_table = os.environ.get(TASK_TABLE_ENV, "").strip()
+    approvals_table = os.environ.get(TASK_APPROVALS_TABLE_ENV, "").strip()
     if not task_table or not approvals_table:
         raise RuntimeError("Lifecycle task/approval tables are unavailable")
     client = tenant_client(
         "dynamodb",
         region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
-        config=Config(connect_timeout=2, read_timeout=2, retries={"total_max_attempts": 1}),
+        config=fast_fail_config(),
     )
     deserialize = TypeDeserializer().deserialize
 
@@ -82,7 +79,7 @@ def _read(
         task.get("task_id") != park.task_id
         or task.get("user_id") != record.user_id
         or task.get("repo", "") != record.repo
-        or task.get("compute_type") != "lambda-microvm"
+        or task.get("compute_type") != LAMBDA_MICROVM
         or task.get("session_id") != park.microvm_id
         or not isinstance(metadata, dict)
         or metadata.get("microvmId") != park.microvm_id
@@ -144,7 +141,7 @@ def _transaction_checks(
         ":vm": park.microvm_id,
         ":request": park.request_id,
         ":awaiting": "AWAITING_APPROVAL",
-        ":backend": "lambda-microvm",
+        ":backend": LAMBDA_MICROVM,
         ":intent": intent,
     }
     task_check = {

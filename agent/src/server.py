@@ -1408,13 +1408,14 @@ class MicrovmRunHookRequest(BaseModel):
 
 def _resolve_microvm_run_payload(run_hook_payload: str) -> tuple[dict, dict]:
     """Authenticate deployment settings and resolve the v2 task reference."""
+    from microvm_lifecycle import LAMBDA_MICROVM
     from payload_bootstrap import resolve_payload_reference
 
     try:
         reference = json.loads(run_hook_payload)
     except (UnicodeError, ValueError) as exc:
         raise ValueError("runHookPayload is not valid JSON") from exc
-    return resolve_payload_reference(reference, "lambda-microvm")
+    return resolve_payload_reference(reference, LAMBDA_MICROVM)
 
 
 #: The ONE executable whose warm-up gates the snapshot, exec'd FIRST.

@@ -30,8 +30,12 @@ sys.path.insert(0, str(AGENT_ROOT))
 sys.path.insert(0, str(AGENT_ROOT / "src"))
 
 from continuation_runtime import decision_prompt
-from continuation_session import CheckpointIdentity, CheckpointSessionStore, decode_checkpoint
-from continuation_usage import read_usage
+from continuation_session import (
+    CheckpointIdentity,
+    CheckpointSessionStore,
+    decode_checkpoint,
+    read_usage,
+)
 from continuation_workspace import capture_workspace, restore_workspace
 from scripts.verify_microvm_credentials import MODEL, event_frame, model_response, pinned_versions
 

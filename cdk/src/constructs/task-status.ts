@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import type { ApprovalStatus } from '../handlers/shared/types';
+
 /**
  * Valid task states in the task lifecycle state machine.
  *
@@ -57,6 +59,22 @@ export const TaskStatus = {
   CANCELLED: 'CANCELLED',
   TIMED_OUT: 'TIMED_OUT',
 } as const;
+
+/**
+ * TaskApprovalsTable row statuses: the runtime mirror of the `ApprovalStatus`
+ * type, for DynamoDB expression values the compiler cannot otherwise check.
+ */
+export const ApprovalStatusValue = {
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  DENIED: 'DENIED',
+  CANCELLED: 'CANCELLED',
+  TIMED_OUT: 'TIMED_OUT',
+  STRANDED: 'STRANDED',
+} as const satisfies Record<ApprovalStatus, ApprovalStatus>;
+
+/** Every approval-row status, in declaration order. */
+export const APPROVAL_STATUSES: readonly ApprovalStatus[] = Object.values(ApprovalStatusValue);
 
 /**
  * Union type of all valid task status values.

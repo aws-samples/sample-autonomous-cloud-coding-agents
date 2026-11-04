@@ -47,7 +47,7 @@ def git(workspace, *args):
 
 @pytest.fixture
 def ready(tmp_path, monkeypatch):
-    from continuation_usage import UsageSnapshot
+    from continuation_session import UsageSnapshot
 
     async def usage(_):
         return UsageSnapshot(0.02, {"input_tokens": 100, "output_tokens": 10})

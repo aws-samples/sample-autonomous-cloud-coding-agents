@@ -19,10 +19,12 @@ from typing import TYPE_CHECKING, Any
 from claude_agent_sdk import project_key_for_directory
 
 from continuation_session import (
+    TOKEN_FIELDS,
     CheckpointIdentity,
     CheckpointSessionStore,
     ContinuationCheckpointError,
     decode_checkpoint,
+    read_usage,
 )
 from continuation_storage import (
     ContinuationContext,
@@ -30,8 +32,8 @@ from continuation_storage import (
     FileReceipt,
     S3ContinuationStorage,
 )
-from continuation_usage import TOKEN_FIELDS, read_usage
 from continuation_workspace import WorkspaceLimits, capture_workspace, restore_workspace
+from shared_constants import SHARED_CONSTANTS
 
 if TYPE_CHECKING:
     from microvm_lifecycle import ApprovalPark, MicrovmLifecycle
@@ -56,10 +58,10 @@ def bind_runtime(runtime: ContinuationRuntime | None):
 
 
 def create_runtime(context: ContinuationContext, task_id: str) -> ContinuationRuntime | None:
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import continuation_bucket, continuation_context
 
-    bucket = os.environ.get("CONTINUATION_BUCKET_NAME", "")
-    if not bucket or get_context(task_id) is None:
+    bucket = continuation_bucket()
+    if continuation_context(task_id) is None:
         return None
     return ContinuationRuntime(context, S3ContinuationStorage(bucket))
 
@@ -130,17 +132,17 @@ def restore_for_task(config: TaskConfig) -> ContinuationRuntime | None:
     """Read a coordinator-owned replacement assignment; payloads do not choose S3 keys."""
     import task_state
     from config import AGENT_WORKSPACE
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import ContinuationState, continuation_bucket, continuation_context
 
-    bucket = os.environ.get("CONTINUATION_BUCKET_NAME", "")
-    lifecycle = get_context(config.task_id)
-    if not bucket or lifecycle is None:
+    bucket = continuation_bucket()
+    lifecycle = continuation_context(config.task_id)
+    if lifecycle is None:
         return None
     registration_deadline = time.monotonic() + 30
     while True:
         task = task_state.get_task(config.task_id, consistent_read=True)
         record = task.get("continuation") if task else None
-        if not isinstance(record, dict) or record.get("state") != "STARTING":
+        if not isinstance(record, dict) or record.get("state") != ContinuationState.STARTING:
             break
         # /run can start the pipeline before RunMicrovm returns its handle to
         # the coordinator. Never turn that registration race into a fresh clone.
@@ -158,11 +160,11 @@ def restore_for_task(config: TaskConfig) -> ContinuationRuntime | None:
     record = task.get("continuation")
     if record is None:
         return None
-    if not isinstance(record, dict) or record.get("state") != "RESTORING":
+    if not isinstance(record, dict) or record.get("state") != ContinuationState.RESTORING:
         raise ContinuationCheckpointError("Existing continuation cannot start as a fresh task")
     identity = CheckpointIdentity(**record["identity"])
     if (
-        record.get("version") != 1
+        record.get("version") != SHARED_CONSTANTS["microvm_continuation"]["version"]
         or record.get("worker_id") != lifecycle.microvm_id
         or task.get("session_id") != lifecycle.microvm_id
         or task.get("status") != "AWAITING_APPROVAL"
@@ -226,10 +228,10 @@ def prepare_repoless_runtime(
 ) -> ContinuationRuntime | None:
     """Give a MicroVM task a private scratch workspace with a local-only Git baseline."""
     from config import AGENT_WORKSPACE
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import continuation_context
     from models import RepoSetup
 
-    if not os.environ.get("CONTINUATION_BUCKET_NAME") or get_context(config.task_id) is None:
+    if continuation_context(config.task_id) is None:
         return None
     if config.repo_url:
         raise ContinuationCheckpointError(

@@ -730,7 +730,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const actions: string[] = statements.flatMap((s: { Action: string | string[] }) =>
       Array.isArray(s.Action) ? s.Action : [s.Action]);
 
-    const allowed = statements.filter((s: { Effect: string }) => s.Effect === 'Allow' && s.Action === 's3:GetObject');
+    const allowed = statements.filter((s: { Effect: string; Action: string | string[] }) => s.Effect === 'Allow' && s.Action === 's3:GetObject');
     expect(allowed).toHaveLength(1);
     expect(JSON.stringify(allowed[0].Resource)).toContain('/bootstrap/*');
     const denied = statements.find((s: { NotResource?: unknown }) => s.NotResource);

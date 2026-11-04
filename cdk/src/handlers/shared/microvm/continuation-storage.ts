@@ -23,13 +23,10 @@ import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectVe
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { canonicalJson } from '../canonical-json';
 import type { SessionControlOptions } from '../compute-strategy';
-import { CONTINUATION_IO_TIMEOUT_MS } from './continuation-timing';
-import {
-  CONTINUATION, type ContinuationLaunchReceipt, type ContinuationRecord, validAttemptId,
-} from './continuation-types';
+import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION, type ContinuationLaunchReceipt, type ContinuationRecord, validAttemptId } from './continuation-types';
 import { continuationEnabled } from './worker-lease';
 import constants from '../../../../../contracts/constants.json';
-import { TERMINAL_STATUSES } from '../../../constructs/task-status';
+import { TERMINAL_STATUSES, TaskStatus } from '../../../constructs/task-status';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient, makeDocClient } from '../ua';
 
@@ -163,7 +160,7 @@ export async function saveContinuationLaunch(
       ConditionExpression: 'user_id = :user AND #status = :hydrating '
         + 'AND (attribute_not_exists(continuation_launch) OR continuation_launch = :receipt)',
       ExpressionAttributeNames: { '#status': 'status', '#ttl': 'ttl' },
-      ExpressionAttributeValues: { ':receipt': receipt, ':user': userId, ':hydrating': 'HYDRATING' },
+      ExpressionAttributeValues: { ':receipt': receipt, ':user': userId, ':hydrating': TaskStatus.HYDRATING },
     }));
   } catch (error) {
     const current = await ddb.send(new GetCommand({

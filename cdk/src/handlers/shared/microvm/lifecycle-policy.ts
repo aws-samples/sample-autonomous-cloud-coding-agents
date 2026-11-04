@@ -18,6 +18,7 @@
  */
 
 import type { SessionStatus } from '../compute-strategy';
+import { MICROVM_TRANSITION_POLL_MS } from './continuation-types';
 import { supportsMicrovmLifecycle } from './image-capability';
 import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './lifecycle';
 import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
@@ -26,7 +27,6 @@ import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../typ
 // Initial policy values, not service limits. Live timings must validate them.
 export const MICROVM_WAKE_MARGIN_MS = 60_000;
 export const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
-export const MICROVM_TRANSITION_POLL_MS = 5_000;
 
 export interface MicrovmLifecyclePolicyInput {
   readonly snapshot: MicrovmLifecycleSnapshot;

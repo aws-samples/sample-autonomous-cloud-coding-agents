@@ -23,10 +23,9 @@ import { canonicalJson } from '../canonical-json';
 import type { ComputeStrategy, SessionControlOptions } from '../compute-strategy';
 import { logger } from '../logger';
 import { verifyContinuationCheckpoint } from './continuation-storage';
-import { CONTINUATION_RETIREMENT_TIMEOUT_MS, CONTINUATION_STOP_TIMEOUT_MS } from './continuation-timing';
-import { CONTINUATION, type ContinuationRecord, type MicrovmHandle, type MicrovmStartReceipt, type WorkerLease, validateContinuation, workerLeaseKey } from './continuation-types';
+import { CONTINUATION_RETIREMENT_TIMEOUT_MS, MICROVM_STOP_TIMEOUT_MS, CONTINUATION, type ContinuationRecord, type MicrovmHandle, type MicrovmStartReceipt, type WorkerLease, validateContinuation, leaseMatches as storedLeaseMatches, workerLeaseKey } from './continuation-types';
 import { continuationEnabled } from './worker-lease';
-import { TaskStatus } from '../../../constructs/task-status';
+import { TaskStatus, ApprovalStatusValue } from '../../../constructs/task-status';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, type TaskRecord } from '../types';
 import { makeDocClient } from '../ua';
 
@@ -68,9 +67,9 @@ async function leaseMatches(
     TableName: TABLE, Key: workerLeaseKey(task.task_id), ConsistentRead: true,
   }), options);
   const lease = result.Item as WorkerLease | undefined;
-  return lease?.lease_state === state && lease.lease_attempt_id === task.microvm_start.clientToken
-    && lease.lease_microvm_id === handle.microvmId && lease.lease_user_id === task.user_id
-    && lease.lease_repo === (task.repo ?? '');
+  return storedLeaseMatches(lease, {
+    state, attemptId: task.microvm_start.clientToken, userId: task.user_id, repo: task.repo, microvmId: handle.microvmId,
+  });
 }
 
 async function fence(task: ContinuableTask, handle: MicrovmHandle, options: SessionControlOptions): Promise<ContinuationRecord | undefined> {
@@ -126,10 +125,10 @@ async function fence(task: ContinuableTask, handle: MicrovmHandle, options: Sess
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
               ':user': task.user_id,
-              ':pending': 'PENDING',
-              ':approved': 'APPROVED',
-              ':denied': 'DENIED',
-              ':timedout': 'TIMED_OUT',
+              ':pending': ApprovalStatusValue.PENDING,
+              ':approved': ApprovalStatusValue.APPROVED,
+              ':denied': ApprovalStatusValue.DENIED,
+              ':timedout': ApprovalStatusValue.TIMED_OUT,
             },
           },
         },
@@ -292,7 +291,7 @@ export async function retireCheckpointedMicrovm(input: {
   if (fenced.source_handle?.microvmId !== input.handle.microvmId) {
     throw new Error('MICROVM_CONTINUATION_INVALID: retirement handle does not match the fence');
   }
-  const signal = AbortSignal.any([options.abortSignal, AbortSignal.timeout(CONTINUATION_STOP_TIMEOUT_MS)]);
+  const signal = AbortSignal.any([options.abortSignal, AbortSignal.timeout(MICROVM_STOP_TIMEOUT_MS)]);
   await input.strategy.stopSession(input.handle, { abortSignal: signal });
   const state = await input.strategy.pollSession(input.handle, { abortSignal: signal });
   if (state.microvmState !== 'TERMINATED' && state.microvmState !== 'NOT_FOUND') return 'stopping';

@@ -27,7 +27,6 @@ import {
   DEFAULT_BEDROCK_MODEL_IDS,
 } from '../../src/constructs/bedrock-models';
 import * as lambdaMicrovmCompute from '../../src/constructs/lambda-microvm-compute';
-import { LambdaMicrovmStack } from '../../src/constructs/lambda-microvm-stack';
 import { buildAppId, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
 import { AgentStack } from '../../src/stacks/agent';
 
@@ -1341,7 +1340,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
-    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
   });
 
   test('defaults to a child stack for the MicroVM image and both egress network connectors', () => {
@@ -1595,7 +1594,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         env: { account: '123456789012', region: 'eu-central-1' },
       });
       Template.fromStack(stack);
-      overriddenTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
+      overriddenTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
@@ -1659,7 +1658,7 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
       env: { account: '123456789012', region: 'us-east-1' },
     });
     template = Template.fromStack(stack);
-    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as LambdaMicrovmStack);
+    childTemplate = Template.fromStack(stack.node.findChild('Microvm') as lambdaMicrovmCompute.LambdaMicrovmStack);
   });
 
   test('provisions the substrate (buckets, roles, both connectors) but no image', () => {

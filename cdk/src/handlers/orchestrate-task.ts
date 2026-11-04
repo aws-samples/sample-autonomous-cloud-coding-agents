@@ -26,7 +26,7 @@ import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { runMicrovmContinuation } from './shared/microvm/continuation-runner';
 import { saveContinuationLaunch } from './shared/microvm/continuation-storage';
-import { CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_TRANSITION_POLL_SECONDS } from './shared/microvm/continuation-timing';
+import { CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_TRANSITION_POLL_SECONDS } from './shared/microvm/continuation-types';
 import { stopMicrovmWithDiagnostics } from './shared/microvm/supervisor';
 import { pollMicrovmTask } from './shared/microvm/task-poll';
 import {

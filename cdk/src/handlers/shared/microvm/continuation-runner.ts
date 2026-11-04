@@ -23,15 +23,14 @@ import { resolveComputeStrategy, type ComputeStrategy } from '../compute-strateg
 import type { ContinuableTask } from './continuation-retirement';
 import { admitContinuation } from './continuation-start';
 import { loadContinuationLaunch } from './continuation-storage';
-import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_POLL_INTERVAL_MS, CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_START_ATTEMPTS, CONTINUATION_TRANSITION_POLL_SECONDS } from './continuation-timing';
-import { type MicrovmHandle, validAttemptId, workerLeaseKey } from './continuation-types';
-import { microvmErrorIdentity } from './control';
+import { CONTINUATION_IO_TIMEOUT_MS, CONTINUATION_POLL_INTERVAL_MS, CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_START_ATTEMPTS, CONTINUATION_START_RETRY_SECONDS, CONTINUATION_TRANSITION_POLL_SECONDS, type MicrovmHandle, validAttemptId, workerLeaseKey } from './continuation-types';
 import { MICROVM_MAX_POLL_FAILURES, stopMicrovmWithDiagnostics } from './supervisor';
 import { pollMicrovmTask } from './task-poll';
 import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
 import { emitTaskEvent, envelopeFor, finalizeTask, loadTask, type PollState } from '../orchestrator';
 import { deleteMicrovmPayload } from '../strategies/lambda-microvm-strategy';
 import { makeDocClient } from '../ua';
+import { microvmErrorIdentity } from './control';
 
 const ddb = makeDocClient();
 const TABLE = process.env.TASK_TABLE_NAME!;
@@ -209,7 +208,9 @@ export async function runMicrovmContinuation(event: MicrovmContinuationEvent, co
     };
     const started = await context.step('continuation-start', () => strategy!.startSession(startInput), {
       // All retries use the immutable start receipt/token, including lost replies.
-      retryStrategy: (_error, attempt) => ({ shouldRetry: attempt < CONTINUATION_START_ATTEMPTS, delay: { seconds: 10 } }),
+      retryStrategy: (_error, attempt) => ({
+        shouldRetry: attempt < CONTINUATION_START_ATTEMPTS, delay: { seconds: CONTINUATION_START_RETRY_SECONDS },
+      }),
     });
     if (started.strategyType !== 'lambda-microvm') throw new Error('MICROVM_CONTINUATION_BACKEND_CHANGED');
     handle = started;
@@ -218,7 +219,7 @@ export async function runMicrovmContinuation(event: MicrovmContinuationEvent, co
       initialState: { deadlineMs: Date.parse(assigned.continuation.started_at) + RESTORE_TIMEOUT_MS },
       waitStrategy: state => ({
         shouldContinue: !state.ready && !state.closed && !state.ownershipLost && !state.failure,
-        delay: { seconds: 5 },
+        delay: { seconds: CONTINUATION_TRANSITION_POLL_SECONDS },
       }),
     });
     if (restoring.failure) throw new Error(restoring.failure);

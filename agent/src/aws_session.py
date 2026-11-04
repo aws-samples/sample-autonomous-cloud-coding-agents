@@ -84,6 +84,17 @@ class SessionScopingError(RuntimeError):
     """
 
 
+def fast_fail_config(read_timeout: int = 2) -> Any:
+    """One attempt with short timeouts, for calls inside a MicroVM lifecycle budget.
+
+    Lifecycle hooks and suspend-time checkpoints must answer within the service
+    hook budget, so a stalled endpoint fails fast instead of being retried.
+    """
+    from botocore.config import Config
+
+    return Config(connect_timeout=2, read_timeout=read_timeout, retries={"total_max_attempts": 1})
+
+
 def build_session_tags(user_id: str, repo: str, task_id: str) -> list[dict[str, str]]:
     """Build the AssumeRole ``Tags`` list from tenant identifiers.
 
@@ -174,11 +185,7 @@ def _build_scoped_session(role_arn: str) -> Any:
     # This is the role-chaining caller; the assumed SessionRole credentials it
     # returns must NOT be used to build it, or refresh would recurse. Carries
     # the static md/ UA segment so the assume-role call is attributed too.
-    sts_config = (
-        Config(connect_timeout=2, read_timeout=2, retries={"total_max_attempts": 1})
-        if get_context(task_id) is not None
-        else Config()
-    )
+    sts_config = fast_fail_config() if get_context(task_id) is not None else Config()
     sts_client = platform_client("sts", region_name=region, config=sts_config)
     # A retained client's refresh must never pick up another task's identity.
     tags = _session_tags()

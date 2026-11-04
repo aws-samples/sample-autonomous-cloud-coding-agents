@@ -17,19 +17,150 @@ the supervisor must wake or terminate within its bounded recovery window.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import random
+import re
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
-
-from microvm_diagnostics import lifecycle_stage
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# ---------------------------------------------------------------------------
+# Bounded, payload-free lifecycle diagnostics shared with callback threads
+# ---------------------------------------------------------------------------
+
+_ACTIVE: ContextVar[HookDiagnostics | None] = ContextVar("microvm_hook_diagnostics", default=None)
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_OUTPUT_LOCK = threading.Lock()
+
+
+def _error_identity(error: BaseException | None) -> dict[str, str]:
+    if error is None:
+        return {}
+    name = type(error).__name__
+    identity = {"error_type": name if _IDENTIFIER.fullmatch(name) else "Error"}
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        for source, field, target in [
+            ("Error", "Code", "aws_error_code"),
+            ("ResponseMetadata", "RequestId", "aws_request_id"),
+        ]:
+            section = response.get(source)
+            value = section.get(field) if isinstance(section, dict) else None
+            if isinstance(value, str) and _IDENTIFIER.fullmatch(value):
+                identity[target] = value
+    return identity
+
+
+class HookDiagnostics:
+    """One HTTP invocation; copied thread contexts retain this same correlation id.
+
+    Logging cannot authorize a transition. Callback threads may outlive a timeout;
+    their subsequent records are marked late, never a successful HTTP acknowledgment.
+    """
+
+    def __init__(self, action: str, snapshot: Callable[[], dict[str, Any]]) -> None:
+        self.action = action
+        self.hook_id = str(uuid.uuid4())
+        self._snapshot = snapshot
+        self._started = time.monotonic()
+        self._stage = "body-read"
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def emit(self, event: str, **fields: Any) -> None:
+        # Snapshot only safe local facts. Never include request bodies, SDK messages,
+        # approval records, tool arguments, credentials, or exception tracebacks.
+        try:
+            snapshot = self._snapshot()
+            safe = {
+                key: value
+                for key, value in snapshot.items()
+                if not isinstance(value, str) or _IDENTIFIER.fullmatch(value)
+            }
+            with self._lock:
+                record = {
+                    **safe,
+                    "event": event,
+                    "level": "WARN" if event.endswith("_failed") else "INFO",
+                    "action": self.action,
+                    "hook_id": self.hook_id,
+                    "pid": os.getpid(),
+                    "timestamp_ms": int(time.time() * 1000),
+                    "elapsed_ms": round((time.monotonic() - self._started) * 1000),
+                    "stage": self._stage,
+                    "late": self._closed,
+                    **fields,
+                }
+                # Concurrent hooks and their callback threads must not interleave
+                # the JSON and newline writes of these records.
+                with _OUTPUT_LOCK:
+                    print(json.dumps(record), flush=True)
+        except Exception:  # noqa: S110 — failure in the logging sink cannot safely log to itself.
+            # Diagnostics are best effort; a broken stdout must not change the
+            # response or bypass the controller's generation/barrier checks.
+            pass
+
+    def stage(self, name: str) -> None:
+        with self._lock:
+            if not self._closed:
+                self._stage = name
+        self.emit("microvm_hook_stage", callback_stage=name)
+
+    def finish(self, status: int | None, code: str, error: BaseException | None = None) -> None:
+        with self._lock:
+            self._closed = True
+        self.emit(
+            "microvm_hook_finished",
+            http_status=status,
+            code=code,
+            late=False,
+            level="INFO" if code == "acknowledged" else "WARN",
+            **_error_identity(error),
+        )
+
+
+@contextmanager
+def hook_diagnostics(action: str, snapshot: Callable[[], dict[str, Any]]):
+    diagnostics = HookDiagnostics(action, snapshot)
+    token = _ACTIVE.set(diagnostics)
+    try:
+        diagnostics.emit("microvm_hook_started")
+        yield diagnostics
+    finally:
+        _ACTIVE.reset(token)
+
+
+@contextmanager
+def lifecycle_stage(name: str):
+    """Record entry before potentially blocking work, including inside to_thread."""
+    diagnostics = _ACTIVE.get()
+    if diagnostics:
+        diagnostics.stage(name)
+    try:
+        yield
+    except BaseException as error:
+        if diagnostics:
+            diagnostics.emit(
+                "microvm_hook_stage_failed", callback_stage=name, **_error_identity(error)
+            )
+        raise
+    else:
+        if diagnostics:
+            diagnostics.emit("microvm_hook_stage_finished", callback_stage=name)
+
+
+# ---------------------------------------------------------------------------
+# Approval barrier and suspend/resume controller
+# ---------------------------------------------------------------------------
 
 
 class ApprovalDeadline(Protocol):
@@ -483,6 +614,45 @@ def register_task(
 def get_context(task_id: str | None) -> MicrovmLifecycle | None:
     with _registry_lock:
         return _contexts.get(task_id or "")
+
+
+#: ``compute_type`` of tasks this module coordinates.
+LAMBDA_MICROVM = "lambda-microvm"
+
+
+class ContinuationState:
+    """TaskTable ``continuation.state`` values (mirrors ``ContinuationRecord`` in CDK)."""
+
+    READY = "READY"
+    FENCED = "FENCED"
+    PARKED = "PARKED"
+    STARTING = "STARTING"
+    RESTORING = "RESTORING"
+    CONSUMED = "CONSUMED"
+
+
+def continuation_bucket() -> str:
+    """The deployment's continuation bucket, or "" when continuation is not deployed."""
+    from shared_constants import SHARED_CONSTANTS
+
+    env = SHARED_CONSTANTS["microvm_platform_config"]["env_by_key"]["continuation_bucket_name"]
+    return os.environ.get(env, "")
+
+
+def continuation_context(task_id: str | None) -> MicrovmLifecycle | None:
+    """This task's MicroVM lifecycle when continuation is deployed, else None."""
+    return get_context(task_id) if continuation_bucket() else None
+
+
+def worker_closed(task_id: str | None) -> bool:
+    """True when this task's MicroVM worker can no longer run task steps.
+
+    Once the barrier is closed or failed, the coordinator owns continuation or
+    cleanup, so no deterministic post-hook may run on this worker. False for
+    every non-MicroVM task.
+    """
+    lifecycle = get_context(task_id)
+    return lifecycle is not None and lifecycle.barrier_unrecoverable()
 
 
 def get_registered_context() -> MicrovmLifecycle | None:

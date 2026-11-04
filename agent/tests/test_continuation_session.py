@@ -10,9 +10,11 @@ import base64
 import hashlib
 import io
 import json
+from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
@@ -463,3 +465,87 @@ def test_invalid_json_reports_a_specific_checkpoint_code():
 
 def test_unspecified_checkpoint_failure_does_not_claim_invalid_data():
     assert checkpoint.ContinuationCheckpointError("Unknown failure").code == "checkpoint_failed"
+
+
+# --- Exact CLI spending (read_usage) -----------------------------------------
+
+RESPONSE: dict[str, Any] = {
+    "session": {
+        "total_cost_usd": 0.03,
+        "model_usage": {
+            "sonnet": {
+                "costUSD": 0.01,
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 30,
+                "cacheCreationInputTokens": 40,
+            },
+            "haiku": {
+                "costUSD": 0.02,
+                "inputTokens": 5,
+                "outputTokens": 6,
+                "cacheReadInputTokens": 7,
+                "cacheCreationInputTokens": 8,
+            },
+        },
+    }
+}
+
+
+def test_reads_exact_current_process_spending_across_models():
+    send = AsyncMock(return_value=RESPONSE)
+    snapshot = asyncio.run(
+        checkpoint.read_usage(SimpleNamespace(_query=SimpleNamespace(_send_control_request=send)))
+    )
+    assert snapshot.cost_usd == 0.03
+    assert snapshot.tokens == {
+        "input_tokens": 105,
+        "output_tokens": 26,
+        "cache_read_input_tokens": 37,
+        "cache_creation_input_tokens": 48,
+    }
+    send.assert_awaited_once_with({"subtype": "get_usage"})
+
+
+@pytest.mark.parametrize(
+    "mutation", ["negative", "nan", "missing", "empty_models", "bad_tokens", "different_cost"]
+)
+def test_incomplete_or_invalid_accounting_cannot_publish_a_checkpoint(mutation):
+    response = deepcopy(RESPONSE)
+    if mutation in {"negative", "nan"}:
+        response["session"]["total_cost_usd"] = -1 if mutation == "negative" else float("nan")
+    elif mutation == "missing":
+        response = {}
+    elif mutation == "empty_models":
+        response["session"]["model_usage"] = {}
+    elif mutation == "bad_tokens":
+        response["session"]["model_usage"]["haiku"]["inputTokens"] = "5"
+    else:
+        response["session"]["model_usage"]["haiku"]["costUSD"] = 0.5
+    client = SimpleNamespace(
+        _query=SimpleNamespace(_send_control_request=AsyncMock(return_value=response))
+    )
+    with pytest.raises(checkpoint.ContinuationCheckpointError):
+        asyncio.run(checkpoint.read_usage(client))
+
+
+def test_unverified_sdk_upgrade_requires_explicit_accounting_validation(monkeypatch):
+    monkeypatch.setattr("continuation_session.importlib.metadata.version", lambda _: "0.3.0")
+    with pytest.raises(checkpoint.ContinuationCheckpointError, match="verified SDK") as error:
+        asyncio.run(checkpoint.read_usage(None))
+    assert error.value.code == "checkpoint_sdk_unverified"
+
+
+def test_missing_sdk_accounting_interface_is_not_invalid_checkpoint_data():
+    with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
+        asyncio.run(checkpoint.read_usage(SimpleNamespace()))
+    assert error.value.code == "checkpoint_sdk_unverified"
+
+
+def test_sdk_accounting_timeout_reports_transport_failure():
+    client = SimpleNamespace(
+        _query=SimpleNamespace(_send_control_request=AsyncMock(side_effect=TimeoutError))
+    )
+    with pytest.raises(checkpoint.ContinuationCheckpointError) as error:
+        asyncio.run(checkpoint.read_usage(client))
+    assert error.value.code == "checkpoint_sdk_timeout"

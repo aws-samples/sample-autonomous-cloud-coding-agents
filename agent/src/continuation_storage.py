@@ -145,7 +145,7 @@ class ContinuationContext:
 
     @classmethod
     def from_dict(cls, value: Any) -> ContinuationContext:
-        from continuation_usage import valid_cost, valid_tokens
+        from continuation_session import valid_cost, valid_tokens
 
         text_fields = {"user_prompt", "system_prompt", "workflow_id", "workflow_version"}
         fields = text_fields | {

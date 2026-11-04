@@ -22,23 +22,23 @@
 import { evaluateAgentHeartbeat } from '../agent-heartbeat';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
-import { microvmErrorIdentity } from './control';
+import { MICROVM_STOP_TIMEOUT_MS, MICROVM_TRANSITION_POLL_MS } from './continuation-types';
 import {
   intentMatchesGate, readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent,
   type MicrovmLifecycleSnapshot,
 } from './lifecycle';
-import { decideMicrovmLifecycle, MICROVM_TRANSITION_POLL_MS } from './lifecycle-policy';
+import { decideMicrovmLifecycle } from './lifecycle-policy';
 import { readMicrovmSuspendEnabled } from './suspend-config';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../../../constructs/task-status';
 import { MICROVM_MAX_DURATION_SECONDS } from '../strategies/lambda-microvm-strategy';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../types';
+import { microvmErrorIdentity } from './control';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 export const MICROVM_SUPERVISOR_CYCLE_MS = 45_000;
 export const MICROVM_MAX_POLL_FAILURES = 3;
 export const MICROVM_RECOVERY_TIMEOUT_MS = 120_000;
 export const MICROVM_STARTUP_TIMEOUT_MS = 300_000;
-export const MICROVM_CLEANUP_TIMEOUT_MS = 25_000;
 
 interface Recovery {
   readonly kind: 'starting' | 'unconfirmed' | 'suspend' | 'wake';
@@ -443,7 +443,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
 export async function stopMicrovmWithDiagnostics(
   input: Pick<MicrovmSupervisorInput, 'taskId' | 'handle' | 'strategy' | 'emitEvent'>,
 ): Promise<void> {
-  const options: SessionControlOptions = { abortSignal: AbortSignal.timeout(MICROVM_CLEANUP_TIMEOUT_MS) };
+  const options: SessionControlOptions = { abortSignal: AbortSignal.timeout(MICROVM_STOP_TIMEOUT_MS) };
   let failure = { error_type: 'NoStopEvidence' } as ReturnType<typeof microvmErrorIdentity>;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {

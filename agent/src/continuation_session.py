@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import importlib.metadata
 import json
 import math
 import re
@@ -72,10 +73,15 @@ def _session_id(value: Any) -> bool:
 
 
 def _action_hash(tool_input: dict) -> str:
-    # Match the approval row / RecentDecisionCache encoding, including spaces
-    # and ASCII escaping. Invalid input is rejected rather than stringified.
+    """The approval row / RecentDecisionCache hash, from the policy engine itself.
+
+    Invalid JSON input is rejected here rather than stringified, so a saved
+    action can never match a row by accident.
+    """
+    from policy import _sha256_tool_input
+
     _encode(tool_input)
-    return hashlib.sha256(json.dumps(tool_input, sort_keys=True).encode()).hexdigest()
+    return _sha256_tool_input(tool_input)
 
 
 @dataclass(frozen=True)
@@ -401,9 +407,7 @@ class S3ContinuationCheckpoints:
                 "Checkpoint bucket is unavailable", code="checkpoint_storage_unavailable"
             )
         if client is None:
-            from botocore.config import Config
-
-            from aws_session import is_scoped, tenant_client
+            from aws_session import fast_fail_config, is_scoped, tenant_client
 
             if not is_scoped():
                 raise ContinuationCheckpointError(
@@ -411,7 +415,7 @@ class S3ContinuationCheckpoints:
                 )
             client = tenant_client(
                 "s3",
-                config=Config(connect_timeout=2, read_timeout=5, retries={"total_max_attempts": 1}),
+                config=fast_fail_config(read_timeout=5),
             )
         self.bucket, self.client = bucket, client
 
@@ -493,3 +497,88 @@ class S3ContinuationCheckpoints:
             raise ContinuationCheckpointError("Saved checkpoint does not match its receipt")
         decode_checkpoint(body, identity)
         return body
+
+
+# ---------------------------------------------------------------------------
+# Exact CLI spending at a paused approval hook (version-checked SDK control call)
+# ---------------------------------------------------------------------------
+
+TOKEN_FIELDS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_input_tokens": "cacheReadInputTokens",
+    "cache_creation_input_tokens": "cacheCreationInputTokens",
+}
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    cost_usd: float
+    tokens: dict[str, int]
+
+
+def valid_cost(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def valid_tokens(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) <= set(TOKEN_FIELDS)
+        and all(type(count) is int and count >= 0 for count in value.values())
+    )
+
+
+async def read_usage(client: Any) -> UsageSnapshot:
+    """Read cumulative spending without interrupting or issuing another query.
+
+    The verified SDK's bundled CLI (``verified_sdk_version`` in the contract)
+    answers the experimental ``get_usage`` control request with exact session
+    dollars and per-model token counters. Python
+    has no public wrapper yet. Keep this dependency isolated and covered by the
+    real SDK probe in CI; an upgrade must verify it before publishing checkpoints.
+    """
+    if (
+        importlib.metadata.version("claude-agent-sdk")
+        != SHARED_CONSTANTS["microvm_continuation"]["verified_sdk_version"]
+    ):
+        raise ContinuationCheckpointError(
+            "Continuation accounting requires the verified SDK version",
+            code="checkpoint_sdk_unverified",
+        )
+    query = getattr(client, "_query", None)
+    send = getattr(query, "_send_control_request", None)
+    if not callable(send):
+        raise ContinuationCheckpointError(
+            "Continuation accounting client is unavailable", code="checkpoint_sdk_unverified"
+        )
+    try:
+        response = await asyncio.wait_for(send({"subtype": "get_usage"}), timeout=5)
+    except TimeoutError as exc:
+        raise ContinuationCheckpointError(
+            "Continuation accounting request timed out", code="checkpoint_sdk_timeout"
+        ) from exc
+    session = response.get("session") if isinstance(response, dict) else None
+    if not isinstance(session, dict) or not valid_cost(session.get("total_cost_usd")):
+        raise ContinuationCheckpointError("Continuation accounting response has no valid cost")
+    models = session.get("model_usage")
+    if not isinstance(models, dict):
+        raise ContinuationCheckpointError("Continuation accounting response has no model usage")
+    tokens = dict.fromkeys(TOKEN_FIELDS, 0)
+    model_cost = 0.0
+    for usage in models.values():
+        if (
+            not isinstance(usage, dict)
+            or not valid_cost(usage.get("costUSD"))
+            or any(
+                type(usage.get(key)) is not int or usage[key] < 0 for key in TOKEN_FIELDS.values()
+            )
+        ):
+            raise ContinuationCheckpointError("Continuation model usage is invalid")
+        model_cost += usage["costUSD"]
+        for target, source in TOKEN_FIELDS.items():
+            tokens[target] += usage[source]
+    cost = float(session["total_cost_usd"])
+    if not math.isclose(model_cost, cost, rel_tol=1e-9, abs_tol=1e-12):
+        raise ContinuationCheckpointError("Continuation model costs do not match session spending")
+    return UsageSnapshot(cost, tokens)

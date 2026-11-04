@@ -50,7 +50,6 @@ import { BudgetAlerts } from '../constructs/budget-alerts';
 import { BudgetTable } from '../constructs/budget-table';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
-import { ContinuationBucket } from '../constructs/continuation-bucket';
 import { DnsFirewall } from '../constructs/dns-firewall';
 import { EcsAgentCluster, resolveEcsTaskSizing } from '../constructs/ecs-agent-cluster';
 import { EcsPayloadBucket } from '../constructs/ecs-payload-bucket';
@@ -63,12 +62,12 @@ import {
   createMicrovmExecutionRole,
   isLambdaMicrovmImageConfigured,
   type LambdaMicrovmImageInputs,
+  LambdaMicrovmStack,
 } from '../constructs/lambda-microvm-compute';
-import { LambdaMicrovmStack } from '../constructs/lambda-microvm-stack';
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
-import { MicrovmContinuationManager } from '../constructs/microvm-continuation-manager';
+import { ContinuationBucket, MicrovmContinuationManager } from '../constructs/microvm-continuation-manager';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -1432,6 +1431,7 @@ export class AgentStack extends Stack {
         continuationBucket,
         orchestratorFunctionArn: orchestrator.fn.functionArn,
         imageArn: lambdaMicrovm.imageArn,
+        maxConcurrentTasksPerUser,
       });
     }
 

@@ -70,11 +70,11 @@ def _now_iso() -> str:
 
 def _lease_check(task_id: str, *, low_level: bool, identity=None) -> dict | None:
     """Read coordinator authority without granting workers permission to rewrite it."""
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import continuation_context
     from shared_constants import SHARED_CONSTANTS
 
-    lifecycle = get_context(task_id)
-    if lifecycle is None or not os.environ.get("CONTINUATION_BUCKET_NAME"):
+    lifecycle = continuation_context(task_id)
+    if lifecycle is None:
         return None
     values = {":attempt": lifecycle.attempt_id, ":active": "ACTIVE"}
     condition = "lease_attempt_id = :attempt AND lease_state = :active"
@@ -169,11 +169,11 @@ def verify_worker_lease(task_id: str, *, client=None) -> None:
     """Reject a superseded launch before repository code or SDK tools can execute."""
     from boto3.dynamodb.types import TypeDeserializer
 
-    from microvm_lifecycle import get_context
+    from microvm_lifecycle import continuation_context
     from shared_constants import SHARED_CONSTANTS
 
-    lifecycle = get_context(task_id)
-    if lifecycle is None or not os.environ.get("CONTINUATION_BUCKET_NAME"):
+    lifecycle = continuation_context(task_id)
+    if lifecycle is None:
         return
     table, _ = _require_tables()
     result = _get_ddb_client(client=client).get_item(
@@ -873,8 +873,9 @@ def publish_continuation_checkpoint(
 
     from boto3.dynamodb.types import TypeSerializer
 
+    from continuation_session import valid_cost
     from continuation_storage import StorageLimits
-    from continuation_usage import valid_cost
+    from microvm_lifecycle import ContinuationState
     from shared_constants import SHARED_CONSTANTS
 
     serialize = TypeSerializer().serialize
@@ -885,7 +886,7 @@ def publish_continuation_checkpoint(
     ddb = _get_ddb_client(client=client)
     record = {
         "version": SHARED_CONSTANTS["microvm_continuation"]["version"],
-        "state": "READY",
+        "state": ContinuationState.READY,
         "identity": asdict(identity),
         "manifest": asdict(receipt),
     }
@@ -893,7 +894,7 @@ def publish_continuation_checkpoint(
         ":request": identity.request_id,
         ":awaiting": _STATUS_AWAITING_APPROVAL,
         ":record": record,
-        ":consumed": "CONSUMED",
+        ":consumed": ContinuationState.CONSUMED,
     }
     update = "SET continuation = :record"
     if cost_usd is not None:
@@ -959,17 +960,18 @@ def consume_restored_continuation(
 
     serialize = TypeSerializer().serialize
     from continuation_session import CheckpointIdentity
+    from microvm_lifecycle import ContinuationState
 
     task_table, approvals_table = _require_tables()
     identity = record["identity"]
-    if record.get("state") != "RESTORING" or record.get("worker_id") != worker_id:
+    if record.get("state") != ContinuationState.RESTORING or record.get("worker_id") != worker_id:
         raise ValueError("Continuation is not owned by this replacement worker")
     values = {
         ":request": identity["request_id"],
         ":record": record,
         ":awaiting": _STATUS_AWAITING_APPROVAL,
         ":running": _STATUS_RUNNING,
-        ":consumed": "CONSUMED",
+        ":consumed": ContinuationState.CONSUMED,
         ":heartbeat": _now_iso(),
     }
     ddb = _get_ddb_client(client=client)
@@ -1026,7 +1028,7 @@ def consume_restored_continuation(
                 ConsistentRead=True,
             )
             task = {key: deserialize(value) for key, value in response.get("Item", {}).items()}
-            expected = {**record, "state": "CONSUMED"}
+            expected = {**record, "state": ContinuationState.CONSUMED}
             if (
                 task.get("status") != _STATUS_RUNNING
                 or task.get("session_id") != worker_id
