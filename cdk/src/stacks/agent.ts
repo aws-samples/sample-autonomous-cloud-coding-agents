@@ -321,6 +321,14 @@ export class AgentStack extends Stack {
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
 
+    // ADR-018 Phase 2 (Linear native agent sessions, #990). Additive + default-off
+    // (ADR-006): the Linear receiver, processor and fan-out consumer key off this
+    // one predicate. Flip it together with the Linear app's "Agent session events"
+    // webhook category — with the category on and this off, every mention opens a
+    // session nothing answers.
+    const linearAgentSessionsEnabled = this.node.tryGetContext('enableLinearAgentSessions') === true
+      || this.node.tryGetContext('enableLinearAgentSessions') === 'true';
+
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
     // below, because TaskApi — created well before the MicroVM construct — needs
@@ -1500,6 +1508,7 @@ export class AgentStack extends Stack {
       // Image attachments extracted from issue descriptions upload here
       // (otherwise createTaskCore 503s "Attachment storage is not configured").
       attachmentsBucket: attachmentsBucket.bucket,
+      ...(linearAgentSessionsEnabled && { agentSessions: { nudgesTable: taskNudgesTable.table } }),
     });
 
     // The orchestration reconciler consumes the TaskTable stream and
@@ -1915,6 +1924,7 @@ export class AgentStack extends Stack {
         resourceName: 'bgagent-linear-oauth-*',
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
+      linearAgentSessionsEnabled,
       // Jira dispatcher posts a deterministic final-status comment with
       // cost/turns/duration on Jira-origin terminal tasks. Same scope
       // `bgagent-jira-oauth-*` as the orchestrator and Jira webhook

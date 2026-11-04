@@ -404,3 +404,78 @@ describe('revoked-authorization recording (#812)', () => {
     expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
   });
 });
+
+describe('LinearIntegration construct — agent sessions (ADR-018 Phase 2)', () => {
+  function synth(agentSessions?: { withNudges: boolean }): Template {
+    const stack = new Stack(new App(), 'TestStack');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const nudgesTable = new dynamodb.Table(stack, 'NudgesTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'nudge_id', type: dynamodb.AttributeType.STRING },
+    });
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api: new apigw.RestApi(stack, 'TestApi'),
+      userPool: new cognito.UserPool(stack, 'TestUserPool'),
+      taskTable,
+      taskEventsTable,
+      ...(agentSessions && { agentSessions: agentSessions.withNudges ? { nudgesTable } : {} }),
+    });
+    return Template.fromStack(stack);
+  }
+
+  const envOf = (template: Template, marker: string): Record<string, unknown> => {
+    const fns = Object.values(template.findResources('AWS::Lambda::Function')).filter((fn) =>
+      Object.prototype.hasOwnProperty.call(
+        (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {},
+        marker,
+      ));
+    expect(fns).toHaveLength(1);
+    return (fns[0].Properties as { Environment: { Variables: Record<string, unknown> } }).Environment.Variables;
+  };
+
+  const nudgeStatements = (template: Template): unknown[] =>
+    Object.values(template.findResources('AWS::IAM::Policy')).flatMap((p) =>
+      ((p.Properties as { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } })
+        .PolicyDocument.Statement)
+        .filter((st) => JSON.stringify(st.Resource).includes('NudgesTable')));
+
+  test('flag on: receiver and processor carry the gate; processor gets the nudges table name', () => {
+    const t = synth({ withNudges: true });
+    expect(envOf(t, 'LINEAR_WEBHOOK_SECRET_ARN').LINEAR_AGENT_SESSIONS_ENABLED).toBe('true');
+    const processor = envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME');
+    expect(processor.LINEAR_AGENT_SESSIONS_ENABLED).toBe('true');
+    expect(processor.NUDGES_TABLE_NAME).toBeDefined();
+  });
+
+  test('flag on: the nudges grant is exactly PutItem + UpdateItem on the base table', () => {
+    const statements = nudgeStatements(synth({ withNudges: true }));
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toEqual(expect.objectContaining({
+      Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      Resource: { 'Fn::GetAtt': [expect.stringMatching(/^NudgesTable/), 'Arn'] },
+    }));
+  });
+
+  test('flag on without a nudges table: gate set, no nudge env or grant', () => {
+    const t = synth({ withNudges: false });
+    const processor = envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME');
+    expect(processor.LINEAR_AGENT_SESSIONS_ENABLED).toBe('true');
+    expect(processor).not.toHaveProperty('NUDGES_TABLE_NAME');
+    expect(nudgeStatements(t)).toEqual([]);
+  });
+
+  test('flag off (default): no gate, no nudge env, no grant', () => {
+    const t = synth();
+    expect(envOf(t, 'LINEAR_WEBHOOK_SECRET_ARN')).not.toHaveProperty('LINEAR_AGENT_SESSIONS_ENABLED');
+    const processor = envOf(t, 'LINEAR_PROJECT_MAPPING_TABLE_NAME');
+    expect(processor).not.toHaveProperty('LINEAR_AGENT_SESSIONS_ENABLED');
+    expect(processor).not.toHaveProperty('NUDGES_TABLE_NAME');
+    expect(nudgeStatements(t)).toEqual([]);
+  });
+});

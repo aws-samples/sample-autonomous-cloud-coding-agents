@@ -2030,3 +2030,26 @@ describe('AgentStack Agent Registry gate', () => {
     })).toThrow("enableAgentRegistry must be true or false, got 'fasle'");
   });
 });
+
+describe('AgentStack — Linear agent sessions gate (ADR-018 Phase 2, #990)', () => {
+  const envVarsWith = (template: Template, marker: string): Array<Record<string, unknown>> =>
+    Object.values(template.findResources('AWS::Lambda::Function'))
+      .map((fn) => (fn.Properties as { Environment?: { Variables?: Record<string, unknown> } }).Environment?.Variables ?? {})
+      .filter((vars) => vars.LINEAR_AGENT_SESSIONS_ENABLED === marker);
+
+  test('flag on: receiver, processor and fan-out consumer carry the gate; the processor can forward nudges', () => {
+    const template = Template.fromStack(new AgentStack(new App({ context: { enableLinearAgentSessions: 'true' } }), 'LinearSessionsOn', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    const gated = envVarsWith(template, 'true');
+    expect(gated).toHaveLength(3);
+    expect(gated.some((vars) => 'NUDGES_TABLE_NAME' in vars && 'LINEAR_PROJECT_MAPPING_TABLE_NAME' in vars)).toBe(true);
+  });
+
+  test('flag off (default): no Lambda carries the gate', () => {
+    const template = Template.fromStack(new AgentStack(new App(), 'LinearSessionsOff', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    expect(envVarsWith(template, 'true')).toHaveLength(0);
+  });
+});

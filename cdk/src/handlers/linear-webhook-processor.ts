@@ -26,7 +26,10 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { AGENT_SESSION_EVENT_TYPE, isLinearAgentSessionsEnabled, type LinearAgentSessionEvent } from './shared/linear-agent-session-event';
+import { handleAgentSessionEvent } from './shared/linear-agent-session-handler';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
+import { lookupLinearPlatformUser, vaultMetadata } from './shared/linear-channel-metadata';
 import {
   deleteComment,
   fetchRecentComments,
@@ -648,27 +651,6 @@ interface ProcessorEvent {
  *   handles all Linear I/O deterministically; there is no Linear MCP).
  */
 /**
- * The vault fields a task needs so the AGENT can mint its own Linear token.
- *
- * Every channel_metadata builder must spread this. A builder that omits it hands the
- * agent no provider, so it falls back to a Secrets-Manager token a vault-managed
- * workspace does not have: no reactions and no state transitions, on work that
- * otherwise succeeded.
- *
- * Three checks guard it, because they fail for different reasons. Two source-level ones
- * (in the test file) catch a builder nobody exercised — one keys off the object-literal
- * form, the other off the assignment form, so a builder that writes onto an existing
- * object is covered too (#879). The behavioural one asserts the fields actually reach
- * `channel_metadata`.
- */
-function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
-  return {
-    ...(resolved.providerName && { linear_provider_name: resolved.providerName }),
-    ...(resolved.vaultUserId && { linear_vault_user_id: resolved.vaultUserId }),
-  };
-}
-
-/**
  * The resolver fields the `channel_metadata` builders thread through.
  *
  * Declared once rather than re-stated per builder, because it has to stay WIDER than
@@ -725,6 +707,19 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       });
     }
     (payload as { organizationId?: string }).organizationId = bound;
+  }
+
+  // Native Linear agent sessions (ADR-018 Phase 2): an @-mention or delegation
+  // of the bgagent app arrives as a typed AgentSessionEvent. Flag-gated — the
+  // receiver forwards these only when the flag is on, so a delivery here with
+  // the flag off is a misrouted event, not work.
+  if ((payload as { type?: string }).type === AGENT_SESSION_EVENT_TYPE) {
+    if (!isLinearAgentSessionsEnabled()) {
+      logger.warn('Agent-session delivery reached the processor with LINEAR_AGENT_SESSIONS_ENABLED off — ignoring');
+      return;
+    }
+    await handleAgentSessionEvent(payload as LinearAgentSessionEvent);
+    return;
   }
 
   // A Comment with an @bgagent mention on an orchestrated sub-issue
@@ -1993,6 +1988,9 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
     logger.warn('Comment trigger: commenter has no linked platform user — refusing to act on the trigger', {
       linear_workspace_id: workspaceId, linear_user_id: commenterId, linear_issue_id: commentedIssueId,
     });
+    // With agent sessions on, the session opened for this same mention already
+    // tells the user to link their account; a ❓ + reply here would say it twice.
+    if (isLinearAgentSessionsEnabled()) return;
     const channel = channelFor(WORKSPACE_REGISTRY_TABLE);
     const commented = issueRef(commentedIssueId, workspaceId);
     await channel.reactToComment?.({ commentId }, commented, 'needs_input');
@@ -2067,6 +2065,22 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
   if (snapshot && !commentTargetBelongsToWorkspace(snapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
   if (!snapshot || !child || !child.child_task_id) {
+    if (isLinearAgentSessionsEnabled()) {
+      // With agent sessions on, Linear opens a session for this same @-mention
+      // and the session path answers it (handleAgentSessionEvent). Acting here
+      // too would start a second task. Epic and orchestration-child mentions
+      // above stay on this path — the session path defers those back here.
+      // WARN, not INFO: the flag is stack-wide but Linear's "Agent session events"
+      // toggle is per app installation. A workspace whose app lacks the toggle
+      // gets no session for this mention, and this line is the only trace.
+      logger.warn('Comment trigger: standalone mention is left to the Linear agent session — skipping', {
+        linear_workspace_id: workspaceId,
+        linear_issue_id: commentedIssueId,
+        comment_id: commentId,
+        remedy: 'enable "Agent session events" on this workspace\'s Linear app',
+      });
+      return;
+    }
     await handleStandaloneCommentTrigger({
       subIssueId: commentedIssueId,
       workspaceId,
@@ -3390,11 +3404,5 @@ function isLinearUploadsUrl(url: string): boolean {
 }
 
 async function lookupPlatformUser(workspaceId: string, userId: string): Promise<string | null> {
-  const key = `${workspaceId}#${userId}`;
-  const result = await ddb.send(new GetCommand({
-    TableName: USER_MAPPING_TABLE,
-    Key: { linear_identity: key },
-  }));
-  if (!result.Item || result.Item.status === 'pending') return null;
-  return (result.Item.platform_user_id as string) ?? null;
+  return lookupLinearPlatformUser(ddb, USER_MAPPING_TABLE, workspaceId, userId);
 }

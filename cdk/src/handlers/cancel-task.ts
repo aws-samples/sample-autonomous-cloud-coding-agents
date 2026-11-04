@@ -20,10 +20,11 @@
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { LambdaMicrovmsClient, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
-import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
+import { transitionTaskToCancelled, writeTaskCancelledEvent } from './shared/cancel-task-core';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
@@ -91,29 +92,14 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     // 6. Update task to CANCELLED with condition to prevent race
     const now = new Date().toISOString();
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: TABLE_NAME,
-        Key: { task_id: taskId },
-        UpdateExpression: 'SET #status = :cancelled, updated_at = :now, completed_at = :now, status_created_at = :sca, #ttl = :ttl',
-        ConditionExpression: 'attribute_exists(task_id) AND NOT #status IN (:s1, :s2, :s3, :s4)',
-        ExpressionAttributeNames: { '#status': 'status', '#ttl': 'ttl' },
-        ExpressionAttributeValues: {
-          ':cancelled': TaskStatus.CANCELLED,
-          ':now': now,
-          ':sca': `${TaskStatus.CANCELLED}#${now}`,
-          ':s1': TaskStatus.COMPLETED,
-          ':s2': TaskStatus.FAILED,
-          ':s3': TaskStatus.CANCELLED,
-          ':s4': TaskStatus.TIMED_OUT,
-          ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS),
-        },
-      }));
-    } catch (condErr: any) {
-      if (condErr.name === 'ConditionalCheckFailedException') {
-        return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
-      }
-      throw condErr;
+    const cancelTables = {
+      ddb,
+      taskTableName: TABLE_NAME,
+      taskEventsTableName: EVENTS_TABLE_NAME,
+      retentionDays: TASK_RETENTION_DAYS,
+    };
+    if (await transitionTaskToCancelled(cancelTables, taskId, now) === 'already_terminal') {
+      return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
     }
 
     // 6b. Stop the compute session so the container winds down (best-effort)
@@ -234,17 +220,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 7. Write task_cancelled event
-    await ddb.send(new PutCommand({
-      TableName: EVENTS_TABLE_NAME,
-      Item: {
-        task_id: taskId,
-        event_id: ulid(),
-        event_type: 'task_cancelled',
-        timestamp: now,
-        ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
-        metadata: { cancelled_by: userId },
-      },
-    }));
+    await writeTaskCancelledEvent(cancelTables, taskId, userId, now);
 
     logger.info('Task cancelled', { task_id: taskId, user_id: userId, request_id: requestId });
 

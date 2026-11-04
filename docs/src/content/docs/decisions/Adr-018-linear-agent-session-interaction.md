@@ -4,8 +4,8 @@ title: Adr 018 linear agent session interaction
 
 # ADR-018: Linear agent-session as a future interaction channel
 
-**Status:** proposed
-**Date:** 2026-06-17
+**Status:** accepted — Phase 2 implemented behind a flag (#990, 2026-11-04)
+**Date:** 2026-06-17 · amended 2026-11-04
 
 ## Context
 
@@ -187,6 +187,48 @@ spike issues were created + deleted; no migration code written.
 3. **After evaluation:** if the native path is strictly better, default the
    flag on and deprecate the `@bgagent` string-match trigger; keep the
    panel/rollup engine.
+
+## Amendment (2026-11-04, #990): Phase 2 ships during the Preview
+
+Phase 2 was planned for after Linear's Agents API reached GA. It ships earlier, during the Developer Preview, because:
+
+- The approved issue (#990) asks for it.
+- The spike above already proved the full lifecycle end to end against the live API.
+- The flag keeps the Preview risk contained. The flag is off by default; with it off, a stack synthesizes and behaves exactly as before. Rollback is untick *Agent session events* and redeploy without the flag.
+
+The GA wait still applies to **Phase 3**: defaulting the flag on and deprecating the `@bgagent` string match.
+
+**Flag (ADR-006).**
+
+- **Name:** `--context enableLinearAgentSessions=true`. This sets `LINEAR_AGENT_SESSIONS_ENABLED=true` on the Linear webhook receiver, the processor and the fan-out consumer.
+- **Owner:** #990.
+- **Removal:** the Phase 3 change, which removes the flag together with the string-match trigger. Re-evaluate at Linear's Agents API GA.
+- **Coupling:** the flag must be flipped together with the Linear app's *Agent session events* toggle, for the reason in the ⚠️ note above.
+
+**How the channel maps onto the engine.**
+
+| Linear | ABCA |
+|---|---|
+| `created` (mention / delegation) | An immediate `thought`, then `createTaskCore`: `coding/new-task-v1` from the issue + `promptContext`, or `coding/pr-iteration-v1` when the issue already has an ABCA PR and the mention carries an instruction. The task's `channel_metadata.linear_agent_session_id` ties it to the session. |
+| `prompted` while the task runs | Forwarded to the running agent as a nudge. This goes through the same `submitNudge` core as `POST /tasks/{id}/nudge`: guardrail screening fails closed, with the same per-minute limit. As with that API, only the task's owner can nudge. A request arriving in a session other than the task's own gets a final `response`, so it never hangs. |
+| `prompted` after the task finished | A follow-up task, with the same rules as `created`. An answer to a clarify hold resumes the original request (`buildClarifyResumeDescription`). |
+| `prompted` with `signal: stop` | `transitionTaskToCancelled`, then a final `response`. The agent exits at its next between-turns status check. This is the same core as `DELETE /tasks/{id}`, and like it only the task's owner can stop. It omits the compute-stop call, which needs grants the processor deliberately does not hold. Orchestration children are refused, because the epic owns their lifecycle. |
+| `pr_created` milestone | `agentSessionUpdate.addedExternalUrls` (the PR), plus an `action` activity. |
+| `agent_turn` | One ephemeral `thought` per 10 minutes, claimed by a conditional write on the task record, so a long run never goes `stale` (30 min idle). |
+| terminal task event | One `response` / `elicitation` / `error` with the comment channel's final-status body. It is post-once via the existing fan-out markers. |
+
+**Boundaries kept from the original decision.**
+
+- **Epics and started orchestration children stay on the comment path.** The session handler applies the same membership test the comment trigger routes on, and defers with a `response`.
+- **Standalone `@bgagent` comments are not acted on while the flag is on.** The session answers the same mention, and acting on both would start two tasks. The flag is stack-wide while Linear's toggle is per app installation, so every workspace on a flagged stack must enable *Agent session events*. A skipped mention logs at WARN with the workspace id. A per-workspace opt-in would need a registry attribute and is left as a follow-up.
+- **Decisions use the base-table row.** "Running or finished?", the owner and the clarify state are read from the task row with a strongly consistent read, never from the eventually consistent `LinearIssueIndex`.
+- **No new AWS resources.** The processor gains `PutItem`/`UpdateItem` on the nudges table and nothing else.
+
+**Deliberate differences from the comment path.**
+
+- **Attribution.** A session task is attributed to the linked user who made the request, not to the original task's requester. This matches the identity split in #786: the human actor is the task owner.
+- **Attachments.** Session-triggered tasks do not hydrate issue attachments yet.
+- **First-activity latency.** The ack is emitted after the processor's cold start and token resolution. The 10 s budget has not been measured under a vault-token cold start; a dedicated, smaller session Lambda is the mitigation if it proves tight.
 
 ## Out of scope (this ADR)
 

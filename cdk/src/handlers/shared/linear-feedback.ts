@@ -263,7 +263,7 @@ interface TeamState {
  * documented contract is to proceed on any failure (advisory context, cosmetic
  * cleanup, a skipped transition). Never throws.
  */
-async function graphqlData(
+export async function graphqlData(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
@@ -310,7 +310,7 @@ export type LinearPostResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly retryable: boolean };
 
-async function graphqlRequest(
+export async function graphqlRequest(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
@@ -371,7 +371,7 @@ export interface LinearFeedbackContext {
   readonly registryTableName: string;
 }
 
-async function resolveToken(ctx: LinearFeedbackContext): Promise<string | null> {
+export async function resolveToken(ctx: LinearFeedbackContext): Promise<string | null> {
   try {
     const resolved = await resolveLinearOauthToken(ctx.linearWorkspaceId, ctx.registryTableName);
     return resolved?.accessToken ?? null;

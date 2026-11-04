@@ -141,6 +141,24 @@ export interface LinearIntegrationProps {
    * existing Secrets-Manager-only path, synthesized byte-for-byte unchanged.
    */
   readonly identityVault?: LinearIdentityVault;
+
+  /**
+   * Native Linear agent-session channel (ADR-018 Phase 2), gated by the
+   * ``enableLinearAgentSessions`` context flag. When set, the webhook receiver
+   * forwards ``AgentSessionEvent`` deliveries and the processor answers them
+   * with agent activities (``LINEAR_AGENT_SESSIONS_ENABLED``); the standalone
+   * ``@bgagent`` comment trigger yields to the session for the same mention.
+   * Omitted (the default) ⇒ agent-session events are acknowledged and ignored,
+   * synthesized byte-for-byte unchanged.
+   */
+  readonly agentSessions?: {
+    /**
+     * Task nudges table. A follow-up prompt into a session whose task is still
+     * running is forwarded to the agent as a nudge; without it the processor
+     * tells the user to wait for the run to finish.
+     */
+    readonly nudgesTable?: dynamodb.ITable;
+  };
 }
 
 /**
@@ -326,6 +344,8 @@ export class LinearIntegration extends Construct {
         // live) is the signal there. Granting the reconciler write would widen the grant
         // the threat-model note below argues down, to recover an alert, not a diagnosis.
         LINEAR_REVOCATION_RECORDING: 'true',
+        ...(props.agentSessions && { LINEAR_AGENT_SESSIONS_ENABLED: 'true' }),
+        ...(props.agentSessions?.nudgesTable && { NUDGES_TABLE_NAME: props.agentSessions.nudgesTable.tableName }),
       },
       // Uses the PDF attachment-screening path — pdf-parse must stay unbundled.
       bundling: attachmentScreeningBundling,
@@ -431,6 +451,16 @@ export class LinearIntegration extends Construct {
       props.attachmentsBucket.grantPut(webhookProcessorFn);
       props.attachmentsBucket.grantDelete(webhookProcessorFn);
     }
+    // Agent-session follow-ups forwarded to a running agent (shared nudge core):
+    // a rate-limit counter UpdateItem and the nudge PutItem — never read or
+    // delete, so not `grantReadWriteData`. Same narrowing rationale as the
+    // registry grant above: this role parses attacker-supplied attachments.
+    if (props.agentSessions?.nudgesTable) {
+      webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+        resources: [props.agentSessions.nudgesTable.tableArn],
+      }));
+    }
 
     // --- Webhook receiver (verifies HMAC, dedups, invokes processor) ---
     const webhookFn = new lambda.NodejsFunction(this, 'WebhookFn', {
@@ -449,6 +479,8 @@ export class LinearIntegration extends Construct {
         // falls back to LINEAR_WEBHOOK_SECRET_ARN when this lookup
         // misses (back-compat for single-workspace installs).
         LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: this.workspaceRegistryTable.tableName,
+        // Forward AgentSessionEvent deliveries instead of acking-and-ignoring.
+        ...(props.agentSessions && { LINEAR_AGENT_SESSIONS_ENABLED: 'true' }),
       },
       bundling: commonBundling,
     });

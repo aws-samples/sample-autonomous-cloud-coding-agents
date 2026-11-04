@@ -75,7 +75,7 @@ Two fields deserve attention:
 
 Click **Create** and copy the **Client ID** and **Client Secret**.
 
-> **Don't enable Linear's agent / app-notification events.** ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary comments. With agent-session events on, Linear renders an `@mention` of the app as its interactive agent-activity surface instead of a comment thread, which breaks the reply/reaction UX. ABCA ignores agent-session events and logs a WARN naming the workspace. If comments start behaving "interactively", this toggle is why.
+> **Don't enable Linear's agent / app-notification events** unless you opted into [native agent sessions](#native-agent-sessions-opt-in). By default ABCA is a **comment-based** integration: it posts a maturing threaded reply and reacts 👀→✅ on ordinary comments. With agent-session events on, Linear renders an `@mention` of the app as its interactive agent-activity surface instead of a comment thread, which breaks the reply/reaction UX. A stack without the opt-in ignores agent-session events and logs a WARN naming the workspace. If comments start behaving "interactively", this toggle is why.
 
 > **One webhook, not two.** The app's own webhook is all ABCA needs. A separate workspace webhook (Linear → Settings → API → Webhooks) works equally well as an *alternative* — but pointing both at ABCA delivers every event twice under two different signing secrets, and only one of them can verify. Pick one.
 
@@ -198,6 +198,44 @@ Gathered on **every** trigger path (labelled issue, orchestration, `@bgagent` co
 
 No extra setup — this is automatic once the workspace and project are onboarded.
 
+## Native agent sessions (opt-in)
+
+Linear's [Agents API](https://linear.app/developers/agents) gives an installed app a first-class agent UI: people **@-mention or delegate an issue** to it, follow up **inside the session**, and watch typed progress (thoughts, actions, a final response) instead of a comment thread. ABCA can answer through that API instead of the `@bgagent` comment protocol. It's an additive, flag-gated channel ([ADR-018](../decisions/ADR-018-linear-agent-session-interaction.md) Phase 2): the label triggers, the epic orchestration and the AWS compute are unchanged. Only how a standalone issue is triggered and how its progress is shown changes.
+
+> **Developer Preview.** Linear marks the Agents API as subject to change before GA. Keep the flag off on stacks where a Preview-API change would hurt.
+
+**Enable it.** Turn on both halves together, in this order:
+
+1. Deploy the stack with the flag:
+
+   ```bash
+   MISE_EXPERIMENTAL=1 mise //cdk:deploy -- --context enableLinearAgentSessions=true
+   ```
+
+2. In the Linear app (*Settings → API → Applications → your app → Webhooks*), tick **Agent session events** under *App events*. Leave **Issues** and **Comments** ticked. Inbox notifications and permission changes stay off.
+
+If you do these the other way round, every mention in the meantime opens a session that nothing answers, and Linear shows "did not respond". To turn the channel off, reverse the order: untick **Agent session events** first, then redeploy without the flag.
+
+**Every workspace on the stack needs step 2.** The flag is stack-wide, but the toggle belongs to each workspace's Linear app. With the flag on, a workspace whose app lacks the toggle gets no reply to standalone `@bgagent` mentions. ABCA logs `standalone mention is left to the Linear agent session` at WARN, naming the workspace. Label triggers still work there.
+
+**What changes once it's on**
+
+| You do in Linear | ABCA does |
+|---|---|
+| @-mention bgagent on an issue, or delegate the issue to it | Acknowledges within seconds with a *thought*, then starts a coding task on the project's mapped repo. If the issue already has an ABCA pull request and your mention carries an instruction, it iterates on that PR instead. The session shows **Started coding task** or **Iterating on pull request**. |
+| — the agent opens a PR | Attaches the pull request to the session header and posts an **Opened pull request** action. |
+| — a long run is in progress | Posts a short-lived "Still working" thought at most every 10 minutes, so the session never goes stale (Linear's idle limit is 30 minutes). |
+| — the task finishes | Posts one final activity carrying the same outcome, cost, turns and duration as the comment channel: a *response* on success, an *elicitation* if the run stopped to ask you a question, an *error* on failure. Linear turns it into the thread comment. |
+| Reply inside the session while the task runs | Your message goes to the running agent as a nudge (the same guardrail screening, 2,000-character cap and per-minute limit as `bgagent nudge`). The agent picks it up at its next step. Only the task's owner can steer it. |
+| Reply after the task has finished | Starts a follow-up task. If the run stopped to ask a question, your reply resumes the original request with the answer. Otherwise it's a PR iteration if a PR exists, or new work from your message plus the issue. |
+| Click **Stop** in the session | Cancels the running task (the agent exits after its current step) and confirms with a final response. Only the task's owner can stop it. |
+
+**What stays on the comment path.** Linear sessions are per-issue and can't roll up across issues. So mentions on an **epic** or on a **started sub-issue of an orchestration** are still handled by the `@bgagent` comment flow and its epic panel. The session for those mentions replies with a pointer and closes. Label triggers (`bgagent`, `bgagent:help`) are unchanged. With the flag on, ABCA no longer acts on standalone `@bgagent` comments, because the session answers that same mention and acting on both would start two tasks.
+
+**Who can act.** Every session request, `stop` included, needs a linked ABCA user ([Inviting teammates](#inviting-teammates)). An unlinked user gets an error activity and nothing runs. A new task is attributed to whoever asked for it. Steering or stopping a *running* task follows the API's rule: only its owner can do it.
+
+**Not yet supported in sessions:** image and file attachments from the issue description (use a label trigger for those), and Linear's *plan* checklist.
+
 ## Adding another workspace
 
 Run `bgagent linear setup <slug>` again for the new workspace. It's the only command that supports the Identity vault, and it will walk the same one-consent flow.
@@ -301,7 +339,7 @@ If the failing event's `organizationId` matches no registered workspace and the 
 
 An `@mention` shows up as an interactive agent widget rather than a comment, and replies/reactions don't behave like a thread. The OAuth app is configured as a Linear **agent**.
 
-Fix: untick the app's **App events** checkboxes (agent session events, inbox notifications, permission changes). Keep the webhook enabled with the **Issues** and **Comments** data-change events. No redeploy needed.
+Fix: untick the app's **App events** checkboxes (agent session events, inbox notifications, permission changes). Keep the webhook enabled with the **Issues** and **Comments** data-change events. No redeploy needed. If you want the interactive surface, enable [native agent sessions](#native-agent-sessions-opt-in) instead; with the flag on, ABCA answers in the session.
 
 To confirm ABCA is seeing agent-mode traffic:
 
