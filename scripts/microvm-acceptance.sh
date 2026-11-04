@@ -59,7 +59,11 @@ vm() {
 status() { bg status "$1" --output json 2>/dev/null | jq -r '.status // "UNKNOWN"'; }
 vm_of() { bg status "$1" --output json 2>/dev/null | jq -r '.compute_metadata.microvmId // .session_id // empty'; }
 pr_of() { bg status "$1" --output json 2>/dev/null | jq -r '.pr_url // empty'; }
-events() { bg events "$1" --all --output json 2>/dev/null | jq -r '[.. | objects | .event_type? // empty] | join(" ")'; }
+# Event types plus agent milestone names (continuation_restored is a milestone).
+events() {
+  bg events "$1" --all --output json 2>/dev/null \
+    | jq -r '[.. | objects | select(.event_type?) | .event_type, (.metadata.milestone? // empty)] | join(" ")'
+}
 pending() {
   bg pending --output json 2>/dev/null \
     | jq -r --arg t "$1" '[.. | objects | select(.task_id? == $t) | (.request_id // empty)] | .[0] // empty'
@@ -101,10 +105,12 @@ finished() { wait_for "$1 terminal" "$TIMEOUT_S" status_in "$1" COMPLETED FAILED
 scenario_normal() {
   local id; id=$(submit_plain normal)
   local final; final=$(finished "$id") || final=TIMEOUT
-  local vm_id; vm_id=$(vm_of "$id")
-  [[ $final == COMPLETED && -n $(pr_of "$id") ]] \
-    && record normal PASS "$id" "completed, PR $(pr_of "$id"), worker $(vm get "$vm_id")" \
-    || record normal FAIL "$id" "status $final"
+  # Finalization terminates the worker shortly after the terminal status.
+  local vm_id state; vm_id=$(vm_of "$id")
+  state=$(wait_for "$vm_id cleanup" 180 vm_in "$vm_id" TERMINATED NOT_FOUND) || state=$(vm get "$vm_id")
+  [[ $final == COMPLETED && -n $(pr_of "$id") && ( $state == TERMINATED || $state == NOT_FOUND ) ]] \
+    && record normal PASS "$id" "completed, PR $(pr_of "$id"), worker $state" \
+    || record normal FAIL "$id" "status $final, worker $state"
 }
 
 scenario_decision() { # approve|deny
