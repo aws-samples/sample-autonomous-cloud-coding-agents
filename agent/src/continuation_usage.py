@@ -43,8 +43,9 @@ def valid_tokens(value: Any) -> bool:
 async def read_usage(client: Any) -> UsageSnapshot:
     """Read cumulative spending without interrupting or issuing another query.
 
-    SDK 0.2.110 bundles CLI 2.1.191, whose experimental ``get_usage`` control
-    request exposes exact session dollars and per-model token counters. Python
+    The verified SDK's bundled CLI (``verified_sdk_version`` in the contract)
+    answers the experimental ``get_usage`` control request with exact session
+    dollars and per-model token counters. Python
     has no public wrapper yet. Keep this dependency isolated and covered by the
     real SDK probe in CI; an upgrade must verify it before publishing checkpoints.
     """

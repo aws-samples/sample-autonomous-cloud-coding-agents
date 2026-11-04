@@ -29,10 +29,11 @@ AGENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_ROOT))
 sys.path.insert(0, str(AGENT_ROOT / "src"))
 
+from continuation_runtime import decision_prompt
 from continuation_session import CheckpointIdentity, CheckpointSessionStore, decode_checkpoint
 from continuation_usage import read_usage
 from continuation_workspace import capture_workspace, restore_workspace
-from scripts.verify_microvm_credentials import MODEL, event_frame, model_response
+from scripts.verify_microvm_credentials import MODEL, event_frame, model_response, pinned_versions
 
 IDENTITY = CheckpointIdentity("sdk-probe", "attempt-1", "request-1", "owner", "probe/owned")
 
@@ -184,11 +185,14 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
         },
     )
     async with ClaudeSDKClient(options=options) as client:
+        # The restored worker receives the production resume prompt, not a
+        # probe-specific one, so this diagnostic covers what the model sees.
         prompt = (
-            "Continue the saved task. The human decision was "
-            + decision
-            + ". The saved pending action was "
-            + json.dumps(saved["action"])
+            decision_prompt(
+                saved["action"],
+                decision="APPROVED" if decision == "approve" else "DENIED",
+                reason="" if decision == "approve" else "Choose another approach",
+            )
             if saved
             else "Read the owned marker once, then stop."
         )
@@ -211,10 +215,11 @@ async def _worker(directory: Path, endpoint: str, phase: str, decision: str) -> 
 def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision):
     import claude_agent_sdk
 
-    assert importlib.metadata.version("claude-agent-sdk") == "0.2.110"
+    verified_sdk, pinned_cli = pinned_versions()
+    assert importlib.metadata.version("claude-agent-sdk") == verified_sdk
     cli = Path(claude_agent_sdk.__file__).parent / "_bundled/claude"
     version = subprocess.check_output([str(cli), "--version"], text=True, timeout=10).strip()
-    assert version == "2.1.191 (Claude Code)"
+    assert version == f"{pinned_cli} (Claude Code)"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     target = workspace / "owned.txt"
@@ -263,15 +268,15 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append({"phase": phase[0], "body": body})
-            results = [
-                item
-                for message in body.get("messages", [])
-                for item in (
-                    message.get("content", []) if isinstance(message.get("content"), list) else []
-                )
-                if isinstance(item, dict) and item.get("type") == "tool_result"
-            ]
-            response = model_response() if results else _tool_response(target, "toolu_" + phase[0])
+            # Behave like a model following its latest instruction: answer a tool
+            # result by finishing, and answer a prompt by proposing the read. On
+            # restore the latest message is the decision prompt, whatever result
+            # the CLI recorded for the interrupted call earlier in the transcript.
+            last = (body.get("messages") or [{}])[-1].get("content")
+            answered = isinstance(last, list) and any(
+                isinstance(item, dict) and item.get("type") == "tool_result" for item in last
+            )
+            response = model_response() if answered else _tool_response(target, "toolu_" + phase[0])
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.amazon.eventstream")
             self.send_header("Content-Length", str(len(response)))
@@ -349,13 +354,28 @@ def test_sdk_resumes_from_checkpoint_without_original_config(tmp_path, decision)
         assert any(
             saved["action"]["tool_use_id"] in json.dumps(r["body"]) for r in restored_requests
         )
+        # Safety: the restored transcript must never report the pending call as
+        # having run. A CLI may drop it or record it as interrupted (an error).
+        pending_results = [
+            item
+            for request in restored_requests
+            for message in request["body"].get("messages", [])
+            if isinstance(message.get("content"), list)
+            for item in message["content"]
+            if isinstance(item, dict)
+            and item.get("type") == "tool_result"
+            and item.get("tool_use_id") == saved["action"]["tool_use_id"]
+        ]
+        assert all(item.get("is_error") is True for item in pending_results)
         proof = {
-            "sdk": "0.2.110",
+            "sdk": verified_sdk,
             "cli": version,
             "decision": decision,
             "session_id": saved["session_id"],
             "original_config_deleted": True,
             "pending_action_acknowledged": True,
+            "pending_action_never_reported_successful": True,
+            "pending_action_results": len(pending_results),
             "auth_file_excluded": True,
             "workspace_archive_sha256": workspace_receipt.sha256,
             "workspace_head": workspace_receipt.head,

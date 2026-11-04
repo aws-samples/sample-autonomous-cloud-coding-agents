@@ -7,8 +7,9 @@ not the agent's boto3 — so the per-task tenant-data SessionRole in
 ``awsCredentialExport`` setting (in the image's managed-settings layer) runs
 this script, captures its JSON stdout, and signs Bedrock requests with the
 returned credentials. With a real ``Expiration`` it re-runs ~5 min before
-expiry during active use. Pinned Claude 2.1.191 returns its previous cached
-value while that refresh runs in the background: this is NOT an acknowledged
+expiry during active use. The pinned CLI (probed on 2.1.191 and 2.1.301 with
+``scripts/verify_microvm_credentials.py``) returns its previous cached value
+while that refresh runs in the background: this is NOT an acknowledged
 refresh barrier after MicroVM sleep. MicroVM workers instead leave this export
 empty and use the scoped container-credential provider installed by the parent.
 That provider renews synchronously before signing an expired-key request.

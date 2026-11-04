@@ -41,6 +41,22 @@ class ProbeState(TypedDict):
     fail: bool
 
 
+def pinned_versions() -> tuple[str, str]:
+    """The verified SDK from the contract and the CLI the image installs, never literals.
+
+    The Dockerfile pins the CLI in lockstep with the SDK (#215). Read lazily:
+    the SDK continuation probe also runs this module in its child process.
+    """
+    agent = Path(__file__).resolve().parents[1]
+    contract = json.loads((agent.parent / "contracts/constants.json").read_text())
+    cli = re.search(
+        r"@anthropic-ai/claude-code@(\d+\.\d+\.\d+)", (agent / "Dockerfile").read_text()
+    )
+    if cli is None:
+        raise RuntimeError("Dockerfile does not pin @anthropic-ai/claude-code")
+    return contract["microvm_continuation"]["verified_sdk_version"], cli.group(1)
+
+
 def event_frame(event: dict) -> bytes:
     """Encode one AWS event-stream chunk containing an Anthropic streaming event."""
     headers = bytearray()
@@ -126,8 +142,11 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
     cli_version = subprocess.run(
         [str(cli), "--version"], capture_output=True, text=True, check=True, timeout=5
     ).stdout.strip()
-    if sdk_version != "0.2.110" or cli_version != "2.1.191 (Claude Code)":
-        raise RuntimeError("Probe expectations require reviewed SDK 0.2.110 / Claude 2.1.191 pins")
+    verified_sdk, pinned_cli = pinned_versions()
+    if sdk_version != verified_sdk or cli_version != f"{pinned_cli} (Claude Code)":
+        raise RuntimeError(
+            f"Probe expectations require reviewed SDK {verified_sdk} / Claude {pinned_cli} pins"
+        )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):

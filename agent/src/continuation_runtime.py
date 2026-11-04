@@ -64,6 +64,36 @@ def create_runtime(context: ContinuationContext, task_id: str) -> ContinuationRu
     return ContinuationRuntime(context, S3ContinuationStorage(bucket))
 
 
+def decision_prompt(action: dict, *, decision: str, reason: str = "") -> str:
+    """Supply the saved action as context; every newly proposed tool is gated."""
+    import json
+
+    if decision not in {"APPROVED", "DENIED", "TIMED_OUT"}:
+        raise ContinuationCheckpointError("A resolved continuation decision is required")
+    return (
+        "Continue the saved task from the restored workspace and conversation. "
+        "The previous worker stopped while waiting for a human decision; its pending "
+        "tool call was not executed. Any earlier tool result saying that call was "
+        "interrupted or has an unknown outcome refers to this stop: the call was blocked "
+        "before it ran. The recorded decision for that request is "
+        + decision
+        + ". Human feedback: "
+        + json.dumps(reason)
+        + ". Saved tool proposal: "
+        + json.dumps({"tool_name": action["tool_name"], "tool_input": action["tool_input"]})
+        + (
+            ". If you perform this approved proposal, use exactly the saved tool name "
+            "and every saved input field and value, including descriptions and timeouts. "
+            "Do not paraphrase the description or add optional arguments: any input change "
+            "is a new proposal and requires its own permission check"
+            if decision == "APPROVED"
+            else ""
+        )
+        + ". Decide how to continue using this context. A denial must not be worked around. "
+        "Any new tool proposal still goes through the normal permission checks."
+    )
+
+
 def _normalized_scope(scope: str) -> str | None:
     from policy import ApprovalAllowlist
 
@@ -443,28 +473,6 @@ class ContinuationRuntime:
 
     def decision_prompt(self, *, decision: str, reason: str = "") -> str:
         """Supply the saved action as context; every newly proposed tool is gated."""
-        import json
-
-        if self.restored is None or decision not in {"APPROVED", "DENIED", "TIMED_OUT"}:
+        if self.restored is None:
             raise ContinuationCheckpointError("A resolved continuation decision is required")
-        action = self.restored["action"]
-        return (
-            "Continue the saved task from the restored workspace and conversation. "
-            "The previous worker stopped while waiting for a human decision; its pending "
-            "tool call was not executed. The recorded decision for that request is "
-            + decision
-            + ". Human feedback: "
-            + json.dumps(reason)
-            + ". Saved tool proposal: "
-            + json.dumps({"tool_name": action["tool_name"], "tool_input": action["tool_input"]})
-            + (
-                ". If you perform this approved proposal, use exactly the saved tool name "
-                "and every saved input field and value, including descriptions and timeouts. "
-                "Do not paraphrase the description or add optional arguments: any input change "
-                "is a new proposal and requires its own permission check"
-                if decision == "APPROVED"
-                else ""
-            )
-            + ". Decide how to continue using this context. A denial must not be worked around. "
-            "Any new tool proposal still goes through the normal permission checks."
-        )
+        return decision_prompt(self.restored["action"], decision=decision, reason=reason)
