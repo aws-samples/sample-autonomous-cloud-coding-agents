@@ -17,16 +17,15 @@
  *  SOFTWARE.
  */
 
-import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES } from '../constructs/task-status';
-import { GuardrailScreeningError, screenWithGuardrail } from './shared/context-hydration';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
-import { formatMinuteBucket } from './shared/rate-limit';
+import { submitNudge } from './shared/nudge-core';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
+import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRequest, type TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
@@ -38,11 +37,6 @@ if (!TASK_TABLE_NAME || !NUDGES_TABLE_NAME) {
   );
 }
 const RATE_LIMIT_PER_MINUTE = Number(process.env.NUDGE_RATE_LIMIT_PER_MINUTE ?? '10');
-/** TTL for stored nudge rows (days). */
-const NUDGE_RETENTION_DAYS = 30;
-const NUDGE_RETENTION_SECONDS = NUDGE_RETENTION_DAYS * 86400;
-/** TTL for rate-limit counter rows (~2 minutes — only need the current minute bucket). */
-const RATE_LIMIT_ROW_TTL_SECONDS = 120;
 
 /**
  * POST /v1/tasks/{task_id}/nudge — submit a steering message to a running agent.
@@ -121,95 +115,41 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       );
     }
 
-    const now = new Date();
-    const minuteBucket = formatMinuteBucket(now);
-    const nowIso = now.toISOString();
-    const nowEpoch = Math.floor(now.getTime() / 1000);
-
-    // 5. Guardrail screening (fail-closed).
-    //
-    // Runs BEFORE the rate-limit counter so a guardrail-blocked message
-    // does not consume a rate-limit slot (see handler docstring).
-    try {
-      const screenResult = await screenWithGuardrail(message, taskId);
-      if (screenResult?.action === 'GUARDRAIL_INTERVENED') {
-        const details = screenResult.assessments
-          ?.map(a => `${a.filter_type}/${a.filter_name}${a.confidence ? ` (${a.confidence})` : ''}`)
-          .join(', ');
-        const reason = `Nudge message blocked by content policy${details ? ': ' + details : ''}`;
-        return errorResponse(400, ErrorCode.VALIDATION_ERROR, reason, requestId);
-      }
-    } catch (err) {
-      if (err instanceof GuardrailScreeningError) {
-        logger.error('Guardrail screening failed for nudge (fail-closed)', {
-          task_id: taskId,
-          request_id: requestId,
-          error: err.message,
-        });
-        return errorResponse(
-          503,
-          ErrorCode.SERVICE_UNAVAILABLE,
-          'Content screening is temporarily unavailable.',
-          requestId,
-        );
-      }
-      throw err;
-    }
-
-    // 6. Per-task per-minute rate limit.
-    //
-    // Uses a synthetic row in the nudges table to take advantage of the
-    // existing grantReadWriteData wiring and atomic UpdateItem semantics.
-    // PK = `RATE#<task_id>` (distinct from real PKs which are task ULIDs),
-    // SK = `MINUTE#<yyyymmddhhmm>` (one bucket per wall-clock minute).
-    // Short TTL (~2m) cleans up stale counters automatically.
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: NUDGES_TABLE_NAME,
-        Key: {
-          task_id: `RATE#${taskId}`,
-          nudge_id: `MINUTE#${minuteBucket}`,
-        },
-        UpdateExpression: 'ADD #count :one SET #ttl = :ttl',
-        ConditionExpression: 'attribute_not_exists(#count) OR #count < :max',
-        ExpressionAttributeNames: {
-          '#count': 'count',
-          '#ttl': 'ttl',
-        },
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':max': RATE_LIMIT_PER_MINUTE,
-          ':ttl': nowEpoch + RATE_LIMIT_ROW_TTL_SECONDS,
-        },
-      }));
-    } catch (err: unknown) {
-      const name = (err as { name?: string })?.name;
-      if (name === 'ConditionalCheckFailedException') {
-        return errorResponse(
-          429,
-          ErrorCode.RATE_LIMIT_EXCEEDED,
-          `Rate limit exceeded: at most ${RATE_LIMIT_PER_MINUTE} nudges per minute per task.`,
-          requestId,
-        );
-      }
-      throw err;
-    }
-
-    // 7. Persist nudge record.
-    const nudgeId = ulid();
-    const nudgeRecord: NudgeRecord = {
-      task_id: taskId,
-      nudge_id: nudgeId,
-      user_id: userId,
+    // 5–7. Guardrail screening (fail-closed) → per-task per-minute rate
+    // limit → persist. Shared with the Linear agent-session path.
+    const result = await submitNudge({
+      ddb,
+      nudgesTableName: NUDGES_TABLE_NAME!,
+      taskId,
+      userId,
       message,
-      created_at: nowIso,
-      consumed: false,
-      ttl: nowEpoch + NUDGE_RETENTION_SECONDS,
-    };
-    await ddb.send(new PutCommand({
-      TableName: NUDGES_TABLE_NAME,
-      Item: nudgeRecord,
-    }));
+      rateLimitPerMinute: RATE_LIMIT_PER_MINUTE,
+    });
+    if (result.kind === 'blocked') {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, result.reason, requestId);
+    }
+    if (result.kind === 'screening_unavailable') {
+      logger.error('Guardrail screening failed for nudge (fail-closed)', {
+        task_id: taskId,
+        request_id: requestId,
+        error: result.error,
+      });
+      return errorResponse(
+        503,
+        ErrorCode.SERVICE_UNAVAILABLE,
+        'Content screening is temporarily unavailable.',
+        requestId,
+      );
+    }
+    if (result.kind === 'rate_limited') {
+      return errorResponse(
+        429,
+        ErrorCode.RATE_LIMIT_EXCEEDED,
+        `Rate limit exceeded: at most ${result.limitPerMinute} nudges per minute per task.`,
+        requestId,
+      );
+    }
+    const { nudgeId, submittedAt: nowIso } = result;
 
     logger.info('Nudge submitted', {
       task_id: taskId,
