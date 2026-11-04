@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # abca-onboard.sh — guided onboarding for ABCA (aws-samples/sample-autonomous-cloud-coding-agents) on macOS.
 #
-# Usage:
+# Usage (from the checkout: `mise run onboard -- <flags>` does the same once mise is installed):
 #   ./abca-onboard.sh                 # full guided install (deps → build → optional AWS deploy → smoke test)
 #   ./abca-onboard.sh --no-aws        # dependency checks + install + compile only; never touches AWS
 #   ./abca-onboard.sh --dry-run       # run read-only checks, print every changing command instead of running it

@@ -49,6 +49,15 @@ run = [
 ]
 
 # Dependency upgrades for the scheduled upgrade-main workflow (and local use).
+# Guided macOS installer (scripts/abca-onboard.sh): prerequisites, build, bootstrap, deploy, your
+# user, GitHub token and a smoke test. Flags go after `--`, e.g. `mise run onboard -- --dry-run`.
+# raw = true hands the script your terminal, since it asks questions as it goes. On a Mac without
+# mise yet, run `./scripts/abca-onboard.sh` directly: the script installs mise itself.
+[tasks.onboard]
+description = "Guided macOS install and deploy of ABCA (flags after --, e.g. -- --dry-run, -- --teardown)"
+raw = true
+run = "bash scripts/abca-onboard.sh"
+
 # Upgrades stay WITHIN the ranges/pins declared in each manifest — no
 # range-widening flags (e.g. `yarn upgrade --latest`) — so exact pins are never
 # rewritten. This is what keeps the Cedar engine parity contract intact:
