@@ -53,7 +53,7 @@ process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 
-import { handler, recordDenialForUser } from '../../src/handlers/deny-task';
+import { handler } from '../../src/handlers/deny-task';
 
 // Secret fixtures assembled at runtime so the source file itself
 // never holds a contiguous secret literal (Code Defender pre-commit

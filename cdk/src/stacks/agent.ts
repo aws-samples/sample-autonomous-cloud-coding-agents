@@ -19,7 +19,7 @@
 
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -1403,8 +1403,13 @@ export class AgentStack extends Stack {
     // (reads during context hydration, writes for fallback episodes)
     agentMemory.grantReadWrite(orchestrator.fn);
 
+    // Stateless scheduled jobs share a nested stack to keep every backend
+    // profile inside the root stack's resource budget. Upgrades replace their
+    // generated-name functions/schedules; task tables and buckets stay in the parent.
+    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
+
     // --- Concurrency counter reconciler (drift correction) ---
-    new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
+    new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
@@ -1414,7 +1419,7 @@ export class AgentStack extends Stack {
     // concurrency cap is hit) in FIFO order as slots free up: flips
     // QUEUED -> SUBMITTED and re-invokes the orchestrator, whose atomic
     // admissionControl remains the single writer of the counter.
-    new AdmissionQueuePickup(this, 'AdmissionQueuePickup', {
+    new AdmissionQueuePickup(concurrencyMaintenance, 'AdmissionQueuePickup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1426,7 +1431,7 @@ export class AgentStack extends Stack {
     // (orchestrator Lambda crash between TaskTable write and InvokeAgentRuntime,
     // container crash during startup, etc.). Transitions to FAILED with a
     // `task_stranded` event.
-    new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
+    new StrandedTaskReconciler(concurrencyMaintenance, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1436,7 +1441,7 @@ export class AgentStack extends Stack {
     // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
     // 30 minutes (client crash, abandoned session, network failure).
     // Cleans up orphaned S3 objects under the task's attachment prefix.
-    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
+    new PendingUploadCleanup(concurrencyMaintenance, 'PendingUploadCleanup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       attachmentsBucket: attachmentsBucket.bucket,

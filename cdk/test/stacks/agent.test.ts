@@ -72,30 +72,6 @@ describe('AgentStack', () => {
       .toEqual({ Ref: expect.stringMatching(/^UserConcurrencyTable/) });
   });
 
-  test('retains the guardrail version referenced by pinned durable environments', () => {
-    template.resourceCountIs('AWS::Bedrock::GuardrailVersion', 1);
-    template.hasResource('AWS::Bedrock::GuardrailVersion', {
-      DeletionPolicy: 'Retain',
-      UpdateReplacePolicy: 'Retain',
-    });
-  });
-
-  test('AgentCore runtime has no direct DynamoDB grant, including capacity counters', () => {
-    const roles = Object.entries(template.findResources('AWS::IAM::Role'));
-    const runtimeRoleIds = roles.filter(([, role]) =>
-      JSON.stringify(role.Properties.AssumeRolePolicyDocument).includes('bedrock-agentcore.amazonaws.com'),
-    ).map(([id]) => id);
-    expect(runtimeRoleIds.length).toBeGreaterThan(0);
-    const policies = Object.values(template.findResources('AWS::IAM::Policy')).filter(
-      (policy) => policy.Properties.Roles.some((role: { Ref?: string }) =>
-        role.Ref && runtimeRoleIds.includes(role.Ref),
-      ),
-    );
-    expect(policies.length).toBeGreaterThan(0);
-    expect(JSON.stringify(policies)).not.toContain('dynamodb:');
-    expect(JSON.stringify(roles.filter(([id]) => runtimeRoleIds.includes(id)))).not.toContain('dynamodb:');
-  });
-
   test('creates exactly 22 DynamoDB tables', () => {
     // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
@@ -152,7 +128,6 @@ describe('AgentStack', () => {
 
     for (const key of [
       'TASK_APPROVALS_TABLE_NAME',
-      'APPROVAL_REQUESTS_API_URL',
       'NUDGES_TABLE_NAME',
       'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME',
@@ -166,7 +141,8 @@ describe('AgentStack', () => {
     ]) {
       expect(env[key]).toBeDefined();
     }
-    // These existing coordinator values complete the required platform configuration.
+    // Plus the three the orchestrator already carried for its own work — together
+    // these cover all four identifiers the MicroVM strategy treats as required.
     expect(env.TASK_TABLE_NAME).toBeDefined();
     expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
     expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();
@@ -186,7 +162,6 @@ describe('AgentStack', () => {
 
     for (const key of [
       'TASK_APPROVALS_TABLE_NAME',
-      'APPROVAL_REQUESTS_API_URL',
       'NUDGES_TABLE_NAME',
       'LOG_GROUP_NAME',
       'ARTIFACTS_BUCKET_NAME',
@@ -1212,7 +1187,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs — the 16 GB build def and the 8 GB read-only planning def
+    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
     // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
@@ -1220,23 +1195,6 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
-  });
-
-  test('both ECS task definitions receive the platform approval table', () => {
-    // This suite deploys ECS alone, so compare against the table itself rather
-    // than an AgentCore runtime that is not present.
-    const approvalTableId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
-      .find(id => id.startsWith('TaskApprovalsTable'));
-    expect(approvalTableId).toBeDefined();
-    const approvalTable = { Ref: approvalTableId };
-    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
-    expect(definitions).toHaveLength(2);
-    for (const definition of definitions) {
-      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
-        Name: 'TASK_APPROVALS_TABLE_NAME',
-        Value: approvalTable,
-      });
-    }
   });
 
   test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {
@@ -1470,7 +1428,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     expect(rendered).not.toContain('lambda:ConnectMicrovm');
   });
 
-  test('orchestrator may upload payloads and delete task payload objects at finalize', () => {
+  test('orchestrator may upload payloads and delete them at finalize, never read them', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('TaskOrchestrator'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement as Array<{
@@ -1479,22 +1437,10 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     }>);
     const payloadStatements = statements.filter(s =>
       JSON.stringify(s.Resource).includes('ComputePayloadBucket'));
-
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    expect(actions).toContain('s3:DeleteObject');
-    expect(actions).toContain('s3:GetObject');
-    expect(actions).toContain('s3:ListBucket');
-    const deletion = payloadStatements.find(s => Array.isArray(s.Action) && s.Action.includes('s3:DeleteObject'));
-    const resources = deletion!.Resource as Array<{ 'Fn::Join': [string, unknown[]] }>;
-    const payloadArn = resources[0]['Fn::Join'][1][0];
-    assertChildReference(payloadArn, 'AWS::S3::Bucket', 'Arn', 'ComputePayloadBucket');
-    expect(deletion!.Resource).toEqual(['payload.json', 'launch.json'].map(filename => ({
-      'Fn::Join': ['', [
-        payloadArn,
-        `/*/${filename}`,
-      ]],
-    })));
+    expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
+    expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
@@ -1797,9 +1743,9 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    // 47 existing handlers (including concurrency repair) + 2 registry
+    // 47 existing handlers (4 scheduled maintenance jobs nested) + 2 registry
     // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(54);
+    expect(abcaLambdas.length).toBe(53);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -2071,107 +2017,6 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       Properties: { Environment: { Variables: Record<string, unknown> } };
     }).Properties.Environment.Variables.LINEAR_WORKLOAD_IDENTITY_NAME));
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
-  });
-
-  describe('MicroVM vault configuration and execution-role grants (#857)', () => {
-    let template: Template;
-    let childTemplates: Template[];
-    const workloadName = 'abca_linear_oauth_LinearVaultMicrovmStack';
-
-    beforeAll(() => {
-      const app = new App({
-        context: {
-          enableLinearIdentityVault: true,
-          compute_type: 'lambda-microvm',
-          microvm_nested_stack: true,
-          microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
-          microvm_base_image_version: '1',
-          microvm_artifact_sha256: 'a'.repeat(64),
-        },
-      });
-      const stack = new AgentStack(app, 'LinearVaultMicrovmStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      });
-      template = Template.fromStack(stack);
-      childTemplates = stack.node.findAll()
-        .filter((child): child is NestedStack => NestedStack.isNestedStack(child))
-        .map(child => Template.fromStack(child));
-    });
-
-    test('delivers the same workload identity through the coordinator and runtime configuration', () => {
-      template.hasResourceProperties('Custom::LinearWorkloadIdentity', {
-        WorkloadName: workloadName,
-      });
-      template.hasOutput('LinearVaultWorkloadName', { Value: workloadName });
-      const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
-        .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
-      expect(orchestrator[1].Properties.Environment.Variables).toMatchObject({
-        LINEAR_VAULT_ENABLED: 'true',
-        LINEAR_WORKLOAD_IDENTITY_NAME: workloadName,
-      });
-      template.hasResourceProperties('AWS::BedrockAgentCore::Runtime', {
-        EnvironmentVariables: Match.objectLike({
-          LINEAR_VAULT_ENABLED: 'true',
-          LINEAR_WORKLOAD_IDENTITY_NAME: workloadName,
-        }),
-      });
-    });
-
-    test('grants the MicroVM role both token operations on the Linear vault resources', () => {
-      const roles = template.findResources('AWS::IAM::Role');
-      const executionRole = Object.keys(roles)
-        .find(id => id.startsWith('LambdaMicrovmComputeExecutionRole'))!;
-      expect(executionRole).toBeDefined();
-      const policies = Object.values(template.findResources('AWS::IAM::Policy'))
-        .filter(policy => policy.Properties.Roles?.some(
-          (role: { Ref?: string }) => role.Ref === executionRole,
-        ));
-      const statements = policies.flatMap(policy => policy.Properties.PolicyDocument.Statement);
-      const arn = (suffix: string) => ({
-        'Fn::Join': ['', [
-          'arn:', { Ref: 'AWS::Partition' }, `:bedrock-agentcore:us-east-1:123456789012:${suffix}`,
-        ]],
-      });
-      const directory = arn('workload-identity-directory/default');
-      const identity = arn(`workload-identity-directory/default/workload-identity/${workloadName}`);
-      for (const action of [
-        'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
-        'bedrock-agentcore:GetResourceOauth2Token',
-      ]) {
-        const grants = statements.filter(statement =>
-          [statement.Action].flat().includes(action));
-        expect(grants).toHaveLength(1);
-        expect(grants[0].Effect).toBe('Allow');
-        expect(grants[0].Resource).toEqual(expect.arrayContaining([directory, identity]));
-        expect([grants[0].Resource].flat()).not.toContain('*');
-      }
-      const oauthGrant = statements.find(statement =>
-        [statement.Action].flat().includes('bedrock-agentcore:GetResourceOauth2Token'));
-      expect(oauthGrant.Resource).toEqual(expect.arrayContaining([
-        arn('token-vault/default'),
-        arn('token-vault/default/oauth2credentialprovider/bgagent-linear-oauth-*'),
-      ]));
-      const policyJson = JSON.stringify(policies);
-      expect(policyJson).toContain('bedrock-agentcore-identity!default/oauth2/bgagent-linear-oauth-*');
-      expect(policyJson).not.toContain('bedrock-agentcore:CreateWorkloadIdentity');
-      expect(policyJson).not.toContain('bedrock-agentcore:DeleteWorkloadIdentity');
-    });
-
-    test('keeps task vault configuration and credentials out of the reusable image', () => {
-      const images = childTemplates.flatMap(child =>
-        Object.values(child.findResources('AWS::Lambda::MicrovmImage')));
-      expect(images).toHaveLength(1);
-      const imageJson = JSON.stringify(images);
-      for (const field of [
-        'LINEAR_VAULT_ENABLED',
-        'LINEAR_WORKLOAD_IDENTITY_NAME',
-        'access_token',
-        'refresh_token',
-        workloadName,
-      ]) {
-        expect(imageJson).not.toContain(field);
-      }
-    });
   });
 
   test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {

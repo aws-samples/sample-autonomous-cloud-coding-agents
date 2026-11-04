@@ -12,7 +12,7 @@ title: Cedar hitl gates
 >
 > **Current source behavior (2026-09-22):** the task default is `approval_timeout_s=0`,
 > meaning no decision deadline. Workers create/close requests through the IAM-authenticated
-> [trusted approval writer](/sample-autonomous-cloud-coding-agents/decisions/adr-023-trusted-approval-writer); they cannot
+> [trusted approval writer](/sample-autonomous-cloud-coding-agents/architecture/adr-023-trusted-approval-writer); they cannot
 > write approval rows directly. Explicit task settings are 30–3,600 seconds;
 > positive policy-rule deadlines still apply. Pending rows have no DynamoDB TTL,
 > and `expires_at` is nullable. Task closure cancels unanswered requests and adds
@@ -23,11 +23,11 @@ title: Cedar hitl gates
 > Linear accepts an owner’s `approve` or `deny` reply to the approval comment;
 > the handler verifies the actual comment through Linear’s API. Slack uses CLI
 > response instructions. See the current
-> [user guide](/sample-autonomous-cloud-coding-agents/using/approval-gates-cedar-hitl) and
+> [user guide](/sample-autonomous-cloud-coding-agents/using/overview#approval-gates-cedar-hitl) and
 > [continuation protocol](/sample-autonomous-cloud-coding-agents/architecture/orchestrator#retained-microvm-approvals).
 > The normal deployment passed retained-request, ten-minute sleep, explicit-expiry
 > and sleep-off/rollback acceptance; see the
-> [deployment record](/sample-autonomous-cloud-coding-agents/verification/readme).
+> [deployment record](/sample-autonomous-cloud-coding-agents/architecture/readme).
 
 ---
 
@@ -257,7 +257,7 @@ Narrative walk-through with an explicit 600-second task deadline and a custom `f
     Severity colors the line (respecting `NO_COLOR` env var).
 18. Hook enters the poll loop with strongly-consistent reads. For an explicit positive timeout, the deadline is captured with the original approval row, before database writes/notifications: UTC expiry is `created_at + timeout_s`, capped by the original monotonic remaining duration. `deadline.remaining_s()` takes the smaller remainder and clamps at zero, so a frozen guest clock or backward UTC correction cannot restart the window.
     An untimed request has no expiry. The executable poll loop in
-    [hooks.py](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/src/hooks.py) also handles cancelled/closed requests,
+    [hooks.py](../../agent/src/hooks.py) also handles cancelled/closed requests,
     read failures and continuation barriers; it must not be replaced by a loop
     that checks only APPROVED/DENIED or starts a fresh timer after wake.
 19. The local-timeout path asks the trusted approval service to conditionally mark the pending row TIMED_OUT before returning. If that write loses or fails, the hook rereads consistently to honor an already-committed decision. The approval-cap check runs before row creation and has no row to update.
@@ -675,7 +675,7 @@ The recent-decision cache is a simple `dict[(tool_name, input_sha), (decision, r
 
 When multiple soft-deny rules match a single tool call:
 
-The implementation is `_merge_annotations` in [policy.py](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/src/policy.py).
+The implementation is `_merge_annotations` in [policy.py](../../agent/src/policy.py).
 It takes the shortest **positive** matching-rule or task timeout; zero means no
 deadline and is excluded from that minimum. If no positive timeout exists, the
 result is zero. Positive results retain the 30-second floor. The highest matching
@@ -747,9 +747,9 @@ class ApprovalAllowlist:
 
 PreToolUse hook (compressed for doc; implementation will be richer):
 
-The executable flow lives in [hooks.py](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/src/hooks.py), with signed
-request creation/closure in [approval_requests.py](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/src/approval_requests.py)
-and task-state transactions in [task_state.py](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/src/task_state.py).
+The executable flow lives in [hooks.py](../../agent/src/hooks.py), with signed
+request creation/closure in [approval_requests.py](../../agent/src/approval_requests.py)
+and task-state transactions in [task_state.py](../../agent/src/task_state.py).
 
 1. Evaluate policy, existing grants, gate cap and creation-rate limit.
 2. Resolve the shortest positive task/rule deadline. Zero remains untimed.
@@ -768,7 +768,7 @@ and task-state transactions in [task_state.py](https://github.com/aws-samples/sa
 
 The worker's `TIMED_OUT` outcome currently also covers polling failures; it is
 not proof that an explicit human deadline elapsed. This limitation is recorded in
-[ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-trusted-approval-writer).
+[ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-trusted-approval-writer).
 
 **Scenario (§13.12 VM-throttle + late-approval race).** Alice hits a gate with a 300-second window and commits APPROVED at t=294.7s. Scheduling delays prevent the next agent poll until t=300.2s. That poll sees the original deadline has passed and returns TIMED_OUT before reading the row. The conditional TIMED_OUT write then loses because APPROVED is already stored. The hook rereads with `ConsistentRead`, preserves Alice's scope and decision metadata, emits `approval_late_win`, and proceeds through the guarded resume transaction and allow flow. Without that reread it would deny an already-approved call. See IMPL-24, §13.12, and §15.2 task #43 for the race test.
 
@@ -871,7 +871,7 @@ event. A later decision is rejected: the existing API returns
 `404 REQUEST_NOT_FOUND` for missing, foreign or already-decided approval rows,
 including a cancelled row. If approval committed first, cancellation preserves
 the recorded decision while cancelling the task. See the
-[P3 approval verification record](/sample-autonomous-cloud-coding-agents/verification/readme)
+[P3 approval verification record](/sample-autonomous-cloud-coding-agents/architecture/readme)
 for source versus deployment status.
 
 ### 7.2 `POST /v1/tasks/{task_id}/deny`
@@ -1225,7 +1225,7 @@ The design assumes a human is watching. For truly unattended tasks (scheduled au
 
 ### 10.1 New DynamoDB table: `TaskApprovalsTable`
 
-[TaskApprovalsTable](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cdk/src/constructs/task-approvals-table.ts) defines the
+[TaskApprovalsTable](../../cdk/src/constructs/task-approvals-table.ts) defines the
 `task_id` partition key, `request_id` sort key, optional retention TTL attribute
 `ttl`, and `user_id-status-index` GSI. Streams are disabled; TaskEventsTable carries
 the audit/fan-out stream. The GSI discovers candidates; the pending endpoint then
@@ -1345,7 +1345,7 @@ cancellations, timeouts and stranded waits also produce messages. The response
 path supports the CLI and native Linear thread replies. Slack approval buttons
 and the Slack OAuth/button design below remain proposed. Email remains a log-only stub and GitHub does not
 receive approval messages. Deployment status is recorded in the
-[P3 verification record](/sample-autonomous-cloud-coding-agents/verification/readme).
+[P3 verification record](/sample-autonomous-cloud-coding-agents/architecture/readme).
 
 **TaskApprovalsTable Streams are not consumed by the fan-out Lambda**. The approval row is working state; the audit trail is in TaskEventsTable. Enabling Streams on TaskApprovalsTable would be redundant and add noise. Final design: TaskApprovalsTable DOES NOT have Streams enabled.
 
@@ -1521,7 +1521,7 @@ These alarms transition to `ALARM` state in CloudWatch and appear in the console
   readback protects this approval path, not every other webhook action.
   The Slack button/proxy design in §11.2 remains future work.
 
-See [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-trusted-approval-writer) for the decision and limits, and [upgrading approval permissions](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#upgrading-approval-permissions)
+See [ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-trusted-approval-writer) for the decision and limits, and [upgrading approval permissions](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#upgrading-approval-permissions)
 before updating an existing deployment.
 
 ### 12.2 Ownership encoded in ConditionExpression
@@ -2182,10 +2182,10 @@ Rollout steps:
 
 The agent uses Python `cedarpy`; the policy Lambdas use
 `@cedar-policy/cedar-wasm`. Exact current pins live in
-[agent/pyproject.toml](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/pyproject.toml) and
-[cdk/package.json](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cdk/package.json). Binding version strings need not be
+[agent/pyproject.toml](../../agent/pyproject.toml) and
+[cdk/package.json](../../cdk/package.json). Binding version strings need not be
 identical. Upgrade them as a tested pair and run the shared
-[parity fixtures](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/contracts/cedar-parity/README.md), which check decisions
+[parity fixtures](/sample-autonomous-cloud-coding-agents/architecture/readme), which check decisions
 and matching rule IDs across both engines.
 
 **Lambda layer packaging** (finding #5). The cedar-wasm package is 4.1 MB unzipped. Shipping it in the deployment bundle of each of the 4 policy Lambdas would consume ~16 MB of unzipped bundle size — manageable on its own but leaves little room for AWS SDK + other deps as the codebase grows, and threatens the Lambda 250 MB unzipped limit under realistic growth. Solution: package cedar-wasm as a **Lambda layer** (`cedar-wasm-layer.ts`, task #10 in §15.2), attached to each policy Lambda. This reduces each Lambda's deployment bundle to just the handler code + thin wrapper around the layer import. Policy Lambdas are configured with ≥ 512 MB memory to accommodate WASM module instantiation under concurrent invocation (measured under 100-concurrent bursts in §15.3 Lambda memory tests).

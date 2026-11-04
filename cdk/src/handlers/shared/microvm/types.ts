@@ -16,6 +16,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+
 import type { SessionHandle } from '../compute-strategy';
 
 export type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;

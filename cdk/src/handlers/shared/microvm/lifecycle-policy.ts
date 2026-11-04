@@ -18,9 +18,9 @@
  */
 
 import type { SessionStatus } from '../compute-strategy';
-import { MICROVM_TRANSITION_POLL_MS } from './types';
 import { supportsMicrovmLifecycle } from './image-capability';
 import { intentMatchesGate, type MicrovmLifecycleSnapshot } from './lifecycle';
+import { MICROVM_TRANSITION_POLL_MS } from './types';
 import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../types';
 

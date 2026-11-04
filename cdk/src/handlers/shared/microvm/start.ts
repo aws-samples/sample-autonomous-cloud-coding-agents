@@ -20,8 +20,8 @@
 import { createHash } from 'node:crypto';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { canonicalJson } from '../canonical-json';
-import type { MicrovmHandle, MicrovmStartReceipt } from './types';
 import { MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS, readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
+import type { MicrovmHandle, MicrovmStartReceipt } from './types';
 import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
 import { makeDocClient } from '../ua';
 

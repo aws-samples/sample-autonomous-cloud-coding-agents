@@ -22,17 +22,17 @@
 import { evaluateAgentHeartbeat } from '../agent-heartbeat';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
-import { MICROVM_STOP_TIMEOUT_MS, MICROVM_TRANSITION_POLL_MS } from './types';
+import { microvmErrorIdentity } from './control';
 import {
   intentMatchesGate, readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent,
   type MicrovmLifecycleSnapshot,
 } from './lifecycle';
 import { decideMicrovmLifecycle } from './lifecycle-policy';
 import { readMicrovmSuspendEnabled } from './suspend-config';
+import { MICROVM_STOP_TIMEOUT_MS, MICROVM_TRANSITION_POLL_MS } from './types';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../../../constructs/task-status';
 import { MICROVM_MAX_DURATION_SECONDS } from '../strategies/lambda-microvm-strategy';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../types';
-import { microvmErrorIdentity } from './control';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 export const MICROVM_SUPERVISOR_CYCLE_MS = 45_000;

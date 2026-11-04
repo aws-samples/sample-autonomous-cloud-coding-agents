@@ -4,7 +4,7 @@ title: Deployment guide
 
 # Deployment guide
 
-This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
+This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](./QUICK_START.mdx). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 
 ## Architecture overview
 
@@ -31,7 +31,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest, all three backends with every option, is 484); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest, all three backends with every option, is 484); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
 For a **new installation**:
 
@@ -44,7 +44,7 @@ Replace the compute list as needed and supply image settings for MicroVM. Persis
 
 **Existing inline-to-split migration is deferred.** Do not flip `networkTopology` on an existing inline deployment. An ordinary deploy creates a new VPC and removes old resources; identical logical IDs in different stacks do not preserve physical identity. Keep the existing topology until a separately reviewed migration has established resource-type eligibility, source retention and cleanup behavior, an ownership mapping, physical-ID/data preservation, and rollback on a populated disposable deployment. The `cdk refactor --unstable=refactor` criterion in #852 remains open; it is not waived or satisfied by synthesis tests.
 
-This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
+This change does not install broad retention, change the Blueprint provider, create an ownership ledger, or replace the guardrail versioning scheme. Those prerequisites belong in separate releases. CloudFormation exports still prevent removing a network used by the application; switching back to `inline` is not an automatic rollback. See [ADR-023's deferred work](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries#deferred-migration-work).
 
 Stacks used to test earlier revisions with `blueprintProvisioning=prepare|adopt|managed` or the broad retention aspect require a separate recovery plan before adopting this narrowed version. Returning those stacks directly to the original Blueprint provider can overwrite or soft-delete repository rows. Synthesis rejects the removed `blueprintProvisioning` and `guardrailVersionMigration` context keys instead of silently ignoring them; removing those keys does not make an experimental stack safe to update. Preserve its deployed templates, repository data and ledger inventory; the removed experimental modes are not an upgrade path supported by this release.
 
@@ -96,7 +96,7 @@ Local synthesis tests verify the import ordering and unchanged remaining subnet 
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) and [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
 
 Include it in the deployment's backend list, preserving any backends already in use. A new installation also selects the nested layout:
 
@@ -105,7 +105,7 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm --context 
 ```
 
 Existing flat installations must retain `microvm_nested_stack=false` until
-completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
+completing the [resource migration](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack).
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
 
@@ -378,7 +378,7 @@ New MicroVM installations must explicitly select `microvm_nested_stack=true`
 Before upgrading an existing flat MicroVM deployment, save
 `"microvm_nested_stack": false` in its CDK context or pass
 `--context microvm_nested_stack=false` on every deploy. Keep this escape hatch
-until completing the [resource migration](/sample-autonomous-cloud-coding-agents/verification/645-p3-nested-stack).
+until completing the [resource migration](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack).
 Omitting the setting fails synthesis. Selecting `true` does not migrate existing flat resources.
 
 
@@ -543,11 +543,11 @@ For users without AWS CLI access.
 
 ## Related docs
 
-- [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) -- Zero-to-first-PR in 6 steps.
+- [Quick start](./QUICK_START.mdx) -- Zero-to-first-PR in 6 steps.
 - [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) -- Local development, testing, repository onboarding.
 - [User guide](/sample-autonomous-cloud-coding-agents/using/overview) -- API reference, CLI usage, task management.
 - [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles) -- Least-privilege IAM policies for CloudFormation execution.
 - [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model) -- Per-task costs, cost guardrails, cost at scale.
 - [COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/getting-started/cost-attribution) -- Operator FinOps setup for per-user/per-repo Bedrock chargeback (Cost Explorer / CUR 2.0, invocation-log forensics).
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) -- Compute backend architecture and trade-offs.
-- [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.
+- [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend) -- Lambda MicroVMs backend decision, phased rollout, and live-verification evidence.

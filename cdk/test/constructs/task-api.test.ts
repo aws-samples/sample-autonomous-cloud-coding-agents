@@ -137,13 +137,11 @@ describe('TaskApi construct', () => {
   let baseTemplate: Template;
   let budgetTemplate: Template;
   let webhookTemplate: Template;
-  let uploadsTemplate: Template;
 
   beforeAll(() => {
     baseTemplate = createStack().template;
     budgetTemplate = createStackWithBudget().template;
     webhookTemplate = createStackWithWebhooks().template;
-    uploadsTemplate = createStack(undefined, true).template;
   });
 
   test('creates a Cognito User Pool', () => {

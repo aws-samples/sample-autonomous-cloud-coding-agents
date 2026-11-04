@@ -61,7 +61,7 @@ process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 process.env.APPROVE_RATE_LIMIT_PER_MINUTE = '30';
 
-import { handler, recordApprovalForUser } from '../../src/handlers/approve-task';
+import { handler } from '../../src/handlers/approve-task';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {

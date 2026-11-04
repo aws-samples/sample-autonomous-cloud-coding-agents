@@ -52,7 +52,6 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
-
 /**
  * Properties for TaskOrchestrator construct.
  */
