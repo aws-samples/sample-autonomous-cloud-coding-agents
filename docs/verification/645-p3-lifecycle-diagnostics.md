@@ -47,24 +47,6 @@ identity reconciliation. `late: true` means a callback finished after the handle
 had already returned; it cannot turn a timed-out wake into success. The coding
 barrier remains responsible for preventing tools after an uncertain wake.
 
-## Checkpoint failure codes
-
-The checkpoint diagnostic `code` narrows the failing operation; it does not
-prove that saved data is corrupt.
-
-| Code | Meaning |
-|---|---|
-| `checkpoint_failed` | No narrower classification; inspect the accompanying stage and message. |
-| `checkpoint_invalid_json` | Checkpoint JSON could not be encoded or decoded. |
-| `checkpoint_sdk_unverified` | SDK version or required accounting interface is not verified. |
-| `checkpoint_sdk_timeout` | SDK transcript acknowledgment or accounting request timed out. |
-| `checkpoint_storage_unverified` | A save could not be verified by reading back the exact data; keep the source worker. |
-| `checkpoint_storage_unavailable` | Storage configuration is unavailable or the saved version could not be read. |
-
-Workspace capture and restore can also report specific codes such as
-`disk_pressure` or `git_timeout`. Preserve the reported code and stage when
-escalating; do not replace them with a generic checkpoint label.
-
 ## Diagnose a failed wake
 
 1. Locate the saved decision/intent and actual Resume acknowledgment or failure.
@@ -74,9 +56,9 @@ escalating; do not replace them with a generic checkpoint label.
 3. If entered, inspect the final stage/code. Credential-refresh `AccessDenied`
    points to renewal permissions; identity-read failures point to task/gate
    reconciliation. A timeout identifies the outstanding operation.
-4. Check subsequent guest progress, coordinator outcome, worker termination and
-   capacity release. A saved approval or successful cleanup does not establish
-   that the approved tool ran.
+4. Check subsequent guest progress, coordinator outcome and worker termination.
+   A saved approval or successful cleanup does not establish that the approved
+   tool ran.
 5. Retain UTC timestamps, task/worker identifiers, exact image/coordinator
    versions, service state reason, AWS receipts and relevant sanitized logs.
 
@@ -95,4 +77,4 @@ unavailable. Lifecycle responses explicitly close connections before freeze.
 
 Diagnostics omit hook bodies, tool arguments, approval contents, credentials,
 raw exception messages and SDK response bodies. Do not attach signed payload
-URLs or conversation/workspace checkpoints when escalating an incident.
+URLs or task payloads when escalating an incident.

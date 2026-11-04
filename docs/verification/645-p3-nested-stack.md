@@ -61,14 +61,14 @@ runnable migration command:
 3. Deploy compatible approval handlers/coordinator before producers of retained
    requests. Preserve permissions for old workers, including the old payload
    access that P3's new bootstrap deny would otherwise block.
-4. Switch consumers with an explicit image pin. Verify normal tasks, retained
-   approvals, sleep/wake and rollback while both resource sets are available.
+4. Switch consumers with an explicit image pin. Verify normal tasks, approval
+   waits, sleep/wake and rollback while both resource sets are available.
 5. Retire old resources only after old workers, Durable executions and uncertain
-   starts are accounted for and old tasks/leases are drained. An idle inventory
-   snapshot alone is not an admission fence. Preserve checkpoint data and any
-   resources still needed by published coordinator versions.
+   starts are accounted for and old tasks are drained. An idle inventory
+   snapshot alone is not an admission fence. Preserve any resources still
+   needed by published coordinator versions.
 
 Setting a concurrency counter to zero is not a reliable pause for asynchronous
 producers. A rollback must restore compatible code, image selection and IAM
-without deleting pending requests or saved work. The reusable tool must enforce
+without deleting pending requests. The reusable tool must enforce
 these prerequisites. Track remaining acceptance in [verification status](./README.md#open-pr-checks).

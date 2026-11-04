@@ -133,7 +133,7 @@ Operational notes specific to this backend:
 
 - **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
-- **Deployment identifiers are not baked into the image.** Current table names, secret ARNs and session-role ARN arrive through the v2 IAM-authenticated manifest and signed task document. Old unsigned envelopes are refused. Deploy matching coordinator code, worker images and IAM with admissions paused and old tasks drained; the repository runbook `docs/verification/645-payload-bootstrap.md` records the procedure and pending live checks.
+- **Approval-wait sleep.** With `microvm_approval_suspend_enabled=true`, a task waiting for approval sleeps after its `microvm_sleep_after_s` delay (default 60 s, `--microvm-sleep-after off` keeps it awake) and wakes on the decision or 60 s before the gate deadline. A Parameter Store switch created by the stack can stop new suspensions without a redeploy; it never strands a suspended worker. Only images that declare the lifecycle protocol are suspended.
 - **Registry tools share the runtime network restriction.** Remote HTTP/SSE MCP assets need reachable HTTPS/443 endpoints. AgentCore and ECS defaults also block remote non-443 ports. `stdio` programs run locally but their outbound calls remain restricted; resolution does not test connectivity. The image builder's 80/443 access does not widen runtime egress. See [REGISTRY.md](/sample-autonomous-cloud-coding-agents/architecture/registry).
 - **Logging failures have a fallback record.** Debug/warn CloudWatch failures emit `cloudwatch_write_failed` to stdout with writer/task/error class, without another AWS call or sensitive log text. This is not a configured metric/alarm; verify collection in the guest log stream while the VM is running.
 
@@ -321,51 +321,16 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 
 ## Known deployment issues
 
-### Upgrading approval permissions
-
-Worker approval creation and timeout writes now use an IAM-authenticated
-service. Deploy the matching agent image and CDK together: old workers write
-directly to DynamoDB and cannot create new gates after those permissions are removed.
-
-1. Pause submissions from the CLI, integrations and schedules during the upgrade.
-   Let existing tasks finish, or have their owners cancel them. Include tasks
-   awaiting approval, suspended MicroVMs and retained continuations; an empty
-   running-container list does not prove the deployment has drained.
-2. Build the agent from the same revision as the CDK. For an externally managed
-   MicroVM image, publish that build and select its new version before resuming
-   submissions. A suspended VM keeps its old code.
-3. Deploy the stack. Check that the SessionRole has approval-table reads and
-   condition checks only, plus `execute-api:Invoke` restricted to its task tag.
-   CDK supplies `APPROVAL_REQUESTS_API_URL` to all three compute backends.
-   Custom ECS constructs must provide both the SessionRole and service URL;
-   approval wiring without them is rejected before deployment. A MicroVM
-   manifest missing the URL is rejected before the worker starts.
-   If an AgentCore environment was edited to remove the URL, the worker reports
-   `APPROVAL_REQUESTS_API_URL is required for cloud approval requests` at its
-   next gate rather than attempting a direct DynamoDB write. Redeploy the
-   matching stack and image.
-4. Submit a test task that triggers a known approval rule on each enabled backend.
-   Verify that the request appears, an owner decision resumes it, and an explicit
-   deadline records `TIMED_OUT` without overwriting a human decision. Then resume
-   normal submissions.
-
-If an old worker survives the upgrade, its next approval write fails closed.
-Existing rows remain readable; do not restore direct writes to work around a stale
-image. Roll forward with the matching image. Rolling back IAM restores the original
-approval-record vulnerability and requires a deliberate operator decision.
-
 ### Scheduled maintenance stack
 
 Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
-cleanup run in the `ConcurrencyMaintenance` nested stack. MicroVM continuation
-recovery also runs there when an image is configured. An upgrade recreates the
+cleanup run in the `ConcurrencyMaintenance` nested stack. An upgrade recreates the
 stateless functions, roles and schedules; their task tables and storage stay in
 the parent stack. This applies to every compute backend, including AgentCore,
 and replaces roughly twenty resources, depending on enabled features.
 CloudFormation creates the new schedules before deleting the old ones, so both
-can fire during the update. Task mutations and the continuation scan cursor use
-conditional writes to tolerate that overlap. The drain above is required for
-the approval permission/image upgrade, not a scheduling gap.
+can fire during the update. Task mutations use conditional writes to tolerate
+that overlap.
 
 Review the replacements in the change set. Existing Lambda log groups remain
 under their old generated names; use the new function's log group for post-upgrade

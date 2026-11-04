@@ -3,19 +3,20 @@
 #
 # Drives a deployed stack through the real `bgagent` CLI and the MicroVM API:
 # normal task, approval after sleep (approve / deny), cancel while suspended,
-# a declined suspend on a working guest, worker replacement (continuation) and a
+# a declined suspend on a working guest, the out-of-the-box defaults, an unanswered
+# gate that times out while asleep and a
 # concurrent burst. Each scenario records PASS/FAIL with the evidence it checked.
 # This is the scripted form of docs/verification/README.md "Live acceptance".
 #
 # Usage:
 #   ABCA_ACCEPT_REPO=owner/test-repo ./scripts/microvm-acceptance.sh [scenario ...]
 #
-# Scenarios (default: all): normal approve deny cancel declined continuation burst
+# Scenarios (default: all): normal approve deny defaults expiry cancel declined burst
 #
 # Environment:
 #   ABCA_ACCEPT_REPO      Required. An owned test repository onboarded with
 #                         compute_type lambda-microvm. Tasks open real PRs there.
-#   ABCA_ACCEPT_SLEEP_S   Sleep-after for gate tasks (default 60).
+#   ABCA_ACCEPT_SLEEP_S   Sleep-after for approve/deny/cancel gate tasks (default 60).
 #   ABCA_ACCEPT_TIMEOUT_S Per-wait timeout (default 900).
 #   ABCA_ACCEPT_OUT       Results directory (default: a new mktemp dir).
 #   AWS_REGION            Region of the stack (default us-east-1).
@@ -59,7 +60,7 @@ vm() {
 status() { bg status "$1" --output json 2>/dev/null | jq -r '.status // "UNKNOWN"'; }
 vm_of() { bg status "$1" --output json 2>/dev/null | jq -r '.compute_metadata.microvmId // .session_id // empty'; }
 pr_of() { bg status "$1" --output json 2>/dev/null | jq -r '.pr_url // empty'; }
-# Event types plus agent milestone names (continuation_restored is a milestone).
+# Event types plus agent milestone names (e.g. approval_timed_out).
 events() {
   bg events "$1" --all --output json 2>/dev/null \
     | jq -r '[.. | objects | select(.event_type?) | .event_type, (.metadata.milestone? // empty)] | join(" ")'
@@ -88,8 +89,11 @@ submit_plain() {
     | jq -r '.task_id'
 }
 # Writes a .env file, which the built-in write_env_files soft-deny gates.
+# SLEEP_FLAG=none omits --microvm-sleep-after so the platform default applies.
 submit_gate() {
-  bg submit --repo "$REPO" --max-turns 40 --max-budget 3 --microvm-sleep-after "$SLEEP_S" --output json \
+  local sleep_args=(--microvm-sleep-after "$SLEEP_S")
+  [[ ${SLEEP_FLAG:-} == none ]] && sleep_args=()
+  bg submit --repo "$REPO" --max-turns 40 --max-budget 3 "${sleep_args[@]}" --output json \
     --task "MicroVM acceptance $RUN-$1: create docs/accept-$RUN-$1.env containing EXAMPLE_FLAG=false using your file-write tool (not shell redirection). If that is denied, create docs/accept-$RUN-$1.example with the same content instead. Commit on a new branch named abca-accept-$RUN-$1 and open a pull request. Change nothing else." \
     | jq -r '.task_id'
 }
@@ -152,19 +156,31 @@ scenario_declined() {
     || record declined FAIL "$id" "worker $after after suspend, status $final"
 }
 
-# Lose the suspended worker, then approve: a replacement must restore and finish.
-scenario_continuation() {
-  local id; id=$(submit_gate continuation)
-  gate_and_sleep "$id" || { record continuation FAIL "$id" "never reached a suspended approval wait"; return; }
-  local old; old=$(vm_of "$id")
-  vm terminate "$old"
-  wait_for "$old terminated" 300 vm_in "$old" TERMINATED NOT_FOUND >/dev/null || true
+# Out-of-the-box timing: no sleep override, so the contract defaults apply
+# (300 s approval window, 60 s sleep-after). The worker must still sleep.
+scenario_defaults() {
+  local id; id=$(SLEEP_FLAG=none submit_gate defaults)
+  gate_and_sleep "$id" || { record defaults FAIL "$id" "default gate never reached a suspended approval wait"; return; }
   bg approve "$id" "$(pending "$id")" >/dev/null
   local final; final=$(finished "$id") || final=TIMEOUT
-  local seen; seen=$(events "$id")
-  [[ $final == COMPLETED && $seen == *continuation_restored* && $(vm_of "$id") != "$old" ]] \
-    && record continuation PASS "$id" "replacement $(vm_of "$id") restored the checkpoint, PR $(pr_of "$id")" \
-    || record continuation FAIL "$id" "status $final; events: $(grep -o 'continuation_[a-z_]*' <<<"$seen" | sort -u | tr '\n' ' ')"
+  [[ $final == COMPLETED ]] \
+    && record defaults PASS "$id" "default gate slept and completed on approve, PR $(pr_of "$id")" \
+    || record defaults FAIL "$id" "status $final"
+}
+
+# Never answer: the worker must wake before the deadline and the gate must time
+# out, so the gated .env write never runs.
+scenario_expiry() {
+  local id; id=$(SLEEP_FLAG=none submit_gate expiry)
+  gate_and_sleep "$id" || { record expiry FAIL "$id" "never reached a suspended approval wait"; return; }
+  local final; final=$(finished "$id") || final=TIMEOUT
+  local raw; raw=$(bg events "$id" --all --output json 2>/dev/null)
+  local timed_out wrote
+  timed_out=$(jq -r '[.. | objects | select((.event_type? // "") | test("timed_out|timeout")) or ((.metadata.milestone? // "") | test("timed_out|timeout"))] | length' <<<"$raw")
+  wrote=$(jq -r --arg f "accept-$RUN-expiry.env" '[.. | objects | select(.event_type? == "agent_tool_result") | select((.metadata | tostring) | contains($f) and contains("successfully"))] | length' <<<"$raw")
+  [[ $final != TIMEOUT && $timed_out -gt 0 && $wrote -eq 0 ]] \
+    && record expiry PASS "$id" "gate timed out while asleep, gated .env write never ran, task $final" \
+    || record expiry FAIL "$id" "status $final, timeout events $timed_out, .env writes $wrote"
 }
 
 scenario_burst() {
@@ -184,14 +200,15 @@ run_scenario() {
     approve | deny) scenario_decision "$1" ;;
     cancel) scenario_cancel ;;
     declined) scenario_declined ;;
-    continuation) scenario_continuation ;;
+    defaults) scenario_defaults ;;
+    expiry) scenario_expiry ;;
     burst) scenario_burst ;;
     *) echo "unknown scenario: $1" >&2; exit 64 ;;
   esac
 }
 
 scenarios=("$@")
-(( ${#scenarios[@]} )) || scenarios=(normal approve deny cancel declined continuation burst)
+(( ${#scenarios[@]} )) || scenarios=(normal approve deny defaults expiry cancel declined burst)
 printf 'scenario\tresult\ttask\tevidence\n' > "$RESULTS"
 log "repo $REPO, region $AWS_REGION, results $RESULTS"
 # Independent scenarios run in parallel; each one owns only the tasks it submits.
