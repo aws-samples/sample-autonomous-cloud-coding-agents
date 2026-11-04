@@ -360,9 +360,12 @@ def platform_client(service_name: str, **kwargs: Any) -> Any:
     import boto3
 
     client = boto3.client(service_name, **_merge_ua_config(kwargs))
-    credentials = client._request_signer._credentials
-    with _ambient_lock:
-        _ambient_credentials[id(credentials)] = credentials
+    # Track the ambient credential object so a MicroVM resume can refresh it
+    # before any platform call reuses keys cached from before the freeze.
+    credentials = getattr(getattr(client, "_request_signer", None), "_credentials", None)
+    if credentials is not None:
+        with _ambient_lock:
+            _ambient_credentials[id(credentials)] = credentials
     return client
 
 

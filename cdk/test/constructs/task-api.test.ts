@@ -146,19 +146,6 @@ describe('TaskApi construct', () => {
     uploadsTemplate = createStack(undefined, true).template;
   });
 
-  test('upload confirmation can inspect capacity but cannot reserve or return a seat', () => {
-    const policy = Object.entries(uploadsTemplate.findResources('AWS::IAM::Policy'))
-      .find(([id]) => id.includes('ConfirmUploadsFn'))![1];
-    const tableId = Object.keys(uploadsTemplate.findResources('AWS::DynamoDB::Table')).find(id => id.startsWith('CapacityTable'))!;
-    const actions = policy.Properties.PolicyDocument.Statement
-      .filter((statement: any) => JSON.stringify(statement.Resource).includes(tableId))
-      .flatMap((statement: any) => [statement.Action].flat());
-    expect(actions).toContain('dynamodb:GetItem');
-    expect(actions).not.toContain('dynamodb:UpdateItem');
-    expect(actions).not.toContain('dynamodb:PutItem');
-    expect(actions).not.toContain('dynamodb:DeleteItem');
-  });
-
   test('creates a Cognito User Pool', () => {
     baseTemplate.resourceCountIs('AWS::Cognito::UserPool', 1);
     baseTemplate.hasResourceProperties('AWS::Cognito::UserPool', {
@@ -969,26 +956,5 @@ describe('MicroVM approval wake wiring', () => {
       expect(resource.Properties.Timeout).toBe(15);
       expect(resource.Properties.Environment.Variables.MICROVM_IMAGE_IDENTIFIER).toBeUndefined();
     }
-  });
-
-  test('cancellation and pending listing receive their approval workflow permissions', () => {
-    const functions = configured.findResources('AWS::Lambda::Function');
-    const cancel = Object.entries(functions).find(([id]) => id.includes('CancelTaskFn'))![1];
-    expect(cancel.Properties.Environment.Variables.TASK_APPROVALS_TABLE_NAME).toBeDefined();
-    const policies = Object.entries(configured.findResources('AWS::IAM::Policy'));
-    const cancelPolicy = policies.find(([id]) => id.includes('CancelTaskFn'))![1];
-    expect(cancelPolicy.Properties.PolicyDocument.Statement).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
-        Resource: expect.arrayContaining([expect.objectContaining({ 'Fn::GetAtt': expect.arrayContaining([expect.stringContaining('Approvals')]) })]),
-      }),
-    ]));
-    const pendingPolicy = policies.find(([id]) => id.includes('GetPendingFn'))![1];
-    expect(pendingPolicy.Properties.PolicyDocument.Statement).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        Action: 'dynamodb:BatchGetItem',
-        Resource: expect.arrayContaining([expect.objectContaining({ 'Fn::GetAtt': expect.arrayContaining([expect.stringContaining('Tasks')]) })]),
-      }),
-    ]));
   });
 });

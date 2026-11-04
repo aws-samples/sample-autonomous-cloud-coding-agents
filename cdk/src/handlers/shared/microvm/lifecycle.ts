@@ -107,12 +107,13 @@ function parseApproval(row: Record<string, unknown> | undefined, taskId: string,
   if (row.task_id !== taskId || row.user_id !== userId || row.request_id !== requestId
     || !APPROVAL_STATUSES.includes(row.status as ApprovalStatus)
     || typeof row.created_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/.test(row.created_at)
-    || !timestamp(row.timeout_s)) return { kind: 'invalid' };
+    || !timestamp(row.timeout_s) || (row.timeout_s as number) <= 0) return { kind: 'invalid' };
   const createdAtMs = Date.parse(row.created_at);
   const canonical = row.created_at.includes('.') ? row.created_at : row.created_at.replace('Z', '.000Z');
-  const deadlineMs = row.timeout_s === 0 ? null : createdAtMs + row.timeout_s * 1000;
+  // Approval windows are bounded (30 s – 1 h): every gate has a wall-clock deadline.
+  const deadlineMs = createdAtMs + row.timeout_s * 1000;
   if (!timestamp(createdAtMs) || new Date(createdAtMs).toISOString() !== canonical
-    || (deadlineMs !== null && !timestamp(deadlineMs))) return { kind: 'invalid' };
+    || !timestamp(deadlineMs)) return { kind: 'invalid' };
   return {
     kind: 'present',
     status: row.status as ApprovalStatus,

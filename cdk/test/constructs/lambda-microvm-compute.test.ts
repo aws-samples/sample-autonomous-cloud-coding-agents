@@ -723,23 +723,19 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     ]);
   });
 
-  test('execution role gets only bootstrap reads, explicit payload/list denies and no writes', () => {
+  test('execution role gets READ-ONLY on the payload bucket and no write/delete', () => {
     const policies = Object.entries(template.findResources('AWS::IAM::Policy'))
       .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole'));
     const statements = policies.flatMap(([, p]) => p.Properties.PolicyDocument.Statement);
     const actions: string[] = statements.flatMap((s: { Action: string | string[] }) =>
       Array.isArray(s.Action) ? s.Action : [s.Action]);
 
-    const allowed = statements.filter((s: { Effect: string; Action: string | string[] }) => s.Effect === 'Allow' && s.Action === 's3:GetObject');
-    expect(allowed).toHaveLength(1);
-    expect(JSON.stringify(allowed[0].Resource)).toContain('/bootstrap/*');
-    const denied = statements.find((s: { NotResource?: unknown }) => s.NotResource);
-    expect(denied.Effect).toBe('Deny');
-    expect(denied.NotResource).toEqual(allowed[0].Resource);
+    // CDK's grantRead renders the Get*/List* read set.
+    expect(actions).toContain('s3:GetObject*');
     // The MicroVM runs untrusted repo code — it must not be able to clobber
     // another task's payload, so nothing mutating may appear.
     const s3Actions = actions.filter(a => a.startsWith('s3:'));
-    expect(s3Actions).toEqual(['s3:GetObject', 's3:GetObject*', 's3:List*']);
+    expect(s3Actions).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
     for (const action of s3Actions) {
       expect(action).not.toMatch(/Put|Delete|Abort|Write|^s3:\*$/);
     }
@@ -939,7 +935,7 @@ describe('LambdaMicrovmCompute — image provisioned from a managed base image',
     const s3Resources = executionRoleStatements()
       .flatMap(st => (Array.isArray(st.Action) ? st.Action : [st.Action]))
       .filter(action => action.startsWith('s3:'));
-    expect(s3Resources).toEqual(['s3:GetObject', 's3:GetObject*', 's3:List*']);
+    expect(s3Resources).toEqual(['s3:GetObject*', 's3:GetBucket*', 's3:List*']);
     const rendered = JSON.stringify(
       executionRoleStatements().filter((st) => {
         const actions = Array.isArray(st.Action) ? st.Action : [st.Action];

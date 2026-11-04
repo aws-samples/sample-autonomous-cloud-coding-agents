@@ -89,12 +89,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
   DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
 
-const mockReleaseTaskSlot = jest.fn().mockResolvedValue(false);
-jest.mock('../../src/handlers/shared/task-concurrency', () => ({
-  acquireTaskSlot: jest.fn().mockResolvedValue(true),
-  releaseTaskSlot: (...args: unknown[]) => mockReleaseTaskSlot(...args),
-}));
-
 // Real orchestrator helpers would talk to DynamoDB; stub them and assert on the
 // calls. `buildComputeMetadata` is kept REAL (re-exported from the actual module)
 // so the persisted metadata shape is genuinely exercised, not mirrored.
@@ -374,7 +368,7 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(commandsOfType('TerminateMicrovm')).toHaveLength(1);
   });
 
-  test('registry assets alone exceed the hook cap and survive real hydration and v2 S3 delivery (#818)', async () => {
+  test('registry assets alone exceed the hook cap and survive real hydration and S3-pointer delivery (#818)', async () => {
     const runtime = {
       transport: 'http',
       url: 'https://mcp.example.com/tools',
@@ -397,33 +391,23 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(mockResolveAsset).toHaveBeenCalledTimes(1);
     const upload = s3CommandsOfType('PutObject').find(c => c.input.Key === 'TASK001/payload.json');
     const document = JSON.parse(upload.input.Body);
-    expect(document.agent_payload.resolved_assets).toEqual([asset]);
-    const { resolved_assets: assets, ...basePayload } = document.agent_payload;
+    expect(document.resolved_assets).toEqual([asset]);
+    const { resolved_assets: assets, platform_config: _config, ...basePayload } = document;
     expect(Buffer.byteLength(JSON.stringify(basePayload))).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     expect(Buffer.byteLength(JSON.stringify(assets))).toBeGreaterThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
     const run = commandsOfType('RunMicrovm');
     expect(run).toHaveLength(1);
     const wire = run[0].input.runHookPayload;
     expect(Buffer.byteLength(wire)).toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    expect(JSON.parse(wire)).toMatchObject({ version: 2, task_id: 'TASK001', payload_url: expect.any(String) });
+    expect(JSON.parse(wire)).toMatchObject({
+      agent_payload_s3_uri: 's3://test-microvm-payload-bucket/TASK001/payload.json',
+      platform_config: expect.any(Object),
+    });
     expect(wire).not.toContain('X-Registry-Context');
     const audit = mockDdbSend.mock.calls.find(([c]) => c.input.ExpressionAttributeValues?.[':ra']);
     expect(audit![0].input.ExpressionAttributeValues[':ra']).toEqual([
       { kind: 'mcp_server', id: 'acme/large', version: '1.0.0' },
     ]);
-  });
-
-  test.each([2, 3])('cancellation on task read %s checks release before leaving the pipeline', async (cancelOnRead) => {
-    let reads = 0;
-    mockLoadTask.mockImplementation(async () => ({
-      task_id: 'TASK001',
-      user_id: 'user-1',
-      repo: 'org/repo',
-      status: ++reads >= cancelOnRead ? TaskStatus.CANCELLED : TaskStatus.SUBMITTED,
-    }));
-    await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
-    expect(commandsOfType('RunMicrovm')).toHaveLength(0);
-    expect(mockReleaseTaskSlot).toHaveBeenCalledWith('TASK001', 'user-1');
   });
 
   test('replaying a persisted start failure reaches finalization once without an earlier slot release', async () => {
@@ -646,22 +630,18 @@ describe('orchestrate-task for a lambda-microvm task', () => {
 
   // --- finalize-time payload delete (review NB3) ---
 
-  test('deletes its own payload and saved capability on finalize', async () => {
-    // Revoke the signed payload link and remove its private replay record.
-    // The one-day lifecycle remains a cleanup backstop.
+  test('deletes its own payload object on finalize', async () => {
+    // The execution role can read the whole payload bucket, so finalize deletes
+    // this task's prompt instead of leaving it to the one-day lifecycle rule.
     runMicrovmOk();
 
     await handler({ task_id: 'TASK001' }, fakeContext().ctx as never);
 
     const deletes = s3CommandsOfType('DeleteObject');
-    expect(deletes).toHaveLength(2);
+    expect(deletes).toHaveLength(1);
     expect(deletes[0].input).toEqual({
       Bucket: 'test-microvm-payload-bucket',
       Key: 'TASK001/payload.json',
-    });
-    expect(deletes[1].input).toEqual({
-      Bucket: 'test-microvm-payload-bucket',
-      Key: 'TASK001/launch.json',
     });
     // ...and it did not reach for the ECS deleter.
     expect(mockDeleteEcsPayload).not.toHaveBeenCalled();

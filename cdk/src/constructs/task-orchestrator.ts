@@ -52,17 +52,11 @@ const ORCHESTRATOR_TIMEOUT_SECONDS = 60;
 /** Orchestrator Lambda memory (MB). */
 const ORCHESTRATOR_MEMORY_MB = 1024;
 
-import type { ContinuationBucket } from './microvm-continuation-manager';
-import { grantCoordinatorPayloads } from './payload-bootstrap-permissions';
 
 /**
  * Properties for TaskOrchestrator construct.
  */
 export interface TaskOrchestratorProps {
-  /** Close outstanding requests and apply retention after task completion. */
-  readonly taskApprovalsTable?: dynamodb.ITable;
-  /** Versioned durable checkpoints and launch inputs for MicroVM worker replacement. */
-  readonly continuationBucket?: ContinuationBucket;
   /**
    * The DynamoDB task table.
    */
@@ -247,7 +241,6 @@ export interface TaskOrchestratorProps {
      * fails closed with `approval_write_failed`.
      */
     readonly taskApprovalsTableName: string;
-    readonly approvalRequestsApiUrl?: string;
     /** Nudges table (`NUDGES_TABLE_NAME`) the agent polls for mid-task nudges. */
     readonly nudgesTableName: string;
     /** Application log group (`LOG_GROUP_NAME`) the agent writes progress logs to. */
@@ -405,9 +398,6 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
-    if (props.agentPlatformConfig && !props.agentPlatformConfig.approvalRequestsApiUrl) {
-      throw new Error('agentPlatformConfig requires approvalRequestsApiUrl; deploy the matching approval service');
-    }
     if (props.deployedComputeTypes) {
       const backends = props.deployedComputeTypes;
       const agentcore = backends.includes('agentcore');
@@ -484,7 +474,6 @@ export class TaskOrchestrator extends Construct {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
-        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         ...(props.runtimeArn && { RUNTIME_ARN: props.runtimeArn }),
@@ -530,9 +519,6 @@ export class TaskOrchestrator extends Construct {
           // unconditional; there is no "no ingress configured" state to express.
           MICROVM_INGRESS_CONNECTOR_ARNS: props.microvmConfig.ingressConnectorArns.join(','),
           MICROVM_PAYLOAD_BUCKET: props.microvmConfig.payloadBucket.bucketName,
-          ...(props.continuationBucket && {
-            CONTINUATION_BUCKET_NAME: props.continuationBucket.bucket.bucketName,
-          }),
           TASK_APPROVALS_TABLE_NAME: props.microvmConfig.approvalsTable.tableName,
           MICROVM_APPROVAL_SUSPEND_ENABLED: String(props.microvmConfig.approvalSuspendEnabled ?? false),
           MICROVM_APPROVAL_SUSPEND_PARAMETER_NAME: suspendParameter!.parameterName,
@@ -550,9 +536,6 @@ export class TaskOrchestrator extends Construct {
         // backends. NO IAM grant accompanies any of these (see the prop docs).
         ...(props.agentPlatformConfig && {
           TASK_APPROVALS_TABLE_NAME: props.microvmConfig?.approvalsTable.tableName ?? props.agentPlatformConfig.taskApprovalsTableName,
-          ...(props.agentPlatformConfig.approvalRequestsApiUrl && {
-            APPROVAL_REQUESTS_API_URL: props.agentPlatformConfig.approvalRequestsApiUrl,
-          }),
           NUDGES_TABLE_NAME: props.agentPlatformConfig.nudgesTableName,
           LOG_GROUP_NAME: props.agentPlatformConfig.logGroupName,
           ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.artifactsBucketName,
@@ -576,7 +559,6 @@ export class TaskOrchestrator extends Construct {
 
     // DynamoDB grants
     props.taskTable.grantReadWriteData(this.fn);
-    props.taskApprovalsTable?.grantReadWriteData(this.fn);
     props.taskEventsTable.grantReadWriteData(this.fn);
     props.userConcurrencyTable.grantReadWriteData(this.fn);
     if (props.repoTable) {
@@ -588,11 +570,22 @@ export class TaskOrchestrator extends Construct {
       props.attachmentsBucket.grantReadWrite(this.fn);
     }
 
-    // Publish manifests/payloads, sign one-object reads and persist private
-    // launch references for replay. Workers cannot read the launch records.
-    if (props.ecsPayloadBucket) grantCoordinatorPayloads(props.ecsPayloadBucket, this.fn);
-    if (props.microvmConfig) grantCoordinatorPayloads(props.microvmConfig.payloadBucket, this.fn);
-    props.continuationBucket?.grantCoordinator(this.fn);
+    // ECS payload bucket (#502): the orchestrator writes the payload before
+    // RunTask and deletes it at finalize. Write + delete only (it never reads
+    // its own payload back; the ECS container is the reader, with its own
+    // read-only grant from EcsAgentCluster).
+    if (props.ecsPayloadBucket) {
+      props.ecsPayloadBucket.grantPut(this.fn);
+      props.ecsPayloadBucket.grantDelete(this.fn);
+    }
+
+    // ADR-021: MicroVM payload bucket. The strategy uploads an oversized /run
+    // payload and deletes it at finalize (`deleteMicrovmPayload`); it never
+    // reads it back — the MicroVM execution role is the reader.
+    if (props.microvmConfig) {
+      props.microvmConfig.payloadBucket.grantPut(this.fn);
+      props.microvmConfig.payloadBucket.grantDelete(this.fn);
+    }
 
     // Durable execution managed policy
     this.fn.role!.addManagedPolicy(

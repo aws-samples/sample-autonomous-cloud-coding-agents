@@ -80,6 +80,7 @@ process.env.REPO_TABLE_NAME = 'RepoConfig';
 
 import { createTaskCore, type TaskCreationContext } from '../../../src/handlers/shared/create-task-core';
 import { logger } from '../../../src/handlers/shared/logger';
+import { MICROVM_SLEEP_AFTER_S_DEFAULT } from '../../../src/handlers/shared/types';
 
 function makeContext(overrides: Partial<TaskCreationContext> = {}): TaskCreationContext {
   return {
@@ -860,8 +861,8 @@ describe('createTaskCore', () => {
       makeContext(), 'req-sleep',
     );
     expect(result.statusCode).toBe(201);
-    expect(getPersistedTaskRecord().microvm_sleep_after_s).toBe(value ?? 600);
-    expect(JSON.parse(result.body).data.microvm_sleep_after_s).toBe(value ?? 600);
+    expect(getPersistedTaskRecord().microvm_sleep_after_s).toBe(value ?? MICROVM_SLEEP_AFTER_S_DEFAULT);
+    expect(JSON.parse(result.body).data.microvm_sleep_after_s).toBe(value ?? MICROVM_SLEEP_AFTER_S_DEFAULT);
   });
 
   test.each([-1, 3601, 0.5, '600', null, false, {}, []])('rejects invalid MicroVM sleep delay %j before creating a task', async value => {

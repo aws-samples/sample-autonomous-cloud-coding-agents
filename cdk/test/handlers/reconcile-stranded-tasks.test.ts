@@ -19,15 +19,6 @@
 
 // --- Mocks ---
 const mockDdbSend = jest.fn();
-const mockRelease = jest.fn();
-const mockCloseApprovals = jest.fn();
-jest.mock('../../src/handlers/shared/task-cancellation', () => ({
-  closeTaskApprovals: (...args: unknown[]) => mockCloseApprovals(...args),
-}));
-jest.mock('../../src/handlers/shared/task-concurrency', () => ({
-  releaseTaskSlot: (...args: unknown[]) => mockRelease(...args),
-}));
-beforeEach(() => mockRelease.mockReset().mockResolvedValue(true));
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({ send: mockDdbSend })),
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
@@ -98,7 +89,7 @@ describe('reconcile-stranded-tasks', () => {
     expect(mockDdbSend).toHaveBeenCalledTimes(3);
   });
 
-  test('task older than 1200s → fails + emits events + releases the task reservation', async () => {
+  test('task older than 1200s → fails + emits events + decrements concurrency', async () => {
     const ancient = new Date(Date.now() - 25 * 60 * 1000).toISOString(); // 25 min ago
     primeResponses([
       // Query SUBMITTED returns one stranded candidate.
@@ -112,6 +103,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // conditional UpdateItem → FAILED
       {}, // PutItem task_stranded event
       {}, // PutItem task_failed event
+      {}, // UpdateItem decrement concurrency
       { Items: [] }, // Query HYDRATING
       { Items: [] }, // Query AWAITING_APPROVAL
     ]);
@@ -140,7 +132,10 @@ describe('reconcile-stranded-tasks', () => {
     });
     expect(eventTypes).toEqual(expect.arrayContaining(['task_stranded', 'task_failed']));
 
-    expect(mockRelease).toHaveBeenCalledWith('t-stranded', 'u-1');
+    // Concurrency decrement.
+    const decrementCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
+      .find(([c]) => c._type === 'UpdateItem' && String(c.input.UpdateExpression).includes('active_count'));
+    expect(decrementCall).toBeDefined();
   });
 
   test('#441: task with old created_at but FRESH status_created_at is NOT failed (freshly picked up from the queue)', async () => {
@@ -185,6 +180,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // conditional UpdateItem → FAILED
       {}, // PutItem task_stranded event
       {}, // PutItem task_failed event
+      {}, // UpdateItem decrement concurrency
       { Items: [] }, // HYDRATING
       { Items: [] }, // AWAITING_APPROVAL
     ]);
@@ -219,6 +215,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // conditional UpdateItem → FAILED
       {}, // PutItem task_stranded event
       {}, // PutItem task_failed event
+      {}, // UpdateItem decrement concurrency
       { Items: [] }, // HYDRATING
       { Items: [] }, // AWAITING_APPROVAL
     ]);
@@ -249,7 +246,7 @@ describe('reconcile-stranded-tasks', () => {
       { Items: [] }, // AWAITING_APPROVAL query
     ]);
 
-    // Must NOT throw; no events written, no reservation release.
+    // Must NOT throw; no events written, no concurrency decrement.
     await handler();
 
     const writes = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
@@ -267,7 +264,7 @@ describe('reconcile-stranded-tasks', () => {
     // (``event_type`` == their own names) never reach it. This test
     // pins the extra ``agent_milestone`` / ``approval_stranded`` emit
     // that makes the stranded case visible on §11.3 widgets.
-    const ancient = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
+    const ancient = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
     primeResponses([
       { Items: [] }, // SUBMITTED
       { Items: [] }, // HYDRATING
@@ -277,6 +274,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // PutItem task_stranded event
       {}, // PutItem task_failed event
       {}, // PutItem approval_stranded milestone (Chunk 10 new)
+      {}, // UpdateItem decrement concurrency
     ]);
 
     await handler();
@@ -314,6 +312,7 @@ describe('reconcile-stranded-tasks', () => {
       {}, // conditional UpdateItem → FAILED
       {}, // PutItem task_stranded
       {}, // PutItem task_failed
+      {}, // UpdateItem concurrency
       { Items: [] }, // HYDRATING
       { Items: [] }, // AWAITING_APPROVAL
     ]);
@@ -442,6 +441,7 @@ describe('reconcile-stranded-tasks', () => {
         {}, // UpdateItem t-ok (transition) → success
         {}, // PutItem task_stranded event
         {}, // PutItem task_failed event
+        {}, // UpdateItem decrement concurrency
         ddbErr, // UpdateItem t-fail (transition) → throws
         { Items: [] }, // HYDRATING query
         { Items: [] }, // AWAITING_APPROVAL query
@@ -467,8 +467,8 @@ describe('reconcile-stranded-tasks', () => {
             mockTaskRow({ task_id: 't-2', user_id: 'u-b', created_at: ancient }),
           ],
         },
-        {}, {}, {}, // t-1: transition + 2 events
-        {}, {}, {}, // t-2: transition + 2 events
+        {}, {}, {}, {}, // t-1: transition + 2 events + decrement
+        {}, {}, {}, {}, // t-2: transition + 2 events + decrement
         { Items: [] }, // HYDRATING
         { Items: [] }, // AWAITING_APPROVAL
       ]);

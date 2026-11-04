@@ -35,8 +35,6 @@ import { parseRef } from './registry/ref';
 import { RegistryResolutionError, type ResolvedAsset } from './registry/types';
 import { loadRepoConfig, type BlueprintConfig, type ComputeType } from './repo-config';
 import { resolveUrlAttachments } from './resolve-url-attachments';
-import { closeTaskApprovals } from './task-cancellation';
-import { acquireTaskSlot, releaseTaskSlot } from './task-concurrency';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
@@ -46,6 +44,7 @@ const ddb = makeDocClient();
 
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
+const CONCURRENCY_TABLE_NAME = process.env.USER_CONCURRENCY_TABLE_NAME!;
 const RUNTIME_ARN = process.env.RUNTIME_ARN!;
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
@@ -70,12 +69,8 @@ export interface PollState {
   readonly microvmSupervisor?: MicrovmSupervisorState;
   readonly microvmFailureReason?: string;
   readonly microvmFailureMessage?: string;
-  /** A stale execution must clean up only its own handle, leaving the replacement alone. */
+  /** The task row no longer names this execution's MicroVM; clean up only its own handle. */
   readonly microvmOwnershipLost?: boolean;
-  /** The worker is stopped and its reservation released; the approval remains open. */
-  readonly microvmParked?: boolean;
-  readonly microvmRetiring?: boolean;
-  readonly microvmRetirementError?: string;
 }
 
 /**
@@ -93,12 +88,14 @@ export interface PollState {
  *   `AgentCoreComputeStrategy.pollSession` is an explicit stub that always
  *   reports `running`, so a crashed container is invisible without the heartbeat.
  * - `lambda-microvm` — yes, and it is the SECOND of two complementary signals
- *   (ADR-021 P2). `GetMicrovm` reports VM state; a stale heartbeat detects loss
- *   of the in-guest heartbeat writer even if the VM still reports RUNNING.
- *   The writer runs in a separate thread, so it can continue during a pipeline
- *   deadlock: neither signal proves that coding work is progressing. A failed
- *   run hook can cause service teardown; after an accepted hook, explicit
- *   termination and the maximum session duration remain cleanup safeguards.
+ *   (ADR-021 P2). The substrate `GetMicrovm` check catches a VM that DIED; it
+ *   cannot catch a VM that is alive and healthy while the in-guest pipeline is
+ *   hung, deadlocked, or OOM-killed inside the guest — nothing self-terminates on
+ *   this substrate (live-verified: a MicroVM with a broken hook sat in `RUNNING`
+ *   indefinitely with no `stateReason`). Without the heartbeat check such a task
+ *   would burn the full ~8.5 h poll window, billing an 8-hour MicroVM
+ *   reservation, before the safety net fired. So liveness here is substrate state
+ *   AND agent heartbeat.
  * - `ecs` — no, and this is a HARD CORRECTNESS CONSTRAINT, not a tuning
  *   preference. The ECS boot command (`ecs-strategy.ts`) invokes
  *   `run_task_from_payload` directly and "bypasses the uvicorn server entirely",
@@ -184,12 +181,31 @@ export async function loadTask(taskId: string, consistentRead = false): Promise<
 }
 
 /**
- * Admission control: acquire or recover this task's capacity reservation.
+ * Admission control: check user concurrency and increment counter.
  * @param task - the task record.
  * @returns true if admitted, false if concurrency limit reached.
  */
 export async function admissionControl(task: TaskRecord): Promise<boolean> {
-  return acquireTaskSlot(task.task_id, task.user_id, MAX_CONCURRENT);
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: CONCURRENCY_TABLE_NAME,
+      Key: { user_id: task.user_id },
+      UpdateExpression: 'SET active_count = if_not_exists(active_count, :zero) + :one, updated_at = :now',
+      ConditionExpression: 'attribute_not_exists(active_count) OR active_count < :max',
+      ExpressionAttributeValues: {
+        ':zero': 0,
+        ':one': 1,
+        ':max': MAX_CONCURRENT,
+        ':now': new Date().toISOString(),
+      },
+    }));
+    return true;
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
+      return false;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -241,10 +257,9 @@ export async function transitionTask(
     }
   }
 
-  let condition = fromStatus === TaskStatus.SUBMITTED && toStatus === TaskStatus.QUEUED
-    ? '#status = :fromStatus AND attribute_not_exists(concurrency_slot)'
-    : '#status = :fromStatus';
+  let condition = '#status = :fromStatus';
   if (expectedMicrovmId) {
+    // A MicroVM transition applies only while the task still names this worker.
     condition += ' AND compute_type = :microvmType AND session_id = :microvmId AND compute_metadata.microvmId = :microvmId';
     expressionValues[':microvmType'] = 'lambda-microvm';
     expressionValues[':microvmId'] = expectedMicrovmId;
@@ -324,8 +339,8 @@ const MAX_POLL_INTERVAL_MS = 300_000;
 /**
  * Build the ``compute_metadata`` map persisted on the task row at session start,
  * so a later handler can act on the right backend without re-deriving anything:
- * cancellation uses the backend's worker identity, and MicroVM approval wake
- * uses ``microvmId`` plus the saved image identity.
+ * ``cancel-task.ts`` reads ``clusterArn``/``taskArn`` from it today, and ADR-021
+ * sub-decision 2 has the approve/deny Lambdas read ``microvmId`` from it in P3.
  *
  * Kept as an exhaustive switch (not a ternary + spread) so a fourth backend is a
  * compile error here rather than a silently empty metadata map — the field is
@@ -945,27 +960,20 @@ export async function finalizeTask(
   pollState: PollState,
   userId: string,
 ): Promise<boolean> {
-  const current = await loadTask(taskId, true);
+  // Strong read: finalization can immediately follow a committed start
+  // failure or cancellation, and a stale active state emits the wrong event.
+  const task = await loadTask(taskId, true);
   const expectedId = pollState.microvmSupervisor?.microvmId;
-  if (expectedId && (current.user_id !== userId || current.compute_type !== 'lambda-microvm'
-    || current.session_id !== expectedId || current.compute_metadata?.microvmId !== expectedId)) {
+  if (expectedId && (task.user_id !== userId || task.compute_type !== 'lambda-microvm'
+    || task.session_id !== expectedId || task.compute_metadata?.microvmId !== expectedId)) {
     logger.warn('MicroVM finalization skipped after worker ownership changed', { task_id: taskId, microvm_id: expectedId });
     return false;
   }
-  try {
-    await finalizeTaskOutcome(taskId, pollState, current);
-    return true;
-  } finally {
-    // The marker makes this safe after a crash, an event failure, or a competing
-    // cleaner. A still-active task keeps its reservation.
-    await releaseTaskSlot(taskId, userId);
-    await closeTaskApprovals(taskId, userId);
-  }
+  await finalizeTaskOutcome(taskId, pollState, userId, task);
+  return true;
 }
 
-async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: TaskRecord): Promise<void> {
-  // Finalization can immediately follow a committed start failure/cancellation.
-  // A stale active state would emit the wrong terminal event.
+async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId: string, task: TaskRecord): Promise<void> {
   const currentStatus = task.status;
   // Correlation envelope on this function's own log lines too, not just the
   // events it emits — admission→terminal logs must join by {user_id, repo}.
@@ -988,6 +996,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
         final_status: winner.status, poll_attempts: pollState.attempts,
       }, correlation);
+      await decrementConcurrency(userId);
       return;
     }
     await emitTaskEvent(taskId, timeout ? 'task_timed_out' : 'task_failed', {
@@ -996,11 +1005,23 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       microvm_id: pollState.microvmSupervisor?.microvmId,
       poll_attempts: pollState.attempts,
     }, correlation);
+    await decrementConcurrency(userId);
     return;
   }
 
-  // A heartbeat failure is detected while RUNNING. The strong read above may
-  // already observe FINALIZING; neither active status is a successful outcome.
+  // Lost session: RUNNING but agent heartbeats stopped (crash/OOM) — fail fast.
+  //
+  // FINALIZING is in the guard DEFENSIVELY, and is currently unreachable: the
+  // only writer of `sessionUnhealthy` is `pollTaskStatus`, which computes it
+  // under `currentStatus === TaskStatus.RUNNING`, so a FINALIZING task can never
+  // arrive here with the flag set. It is kept rather than removed because the
+  // reachability depends on a predicate in ANOTHER function: the day
+  // `pollTaskStatus` widens its own status gate (P3's suspend policy already has
+  // to revisit that block), a heartbeat-stale FINALIZING task must fail rather
+  // than fall through to the normal terminal path and be reported as a success.
+  // Dropping the arm would make that a silent behaviour change instead of a
+  // no-op. Do NOT "simplify" it away without also pinning `pollTaskStatus`'s
+  // RUNNING-only gate with a test.
   if (
     pollState.sessionUnhealthy
     && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING)
@@ -1016,7 +1037,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       transitioned = true;
     } catch (err) {
       // Task may have transitioned concurrently (e.g. agent wrote terminal status).
-      // Re-read to report the terminal status that actually won.
+      // Re-read to avoid double-decrement or contradictory events.
       log.warn('Finalization transition to FAILED (heartbeat) failed, task may have transitioned concurrently', {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -1026,6 +1047,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
         reason: 'agent_heartbeat_stale',
         poll_attempts: pollState.attempts,
       }, correlation);
+      await decrementConcurrency(userId);
     } else {
       // Transition failed — re-read task to determine actual state.
       // If already terminal the block below will handle TTL + concurrency.
@@ -1036,9 +1058,10 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
           final_status: reread.status,
           poll_attempts: pollState.attempts,
         }, correlation);
+        await decrementConcurrency(userId);
       } else {
-        log.warn('Heartbeat path: task in unexpected state after failed transition, keeping its reservation until terminal', { status: reread.status });
-        throw new Error(`Heartbeat finalization left task ${taskId} active in ${reread.status}`);
+        log.warn('Heartbeat path: task in unexpected state after failed transition, releasing concurrency', { status: reread.status });
+        await decrementConcurrency(userId);
       }
     }
     return;
@@ -1105,13 +1128,15 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       final_status: currentStatus,
       poll_attempts: pollState.attempts,
     }, correlation);
+    await decrementConcurrency(userId);
     return;
   }
 
   // If still RUNNING / FINALIZING / AWAITING_APPROVAL after the poll
-  // window closes, terminate the task through an allowed transition. Approval
-  // waits permit FAILED, not TIMED_OUT. Task closure cancels pending approvals;
-  // reaching the execution limit is not a human denial.
+  // window closes, terminate the task through an allowed transition: approval
+  // waits permit FAILED, not TIMED_OUT, and reaching the execution limit is not
+  // a human denial. The stranded-approval reconciler remains a secondary
+  // safety net for tasks the orchestrator already lost track of.
   if (
     currentStatus === TaskStatus.RUNNING
     || currentStatus === TaskStatus.FINALIZING
@@ -1127,14 +1152,8 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
           : 'Orchestrator poll timeout exceeded',
       });
     } catch (err) {
-      // Accept a committed terminal winner; otherwise retry finalization.
+      // Task may have transitioned concurrently — re-read and accept
       log.warn('Finalization transition failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
-      const current = await loadTask(taskId, true);
-      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
-      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
-        final_status: current.status, poll_attempts: pollState.attempts,
-      }, correlation);
-      return;
     }
     await emitTaskEvent(taskId, terminalStatus === TaskStatus.FAILED ? 'task_failed' : 'task_timed_out', {
       reason: currentStatus === TaskStatus.AWAITING_APPROVAL
@@ -1142,6 +1161,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
         : 'poll_timeout',
       poll_attempts: pollState.attempts,
     }, correlation);
+    await decrementConcurrency(userId);
     return;
   }
 
@@ -1155,23 +1175,18 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, task: T
       });
     } catch (err) {
       log.warn('Finalization transition from HYDRATING failed, task may have transitioned concurrently', { error: err instanceof Error ? err.message : String(err) });
-      const current = await loadTask(taskId, true);
-      if (!TERMINAL_STATUSES.includes(current.status)) throw err;
-      await emitTaskEvent(taskId, `task_${current.status.toLowerCase()}`, {
-        final_status: current.status, poll_attempts: pollState.attempts,
-      }, correlation);
-      return;
     }
     await emitTaskEvent(taskId, 'task_failed', {
       reason: 'session_never_started',
       poll_attempts: pollState.attempts,
     }, correlation);
+    await decrementConcurrency(userId);
     return;
   }
 
-  // Unexpected active state — retain its reservation until terminal.
+  // Unexpected state — log and release concurrency
   log.error('Unexpected task state during finalization', { status: currentStatus });
-  throw new Error(`Cannot finalize task ${taskId} in ${currentStatus}`);
+  await decrementConcurrency(userId);
 }
 
 /**
@@ -1227,7 +1242,7 @@ export async function queueTask(task: TaskRecord): Promise<boolean> {
  * @param fromStatus - the current status.
  * @param errorMessage - the error reason.
  * @param userId - the user who owns the task.
- * @param releaseConcurrency - whether to release this task's held reservation.
+ * @param releaseConcurrency - whether to decrement the concurrency counter.
  * @param repo - optional target repo (`owner/repo`) for the correlation
  *   envelope; omit for repo-less workflows.
  */
@@ -1251,17 +1266,41 @@ export async function failTask(
     log.warn('Failed to transition task to FAILED', {
       error: err instanceof Error ? err.message : String(err),
     });
-    const current = await loadTask(taskId, true);
-    if (!TERMINAL_STATUSES.includes(current.status)) throw err;
   }
-  // A replay may find the FAILED write already committed. Events remain
-  // transition-owned; reservation release is independently safe to repeat.
-  try {
-    if (transitioned) {
-      await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
+  // Only emit / release concurrency after a successful transition. Callers such as
+  // orchestrate-task rethrow after failTask; Durable Execution retries the step and
+  // would otherwise re-run emit + decrement while the task is already FAILED.
+  if (transitioned) {
+    await emitTaskEvent(taskId, 'task_failed', { error_message: errorMessage }, { user_id: userId, repo });
+    if (releaseConcurrency) {
+      await decrementConcurrency(userId);
     }
-  } finally {
-    if (releaseConcurrency) await releaseTaskSlot(taskId, userId);
+  }
+}
+
+/**
+ * Decrement the user's concurrency counter (best-effort).
+ * @param userId - the user ID.
+ */
+async function decrementConcurrency(userId: string): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: CONCURRENCY_TABLE_NAME,
+      Key: { user_id: userId },
+      UpdateExpression: 'SET active_count = active_count - :one, updated_at = :now',
+      ConditionExpression: 'active_count > :zero',
+      ExpressionAttributeValues: {
+        ':one': 1,
+        ':zero': 0,
+        ':now': new Date().toISOString(),
+      },
+    }));
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'name' in err && err.name === 'ConditionalCheckFailedException') {
+      logger.info('Concurrency counter already at zero, nothing to decrement', { user_id: userId });
+    } else {
+      logger.warn('Failed to decrement concurrency counter', { user_id: userId, error: err instanceof Error ? err.message : String(err) });
+    }
   }
 }
 

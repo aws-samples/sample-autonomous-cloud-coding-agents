@@ -23,6 +23,7 @@ process.env.TASK_TABLE_NAME = 'LifecycleTasks';
 process.env.TASK_APPROVALS_TABLE_NAME = 'LifecycleApprovals';
 
 import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import sharedConstants from '../../../../../contracts/constants.json';
 import type { MicrovmObservedState } from '../../../../src/handlers/shared/compute-strategy';
 import {
   readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot,
@@ -85,39 +86,42 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('MicroVM lifecycle policy', () => {
-  test('default waits ten minutes from the original gate creation before sleeping', () => {
-    const current = snapshot({
-      sleepAfterSeconds: undefined,
-      approval: {
-        kind: 'present',
-        status: 'PENDING',
-        created_at: new Date(NOW).toISOString(),
-        createdAtMs: NOW,
-        timeout_s: 1800,
-        deadlineMs: NOW + 1_800_000,
-      },
-    });
-    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 599_000 }))
-      .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 1000 });
-    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 600_000 })).toMatchObject({ action: 'suspend' });
+  // Out-of-the-box timing: the contract's approval default (300 s) with the
+  // contract's sleep-after default (60 s). Suspension must actually engage.
+  const defaultGate = () => snapshot({
+    sleepAfterSeconds: undefined,
+    approval: {
+      kind: 'present',
+      status: 'PENDING',
+      created_at: new Date(NOW).toISOString(),
+      createdAtMs: NOW,
+      timeout_s: sharedConstants.approval_timeout_s.default,
+      deadlineMs: NOW + sharedConstants.approval_timeout_s.default * 1000,
+    },
   });
-  test('a default five-minute gate stays awake and retains its original deadline', () => {
-    const current = snapshot({
-      sleepAfterSeconds: undefined,
-      approval: {
-        kind: 'present',
-        status: 'PENDING',
-        created_at: new Date(NOW).toISOString(),
-        createdAtMs: NOW,
-        timeout_s: 300,
-        deadlineMs: NOW + 300_000,
-      },
-    });
-    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 200_000 }))
-      .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 30_000 });
-    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 240_000 }))
+  test('default timing: a 300 s gate sleeps after 60 s and wakes 60 s before its deadline', () => {
+    expect(sharedConstants.approval_timeout_s.default).toBe(300);
+    expect(sharedConstants.microvm_sleep_after_s.default).toBe(60);
+    const current = defaultGate();
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 59_000 }))
+      .toMatchObject({ action: 'wait', reason: 'suspend-grace', nextPollInMs: 1000 });
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 60_000 })).toMatchObject({ action: 'suspend' });
+    // Once the suspend intent for this gate is recorded, it stays asleep until the
+    // wake margin before the ORIGINAL deadline (300 - 60 = 240 s).
+    const asleep = { ...current, intent: { ...intent(), deadline_ms: NOW + 300_000 } };
+    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + 239_000 }))
+      .toMatchObject({ action: 'wait', reason: 'intentionally-suspended', nextPollInMs: 1000 });
+    expect(policy('SUSPENDED', { snapshot: asleep, nowMs: NOW + 240_000 }))
       .toMatchObject({ action: 'resume', reason: 'wake-deadline' });
     expect(current.approval).toMatchObject({ deadlineMs: NOW + 300_000 });
+  });
+  test('a 600 s sleep-after never suspends a default 300 s gate', () => {
+    const current = { ...defaultGate(), sleepAfterSeconds: 600 };
+    for (const elapsed of [60_000, 200_000, 239_000]) {
+      expect(policy('RUNNING', { snapshot: current, nowMs: NOW + elapsed })).toMatchObject({ action: 'wait' });
+    }
+    expect(policy('RUNNING', { snapshot: current, nowMs: NOW + 240_000 }))
+      .toMatchObject({ action: 'resume', reason: 'wake-deadline' });
   });
   test.each([0, -1, NaN, Infinity, 0.5, 3601, '30', null])('off or malformed delay %s keeps awake and repairs existing sleep', value => {
     const current = snapshot({ sleepAfterSeconds: value as number });

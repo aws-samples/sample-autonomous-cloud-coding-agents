@@ -42,7 +42,6 @@ import {
   APPROVAL_GATE_CAP_MIN,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
-  APPROVAL_TIMEOUT_S_NO_DEADLINE,
   type AttachmentRecord,
   type AttachmentUploadInstruction,
   type ChannelSource,
@@ -313,8 +312,9 @@ export async function createTaskCore(
   }
 
   // Cedar HITL — validate approval_timeout_s if supplied (§7.3 step 5).
-  // Zero retains unanswered requests. Positive explicit deadlines use the
-  // supported range; the worker's resource lifetime is managed separately.
+  // maxLifetime-based ceiling clip is applied at orchestrator
+  // invocation time; at submit time we only enforce the `[floor, cap]`
+  // envelope.
   let approvalTimeoutS: number | undefined;
   if (body.approval_timeout_s !== undefined) {
     if (typeof body.approval_timeout_s !== 'number'
@@ -326,12 +326,12 @@ export async function createTaskCore(
         requestId,
       );
     }
-    if ((body.approval_timeout_s !== APPROVAL_TIMEOUT_S_NO_DEADLINE && body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN)
+    if (body.approval_timeout_s < APPROVAL_TIMEOUT_S_MIN
         || body.approval_timeout_s > APPROVAL_TIMEOUT_S_MAX) {
       return errorResponse(
         400,
         ErrorCode.VALIDATION_ERROR,
-        `Invalid approval_timeout_s. Must be 0 (no automatic expiry), or between ${APPROVAL_TIMEOUT_S_MIN}s `
+        `Invalid approval_timeout_s. Must be between ${APPROVAL_TIMEOUT_S_MIN}s `
           + `and ${APPROVAL_TIMEOUT_S_MAX}s.`,
         requestId,
       );

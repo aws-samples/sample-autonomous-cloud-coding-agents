@@ -204,12 +204,11 @@ class MicrovmLifecycle:
     can commit a transition, and its generation check rejects late completion.
     """
 
-    def __init__(self, task_id: str, microvm_id: str, *, attempt_id: str | None = None) -> None:
+    def __init__(self, task_id: str, microvm_id: str) -> None:
         if not task_id or not microvm_id:
             raise ValueError("Lifecycle requires task and MicroVM identity")
         self.task_id = task_id
         self.microvm_id = microvm_id
-        self.attempt_id = attempt_id or task_id
         self._lock = threading.Lock()
         self._tools: set[str] = set()
         self._park: ApprovalPark | None = None
@@ -220,7 +219,6 @@ class MicrovmLifecycle:
         self._suspend_ineligible = False
         self._slept_request_id: str | None = None
         self._last_resume_park: ApprovalPark | None = None
-        self._continuation_park: ApprovalPark | None = None
 
     def _check_open(self) -> bool:
         if self._phase in {"closed", "failed"}:
@@ -306,17 +304,11 @@ class MicrovmLifecycle:
             # cached result. Its own suspend must establish a fresh safe point.
             self._last_resume_park = None
             # Local "parked" keeps this worker alive at a safe tool boundary.
-            # The coordinator's persisted PARKED continuation means source retirement.
             self._phase = "parked"
             return park
 
     async def leave_approval(self, park: ApprovalPark) -> None:
         """Remove the safe point *before* the hook changes task state/returns."""
-        with self._lock:
-            if self._continuation_park is park:
-                raise LifecycleUnavailable(
-                    "Continuation must claim task ownership before releasing tools"
-                )
         while True:
             await self.wait_until_open()
             with self._lock:
@@ -329,23 +321,15 @@ class MicrovmLifecycle:
                 return
 
     @contextmanager
-    def activity(self, *, checkpoint_safe: bool = False):
+    def activity(self):
         """Drain synchronous progress and heartbeat work before suspension.
 
         Best-effort writers must explicitly report missing/failed acknowledgments
         with progress_write_failed(). A later successful event cannot recover a
         dropped earlier event, so that failure remains latched for the task.
-        Progress events may finish during a continuation upload: they do not
-        modify the workspace, and capture drains their acknowledgments again
-        before publishing. Other activity remains paused during that upload.
         """
         with self._lock:
-            capture_progress = checkpoint_safe and self._phase == "checkpointing"
-            if (
-                not self._check_open()
-                and self._phase != "checkpoint-ready"
-                and not capture_progress
-            ):
+            if not self._check_open():
                 # Do not silently write with pre-wake credentials. The progress
                 # writer catches this like its existing best-effort failures.
                 raise LifecycleUnavailable("Guest activity is paused")
@@ -361,7 +345,7 @@ class MicrovmLifecycle:
         """Pause new approval reads and drain an already-running read safely."""
         while True:
             with self._lock:
-                if self._check_open() or self._phase == "checkpoint-ready":
+                if self._check_open():
                     self._activities += 1
                     break
             await asyncio.sleep(0.02)
@@ -381,90 +365,10 @@ class MicrovmLifecycle:
             raise ValueError("Lifecycle budget must be finite and positive")
         return time.monotonic() + seconds
 
-    @asynccontextmanager
-    async def continuation_checkpoint(self, park: ApprovalPark, *, drain_budget_s: float = 5):
-        """Hold the sole pending tool while saving a replacement-worker checkpoint.
-
-        This runs on the SDK loop before decision polling starts. It is separate
-        from the short HTTP suspend hook: a full workspace transfer may take
-        minutes. Cancellation keeps the barrier closed because a cancelled
-        ``to_thread`` capture can still be reading the workspace.
-        """
-        end = self._budget(drain_budget_s)
-        with self._lock:
-            if (
-                self._park is not park
-                or self._phase != "parked"
-                or self._tools != {park.tool_use_id}
-                or self._suspend_ineligible
-                or self._progress_failed
-            ):
-                raise LifecycleUnavailable(
-                    "Task is not safely parked for a continuation checkpoint"
-                )
-            self._phase = "checkpointing"
-            self._generation += 1
-            generation = self._generation
-        cancelled = False
-        complete = False
-        try:
-            while True:
-                with self._lock:
-                    self._assert_transition(generation, "checkpointing")
-                    if self._progress_failed:
-                        raise LifecycleUnavailable("Progress was not acknowledged")
-                    drained = self._activities == 0
-                if drained:
-                    break
-                if time.monotonic() >= end:
-                    raise TimeoutError("Progress did not drain before continuation capture")
-                await asyncio.sleep(0.02)
-            yield
-            # SDK progress can arrive while the full workspace upload awaits
-            # a thread. Do not drop it or publish before its write is known.
-            # The upload can take minutes, so this drain gets its own budget.
-            end = self._budget(drain_budget_s)
-            while True:
-                with self._lock:
-                    self._assert_transition(generation, "checkpointing")
-                    if self._progress_failed:
-                        raise LifecycleUnavailable("Progress was not acknowledged")
-                    if self._activities == 0:
-                        self._continuation_park = park
-                        complete = True
-                        break
-                if time.monotonic() >= end:
-                    raise TimeoutError("Progress did not drain after continuation capture")
-                await asyncio.sleep(0.02)
-        except BaseException as exc:
-            cancelled = not isinstance(exc, Exception)
-            raise
-        finally:
-            with self._lock:
-                if self._generation == generation and self._phase == "checkpointing":
-                    self._phase = (
-                        "failed" if cancelled else ("checkpoint-ready" if complete else "parked")
-                    )
-                    self._generation += 1
-
-    async def release_continuation(self, park: ApprovalPark) -> None:
-        """Open tools only after a conditional RUNNING claim by this same worker."""
-        while True:
-            with self._lock:
-                self._check_open()
-                if self._continuation_park is not park or self._park is not park:
-                    raise LifecycleUnavailable("Continuation approval changed")
-                if self._phase == "checkpoint-ready":
-                    self._continuation_park = None
-                    self._park = None
-                    self._phase = "active"
-                    return
-            await asyncio.sleep(0.02)
-
     async def suspend(
         self, checkpoint: Callable[[ApprovalPark], None], *, budget_s: float
     ) -> ApprovalPark:
-        """Drain progress, then require an acknowledged gate/checkpoint check.
+        """Drain progress, then require an acknowledged gate/identity check.
 
         ``checkpoint`` must synchronously verify durable task/gate identity and
         deadline and raise on any failed or uncertain write/read. Returning None
@@ -484,7 +388,7 @@ class MicrovmLifecycle:
                 return park
             if (
                 park is None
-                or self._phase not in {"parked", "checkpoint-ready"}
+                or self._phase != "parked"
                 or self._suspend_ineligible
                 or park.request_id == self._slept_request_id
                 or self._progress_failed
@@ -521,9 +425,7 @@ class MicrovmLifecycle:
             # progress may finish later; new suspension stays off after failure.
             with self._lock:
                 if self._generation == generation and self._phase == "suspending":
-                    self._phase = (
-                        "checkpoint-ready" if self._continuation_park is park else "parked"
-                    )
+                    self._phase = "parked"
                     self._suspend_ineligible = True
                     self._generation += 1
             raise
@@ -545,7 +447,7 @@ class MicrovmLifecycle:
         end = self._budget(budget_s)
         with self._lock:
             park = self._park
-            if self._phase in {"active", "parked", "checkpoint-ready"}:
+            if self._phase in {"active", "parked"}:
                 # A duplicate wake acknowledgment cannot renew the approval
                 # timeout or re-run credential refresh on an executing task.
                 return self._last_resume_park
@@ -560,7 +462,7 @@ class MicrovmLifecycle:
             reseed_random()
             with self._lock:
                 self._assert_transition(generation, "resuming")
-                self._phase = "checkpoint-ready" if self._continuation_park is park else "parked"
+                self._phase = "parked"
                 # One sleep per approval gate. A duplicate suspend must not
                 # race the newly released decision loop.
                 self._slept_request_id = park.request_id
@@ -592,7 +494,6 @@ class MicrovmLifecycle:
             self._phase = "closed"
             self._generation += 1
             self._park = None
-            self._continuation_park = None
             self._tools.clear()
 
 
@@ -600,13 +501,11 @@ _registry_lock = threading.Lock()
 _contexts: dict[str, MicrovmLifecycle] = {}
 
 
-def register_task(
-    task_id: str, microvm_id: str, *, attempt_id: str | None = None
-) -> MicrovmLifecycle:
+def register_task(task_id: str, microvm_id: str) -> MicrovmLifecycle:
     with _registry_lock:
         if _contexts:
             raise LifecycleUnavailable("A MicroVM pipeline is already registered")
-        context = MicrovmLifecycle(task_id, microvm_id, attempt_id=attempt_id)
+        context = MicrovmLifecycle(task_id, microvm_id)
         _contexts[task_id] = context
         return context
 
@@ -618,41 +517,6 @@ def get_context(task_id: str | None) -> MicrovmLifecycle | None:
 
 #: ``compute_type`` of tasks this module coordinates.
 LAMBDA_MICROVM = "lambda-microvm"
-
-
-class ContinuationState:
-    """TaskTable ``continuation.state`` values (mirrors ``ContinuationRecord`` in CDK)."""
-
-    READY = "READY"
-    FENCED = "FENCED"
-    PARKED = "PARKED"
-    STARTING = "STARTING"
-    RESTORING = "RESTORING"
-    CONSUMED = "CONSUMED"
-
-
-def continuation_bucket() -> str:
-    """The deployment's continuation bucket, or "" when continuation is not deployed."""
-    from shared_constants import SHARED_CONSTANTS
-
-    env = SHARED_CONSTANTS["microvm_platform_config"]["env_by_key"]["continuation_bucket_name"]
-    return os.environ.get(env, "")
-
-
-def continuation_context(task_id: str | None) -> MicrovmLifecycle | None:
-    """This task's MicroVM lifecycle when continuation is deployed, else None."""
-    return get_context(task_id) if continuation_bucket() else None
-
-
-def worker_closed(task_id: str | None) -> bool:
-    """True when this task's MicroVM worker can no longer run task steps.
-
-    Once the barrier is closed or failed, the coordinator owns continuation or
-    cleanup, so no deterministic post-hook may run on this worker. False for
-    every non-MicroVM task.
-    """
-    lifecycle = get_context(task_id)
-    return lifecycle is not None and lifecycle.barrier_unrecoverable()
 
 
 def get_registered_context() -> MicrovmLifecycle | None:

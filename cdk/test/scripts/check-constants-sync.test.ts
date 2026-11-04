@@ -58,14 +58,11 @@ const SCRIPT_REL = 'scripts/check-constants-sync.ts';
 const FIXTURE_FILES = [
   SCRIPT_REL,
   'contracts/constants.json',
-  'agent/pyproject.toml',
   'agent/src/policy.py',
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
   'agent/src/config.py',
-  'agent/src/payload_bootstrap.py',
   'agent/src/microvm_http.py',
-  'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
   'cdk/src/handlers/shared/microvm/image-capability.ts',
   'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
@@ -128,31 +125,6 @@ function patchContract(root: string, mutate: (json: Record<string, any>) => void
 }
 
 describe('check-constants-sync', () => {
-  describe('approval timeout no-deadline sentinel', () => {
-    test.each([1, 30])('rejects no_deadline_sentinel=%s', sentinel => {
-      const result = runInMutatedRepo(root => patchContract(root, json => {
-        json.approval_timeout_s.no_deadline_sentinel = sentinel;
-      }));
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('no_deadline_sentinel must be 0');
-    });
-    test('requires the sentinel field', () => {
-      const result = runInMutatedRepo(root => patchContract(root, json => {
-        delete json.approval_timeout_s.no_deadline_sentinel;
-      }));
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('approval_timeout_s.{min,max,default,no_deadline_sentinel}');
-    });
-  });
-
-  test('rejects an SDK upgrade without checkpoint compatibility verification', () => {
-    const result = runInMutatedRepo(root => {
-      write(root, 'agent/pyproject.toml', read(root, 'agent/pyproject.toml')
-        .replace(/claude-agent-sdk==[0-9.]+/, 'claude-agent-sdk==99.0.0'));
-    });
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('claude-agent-sdk pin must match');
-  });
   // Node's type-stripping runs the script from source; the suite is a handful of
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
@@ -185,30 +157,6 @@ describe('check-constants-sync', () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(name);
       expect(result.stderr).toContain('Cross-language constants drift detected');
-    });
-  });
-
-  describe('payload bootstrap contract', () => {
-    test.each([
-      ['max_payload_bytes', 0],
-      ['minimum_url_lifetime_seconds', 901],
-      ['manifest_prefix', '../'],
-      ['launch_filename', 'payload.json'],
-    ])('rejects unsafe %s', (key, value) => {
-      const result = runInMutatedRepo(root => patchContract(root, json => {
-        json.payload_bootstrap[key] = value;
-      }));
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('payload_bootstrap');
-    });
-
-    test.each([
-      ['agent/src/payload_bootstrap.py', 'CONTRACT = {}'],
-      ['cdk/src/handlers/shared/payload-bootstrap.ts', 'export const PAYLOAD_BOOTSTRAP = {};'],
-    ])('rejects a consumer with its own copy: %s', (file, source) => {
-      const result = runInMutatedRepo(root => write(root, file, source));
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('consumers must read the shared contract');
     });
   });
 

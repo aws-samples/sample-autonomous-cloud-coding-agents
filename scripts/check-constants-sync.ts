@@ -49,12 +49,8 @@ const POLICY_PY = path.join(REPO_ROOT, 'agent/src/policy.py');
 const JIRA_REACTIONS_PY = path.join(REPO_ROOT, 'agent/src/jira_reactions.py');
 const SERVER_PY = path.join(REPO_ROOT, 'agent/src/server.py');
 const CONFIG_PY = path.join(REPO_ROOT, 'agent/src/config.py');
-const PAYLOAD_BOOTSTRAP_PY = path.join(REPO_ROOT, 'agent/src/payload_bootstrap.py');
 const MICROVM_HTTP_PY = path.join(REPO_ROOT, 'agent/src/microvm_http.py');
-const PAYLOAD_BOOTSTRAP_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/payload-bootstrap.ts');
-const PYTHON_CONSUMERS = [
-  POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, PAYLOAD_BOOTSTRAP_PY, MICROVM_HTTP_PY,
-];
+const PYTHON_CONSUMERS = [POLICY_PY, JIRA_REACTIONS_PY, SERVER_PY, CONFIG_PY, MICROVM_HTTP_PY];
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
 const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm/image-capability.ts');
 const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
@@ -207,7 +203,7 @@ function main(): number {
   // Sanity: confirm the JSON is parseable and shaped as expected.
   let json: {
     approval_gate_cap?: { min: number; max: number; default: number };
-    approval_timeout_s?: { min: number; max: number; default: number; no_deadline_sentinel: number };
+    approval_timeout_s?: { min: number; max: number; default: number };
     jira_app_actor?: { min_secret_length: number; forge_webtrigger_suffix: string };
     microvm_platform_config?: {
       env_by_key: Record<string, string>;
@@ -228,26 +224,6 @@ function main(): number {
       hook_port: number;
       maximum_duration_seconds: number;
     };
-    microvm_continuation?: {
-      version: number;
-      lease_key_prefix: string;
-      object_key_prefix: string;
-      max_manifest_bytes: number;
-      max_workspace_bytes: number;
-      max_conversation_bytes: number;
-      park_after_seconds: number;
-      retirement_margin_seconds: number;
-      verified_sdk_version: string;
-    };
-    payload_bootstrap?: {
-      version: number;
-      manifest_prefix: string;
-      launch_filename: string;
-      max_manifest_bytes: number;
-      max_payload_bytes: number;
-      url_ttl_seconds: number;
-      minimum_url_lifetime_seconds: number;
-    };
   };
   try {
     json = JSON.parse(fs.readFileSync(CONSTANTS_JSON, 'utf-8'));
@@ -263,9 +239,8 @@ function main(): number {
   }
 
   const ats = json.approval_timeout_s;
-  if (!ats || typeof ats.min !== 'number' || typeof ats.max !== 'number' || typeof ats.default !== 'number'
-    || typeof ats.no_deadline_sentinel !== 'number') {
-    console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default,no_deadline_sentinel}`);
+  if (!ats || typeof ats.min !== 'number' || typeof ats.max !== 'number' || typeof ats.default !== 'number') {
+    console.error(`${CONSTANTS_JSON} is missing approval_timeout_s.{min,max,default}`);
     return 1;
   }
   const jiraAppActor = json.jira_app_actor;
@@ -287,12 +262,7 @@ function main(): number {
   if (agc.default < agc.min) invariantErrors.push('approval_gate_cap.default must be >= min');
   if (agc.max < agc.default) invariantErrors.push('approval_gate_cap.max must be >= default');
   if (ats.min <= 0) invariantErrors.push('approval_timeout_s.min must be > 0');
-  // The sentinel means "no automatic expiry". Consumers test for it before the
-  // min/max range, so it must sit below the floor and is pinned to 0 on the wire.
-  if (ats.no_deadline_sentinel !== 0) invariantErrors.push('approval_timeout_s.no_deadline_sentinel must be 0');
-  if (ats.default !== ats.no_deadline_sentinel && ats.default < ats.min) {
-    invariantErrors.push('approval_timeout_s.default must be no_deadline_sentinel or >= min');
-  }
+  if (ats.default < ats.min) invariantErrors.push('approval_timeout_s.default must be >= min');
   if (ats.max < ats.default) invariantErrors.push('approval_timeout_s.max must be >= default');
   if (jiraAppActor.min_secret_length < 32) {
     invariantErrors.push('jira_app_actor.min_secret_length must be >= 32');
@@ -411,23 +381,6 @@ function main(): number {
     || typeof lifecycle.image_protocol_env !== 'string' || !/^ABCA_MICROVM_[A-Z0-9_]+$/.test(lifecycle.image_protocol_env)) {
     invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port, duration within 1–28800 seconds and ABCA_MICROVM_ marker name');
   }
-  const continuation = json.microvm_continuation;
-  const sdkPins = [...fs.readFileSync(path.join(REPO_ROOT, 'agent/pyproject.toml'), 'utf8')
-    .matchAll(/^\s*"claude-agent-sdk==([^"]+)"/gm)];
-  if (sdkPins.length !== 1 || sdkPins[0][1] !== continuation?.verified_sdk_version) {
-    invariantErrors.push('claude-agent-sdk pin must match microvm_continuation.verified_sdk_version; verify checkpoint compatibility before upgrading both');
-  }
-  if (!continuation || !Number.isSafeInteger(continuation.version) || continuation.version <= 0
-    || continuation.lease_key_prefix !== 'worker-lease#' || continuation.object_key_prefix !== 'continuations/'
-    || !Number.isSafeInteger(continuation.max_manifest_bytes) || continuation.max_manifest_bytes <= 0
-    || !Number.isSafeInteger(continuation.max_workspace_bytes) || continuation.max_workspace_bytes <= 0
-    || !Number.isSafeInteger(continuation.max_conversation_bytes) || continuation.max_conversation_bytes <= 0
-    || !Number.isInteger(continuation.park_after_seconds) || continuation.park_after_seconds <= 0
-    || !Number.isInteger(continuation.retirement_margin_seconds) || continuation.retirement_margin_seconds <= 0
-    || !lifecycle || continuation.park_after_seconds + continuation.retirement_margin_seconds >= lifecycle.maximum_duration_seconds
-    || !/^\d+\.\d+\.\d+$/.test(continuation.verified_sdk_version)) {
-    invariantErrors.push('microvm_continuation requires stable prefixes, a positive version/size, verified SDK version and retirement within the worker lifetime');
-  }
   const BUDGET_FIELDS = [
     'ready_hook_timeout_seconds',
     'warmup_total_budget_seconds',
@@ -465,26 +418,6 @@ function main(): number {
     );
   }
 
-  const bootstrap = json.payload_bootstrap;
-  const bootstrapNumbers = [
-    'version', 'max_manifest_bytes', 'max_payload_bytes',
-    'url_ttl_seconds', 'minimum_url_lifetime_seconds',
-  ] as const;
-  if (!bootstrap || bootstrapNumbers.some(key => !Number.isInteger(bootstrap[key]) || bootstrap[key] <= 0)
-    || typeof bootstrap.manifest_prefix !== 'string' || !/^[a-z][a-z0-9_-]*\/$/.test(bootstrap.manifest_prefix)
-    || typeof bootstrap.launch_filename !== 'string' || !/^[a-z][a-z0-9_-]*\.json$/.test(bootstrap.launch_filename)
-    || bootstrap.launch_filename === 'payload.json') {
-    invariantErrors.push('payload_bootstrap must define positive integer bounds and distinct safe object paths');
-  } else if (bootstrap.minimum_url_lifetime_seconds > bootstrap.url_ttl_seconds
-    || bootstrap.max_manifest_bytes > bootstrap.max_payload_bytes) {
-    invariantErrors.push('payload_bootstrap minimum lifetime/manifest size exceeds its corresponding maximum');
-  }
-  // Check that both implementations still read the shared block. Literal copies
-  // would allow a security cap or protocol version to drift across languages.
-  if (!/CONTRACT\s*=\s*SHARED_CONSTANTS\["payload_bootstrap"\]/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_PY, 'utf8'))
-    || !/PAYLOAD_BOOTSTRAP\s*=\s*constants\.payload_bootstrap/.test(fs.readFileSync(PAYLOAD_BOOTSTRAP_TS, 'utf8'))) {
-    invariantErrors.push('payload_bootstrap consumers must read the shared contract');
-  }
 
   if (invariantErrors.length > 0) {
     console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);

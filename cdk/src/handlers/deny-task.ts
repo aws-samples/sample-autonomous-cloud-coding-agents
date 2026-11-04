@@ -66,35 +66,25 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
 export async function handler(
   event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
 ): Promise<APIGatewayProxyResult> {
-  return recordDenialForUser({
-    userId: extractUserId(event), taskId: event.pathParameters?.task_id, body: event.body,
-  }, context);
-}
-
-/** Shared decision path. Callers must authenticate and map the platform user first. */
-export async function recordDenialForUser(
-  input: { userId: string | null; taskId?: string; body?: string | null; decisionSource?: string },
-  context?: Pick<Context, 'getRemainingTimeInMillis'>,
-): Promise<APIGatewayProxyResult> {
   const invocationStartedMs = Date.now();
   const requestId = ulid();
 
   try {
     // 1. Auth
-    const callerUserId = input.userId;
+    const callerUserId = extractUserId(event);
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
     // 2. Path + body
-    const taskId = input.taskId;
+    const taskId = event.pathParameters?.task_id;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
     let parsed: DenyRequest | null = null;
     try {
-      parsed = input.body ? JSON.parse(input.body) as DenyRequest : null;
+      parsed = event.body ? JSON.parse(event.body) as DenyRequest : null;
     } catch {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -163,8 +153,7 @@ export async function recordDenialForUser(
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :denied, decided_at = :now, deny_reason = :reason'
-                  + (input.decisionSource ? ', decision_source = :source' : ''),
+                'SET #status = :denied, decided_at = :now, deny_reason = :reason',
               ConditionExpression:
                 'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
                   + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
@@ -176,7 +165,6 @@ export async function recordDenialForUser(
                 ':reason': sanitizedReason,
                 ':caller': callerUserId,
                 ':epoch': nowEpoch,
-                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },

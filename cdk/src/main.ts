@@ -64,8 +64,7 @@ export interface BuildAppOptions {
  * Async because AgentCore-supported availability zones are resolved from the
  * account's zone mapping at synth time (live `DescribeAvailabilityZones` +
  * `sts:GetCallerIdentity`) when a concrete account/region is bound. Env-agnostic
- * synth does not call AWS; explicit overrides in supported regions are checked
- * against the account's EC2 zone mapping.
+ * synth and the validated context override never touch AWS.
  */
 export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const app = new App(options.appProps);

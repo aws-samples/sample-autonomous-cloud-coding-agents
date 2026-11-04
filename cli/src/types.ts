@@ -453,7 +453,7 @@ export interface CreateTaskResponse extends TaskDetail {
 
 /** Create task request body for POST /v1/tasks. */
 export interface CreateTaskRequest {
-  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = 600). Does not extend approval deadlines. */
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the platform default). Does not extend approval deadlines. */
   readonly microvm_sleep_after_s?: number;
   /** Optional since #248 Phase 3: repo-less workflows submit without it. */
   readonly repo?: string;
@@ -475,8 +475,7 @@ export interface CreateTaskRequest {
    */
   readonly trace?: boolean;
   /** Cedar HITL per-task default approval timeout (design §7.3 step 5).
-   *  Zero retains unanswered requests; positive values use
-   *  ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
+   *  Valid range ``[APPROVAL_TIMEOUT_S_MIN, APPROVAL_TIMEOUT_S_MAX]``. */
   readonly approval_timeout_s?: number;
   /** Cedar HITL pre-approval allowlist seeded at task start (§7.3 step 4).
    *  Each entry must be a valid ``ApprovalScope``. */
@@ -747,7 +746,6 @@ export type ApprovalStatus =
   | 'PENDING'
   | 'APPROVED'
   | 'DENIED'
-  | 'CANCELLED'
   | 'TIMED_OUT'
   | 'STRANDED';
 
@@ -799,7 +797,7 @@ export interface PendingApprovalSummary {
   readonly reason: string;
   readonly created_at: string;
   readonly timeout_s: number;
-  readonly expires_at: string | null;
+  readonly expires_at: string;
   /** Cedar rule ids that matched this request — shown by
    *  ``bgagent pending`` so users can see which rule fired without
    *  spelunking TaskEventsTable. */
@@ -845,15 +843,12 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
 /** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 0;
-
-/** approval_timeout_s value meaning "no automatic expiry" (below the floor). */
-export const APPROVAL_TIMEOUT_S_NO_DEADLINE = 0;
+export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
 
 /** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
 export const MICROVM_SLEEP_AFTER_S_MIN = 0;
 export const MICROVM_SLEEP_AFTER_S_MAX = 3600;
-export const MICROVM_SLEEP_AFTER_S_DEFAULT = 600;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = 60;
 
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */

@@ -502,7 +502,7 @@ class _ProgressWriter:
             self._put_event_best_effort(event_type, metadata)
             return
         try:
-            with lifecycle.activity(checkpoint_safe=True):
+            with lifecycle.activity():
                 acknowledged = False
                 try:
                     acknowledged = self._put_event_best_effort(event_type, metadata)

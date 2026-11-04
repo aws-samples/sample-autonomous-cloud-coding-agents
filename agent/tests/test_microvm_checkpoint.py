@@ -105,38 +105,6 @@ def state(monkeypatch):
 
 
 class TestCheckpoint:
-    @pytest.mark.parametrize("repo", ["owner/repo", ""])
-    def test_retained_request_can_suspend_and_resume_with_explicit_null_deadline(self, state, repo):
-        from hooks import _ApprovalDeadline
-
-        original, task, approval, client = state
-        assert original.record is not None
-        record = replace(original.record, timeout_s=0, repo=repo)
-        park = replace(
-            original,
-            record=record,
-            deadline=_ApprovalDeadline.from_recorded(record.created_at, 0),
-        )
-        new_task, new_approval = make_rows(park)
-        task.update(new_task)
-        if not repo:
-            task.pop("repo")
-        approval.update(new_approval)
-        checkpoint.checkpoint_before_suspend(park)
-        operations = client.transact_write_items.call_args.kwargs["TransactItems"]
-        marker = {
-            key: TypeDeserializer().deserialize(value)
-            for key, value in operations[2]["Put"]["Item"].items()
-        }
-        assert marker["metadata"]["approval_deadline_ms"] is None
-        assert task["microvm_lifecycle"]["deadline_ms"] is None
-        task["microvm_lifecycle"].update(action="resume", generation="resume-generation")
-        approval["status"] = "APPROVED"
-        checkpoint.refresh_and_reconcile_after_resume(park)
-        assert park.deadline.remaining_s() == float("inf")
-        assert approval["status"] == "APPROVED"
-        assert len(client.transact_write_items.call_args.kwargs["TransactItems"]) == 2
-
     @pytest.mark.parametrize("deadline_value", [0, True, "null", "missing"])
     def test_retained_request_rejects_non_null_or_missing_intent_deadline(
         self, state, deadline_value

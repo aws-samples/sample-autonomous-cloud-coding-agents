@@ -18,9 +18,9 @@
  */
 
 import { ECSClient, RunTaskCommand, DescribeTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
-import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
 import { DEFAULT_MAX_TURNS } from '../validation';
@@ -31,6 +31,14 @@ function getClient(): ECSClient {
     sharedClient = makeClient(ECSClient);
   }
   return sharedClient;
+}
+
+let sharedS3Client: S3Client | undefined;
+function getS3Client(): S3Client {
+  if (!sharedS3Client) {
+    sharedS3Client = makeClient(S3Client);
+  }
+  return sharedS3Client;
 }
 
 const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
@@ -71,23 +79,45 @@ export function toTaskDefinitionFamily(ref: string): string {
 const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP;
 const ECS_CONTAINER_NAME = process.env.ECS_CONTAINER_NAME ?? 'AgentContainer';
 const ECS_PAYLOAD_BUCKET = process.env.ECS_PAYLOAD_BUCKET;
-const ECS_OVERRIDES_LIMIT_BYTES = 8192;
 
-function safeLaunchError(error: unknown): Error {
-  const safe = new Error(redactPayloadUrls(error instanceof Error ? error.message : String(error)));
-  safe.name = error instanceof Error ? error.name : 'Error';
-  return safe;
+/**
+ * Inline-payload size (bytes) above which we warn that RunTask will likely
+ * reject the call when no payload bucket is configured. ECS caps the TOTAL
+ * containerOverrides blob at 8192 bytes; the other env vars + command consume
+ * some of that, so 6 KB of payload is the practical danger line.
+ */
+const INLINE_PAYLOAD_WARN_BYTES = 6144;
+
+/**
+ * S3 object key for a task's ECS payload. One object per task under its own
+ * task-id prefix; deleted by the orchestrator at finalize (see
+ * ``deleteEcsPayload``), with the bucket's 1-day lifecycle rule as a backstop.
+ */
+export function ecsPayloadKey(taskId: string): string {
+  return `${taskId}/payload.json`;
 }
 
 /**
- * Delete a task's ECS payload and private launch reference. A failed delete must never
+ * Delete a task's ECS payload object. Best-effort: a failed delete must never
  * fail the task — the bucket's 1-day lifecycle rule reaps it regardless. Called
  * from the orchestrator's ``finalize`` step once the task is terminal. No-ops
  * when the payload bucket isn't configured (AgentCore-only deployments).
  */
 export async function deleteEcsPayload(taskId: string): Promise<void> {
   if (!ECS_PAYLOAD_BUCKET) return;
-  await deletePayloadReference(ECS_PAYLOAD_BUCKET, taskId);
+  try {
+    await getS3Client().send(new DeleteObjectCommand({
+      Bucket: ECS_PAYLOAD_BUCKET,
+      Key: ecsPayloadKey(taskId),
+    }));
+    logger.info('Deleted ECS payload object', { task_id: taskId });
+  } catch (err) {
+    // Non-fatal — the lifecycle rule is the backstop.
+    logger.warn('Failed to delete ECS payload object (non-fatal)', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export class EcsComputeStrategy implements ComputeStrategy {
@@ -147,21 +177,46 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     // The ECS container's default CMD starts the FastAPI server (uvicorn) which
     // waits for HTTP POST to /invocations — but in standalone ECS nobody sends
-    // that request. We override the container command to invoke run_task_from_payload()
+    // that request. We override the container command to invoke run_task()
     // directly with the full orchestrator payload (including hydrated_context).
     // This avoids the server entirely and runs the agent in batch mode.
-    if (!ECS_PAYLOAD_BUCKET) {
-      throw new Error('PAYLOAD_BOOTSTRAP_INVALID: ECS_PAYLOAD_BUCKET is required; deploy matching infrastructure');
+    const payloadJson = JSON.stringify(payload);
+
+    // The payload (especially hydrated_context) routinely exceeds the 8192-byte
+    // cap that ECS RunTask enforces on the TOTAL containerOverrides blob, which
+    // rejected the call with InvalidParameterException. Write the payload to S3
+    // and pass only a small pointer (AGENT_PAYLOAD_S3_URI); the container fetches
+    // it on boot. The inline AGENT_PAYLOAD remains as a fallback for small
+    // payloads / deployments without a payload bucket configured.
+    let payloadS3Uri: string | undefined;
+    if (ECS_PAYLOAD_BUCKET) {
+      const key = ecsPayloadKey(taskId);
+      await getS3Client().send(new PutObjectCommand({
+        Bucket: ECS_PAYLOAD_BUCKET,
+        Key: key,
+        Body: payloadJson,
+        ContentType: 'application/json',
+      }));
+      payloadS3Uri = `s3://${ECS_PAYLOAD_BUCKET}/${key}`;
+      logger.info('Wrote ECS payload to S3', {
+        task_id: taskId,
+        bytes: payloadJson.length,
+        uri: payloadS3Uri,
+      });
+    } else if (payloadJson.length > INLINE_PAYLOAD_WARN_BYTES) {
+      // No bucket configured AND the payload is large enough that the inline
+      // path will almost certainly blow the 8192-byte overrides cap. Surface a
+      // clear cause rather than a raw InvalidParameterException from RunTask.
+      logger.warn('ECS payload is large but ECS_PAYLOAD_BUCKET is not set — RunTask may reject it (see #502)', {
+        task_id: taskId,
+        bytes: payloadJson.length,
+      });
     }
-    const reference = await preparePayloadReference({
-      bucket: ECS_PAYLOAD_BUCKET, taskId, backend: 'ecs', payload,
-    }).catch((error: unknown) => {
-      throw safeLaunchError(error);
-    });
 
     const containerEnv = [
       { name: 'TASK_ID', value: taskId },
       { name: 'REPO_URL', value: String(payload.repo_url ?? '') },
+      ...(payload.prompt ? [{ name: 'TASK_DESCRIPTION', value: String(payload.prompt) }] : []),
       ...(payload.issue_number ? [{ name: 'ISSUE_NUMBER', value: String(payload.issue_number) }] : []),
       // Single source of truth with the hydrate path in `orchestrator.ts`, which
       // resolves the same default via `DEFAULT_MAX_TURNS`. A literal here would
@@ -172,34 +227,47 @@ export class EcsComputeStrategy implements ComputeStrategy {
       ...(blueprintConfig.model_id ? [{ name: 'ANTHROPIC_MODEL', value: blueprintConfig.model_id }] : []),
       ...(blueprintConfig.system_prompt_overrides ? [{ name: 'SYSTEM_PROMPT_OVERRIDES', value: blueprintConfig.system_prompt_overrides }] : []),
       { name: 'CLAUDE_CODE_USE_BEDROCK', value: '1' },
-      { name: 'AGENT_PAYLOAD_REF', value: JSON.stringify(reference) },
+      // Prefer the S3 pointer; fall back to the inline payload when no bucket is
+      // configured (keeps small-payload / AgentCore-only deployments working with
+      // no behavior change).
+      ...(payloadS3Uri
+        ? [{ name: 'AGENT_PAYLOAD_S3_URI', value: payloadS3Uri }]
+        : [{ name: 'AGENT_PAYLOAD', value: payloadJson }]),
       ...(payload.github_token_secret_arn
         ? [{ name: 'GITHUB_TOKEN_SECRET_ARN', value: String(payload.github_token_secret_arn) }]
         : []),
       ...(payload.memory_id ? [{ name: 'MEMORY_ID', value: String(payload.memory_id) }] : []),
     ];
 
-    // Consume the one-object capability before importing/running the pipeline.
-    // The helper removes it from os.environ so repo subprocesses do not inherit it.
+    // Override the container command to run a Python one-liner that:
+    // 1. Loads the payload — from S3 (AGENT_PAYLOAD_S3_URI) when set, else the
+    //    inline AGENT_PAYLOAD env var (fallback).
+    // 2. Calls entrypoint.run_task_from_payload(p), which maps the WHOLE payload
+    //    dict to run_task's signature (rename prompt→task_description /
+    //    model_id→anthropic_model, filter to accepted params, coerce str/int).
+    //    This replaces an older hand-listed kwarg subset that silently dropped
+    //    fields such as channel_source/channel_metadata (which meant no
+    //    Linear/Jira reactions or channel MCP on ECS), build_command,
+    //    cedar_policies, base_branch/merge_branches, attachments, trace, user_id,
+    //    etc. Single source of truth in the agent, unit-tested (see
+    //    test_run_task_from_payload).
+    // 3. Exits with code 0 on success, 1 on failure.
+    // This bypasses the uvicorn server entirely — no HTTP, no OTEL noise.
     const bootCommand = [
       'python', '-c',
-      'import sys; sys.path.insert(0, "/app/src"); '
-      + 'from payload_bootstrap import load_ecs_payload; p = load_ecs_payload(); '
+      'import json, os, sys; '
+      + 'sys.path.insert(0, "/app/src"); '
       + 'from entrypoint import run_task_from_payload; '
+      + '_uri = os.environ.get("AGENT_PAYLOAD_S3_URI"); '
+      + 'p = ('
+      + 'json.loads(__import__("boto3").client("s3").get_object('
+      + 'Bucket=_uri.split("/",3)[2], Key=_uri.split("/",3)[3])["Body"].read()) '
+      + 'if _uri else json.loads(os.environ["AGENT_PAYLOAD"])'
+      + '); '
       + 'r = run_task_from_payload(p); '
       + 'sys.exit(0 if r.get("status")=="success" else 1)',
     ];
 
-    const overrides = {
-      containerOverrides: [{
-        name: ECS_CONTAINER_NAME,
-        environment: containerEnv,
-        command: bootCommand,
-      }],
-    };
-    if (Buffer.byteLength(JSON.stringify(overrides), 'utf8') > ECS_OVERRIDES_LIMIT_BYTES) {
-      throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: ECS container overrides exceed 8192 bytes');
-    }
     const command = new RunTaskCommand({
       cluster: ECS_CLUSTER_ARN,
       taskDefinition,
@@ -220,17 +288,21 @@ export class EcsComputeStrategy implements ComputeStrategy {
           assignPublicIp: 'DISABLED',
         },
       },
-      overrides,
+      overrides: {
+        containerOverrides: [{
+          name: ECS_CONTAINER_NAME,
+          environment: containerEnv,
+          command: bootCommand,
+        }],
+      },
     });
 
-    const result = await getClient().send(command).catch((error: unknown) => {
-      throw safeLaunchError(error);
-    });
+    const result = await getClient().send(command);
 
     const ecsTask = result.tasks?.[0];
     if (!ecsTask?.taskArn) {
       const failures = result.failures?.map(f => `${f.arn}: ${f.reason}`).join('; ') ?? 'unknown';
-      throw new Error(`ECS RunTask returned no task: ${redactPayloadUrls(failures)}`);
+      throw new Error(`ECS RunTask returned no task: ${failures}`);
     }
 
     logger.info('ECS Fargate task started', {

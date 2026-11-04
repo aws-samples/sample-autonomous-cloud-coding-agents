@@ -226,7 +226,7 @@ export interface TaskApiProps {
   readonly attachmentsBucket?: s3.IBucket;
 
   /**
-   * User concurrency table for the advisory confirm-uploads pre-check.
+   * User concurrency table for admission control during confirm-uploads.
    * Required when attachmentsBucket is provided.
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
@@ -259,8 +259,6 @@ export interface TaskApiProps {
  * - DELETE /api-keys/{key_id}    → deleteApiKey (Cognito)
  */
 export class TaskApi extends Construct {
-  private readonly approvalDecisionFunctions: lambda.NodejsFunction[] = [];
-
   /**
    * The API Gateway REST API.
    */
@@ -654,9 +652,6 @@ export class TaskApi extends Construct {
     });
 
     const cancelTaskEnv: Record<string, string> = { ...commonEnv };
-    if (props.taskApprovalsTable) {
-      cancelTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
-    }
     const stopSessionArn = props.agentCoreStopSessionRuntimeArn;
     if (stopSessionArn) {
       cancelTaskEnv.RUNTIME_ARN = stopSessionArn;
@@ -672,8 +667,10 @@ export class TaskApi extends Construct {
       architecture: Architecture.ARM_64,
       environment: cancelTaskEnv,
       bundling: commonBundling,
-      // Cancel reads state, atomically closes an unanswered approval, stops
-      // compute and writes an event. The state operation has its own 5s bound.
+      // Cancel performs: DDB GetItem + DDB UpdateItem + ECS StopTask or
+      // AgentCore StopRuntimeSession + DDB PutItem.  The default 3s timeout
+      // is not enough once cold-start TLS handshakes for bedrock-agentcore
+      // are added.  15s gives comfortable headroom.
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
       memorySize: API_HANDLER_MEMORY_MB,
     });
@@ -712,7 +709,6 @@ export class TaskApi extends Construct {
     props.taskEventsTable.grantReadWriteData(createTaskFn);
     props.taskTable.grantReadWriteData(cancelTaskFn);
     props.taskEventsTable.grantReadWriteData(cancelTaskFn);
-    props.taskApprovalsTable?.grant(cancelTaskFn, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
 
     if (stopSessionArn) {
       cancelTaskFn.addToRolePolicy(new iam.PolicyStatement({
@@ -735,9 +731,9 @@ export class TaskApi extends Construct {
 
     // ADR-021: cancelling a `lambda-microvm` task must actively terminate the
     // MicroVM — leaving it to the 8-hour `maximumDurationInSeconds` cap would
-    // keep running compute or retained snapshots billable. Conditional for the
-    // same reason the AgentCore and ECS grants above are: a deployment without
-    // the backend gets no grant.
+    // keep billing 16 vCPU and would hold account memory quota that gates
+    // admission of new tasks. Conditional for the same reason the AgentCore and
+    // ECS grants above are: a deployment without the backend gets no grant.
     //
     // ONLY `lambda:TerminateMicrovm`. `cancel-task.ts` sends
     // `TerminateMicrovmCommand` and nothing else — it does not read MicroVM
@@ -837,7 +833,7 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(confirmUploadsFn);
       props.attachmentsBucket.grantReadWrite(confirmUploadsFn);
       props.attachmentsBucket.grantDelete(confirmUploadsFn);
-      props.userConcurrencyTable.grantReadData(confirmUploadsFn);
+      props.userConcurrencyTable.grantReadWriteData(confirmUploadsFn);
 
       if (props.orchestratorFunctionArn) {
         confirmUploadsFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1000,10 +996,6 @@ export class TaskApi extends Construct {
         ...commonEnv,
         TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
       };
-      const decisionBundling = {
-        ...commonBundling,
-        externalModules: commonBundling.externalModules?.filter(name => name !== '@aws-sdk/client-lambda'),
-      };
 
       // ApproveTaskFn — POST /tasks/{task_id}/approve
       const approveTaskFn = new lambda.NodejsFunction(this, 'ApproveTaskFn', {
@@ -1012,7 +1004,7 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: decisionBundling,
+        bundling: commonBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
@@ -1027,14 +1019,13 @@ export class TaskApi extends Construct {
         runtime: Runtime.NODEJS_24_X,
         architecture: Architecture.ARM_64,
         environment: approvalEnv,
-        bundling: decisionBundling,
+        bundling: commonBundling,
         timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
         memorySize: API_HANDLER_MEMORY_MB,
       });
       props.taskTable.grantReadWriteData(denyTaskFn);
       props.taskApprovalsTable.grantReadWriteData(denyTaskFn);
       props.taskEventsTable.grantReadWriteData(denyTaskFn);
-      this.approvalDecisionFunctions.push(approveTaskFn, denyTaskFn);
       if (props.lambdaMicrovmImageArn) {
         for (const decisionFn of [approveTaskFn, denyTaskFn]) {
           decisionFn.addToRolePolicy(new iam.PolicyStatement({
@@ -1055,7 +1046,6 @@ export class TaskApi extends Construct {
         timeout: Duration.seconds(10),
         memorySize: API_HANDLER_MEMORY_MB,
       });
-      props.taskTable.grant(getPendingFn, 'dynamodb:BatchGetItem');
       // Least-privilege: GetPendingFn only reads (Query on
       // user_id-status-index for the user's pending rows) and writes
       // a synthetic ``RATE#<user_id>#PENDING`` rate-limit row
@@ -1454,22 +1444,5 @@ export class TaskApi extends Construct {
         reason: 'AmazonAPIGatewayPushToCloudWatchLogs is the AWS-recommended managed policy for API Gateway CloudWatch logging',
       },
     ], true);
-  }
-
-  /** Wire after the coordinator and bucket exist, avoiding a construction-order cycle. */
-  public enableMicrovmContinuations(
-    bucketName: string, coordinatorArn: string, concurrencyTable: dynamodb.ITable,
-    maxConcurrentTasksPerUser: number,
-  ): void {
-    for (const fn of this.approvalDecisionFunctions) {
-      fn.addEnvironment('CONTINUATION_BUCKET_NAME', bucketName);
-      fn.addEnvironment('ORCHESTRATOR_FUNCTION_ARN', coordinatorArn);
-      fn.addEnvironment('USER_CONCURRENCY_TABLE_NAME', concurrencyTable.tableName);
-      fn.addEnvironment('MAX_CONCURRENT_TASKS_PER_USER', String(maxConcurrentTasksPerUser));
-      concurrencyTable.grantReadWriteData(fn);
-      fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ['lambda:InvokeFunction'], resources: [`${coordinatorArn}:*`],
-      }));
-    }
   }
 }

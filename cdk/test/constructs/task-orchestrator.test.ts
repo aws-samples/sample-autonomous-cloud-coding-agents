@@ -36,7 +36,6 @@ interface StackOverrides {
   /** ADR-021 P2: the identifiers the orchestrator forwards as `platform_config`. */
   agentPlatformConfig?: {
     taskApprovalsTableName: string;
-    approvalRequestsApiUrl?: string;
     nudgesTableName: string;
     logGroupName: string;
     artifactsBucketName: string;
@@ -847,28 +846,18 @@ describe('TaskOrchestrator with the Lambda MicroVMs backend (ADR-021)', () => {
     expect(actions.has('lambda:CreateMicrovmShellAuthToken')).toBe(false);
   });
 
-  test('can upload payloads and delete only task payload objects at finalize', () => {
+  test('can upload payloads and delete them at finalize, but never reads them back', () => {
     const payloadStatements = Object.values(template.findResources('AWS::IAM::Policy'))
       .flatMap(p => p.Properties.PolicyDocument.Statement as Array<{
         Action: string | string[];
         Resource: unknown;
       }>)
       .filter(s => JSON.stringify(s.Resource).includes('MicrovmPayloadBucket'));
-
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    expect(actions).toContain('s3:DeleteObject');
-    expect(actions).toContain('s3:GetObject');
-    expect(actions.filter(action => action.startsWith('s3:List'))).toEqual(['s3:ListBucket']);
-    const list = payloadStatements.find(s => s.Action === 's3:ListBucket');
-    expect(list!.Resource).toEqual({ 'Fn::GetAtt': [expect.stringMatching(/^MicrovmPayloadBucket/), 'Arn'] });
-    const deletes = payloadStatements.filter(s =>
-      (Array.isArray(s.Action) ? s.Action : [s.Action]).some(action => action.startsWith('s3:Delete')));
-    expect(deletes).toHaveLength(1);
-    expect(deletes[0]!.Action).toEqual(['s3:GetObject', 's3:DeleteObject']);
-    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/payload.json');
-    expect(JSON.stringify(deletes[0]!.Resource)).toContain('/*/launch.json');
-    expect(JSON.stringify(deletes[0]!.Resource)).not.toContain('/bootstrap/*');
+    expect(actions.some(action => action.startsWith('s3:DeleteObject'))).toBe(true);
+    // The MicroVM execution role is the only reader of a task's payload.
+    expect(actions.some(action => action.startsWith('s3:GetObject'))).toBe(false);
   });
 
   test('adds no MicroVM statements when microvmConfig is omitted', () => {
@@ -892,10 +881,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
    * NAME, grants nothing" property can be asserted against actual logical IDs
    * rather than string literals.
    */
-  function createPlatformConfigStack(
-    withConfig: boolean,
-    approvalRequestsApiUrl = 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
-  ): { template: Template } {
+  function createPlatformConfigStack(withConfig: boolean): { template: Template } {
     const app = new App();
     const stack = new Stack(app, 'TestStack', {
       env: { account: '123456789012', region: 'us-east-1' },
@@ -917,7 +903,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       ...(withConfig && {
         agentPlatformConfig: {
           taskApprovalsTableName: approvalsTable.tableName,
-          approvalRequestsApiUrl,
           nudgesTableName: nudgesTable.tableName,
           logGroupName: '/aws/abca/application',
           artifactsBucketName: traceBucket.bucketName,
@@ -946,10 +931,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     withoutConfigTemplate = createPlatformConfigStack(false).template;
   });
 
-  test('rejects platform approval configuration without the service URL', () => {
-    expect(() => createPlatformConfigStack(true, '')).toThrow('requires approvalRequestsApiUrl');
-  });
-
   test('injects forwarded identifiers under the names the strategy reads', () => {
     // These names are a CONTRACT with
     // `handlers/shared/strategies/lambda-microvm-strategy.ts`'s
@@ -958,7 +939,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     // side silently strips a key from every MicroVM task's platform_config.
     const env = orchestratorEnvVars(template);
     expect(env.TASK_APPROVALS_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskApprovalsTable/) });
-    expect(env.APPROVAL_REQUESTS_API_URL).toBe('https://approval.execute-api.us-east-1.amazonaws.com/v1');
     expect(env.NUDGES_TABLE_NAME).toEqual({ Ref: expect.stringMatching(/^TaskNudgesTable/) });
     expect(env.LOG_GROUP_NAME).toBe('/aws/abca/application');
     expect(env.ARTIFACTS_BUCKET_NAME).toEqual({ Ref: expect.stringMatching(/^TraceArtifactsBucket/) });
@@ -975,13 +955,12 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
     expect(env.ANTHROPIC_MODEL).toBe(MAIN_PROFILE);
   });
 
-  test('carries all required platform configuration, including the approval service', () => {
+  test('carries all required platform configuration', () => {
     // One deployment must supply the complete configuration required at launch.
     const env = orchestratorEnvVars(createStack({
       githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
       agentPlatformConfig: {
         taskApprovalsTableName: 'approvals',
-        approvalRequestsApiUrl: 'https://approval.execute-api.us-east-1.amazonaws.com/v1',
         nudgesTableName: 'nudges',
         logGroupName: '/aws/abca/application',
         artifactsBucketName: 'artifacts',
@@ -991,7 +970,6 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
         anthropicModel: MAIN_PROFILE,
       },
     }).template);
-    expect(env.APPROVAL_REQUESTS_API_URL).toBe('https://approval.execute-api.us-east-1.amazonaws.com/v1');
     expect(env.TASK_TABLE_NAME).toBeDefined();
     expect(env.TASK_EVENTS_TABLE_NAME).toBeDefined();
     expect(env.GITHUB_TOKEN_SECRET_ARN).toBeDefined();

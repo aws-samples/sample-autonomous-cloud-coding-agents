@@ -203,7 +203,7 @@ describe.each(['suspendSession', 'resumeSession'] as const)('%s contract', opera
     'ThrottlingException', 'InternalServerException', 'ValidationException',
   ])('preserves %s as an operational failure with a sanitized cause', async name => {
     mockMicrovmSend.mockRejectedValueOnce(Object.assign(new Error(
-      'failed https://example.test/task?X-Amz-Signature=BEARER-SECRET',
+      'request failed',
       { cause: new Error('private request metadata: BEARER-SECRET') },
     ), { name }));
     const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });

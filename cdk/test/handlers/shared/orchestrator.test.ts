@@ -74,10 +74,11 @@ function primeReread(status: string): void {
     },
   } : {}));
 }
-const mockRelease = jest.fn();
-jest.mock('../../../src/handlers/shared/task-concurrency', () => ({
-  acquireTaskSlot: jest.fn(), releaseTaskSlot: (...args: unknown[]) => mockRelease(...args),
-}));
+/** Finalization returns the user's concurrency slot through the counter table. */
+function concurrencyDecrements() {
+  return commandsOfType('Update').filter(command =>
+    String(command.input.UpdateExpression).includes('active_count = active_count - :one'));
+}
 function finish(substrate: SessionStatus, polledStatus = TaskStatus.RUNNING) {
   return finalizeTask('TASK001', {
     attempts: 1,
@@ -103,7 +104,6 @@ function finish(substrate: SessionStatus, polledStatus = TaskStatus.RUNNING) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockLogger.child.mockReturnValue(mockLogger);
-  mockRelease.mockResolvedValue(false);
   mockDdbSend.mockReset();
   mockDdbSend.mockResolvedValue({});
 });
@@ -218,12 +218,12 @@ describe('MicroVM terminal finalization', () => {
       primeReread(status);
       await finish({ status: 'completed' });
       expect(commandsOfType('Get')[0].input.ConsistentRead).toBe(true);
-      expect(commandsOfType('Update')).toHaveLength(1);
-      for (const command of commandsOfType('Update')) {
-        expect(command.input.ConditionExpression).toBeUndefined(); // terminal TTL stamp only
-      }
+      // Terminal TTL stamp plus the concurrency decrement; no status transition.
+      expect(commandsOfType('Update')).toHaveLength(2);
+      expect(commandsOfType('Update').some(command =>
+        String(command.input.ConditionExpression ?? '').includes(':fromStatus'))).toBe(false);
       expect((commandsOfType('Put')[0].input.Item as Record<string, unknown>).event_type).toBe(`task_${status.toLowerCase()}`);
-      expect(mockRelease).toHaveBeenCalledTimes(1);
+      expect(concurrencyDecrements()).toHaveLength(1);
     },
   );
 
@@ -237,6 +237,7 @@ describe('MicroVM terminal finalization', () => {
       'MICROVM_SUBSTRATE_TERMINATED: MicroVM substrate terminated before the agent wrote a terminal status: host fault (hypervisor evicted the guest)',
     );
     expect(classifyError(String(values[':attr_error_message']))?.retryable).toBe(true);
-    expect(mockRelease).toHaveBeenCalledWith('TASK001', 'user-1');
+    expect(concurrencyDecrements()).toHaveLength(1);
+    expect(concurrencyDecrements()[0].input.Key).toEqual({ user_id: 'user-1' });
   });
 });

@@ -26,17 +26,12 @@ import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
-import constants from '../../../contracts/constants.json';
 
 /** Default stranded-timeout (seconds; 20 minutes). */
 const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 
-/** Time the coordinator gets to close a task after its worker's lifetime ends. */
-const APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS = 1800;
-
-/** Backstop for approval waits without a checkpoint: the worker lifetime plus the close margin. */
-const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS =
-  constants.microvm_lifecycle.maximum_duration_seconds + APPROVAL_STRANDED_CLOSE_MARGIN_SECONDS;
+/** Default approval-stranded timeout (seconds; 2 hours). */
+const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
 
 /** Default task-record retention used for event TTL (days). */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
@@ -59,10 +54,8 @@ export interface StrandedTaskReconcilerProps {
 
   /** TaskEventsTable (handler writes task_stranded + task_failed events). */
   readonly taskEventsTable: dynamodb.ITable;
-  /** Close unanswered requests when the owning task is declared stranded. */
-  readonly taskApprovalsTable?: dynamodb.ITable;
 
-  /** UserConcurrencyTable (handler atomically releases held task reservations). */
+  /** UserConcurrencyTable (handler decrements active_count on fail). */
   readonly userConcurrencyTable: dynamodb.ITable;
 
   /**
@@ -84,12 +77,13 @@ export interface StrandedTaskReconcilerProps {
   readonly strandedTimeoutSeconds?: number;
 
   /**
-   * Backstop for AWAITING_APPROVAL tasks without a saved continuation.
-   * Allows the worker's full service lifetime and coordinator cleanup.
-   * Saved MicroVM requests are handled by the continuation manager. Set via
+   * Cedar HITL approval-stranded timeout (seconds). Tasks in
+   * AWAITING_APPROVAL older than this are transitioned to FAILED.
+   * Longer than the stranded-timeout because approvals legitimately
+   * sit for up to an hour (§7.3). Set via
    * ``APPROVAL_STRANDED_TIMEOUT_SECONDS``.
    *
-   * @default 30600 (8.5 hours)
+   * @default 7200 (2 hours — double §7.3's 1-hour ceiling + an hour grace)
    */
   readonly approvalStrandedTimeoutSeconds?: number;
 
@@ -132,7 +126,6 @@ export class StrandedTaskReconciler extends Construct {
         // Solution-attribution component label (#319): orchestration plane.
         ABCA_COMPONENT: 'orchestr',
         TASK_TABLE_NAME: props.taskTable.tableName,
-        ...(props.taskApprovalsTable && { TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName }),
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
         STRANDED_TIMEOUT_SECONDS: String(strandedTimeout),
@@ -147,10 +140,9 @@ export class StrandedTaskReconciler extends Construct {
     // TaskTable: read (query by StatusIndex) + conditional UpdateItem to
     // transition stranded rows to FAILED.
     props.taskTable.grantReadWriteData(this.fn);
-    props.taskApprovalsTable?.grantReadWriteData(this.fn);
     // TaskEvents: write task_stranded + task_failed events.
     props.taskEventsTable.grantWriteData(this.fn);
-    // Concurrency: read/release a task-owned reservation transactionally.
+    // Concurrency: decrement active_count on fail.
     props.userConcurrencyTable.grantReadWriteData(this.fn);
 
     const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);

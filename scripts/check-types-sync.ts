@@ -91,7 +91,6 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   'PendingApprovalRecord',
   'ApprovedApprovalRecord',
   'DeniedApprovalRecord',
-  'CancelledApprovalRecord', // Persisted cancellation row; CLI consumes summaries, not DDB records.
   'TimedOutApprovalRecord',
   'StrandedApprovalRecord',
   'NudgeRecord',

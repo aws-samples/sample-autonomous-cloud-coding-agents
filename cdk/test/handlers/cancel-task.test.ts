@@ -129,26 +129,6 @@ beforeEach(() => {
 });
 
 describe('cancel-task handler', () => {
-  test('closes an unanswered approval atomically before stopping its worker', async () => {
-    mockSend.mockReset();
-    mockSend.mockResolvedValueOnce({
-      Item: {
-        ...RUNNING_TASK, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'request-1',
-      },
-    })
-      .mockResolvedValueOnce({ Item: { status: 'PENDING', user_id: RUNNING_TASK.user_id } })
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({});
-    const response = await handler(makeEvent());
-    expect(response.statusCode).toBe(200);
-    const transaction = mockSend.mock.calls.find(([command]) => command._type === 'TransactWrite')![0].input;
-    expect(transaction.TransactItems[0].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
-    expect(transaction.TransactItems[1].Update.Key.request_id).toBe('request-1');
-    expect(transaction.TransactItems[1].Update.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
-    expect(transaction.TransactItems[2].Put.Item.event_type).toBe('approval_cancelled');
-    expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);
-  });
-
   test.each(['HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'])('stops an AgentCore session when cancelling %s', async (status) => {
     mockSend.mockReset();
     mockSend

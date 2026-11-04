@@ -22,7 +22,7 @@
 import { evaluateAgentHeartbeat } from '../agent-heartbeat';
 import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
-import { MICROVM_STOP_TIMEOUT_MS, MICROVM_TRANSITION_POLL_MS } from './continuation-types';
+import { MICROVM_STOP_TIMEOUT_MS, MICROVM_TRANSITION_POLL_MS } from './types';
 import {
   intentMatchesGate, readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent,
   type MicrovmLifecycleSnapshot,

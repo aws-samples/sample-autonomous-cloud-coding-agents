@@ -9,11 +9,9 @@ the all-PENDING happy-path timeout was tested.
 """
 
 import asyncio
-import math
 from unittest.mock import MagicMock
 
 import hooks
-from hooks import _ApprovalDeadline, _compute_effective_timeout
 from policy import PolicyEngine
 
 
@@ -168,23 +166,6 @@ class TestPollForDecisionConsecutiveFails:
 
 
 # --- Explicit approval deadlines (no compute-lifetime deadline) ------------
-
-
-def test_default_builtin_gate_has_no_automatic_deadline():
-    engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-    decision = engine.evaluate_tool_use("Bash", {"command": "git push --force origin feature"})
-    assert decision.outcome == "require_approval"
-    assert decision.timeout_s == 0
-
-
-def test_zero_deadline_survives_a_long_pause(monkeypatch):
-    deadline = _ApprovalDeadline.from_recorded("2026-01-01T00:00:00Z", 0)
-    monkeypatch.setattr("hooks.time.time", lambda: 9_999_999_999)
-    monkeypatch.setattr("hooks.time.monotonic", lambda: 9_999_999_999)
-    assert math.isinf(deadline.remaining_s())
-    assert _compute_effective_timeout(
-        decision_timeout_s=0, task_default_timeout_s=0, remaining_lifetime_s=10
-    ) == (0, None, 0)
 
 
 def test_explicit_rule_deadline_survives_a_no_deadline_task_default():

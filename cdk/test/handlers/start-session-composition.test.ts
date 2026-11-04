@@ -57,17 +57,10 @@ jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   },
 }));
 
-// This suite checks strategy/metadata composition. Real bootstrap replay is
-// covered by microvm/start-recovery and orchestrate-task-microvm.
-jest.mock('../../src/handlers/shared/payload-bootstrap', () => ({
-  ...jest.requireActual('../../src/handlers/shared/payload-bootstrap'),
-  preparePayloadReference: jest.fn(async ({ taskId }: { taskId: string }) => ({
-    version: 2,
-    task_id: taskId,
-    bootstrap_s3_uri: 's3://bucket/bootstrap/example.json',
-    payload_url: 'https://signed.example/task',
-    expires_at: Date.now() + 900000,
-  })),
+jest.mock('@aws-sdk/client-s3', () => ({
+  S3Client: jest.fn(() => ({ send: jest.fn().mockResolvedValue({}) })),
+  PutObjectCommand: jest.fn((input: unknown) => ({ _type: 'PutObject', input })),
+  DeleteObjectCommand: jest.fn((input: unknown) => ({ _type: 'DeleteObject', input })),
 }));
 
 jest.mock('../../src/handlers/shared/repo-config', () => ({
@@ -91,7 +84,6 @@ let ulidCounter = 0;
 jest.mock('ulid', () => ({ ulid: jest.fn(() => `ULID${ulidCounter++}`) }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
-process.env.APPROVAL_REQUESTS_API_URL = 'https://approval.execute-api.us-east-1.amazonaws.com/v1';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test';

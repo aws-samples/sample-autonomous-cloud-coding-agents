@@ -17,20 +17,16 @@
  *  SOFTWARE.
  */
 
-import { GetCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logger } from './shared/logger';
 import { getSlackSecret, SLACK_SECRET_PREFIX, verifySlackRequest } from './shared/slack-verify';
-import { cancelTaskState, TaskCancellationError } from './shared/task-cancellation';
-import type { TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
 
 const SIGNING_SECRET_ARN = process.env.SLACK_SIGNING_SECRET_ARN!;
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
-const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME;
-const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME;
 const USER_MAPPING_TABLE = process.env.SLACK_USER_MAPPING_TABLE_NAME!;
 
 interface SlackInteractionPayload {
@@ -123,7 +119,6 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
   const taskResult = await ddb.send(new GetCommand({
     TableName: TASK_TABLE,
     Key: { task_id: taskId },
-    ConsistentRead: true,
   }));
 
   if (!taskResult.Item) {
@@ -136,19 +131,32 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
     return;
   }
 
-  // Share the REST path's atomic task/approval cancellation and race handling.
+  // Attempt to cancel. QUEUED (#441) is cancellable — it removes the
+  // task from the admission queue (no compute or concurrency to release).
+  const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'QUEUED', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
   try {
-    const cancelled = await cancelTaskState(taskResult.Item as TaskRecord, {
-      userId: platformUserId,
-      taskTable: TASK_TABLE,
-      approvalsTable: APPROVALS_TABLE,
-      eventsTable: EVENTS_TABLE,
-      retentionDays: Number(process.env.TASK_RETENTION_DAYS ?? '90'),
-    });
+    await ddb.send(new UpdateCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET #s = :cancelled, updated_at = :now',
+      ConditionExpression: '#s IN (:s1, :s2, :s3, :s4, :s5, :s6, :s7)',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: {
+        ':cancelled': 'CANCELLED',
+        ':now': new Date().toISOString(),
+        ':s1': CANCELLABLE_STATUSES[0],
+        ':s2': CANCELLABLE_STATUSES[1],
+        ':s3': CANCELLABLE_STATUSES[2],
+        ':s4': CANCELLABLE_STATUSES[3],
+        ':s5': CANCELLABLE_STATUSES[4],
+        ':s6': CANCELLABLE_STATUSES[5],
+        ':s7': CANCELLABLE_STATUSES[6],
+      },
+    }));
 
     // Instant feedback: replace the Cancel button message with "Cancelling..."
     // then clean up all intermediate messages.
-    const channelMeta = cancelled.task.channel_metadata as Record<string, string> | undefined;
+    const channelMeta = taskResult.Item.channel_metadata as Record<string, string> | undefined;
     const channelId = payload.channel?.id ?? channelMeta?.slack_channel_id;
     if (channelMeta && channelId) {
       const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
@@ -164,10 +172,8 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
       }
     }
   } catch (err) {
-    if (err instanceof TaskCancellationError) {
-      await postToResponseUrl(payload.response_url, err.reason === 'conflict'
-        ? ':warning: Task state changed. Please retry cancellation.'
-        : ':warning: Task is no longer available for cancellation.');
+    if ((err as Error)?.name === 'ConditionalCheckFailedException') {
+      await postToResponseUrl(payload.response_url, ':warning: Task is already in a terminal state.');
     } else {
       throw err;
     }

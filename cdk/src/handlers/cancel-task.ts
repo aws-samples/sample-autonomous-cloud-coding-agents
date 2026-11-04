@@ -20,14 +20,13 @@
 import { BedrockAgentCoreClient, StopRuntimeSessionCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { ECSClient, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { LambdaMicrovmsClient, TerminateMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { cancelTaskState, TaskCancellationError } from './shared/task-cancellation';
 import type { TaskRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { computeTtlEpoch } from './shared/validation';
@@ -38,7 +37,6 @@ const ecsClient = makeClient(ECSClient);
 const microvmClient = makeClient(LambdaMicrovmsClient);
 const TABLE_NAME = process.env.TASK_TABLE_NAME!;
 const EVENTS_TABLE_NAME = process.env.TASK_EVENTS_TABLE_NAME!;
-const APPROVALS_TABLE_NAME = process.env.TASK_APPROVALS_TABLE_NAME;
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const RUNTIME_ARN = process.env.RUNTIME_ARN;
 const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN;
@@ -74,7 +72,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 4. Ownership check
-    let record = result.Item as TaskRecord;
+    const record = result.Item as TaskRecord;
     if (record.user_id !== userId) {
       return errorResponse(403, ErrorCode.FORBIDDEN, 'You do not have access to this task.', requestId);
     }
@@ -84,41 +82,44 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} is already in terminal state ${record.status}.`, requestId);
     }
 
-    // 6. Cancel the task and any unanswered approval atomically.
-    let now: string;
-    try {
-      const cancelled = await cancelTaskState(record, {
-        userId,
-        taskTable: TABLE_NAME,
-        approvalsTable: APPROVALS_TABLE_NAME,
-        eventsTable: EVENTS_TABLE_NAME,
-        retentionDays: TASK_RETENTION_DAYS,
-      });
-      record = cancelled.task;
-      now = cancelled.cancelledAt;
-    } catch (condErr) {
-      if (condErr instanceof TaskCancellationError) {
-        if (condErr.reason === 'missing') {
-          return errorResponse(404, ErrorCode.TASK_NOT_FOUND, `Task ${taskId} not found.`, requestId);
-        }
-        if (condErr.reason === 'forbidden') {
-          return errorResponse(403, ErrorCode.FORBIDDEN, 'You do not have access to this task.', requestId);
-        }
-        if (condErr.reason === 'conflict') {
-          return errorResponse(409, ErrorCode.TASK_STATE_CONFLICT, 'Task state changed during cancellation. Retry the cancellation.', requestId);
-        }
-        return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
-      }
-      throw condErr;
-    }
-
-    // Use the latest pre-cancel record after any retry, including its compute handle.
+    // A task waiting for approval may own a suspended MicroVM: stop that too.
     const mayHaveCompute = record.status === TaskStatus.HYDRATING
       || record.status === TaskStatus.RUNNING
       || record.status === TaskStatus.AWAITING_APPROVAL
       || record.status === TaskStatus.FINALIZING;
     const runtimeSessionId = record.session_id;
+    // Prefer the ARN recorded on the task record (agent container writes
+    // this when the session starts). Fall back to the stack's single
+    // runtime ARN for the pre-session window — the task was admitted but
+    // the container hasn't written its session info yet.
     const agentRuntimeArn = record.agent_runtime_arn ?? RUNTIME_ARN;
+
+    // 6. Update task to CANCELLED with condition to prevent race
+    const now = new Date().toISOString();
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { task_id: taskId },
+        UpdateExpression: 'SET #status = :cancelled, updated_at = :now, completed_at = :now, status_created_at = :sca, #ttl = :ttl',
+        ConditionExpression: 'attribute_exists(task_id) AND NOT #status IN (:s1, :s2, :s3, :s4)',
+        ExpressionAttributeNames: { '#status': 'status', '#ttl': 'ttl' },
+        ExpressionAttributeValues: {
+          ':cancelled': TaskStatus.CANCELLED,
+          ':now': now,
+          ':sca': `${TaskStatus.CANCELLED}#${now}`,
+          ':s1': TaskStatus.COMPLETED,
+          ':s2': TaskStatus.FAILED,
+          ':s3': TaskStatus.CANCELLED,
+          ':s4': TaskStatus.TIMED_OUT,
+          ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS),
+        },
+      }));
+    } catch (condErr: any) {
+      if (condErr.name === 'ConditionalCheckFailedException') {
+        return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} transitioned to a terminal state.`, requestId);
+      }
+      throw condErr;
+    }
 
     // 6b. Stop the compute session so the container winds down (best-effort)
     if (mayHaveCompute && runtimeSessionId) {
@@ -153,8 +154,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else if (computeType === 'lambda-microvm') {
         // ADR-021: `terminate-microvm` is the ACTIVE cleanup path — a cancelled
         // MicroVM must not be left to the 8-hour `maximumDurationInSeconds` cap
-        // (with `idlePolicy` omitted there is no tighter substrate bound).
-        // Stop it promptly rather than relying on the lifetime ceiling.
+        // (with `idlePolicy` omitted there is no tighter substrate bound), both
+        // for cost and because running/suspended VMs count against the account
+        // memory quota that gates admission of new tasks.
         //
         // This branch MUST come before the `agentRuntimeArn` branch below.
         // `agentRuntimeArn` falls back to the stack-level RUNTIME_ARN env var,

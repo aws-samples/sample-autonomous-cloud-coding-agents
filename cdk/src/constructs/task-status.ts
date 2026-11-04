@@ -68,7 +68,6 @@ export const ApprovalStatusValue = {
   PENDING: 'PENDING',
   APPROVED: 'APPROVED',
   DENIED: 'DENIED',
-  CANCELLED: 'CANCELLED',
   TIMED_OUT: 'TIMED_OUT',
   STRANDED: 'STRANDED',
 } as const satisfies Record<ApprovalStatus, ApprovalStatus>;

@@ -266,21 +266,6 @@ describe('postcommit MicroVM wake', () => {
 });
 
 describe('trusted channel decision source', () => {
-  test('stores the source inside the guarded decision transaction', async () => {
-    mockSend.mockResolvedValue({});
-    const result = await recordDenialForUser({
-      userId: 'user-alice',
-      taskId: 'task-1',
-      body: JSON.stringify({ request_id: 'gate', decision: 'deny' }),
-      decisionSource: 'linear-source',
-    });
-    expect(result.statusCode).toBe(202);
-    const update = mockSend.mock.calls.find(([cmd]) => cmd._type === 'TransactWrite')![0].input.TransactItems[0].Update;
-    expect(update.UpdateExpression).toContain('decision_source = :source');
-    expect(update.ExpressionAttributeValues[':source']).toBe('linear-source');
-    expect(update.ConditionExpression).toContain('#status = :pending');
-    expect(update.ConditionExpression).toContain('deadline_epoch > :epoch');
-  });
   test('does not trust a source supplied in the HTTP body', async () => {
     mockSend.mockResolvedValue({});
     await handler(makeEvent({ body: JSON.stringify({ request_id: 'gate', decision: 'deny', decisionSource: 'forged' }) }));

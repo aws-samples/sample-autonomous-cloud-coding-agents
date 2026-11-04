@@ -24,9 +24,6 @@ import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
 import { logger } from './shared/logger';
-import { runMicrovmContinuation } from './shared/microvm/continuation-runner';
-import { saveContinuationLaunch } from './shared/microvm/continuation-storage';
-import { CONTINUATION_RETRY_POLL_SECONDS, CONTINUATION_TRANSITION_POLL_SECONDS } from './shared/microvm/continuation-types';
 import { stopMicrovmWithDiagnostics } from './shared/microvm/supervisor';
 import { pollMicrovmTask } from './shared/microvm/task-poll';
 import {
@@ -48,7 +45,6 @@ import { runPreflightChecks } from './shared/preflight';
 import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import { deleteMicrovmPayload } from './shared/strategies/lambda-microvm-strategy';
-import { releaseTaskSlot } from './shared/task-concurrency';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
@@ -62,8 +58,6 @@ interface OrchestrateTaskEvent {
    * durable-execution idempotency) can mistake it for a replay.
    */
   readonly queue_pickup_id?: string;
-  readonly continuation_request_id?: string;
-  readonly continuation_attempt_id?: string;
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
@@ -74,13 +68,6 @@ const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 const DEFAULT_POLL_INTERVAL_SECONDS = 30;
 
 const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = async (event, context) => {
-  if (event.continuation_request_id !== undefined || event.continuation_attempt_id !== undefined) {
-    return runMicrovmContinuation({
-      task_id: event.task_id,
-      continuation_request_id: event.continuation_request_id ?? '',
-      continuation_attempt_id: event.continuation_attempt_id ?? '',
-    }, context);
-  }
   const { task_id: taskId } = event;
 
   // Step 1: Load task record
@@ -146,7 +133,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!admitted) {
-    await context.step('release-before-admission', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 
@@ -182,7 +168,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!preflightPassed) {
-    await context.step('release-before-work', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 
@@ -207,9 +192,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
-      if (blueprintConfig.compute_type === 'lambda-microvm') {
-        await saveContinuationLaunch(taskId, task.user_id, payload, blueprintConfig);
-      }
       strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
         taskId,
@@ -356,8 +338,8 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         : String(err);
       const errorMessage = `Session start failed: ${detail}${retriedNote}`;
       if (blueprintConfig.compute_type === 'lambda-microvm') {
-        // The durable finalization step below owns the terminal event and slot
-        // release. Replaying this step after FAILED must not release it twice.
+        // The durable finalization step below owns the terminal event and the
+        // concurrency release. Replaying this step after FAILED must not repeat them.
         try {
           await transitionTask(taskId, failureStatus, TaskStatus.FAILED, {
             completed_at: new Date().toISOString(), error_message: errorMessage,
@@ -474,13 +456,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     {
       initialState: { attempts: 0 },
       waitStrategy: (state: PollState) => {
-        if (state.microvmParked || state.microvmOwnershipLost) return { shouldContinue: false };
-        if (state.microvmRetiring) {
-          return {
-            shouldContinue: true,
-            delay: { seconds: state.microvmRetirementError ? CONTINUATION_RETRY_POLL_SECONDS : CONTINUATION_TRANSITION_POLL_SECONDS },
-          };
-        }
+        if (state.microvmOwnershipLost) return { shouldContinue: false };
         if (state.lastStatus && TERMINAL_STATUSES.includes(state.lastStatus)) {
           return { shouldContinue: false };
         }
@@ -513,14 +489,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
   // Step 6: Finalize — update terminal status, emit events, release concurrency
   await context.step('finalize', async () => {
-    if (finalPollState.microvmParked) {
-      await emitTaskEvent(taskId, 'continuation_parked', {
-        microvm_id: sessionHandle.sessionId,
-        detail: 'Your approval request is still available. The saved task will continue on another worker after your answer.',
-      }, correlation);
-      await deleteMicrovmPayload(taskId);
-      return;
-    }
     let finalized = false;
     try {
       if (!finalPollState.microvmOwnershipLost) {
@@ -528,7 +496,6 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       }
     } finally {
       // Even a database finalization failure must not lose cleanup of this handle.
-      // A replacement worker, if any, is never followed or terminated here.
       if (microvmStrategy && sessionHandle.strategyType === 'lambda-microvm') {
         await stopMicrovmWithDiagnostics({
           taskId,
@@ -539,8 +506,10 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       }
     }
     if (!finalized) return;
-    // Delete task instructions and their saved signed download capability after
-    // finalization. Shared manifests remain; bucket lifecycle is a backstop.
+    // The task is terminal and the substrate has read its payload: delete the
+    // ephemeral S3 payload object. Best-effort; the bucket lifecycle rule is the
+    // backstop. The MicroVM execution role can read the whole payload bucket, so
+    // prompt deletion at finalize (not TTL alone) limits cross-task exposure.
     if (blueprintConfig.compute_type === 'ecs') {
       await deleteEcsPayload(taskId);
     } else if (blueprintConfig.compute_type === 'lambda-microvm') {

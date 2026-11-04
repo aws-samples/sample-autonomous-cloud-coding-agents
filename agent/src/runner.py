@@ -293,11 +293,6 @@ def _initialize_policy_engine_and_hooks(
         extra_policies=cedar_policies if cedar_policies else None,
         **engine_kwargs,
     )
-    from continuation_runtime import current_runtime
-
-    continuation = current_runtime()
-    if continuation is not None:
-        continuation.seed_policy(policy_engine)
     # Surface the resolved cap + its source so operators can distinguish a
     # blueprint-threaded value from the engine's compile-time default on a
     # container restart. Mirrors the ``approval_gate_cap_source`` field on the
@@ -639,38 +634,13 @@ async def run_agent(
         **({"mcp_servers": mcp_servers} if mcp_servers else {}),
     )
 
-    from continuation_runtime import current_runtime
-
-    continuation = current_runtime()
-    if continuation is not None:
-        options.session_store = continuation.store
-        options.session_store_flush = "eager"
-        if continuation.restored is not None:
-            options.resume = continuation.restored["session_id"]
-            options.max_turns = config.max_turns - continuation.context.turns_used
-            if options.max_turns <= 0:
-                raise RuntimeError("Task turn limit was reached before the saved continuation")
-            if config.max_budget_usd is not None:
-                options.max_budget_usd = config.max_budget_usd - continuation.prior_cost_usd
-                if options.max_budget_usd <= 0:
-                    raise RuntimeError(
-                        "Task dollar budget was reached before the saved continuation"
-                    )
-
-    prior_turns = (
-        continuation.context.turns_used
-        if continuation is not None and continuation.restored is not None
-        else 0
-    )
-    result = AgentResult(turns=prior_turns)
+    result = AgentResult()
     message_counts = {"system": 0, "assistant": 0, "result": 0, "other": 0}
 
     # Use ClaudeSDKClient (connect/query/receive_response) instead of the
     # standalone query() function.  This matches the official AWS sample:
     # https://github.com/aws-samples/sample-deploy-ClaudeAgentSDK-based-agents-to-AgentCore-Runtime
     client = ClaudeSDKClient(options=options)
-    if continuation is not None:
-        continuation.client = client
     from microvm_credentials import ScopedCredentialBroker
     from microvm_lifecycle import get_context
 
@@ -788,9 +758,7 @@ async def run_agent(
                 subtype = getattr(message, "subtype", "unknown")
                 result.status = subtype
                 result.cost_usd = getattr(message, "total_cost_usd", None)
-                if result.cost_usd is not None and continuation is not None:
-                    result.cost_usd += continuation.prior_cost_usd
-                result.num_turns = getattr(message, "num_turns", 0) + prior_turns
+                result.num_turns = getattr(message, "num_turns", 0)
                 result.duration_ms = getattr(message, "duration_ms", 0)
                 result.duration_api_ms = getattr(message, "duration_api_ms", 0)
                 result.session_id = getattr(message, "session_id", "") or ""
@@ -822,13 +790,6 @@ async def run_agent(
                 if raw_usage is not None:
                     # Handle both object (dataclass) and dict forms
                     usage = _parse_token_usage(raw_usage)
-                    if continuation is not None:
-                        usage = TokenUsage(
-                            **{
-                                key: count + continuation.prior_token_usage.get(key, 0)
-                                for key, count in usage.model_dump().items()
-                            }
-                        )
                     result.usage = usage
                     if all(v == 0 for v in usage.model_dump().values()):
                         log(

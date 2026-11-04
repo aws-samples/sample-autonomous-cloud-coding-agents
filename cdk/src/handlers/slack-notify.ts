@@ -51,9 +51,8 @@ import { type DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk
 // so importing the type back creates no runtime cycle. ``import type``
 // is erased after compile, so the bundler sees a one-way dep.
 import type { FanOutEvent } from './fanout-task-events';
-import { APPROVAL_NOTIFICATION_EVENTS, isApprovalNotification, loadApprovalNotification, markApprovalNotificationDelivered } from './shared/approval-notifications';
 import { logger } from './shared/logger';
-import { renderSlackBlocks, type SlackMessage } from './shared/slack-blocks';
+import { renderSlackBlocks } from './shared/slack-blocks';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { TaskRecord } from './shared/types';
 
@@ -98,8 +97,8 @@ const SLACK_DEDUP_ATTRIBUTE: Record<string, string | null> = {
  *  Slack entries in ``CHANNEL_DEFAULTS`` (see fanout-task-events.ts) —
  *  drift means the router subscribes Slack to events that the
  *  dispatcher silently ignores, which lies in batch telemetry
- *  (issue #64 review Cat 7). Forward-compat ``status_response`` is
- *  deliberately absent until its emitter
+ *  (issue #64 review Cat 7). Forward-compat ``approval_required`` and
+ *  ``status_response`` are deliberately absent until their emitters
  *  ship; until then they fall through and are dropped at this gate.
  *  ``pr_created`` is intentionally omitted from Slack — the
  *  ``task_completed`` block already carries the View PR button, so a
@@ -115,7 +114,6 @@ export const NOTIFIABLE_EVENTS = new Set<string>([
   'task_timed_out',
   'task_stranded',
   'agent_error',
-  ...APPROVAL_NOTIFICATION_EVENTS,
 ]);
 
 /**
@@ -231,14 +229,9 @@ export async function dispatchSlackEvent(
   const taskResult = await ddb.send(new GetCommand({
     TableName: tableName,
     Key: { task_id: taskId },
-    ConsistentRead: true,
   }));
   const task = taskResult.Item as TaskRecord | undefined;
   if (!task || task.channel_source !== 'slack') return;
-
-  const approval = isApprovalNotification(eventType)
-    ? await loadApprovalNotification(ddb, task, eventType, event.metadata ?? {}, 'slack') : null;
-  if (isApprovalNotification(eventType) && !approval) return;
 
   // Dedup any event that should only ever post once per task even
   // under partial-batch retry (terminals, agent_error). The orchestrator
@@ -297,10 +290,7 @@ export async function dispatchSlackEvent(
   // ``metadata: { S: ... }`` shape itself from the raw stream record.
   const eventMetadata = event.metadata;
 
-  const message: SlackMessage = approval ? {
-    text: `${approval.title} for task ${taskId}`,
-    blocks: [{ type: 'section', text: { type: 'plain_text', text: approval.text } }],
-  } : renderSlackBlocks(eventType, task, eventMetadata);
+  const message = renderSlackBlocks(eventType, task, eventMetadata);
 
   const threadTs = channelMeta.slack_thread_ts;
 
@@ -357,8 +347,6 @@ export async function dispatchSlackEvent(
     }
     throw new SlackApiError(failureMessage);
   }
-
-  if (approval) await markApprovalNotificationDelivered(ddb, approval);
 
   // Reactions always use the real channel id even for DMs.
   const reactionChannel = channelMeta.slack_channel_id;

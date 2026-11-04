@@ -30,7 +30,6 @@ export const ErrorCode = {
   TRACE_NOT_AVAILABLE: 'TRACE_NOT_AVAILABLE',
   DUPLICATE_TASK: 'DUPLICATE_TASK',
   TASK_ALREADY_TERMINAL: 'TASK_ALREADY_TERMINAL',
-  TASK_STATE_CONFLICT: 'TASK_STATE_CONFLICT',
   RATE_LIMIT_EXCEEDED: 'RATE_LIMIT_EXCEEDED',
   WEBHOOK_NOT_FOUND: 'WEBHOOK_NOT_FOUND',
   WEBHOOK_ALREADY_REVOKED: 'WEBHOOK_ALREADY_REVOKED',
@@ -132,7 +131,6 @@ export function errorResponse(
   code: string,
   message: string,
   requestId: string,
-  details?: Record<string, unknown>,
 ): APIGatewayProxyResult {
   return {
     statusCode,
@@ -142,7 +140,6 @@ export function errorResponse(
         code,
         message,
         request_id: requestId,
-        ...(details ? { details } : {}),
       },
     }),
   };

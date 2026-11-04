@@ -30,7 +30,6 @@ import { Construct } from 'constructs';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { resolveBedrockModelIds } from './bedrock-models';
-import { grantWorkerBootstrap } from './payload-bootstrap-permissions';
 import sharedConstants from '../../../contracts/constants.json';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
 
@@ -363,11 +362,11 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
 
 /**
  * Lambda MicroVM infrastructure: build/runtime VPC connectors, image artifacts,
- * bootstrap payloads, logs, roles and an optional managed image (ADR-021).
+ * task payloads, logs, roles and an optional managed image (ADR-021).
  *
  * Runtime egress permits HTTPS; the separate build connector also permits HTTP
  * for apt-get. Every launch explicitly selects NO_INGRESS. The execution role
- * reads bootstrap manifests and startup credentials, invokes models, writes logs
+ * reads its task payload and startup credentials, invokes models, writes logs
  * and uses Memory. Tenant data remains on the per-task SessionRole; lifecycle
  * control remains on coordinator and decision-handler roles.
  *
@@ -391,7 +390,7 @@ export class LambdaMicrovmCompute extends Construct {
   /** Unsuffixed key used by the manual builder and packaging helper. */
   public readonly artifactBaseObjectKey: string;
 
-  /** S3 bucket holding bootstrap manifests, task payloads and private launch references. */
+  /** S3 bucket holding oversized `/run` payloads (S3-pointer delivery). */
   public readonly payloadBucket: s3.Bucket;
 
   /** Role Lambda assumes while building the snapshot image. */
@@ -698,10 +697,9 @@ export class LambdaMicrovmCompute extends Construct {
     // Platform task logs use a separate namespace from MicroVM service logs.
     props.applicationLogGroup?.grantWrite(this.executionRole);
 
-    // Authenticate only this deployment's manifests. Payload and launch reads
-    // using worker credentials are explicitly denied; one-object signed URLs
-    // carry the coordinator's authorization instead.
-    grantWorkerBootstrap(this.payloadBucket, this.executionRole);
+    // The guest reads its oversized `/run` payload from S3 before any tenant
+    // identity exists, so the grant is bucket-wide; finalize deletes the object.
+    this.payloadBucket.grantRead(this.executionRole);
 
     // Tenant access requires the task-scoped role; there is no direct-grant fallback.
     if (props.agentSessionRole) {
@@ -903,7 +901,7 @@ export class LambdaMicrovmCompute extends Construct {
         reason: 'Artifact bucket holds versioned agent zip+Dockerfile build inputs read only by '
           + 'the Lambda MicroVMs build role; the payload bucket holds ephemeral per-task /run payloads '
           + `with a ${MICROVM_PAYLOAD_TTL_DAYS}-day TTL, written only by the orchestrator and `
-          + 'read through single-object signed URLs; the worker reads only bootstrap manifests. Object-level access '
+          + 'read only by the MicroVM execution role, both scoped to the bucket. Object-level access '
           + 'logging (a second log bucket + CloudTrail data events) is not justified for these '
           + 'build inputs or for transient boot payloads.',
       },
@@ -914,8 +912,8 @@ export class LambdaMicrovmCompute extends Construct {
         id: 'AwsSolutions-IAM5',
         reason: 'CloudWatch Logs wildcard is the service-owned '
           + `${MICROVM_LOG_GROUP_PREFIX}/* namespace (log stream names are minted per MicroVM, so no `
-          + 'synth-time ARN exists); worker S3 GetObject is limited to bootstrap/* in its payload bucket, '
-          + 'with explicit denial outside that prefix and for bucket listing. The build '
+          + 'synth-time ARN exists); S3 object/* wildcard comes from CDK grantRead on the dedicated '
+          + 'payload bucket (read-only, scoped to that bucket — ADR-021 sub-decision 3). The build '
           + 'role\'s s3:GetObject names the selected artifact and manual-build key. On the execution '
           + 'role (ADR-021 P2 runtime parity, mirroring the ECS task role): the second Logs grant is '
           + 'CDK grantWrite (CreateLogStream + PutLogEvents only) on the SINGLE platform '
@@ -1001,7 +999,7 @@ export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Ro
     assumedBy: principal,
     description:
       'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
-      + 'lifecycle hooks; writes logs and reads deployment bootstrap manifests.',
+      + 'lifecycle hooks; writes logs and reads task payloads.',
   });
   grantTagSession(role, principal);
   Tags.of(role).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);

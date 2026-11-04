@@ -23,7 +23,6 @@ import { GetMicrovmCommand, LambdaMicrovmsClient, ResumeMicrovmCommand } from '@
 import type { Context } from 'aws-lambda';
 import type { SessionControlOptions } from '../compute-strategy';
 import { logger } from '../logger';
-import { dispatchMicrovmContinuation } from './continuation-dispatch';
 import { microvmErrorIdentity, microvmRequestIdentity } from './control';
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot } from './lifecycle';
 import { TaskStatus } from '../../../constructs/task-status';
@@ -97,7 +96,6 @@ export async function wakeMicrovmAfterApproval(input: ApprovalWakeInput): Promis
   };
   try {
     options.abortSignal?.throwIfAborted();
-    if (await dispatchMicrovmContinuation(input.taskId, input.userId, input.requestId, options)) return;
     const snapshot = await readMicrovmLifecycleSnapshot(input.taskId, input.userId, options);
     options.abortSignal.throwIfAborted();
     if (!snapshot) return;

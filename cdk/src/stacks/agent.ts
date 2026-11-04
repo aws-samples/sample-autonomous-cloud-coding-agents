@@ -19,7 +19,7 @@
 
 import * as path from 'path';
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, NestedStack, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
+import { ArnFormat, AspectPriority, Aspects, Stack, StackProps, RemovalPolicy, CfnOutput, CfnResource, Duration, Fn, Lazy } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
@@ -36,7 +36,6 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentNetwork, AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
-import { ApprovalRequestService } from '../constructs/approval-request-service';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
@@ -67,7 +66,6 @@ import {
 import { LinearIdentityVault } from '../constructs/linear-identity-vault';
 import { LinearIntegration } from '../constructs/linear-integration';
 import { LinearVaultConsentPageStack } from '../constructs/linear-vault-consent-page';
-import { ContinuationBucket, MicrovmContinuationManager } from '../constructs/microvm-continuation-manager';
 import { OperationalAlerts } from '../constructs/operational-alerts';
 import { OrchestrationReconciler } from '../constructs/orchestration-reconciler';
 import { OrchestrationTable } from '../constructs/orchestration-table';
@@ -532,13 +530,6 @@ export class AgentStack extends Stack {
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
 
-    const approvalRequests = new ApprovalRequestService(this, 'ApprovalRequests', {
-      taskTable: taskTable.table, approvalsTable: taskApprovalsTable.table,
-    });
-    // Reuse the parent's regional API Gateway logging configuration.
-    const apiLoggingAccount = taskApi.api.node.tryFindChild('Account');
-    if (apiLoggingAccount) approvalRequests.node.addDependency(apiLoggingAccount);
-
     // Agent asset registry API (#246) in its own NestedStack + RestApi so its
     // ~35 resources don't count against this root stack's 500-resource limit.
     // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
@@ -630,7 +621,6 @@ export class AgentStack extends Stack {
         // AWAITING_APPROVAL; absent → hook fails closed with
         // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
         TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
-        APPROVAL_REQUESTS_API_URL: approvalRequests.api.url,
         // Hint for the hook's remaining-maxLifetime calculation (§6.5
         // pseudocode line 793). Kept in sync with the AgentCore
         // lifecycle configuration below so drift is visible. 8 hours.
@@ -770,9 +760,12 @@ export class AgentStack extends Stack {
       // {user_id, repo, task_id}, and that role carries the tenant-data grants
       // constrained by aws:PrincipalTag conditions. The runtime role keeps only
       // non-tenant / shared access:
+      //   - UserConcurrencyTable: user-scoped counter (agent path does not write
+      //     it today; left here for the reconciler/orchestrator parity).
       //   - GitHub PAT secret: read once at startup, before the agent assumes the
       //     SessionRole.
       //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
+      userConcurrencyTable.table.grantReadWriteData(runtime);
       githubTokenSecret.grantRead(runtime);
       applicationLogGroup.grantWrite(runtime);
       agentMemory.grantReadWrite(runtime);
@@ -843,19 +836,17 @@ export class AgentStack extends Stack {
     // --- Per-task SessionRole ---
     // Holds the tenant-data grants (the four task_id-partitioned tables, plus
     // per-user-prefixed trace writes and attachment reads), each constrained
-    // by aws:PrincipalTag conditions for the existing session credentials.
-    // The compute role chooses the tags; that choice is not independently
-    // authenticated by this trust policy. Main-task writes are restricted to
-    // reporting attributes. The agent assumes this with refreshable credentials
+    // by aws:PrincipalTag conditions so a compromised session reaches only its
+    // own task's data. The agent assumes this with refreshable credentials
     // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
     // roles of the deployed backends as assuming principals. ECS and MicroVM
     // admit their role during construction below.
     const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
       ...(runtime ? { assumingRoles: [runtime.role] } : { deferComputeRoleBinding: true }),
-      taskTable: taskTable.table,
-      approvalsTable: taskApprovalsTable.table,
       taskScopedTables: [
+        taskTable.table,
         taskEventsTable.table,
+        taskApprovalsTable.table,
         taskNudgesTable.table,
       ],
       traceArtifactsBucket: traceArtifactsBucket.bucket,
@@ -866,7 +857,6 @@ export class AgentStack extends Stack {
       invokableModels: invokableBedrockModels,
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
-    approvalRequests.grantRequests(agentSessionRole.role);
 
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
     // which needs CloudWatch Logs resource policy propagation. Re-enable via
@@ -1042,10 +1032,10 @@ export class AgentStack extends Stack {
     // includes ecs or the legacy `compute_type=ecs` context is used. Default
     // synthesis remains AgentCore-only. The backend list is resolved near the
     // top of this constructor so TaskApi can apply the same cancellation gates.
-    // ECS v2 bootstrap storage: deployment manifests, task instructions and
-    // private launch references. Workers read manifests with IAM and download
-    // their task through a signed one-object URL. Finalize deletes task objects;
-    // the one-day lifecycle reaps leftovers. Synthesized only under the ECS gate.
+    // Ephemeral bucket for ECS task payloads — the orchestrator writes the
+    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
+    // passes only an S3 URI pointer; the container fetches it on boot, the
+    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
     const ecsPayloadBucket = ecsEnabled
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
@@ -1053,7 +1043,7 @@ export class AgentStack extends Stack {
       NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
         {
           id: 'AwsSolutions-S1',
-          reason: 'Ephemeral bootstrap storage with a 1-day TTL. The coordinator writes manifests and task objects, signs task reads and deletes task objects at finalize. Workers read only bootstrap/* with IAM and use single-object signed URLs for payloads; other object reads and bucket listing are explicitly denied. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+          reason: 'Ephemeral per-task payloads with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
         },
       ]);
     }
@@ -1137,8 +1127,6 @@ export class AgentStack extends Stack {
         }),
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
-        taskApprovalsTable: taskApprovalsTable.table,
-        approvalRequestsApiUrl: approvalRequests.api.url,
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
@@ -1148,7 +1136,7 @@ export class AgentStack extends Stack {
         // without this grant. The AgentCore runtime gets the equivalent grant
         // where it is created above.
         agentMemory,
-        // The task role reads bootstrap manifests; a signed URL delivers its payload.
+        // Read-only grant so the container can fetch its payload from S3.
         payloadBucket: ecsPayloadBucket!.bucket,
         // ECS parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
         // a repo-bound artifact workflow delivers here. Wires the
@@ -1219,8 +1207,6 @@ export class AgentStack extends Stack {
     // `imageArn`, so a configured deployment always has an ARN to resolve and an
     // unconfigured one never asks for it.
     microvmImageArnHolder = lambdaMicrovm?.imageArn;
-    const continuationBucket = lambdaMicrovm ? new ContinuationBucket(this, 'ContinuationBucket') : undefined;
-    continuationBucket?.grantWorker(agentSessionRole.role);
 
     const computeRoles = [runtime?.role, ecsCluster?.taskDefinition.taskRole, lambdaMicrovm?.executionRole]
       .filter((role): role is iam.IRole => role !== undefined);
@@ -1339,7 +1325,6 @@ export class AgentStack extends Stack {
       // of the resources they identify.
       agentPlatformConfig: {
         taskApprovalsTableName: taskApprovalsTable.table.tableName,
-        approvalRequestsApiUrl: approvalRequests.api.url,
         nudgesTableName: taskNudgesTable.table.tableName,
         logGroupName: agentLogGroup.logGroupName,
         // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
@@ -1365,8 +1350,6 @@ export class AgentStack extends Stack {
         anthropicModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
         ...(toolGateway && { toolGatewayUrl: toolGateway.gatewayUrl }),
       },
-      ...(continuationBucket && { continuationBucket }),
-      taskApprovalsTable: taskApprovalsTable.table,
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
       // only when ECS is included in the deployment's backend list.
       ...(ecsCluster && {
@@ -1415,32 +1398,13 @@ export class AgentStack extends Stack {
 
     // Now that the orchestrator exists, resolve the Lazy used by TaskApi at synth.
     orchestratorArnHolder = orchestrator.alias.functionArn;
-    // Stateless scheduled jobs share a nested stack to leave room in both
-    // flat and nested MicroVM layouts. Upgrades replace their generated-name
-    // functions/schedules; task tables, buckets and compute resources stay put.
-    const concurrencyMaintenance = new NestedStack(this, 'ConcurrencyMaintenance');
-    if (continuationBucket && lambdaMicrovm?.imageArn) {
-      taskApi.enableMicrovmContinuations(
-        continuationBucket.bucket.bucketName, orchestrator.fn.functionArn, userConcurrencyTable.table,
-        maxConcurrentTasksPerUser,
-      );
-      new MicrovmContinuationManager(concurrencyMaintenance, 'MicrovmContinuationManager', {
-        taskTable: taskTable.table,
-        approvalsTable: taskApprovalsTable.table,
-        userConcurrencyTable: userConcurrencyTable.table,
-        continuationBucket,
-        orchestratorFunctionArn: orchestrator.fn.functionArn,
-        imageArn: lambdaMicrovm.imageArn,
-        maxConcurrentTasksPerUser,
-      });
-    }
 
     // Grant the orchestrator Lambda read+write access to memory
     // (reads during context hydration, writes for fallback episodes)
     agentMemory.grantReadWrite(orchestrator.fn);
 
     // --- Concurrency counter reconciler (drift correction) ---
-    new ConcurrencyReconciler(concurrencyMaintenance, 'ConcurrencyReconciler', {
+    new ConcurrencyReconciler(this, 'ConcurrencyReconciler', {
       taskTable: taskTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
@@ -1450,7 +1414,7 @@ export class AgentStack extends Stack {
     // concurrency cap is hit) in FIFO order as slots free up: flips
     // QUEUED -> SUBMITTED and re-invokes the orchestrator, whose atomic
     // admissionControl remains the single writer of the counter.
-    new AdmissionQueuePickup(concurrencyMaintenance, 'AdmissionQueuePickup', {
+    new AdmissionQueuePickup(this, 'AdmissionQueuePickup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
@@ -1462,10 +1426,9 @@ export class AgentStack extends Stack {
     // (orchestrator Lambda crash between TaskTable write and InvokeAgentRuntime,
     // container crash during startup, etc.). Transitions to FAILED with a
     // `task_stranded` event.
-    new StrandedTaskReconciler(concurrencyMaintenance, 'StrandedTaskReconciler', {
+    new StrandedTaskReconciler(this, 'StrandedTaskReconciler', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
-      taskApprovalsTable: taskApprovalsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
     });
 
@@ -1473,7 +1436,7 @@ export class AgentStack extends Stack {
     // Auto-cancels PENDING_UPLOADS tasks that were never confirmed within
     // 30 minutes (client crash, abandoned session, network failure).
     // Cleans up orphaned S3 objects under the task's attachment prefix.
-    new PendingUploadCleanup(concurrencyMaintenance, 'PendingUploadCleanup', {
+    new PendingUploadCleanup(this, 'PendingUploadCleanup', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       attachmentsBucket: attachmentsBucket.bucket,
@@ -1505,7 +1468,6 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
-      taskApprovalsTable: taskApprovalsTable.table,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
@@ -1599,9 +1561,6 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
-      taskApprovalsTable: taskApprovalsTable.table,
-      lambdaMicrovmImageArn: lambdaMicrovm?.imageArn,
-      continuationBucketName: continuationBucket?.bucket.bucketName,
       budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
@@ -2011,7 +1970,6 @@ export class AgentStack extends Stack {
     const fanOutConsumer = new FanOutConsumer(this, 'FanOutConsumer', {
       taskEventsTable: taskEventsTable.table,
       taskTable: taskTable.table,
-      taskApprovalsTable: taskApprovalsTable.table,
       repoTable: repoTable.table,
       githubTokenSecret,
       // Slack bot-token grant is guarded on this prop — pass the
