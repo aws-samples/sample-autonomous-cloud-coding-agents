@@ -158,7 +158,7 @@ describe('new installation', () => {
     expect(text()).toContain('Deployment complete in');
     expect(text()).toContain(`API      ${BUNDLE.api_url}`);
     expect(runs[0].env).toMatchObject({ AWS_REGION: 'us-east-1', CDK_DEFAULT_REGION: 'us-east-1', MISE_EXPERIMENTAL: '1' });
-    expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual(BUNDLE);
+    expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual({ ...BUNDLE, stack_name: 'backgroundagent-dev' });
   });
 
   test('asks about each available feature and records the answers', async () => {
@@ -169,8 +169,8 @@ describe('new installation', () => {
   test('marks Region-unavailable features and never asks about them', async () => {
     const asked: string[] = [];
     const d = deps({ answers: [ACCOUNT_OK, COMPUTE_DEFAULT, 'n', 'n', 'n', 'n', 'n', 'y'] });
-    await runSetup({ region: 'eu-central-1', stackName: 'backgroundagent-dev' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
-    expect(text()).toContain('✗ AWS Agent Registry — not available in eu-central-1');
+    await runSetup({ region: 'eu-west-3', stackName: 'backgroundagent-dev' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
+    expect(text()).toContain('✗ AWS Agent Registry — not available in eu-west-3');
     expect(asked.some(q => q.includes('AWS Agent Registry'))).toBe(false);
     expect(profileOnDisk().agentRegistry).toBe(false);
   });
@@ -260,7 +260,7 @@ describe('existing deployments', () => {
 
   test('refuses to remove a deployed feature the catalog calls unavailable', async () => {
     const d = deps({ describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'agentRegistry' }) }) });
-    await expect(runSetup({ region: 'eu-central-1', yes: true }, d)).rejects.toThrow(/may be stale/);
+    await expect(runSetup({ region: 'eu-west-3', yes: true }, d)).rejects.toThrow(/may be stale/);
   });
 
   test('keeps the compute an existing stack was deployed with and records it in the profile', async () => {
@@ -290,6 +290,67 @@ describe('existing deployments', () => {
   });
 });
 
+describe('stack names the bootstrap can deploy', () => {
+  test('rejects a new --stack-name that ABCA\'s least-privilege bootstrap cannot deploy, before any diff', async () => {
+    await expect(setup({ features: 'none', yes: true, stackName: 'team-b' }, deps()))
+      .rejects.toThrow("Cannot create 'team-b': ABCA's least-privilege bootstrap only deploys stacks named backgroundagent-dev or backgroundagent-dev-<suffix>; try backgroundagent-dev-team-b.");
+    expect(runs).toEqual([]);
+  });
+
+  test('applies the same rule when setup will install the bootstrap', async () => {
+    await expect(setup({ features: 'none', yes: true, stackName: 'team-b' }, deps({ describeStack: stacks({ CDKToolkit: null }) })))
+      .rejects.toThrow(/least-privilege bootstrap only deploys/);
+  });
+
+  test('accepts any name on a standard CDK bootstrap, which deploys with admin rights', async () => {
+    await setup({ features: 'none', yes: true, stackName: 'team-b' }, deps({ describeStack: stacks({ CDKToolkit: stack({}) }) }));
+    expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+  });
+
+  test('re-asks at the prompt with a name the bootstrap covers', async () => {
+    const answers = [ACCOUNT_OK, 'team-c', 'backgroundagent-dev-c', COMPUTE_DEFAULT, 'y'];
+    await runSetup({ region: 'us-east-1', features: 'none' }, deps({ answers }));
+    expect(text()).toContain('try backgroundagent-dev-team-c.');
+    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev-c']));
+  });
+});
+
+describe('compute of stacks that predate ComputeTypes', () => {
+  const preComputeTypes = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeSubstrate: 'ecs' }) });
+
+  test('fails closed instead of reading an ECS stack as AgentCore-only', async () => {
+    await expect(setup({ yes: true, acceptDataLoss: true }, deps({ describeStack: preComputeTypes })))
+      .rejects.toThrow("Stack 'backgroundagent-dev' predates the ComputeTypes output and reports ComputeSubstrate=ecs. Pass --compute");
+    expect(runs).toEqual([]);
+  });
+
+  test('keeps that backend once --compute names it', async () => {
+    await setup({ yes: true, compute: 'agentcore,ecs' }, deps({ describeStack: preComputeTypes }));
+    expect(profileFile().compute).toEqual(['agentcore', 'ecs']);
+  });
+
+  test('still refuses an explicit --compute that drops it', async () => {
+    await expect(setup({ yes: true, compute: 'agentcore' }, deps({ describeStack: preComputeTypes }))).rejects.toThrow(/will not remove ECS Fargate/);
+  });
+});
+
+describe('compute changes on the review screen', () => {
+  test('says which backend is being added rather than calling it deployed', async () => {
+    const existing = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore' }) });
+    await setup({ yes: true, compute: 'agentcore,ecs' }, deps({ describeStack: existing }));
+    expect(text()).toContain('AgentCore Runtime + ECS Fargate (adding ECS Fargate)');
+  });
+
+  test('warns when reordering moves the repository default, and asks interactively', async () => {
+    const existing = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'none', ComputeTypes: 'agentcore,ecs' }) });
+    await setup({ yes: true, compute: 'ecs,agentcore' }, deps({ describeStack: existing }));
+    expect(text()).toContain('The repository default changes from AgentCore Runtime to ECS Fargate.');
+    const error = await setup({ features: 'none', compute: 'ecs,agentcore' }, deps({ describeStack: existing, answers: [ACCOUNT_OK, 'n'] }))
+      .catch((err: unknown) => err);
+    expect(error).toMatchObject({ exitCode: SETUP_CANCELLED_EXIT_CODE });
+  });
+});
+
 describe('non-interactive operation', () => {
   test('deploys the requested features with --yes and no prompts', async () => {
     const d = deps({ interactive: false, ask: async () => { throw new Error('must not prompt'); } });
@@ -313,8 +374,8 @@ describe('non-interactive operation', () => {
   });
 
   test('fails clearly on a feature the Region does not support', async () => {
-    await expect(runSetup({ region: 'eu-central-1', features: 'agentRegistry', yes: true }, deps({ interactive: false })))
-      .rejects.toThrow(/AWS Agent Registry \('agentRegistry'\) is unavailable in eu-central-1/);
+    await expect(runSetup({ region: 'eu-west-3', features: 'agentRegistry', yes: true }, deps({ interactive: false })))
+      .rejects.toThrow(/AWS Agent Registry \('agentRegistry'\) is unavailable in eu-west-3/);
     expect(profileOnDisk()).toBeUndefined();
     expect(runs).toEqual([]);
   });
@@ -322,7 +383,7 @@ describe('non-interactive operation', () => {
   test('validates a repository profile against the Region before diffing', async () => {
     const withRegistry = { ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true };
     fs.writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), serializeDeploymentProfile({ features: withRegistry }));
-    await expect(runSetup({ region: 'eu-central-1', yes: true }, deps({ interactive: false }))).rejects.toThrow(/unavailable in eu-central-1/);
+    await expect(runSetup({ region: 'eu-west-3', yes: true }, deps({ interactive: false }))).rejects.toThrow(/unavailable in eu-west-3/);
     expect(runs).toEqual([]);
   });
 
@@ -426,7 +487,7 @@ describe('failures and cancellation', () => {
   test('drops a stale registry URL from the CLI config after removing the Registry', async () => {
     fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify({ ...BUNDLE, registry_api_url: 'https://old/' }));
     await setup({ features: 'none', yes: true }, deps());
-    expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual(BUNDLE);
+    expect(JSON.parse(fs.readFileSync(path.join(configDir, 'config.json'), 'utf-8'))).toEqual({ ...BUNDLE, stack_name: 'backgroundagent-dev' });
   });
 
   test('rejects an invalid stack name before any AWS call', async () => {
@@ -436,7 +497,74 @@ describe('failures and cancellation', () => {
   });
 });
 
+describe('data-loss gate and post-deploy state', () => {
+  test('gates on the catalog even when the diff shows no state-bearing change', async () => {
+    const d = deps({ interactive: false, describeStack: stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'slack' }) }) });
+    await expect(setup({ features: 'none', yes: true }, d)).rejects.toThrow(/--accept-data-loss/);
+    expect(profileOnDisk()).toBeUndefined();
+    await setup({ features: 'none', yes: true, acceptDataLoss: true }, d);
+    expect(text()).toContain('• Slack: all of its data');
+  });
+
+  test('does not write the profile when account preparation fails', async () => {
+    const base = deps({ describeStack: stacks({ CDKToolkit: null }) });
+    const run: SetupDeps['run'] = async (args, options) => (args[0] === '//cdk:bootstrap'
+      ? { code: 1, output: 'AccessDenied: not authorized to perform cloudformation:CreateStack' } : base.run(args, options));
+    await expect(setup({ features: 'none', yes: true }, { ...base, run })).rejects.toThrow(/nothing was deployed/);
+    expect(profileOnDisk()).toBeUndefined();
+  });
+
+  test('explains a CLI-configuration failure after a successful deploy', async () => {
+    const configureFromStack = async () => { throw new Error('Stack is missing output ApiUrl'); };
+    await expect(setup({ features: 'none', yes: true }, deps({ configureFromStack })))
+      .rejects.toThrow('backgroundagent-dev deployed, but the CLI could not be pointed at it (Stack is missing output ApiUrl). '
+        + 'Run `bgagent configure --stack-name backgroundagent-dev --region us-east-1`.');
+  });
+
+  test('drops cached tokens when the CLI moves to another user pool, and keeps them otherwise', async () => {
+    const credentials = path.join(configDir, 'credentials.json');
+    fs.writeFileSync(path.join(configDir, 'config.json'), JSON.stringify(BUNDLE));
+    fs.writeFileSync(credentials, '{}');
+    await setup({ features: 'none', yes: true }, deps());
+    expect(fs.existsSync(credentials)).toBe(true);
+    await setup({ features: 'none', yes: true }, deps({ configureFromStack: async () => ({ ...BUNDLE, user_pool_id: 'other-pool' }) }));
+    expect(fs.existsSync(credentials)).toBe(false);
+  });
+
+  test('creates the log directory owner-only', async () => {
+    await setup({ features: 'none', yes: true }, deps());
+    expect((fs.statSync(path.join(configDir, 'logs')).mode % 0o1000).toString(8)).toBe('700');
+  });
+
+  test('lists only the steps an update still needs', async () => {
+    const existing = stacks({ 'backgroundagent-dev': stack({ DeploymentFeatures: 'jira' }) });
+    await setup({ features: 'jira,slack', yes: true }, deps({ describeStack: existing }));
+    expect(text()).toContain('Connect Slack');
+    expect(text()).toContain('bgagent slack setup --region us-east-1');
+    expect(text()).not.toContain('Create your user');
+    expect(text()).not.toContain('bgagent jira setup');
+  });
+
+  test('a new installation adds the setup step of each selected tracker', async () => {
+    await setup({ features: 'linear', yes: true }, deps());
+    expect(text()).toContain('Create your user');
+    expect(text()).toContain('bgagent linear setup <workspace-slug> --region us-east-1');
+  });
+});
+
 describe('helpers', () => {
+  test('parseStateBearingChanges finds exactly the data a real cdk diff removes', () => {
+    // Captured from aws-cdk 2.1129 `cdk diff` of the legacy topology without Linear (IAM tables trimmed).
+    const diff = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'cdk-diff-remove-linear.txt'), 'utf-8');
+    expect(parseStateBearingChanges(diff)).toEqual([
+      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/ProjectMappingTable/Table' },
+      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/UserMappingTable/Table' },
+      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WorkspaceRegistryTable/Table' },
+      { change: 'delete', type: 'AWS::DynamoDB::Table', id: 'LinearIntegration/WebhookDedupTable' },
+      { change: 'delete', type: 'AWS::SecretsManager::Secret', id: 'LinearIntegration/WebhookSecret' },
+    ]);
+  });
+
   test('parseStateBearingChanges reads the impact word on resource lines', () => {
     const diff = [
       'Stack backgroundagent-dev',
@@ -574,9 +702,9 @@ describe('brand-new accounts', () => {
   });
 
   test('ends with a next-steps checklist for the new stack', async () => {
-    await setup({ features: 'none', yes: true, stackName: 'forked-bgagent-dev' }, deps());
-    expect(text()).toContain('bgagent github set-token --region us-east-1 --stack-name forked-bgagent-dev');
-    expect(text()).toContain('bgagent repo onboard owner/repo --region us-east-1 --stack-name forked-bgagent-dev');
+    await setup({ features: 'none', yes: true, stackName: 'backgroundagent-dev-fork' }, deps());
+    expect(text()).toContain('bgagent github set-token --region us-east-1 --stack-name backgroundagent-dev-fork');
+    expect(text()).toContain('bgagent repo onboard owner/repo --region us-east-1 --stack-name backgroundagent-dev-fork');
   });
 });
 
@@ -623,8 +751,8 @@ describe('account and deployment selection', () => {
     await pick({ answers, listDeployments: async () => deployed, describeStack })();
     expect(text()).toContain("'team-b' already exists");
     expect(text()).toContain('Use letters, numbers and hyphens');
-    // A stack the picker did not list (e.g. older) is still detected.
-    expect(text()).toContain("'old-stack' already exists");
+    // A stack the picker did not list (e.g. a failed first create) is still detected, with a way out.
+    expect(text()).toContain("'old-stack' exists (UPDATE_COMPLETE) but is not a working ABCA deployment; delete it, or rerun with --stack-name old-stack.");
     expect(text()).toContain('Stack    backgroundagent-dev-2 (new installation)');
     expect(text()).toContain('This adds a separate deployment alongside the existing one(s)');
     expect(runs[1].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev-2']));
@@ -633,10 +761,10 @@ describe('account and deployment selection', () => {
 
   test('asks for a name when the account has no deployment yet', async () => {
     const asked: string[] = [];
-    const d = deps({ answers: [ACCOUNT_OK, 'forked-bgagent-dev', COMPUTE_DEFAULT, 'y'] });
+    const d = deps({ answers: [ACCOUNT_OK, 'backgroundagent-dev-fork', COMPUTE_DEFAULT, 'y'] });
     await runSetup({ region: 'us-east-1', features: 'none' }, { ...d, ask: async q => { asked.push(q); return d.ask(q); } });
     expect(asked[1]).toBe('  Name for the new deployment [backgroundagent-dev]: ');
-    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=forked-bgagent-dev']));
+    expect(runs[0].args).toEqual(expect.arrayContaining(['-c', 'stackName=backgroundagent-dev-fork']));
   });
 
   test('skips the picker when --stack-name is given', async () => {

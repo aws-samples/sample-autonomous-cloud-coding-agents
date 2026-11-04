@@ -24,7 +24,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import type { CloudAssembly } from 'aws-cdk-lib/cx-api';
 import { AGENTCORE_AZS_CONTEXT_KEY, AUTO_PIN_AZ_COUNT } from '../../src/constructs/agentcore-azs';
 import { CAPABILITY_CATALOG } from '../../src/deployment/capabilities';
-import { DEPLOYMENT_FEATURES, DeploymentFeature, FEATURE_CONTEXT_KEYS } from '../../src/deployment/features';
+import { DEPLOYMENT_FEATURES, DeploymentFeature, FEATURE_CONTEXT_KEYS, LEGACY_DEPLOYMENT_FEATURES } from '../../src/deployment/features';
 import { resolveComputeBackends } from '../../src/handlers/shared/compute-backend';
 import { buildApp } from '../../src/main';
 import { AssemblyCensus, inspectAssembly } from '../../src/synthesis/assembly';
@@ -43,6 +43,17 @@ const FEATURE_MARKERS: Readonly<Record<DeploymentFeature, { output?: string; pat
   toolGateway: { path: '/ToolGateway/' },
 };
 const APPLICATION_TEMPLATE = 'backgroundagent-dev.template.json';
+/**
+ * Census cell that synthesizes the legacy topology (no profile): what every stack
+ * deployed before ADR-024 runs today.
+ */
+const LEGACY_CELL = 'agentcore-gw0-reg1-vault0-none';
+/** Types whose logical-ID change replaces a resource that holds data (mirrors the CLI's data-loss gate). */
+const STATE_BEARING_TYPES = new Set([
+  'AWS::DynamoDB::Table', 'AWS::DynamoDB::GlobalTable', 'AWS::SecretsManager::Secret', 'AWS::S3::Bucket',
+  'AWS::Cognito::UserPool', 'AWS::KMS::Key', 'AWS::Logs::LogGroup', 'AWS::CloudFormation::Stack',
+  'AWS::BedrockAgentCore::Memory', 'AWS::EC2::VPC',
+]);
 /** Root-stack resource counts of the inline feature cells, reused by the footprint check. */
 const featureRootResources = new Map<string, number>();
 
@@ -159,6 +170,28 @@ describe.each(synthesisProfiles())('$name deployment', profile => {
     expect(count('AWS::ECS::Cluster')).toBe(backends.includes('ecs') ? 1 : 0);
     expect(count('AWS::Lambda::NetworkConnector')).toBe(backends.includes('lambda-microvm') ? 2 : 0);
     expect(count('AWS::CDK::Metadata')).toBeGreaterThan(0);
+  });
+
+  // Generated from main before ADR-024 (legacy-state-ids.json). A refactor that moves a
+  // construct changes its logical ID, and CloudFormation would replace the table or secret
+  // in every existing stack. Regenerate only for an intentional, documented migration.
+  if (profile.name === LEGACY_CELL) {
+    test('keeps the logical IDs of every state-bearing resource of pre-profile stacks', () => {
+      const ids = census.templates.flatMap(template => template.inventory
+        .filter(resource => STATE_BEARING_TYPES.has(resource.type))
+        .map(resource => ({ template: template.file, logicalId: resource.logicalId, type: resource.type })))
+        .sort((a, b) => `${a.template}/${a.logicalId}`.localeCompare(`${b.template}/${b.logicalId}`));
+      expect(ids).toEqual(JSON.parse(readFileSync(path.join(__dirname, 'legacy-state-ids.json'), 'utf8')));
+    });
+  }
+
+  test('publishes the deployed features, which bgagent setup preselects from', () => {
+    const outputs = JSON.parse(readFileSync(path.join(directory, APPLICATION_TEMPLATE), 'utf8')).Outputs;
+    const expected = DEPLOYMENT_FEATURES.filter(feature => {
+      const value = profile.context[FEATURE_CONTEXT_KEYS[feature]];
+      return typeof value === 'boolean' ? value : LEGACY_DEPLOYMENT_FEATURES[feature];
+    });
+    expect(outputs.DeploymentFeatures.Value).toBe(expected.join(',') || 'none');
   });
 
   if (!profile.name.startsWith('features-')) return;

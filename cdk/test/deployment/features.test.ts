@@ -43,7 +43,8 @@ describe('parseDeploymentProfile', () => {
 
   test.each([
     ['a non-object', [], /expected a JSON object/],
-    ['an unknown schemaVersion', { ...profileJson({}), schemaVersion: 2 }, /schemaVersion must be 1/],
+    ['a newer schemaVersion', { ...profileJson({}), schemaVersion: 2 }, /written by a newer ABCA; upgrade/],
+    ['a non-numeric schemaVersion', { ...profileJson({}), schemaVersion: '1' }, /schemaVersion must be 1/],
     ['a missing schemaVersion', { features: MINIMAL_DEPLOYMENT_FEATURES }, /schemaVersion must be 1/],
     ['an unknown top-level key', profileJson({}, { network: 'split' }), /unknown top-level key 'network'/],
     ['an unknown feature (typo)', profileJson({ slak: true }), /unknown feature 'slak'/],
@@ -88,9 +89,10 @@ describe('readDeploymentProfile', () => {
     expect(readDeploymentProfile(node(), root)).toEqual({ features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true } });
   });
 
-  test('prefers a per-stack profile for additional deployments and falls back to the shared one', () => {
+  test('reads a per-stack profile for additional deployments and never inherits the shared one', () => {
     writeFileSync(path.join(root, DEPLOYMENT_PROFILE_FILE), JSON.stringify(profileJson({ jira: true })));
-    expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)?.features.jira).toBe(true);
+    // The shared file belongs to the default stack: another stack without its own file keeps the legacy topology.
+    expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)).toBeUndefined();
     writeFileSync(path.join(root, 'abca.deployment.second-dev.json'), JSON.stringify(profileJson({ slack: true })));
     expect(readDeploymentProfile(node({ stackName: 'second-dev' }), root)?.features).toEqual({ ...MINIMAL_DEPLOYMENT_FEATURES, slack: true });
     // The default stack keeps using the shared file.

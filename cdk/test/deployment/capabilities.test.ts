@@ -67,9 +67,14 @@ describe('regional capability catalog', () => {
     },
   );
 
-  test('pins AWS Agent Registry to its five documented Regions', () => {
-    expect([...CAPABILITY_CATALOG.features.agentRegistry.regions!].sort())
-      .toEqual(['ap-northeast-1', 'ap-southeast-2', 'eu-west-1', 'us-east-1', 'us-west-2']);
+  test('pins AWS Agent Registry to its nine documented Regions', () => {
+    expect([...CAPABILITY_CATALOG.features.agentRegistry.regions!].sort()).toEqual([
+      'ap-northeast-1', 'ap-southeast-2', 'ca-central-1', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'us-east-1', 'us-east-2', 'us-west-2',
+    ]);
+  });
+
+  test('keeps deploy-preview screenshots out of GovCloud, which has no CloudFront', () => {
+    expect(CAPABILITY_CATALOG.features.deployPreviewScreenshots.regions!.filter(region => region.startsWith('us-gov-'))).toEqual([]);
   });
 
   test('has AgentCore zone data for every core Region so the VPC can be auto-pinned', () => {
@@ -86,10 +91,10 @@ describe('capabilityViolations', () => {
   });
 
   test('rejects Agent Registry outside its Regions with the supported list and remediation', () => {
-    const [violation, ...rest] = capabilityViolations({ ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true }, 'eu-central-1');
+    const [violation, ...rest] = capabilityViolations({ ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true }, 'eu-west-3');
     expect(rest).toEqual([]);
-    expect(violation).toContain('AWS Agent Registry is not available in eu-central-1');
-    expect(violation).toContain('us-east-1, us-west-2, eu-west-1, ap-southeast-2, ap-northeast-1');
+    expect(violation).toContain('AWS Agent Registry is not available in eu-west-3');
+    expect(violation).toContain('us-east-1, us-east-2, us-west-2, eu-central-1, eu-west-1, eu-west-2, ap-southeast-2, ap-northeast-1, ca-central-1');
     expect(violation).toContain('disable the Agent Registry');
   });
 
@@ -99,7 +104,7 @@ describe('capabilityViolations', () => {
   });
 
   test('ignores disabled features', () => {
-    expect(capabilityViolations(MINIMAL_DEPLOYMENT_FEATURES, 'eu-central-1')).toEqual([]);
+    expect(capabilityViolations(MINIMAL_DEPLOYMENT_FEATURES, 'eu-west-3')).toEqual([]);
   });
 });
 
@@ -111,9 +116,9 @@ describe('synthesis-time enforcement', () => {
   test('AgentStack rejects an unsupported feature for a concrete Region independently of the CLI', () => {
     const app = new App();
     expect(() => new AgentStack(app, 'Unsupported', {
-      env: { account: '123456789012', region: 'eu-central-1' },
+      env: { account: '123456789012', region: 'eu-west-3' },
       features: { ...MINIMAL_DEPLOYMENT_FEATURES, agentRegistry: true },
-    })).toThrow(/Deployment profile is not deployable in eu-central-1:[\s\S]*AWS Agent Registry/);
+    })).toThrow(/Deployment profile is not deployable in eu-west-3:[\s\S]*AWS Agent Registry/);
   });
 
   test('AgentStack synthesizes env-agnostic stacks without a Region check', () => {
@@ -139,18 +144,18 @@ describe('buildApp consumes the repository profile', () => {
   const synthOutputs = async (context: Record<string, unknown> = {}) => {
     const app = await buildApp({
       account: '123456789012',
-      region: 'eu-central-1',
+      region: 'eu-west-3',
       profileRoot: root,
       describeAzs: async () => [],
       resolveCallerAccount: async () => '123456789012',
-      appProps: { context: { 'aws:cdk:bundling-stacks': [], 'agentcore:availabilityZones': ['eu-central-1a', 'eu-central-1b'], ...context } },
+      appProps: { context: { 'aws:cdk:bundling-stacks': [], 'agentcore:availabilityZones': ['eu-west-3a', 'eu-west-3b'], ...context } },
     });
     const stack = app.node.findChild('backgroundagent-dev') as AgentStack;
     return Object.keys(Template.fromStack(stack).toJSON().Outputs ?? {});
   };
 
   test('fails fast when the legacy default enables a feature the Region lacks', async () => {
-    await expect(synthOutputs()).rejects.toThrow(/AWS Agent Registry is not available in eu-central-1/);
+    await expect(synthOutputs()).rejects.toThrow(/AWS Agent Registry is not available in eu-west-3/);
   });
 
   test('applies the profile compute selection unless context chooses explicitly', async () => {

@@ -1,0 +1,729 @@
+Stack backgroundagent-dev
+Resources
+[-] AWS::Bedrock::GuardrailVersion InputGuardrail/GuardrailVersion-09633c655ccfc3d2/GuardrailVersion-f0ea742754a16bb2 InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588 destroy
+[-] AWS::ApiGateway::Deployment TaskApi/Api/Deployment TaskApiDeployment093F4F13ce8c6f945891900f428d897504a9269c destroy
+[-] AWS::ApiGateway::Resource TaskApi/Api/Default/linear TaskApilinear1BA4D9B5 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/OPTIONS TaskApilinearOPTIONS4DE5098E destroy
+[-] AWS::ApiGateway::Resource TaskApi/Api/Default/linear/webhook TaskApilinearwebhook7AC6E6D6 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/webhook/OPTIONS TaskApilinearwebhookOPTIONS7B4AEC89 destroy
+[-] AWS::Lambda::Permission TaskApi/Api/Default/linear/webhook/POST/ApiPermission.backgroundagentdevTaskApi298E31A8.POST..linear.webhook TaskApilinearwebhookPOSTApiPermissionbackgroundagentdevTaskApi298E31A8POSTlinearwebhookC92AB53D destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/webhook/POST TaskApilinearwebhookPOST6EF8235F destroy
+[-] AWS::ApiGateway::Resource TaskApi/Api/Default/linear/link TaskApilinearlinkE7339694 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/link/OPTIONS TaskApilinearlinkOPTIONS7780565E destroy
+[-] AWS::Lambda::Permission TaskApi/Api/Default/linear/link/POST/ApiPermission.backgroundagentdevTaskApi298E31A8.POST..linear.link TaskApilinearlinkPOSTApiPermissionbackgroundagentdevTaskApi298E31A8POSTlinearlink96CB4A7A destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/link/POST TaskApilinearlinkPOST1DE76C59 destroy
+[-] AWS::ApiGateway::Resource TaskApi/Api/Default/linear/workspaces TaskApilinearworkspacesF968AC45 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/workspaces/OPTIONS TaskApilinearworkspacesOPTIONSFE17EB1C destroy
+[-] AWS::ApiGateway::Resource TaskApi/Api/Default/linear/workspaces/{slug} TaskApilinearworkspacesslugDEAD7D11 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/workspaces/{slug}/OPTIONS TaskApilinearworkspacesslugOPTIONS3CC50FAE destroy
+[-] AWS::Lambda::Permission TaskApi/Api/Default/linear/workspaces/{slug}/DELETE/ApiPermission.backgroundagentdevTaskApi298E31A8.DELETE..linear.workspaces.{slug} TaskApilinearworkspacesslugDELETEApiPermissionbackgroundagentdevTaskApi298E31A8DELETElinearworkspacesslug9792B5A5 destroy
+[-] AWS::ApiGateway::Method TaskApi/Api/Default/linear/workspaces/{slug}/DELETE TaskApilinearworkspacesslugDELETECF2A73A9 destroy
+[-] AWS::Lambda::Version TaskOrchestrator/OrchestratorFn/CurrentVersion TaskOrchestratorOrchestratorFnCurrentVersionD9F7BBD646f677b94ba440aaa18bcef748f2a4f3 destroy
+[-] AWS::DynamoDB::Table LinearIntegration/ProjectMappingTable/Table LinearIntegrationProjectMappingTableF152E008 destroy
+[-] AWS::DynamoDB::Table LinearIntegration/UserMappingTable/Table LinearIntegrationUserMappingTable0DA89F6E destroy
+[-] AWS::DynamoDB::Table LinearIntegration/WorkspaceRegistryTable/Table LinearIntegrationWorkspaceRegistryTableC954A5BC destroy
+[-] AWS::DynamoDB::Table LinearIntegration/WebhookDedupTable LinearIntegrationWebhookDedupTable1162175A destroy
+[-] AWS::SecretsManager::Secret LinearIntegration/WebhookSecret LinearIntegrationWebhookSecret830B9E0E destroy
+[-] AWS::ApiGateway::Authorizer LinearIntegration/LinearCognitoAuthorizer LinearIntegrationLinearCognitoAuthorizerD5A7C9D3 destroy
+[-] AWS::IAM::Role LinearIntegration/WebhookProcessorFn/ServiceRole LinearIntegrationWebhookProcessorFnServiceRole4435011A destroy
+[-] AWS::IAM::Policy LinearIntegration/WebhookProcessorFn/ServiceRole/DefaultPolicy LinearIntegrationWebhookProcessorFnServiceRoleDefaultPolicy413E8CB9 destroy
+[-] AWS::IAM::ManagedPolicy LinearIntegration/WebhookProcessorFn/ServiceRole/OverflowPolicy1 LinearIntegrationWebhookProcessorFnServiceRoleOverflowPolicy1457C47DA destroy
+[-] AWS::Lambda::Function LinearIntegration/WebhookProcessorFn LinearIntegrationWebhookProcessorFnBFD9E468 destroy
+[-] AWS::IAM::Role LinearIntegration/WebhookFn/ServiceRole LinearIntegrationWebhookFnServiceRole186989D7 destroy
+[-] AWS::IAM::Policy LinearIntegration/WebhookFn/ServiceRole/DefaultPolicy LinearIntegrationWebhookFnServiceRoleDefaultPolicy82DF8B2D destroy
+[-] AWS::Lambda::Function LinearIntegration/WebhookFn LinearIntegrationWebhookFn1615288C destroy
+[-] AWS::IAM::Role LinearIntegration/LinkFn/ServiceRole LinearIntegrationLinkFnServiceRole83EBEEEE destroy
+[-] AWS::IAM::Policy LinearIntegration/LinkFn/ServiceRole/DefaultPolicy LinearIntegrationLinkFnServiceRoleDefaultPolicyE0CA3416 destroy
+[-] AWS::Lambda::Function LinearIntegration/LinkFn LinearIntegrationLinkFn0E766700 destroy
+[-] AWS::IAM::Role LinearIntegration/RemoveWorkspaceFn/ServiceRole LinearIntegrationRemoveWorkspaceFnServiceRoleAEAC43C4 destroy
+[-] AWS::IAM::Policy LinearIntegration/RemoveWorkspaceFn/ServiceRole/DefaultPolicy LinearIntegrationRemoveWorkspaceFnServiceRoleDefaultPolicyD94EE255 destroy
+[-] AWS::Lambda::Function LinearIntegration/RemoveWorkspaceFn LinearIntegrationRemoveWorkspaceFn00047D20 destroy
+[+] AWS::Bedrock::GuardrailVersion InputGuardrail/GuardrailVersion-09633c655ccfc3d2/GuardrailVersion-24abf3829886045a InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497
+[+] AWS::ApiGateway::Deployment TaskApi/Api/Deployment TaskApiDeployment093F4F13036b47c76af46ccd20af64b3db1a3f75
+[+] AWS::Lambda::Version TaskOrchestrator/OrchestratorFn/CurrentVersion TaskOrchestratorOrchestratorFnCurrentVersionD9F7BBD6e0390f919ce6d0ad95bdc472b9222504
+[~] Custom::AWS AgentPluginsBlueprint/RepoConfigCR/Resource AgentPluginsBlueprintRepoConfigCR6B5303B6
+ ├─ [~] Create
+ │   └─ [~] .Fn::Join:
+ │       └─ @@ -5,6 +5,6 @@
+ │          [ ]     {
+ │          [ ]       "Ref": "RepoTable0D05C805"
+ │          [ ]     },
+ │          [-]     "\",\"Item\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"},\"status\":{\"S\":\"active\"},\"onboarded_at\":{\"S\":\"2026-11-04T21:37:58.633Z\"},\"updated_at\":{\"S\":\"2026-11-04T21:37:58.633Z\"}}},\"physicalResourceId\":{\"id\":\"blueprint-awslabs/agent-plugins\"}}"
+ │          [+]     "\",\"Item\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"},\"status\":{\"S\":\"active\"},\"onboarded_at\":{\"S\":\"2026-11-04T21:38:00.513Z\"},\"updated_at\":{\"S\":\"2026-11-04T21:38:00.513Z\"}}},\"physicalResourceId\":{\"id\":\"blueprint-awslabs/agent-plugins\"}}"
+ │          [ ]   ]
+ │          [ ] ]
+ ├─ [~] Delete
+ │   └─ [~] .Fn::Join:
+ │       └─ @@ -5,6 +5,6 @@
+ │          [ ]     {
+ │          [ ]       "Ref": "RepoTable0D05C805"
+ │          [ ]     },
+ │          [-]     "\",\"Key\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"}},\"UpdateExpression\":\"SET #status = :removed, #updated = :now, #ttl = :ttl\",\"ExpressionAttributeNames\":{\"#status\":\"status\",\"#updated\":\"updated_at\",\"#ttl\":\"ttl\"},\"ExpressionAttributeValues\":{\":removed\":{\"S\":\"removed\"},\":now\":{\"S\":\"2026-11-04T21:37:58.637Z\"},\":ttl\":{\"N\":\"1796420278\"}}}}"
+ │          [+]     "\",\"Key\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"}},\"UpdateExpression\":\"SET #status = :removed, #updated = :now, #ttl = :ttl\",\"ExpressionAttributeNames\":{\"#status\":\"status\",\"#updated\":\"updated_at\",\"#ttl\":\"ttl\"},\"ExpressionAttributeValues\":{\":removed\":{\"S\":\"removed\"},\":now\":{\"S\":\"2026-11-04T21:38:00.513Z\"},\":ttl\":{\"N\":\"1796420280\"}}}}"
+ │          [ ]   ]
+ │          [ ] ]
+ └─ [~] Update
+     └─ [~] .Fn::Join:
+         └─ @@ -5,6 +5,6 @@
+            [ ]     {
+            [ ]       "Ref": "RepoTable0D05C805"
+            [ ]     },
+            [-]     "\",\"Key\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"}},\"UpdateExpression\":\"SET #status = :active, #updated = :now REMOVE #mcp_servers, #cedar_policy_modules, #skills\",\"ExpressionAttributeNames\":{\"#status\":\"status\",\"#updated\":\"updated_at\",\"#mcp_servers\":\"mcp_servers\",\"#cedar_policy_modules\":\"cedar_policy_modules\",\"#skills\":\"skills\"},\"ExpressionAttributeValues\":{\":active\":{\"S\":\"active\"},\":now\":{\"S\":\"2026-11-04T21:37:58.637Z\"}}},\"physicalResourceId\":{\"id\":\"blueprint-awslabs/agent-plugins\"}}"
+            [+]     "\",\"Key\":{\"repo\":{\"S\":\"awslabs/agent-plugins\"}},\"UpdateExpression\":\"SET #status = :active, #updated = :now REMOVE #mcp_servers, #cedar_policy_modules, #skills\",\"ExpressionAttributeNames\":{\"#status\":\"status\",\"#updated\":\"updated_at\",\"#mcp_servers\":\"mcp_servers\",\"#cedar_policy_modules\":\"cedar_policy_modules\",\"#skills\":\"skills\"},\"ExpressionAttributeValues\":{\":active\":{\"S\":\"active\"},\":now\":{\"S\":\"2026-11-04T21:38:00.513Z\"}}},\"physicalResourceId\":{\"id\":\"blueprint-awslabs/agent-plugins\"}}"
+            [ ]   ]
+            [ ] ]
+[~] AWS::ApiGateway::Stage TaskApi/Api/DeploymentStage.v1 TaskApiDeploymentStagev11DD44A48
+ └─ [~] DeploymentId
+     └─ [~] .Ref:
+         ├─ [-] TaskApiDeployment093F4F13ce8c6f945891900f428d897504a9269c
+         └─ [+] TaskApiDeployment093F4F13036b47c76af46ccd20af64b3db1a3f75
+[~] AWS::WAFv2::WebACL TaskApi/WebAcl TaskApiWebAcl28D7DCC9
+ └─ [~] Rules
+     └─ @@ -37,21 +37,6 @@
+        [ ]       "UriPath": {}
+        [ ]     },
+        [ ]     "PositionalConstraint": "EXACTLY",
+        [-]     "SearchString": "/v1/linear/webhook",
+        [-]     "TextTransformations": [
+        [-]       {
+        [-]         "Priority": 0,
+        [-]         "Type": "NONE"
+        [-]       }
+        [-]     ]
+        [-]   }
+        [-] },
+        [-] {
+        [-]   "ByteMatchStatement": {
+        [-]     "FieldToMatch": {
+        [-]       "UriPath": {}
+        [-]     },
+        [-]     "PositionalConstraint": "EXACTLY",
+        [ ]     "SearchString": "/v1/jira/webhook",
+        [ ]     "TextTransformations": [
+        [ ]       {
+        @@ -146,25 +131,6 @@
+        [ ]           "UriPath": {}
+        [ ]         },
+        [ ]         "PositionalConstraint": "EXACTLY",
+        [-]         "SearchString": "/v1/linear/webhook",
+        [-]         "TextTransformations": [
+        [-]           {
+        [-]             "Priority": 0,
+        [-]             "Type": "NONE"
+        [-]           }
+        [-]         ]
+        [-]       }
+        [-]     }
+        [-]   }
+        [-] },
+        [-] {
+        [-]   "NotStatement": {
+        [-]     "Statement": {
+        [-]       "ByteMatchStatement": {
+        [-]         "FieldToMatch": {
+        [-]           "UriPath": {}
+        [-]         },
+        [-]         "PositionalConstraint": "EXACTLY",
+        [ ]         "SearchString": "/v1/github/webhook",
+        [ ]         "TextTransformations": [
+        [ ]           {
+[~] AWS::Lambda::Function TaskApi/CreateTaskFn TaskApiCreateTaskFnFBBF1DA8
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::Lambda::Function TaskApi/ConfirmUploadsFn TaskApiConfirmUploadsFnB311B5FE
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::Lambda::Function TaskApi/NudgeTaskFn TaskApiNudgeTaskFn824288D1
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::Lambda::Function TaskApi/WebhookCreateTaskFn TaskApiWebhookCreateTaskFn429B0495
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::IAM::Policy Runtime/ExecutionRole/DefaultPolicy RuntimeExecutionRoleDefaultPolicy2B020CFC
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -640,22 +640,6 @@
+            [ ]         {
+            [ ]           "Ref": "AWS::Partition"
+            [ ]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [-]   "Action": "secretsmanager:GetSecretValue",
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [ ]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-jira-oauth-*"
+            [ ]       ]
+            [ ]     ]
+[~] AWS::IAM::Policy TaskOrchestrator/OrchestratorFn/ServiceRole/DefaultPolicy TaskOrchestratorOrchestratorFnServiceRoleDefaultPolicyDECF0D43
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -361,59 +361,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "secretsmanager:GetSecretValue",
+            [-]     "secretsmanager:PutSecretValue"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "JiraIntegrationWorkspaceRegistryTableFF87F094",
+            [ ]         "Arn"
+            [ ]       ]
+[~] AWS::Lambda::Function TaskOrchestrator/OrchestratorFn TaskOrchestratorOrchestratorFn8CE22C41
+ └─ [~] Environment
+     └─ [~] .Variables:
+         ├─ [~] .GUARDRAIL_VERSION:
+         │   └─ [~] .Fn::GetAtt:
+         │       └─ @@ -1,4 +1,4 @@
+         │          [ ] [
+         │          [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+         │          [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+         │          [ ]   "Version"
+         │          [ ] ]
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+[~] AWS::Lambda::Alias TaskOrchestrator/OrchestratorFn/CurrentVersion/Aliaslive TaskOrchestratorOrchestratorFnCurrentVersionAliaslive08F80EEB
+ └─ [~] FunctionVersion
+     └─ [~] .Fn::GetAtt:
+         └─ @@ -1,4 +1,4 @@
+            [ ] [
+            [-]   "TaskOrchestratorOrchestratorFnCurrentVersionD9F7BBD646f677b94ba440aaa18bcef748f2a4f3",
+            [+]   "TaskOrchestratorOrchestratorFnCurrentVersionD9F7BBD6e0390f919ce6d0ad95bdc472b9222504",
+            [ ]   "Version"
+            [ ] ]
+[~] AWS::Lambda::Function SlackIntegration/CommandProcessorFn SlackIntegrationCommandProcessorFn6E6B758C
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::IAM::Policy OrchestrationReconciler/ReconcilerFn/ServiceRole/DefaultPolicy OrchestrationReconcilerReconcilerFnServiceRoleDefaultPolicy6C64677B
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -315,40 +315,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "UserConcurrencyTable48C3732F",
+            [ ]         "Arn"
+            [ ]       ]
+            @@ -410,22 +376,6 @@
+            [ ]   }
+            [ ] },
+            [ ] {
+            [-]   "Action": "secretsmanager:GetSecretValue",
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [ ]   "Action": [
+            [ ]     "dynamodb:BatchGetItem",
+            [ ]     "dynamodb:Query",
+[~] AWS::Lambda::Function OrchestrationReconciler/ReconcilerFn OrchestrationReconcilerReconcilerFnD1840CDF
+ └─ [~] Environment
+     └─ [~] .Variables:
+         ├─ [~] .GUARDRAIL_VERSION:
+         │   └─ [~] .Fn::GetAtt:
+         │       └─ @@ -1,4 +1,4 @@
+         │          [ ] [
+         │          [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+         │          [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+         │          [ ]   "Version"
+         │          [ ] ]
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+[~] AWS::IAM::Policy StrandedOrchestrationReconciler/ReconcilerFn/ServiceRole/DefaultPolicy StrandedOrchestrationReconcilerReconcilerFnServiceRoleDefaultPolicy24BBDF82
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -233,22 +233,6 @@
+            [ ]   }
+            [ ] },
+            [ ] {
+            [-]   "Action": "secretsmanager:GetSecretValue",
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [ ]   "Action": [
+            [ ]     "dynamodb:BatchGetItem",
+            [ ]     "dynamodb:Query",
+            @@ -261,40 +245,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "UserConcurrencyTable48C3732F",
+            [ ]         "Arn"
+            [ ]       ]
+[~] AWS::Lambda::Function StrandedOrchestrationReconciler/ReconcilerFn StrandedOrchestrationReconcilerReconcilerFn1D6188CB
+ └─ [~] Environment
+     └─ [~] .Variables:
+         ├─ [~] .GUARDRAIL_VERSION:
+         │   └─ [~] .Fn::GetAtt:
+         │       └─ @@ -1,4 +1,4 @@
+         │          [ ] [
+         │          [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+         │          [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+         │          [ ]   "Version"
+         │          [ ] ]
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+[~] AWS::IAM::Policy IterationHeartbeat/SweepFn/ServiceRole/DefaultPolicy IterationHeartbeatSweepFnServiceRoleDefaultPolicyAEF4A7DC
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -100,56 +100,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": "secretsmanager:GetSecretValue",
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "JiraIntegrationWorkspaceRegistryTableFF87F094",
+            [ ]         "Arn"
+            [ ]       ]
+[~] AWS::Lambda::Function IterationHeartbeat/SweepFn IterationHeartbeatSweepFn432E07D9
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+[~] AWS::Lambda::Function JiraIntegration/WebhookProcessorFn JiraIntegrationWebhookProcessorFnE5EB0D16
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [~] .GUARDRAIL_VERSION:
+             └─ [~] .Fn::GetAtt:
+                 └─ @@ -1,4 +1,4 @@
+                    [ ] [
+                    [-]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersionf0ea742754a16bb28A63F588",
+                    [+]   "InputGuardrailGuardrailVersion09633c655ccfc3d2GuardrailVersion24abf3829886045aF7F8A497",
+                    [ ]   "Version"
+                    [ ] ]
+[~] AWS::IAM::Policy FanOutConsumer/FanOutFn/ServiceRole/DefaultPolicy FanOutConsumerFanOutFnServiceRoleDefaultPolicyAD7EF98D
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -138,59 +138,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "secretsmanager:GetSecretValue",
+            [-]     "secretsmanager:PutSecretValue"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "JiraIntegrationWorkspaceRegistryTableFF87F094",
+            [ ]         "Arn"
+            [ ]       ]
+[~] AWS::Lambda::Function FanOutConsumer/FanOutFn FanOutConsumerFanOutFn1420194E
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+[~] AWS::IAM::Policy GitHubScreenshotIntegration/WebhookProcessorFn/ServiceRole/DefaultPolicy GitHubScreenshotIntegrationWebhookProcessorFnServiceRoleDefaultPolicyF54B5A29
+ └─ [~] PolicyDocument
+     └─ [~] .Statement:
+         └─ @@ -57,59 +57,6 @@
+            [ ]   "Resource": [
+            [ ]     {
+            [ ]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:GetRecords",
+            [-]     "dynamodb:GetShardIterator"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [-]         "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+            [-]         "Arn"
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "secretsmanager:GetSecretValue",
+            [-]     "secretsmanager:PutSecretValue"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": {
+            [-]     "Fn::Join": [
+            [-]       "",
+            [-]       [
+            [-]         "arn:",
+            [-]         {
+            [-]           "Ref": "AWS::Partition"
+            [-]         },
+            [-]         ":secretsmanager:us-east-1:123456789012:secret:bgagent-linear-oauth-*"
+            [-]       ]
+            [-]     ]
+            [-]   }
+            [-] },
+            [-] {
+            [-]   "Action": [
+            [-]     "dynamodb:BatchGetItem",
+            [-]     "dynamodb:Query",
+            [-]     "dynamodb:GetItem",
+            [-]     "dynamodb:Scan",
+            [-]     "dynamodb:ConditionCheckItem",
+            [-]     "dynamodb:DescribeTable"
+            [-]   ],
+            [-]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::GetAtt": [
+            [ ]         "JiraIntegrationWorkspaceRegistryTableFF87F094",
+            [ ]         "Arn"
+            [ ]       ]
+            @@ -185,40 +132,22 @@
+            [ ] {
+            [ ]   "Action": "dynamodb:Query",
+            [ ]   "Effect": "Allow",
+            [-]   "Resource": [
+            [-]     {
+            [-]       "Fn::Join": [
+            [-]         "",
+            [-]         [
+            [-]           "arn:",
+            [-]           {
+            [-]             "Ref": "AWS::Partition"
+            [-]           },
+            [-]           ":dynamodb:us-east-1:123456789012:table/",
+            [-]           {
+            [-]             "Ref": "TaskTable95FE7720"
+            [-]           },
+            [-]           "/index/LinearIssueIndex"
+            [-]         ]
+            [+]   "Resource": {
+            [+]     "Fn::Join": [
+            [+]       "",
+            [+]       [
+            [+]         "arn:",
+            [+]         {
+            [+]           "Ref": "AWS::Partition"
+            [+]         },
+            [+]         ":dynamodb:us-east-1:123456789012:table/",
+            [+]         {
+            [+]           "Ref": "TaskTable95FE7720"
+            [+]         },
+            [+]         "/index/JiraIssueIndex"
+            [ ]       ]
+            [-]     },
+            [-]     {
+            [-]       "Fn::Join": [
+            [-]         "",
+            [-]         [
+            [-]           "arn:",
+            [-]           {
+            [-]             "Ref": "AWS::Partition"
+            [-]           },
+            [-]           ":dynamodb:us-east-1:123456789012:table/",
+            [-]           {
+            [-]             "Ref": "TaskTable95FE7720"
+            [-]           },
+            [-]           "/index/JiraIssueIndex"
+            [-]         ]
+            [-]       ]
+            [-]     }
+            [-]   ]
+            [+]     ]
+            [+]   }
+            [ ] },
+            [ ] {
+            [ ]   "Action": "dynamodb:GetItem",
+[~] AWS::Lambda::Function GitHubScreenshotIntegration/WebhookProcessorFn GitHubScreenshotIntegrationWebhookProcessorFn2BA32567
+ └─ [~] Environment
+     └─ [~] .Variables:
+         └─ [-] Removed: .LINEAR_WORKSPACE_REGISTRY_TABLE_NAME
+
+Outputs
+[-] Output LinearWebhookSecretArn: {"Description":"Secrets Manager ARN for the Linear webhook signing secret — populate via `bgagent linear setup`","Value":{"Ref":"LinearIntegrationWebhookSecret830B9E0E"}}
+[-] Output LinearProjectMappingTableName: {"Description":"Name of the DynamoDB Linear project → repo mapping table","Value":{"Ref":"LinearIntegrationProjectMappingTableF152E008"}}
+[-] Output LinearUserMappingTableName: {"Description":"Name of the DynamoDB Linear user mapping table","Value":{"Ref":"LinearIntegrationUserMappingTable0DA89F6E"}}
+[-] Output LinearWorkspaceRegistryTableName: {"Description":"Name of the DynamoDB Linear workspace registry — `bgagent linear setup` writes a row per OAuth-installed workspace","Value":{"Ref":"LinearIntegrationWorkspaceRegistryTableC954A5BC"}}
+[~] Output DeploymentFeatures DeploymentFeatures: {"Description":"Optional features deployed in this stack (ADR-024) - read by `bgagent setup`","Value":"slack,linear,jira,deployPreviewScreenshots,agentRegistry"} to {"Description":"Optional features deployed in this stack (ADR-024) - read by `bgagent setup`","Value":"slack,jira,deployPreviewScreenshots,agentRegistry"}
+
+
+
+✨  Number of stacks with differences: 1
+

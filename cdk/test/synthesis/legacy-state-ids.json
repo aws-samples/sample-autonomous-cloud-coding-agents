@@ -1,0 +1,237 @@
+[
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "AgentMemory1601EF79",
+    "type": "AWS::BedrockAgentCore::Memory"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "AgentRegistryStackNestedStackAgentRegistryStackNestedStackResourceE9472B93",
+    "type": "AWS::CloudFormation::Stack"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "AgentVpcA6796801",
+    "type": "AWS::EC2::VPC"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "AgentVpcFlowLogGroup9800E4B6",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "ApiKeyTable42AB1184",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "ApprovalMetricsPublisherConsumerApprovalMetricsPublisherLogsCD5D42B2",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "AttachmentsBucket28B3CCF2",
+    "type": "AWS::S3::Bucket"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "BudgetTable504CC359",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "DnsFirewallQueryLogGroup747F517E",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "FanOutConsumerFanOutFnLogs7BF1396E",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "GitHubScreenshotIntegrationScreenshotBucket180EE982",
+    "type": "AWS::S3::Bucket"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "GitHubScreenshotIntegrationWebhookDedupTableD057E562",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "GitHubScreenshotIntegrationWebhookSecretA2898A93",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "GitHubTokenSecret09BC4210",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "JiraIntegrationProjectMappingTable2A2BCC03",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "JiraIntegrationUserMappingTable50D682D2",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "JiraIntegrationWebhookDedupTable06C09AAB",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "JiraIntegrationWebhookSecretBBD6D649",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "JiraIntegrationWorkspaceRegistryTableFF87F094",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "LinearIntegrationProjectMappingTableF152E008",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "LinearIntegrationUserMappingTable0DA89F6E",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "LinearIntegrationWebhookDedupTable1162175A",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "LinearIntegrationWebhookSecret830B9E0E",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "LinearIntegrationWorkspaceRegistryTableC954A5BC",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "ModelInvocationLogGroupA8B2AC35",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "OperationalAlertsKeyBDF859ED",
+    "type": "AWS::KMS::Key"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "OrchestrationTableDD3F9D18",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "RegistryApiNestedStackRegistryApiNestedStackResourceCFCC5744",
+    "type": "AWS::CloudFormation::Stack"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "RepoTable0D05C805",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "RuntimeApplicationLogGroupCCD512EC",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "RuntimeUsageLogGroup3193D914",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationChannelMappingTable498891AF",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationClientIdSecret3C1950BB",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationClientSecret79EEB782",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationInstallationTableFEA78EC1",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationSigningSecretFBE3D363",
+    "type": "AWS::SecretsManager::Secret"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "SlackIntegrationUserMappingTable72394219",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskApiApiAccessLogsE9B0C015",
+    "type": "AWS::Logs::LogGroup"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskApiUserPoolCE5247B7",
+    "type": "AWS::Cognito::UserPool"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskApprovalsTableV2TableB16FF537",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskEventsTableDC157861",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskNudgesTable285CAD71",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TaskTable95FE7720",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "TraceArtifactsBucket8CBD5207",
+    "type": "AWS::S3::Bucket"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "UserConcurrencyTable48C3732F",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagent-dev.template.json",
+    "logicalId": "WebhookTable610F8307",
+    "type": "AWS::DynamoDB::Table"
+  },
+  {
+    "template": "backgroundagentdevRegistryApiF3ADADE2.nested.template.json",
+    "logicalId": "ApiAccessLogsE9DF007D",
+    "type": "AWS::Logs::LogGroup"
+  }
+]

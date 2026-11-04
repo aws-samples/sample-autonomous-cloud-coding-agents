@@ -30,26 +30,29 @@ import { getStackOutput } from './stack-outputs';
 
 /**
  * Fail an operator subcommand early when its stack omits the module it manages
- * (ADR-024). Only the authoritative `DeploymentFeatures` output can prove a
- * feature absent: stacks that predate it, subcommands without `--stack-name`,
- * and unreadable stacks fall through to the command's own handling.
+ * (ADR-024). The stack is `--stack-name`, else the one the CLI was configured
+ * from. Only the authoritative `DeploymentFeatures` output can prove a feature
+ * absent: stacks that predate it, an unknown stack and unreadable stacks fall
+ * through to the command's own handling.
  */
 export function requireDeployedFeature(command: Command, feature: DeploymentFeature): Command {
   return command.hook('preAction', async (_parent, action) => {
     const opts = action.opts() as { region?: string; stackName?: string };
-    if (!opts.stackName) return;
-    const region = opts.region ?? tryLoadConfig()?.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
+    const config = tryLoadConfig();
+    const stackName = opts.stackName ?? config?.stack_name;
+    if (!stackName) return;
+    const region = opts.region ?? config?.region ?? process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
     if (!region) return;
     let published: string | null;
     try {
-      published = await getStackOutput(region, opts.stackName, DEPLOYMENT_FEATURES_OUTPUT);
+      published = await getStackOutput(region, stackName, DEPLOYMENT_FEATURES_OUTPUT);
     } catch (err) {
       debug(`[feature-guard] skipping ${feature} check: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
     // Lenient: a newer stack may publish features this CLI does not know.
     if (published !== null && !publishedFeatureNames(published).includes(feature)) {
-      throw featureNotDeployedError(feature, opts.stackName);
+      throw featureNotDeployedError(feature, stackName);
     }
   });
 }

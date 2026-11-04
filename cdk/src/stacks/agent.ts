@@ -2190,7 +2190,7 @@ export class AgentStack extends Stack {
     // setup` preselects from it so a rerun never proposes an accidental removal.
     new CfnOutput(this, 'DeploymentFeatures', {
       value: enabledFeatures(features).join(',') || 'none',
-      description: 'Optional features deployed in this stack (ADR-024) — read by `bgagent setup`',
+      description: 'Optional features deployed in this stack (ADR-024) - read by `bgagent setup`',
     });
 
     new CfnOutput(this, 'UserPoolId', {

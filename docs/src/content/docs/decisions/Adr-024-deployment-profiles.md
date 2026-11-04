@@ -12,7 +12,7 @@ Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/architecture/read
 
 ## Context
 
-The application stack deploys Slack, Linear, Jira, deploy-preview screenshots and the Agent Registry whether or not an operator uses them. Each adds Lambdas, tables, secrets, IAM grants, API routes and alarms, so unused integrations cost money, slow deploys, widen the security-review surface and consume the root stack's 490-resource budget ([ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)). Some depend on Region-limited services: AWS Agent Registry is available in five Regions, and AgentCore Memory, which every deployment uses, in sixteen. An unsupported Region fails late, inside CloudFormation, with an opaque service error.
+The application stack deploys Slack, Linear, Jira, deploy-preview screenshots and the Agent Registry whether or not an operator uses them. Each adds Lambdas, tables, secrets, IAM grants, API routes and alarms, so unused integrations cost money, slow deploys, widen the security-review surface and consume the root stack's 490-resource budget ([ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)). Some depend on Region-limited services: AWS Agent Registry is available in nine Regions, and AgentCore Memory, which every deployment uses, in sixteen. An unsupported Region fails late, inside CloudFormation, with an opaque service error.
 
 Issue #836 also suggests moving substantial optional modules into nested stacks. Slack, Linear, Jira and screenshots each attach methods to the shared Task API `RestApi`. ADR-023 §1 and the #852 proof of concept record that extracting such integrations loses deployment dependencies, CORS, attribution and tags even when synthesis passes, and moving their tables and secrets would replace them.
 
@@ -31,14 +31,14 @@ Issue #836 also suggests moving substantial optional modules into nested stacks.
    - diffs a temporary candidate profile, so cancelling leaves the repository untouched;
    - asks for explicit confirmation before deleting or replacing state-bearing resources, then writes the profile and deploys through the existing mise task.
 
-   Non-interactive runs fail on an unsupported feature, and require `--accept-data-loss` in addition to `--yes` to remove state-bearing resources. Operator subcommands for an omitted feature fail early with a pointer to `bgagent setup`.
+   Non-interactive runs fail on an unsupported feature, and require `--accept-data-loss` in addition to `--yes` to remove state-bearing resources. Operator subcommands for an omitted feature fail early with a pointer to `bgagent setup` when they can identify the stack: from `--stack-name`, or the stack the CLI was configured from.
 
 7. **First-install compute and account preparation.** Issue #836 kept compute out of the first wizard; this record extends it for new installations only, where no backend can be removed.
    - The wizard asks where agents run (AgentCore, ECS, or both) and records the ordered list as the profile's optional `compute`. Context `compute_types` / `compute_type` still wins.
-   - On existing stacks the deployed backends are read from `ComputeTypes`. Adding one is allowed; removing one is refused in favour of the COMPUTE.md transition procedure.
+   - On existing stacks the deployed backends are read from `ComputeTypes`. Stacks from before #912 publish only `ComputeSubstrate`; if that names a backend other than AgentCore, the wizard requires `--compute` rather than guessing. Adding a backend is allowed; removing one is refused in favour of the COMPUTE.md transition procedure.
    - Before the deploy, after confirmation, it installs or updates ABCA's least-privilege CDK bootstrap and sets the bootstrap `ComputeTypes` parameter (AgentCore always included). It never modifies a standard CDK bootstrap that other apps may share.
 
-8. **Several deployments per checkout and account.** The wizard confirms the caller's account (STS), lists existing ABCA stacks in the Region and offers to update one or create a named new one. Each non-default stack reads `abca.deployment.<stackName>.json` before the shared file, so one checkout can drive several deployments without their profiles overwriting each other.
+8. **Several deployments per checkout and account.** The wizard confirms the caller's account (STS), lists existing ABCA stacks in the Region and offers to update one or create a named new one. Each non-default stack reads only `abca.deployment.<stackName>.json`, never the shared file, which belongs to the default stack. A stack without its own file therefore keeps the legacy topology (rule 3), and one checkout can drive several deployments without one profile deleting another's modules. When the account uses ABCA's least-privilege bootstrap, whose deploy role is scoped to `backgroundagent-dev` and `backgroundagent-dev-*`, the wizard only creates stacks with those names; a create outside that scope fails and cannot roll back its IAM roles. A bootstrap parameter for other prefixes is a follow-up.
 
 ## Consequences
 
@@ -48,7 +48,7 @@ Issue #836 also suggests moving substantial optional modules into nested stacks.
 - (-) Disabling a stateful feature deletes its tables and secrets (`RemovalPolicy.DESTROY` today). Re-enabling creates empty resources; operators must re-run the feature's setup command. No import path is provided.
 - (-) Regional data is a maintained copy of AWS documentation and can go stale. A stale entry blocks a newly supported Region until the catalog is updated (fail closed); the update process is in the [deployment guide](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles).
 - (!) Strict boolean parsing now rejects malformed `enableToolGateway`, `enableAgentRegistry` (unchanged) and the new switches; values that were previously treated as `false`, such as `enableToolGateway=yes`, now fail synthesis. `enableLinearIdentityVault` keeps its lenient reading.
-- (!) Legacy-default stacks in core Regions without AWS Agent Registry (11 of 16) now fail synthesis rather than at the registry custom resource; such stacks could never deploy the registry. The error names the profile key and context switch that disable it.
+- (!) Legacy-default stacks in core Regions without AWS Agent Registry (7 of 16) now fail synthesis rather than at the registry custom resource; such stacks could never deploy the registry. The error names the profile key and context switch that disable it.
 - (!) Enabling every feature leaves the root stack where it is today; nested-stack extraction of route-owning integrations remains out of scope until ADR-023's migration criteria are met.
 
 ## References

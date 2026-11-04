@@ -26,7 +26,8 @@ import { requireDeployedFeature } from '../src/feature-guard';
 import { getStackOutput } from '../src/stack-outputs';
 
 jest.mock('../src/stack-outputs', () => ({ getStackOutput: jest.fn() }));
-jest.mock('../src/config', () => ({ tryLoadConfig: () => null }));
+const mockConfig: { current: { region: string; stack_name?: string } | null } = { current: null };
+jest.mock('../src/config', () => ({ tryLoadConfig: () => mockConfig.current }));
 const mockGetStackOutput = getStackOutput as jest.MockedFunction<typeof getStackOutput>;
 
 function program(action: jest.Mock): Command {
@@ -41,6 +42,7 @@ function program(action: jest.Mock): Command {
 
 beforeEach(() => {
   mockGetStackOutput.mockReset();
+  mockConfig.current = null;
   process.exitCode = undefined;
 });
 afterEach(() => { process.exitCode = undefined; });
@@ -71,7 +73,16 @@ test.each([
   expect(action).toHaveBeenCalled();
 });
 
-test('skips the stack lookup for subcommands without --stack-name', async () => {
+test('falls back to the stack the CLI was configured from', async () => {
+  mockConfig.current = { region: 'us-east-1', stack_name: 'backgroundagent-dev-team' };
+  mockGetStackOutput.mockResolvedValue('none');
+  const action = jest.fn();
+  await expect(program(action).parseAsync(['node', 'slack', 'link', 'ABC123'], { from: 'node' }))
+    .rejects.toThrow(/Slack is not deployed in stack 'backgroundagent-dev-team'/);
+  expect(action).not.toHaveBeenCalled();
+});
+
+test('skips the stack lookup when neither --stack-name nor the config names a stack', async () => {
   const action = jest.fn();
   await program(action).parseAsync(['node', 'slack', 'link', 'ABC123'], { from: 'node' });
   expect(action).toHaveBeenCalled();

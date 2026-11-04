@@ -157,7 +157,20 @@ describe('configure command', () => {
     );
     const config = JSON.parse(fs.readFileSync(path.join(tmpDir, 'config.json'), 'utf-8'));
     expect(config.client_id).toBe('client-from-stack');
+    // Feature guards fall back to this for subcommands without --stack-name.
+    expect(config.stack_name).toBe('backgroundagent-dev');
     expect(consoleSpy).toHaveBeenCalledWith('Configuration saved.');
+  });
+
+  test('forgets the stack name when a hand-entered API URL replaces the one read from it', async () => {
+    const configFile = path.join(tmpDir, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({
+      api_url: 'https://a.example.com/v1/', region: 'us-east-1', user_pool_id: 'p', client_id: 'c', stack_name: 'backgroundagent-dev',
+    }));
+    await makeConfigureCommand().parseAsync(['node', 'test', '--client-id', 'c2']);
+    expect(JSON.parse(fs.readFileSync(configFile, 'utf-8')).stack_name).toBe('backgroundagent-dev');
+    await makeConfigureCommand().parseAsync(['node', 'test', '--api-url', 'https://b.example.com/v1/']);
+    expect(JSON.parse(fs.readFileSync(configFile, 'utf-8')).stack_name).toBeUndefined();
   });
 
   test('--stack-name allows explicit overrides for individual fields', async () => {

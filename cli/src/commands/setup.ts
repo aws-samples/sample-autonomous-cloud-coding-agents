@@ -32,7 +32,8 @@ import {
 } from '@aws-sdk/client-cloudformation';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
 import { Command } from 'commander';
-import { getConfigDir, saveConfig, tryLoadConfig } from '../config';
+import { clearCredentials, getConfigDir, saveConfig, tryLoadConfig } from '../config';
+import { debug } from '../debug';
 import { CAPABILITY_CATALOG, isAvailableIn } from '../deployment-capabilities';
 import {
   ComputeBackend,
@@ -114,6 +115,8 @@ const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
 ]);
 
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
+/** ABCA's least-privilege bootstrap scopes its deploy role to these names (cdk/src/bootstrap/policies/*). */
+const BOOTSTRAP_STACK_NAME_PATTERN = new RegExp(`^${DEFAULT_STACK_NAME}(-[A-Za-z0-9-]+)?$`);
 const REGION_PATTERN = /^[a-z]{2}(-gov)?-[a-z]+-\d$/;
 const CONTEXT_PATTERN = /^([A-Za-z][\w:.-]*)=(.*)$/s;
 /** Upper bound for the bootstrap parameter update (IAM policy changes only). */
@@ -416,14 +419,38 @@ function suggestStackName(taken: ReadonlySet<string>): string {
   }
 }
 
-async function askNewStackName(deps: SetupDeps, ui: Ui, region: string, taken: ReadonlySet<string>): Promise<string> {
+/** Why ABCA's least-privilege bootstrap cannot deploy `stackName`, or `undefined` when it can. */
+function bootstrapNameProblem(stackName: string): string | undefined {
+  if (BOOTSTRAP_STACK_NAME_PATTERN.test(stackName)) return undefined;
+  return `ABCA's least-privilege bootstrap only deploys stacks named ${DEFAULT_STACK_NAME} or ${DEFAULT_STACK_NAME}-<suffix>; `
+    + `try ${DEFAULT_STACK_NAME}-${stackName.toLowerCase()}.`;
+}
+
+async function askNewStackName(
+  deps: SetupDeps,
+  ui: Ui,
+  region: string,
+  taken: ReadonlySet<string>,
+  abcaBootstrap: boolean,
+): Promise<string> {
   const suggestion = suggestStackName(taken);
   for (;;) {
     const answer = (await deps.ask(`  Name for the new deployment [${suggestion}]: `)).trim() || suggestion;
     if (!STACK_NAME_PATTERN.test(answer)) {
       ui.line(`  ${ui.style.yellow('Use letters, numbers and hyphens, starting with a letter.')}`);
-    } else if (taken.has(answer) || (await deps.describeStack(region, answer))) {
+      continue;
+    }
+    if (taken.has(answer)) {
       ui.line(`  ${ui.style.yellow(`'${answer}' already exists; pick it from the list to update it, or choose another name.`)}`);
+      continue;
+    }
+    // A stack the picker leaves out (no Task API outputs), e.g. a failed first create.
+    const unlisted = await deps.describeStack(region, answer);
+    const nameProblem = abcaBootstrap ? bootstrapNameProblem(answer) : undefined;
+    if (unlisted) {
+      ui.line(`  ${ui.style.yellow(`'${answer}' exists (${unlisted.status}) but is not a working ABCA deployment; delete it, or rerun with --stack-name ${answer}.`)}`);
+    } else if (nameProblem) {
+      ui.line(`  ${ui.style.yellow(nameProblem)}`);
     } else {
       return answer;
     }
@@ -436,10 +463,11 @@ async function chooseDeployment(
   ui: Ui,
   region: string,
   deployments: readonly DeploymentSummary[],
+  abcaBootstrap: boolean,
 ): Promise<{ stackName: string; additional: boolean }> {
   const taken = new Set(deployments.map(deployment => deployment.name));
   if (deployments.length === 0) {
-    return { stackName: await askNewStackName(deps, ui, region, taken), additional: false };
+    return { stackName: await askNewStackName(deps, ui, region, taken, abcaBootstrap), additional: false };
   }
   ui.title('Existing deployments in this account');
   deployments.forEach((deployment, index) => {
@@ -454,7 +482,7 @@ async function chooseDeployment(
     const answer = (await deps.ask('  Update an existing deployment or create a new one? [1]: ')).trim() || '1';
     const choice = Number.parseInt(answer, 10);
     if (choice >= 1 && choice <= deployments.length) return { stackName: deployments[choice - 1].name, additional: false };
-    if (choice === createIndex) return { stackName: await askNewStackName(deps, ui, region, taken), additional: true };
+    if (choice === createIndex) return { stackName: await askNewStackName(deps, ui, region, taken, abcaBootstrap), additional: true };
     ui.line(`  ${ui.style.yellow(`Enter a number from 1 to ${createIndex}.`)}`);
   }
 }
@@ -498,12 +526,14 @@ function printReview(
   ui: Ui,
   selection: DeploymentFeatures,
   removed: readonly DeploymentFeature[],
-  compute: { readonly backends: readonly ComputeBackend[]; readonly deployed: boolean },
+  compute: { readonly backends: readonly ComputeBackend[]; readonly deployed?: readonly ComputeBackend[] },
   preparation: readonly AccountPreparation[],
 ): void {
   const { style } = ui;
   ui.title('Review');
-  ui.line(`  ${style.dim('Compute'.padEnd(REVIEW_LABEL_WIDTH + 2))}${computeLabel(compute.backends)}${compute.deployed ? style.dim(' (deployed)') : ''}`);
+  const added = compute.deployed ? compute.backends.filter(backend => !compute.deployed!.includes(backend)) : [];
+  const computeNote = !compute.deployed ? '' : added.length > 0 ? ` (adding ${computeLabel(added)})` : ' (deployed)';
+  ui.line(`  ${style.dim('Compute'.padEnd(REVIEW_LABEL_WIDTH + 2))}${computeLabel(compute.backends)}${style.dim(computeNote)}`);
   ui.line();
   ui.line(`  ${style.green('✓')} ${'Core platform'.padEnd(REVIEW_LABEL_WIDTH)}${style.dim('always included')}`);
   ui.line(`    ${style.dim('Task API & sign-in · agent runtime & network controls · Cedar approvals')}`);
@@ -525,15 +555,33 @@ function printReview(
   }
 }
 
-function printNextSteps(ui: Ui, region: string, stackName: string): void {
+/** Commands that finish wiring a feature after its resources are deployed. */
+const FEATURE_SETUP_STEPS: Partial<Record<DeploymentFeature, readonly [string, string]>> = {
+  slack: ['Connect Slack', 'bgagent slack setup'],
+  linear: ['Connect a Linear workspace', 'bgagent linear setup <workspace-slug>'],
+  jira: ['Connect Jira', 'bgagent jira setup'],
+};
+
+function printNextSteps(
+  ui: Ui,
+  region: string,
+  stackName: string,
+  update: { readonly existing: boolean; readonly added: readonly DeploymentFeature[] },
+): void {
   const { style } = ui;
   const flags = `--region ${region}${stackName === DEFAULT_STACK_NAME ? '' : ` --stack-name ${stackName}`}`;
-  const steps: Array<readonly [string, string]> = [
+  // A new installation needs the full path to a first task; an update only the features it added.
+  const steps: Array<readonly [string, string]> = update.existing ? [] : [
     ['Store a GitHub token for the agent', `bgagent github set-token ${flags}`],
     ['Create your user', `bgagent admin invite-user you@example.com ${flags}`],
     ['Sign in', 'bgagent login --username you@example.com'],
     ['Onboard a repository', `bgagent repo onboard owner/repo ${flags}`],
   ];
+  for (const feature of update.added) {
+    const step = FEATURE_SETUP_STEPS[feature];
+    if (step) steps.push([step[0], `${step[1]} ${flags}`]);
+  }
+  if (steps.length === 0) return;
   ui.title('Next steps');
   steps.forEach(([label, command], index) => {
     ui.line(`  ${index + 1}. ${label}`);
@@ -632,12 +680,17 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     throw setupCancelled();
   }
 
+  // ABCA's own bootstrap (installed by this run, or publishing BootstrapPolicyVersion) only
+  // deploys the stack names its policies cover; a standard admin bootstrap deploys any name.
+  const bootstrap = await deps.describeStack(region, BOOTSTRAP_STACK);
+  const abcaBootstrap = !bootstrap || bootstrap.outputs.has('BootstrapPolicyVersion');
+
   // 3. Which deployment: an explicit --stack-name, the picker, or the default.
   let stackName = opts.stackName ?? DEFAULT_STACK_NAME;
   let additional = false;
   if (opts.stackName === undefined && prompting) {
     const deployments = await deps.listDeployments(region);
-    ({ stackName, additional } = await chooseDeployment(deps, ui, region, deployments));
+    ({ stackName, additional } = await chooseDeployment(deps, ui, region, deployments, abcaBootstrap));
   }
 
   // 4. Existing deployment: preselect what is there so a rerun never proposes deletion.
@@ -649,10 +702,18 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const deployedFeatures = deployed?.source === 'inferred'
     ? { ...deployed.features, toolGateway: await deps.hasToolGateway(region, stackName) }
     : deployed?.features;
+  // Rejected before any prompt or diff: a create the bootstrap cannot complete ends in ROLLBACK_FAILED.
+  const nameProblem = !existing && abcaBootstrap ? bootstrapNameProblem(stackName) : undefined;
+  if (nameProblem) throw new CliError(`Cannot create '${stackName}': ${nameProblem}`);
   const profile = readDeploymentProfile(repoRoot, stackName);
   const defaults = deployedFeatures ?? profile?.features ?? MINIMAL_DEPLOYMENT_FEATURES;
-  // Every stack since #912 publishes its backends; older ones only ever had AgentCore by default.
-  const deployedCompute = existing ? parseComputeList(existing.outputs.get('ComputeTypes') ?? 'agentcore') : undefined;
+  // Every stack since #912 publishes ComputeTypes; older stacks publish only ComputeSubstrate.
+  const substrate = existing?.outputs.get('ComputeSubstrate');
+  if (existing && !existing.outputs.has('ComputeTypes') && substrate && substrate !== 'agentcore' && opts.compute === undefined) {
+    throw new CliError(`Stack '${stackName}' predates the ComputeTypes output and reports ComputeSubstrate=${substrate}. `
+      + `Pass --compute (for example --compute agentcore,${substrate}) so setup does not remove that backend.`);
+  }
+  const deployedCompute = existing ? parseComputeList(existing.outputs.get('ComputeTypes') ?? substrate ?? 'agentcore') : undefined;
 
   ui.line();
   ui.field('Stack', `${stackName} ${style.dim(existing ? `(existing · ${existing.status})` : '(new installation)')}`);
@@ -687,7 +748,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
   }
 
-  // 3. Compute: chosen once, at installation. An existing stack keeps its backends;
+  // 5. Compute: chosen once, at installation. An existing stack keeps its backends;
   // adding one is allowed, removing one is a migration (docs/design/COMPUTE.md).
   let compute: ComputeBackend[];
   if (opts.compute !== undefined) {
@@ -699,6 +760,11 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
         + 'Follow the backend transition procedure in docs/design/COMPUTE.md instead.',
       );
     }
+    // The first backend is the repository default; reordering moves every repository without an explicit one.
+    if (deployedCompute && compute[0] !== deployedCompute[0]) {
+      ui.line(`  ${style.yellow('⚠')} The repository default changes from ${COMPUTE_LABELS[deployedCompute[0]]} to ${COMPUTE_LABELS[compute[0]]}.`);
+      if (prompting && !(await confirm(deps, '  Change the default backend?', false))) throw setupCancelled();
+    }
   } else if (deployedCompute) {
     compute = deployedCompute;
   } else if (prompting) {
@@ -707,7 +773,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     compute = [...(profile?.compute ?? ['agentcore'])];
   }
 
-  // 4. Features, validated against the Region whatever their source.
+  // 6. Features, validated against the Region whatever their source.
   let selection: DeploymentFeatures;
   if (opts.features !== undefined) {
     selection = parseFeatureList(opts.features);
@@ -721,9 +787,8 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
 
   const removed = enabledFeatures(deployedFeatures ?? MINIMAL_DEPLOYMENT_FEATURES).filter(f => !selection[f]);
   const chosen: DeploymentProfile = { features: selection, compute };
-  const bootstrap = deploying ? await deps.describeStack(region, BOOTSTRAP_STACK) : null;
   const preparation = deploying ? planAccountPreparation(bootstrap, compute) : { steps: [], computeTypes: [], standardBootstrap: false };
-  printReview(ui, selection, removed, { backends: compute, deployed: deployedCompute !== undefined }, preparation.steps);
+  printReview(ui, selection, removed, { backends: compute, deployed: deployedCompute }, preparation.steps);
   if (preparation.standardBootstrap) {
     ui.line();
     ui.line(`  ${style.dim('This account uses the standard CDK bootstrap; setup deploys with it and leaves it unchanged.')}`);
@@ -749,7 +814,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     return;
   }
 
-  // 5. Work out the changes against a temporary profile so cancelling leaves the repository unchanged.
+  // 7. Work out the changes against a temporary profile so cancelling leaves the repository unchanged.
   const engine = await deps.containerEngine();
   if (!engine) {
     throw new CliError(
@@ -774,7 +839,8 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   // Raw CDK output lives outside the repository: the deploy task wipes cdk.out first,
   // and the agent image's build context fingerprints the repository root.
   const logDir = `${getConfigDir()}${path.sep}logs${path.sep}${stackName}`;
-  fs.mkdirSync(logDir, { recursive: true });
+  // Owner-only, like ensureConfigDir: this may create ~/.bgagent itself on a fresh machine.
+  fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const diffLog = `${logDir}${path.sep}setup-changes.log`;
   const deployLog = `${logDir}${path.sep}setup-deploy.log`;
   ui.line();
@@ -806,12 +872,16 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   }
   ui.line(`    ${style.dim(`Full change list: ${displayLogPath(diffLog)}`)}`);
 
-  // 6. Confirmation, with a stronger gate for data loss.
+  // 8. Confirmation, with a stronger gate for data loss.
   const stateBearing = parseStateBearingChanges(diff.output);
+  // The catalog gates too, so a change in CDK's diff format cannot let --yes delete data silently.
+  const statefulRemoved = removed.filter(feature => CAPABILITY_CATALOG.features[feature].stateful);
   ui.line();
-  if (stateBearing.length > 0) {
+  if (stateBearing.length > 0 || statefulRemoved.length > 0) {
     ui.line(`  ${style.yellow('⚠  This removes or replaces resources that hold data:')}`);
-    for (const line of describeDataLoss(stateBearing, stackNames)) ui.line(`     • ${line}`);
+    const lines = stateBearing.length > 0 ? describeDataLoss(stateBearing, stackNames)
+      : statefulRemoved.map(feature => `${CAPABILITY_CATALOG.features[feature].label}: all of its data`);
+    for (const line of lines) ui.line(`     • ${line}`);
     ui.line(`  ${style.dim('   Their contents (installations, mappings, secrets, records) are lost. OAuth secrets created by')}`);
     ui.line(`  ${style.dim('   the CLI are kept; re-enabling a feature later starts empty.')}`);
     if (!(await confirmDataLoss(deps, opts, stackName, deps.interactive))) throw setupCancelled();
@@ -819,10 +889,9 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     throw setupCancelled();
   }
 
-  // 7. Persist, prepare the account, deploy the same profile through mise/CDK, configure the CLI.
-  const file = writeDeploymentProfile(repoRoot, chosen, stackName);
+  // 9. Prepare the account, then persist and deploy the same profile through mise/CDK, then configure the CLI.
+  // The profile is written only once the account is ready, so a failed preparation leaves nothing for CI to apply.
   ui.line();
-  ui.line(`  ${style.green('✓')} Saved your selection to ${path.relative(deps.cwd, file) || file}`);
   for (const step of preparation.steps) {
     const label = step === 'computeTypes' ? `Allowing ${computeLabel(compute)} in the CDK bootstrap` : 'Preparing your AWS account (CDK bootstrap)';
     const running = new Step(deps.screen, style, label);
@@ -846,6 +915,8 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     }
     running.succeed();
   }
+  const file = writeDeploymentProfile(repoRoot, chosen, stackName);
+  ui.line(`  ${style.green('✓')} Saved your selection to ${path.relative(deps.cwd, file) || file}`);
   const started = deps.now();
   const progress = new DeployProgress(deps.screen, style, stackNames, summary.perComponent);
   let deployResult: RunResult;
@@ -882,14 +953,25 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     return;
   }
   ui.line(`  ${style.green('✓')} ${style.bold(`Deployment complete in ${elapsed}`)}`);
-  const bundle = await deps.configureFromStack(region, stackName);
+  let bundle: CliConfig;
+  try {
+    bundle = await deps.configureFromStack(region, stackName);
+  } catch (err) {
+    throw new CliError(
+      `${stackName} deployed, but the CLI could not be pointed at it (${err instanceof Error ? err.message : String(err)}). `
+      + `Run \`bgagent configure --stack-name ${stackName} --region ${region}\`.`,
+    );
+  }
   const { registry_api_url: _stale, ...previous } = tryLoadConfig() ?? ({} as Partial<CliConfig>);
-  // A removed Registry must not leave its URL behind.
-  saveConfig({ ...previous, ...bundle } as CliConfig);
+  // A removed Registry must not leave its URL behind; stack_name lets feature guards find the stack.
+  saveConfig({ ...previous, ...bundle, stack_name: stackName } as CliConfig);
+  // Tokens from another stack's user pool would only produce 401s.
+  if (previous.user_pool_id && previous.user_pool_id !== bundle.user_pool_id) clearCredentials();
   ui.line();
   ui.field('API', bundle.api_url);
   ui.field('CLI', `now points at ${stackName}`);
-  printNextSteps(ui, region, stackName);
+  const added = enabledFeatures(selection).filter(feature => !deployedFeatures?.[feature]);
+  printNextSteps(ui, region, stackName, { existing: existing !== null, added });
 }
 
 /* istanbul ignore next -- thin AWS/terminal adapters; runSetup is tested through SetupDeps */
@@ -963,6 +1045,8 @@ function defaultDeps(): SetupDeps {
     }),
     run: (args, options) => new Promise((resolve, reject) => {
       const log = fs.createWriteStream(options.logFile, { flags: 'w' });
+      // An unwritable log (root-owned leftover, full disk) must not crash setup while CDK keeps running.
+      log.on('error', err => { debug(`[setup] cannot write ${options.logFile}: ${err.message}`); });
       // Argument vector, no shell: the stack name and paths never reach a shell parser.
       // No stdin: nothing downstream may prompt; the wizard already asked.
       const child = spawn('mise', [...args], { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });

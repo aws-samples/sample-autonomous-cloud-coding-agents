@@ -86,6 +86,9 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
   for (const key of Object.keys(record)) {
     if (key !== 'schemaVersion' && key !== 'features' && key !== 'compute') fail(`unknown top-level key '${key}'`);
   }
+  if (typeof record.schemaVersion === 'number' && record.schemaVersion > DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
+    fail(`schemaVersion ${record.schemaVersion} was written by a newer ABCA; upgrade this checkout`);
+  }
   if (record.schemaVersion !== DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
     fail(`schemaVersion must be ${DEPLOYMENT_PROFILE_SCHEMA_VERSION}, got ${JSON.stringify(record.schemaVersion)}`);
   }
@@ -125,13 +128,14 @@ export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**
- * Profile files for a stack, most specific first. Additional deployments from
- * one checkout each get `abca.deployment.<stackName>.json`, so deploying one
- * never changes another's features; the shared file remains the fallback.
+ * The profile file for a stack. Additional deployments from one checkout each get
+ * `abca.deployment.<stackName>.json`. There is no fallback to the shared file: it
+ * belongs to the default stack, and inheriting it would let one deployment's profile
+ * delete another's modules (ADR-024 rule 3).
  */
 export function deploymentProfileCandidates(stackName: unknown): string[] {
   return typeof stackName === 'string' && stackName !== DEFAULT_PROFILE_STACK_NAME && STACK_NAME_PATTERN.test(stackName)
-    ? [`abca.deployment.${stackName}.json`, DEPLOYMENT_PROFILE_FILE]
+    ? [`abca.deployment.${stackName}.json`]
     : [DEPLOYMENT_PROFILE_FILE];
 }
 

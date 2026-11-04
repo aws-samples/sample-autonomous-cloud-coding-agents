@@ -50,7 +50,7 @@ export interface CapabilityCatalog {
  */
 export const CAPABILITY_CATALOG: CapabilityCatalog = {
   schemaVersion: 1,
-  lastVerified: '2026-10-25',
+  lastVerified: '2026-11-04',
   source: 'https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html',
   core: {
     label: 'ABCA core platform',
@@ -91,7 +91,7 @@ export const CAPABILITY_CATALOG: CapabilityCatalog = {
       description: 'GitHub deployment_status webhook that screenshots preview deploys with AgentCore Browser.',
       maturity: 'stable',
       requiredServices: ['AgentCore Built-in Tools (Browser)', 'Amazon CloudFront'],
-      regions: ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-south-2', 'eu-north-1', 'ap-southeast-5', 'ap-south-1', 'ap-south-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-7', 'ap-northeast-1', 'ap-northeast-2', 'ca-central-1', 'sa-east-1', 'us-gov-west-1'],
+      regions: ['us-east-1', 'us-east-2', 'us-west-1', 'us-west-2', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'eu-south-1', 'eu-west-3', 'eu-south-2', 'eu-north-1', 'ap-southeast-5', 'ap-south-1', 'ap-south-2', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-7', 'ap-northeast-1', 'ap-northeast-2', 'ca-central-1', 'sa-east-1'],
       approximateResources: 23,
       stateful: true,
       remediation: 'Choose a Region where AgentCore Built-in Tools are available, or disable deploy-preview screenshots: set features.deployPreviewScreenshots to false in abca.deployment.json, pass -c enableDeployPreviewScreenshots=false, or run bgagent setup.',
@@ -101,7 +101,7 @@ export const CAPABILITY_CATALOG: CapabilityCatalog = {
       description: 'Central registry for Blueprint MCP servers, skills and Cedar policy modules (ADR-022).',
       maturity: 'stable',
       requiredServices: ['AWS Agent Registry'],
-      regions: ['us-east-1', 'us-west-2', 'eu-west-1', 'ap-southeast-2', 'ap-northeast-1'],
+      regions: ['us-east-1', 'us-east-2', 'us-west-2', 'eu-central-1', 'eu-west-1', 'eu-west-2', 'ap-southeast-2', 'ap-northeast-1', 'ca-central-1'],
       approximateResources: 2,
       stateful: true,
       remediation: 'Choose one of the supported Regions, or disable the Agent Registry: set features.agentRegistry to false in abca.deployment.json, pass -c enableAgentRegistry=false, or run bgagent setup.',

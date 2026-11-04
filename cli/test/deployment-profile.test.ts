@@ -75,7 +75,7 @@ describe('profile parsing and serialization', () => {
   });
 
   test.each([
-    [{ schemaVersion: 2, features: MINIMAL_DEPLOYMENT_FEATURES }, /schemaVersion must be 1/],
+    [{ schemaVersion: 2, features: MINIMAL_DEPLOYMENT_FEATURES }, /written by a newer ABCA; upgrade/],
     [{ schemaVersion: 1, features: { ...MINIMAL_DEPLOYMENT_FEATURES, teams: true } }, /unknown feature 'teams'/],
     [{ schemaVersion: 1, features: { ...MINIMAL_DEPLOYMENT_FEATURES, slack: 1 } }, /features.slack must be true or false/],
     [{ schemaVersion: 1, features: MINIMAL_DEPLOYMENT_FEATURES, extra: 1 }, /unknown top-level key 'extra'/],
@@ -105,13 +105,13 @@ describe('profile parsing and serialization', () => {
 describe('per-stack profile files', () => {
   test('mirrors the CDK lookup order', () => {
     expect(deploymentProfileCandidates('backgroundagent-dev')).toEqual([DEPLOYMENT_PROFILE_FILE]);
-    expect(deploymentProfileCandidates('team-b')).toEqual(['abca.deployment.team-b.json', DEPLOYMENT_PROFILE_FILE]);
+    expect(deploymentProfileCandidates('team-b')).toEqual(['abca.deployment.team-b.json']);
     expect(deploymentProfileCandidates('../x')).toEqual([DEPLOYMENT_PROFILE_FILE]);
   });
 
-  test('writes the stack file and reads it back before the shared one', () => {
+  test('writes the stack file and never inherits the shared one', () => {
     writeDeploymentProfile(root, { features: { ...MINIMAL_DEPLOYMENT_FEATURES, jira: true } });
-    expect(readDeploymentProfile(root, 'team-b')?.features.jira).toBe(true);
+    expect(readDeploymentProfile(root, 'team-b')).toBeUndefined();
     writeDeploymentProfile(root, { features: MINIMAL_DEPLOYMENT_FEATURES }, 'team-b');
     expect(readDeploymentProfile(root, 'team-b')?.features.jira).toBe(false);
     expect(readDeploymentProfile(root)?.features.jira).toBe(true);

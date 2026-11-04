@@ -76,6 +76,9 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
   for (const key of Object.keys(record)) {
     if (key !== 'schemaVersion' && key !== 'features' && key !== 'compute') fail(`unknown top-level key '${key}'`);
   }
+  if (typeof record.schemaVersion === 'number' && record.schemaVersion > DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
+    fail(`schemaVersion ${record.schemaVersion} was written by a newer ABCA; upgrade this checkout`);
+  }
   if (record.schemaVersion !== DEPLOYMENT_PROFILE_SCHEMA_VERSION) {
     fail(`schemaVersion must be ${DEPLOYMENT_PROFILE_SCHEMA_VERSION}, got ${JSON.stringify(record.schemaVersion)}`);
   }
@@ -138,12 +141,12 @@ export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**
- * Profile files for a stack, most specific first (same rule as CDK synthesis):
- * extra deployments from one checkout get `abca.deployment.<stack>.json`.
+ * The profile file for a stack (same rule as CDK synthesis): extra deployments from
+ * one checkout get `abca.deployment.<stack>.json`, with no fallback to the shared file.
  */
 export function deploymentProfileCandidates(stackName: string): string[] {
   return stackName !== DEFAULT_PROFILE_STACK_NAME && STACK_NAME_PATTERN.test(stackName)
-    ? [`abca.deployment.${stackName}.json`, DEPLOYMENT_PROFILE_FILE]
+    ? [`abca.deployment.${stackName}.json`]
     : [DEPLOYMENT_PROFILE_FILE];
 }
 

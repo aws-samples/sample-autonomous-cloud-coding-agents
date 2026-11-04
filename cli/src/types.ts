@@ -702,6 +702,9 @@ export interface CliConfig {
   readonly region: string;
   readonly user_pool_id: string;
   readonly client_id: string;
+  /** Stack the config was read from (`bgagent setup`, `configure --stack-name`); lets
+   *  feature guards check a stack when a subcommand takes no `--stack-name`. */
+  readonly stack_name?: string;
 }
 
 /** Cached credentials stored in ~/.bgagent/credentials.json.
