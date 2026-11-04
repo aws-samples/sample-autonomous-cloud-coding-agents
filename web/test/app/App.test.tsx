@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { App, shouldRetry } from '../../src/app/App';
 import type { RuntimeConfig } from '../../src/app/config/runtime-config';
@@ -48,6 +48,26 @@ describe('App session gate', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'operator@example.com', hidden: true })[0]);
     fireEvent.click(await screen.findByText('Sign out'));
     expect(await screen.findByRole('button', { name: 'Sign in' })).toBeInTheDocument();
+  });
+});
+
+describe('Expired sessions', () => {
+  it('returns to sign-in, saying why, when the session expires on its own', async () => {
+    let expire = () => {};
+    const adapter = {
+      restore: async () => ({
+        user: { id: 'u', email: 'operator@example.com', groups: [] },
+        getToken: async () => 'token',
+        signOut: async () => {},
+        onExpired: (listener: () => void) => { expire = listener; return () => {}; },
+      }),
+      signIn: async () => null,
+    };
+    render(<App config={CONFIG} authAdapter={adapter} />);
+    expect(await screen.findByRole('heading', { name: 'Overview', level: 1 })).toBeInTheDocument();
+    act(() => expire());
+    expect(await screen.findByText('Your session expired. Sign in again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument();
   });
 });
 

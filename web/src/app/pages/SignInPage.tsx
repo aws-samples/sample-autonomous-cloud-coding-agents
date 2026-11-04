@@ -54,7 +54,10 @@ export function SignInPage() {
           {state.status === 'error' ? (
             <Alert type="error" header="Sign-in is unavailable">{state.message}</Alert>
           ) : (
-            <Box>Sign in with the same account you use for the <code>bgagent</code> CLI.</Box>
+            <SpaceBetween size="s">
+              {state.status === 'signed-out' && state.reason && <Alert type="info">{state.reason}</Alert>}
+              <Box>Sign in with the same account you use for the <code>bgagent</code> CLI.</Box>
+            </SpaceBetween>
           )}
           {state.status === 'signed-out' && (
             <Button variant="primary" onClick={signIn}>Sign in</Button>

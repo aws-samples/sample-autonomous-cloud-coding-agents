@@ -24,11 +24,11 @@ import { extractUserId } from './shared/gateway';
 import {
   addIssueLabel,
   type ConsoleLinearIssue,
-  consumeStartClaim,
   findTriggerLabelId,
   getIssueForStart,
   LinearApiError,
   listOpenProjectIssues,
+  releaseStartClaim,
   writeStartClaim,
 } from './shared/linear-console';
 import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
@@ -182,11 +182,15 @@ async function startIssue(event: APIGatewayProxyEvent, userId: string, requestId
       return errorResponse(422, ErrorCode.VALIDATION_ERROR, `Linear has no "${label}" label yet. Create it in Linear (Settings → Labels), then try again.`, requestId);
     }
     // Claim first: the label's webhook can arrive before addIssueLabel even returns.
-    await writeStartClaim(ddb, DEDUP_TABLE!, { issueId: issue.id, workspaceId: mapping.linear_workspace_id, platformUserId: userId });
+    const claimed = await writeStartClaim(ddb, DEDUP_TABLE!, { issueId: issue.id, workspaceId: mapping.linear_workspace_id, platformUserId: userId });
+    if (!claimed) {
+      return errorResponse(409, ErrorCode.DUPLICATE_TASK, `Someone else is starting ${issue.identifier} right now.`, requestId);
+    }
     try {
       await addIssueLabel(token, issue.id, labelId);
     } catch (err) {
-      await consumeStartClaim(ddb, DEDUP_TABLE!, issue.id, mapping.linear_workspace_id).catch(() => null);
+      // Only our own claim: someone else's may have replaced it once ours expired.
+      await releaseStartClaim(ddb, DEDUP_TABLE!, issue.id, userId).catch(() => false);
       throw err;
     }
     logger.info('Console started a Linear issue', { issue_id: issue.id, identifier: issue.identifier, user_id: userId, request_id: requestId });

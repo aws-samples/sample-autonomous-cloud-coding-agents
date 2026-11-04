@@ -139,11 +139,10 @@ describe('TaskDetailPage', () => {
     expect(screen.getAllByText('Repository default')).toHaveLength(2);
   });
 
-  it('reports "nothing to change" as that, not as a failure', async () => {
+  it('shows a failed run that opened no pull request as a failure, with Try again', async () => {
     renderRoute(`/tasks/${MOCK_IDS.noChanges}`);
-    expect(await screen.findByText('Finished with no changes')).toBeInTheDocument();
-    expect(screen.getAllByText(/already has a CODEOWNERS file/).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('link', { name: 'Try again' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'Try again' })).toBeInTheDocument();
+    expect(screen.queryByText('Finished with no changes')).not.toBeInTheDocument();
   });
 
   it('says so when it has gone quiet, and offers a message or cancel', async () => {
@@ -198,6 +197,23 @@ describe('TaskDetailPage', () => {
     expect(screen.queryByRole('textbox', { name: 'Message' })).not.toBeInTheDocument();
     expect(screen.getByText('Done: pull request #482 is ready for review')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'View pull request' })).toHaveAttribute('href', 'https://github.com/acme/web-frontend/pull/482');
+  });
+
+  it('keeps fetching briefly after a task finishes, so its final events still arrive', async () => {
+    // The task record says COMPLETED before its last event has been written.
+    const all = mockData.events[MOCK_IDS.completed];
+    let served = all.filter((e) => e.event_type !== 'task_completed');
+    setTimeout(() => { served = all; }, 1_000);
+    server.use(http.get(`${TEST_API_BASE}/tasks/:taskId/events`, ({ request, params }) => {
+      if (params.taskId !== MOCK_IDS.completed) return undefined;
+      const after = new URL(request.url).searchParams.get('after');
+      const data = [...served].sort((a, b) => a.event_id.localeCompare(b.event_id)).filter((e) => !after || e.event_id > after);
+      return HttpResponse.json({ data, pagination: { next_token: null, has_more: false } });
+    }));
+    renderRoute(`/tasks/${MOCK_IDS.completed}`);
+    const feed = await screen.findByRole('list', { name: 'Activity' });
+    expect(within(feed).queryByText('Finished')).not.toBeInTheDocument();
+    expect(await within(feed).findByText('Finished', {}, { timeout: 9_000 })).toBeInTheDocument();
   });
 
   it('cancels after you confirm', async () => {

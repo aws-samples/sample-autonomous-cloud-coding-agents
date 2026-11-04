@@ -282,7 +282,7 @@ function TaskBody({ task, events, eventsLoading }: {
   const live = !isTerminal(task.status);
   const messageBox = useRef<TextareaProps.Ref>(null);
   const lines = useMemo(() => activityFeed(events, task.repo), [events, task.repo]);
-  const outcome = outcomeOf(task, events);
+  const outcome = outcomeOf(task);
 
   return (
     <SpaceBetween size="l">

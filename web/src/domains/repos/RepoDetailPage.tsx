@@ -28,15 +28,14 @@ import { ExternalLink } from '../../core/components/RouterLink';
 import { repoHref } from '../../core/util/format';
 import { NewTaskButton } from '../tasks/components/NewTaskButton';
 import { TaskTable } from '../tasks/components/TaskTable';
-import { useTaskList } from '../tasks/hooks';
+import { useAllRepoTasks } from '../tasks/hooks';
 import { NotStartedPanel } from './NotStartedPanel';
 
 export function RepoDetailPage() {
   const { owner = '', name = '' } = useParams();
   const repo = `${owner}/${name}`;
   const navigate = useNavigate();
-  const query = useTaskList(undefined, repo);
-  const items = query.data?.pages.flatMap((p) => p.data) ?? [];
+  const { query, tasks: items, complete, capped } = useAllRepoTasks(repo);
 
   return (
     <ContentLayout
@@ -60,7 +59,7 @@ export function RepoDetailPage() {
       }
     >
       <SpaceBetween size="l">
-      <NotStartedPanel repo={repo} tasks={items} />
+      <NotStartedPanel repo={repo} tasks={items} tasksComplete={complete} tasksCapped={capped} />
       {query.isError ? (
         <QueryError error={query.error} what="tasks" />
       ) : (

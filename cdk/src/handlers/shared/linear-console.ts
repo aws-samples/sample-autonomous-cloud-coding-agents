@@ -17,7 +17,8 @@
  *  SOFTWARE.
  */
 
-import { DeleteCommand, type DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { DeleteCommand, type DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 
 /**
  * Linear helpers for the operator console: list a mapped project's open issues, and
@@ -172,44 +173,79 @@ export async function addIssueLabel(accessToken: string, issueId: string, labelI
 
 const claimKey = (issueId: string) => `console-start#${issueId}`;
 
-/** Records that `platformUserId` asked for `issueId` to be started from the console. */
+/**
+ * Records that `platformUserId` asked for `issueId` to be started from the console.
+ * Conditional: an unexpired claim from someone else wins, so two people pressing Start
+ * at once cannot overwrite each other's attribution. Returns false when it is taken.
+ */
 export async function writeStartClaim(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   claim: { readonly issueId: string; readonly workspaceId: string; readonly platformUserId: string },
   nowSeconds: number = Math.floor(Date.now() / 1000),
-): Promise<void> {
-  await ddb.send(new PutCommand({
-    TableName: tableName,
-    Item: {
-      dedup_key: claimKey(claim.issueId),
-      platform_user_id: claim.platformUserId,
-      linear_workspace_id: claim.workspaceId,
-      ttl: nowSeconds + START_CLAIM_TTL_SECONDS,
-    },
-  }));
+): Promise<boolean> {
+  try {
+    await ddb.send(new PutCommand({
+      TableName: tableName,
+      Item: {
+        dedup_key: claimKey(claim.issueId),
+        platform_user_id: claim.platformUserId,
+        linear_workspace_id: claim.workspaceId,
+        ttl: nowSeconds + START_CLAIM_TTL_SECONDS,
+      },
+      // DynamoDB TTL deletes lazily, so an expired claim can still be in the table.
+      ConditionExpression: 'attribute_not_exists(dedup_key) OR #ttl < :now OR platform_user_id = :user',
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
+      ExpressionAttributeValues: { ':now': nowSeconds, ':user': claim.platformUserId },
+    }));
+    return true;
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) return false;
+    throw err;
+  }
 }
 
 /**
- * Takes the start claim for `issueId`, at most once (atomic delete). Returns the ABCA
- * user who asked, or null when there is no unexpired claim from this workspace.
- * DynamoDB TTL deletes lazily, so expiry is checked here, not trusted to the table.
+ * The ABCA user who asked for `issueId` to be started, or null when there is no
+ * unexpired claim from this workspace. Reads without consuming: the claim is released
+ * only once the task exists ({@link releaseStartClaim}), so a retried webhook delivery
+ * still finds who asked.
  */
-export async function consumeStartClaim(
+export async function readStartClaim(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   issueId: string,
   workspaceId: string,
   nowSeconds: number = Math.floor(Date.now() / 1000),
 ): Promise<string | null> {
-  const res = await ddb.send(new DeleteCommand({
-    TableName: tableName,
-    Key: { dedup_key: claimKey(issueId) },
-    ReturnValues: 'ALL_OLD',
-  }));
-  const item = res.Attributes;
+  const res = await ddb.send(new GetCommand({ TableName: tableName, Key: { dedup_key: claimKey(issueId) }, ConsistentRead: true }));
+  const item = res.Item;
   if (!item) return null;
   if (typeof item.ttl !== 'number' || item.ttl < nowSeconds) return null;
   if (item.linear_workspace_id !== workspaceId) return null;
   return typeof item.platform_user_id === 'string' ? item.platform_user_id : null;
+}
+
+/**
+ * Deletes `platformUserId`'s claim on `issueId`. Ownership-aware: a claim that now
+ * belongs to someone else is left alone. Returns whether a claim was deleted.
+ */
+export async function releaseStartClaim(
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  issueId: string,
+  platformUserId: string,
+): Promise<boolean> {
+  try {
+    await ddb.send(new DeleteCommand({
+      TableName: tableName,
+      Key: { dedup_key: claimKey(issueId) },
+      ConditionExpression: 'platform_user_id = :user',
+      ExpressionAttributeValues: { ':user': platformUserId },
+    }));
+    return true;
+  } catch (err) {
+    if (err instanceof ConditionalCheckFailedException) return false;
+    throw err;
+  }
 }

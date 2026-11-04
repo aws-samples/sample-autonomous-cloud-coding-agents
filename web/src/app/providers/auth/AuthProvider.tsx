@@ -31,6 +31,11 @@ export interface AuthSession {
   /** A current ID token for the API's Cognito authorizer. */
   getToken(): Promise<string>;
   signOut(): Promise<void>;
+  /**
+   * Calls `listener` if the session ends on its own, for example when its refresh token
+   * has expired. Returns the unsubscribe function. Optional: sessions that cannot expire omit it.
+   */
+  onExpired?(listener: () => void): () => void;
 }
 
 /**
@@ -54,7 +59,7 @@ export function unavailableAuthAdapter(reason: string): AuthAdapter {
 
 export type AuthState =
   | { readonly status: 'loading' }
-  | { readonly status: 'signed-out' }
+  | { readonly status: 'signed-out'; readonly reason?: string }
   | { readonly status: 'signed-in'; readonly session: AuthSession }
   | { readonly status: 'error'; readonly message: string };
 
@@ -83,6 +88,11 @@ export function AuthProvider({ adapter, children }: { adapter: AuthAdapter; chil
       cancelled = true;
     };
   }, [adapter]);
+
+  // A session that expires by itself (refresh token gone) returns the app to sign-in,
+  // instead of every request retrying a token that can no longer be refreshed.
+  const session = state.status === 'signed-in' ? state.session : null;
+  useEffect(() => session?.onExpired?.(() => setState({ status: 'signed-out', reason: 'Your session expired. Sign in again.' })), [session]);
 
   const signIn = useCallback(() => {
     setState({ status: 'loading' });

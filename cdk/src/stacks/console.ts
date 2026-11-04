@@ -43,7 +43,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
-import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 import type { LinearIdentityVault } from '../constructs/linear-identity-vault';
@@ -72,6 +72,11 @@ export interface OperatorConsoleStackProps extends StackProps {
    */
   readonly repoTable?: dynamodb.ITable;
   readonly githubTokenSecret?: secretsmanager.ISecret;
+  /**
+   * Per-repository GitHub token secrets (Blueprint `credentials.githubTokenSecretArn`).
+   * The issue list reads a repository's own token when it has one, so it needs these too.
+   */
+  readonly repoGithubTokenSecretArns?: readonly string[];
   /**
    * Linear wiring from the platform stack. With it, the console API also lists the open
    * issues of mapped Linear projects and can hand one to the agent (by adding its label).
@@ -179,7 +184,9 @@ export class OperatorConsoleStack extends Stack {
     });
 
     if (props.repoTable && props.githubTokenSecret) {
-      this.consoleApi = this.createConsoleApi(props.userPool, props.repoTable, props.githubTokenSecret, origins_, removalPolicy, props.linear);
+      this.consoleApi = this.createConsoleApi(
+        props.userPool, props.repoTable, props.githubTokenSecret, props.repoGithubTokenSecretArns ?? [], origins_, removalPolicy, props.linear,
+      );
     }
 
     const assets = new s3deploy.BucketDeployment(this, 'Assets', {
@@ -224,6 +231,7 @@ export class OperatorConsoleStack extends Stack {
     userPool: cognito.IUserPool,
     repoTable: dynamodb.ITable,
     githubTokenSecret: secretsmanager.ISecret,
+    repoGithubTokenSecretArns: readonly string[],
     allowedOrigins: readonly string[],
     removalPolicy: RemovalPolicy,
     linear: ConsoleLinearProps | undefined,
@@ -265,6 +273,9 @@ export class OperatorConsoleStack extends Stack {
     });
     repoTable.grantReadData(listIssues);
     githubTokenSecret.grantRead(listIssues);
+    for (const [index, arn] of [...new Set(repoGithubTokenSecretArns)].entries()) {
+      secretsmanager.Secret.fromSecretCompleteArn(this, `RepoGitHubToken${index}`, arn).grantRead(listIssues);
+    }
 
     api.root.resourceForPath('repos/{repo_id}/issues').addMethod('GET', new apigw.LambdaIntegration(listIssues, { allowTestInvoke: false }), {
       authorizer,

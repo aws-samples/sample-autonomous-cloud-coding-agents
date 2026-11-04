@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { TaskEvent } from '../../../src/core/api/types';
-import { finishedWithoutChanges, outcomeOf, reachedStep, stepStates } from '../../../src/core/util/progress';
+import { outcomeOf, reachedStep, stepStates } from '../../../src/core/util/progress';
 import { buildFixtures, MOCK_IDS } from '../../../src/mocks/fixtures';
 
 const NOW = new Date();
@@ -56,35 +56,34 @@ describe('stepStates', () => {
 
 describe('outcomeOf', () => {
   it('says nothing while the task is simply working', () => {
-    expect(outcomeOf(task(MOCK_IDS.running), events(MOCK_IDS.running), NOW)).toBeNull();
+    expect(outcomeOf(task(MOCK_IDS.running), NOW)).toBeNull();
   });
 
   it('calls out a stuck task', () => {
-    expect(outcomeOf(task(MOCK_IDS.stale), [], NOW)).toMatchObject({ type: 'warning', title: 'No update for 9 min', offer: 'stuck' });
+    expect(outcomeOf(task(MOCK_IDS.stale), NOW)).toMatchObject({ type: 'warning', title: 'No update for 9 min', offer: 'stuck' });
   });
 
   it('asks for approval', () => {
-    expect(outcomeOf(task(MOCK_IDS.awaiting), [], NOW)).toMatchObject({ title: 'Waiting for your approval', offer: 'approval' });
+    expect(outcomeOf(task(MOCK_IDS.awaiting), NOW)).toMatchObject({ title: 'Waiting for your approval', offer: 'approval' });
   });
 
   it('shows the place in line', () => {
-    expect(outcomeOf(task(MOCK_IDS.queued), [], NOW)).toMatchObject({ title: 'Waiting in line (number 1)', text: 'Should start in about 4m 0s.' });
+    expect(outcomeOf(task(MOCK_IDS.queued), NOW)).toMatchObject({ title: 'Waiting in line (number 1)', text: 'Should start in about 4m 0s.' });
   });
 
   it('reports a finished pull request', () => {
-    expect(outcomeOf(task(MOCK_IDS.completed), [], NOW)?.title).toBe('Done: pull request #482 is ready for review');
+    expect(outcomeOf(task(MOCK_IDS.completed), NOW)?.title).toBe('Done: pull request #482 is ready for review');
   });
 
-  it('turns the platform\'s "not saved" failure into "no changes" when the agent finished cleanly', () => {
-    const t = task(MOCK_IDS.noChanges);
-    expect(finishedWithoutChanges(t, events(MOCK_IDS.noChanges))).toBe(true);
-    expect(outcomeOf(t, events(MOCK_IDS.noChanges), NOW)).toMatchObject({ type: 'info', title: 'Finished with no changes', text: expect.stringContaining('already has a CODEOWNERS file') });
-    expect(finishedWithoutChanges(t, [milestone('agent_execution_complete', 'status=error')])).toBe(false);
+  it('shows a failed run without a pull request as the failure it is, even when the agent reported success', () => {
+    // A clean "no changes" run, a failed PR and lost changes all look alike from here
+    // (FAILED, no PR, agent_execution_complete status=success), so none is softened.
+    expect(outcomeOf(task(MOCK_IDS.noChanges), NOW)).toMatchObject({ type: 'error', offer: 'retry' });
   });
 
   it('keeps real failures as errors with a retry', () => {
-    expect(outcomeOf(task(MOCK_IDS.failed), events(MOCK_IDS.failed), NOW)).toMatchObject({ type: 'error', title: 'Budget exceeded', offer: 'retry' });
-    expect(outcomeOf(task(MOCK_IDS.timedOut), [], NOW)).toMatchObject({ title: 'Ran out of time', offer: 'retry' });
-    expect(outcomeOf(task(MOCK_IDS.cancelled), [], NOW)).toMatchObject({ title: 'Cancelled' });
+    expect(outcomeOf(task(MOCK_IDS.failed), NOW)).toMatchObject({ type: 'error', title: 'Budget exceeded', offer: 'retry' });
+    expect(outcomeOf(task(MOCK_IDS.timedOut), NOW)).toMatchObject({ title: 'Ran out of time', offer: 'retry' });
+    expect(outcomeOf(task(MOCK_IDS.cancelled), NOW)).toMatchObject({ title: 'Cancelled' });
   });
 });

@@ -227,6 +227,40 @@ describe('createCognitoAuthAdapter', () => {
     expect(storage.has('abca-console-tokens')).toBe(false);
   });
 
+  it('ends a live session when Cognito refuses the refresh, and says so', async () => {
+    const { env, storage } = environment();
+    storage.set('abca-console-tokens', JSON.stringify({ idToken: idToken(), refreshToken: 'expired', expiresAt: NOW + 3_600_000 }));
+    const session = await createCognitoAuthAdapter(OPTIONS, env).restore();
+    const expired = vi.fn();
+    session!.onExpired!(expired);
+
+    env.now.mockReturnValue(NOW + 3_590_000);
+    env.fetch.mockResolvedValueOnce(tokenResponse({ error: 'invalid_grant' }, 400));
+    await expect(session!.getToken()).rejects.toThrow('invalid_grant');
+    expect(storage.has('abca-console-tokens')).toBe(false);
+    expect(expired).toHaveBeenCalledTimes(1);
+    // Nothing left to retry with: later calls fail without asking Cognito again.
+    await expect(session!.getToken()).rejects.toThrow('signed out');
+    expect(env.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the session through a temporary refresh failure', async () => {
+    const { env, storage } = environment();
+    storage.set('abca-console-tokens', JSON.stringify({ idToken: idToken(), refreshToken: 'refresh-1', expiresAt: NOW + 3_600_000 }));
+    const session = await createCognitoAuthAdapter(OPTIONS, env).restore();
+    const expired = vi.fn();
+    session!.onExpired!(expired);
+
+    env.now.mockReturnValue(NOW + 3_590_000);
+    env.fetch.mockResolvedValueOnce(tokenResponse({ error: 'unavailable' }, 503));
+    await expect(session!.getToken()).rejects.toThrow('unavailable');
+    expect(storage.has('abca-console-tokens')).toBe(true);
+    expect(expired).not.toHaveBeenCalled();
+
+    env.fetch.mockResolvedValueOnce(tokenResponse({ id_token: idToken({ exp: NOW / 1000 + 7200 }) }));
+    await expect(session!.getToken()).resolves.toBeTruthy();
+  });
+
   it('signs out: clears tokens, revokes the refresh token, ends the managed-login session', async () => {
     const { env, storage } = environment();
     storage.set('abca-console-tokens', JSON.stringify({ idToken: idToken(), refreshToken: 'refresh-1', expiresAt: NOW + 3_600_000 }));

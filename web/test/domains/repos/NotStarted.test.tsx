@@ -19,7 +19,7 @@
 
 import createWrapper from '@cloudscape-design/components/test-utils/dom';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { http, HttpResponse } from 'msw';
+import { delay, http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { renderRoute } from '../../helpers/render';
 import { mockData, server, TEST_API_BASE } from '../../helpers/server';
@@ -52,6 +52,43 @@ describe('Not started yet, on the repository page', () => {
     expect(mockData.tasks.at(-1)).toMatchObject({ repo: 'acme/web-frontend', issue_number: 31 });
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Start issue #31' })).not.toBeInTheDocument());
     expect(screen.getByRole('link', { name: 'Follow its progress' })).toHaveAttribute('href', `/tasks/${mockData.tasks.at(-1)!.task_id}`);
+  });
+
+  it('waits for every page of tasks before offering Start, and leaves out issues found on a later page', async () => {
+    // The API filters by repository after DynamoDB's page limit: page one can be empty.
+    const onPageTwo = { ...mockData.tasks.find((t) => t.repo === 'acme/web-frontend')!, task_id: '01JF3KQZ8X0000000000PAGE02', issue_number: 31 };
+    server.use(http.get(`${TEST_API_BASE}/tasks`, async ({ request }) => {
+      const url = new URL(request.url);
+      if (url.searchParams.get('repo') !== 'acme/web-frontend') return undefined;
+      if (!url.searchParams.get('next_token')) return HttpResponse.json({ data: [], pagination: { next_token: 'cGFnZTI=', has_more: true } });
+      await delay(400);
+      return HttpResponse.json({ data: [onPageTwo], pagination: { next_token: null, has_more: false } });
+    }));
+    renderRoute(REPO_PAGE);
+    expect(await screen.findByText('Checking which issues already have a task…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start issue #27' })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start issue #27' })).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Start issue #31' })).not.toBeInTheDocument();
+  });
+
+  it('retries a start with the same idempotency key, so a lost response cannot create a second task', async () => {
+    const keys: Array<string | null> = [];
+    let calls = 0;
+    server.use(http.post(`${TEST_API_BASE}/tasks`, ({ request }) => {
+      keys.push(request.headers.get('Idempotency-Key'));
+      calls += 1;
+      // The first attempt "succeeds" upstream but its response never arrives.
+      if (calls === 1) return HttpResponse.error();
+      return undefined;
+    }));
+    renderRoute(REPO_PAGE);
+    fireEvent.click(await screen.findByRole('button', { name: 'Start issue #31' }));
+    expect(await screen.findByText('Could not start the issue')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Start issue #31' }));
+    expect(await screen.findByText('Issue #31 is with the agent')).toBeInTheDocument();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(keys[1]).toBe(keys[0]);
   });
 
   it('lists Linear issues the agent has not picked up, and leaves out ones it has', async () => {

@@ -17,16 +17,20 @@
  *  SOFTWARE.
  */
 
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   addIssueLabel,
-  consumeStartClaim,
   findTriggerLabelId,
   getIssueForStart,
   LinearApiError,
   listOpenProjectIssues,
+  readStartClaim,
+  releaseStartClaim,
   START_CLAIM_TTL_SECONDS,
   writeStartClaim,
 } from '../../src/handlers/shared/linear-console';
+
+const conditionFailed = () => new ConditionalCheckFailedException({ message: 'The conditional request failed', $metadata: {} });
 
 const NOW = 1_800_000_000;
 const send = jest.fn();
@@ -39,28 +43,54 @@ function linear(data: unknown, status = 200) {
 beforeEach(() => send.mockReset());
 
 describe('start claims', () => {
-  test('a claim records who asked, for which workspace, and expires', async () => {
+  test('a claim records who asked, for which workspace, and expires, only if nobody else holds one', async () => {
     send.mockResolvedValue({});
-    await writeStartClaim(ddb, 'Dedup', { issueId: 'i1', workspaceId: 'w1', platformUserId: 'u1' }, NOW);
+    await expect(writeStartClaim(ddb, 'Dedup', { issueId: 'i1', workspaceId: 'w1', platformUserId: 'u1' }, NOW)).resolves.toBe(true);
     expect(send.mock.calls[0][0].input).toEqual({
       TableName: 'Dedup',
       Item: { dedup_key: 'console-start#i1', platform_user_id: 'u1', linear_workspace_id: 'w1', ttl: NOW + START_CLAIM_TTL_SECONDS },
+      ConditionExpression: 'attribute_not_exists(dedup_key) OR #ttl < :now OR platform_user_id = :user',
+      ExpressionAttributeNames: { '#ttl': 'ttl' },
+      ExpressionAttributeValues: { ':now': NOW, ':user': 'u1' },
     });
   });
 
-  test('consuming deletes the claim and returns the user (single use)', async () => {
-    send.mockResolvedValue({ Attributes: { platform_user_id: 'u1', linear_workspace_id: 'w1', ttl: NOW + 10 } });
-    await expect(consumeStartClaim(ddb, 'Dedup', 'i1', 'w1', NOW)).resolves.toBe('u1');
-    expect(send.mock.calls[0][0].input).toEqual({ TableName: 'Dedup', Key: { dedup_key: 'console-start#i1' }, ReturnValues: 'ALL_OLD' });
+  test('a second person cannot take over a live claim', async () => {
+    send.mockRejectedValue(conditionFailed());
+    await expect(writeStartClaim(ddb, 'Dedup', { issueId: 'i1', workspaceId: 'w1', platformUserId: 'u2' }, NOW)).resolves.toBe(false);
+  });
+
+  test('other write errors still fail', async () => {
+    send.mockRejectedValue(new Error('throttled'));
+    await expect(writeStartClaim(ddb, 'Dedup', { issueId: 'i1', workspaceId: 'w1', platformUserId: 'u1' }, NOW)).rejects.toThrow('throttled');
+  });
+
+  test('reading returns the user without consuming the claim', async () => {
+    send.mockResolvedValue({ Item: { platform_user_id: 'u1', linear_workspace_id: 'w1', ttl: NOW + 10 } });
+    await expect(readStartClaim(ddb, 'Dedup', 'i1', 'w1', NOW)).resolves.toBe('u1');
+    expect(send.mock.calls[0][0].input).toEqual({ TableName: 'Dedup', Key: { dedup_key: 'console-start#i1' }, ConsistentRead: true });
   });
 
   test.each([
     ['no claim', undefined],
     ['an expired claim (TTL deletion is lazy)', { platform_user_id: 'u1', linear_workspace_id: 'w1', ttl: NOW - 1 }],
     ['a claim from another workspace', { platform_user_id: 'u1', linear_workspace_id: 'other', ttl: NOW + 10 }],
-  ])('ignores %s', async (_label, attributes) => {
-    send.mockResolvedValue({ Attributes: attributes });
-    await expect(consumeStartClaim(ddb, 'Dedup', 'i1', 'w1', NOW)).resolves.toBeNull();
+  ])('ignores %s', async (_label, item) => {
+    send.mockResolvedValue({ Item: item });
+    await expect(readStartClaim(ddb, 'Dedup', 'i1', 'w1', NOW)).resolves.toBeNull();
+  });
+
+  test('releasing deletes only the caller\'s own claim', async () => {
+    send.mockResolvedValue({});
+    await expect(releaseStartClaim(ddb, 'Dedup', 'i1', 'u1')).resolves.toBe(true);
+    expect(send.mock.calls[0][0].input).toEqual({
+      TableName: 'Dedup',
+      Key: { dedup_key: 'console-start#i1' },
+      ConditionExpression: 'platform_user_id = :user',
+      ExpressionAttributeValues: { ':user': 'u1' },
+    });
+    send.mockRejectedValue(conditionFailed());
+    await expect(releaseStartClaim(ddb, 'Dedup', 'i1', 'u1')).resolves.toBe(false);
   });
 });
 

@@ -278,6 +278,32 @@ describe('OperatorConsoleStack', () => {
   });
 });
 
+describe('OperatorConsoleStack per-repository GitHub tokens', () => {
+  test('the issue function may read each repository\'s own token secret, once each', () => {
+    const bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html>');
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    const repoToken = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:acme-service-token-AbCdEf';
+    const stack = new OperatorConsoleStack(app, 'repo-token-console', {
+      env: ENV,
+      userPool: new cognito.UserPool(platform, 'UserPool'),
+      apiUrl: API_URL,
+      assetDirectory: bundle,
+      repoTable: new dynamodb.Table(platform, 'Repos', { partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING } }),
+      githubTokenSecret: new secretsmanager.Secret(platform, 'GitHubToken'),
+      repoGithubTokenSecretArns: [repoToken, repoToken],
+    });
+    const resources = Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ListRepoIssuesFn'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>)
+      .filter((st) => [st.Action].flat().includes('secretsmanager:GetSecretValue'))
+      .flatMap((st) => [st.Resource].flat());
+    expect(resources.filter((r) => r === repoToken)).toHaveLength(1);
+    rmSync(bundle, { recursive: true, force: true });
+  });
+});
+
 describe('OperatorConsoleStack Linear identity vault wiring', () => {
   test('mints Linear tokens through the identity vault when the platform has one', () => {
     const bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { fireEvent, screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { MOCK_IDS } from '../../../src/mocks/fixtures';
 import { mockData } from '../../helpers/server';
@@ -99,6 +99,22 @@ describe('TaskListPage', () => {
   it('shows a stuck task as "No updates lately"', async () => {
     renderRoute('/tasks?view=attention');
     expect(await screen.findByText('No updates lately')).toBeInTheDocument();
+  });
+
+  it('follows a link inside a row instead of opening the task', async () => {
+    const { router } = renderRoute('/tasks?repo=acme%2Finfra');
+    const repoLink = (await screen.findAllByRole('link', { name: 'acme/infra' }))[0];
+    fireEvent.mouseDown(repoLink);
+    fireEvent.click(repoLink);
+    await waitFor(() => expect(router.state.location.pathname).toBe('/repos/acme/infra'));
+  });
+
+  it('still opens the task when the row itself is clicked', async () => {
+    const { router } = renderRoute('/tasks');
+    const cell = (await screen.findAllByText('Waiting for approval'))[0];
+    fireEvent.mouseDown(cell);
+    fireEvent.click(cell);
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/tasks/${MOCK_IDS.awaiting}`));
   });
 
   it('links pull requests to GitHub in a new tab', async () => {

@@ -32,7 +32,7 @@ import type { LinearIssueSummary, LinearProjectIssues, RepoIssueSummary, TaskSum
 import { InfoTip } from '../../core/components/InfoTip';
 import { ExternalLink, RouterLink } from '../../core/components/RouterLink';
 import { formatRelativeTime, taskHref } from '../../core/util/format';
-import { useLinearIssues, useRepoIssues, useStartGitHubIssue, useStartLinearIssue } from '../tasks/hooks';
+import { MAX_REPO_TASKS, useLinearIssues, useRepoIssues, useStartGitHubIssue, useStartLinearIssue } from '../tasks/hooks';
 
 /** A search box appears once a list is long enough to need one. */
 const FILTER_FROM = 8;
@@ -47,7 +47,12 @@ function Labels({ labels }: { labels: readonly string[] }) {
 }
 
 /** Open GitHub issues with no agent task yet. */
-function GitHubIssues({ repo, issues }: { repo: string; issues: readonly RepoIssueSummary[] }) {
+/**
+ * Open GitHub issues with no agent task yet. Start waits until every task of the
+ * repository is loaded (`ready`): otherwise an issue whose task is on a later page
+ * would look unstarted and get a second task.
+ */
+function GitHubIssues({ repo, issues, ready, capped }: { repo: string; issues: readonly RepoIssueSummary[]; ready: boolean; capped: boolean }) {
   const start = useStartGitHubIssue(repo);
   const [filter, setFilter] = useState('');
   const [started, setStarted] = useState<{ number: number; taskId: string } | null>(null);
@@ -69,6 +74,13 @@ function GitHubIssues({ repo, issues }: { repo: string; issues: readonly RepoIss
         <Alert type="error" dismissible onDismiss={() => start.reset()} header="Could not start the issue">
           {start.error instanceof Error ? start.error.message : String(start.error)}
         </Alert>
+      )}
+      {!ready && (
+        <Box variant="small" color="text-status-inactive">
+          {capped
+            ? `This repository has more than ${MAX_REPO_TASKS.toLocaleString()} tasks, too many to check which issues already have one. Start an issue from New task instead.`
+            : 'Checking which issues already have a task…'}
+        </Box>
       )}
       <Table<RepoIssueSummary>
         variant="embedded"
@@ -99,7 +111,7 @@ function GitHubIssues({ repo, issues }: { repo: string; issues: readonly RepoIss
               <Button
                 iconName="caret-right-filled"
                 loading={start.isPending && start.variables === i.number}
-                disabled={start.isPending && start.variables !== i.number}
+                disabled={!ready || (start.isPending && start.variables !== i.number)}
                 ariaLabel={`Start issue #${i.number}`}
                 onClick={() => start.mutate(i.number, { onSuccess: (task) => setStarted({ number: i.number, taskId: task.task_id }) })}
               >
@@ -187,7 +199,13 @@ function LinearIssues({ repo, project, issues }: { repo: string; project: Linear
  * issues in the connected Linear project that have no task. Start is one click;
  * the issue then leaves this list and appears under Tasks.
  */
-export function NotStartedPanel({ repo, tasks }: { repo: string; tasks: readonly TaskSummary[] }) {
+export function NotStartedPanel({ repo, tasks, tasksComplete, tasksCapped = false }: {
+  repo: string;
+  tasks: readonly TaskSummary[];
+  /** Every task of the repository is loaded, so "no task yet" can be trusted. */
+  tasksComplete: boolean;
+  tasksCapped?: boolean;
+}) {
   const github = useRepoIssues(repo, true);
   const linear = useLinearIssues(repo);
   const [tab, setTab] = useState('github');
@@ -207,7 +225,7 @@ export function NotStartedPanel({ repo, tasks }: { repo: string; tasks: readonly
       label: `GitHub issues${github.data ? ` (${githubIssues.length})` : ''}`,
       content: github.isError
         ? <Alert type="warning" header="Could not load GitHub issues">{github.error instanceof Error ? github.error.message : String(github.error)}</Alert>
-        : github.isPending ? <Box color="text-status-inactive">Loading…</Box> : <GitHubIssues repo={repo} issues={githubIssues} />,
+        : github.isPending ? <Box color="text-status-inactive">Loading…</Box> : <GitHubIssues repo={repo} issues={githubIssues} ready={tasksComplete} capped={tasksCapped} />,
     });
   }
   if (linear.isError) {

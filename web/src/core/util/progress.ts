@@ -76,27 +76,6 @@ export interface Outcome {
   readonly offer?: 'approval' | 'stuck' | 'retry';
 }
 
-/** The agent's own last words, used when it explains why it changed nothing. */
-function lastSaid(events: readonly TaskEvent[]): string | null {
-  const said = [...events]
-    .filter((e) => e.event_type === 'agent_turn' && typeof e.metadata?.text_preview === 'string' && e.metadata.text_preview.trim())
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))[0];
-  return said ? String(said.metadata.text_preview).trim() : null;
-}
-
-/**
- * The agent finished its work cleanly but there was nothing to commit. The platform
- * currently reports that as FAILED ("change was not saved"); to a person it is
- * "no changes needed".
- */
-export function finishedWithoutChanges(task: Pick<TaskDetail, 'status' | 'pr_url'>, events: readonly TaskEvent[]): boolean {
-  if (task.status !== 'FAILED' || task.pr_url) return false;
-  return events.some((e) => e.event_type === 'agent_milestone'
-    && e.metadata?.milestone === 'agent_execution_complete'
-    && typeof e.metadata.details === 'string'
-    && e.metadata.details.includes('status=success'));
-}
-
 function minutesSince(iso: string | null, now: Date): number | null {
   if (!iso) return null;
   const t = Date.parse(iso);
@@ -104,7 +83,7 @@ function minutesSince(iso: string | null, now: Date): number | null {
 }
 
 /** One plain sentence about where the task stands, or null while it is simply working. */
-export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: Date = new Date()): Outcome | null {
+export function outcomeOf(task: TaskDetail, now: Date = new Date()): Outcome | null {
   switch (task.status) {
     case 'AWAITING_APPROVAL':
       return { type: 'warning', title: 'Waiting for your approval', text: 'The agent paused before an action that a person has to approve. Approve or deny it below.', offer: 'approval' };
@@ -124,9 +103,9 @@ export function outcomeOf(task: TaskDetail, events: readonly TaskEvent[], now: D
     case 'TIMED_OUT':
       return { type: 'error', title: 'Ran out of time', text: 'It hit the time limit before finishing. Try again with a smaller change.', offer: 'retry' };
     case 'FAILED': {
-      if (finishedWithoutChanges(task, events)) {
-        return { type: 'info', title: 'Finished with no changes', text: lastSaid(events) ?? 'The agent decided nothing needed to change.' };
-      }
+      // Always the platform's own error. A run that changed nothing looks the same from
+      // here as one whose changes were lost or whose PR failed, so the console does not
+      // guess; telling them apart is the platform's job (#751).
       const why = task.error_classification;
       return {
         type: 'error',

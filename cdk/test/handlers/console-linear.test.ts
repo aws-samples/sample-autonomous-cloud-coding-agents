@@ -28,7 +28,7 @@ const linear = {
   findTriggerLabelId: jest.fn(),
   addIssueLabel: jest.fn(),
   writeStartClaim: jest.fn(),
-  consumeStartClaim: jest.fn(),
+  releaseStartClaim: jest.fn(),
 };
 const order: string[] = [];
 
@@ -44,7 +44,7 @@ jest.mock('../../src/handlers/shared/linear-console', () => {
     findTriggerLabelId: (...a: unknown[]) => linear.findTriggerLabelId(...a),
     addIssueLabel: (...a: unknown[]) => { order.push('label'); return linear.addIssueLabel(...a); },
     writeStartClaim: (...a: unknown[]) => { order.push('claim'); return linear.writeStartClaim(...a); },
-    consumeStartClaim: (...a: unknown[]) => linear.consumeStartClaim(...a),
+    releaseStartClaim: (...a: unknown[]) => linear.releaseStartClaim(...a),
   };
 });
 jest.mock('ulid', () => ({ ulid: () => 'REQ1' }));
@@ -85,8 +85,8 @@ beforeEach(() => {
   linear.getIssueForStart.mockResolvedValue({ id: ISSUE, identifier: 'MON-4', projectId: PROJECT, teamId: 't1', labels: [] });
   linear.findTriggerLabelId.mockResolvedValue('label-1');
   linear.addIssueLabel.mockResolvedValue(undefined);
-  linear.writeStartClaim.mockResolvedValue(undefined);
-  linear.consumeStartClaim.mockResolvedValue(null);
+  linear.writeStartClaim.mockResolvedValue(true);
+  linear.releaseStartClaim.mockResolvedValue(true);
 });
 
 describe('GET /repos/{repo_id}/linear-issues', () => {
@@ -168,13 +168,22 @@ describe('POST /linear-issues/{issue_id}/start', () => {
     expect((await handler(start())).statusCode).toBe(422);
   });
 
+  test('refuses to start an issue someone else is starting, without touching the label', async () => {
+    linear.writeStartClaim.mockResolvedValue(false);
+    const res = await handler(start());
+    expect(res.statusCode).toBe(409);
+    expect(json(res).error.message).toBe('Someone else is starting MON-4 right now.');
+    expect(linear.addIssueLabel).not.toHaveBeenCalled();
+    expect(linear.releaseStartClaim).not.toHaveBeenCalled();
+  });
+
   test('removes the claim again when Linear will not add the label', async () => {
     const { LinearApiError } = jest.requireActual('../../src/handlers/shared/linear-console');
     linear.addIssueLabel.mockRejectedValue(new LinearApiError('Linear rejected the request: forbidden'));
     const res = await handler(start());
     expect(res.statusCode).toBe(503);
     expect(json(res).error.message).toBe('Linear rejected the request: forbidden');
-    expect(linear.consumeStartClaim).toHaveBeenCalledWith(expect.anything(), 'Dedup', ISSUE, 'w1');
+    expect(linear.releaseStartClaim).toHaveBeenCalledWith(expect.anything(), 'Dedup', ISSUE, 'user-1');
   });
 
   test.each([

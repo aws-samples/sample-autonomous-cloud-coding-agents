@@ -21,7 +21,7 @@ import Box from '@cloudscape-design/components/box';
 import Button from '@cloudscape-design/components/button';
 import StatusIndicator from '@cloudscape-design/components/status-indicator';
 import Table, { type TableProps } from '@cloudscape-design/components/table';
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 import type { TaskStatusType, TaskSummary } from '../../../core/api/types';
 import { ExternalLink, RouterLink } from '../../../core/components/RouterLink';
@@ -114,6 +114,9 @@ export function TaskTable(props: TaskTableProps) {
   const columnDefinitions = useMemo(() => columns(props.showRepo ?? true), [props.showRepo]);
   const [sortingColumn, setSortingColumn] = useState<TableProps.SortingColumn<TaskSummary> | undefined>();
   const [sortingDescending, setSortingDescending] = useState(false);
+  // Cloudscape's onRowClick does not say what inside the row was clicked. Remember it on
+  // the way down, so links (repository, pull request) and buttons keep their own action.
+  const clickedControl = useRef(false);
 
   const items = useMemo(() => {
     const compare = sortingColumn?.sortingComparator;
@@ -123,6 +126,11 @@ export function TaskTable(props: TaskTableProps) {
   }, [props.items, sortingColumn, sortingDescending]);
 
   return (
+    <div
+      onMouseDownCapture={(e) => {
+        clickedControl.current = e.target instanceof Element && e.target.closest('a, button, input, select, textarea, [role="button"]') !== null;
+      }}
+    >
     <Table<TaskSummary>
       variant={props.variant ?? 'full-page'}
       loading={props.loading}
@@ -138,7 +146,10 @@ export function TaskTable(props: TaskTableProps) {
       trackBy="task_id"
       header={props.header}
       filter={props.filter}
-      onRowClick={({ detail }) => navigate(taskHref(detail.item.task_id))}
+      onRowClick={({ detail }) => {
+        if (clickedControl.current) return;
+        navigate(taskHref(detail.item.task_id));
+      }}
       empty={props.empty ?? <Box textAlign="center" color="inherit">No tasks yet.</Box>}
       footer={
         props.hasMore ? (
@@ -148,5 +159,6 @@ export function TaskTable(props: TaskTableProps) {
         ) : undefined
       }
     />
+    </div>
   );
 }

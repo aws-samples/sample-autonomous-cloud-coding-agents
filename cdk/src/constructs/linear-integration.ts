@@ -359,9 +359,9 @@ export class LinearIntegration extends Construct {
       // The base table only. No `index/*`: UpdateItem never targets an index.
       resources: [this.workspaceRegistryTable.tableArn],
     }));
-    // Single-use console start claims: read-and-delete only, on the base table.
+    // Console start claims: read for attribution, deleted once the task is dispatched.
     webhookProcessorFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:DeleteItem'],
+      actions: ['dynamodb:GetItem', 'dynamodb:DeleteItem'],
       resources: [this.webhookDedupTable.tableArn],
     }));
     // Seed the orchestration DAG + release root children.

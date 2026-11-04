@@ -167,6 +167,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       apiUrl: stack.taskApi.api.url,
       repoTable: stack.repoTable.table,
       githubTokenSecret: stack.githubTokenSecret,
+      repoGithubTokenSecretArns: blueprints.flatMap((b) => (b.credentials?.githubTokenSecretArn ? [b.credentials.githubTokenSecretArn] : [])),
       linear: {
         projectMappingTable: stack.linearIntegration.projectMappingTable,
         workspaceRegistryTable: stack.linearIntegration.workspaceRegistryTable,

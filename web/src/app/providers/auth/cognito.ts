@@ -81,9 +81,13 @@ interface IdTokenClaims {
 }
 
 class CognitoAuthError extends Error {
-  constructor(message: string) {
+  /** Cognito refused the request itself (4xx): retrying with the same tokens cannot help. */
+  readonly permanent: boolean;
+
+  constructor(message: string, { permanent = false } = {}) {
     super(message);
     this.name = 'CognitoAuthError';
+    this.permanent = permanent;
   }
 }
 
@@ -163,7 +167,7 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
     });
     const body = (await res.json().catch(() => ({}))) as { id_token?: string; refresh_token?: string; error?: string };
     if (!res.ok || typeof body.id_token !== 'string') {
-      throw new CognitoAuthError(`sign-in failed: ${body.error ?? `HTTP ${res.status}`}`);
+      throw new CognitoAuthError(`sign-in failed: ${body.error ?? `HTTP ${res.status}`}`, { permanent: res.status >= 400 && res.status < 500 });
     }
     return { id_token: body.id_token, refresh_token: body.refresh_token };
   }
@@ -175,11 +179,24 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
     return tokens;
   }
 
+  /** Listeners of the live session, told when it ends because the tokens cannot be refreshed. */
+  const expiredListeners = new Set<() => void>();
+
   async function refresh(current: StoredTokens): Promise<StoredTokens> {
-    if (!current.refreshToken) throw new CognitoAuthError('your session has expired; sign in again');
-    // Cognito does not rotate the refresh token by default; keep the one we have.
-    const body = await tokenRequest({ grant_type: 'refresh_token', refresh_token: current.refreshToken });
-    return store(body.id_token, body.refresh_token ?? current.refreshToken);
+    try {
+      if (!current.refreshToken) throw new CognitoAuthError('your session has expired; sign in again', { permanent: true });
+      // Cognito does not rotate the refresh token by default; keep the one we have.
+      const body = await tokenRequest({ grant_type: 'refresh_token', refresh_token: current.refreshToken });
+      return store(body.id_token, body.refresh_token ?? current.refreshToken);
+    } catch (error) {
+      // A refused refresh (expired or revoked refresh token) ends the session for good;
+      // network errors and 5xx keep it, so a brief outage does not sign anyone out.
+      if (error instanceof CognitoAuthError && error.permanent) {
+        env.storage.removeItem(TOKENS_KEY);
+        for (const listener of [...expiredListeners]) listener();
+      }
+      throw error;
+    }
   }
 
   function fresh(tokens: StoredTokens): boolean {
@@ -202,6 +219,10 @@ export function createCognitoAuthAdapter(options: CognitoAuthOptions, env: Cogni
     return {
       user,
       getToken: async () => (await currentTokens()).idToken,
+      onExpired: (listener) => {
+        expiredListeners.add(listener);
+        return () => expiredListeners.delete(listener);
+      },
       signOut: async () => {
         const stored = readJson<StoredTokens>(env.storage, TOKENS_KEY);
         env.storage.removeItem(TOKENS_KEY);
