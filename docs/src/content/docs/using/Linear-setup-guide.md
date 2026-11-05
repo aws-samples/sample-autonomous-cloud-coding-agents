@@ -25,8 +25,12 @@ One of two places, chosen automatically at setup time:
 
 | | When it's used | What's stored |
 |---|---|---|
-| **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
-| **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
+| **AgentCore Identity vault** | **Default** whenever the stack deploys AgentCore (the standard deployment). A deployment without AgentCore (for example `compute_types=ecs`) can opt in with `--context enableLinearIdentityVault=true`, provided its region has AgentCore Identity | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
+| **Secrets Manager** | Deployments without AgentCore, or `--context enableLinearIdentityVault=false` | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA only when ABCA uses Linear. |
+
+Prefer the vault. With Secrets Manager, a workspace that ABCA does not use for long enough can be left with an expired refresh token, and re-authorizing needs a browser that can reach the CLI's `localhost` callback. The vault's hosted consent page works from any machine.
+
+Existing vault deployments keep their resources and logical IDs, so turning the default on changes nothing for them. A Secrets Manager workspace on a stack that now has the vault keeps working until you re-run `bgagent linear setup <slug>`, which moves it to the vault.
 
 The vault can be configured with any selected backend. Lambda MicroVMs remains experimental; its image must include the current shared configuration contract.
 

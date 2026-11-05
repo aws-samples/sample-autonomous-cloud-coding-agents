@@ -13,8 +13,11 @@ title: Adr 016 pluggable identity and auth
 
 > **2026-08-28 implementation note — Phase 1 (Linear `ChannelCredential`) is built and live-verified
 > on a dev stack** ([#809](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/809)).
-> Additive and context-gated (`enableLinearIdentityVault`, default off), with Secrets Manager retained
-> as the fallback, so a deployment that does not opt in is byte-for-byte unchanged. The decision below
+> Additive and context-gated (`enableLinearIdentityVault`), with Secrets Manager retained
+> as the fallback. **Update:** the gate now defaults ON wherever AgentCore is deployed (which proves
+> the region has AgentCore) and OFF otherwise; `enableLinearIdentityVault=true|false` overrides.
+> Motivation: a Secrets Manager workspace left unused let its refresh token expire, failing every
+> Linear trigger silently until a browser re-consent through the CLI's localhost callback. The decision below
 > stands; two implementation details deviate from the P1 text and are recorded in *Phasing* → P1.
 
 ## Context
