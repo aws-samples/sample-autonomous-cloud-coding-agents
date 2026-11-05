@@ -33,6 +33,7 @@ import {
   fetchRecentComments,
   type RenderedComment,
 } from './shared/linear-feedback';
+import { type GRANT_HEALTH_PROBE_EVENT, isGrantHealthProbe, probeLinearGrants } from './shared/linear-grant-health';
 import {
   probeLinearIssueContext,
   renderIssueContextHint,
@@ -687,7 +688,37 @@ type BuilderResolvedToken = {
   vaultUserId?: string;
 };
 
-export async function handler(event: ProcessorEvent): Promise<void> {
+/**
+ * Grant health probe (#1004), invoked twice a day by the concurrency reconciler. Runs
+ * in this Lambda because it already holds
+ * the token-refresh grants, the registry write for the revocation latch and the
+ * OperationalAlerts publish, so a dead grant reuses the #812 announce path.
+ */
+async function runGrantHealthProbe(): Promise<void> {
+  if (!WORKSPACE_REGISTRY_TABLE) {
+    logger.error('Linear grant health probe skipped: LINEAR_WORKSPACE_REGISTRY_TABLE_NAME not set');
+    return;
+  }
+  const table = WORKSPACE_REGISTRY_TABLE;
+  const report = await probeLinearGrants(ddb, table, id => resolveLinearOauthToken(id, table));
+  const fields = {
+    checked: report.checked,
+    healthy: report.healthy,
+    unhealthy: report.unhealthy,
+    revoked: report.revoked,
+  };
+  if (report.unhealthy.length > 0) {
+    logger.warn('Linear grant health probe: some workspaces have no usable token — run `bgagent linear setup <slug>`', fields);
+  } else {
+    logger.info('Linear grant health probe', fields);
+  }
+}
+
+export async function handler(event: ProcessorEvent | typeof GRANT_HEALTH_PROBE_EVENT): Promise<void> {
+  if (isGrantHealthProbe(event)) {
+    await runGrantHealthProbe();
+    return;
+  }
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');
     return;
