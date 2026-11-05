@@ -62,6 +62,8 @@ const FIXTURE_FILES = [
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
   'agent/src/config.py',
+  'agent/src/payload_bootstrap.py',
+  'cdk/src/handlers/shared/payload-bootstrap.ts',
   'cdk/src/constructs/lambda-microvm-compute.ts',
 ];
 
@@ -125,6 +127,30 @@ describe('check-constants-sync', () => {
   // Node's type-stripping runs the script from source; the suite is a handful of
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
+
+  describe('payload bootstrap contract', () => {
+    test.each([
+      ['max_payload_bytes', 0],
+      ['minimum_url_lifetime_seconds', 901],
+      ['manifest_prefix', '../'],
+      ['launch_filename', 'payload.json'],
+    ])('rejects unsafe %s', (key, value) => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.payload_bootstrap[key] = value;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('payload_bootstrap');
+    });
+
+    test.each([
+      ['agent/src/payload_bootstrap.py', 'CONTRACT = {}'],
+      ['cdk/src/handlers/shared/payload-bootstrap.ts', 'export const PAYLOAD_BOOTSTRAP = {};'],
+    ])('rejects a consumer with its own copy: %s', (file, source) => {
+      const result = runInMutatedRepo(root => write(root, file, source));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('consumers must read the shared contract');
+    });
+  });
 
   describe('the real repository', () => {
     test('passes, and says what it actually checked', () => {

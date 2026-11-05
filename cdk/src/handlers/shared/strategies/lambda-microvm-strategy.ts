@@ -24,13 +24,13 @@ import {
   RunMicrovmCommand,
   TerminateMicrovmCommand,
 } from '@aws-sdk/client-lambda-microvms';
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 // Cross-language contract (S9): `microvm_platform_config` is read by BOTH this
 // producer and `agent/src/server.py`'s `/run` consumer. Imported (not copied) so
 // `tsc` fails on a renamed field — see `contracts/constants.md`.
 import sharedConstants from '../../../../../contracts/constants.json';
 import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
+import { deletePayloadReference, preparePayloadReference, redactPayloadUrls } from '../payload-bootstrap';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
 
@@ -40,14 +40,6 @@ function getClient(): LambdaMicrovmsClient {
     sharedClient = makeClient(LambdaMicrovmsClient);
   }
   return sharedClient;
-}
-
-let sharedS3Client: S3Client | undefined;
-function getS3Client(): S3Client {
-  if (!sharedS3Client) {
-    sharedS3Client = makeClient(S3Client);
-  }
-  return sharedS3Client;
 }
 
 /**
@@ -364,12 +356,16 @@ export const MICROVM_ERROR_MARKER = 'MicroVM';
  * marker first, which is the order the classifier patterns document.
  */
 function wrapMicrovmError(operation: string, err: unknown): Error {
-  const name = err instanceof Error ? err.name : undefined;
-  const message = err instanceof Error ? err.message : String(err);
+  // SDK errors and their nested causes can contain signed payload URLs, so both
+  // the message and the retained cause are redacted copies (#1002).
+  const name = err instanceof Error ? redactPayloadUrls(err.name) : undefined;
+  const message = redactPayloadUrls(err instanceof Error ? err.message : String(err));
   const detail = name && name !== 'Error' && !message.includes(name)
     ? `${name}: ${message}`
     : message;
-  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: err });
+  const safeCause = new Error(message);
+  safeCause.name = name ?? 'Error';
+  return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: safeCause });
 }
 
 /**
@@ -383,59 +379,12 @@ export function microvmPayloadKey(taskId: string): string {
   return `${taskId}/payload.json`;
 }
 
-/**
- * Delete a task's MicroVM ``/run`` payload object. Best-effort: a failed delete
- * must never fail the task — the bucket's 1-day lifecycle rule reaps it
- * regardless. Called from the orchestrator's ``finalize`` step once the task is
- * terminal. No-ops when the payload bucket isn't configured.
- *
- * WHY this exists rather than leaning on the TTL alone (ECS parity, and a real
- * exposure delta): the execution role's payload-bucket grant is
- * ``grantRead`` on the WHOLE bucket — it cannot be per-task scoped, because the
- * MicroVM has to read its own object before any tenant identity is installed.
- * The key shape is ``<taskId>/payload.json``, so any running MicroVM that knows
- * (or guesses) another task's id can read that task's HYDRATED PROMPT — issue
- * body, comment thread, repo context. The MicroVM also runs untrusted repo code.
- * Relying only on ``MICROVM_PAYLOAD_TTL_DAYS = 1`` left that window open for up
- * to ~24 h; deleting at finalize closes it to the task's own lifetime, which is
- * exactly the posture ``deleteEcsPayload`` already gives the ECS backend.
- *
- * ISSUED UNCONDITIONALLY, including for a task whose payload went INLINE (under
- * the {@link RUN_HOOK_PAYLOAD_LIMIT_BYTES} cap, so no object was ever written).
- * That is on purpose: ``DeleteObject`` on a missing key succeeds, so the call is
- * harmless and idempotent, whereas *deciding* to skip it would mean trusting a
- * per-task record of the delivery mode — and if that record were ever wrong or
- * absent, the skip would leave a real payload behind for the full TTL. Attempting
- * always is the fail-safe direction.
- *
- * The consequence is that a successful call proves a delete was ISSUED, never that
- * an object existed — S3 returns nothing that distinguishes the two on an
- * unversioned bucket. The log line below says exactly that and no more; an earlier
- * "Deleted MicroVM payload object" asserted a deletion that never happened on
- * every inline task.
+/** Remove task instructions and their saved download capability after finalization.
+ * Best-effort; bucket lifecycle reaps leftovers. Deployment manifests are shared.
  */
 export async function deleteMicrovmPayload(taskId: string): Promise<void> {
   if (!MICROVM_PAYLOAD_BUCKET) return;
-  const key = microvmPayloadKey(taskId);
-  try {
-    await getS3Client().send(new DeleteObjectCommand({
-      Bucket: MICROVM_PAYLOAD_BUCKET,
-      Key: key,
-    }));
-    // "issued", not "deleted": see the docstring. An inline-delivered task has no
-    // object here and the call still succeeds.
-    logger.info('MicroVM payload delete issued', {
-      task_id: taskId,
-      bucket: MICROVM_PAYLOAD_BUCKET,
-      key,
-    });
-  } catch (err) {
-    // Non-fatal — the lifecycle rule is the backstop.
-    logger.warn('Failed to delete MicroVM payload object (non-fatal)', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  await deletePayloadReference(MICROVM_PAYLOAD_BUCKET, taskId);
 }
 
 /** Split a comma-separated env-var list into trimmed, non-empty entries. */
@@ -557,83 +506,18 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     // inline branch is the exception. The MicroVM EXECUTION role holds the read
     // grant, exactly as the ECS task role does today.
     //
-    // Three keys, deliberately mirroring the ECS container env contract
-    // (AGENT_PAYLOAD / AGENT_PAYLOAD_S3_URI) so the agent's `/run` hook has one
-    // self-describing shape to branch on:
-    //   { "agent_payload": {...},     "platform_config": {...} }  — inline
-    //   { "agent_payload_s3_uri": "…", "platform_config": {...} }  — pointer
-    //
-    // `platform_config` (see MICROVM_PLATFORM_CONFIG_KEYS) rides in BOTH forms,
-    // and is ALSO merged into the S3 object on the pointer path:
-    //   s3://…/<task>/payload.json = { ...agent_payload, "platform_config": {…} }
-    // The duplication is deliberate and cheap (a few hundred bytes). It is the
-    // agent's env-block substitute — nothing else delivers it, because the
-    // snapshot must not bake it in — so it must be reachable whether the agent
-    // reads it off the hook body before fetching S3 or out of the fetched object.
+    // Payload bootstrap v2 (#700, #1002): the hook body carries only a small,
+    // task-scoped launch reference. The worker reads the deployment manifest with
+    // IAM (no deployment identifiers live in the image snapshot) and downloads its
+    // own task payload through a short-lived signed one-object URL, so it cannot
+    // read other tasks' payloads.
     const platformConfig = buildMicrovmPlatformConfig();
-    const inlineEnvelope = JSON.stringify({ agent_payload: payload, platform_config: platformConfig });
-    // Measure the SERIALIZED envelope, not the bare payload: the envelope is
-    // what the service counts against the 4 KB cap, and `platform_config` is part
-    // of it — which is precisely why nearly everything lands on the S3 path.
-    // Byte length (not String.length) because a multi-byte prompt/diff makes
-    // chars an undercount.
-    const inlineBytes = Buffer.byteLength(inlineEnvelope, 'utf8');
-
-    let runHookPayload: string;
-    let payloadS3Uri: string | undefined;
-    // EXACT boundary: `<= limit` inlines, `> limit` uploads. The service accepts
-    // 4 096 bytes and rejects 4 097 (measured), so 4 096 must still go inline.
-    if (inlineBytes <= RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-      runHookPayload = inlineEnvelope;
-    } else {
-      const key = microvmPayloadKey(taskId);
-      const uri = `s3://${MICROVM_PAYLOAD_BUCKET}/${key}`;
-      const pointerEnvelope = JSON.stringify({
-        agent_payload_s3_uri: uri,
-        platform_config: platformConfig,
-      });
-      // The pointer envelope is the LAST RESORT — there is no smaller shape to
-      // fall back to — so check it BEFORE the upload (an upload followed by a
-      // throw would leave an orphan object for the lifecycle rule to reap) and
-      // name the one thing an operator can actually act on. Unreachable in
-      // practice: the pointer plus all thirteen identifiers is well under 4 KB.
-      const pointerBytes = Buffer.byteLength(pointerEnvelope, 'utf8');
-      if (pointerBytes > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
-        throw new Error(
-          `The MicroVM /run pointer envelope is ${pointerBytes} bytes, over the service's `
-          + `${RUN_HOOK_PAYLOAD_LIMIT_BYTES}-byte runHookPayload cap, with the payload already moved `
-          + 'to S3. The remaining size is the S3 URI plus the platform_config identifiers, so a '
-          + 'pathologically long table/bucket/ARN name is the only possible cause — shorten the '
-          + 'stack name (physical resource names derive from it) and redeploy.',
-        );
-      }
-      // The S3 object carries the payload with `platform_config` merged in at the
-      // top level, so an agent that fetches the object gets the config with it.
-      // Platform config wins on a key collision — the payload has no
-      // `platform_config` key today, and if one ever appeared the platform's
-      // value is the authoritative one.
-      const payloadJson = JSON.stringify({ ...payload, platform_config: platformConfig });
-      try {
-        await getS3Client().send(new PutObjectCommand({
-          Bucket: MICROVM_PAYLOAD_BUCKET,
-          Key: key,
-          Body: payloadJson,
-          ContentType: 'application/json',
-        }));
-      } catch (err) {
-        // Marked so the classifier attributes an upload failure to this backend
-        // rather than letting a bare S3 exception name fall through to UNKNOWN.
-        throw wrapMicrovmError('payload upload', err);
-      }
-      payloadS3Uri = uri;
-      runHookPayload = pointerEnvelope;
-      logger.info('Wrote MicroVM run-hook payload to S3', {
-        task_id: taskId,
-        bytes: Buffer.byteLength(payloadJson, 'utf8'),
-        inline_bytes: inlineBytes,
-        inline_limit_bytes: RUN_HOOK_PAYLOAD_LIMIT_BYTES,
-        uri: payloadS3Uri,
-      });
+    const reference = await preparePayloadReference({
+      bucket: MICROVM_PAYLOAD_BUCKET, taskId, backend: 'lambda-microvm', payload, platformConfig,
+    }).catch((error: unknown) => { throw wrapMicrovmError('payload bootstrap', error); });
+    const runHookPayload = JSON.stringify(reference);
+    if (Buffer.byteLength(runHookPayload, 'utf8') > RUN_HOOK_PAYLOAD_LIMIT_BYTES) {
+      throw new Error('PAYLOAD_BOOTSTRAP_TOO_LARGE: launch reference exceeds the MicroVM hook limit');
     }
 
     // Explicit ingress control (F7, live 2026-07-31): `RunMicrovm` does NOT
@@ -729,8 +613,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       image_arn: result.imageArn,
       image_version: result.imageVersion ?? MICROVM_IMAGE_VERSION,
       maximum_duration_seconds: MICROVM_MAX_DURATION_SECONDS,
-      payload_delivery: payloadS3Uri ? 's3_pointer' : 'inline',
-      ...(payloadS3Uri && { payload_s3_uri: payloadS3Uri }),
+      payload_delivery: 'bootstrap_v2',
       // KEY NAMES only, never values: this is the one operator-visible record of
       // which optional platform identifiers a given session actually received, and
       // "the agent said ARTIFACTS_BUCKET_NAME is not configured" is otherwise a
@@ -936,13 +819,13 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
           microvm_id: microvmId,
           reason,
           error_type: errName,
-          error: err instanceof Error ? err.message : String(err),
+          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
         });
       } else {
         logger.warn('Failed to terminate MicroVM (best-effort)', {
           microvm_id: microvmId,
           reason,
-          error: err instanceof Error ? err.message : String(err),
+          error: redactPayloadUrls(err instanceof Error ? err.message : String(err)),
         });
       }
     }
