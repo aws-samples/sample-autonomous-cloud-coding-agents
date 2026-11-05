@@ -65,24 +65,39 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
  * @returns API Gateway proxy result.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  return recordApprovalForUser({ userId: extractUserId(event), taskId: event.pathParameters?.task_id, body: event.body });
+}
+
+/**
+ * Shared decision path for the API and Linear approval replies. Callers must
+ * authenticate and map the platform user first; this applies the same
+ * validation, rate limit, owner and state checks as the API.
+ * ``decisionSource`` records where a non-API decision came from.
+ */
+export async function recordApprovalForUser(input: {
+  userId: string | null;
+  taskId?: string;
+  body?: string | null;
+  decisionSource?: string;
+}): Promise<APIGatewayProxyResult> {
   const requestId = ulid();
 
   try {
     // 1. Auth
-    const callerUserId = extractUserId(event);
+    const callerUserId = input.userId;
     if (!callerUserId) {
       return errorResponse(401, ErrorCode.UNAUTHORIZED, 'Missing or invalid authentication.', requestId);
     }
 
     // 2. Path + body
-    const taskId = event.pathParameters?.task_id;
+    const taskId = input.taskId;
     if (!taskId) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Missing task_id path parameter.', requestId);
     }
 
     let parsed: ApprovalRequest | null = null;
     try {
-      parsed = event.body ? JSON.parse(event.body) as ApprovalRequest : null;
+      parsed = input.body ? JSON.parse(input.body) as ApprovalRequest : null;
     } catch {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must be valid JSON.', requestId);
     }
@@ -168,7 +183,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
               TableName: TASK_APPROVALS_TABLE_NAME,
               Key: { task_id: taskId, request_id },
               UpdateExpression:
-                'SET #status = :approved, decided_at = :now, #scope = :scope',
+                'SET #status = :approved, decided_at = :now, #scope = :scope'
+                  + (input.decisionSource ? ', decision_source = :source' : ''),
               ConditionExpression:
                 'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
               ExpressionAttributeNames: {
@@ -181,6 +197,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 ':now': nowIso,
                 ':scope': scope,
                 ':caller': callerUserId,
+                ...(input.decisionSource ? { ':source': input.decisionSource } : {}),
               },
             },
           },
@@ -228,6 +245,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             scope,
             decided_at: nowIso,
             caller_user_id: callerUserId,
+            ...(input.decisionSource ? { decision_source: input.decisionSource } : {}),
           },
         },
       }));

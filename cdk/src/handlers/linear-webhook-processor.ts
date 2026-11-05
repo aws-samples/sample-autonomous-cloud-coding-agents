@@ -26,6 +26,7 @@ import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
+import { handleLinearApprovalReply } from './shared/linear-approval-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import { readStartClaim, releaseStartClaim } from './shared/linear-console';
 import {
@@ -1955,6 +1956,17 @@ function commentTargetBelongsToWorkspace(
 }
 
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
+  // A reply to an approval notice is a decision, not a task request. It is
+  // handled only for the exact thread ABCA created, and only for the owner.
+  if (process.env.TASK_APPROVALS_TABLE_NAME && WORKSPACE_REGISTRY_TABLE
+    && await handleLinearApprovalReply(payload, {
+      ddb,
+      approvalsTable: process.env.TASK_APPROVALS_TABLE_NAME,
+      taskTable: process.env.TASK_TABLE_NAME!,
+      registryTable: WORKSPACE_REGISTRY_TABLE,
+      lookupUser: lookupPlatformUser,
+    })) return;
+
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
     return;
@@ -3434,6 +3446,8 @@ async function lookupPlatformUser(workspaceId: string, userId: string): Promise<
   const result = await ddb.send(new GetCommand({
     TableName: USER_MAPPING_TABLE,
     Key: { linear_identity: key },
+    // Approval replies authorize decisions from this mapping.
+    ConsistentRead: true,
   }));
   if (!result.Item || result.Item.status === 'pending') return null;
   return (result.Item.platform_user_id as string) ?? null;

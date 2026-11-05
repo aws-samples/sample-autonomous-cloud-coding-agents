@@ -404,3 +404,68 @@ describe('revoked-authorization recording (#812)', () => {
     expect(JSON.stringify(registryStatements.map((s) => s.Action))).toContain('dynamodb:UpdateItem');
   });
 });
+
+describe('LinearIntegration construct — approval replies (#1001)', () => {
+  function buildWith(opts: { withApprovals: boolean }): { t: Template; approvalsId?: string } {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const api = new apigw.RestApi(stack, 'TestApi');
+    const userPool = new cognito.UserPool(stack, 'TestUserPool');
+    const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+    });
+    const taskApprovalsTable = opts.withApprovals
+      ? new dynamodb.Table(stack, 'ApprovalsTable', {
+        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+        sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+      })
+      : undefined;
+    new LinearIntegration(stack, 'LinearIntegration', {
+      api,
+      userPool,
+      taskTable,
+      taskEventsTable,
+      ...(taskApprovalsTable && { taskApprovalsTable }),
+    });
+    return {
+      t: Template.fromStack(stack),
+      approvalsId: taskApprovalsTable && stack.getLogicalId(taskApprovalsTable.node.defaultChild as dynamodb.CfnTable),
+    };
+  }
+
+  test('wires TASK_APPROVALS_TABLE_NAME on the processor and grants it the approvals table', () => {
+    const { t, approvalsId } = buildWith({ withApprovals: true });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          TASK_APPROVALS_TABLE_NAME: { Ref: approvalsId },
+          LINEAR_WORKSPACE_REGISTRY_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    });
+    const grants = Object.values(t.findResources('AWS::IAM::Policy')).filter((p) => {
+      const stmts = (p as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement;
+      return stmts.some((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes('dynamodb:UpdateItem') && actions.includes('dynamodb:GetItem')
+          && JSON.stringify(s.Resource).includes(approvalsId!);
+      });
+    });
+    expect(grants).toHaveLength(1);
+  });
+
+  test('does NOT set TASK_APPROVALS_TABLE_NAME when the table is omitted (back-compat)', () => {
+    const { t } = buildWith({ withApprovals: false });
+    const fns = t.findResources('AWS::Lambda::Function', {
+      Properties: {
+        Environment: { Variables: Match.objectLike({ TASK_APPROVALS_TABLE_NAME: Match.anyValue() }) },
+      },
+    });
+    expect(Object.keys(fns)).toHaveLength(0);
+  });
+});

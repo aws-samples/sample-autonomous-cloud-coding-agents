@@ -48,7 +48,7 @@ process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 
-import { handler } from '../../src/handlers/deny-task';
+import { handler, recordDenialForUser } from '../../src/handlers/deny-task';
 
 // Secret fixtures assembled at runtime so the source file itself
 // never holds a contiguous secret literal (Code Defender pre-commit
@@ -202,5 +202,43 @@ describe('deny-task — error classification', () => {
     const body = JSON.parse(res.body);
     expect(body.data.status).toBe('DENIED');
     expect(body.data.request_id).toBe('01KREQ');
+  });
+});
+
+describe('deny-task — decision source (#1001)', () => {
+  test('API callers record no decision_source (behaviour unchanged)', async () => {
+    mockSend.mockResolvedValue({});
+    await handler(makeEvent({ body: JSON.stringify({ request_id: '01KREQ1', decision: 'deny' }) }));
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const update = tx.TransactItems[0].Update;
+    expect(update.UpdateExpression).not.toContain('decision_source');
+    expect(update.ExpressionAttributeValues[':source']).toBeUndefined();
+    const audit = mockSend.mock.calls.find((c) => c[0]._type === 'Put')?.[0].input;
+    expect(audit.Item.metadata.decision_source).toBeUndefined();
+  });
+
+  test('recordDenialForUser records the given decision_source on the row and the audit event', async () => {
+    mockSend.mockResolvedValue({});
+    const res = await recordDenialForUser({
+      userId: 'user-alice',
+      taskId: 'task-1',
+      body: JSON.stringify({ request_id: '01KREQ1', decision: 'deny' }),
+      decisionSource: 'linear',
+    });
+    expect(res.statusCode).toBe(202);
+    expect(JSON.parse(res.body).data.status).toBe('DENIED');
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const update = tx.TransactItems[0].Update;
+    expect(update.UpdateExpression).toContain('decision_source = :source');
+    expect(update.ExpressionAttributeValues[':source']).toBe('linear');
+    const audit = mockSend.mock.calls.find((c) => c[0]._type === 'Put')?.[0].input;
+    expect(audit.Item.metadata.decision_source).toBe('linear');
+    expect(audit.Item.metadata.caller_user_id).toBe('user-alice');
+  });
+
+  test('recordDenialForUser rejects a missing user with 401', async () => {
+    const res = await recordDenialForUser({ userId: null, taskId: 'task-1', body: '{}', decisionSource: 'linear' });
+    expect(res.statusCode).toBe(401);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
