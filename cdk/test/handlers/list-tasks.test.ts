@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { BatchGetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 // --- Mocks ---
@@ -25,16 +25,19 @@ const mockSend = jest.fn();
 jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
+  BatchGetCommand: jest.fn((input: unknown) => ({ _type: 'BatchGet', input })),
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
 }));
 
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ-ULID') }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.BUDGET_TABLE_NAME = 'Budgets';
 
 import { handler } from '../../src/handlers/list-tasks';
 
 const MockQueryCommand = QueryCommand as unknown as jest.Mock;
+const MockBatchGetCommand = BatchGetCommand as unknown as jest.Mock;
 
 const TASK_ITEMS = [
   {
@@ -58,6 +61,8 @@ const TASK_ITEMS = [
     status_created_at: 'COMPLETED#2025-03-14T10:00:00Z',
     created_at: '2025-03-14T10:00:00Z',
     updated_at: '2025-03-14T12:00:00Z',
+    completed_at: '2025-03-14T11:58:00Z',
+    cost_usd: 1.25,
   },
 ];
 
@@ -129,6 +134,66 @@ describe('list-tasks handler', () => {
     expect(body.pagination.next_token).toBeNull();
   });
 
+  test('returns only the authenticated user personal budget for view=budget', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-21T12:00:00Z'));
+    mockSend.mockResolvedValueOnce({
+      Responses: {
+        Budgets: [
+          {
+            scope_key: 'USER#user-123',
+            period: 'CONFIG',
+            monthly_limit_usd: 50,
+            hard_stop: true,
+          },
+          {
+            scope_key: 'USER#user-123',
+            period: '2026-08',
+            spend_usd: 25,
+          },
+        ],
+      },
+    });
+
+    try {
+      const result = await handler(makeEvent({
+        queryStringParameters: { view: 'budget' },
+      }));
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body).data).toEqual({
+        period: '2026-08',
+        resets_at: '2026-09-01T00:00:00.000Z',
+        configured: true,
+        spend_usd: 25,
+        monthly_limit_usd: 50,
+        remaining_usd: 25,
+        utilization_percent: 50,
+        hard_stop: true,
+        hard_stop_active: false,
+      });
+      expect(MockBatchGetCommand).toHaveBeenCalledWith(expect.objectContaining({
+        RequestItems: {
+          Budgets: expect.objectContaining({
+            Keys: [
+              { scope_key: 'USER#user-123', period: 'CONFIG' },
+              { scope_key: 'USER#user-123', period: '2026-08' },
+            ],
+            ConsistentRead: true,
+          }),
+        },
+      }));
+      expect(MockQueryCommand).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('summaries carry cost, completion time and source, for cost views', async () => {
+    const body = JSON.parse((await handler(makeEvent())).body);
+    expect(body.data[1]).toMatchObject({ cost_usd: 1.25, completed_at: '2025-03-14T11:58:00Z', channel_source: 'api' });
+    // Not finished or no cost reported yet: explicit nulls, not missing keys.
+    expect(body.data[0]).toMatchObject({ cost_usd: null, completed_at: null, channel_source: 'api' });
+  });
+
   test('returns pagination token when more results exist', async () => {
     mockSend.mockResolvedValueOnce({
       Items: [TASK_ITEMS[0]],
@@ -140,6 +205,19 @@ describe('list-tasks handler', () => {
 
     expect(body.pagination.has_more).toBe(true);
     expect(body.pagination.next_token).toBeTruthy();
+  });
+
+  test('returns 400 for an unknown view instead of returning tasks', async () => {
+    const result = await handler(makeEvent({
+      queryStringParameters: { view: 'budgets' },
+    }));
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid view value. Expected "budget".',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
   });
 
   test('passes next_token as ExclusiveStartKey', async () => {

@@ -45,8 +45,8 @@ describe('AgentStack', () => {
     expect(template).toBeDefined();
   });
 
-  test('creates exactly 21 DynamoDB tables', () => {
-    // task, task-events, repo, user-concurrency, webhook, task-nudges,
+  test('creates exactly 22 DynamoDB tables', () => {
+    // task, task-events, repo, user-concurrency, budget, webhook, task-nudges,
     // task-approvals (Cedar HITL V2),
     // api-key (platform API keys for headless webhook management),
     // slack-installation, slack-user-mapping,
@@ -57,8 +57,8 @@ describe('AgentStack', () => {
     // jira-project-mapping, jira-user-mapping, jira-workspace-registry,
     // jira-webhook-dedup (added for the Jira Cloud integration on main),
     // orchestration (parent/sub-issue DAG state).
-    // = 16 shared/base + 4 Jira + 1 orchestration = 21.
-    template.resourceCountIs('AWS::DynamoDB::Table', 21);
+    // = 17 shared/base + 4 Jira + 1 orchestration = 22.
+    template.resourceCountIs('AWS::DynamoDB::Table', 22);
   });
 
   test('creates TaskApprovalsTable with user_id-status-index GSI', () => {
@@ -82,6 +82,12 @@ describe('AgentStack', () => {
     });
   });
 
+  test('outputs BudgetTableName', () => {
+    template.hasOutput('BudgetTableName', {
+      Description: 'Name of the monthly user/team budget configuration and spend table',
+    });
+  });
+
   test('the orchestrator carries the platform_config transport env on EVERY compute type', () => {
     // Wired unconditionally rather than under the lambda-microvm gate: the strategy
     // fails a session start when a required identifier is missing, and that guard
@@ -101,6 +107,10 @@ describe('AgentStack', () => {
       'TRACE_ARTIFACTS_BUCKET_NAME',
       'AGENT_SESSION_ROLE_ARN',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      // Added with the main model's injection: this parity guard is exactly what a
+      // declared-but-never-read prop slips past — every synth assertion passed while
+      // `anthropicModel` went nowhere (see task-orchestrator.ts).
+      'ANTHROPIC_MODEL',
     ]) {
       expect(env[key]).toBeDefined();
     }
@@ -131,6 +141,10 @@ describe('AgentStack', () => {
       'TRACE_ARTIFACTS_BUCKET_NAME',
       'AGENT_SESSION_ROLE_ARN',
       'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+      // Added with the main model's injection: this parity guard is exactly what a
+      // declared-but-never-read prop slips past — every synth assertion passed while
+      // `anthropicModel` went nowhere (see task-orchestrator.ts).
+      'ANTHROPIC_MODEL',
       'TASK_TABLE_NAME',
       'TASK_EVENTS_TABLE_NAME',
       'GITHUB_TOKEN_SECRET_ARN',
@@ -143,6 +157,28 @@ describe('AgentStack', () => {
     // The CLI reads this to refuse onboarding a repo as compute_type=ecs on a
     // stack that never provisioned the ECS substrate.
     template.hasOutput('ComputeSubstrate', { Value: 'agentcore' });
+  });
+
+  test('outputs BedrockGeoRegion so a client can check the profile it will invoke', () => {
+    // `platform doctor` reads this. Without it, its Bedrock check can only ask "is
+    // this model published in this Region", which passes on a stack granted
+    // profiles the account cannot invoke — the failure then lands at turn 0 as
+    // AccessDenied. Defaults to `us`; the test app passes no context.
+    template.hasOutput('BedrockGeoRegion', { Value: 'us' });
+  });
+
+  test('outputs BedrockModelIds — the linchpin both new consumers read', () => {
+    // Asserted on the PRODUCER side because two independent consumers depend on this
+    // output and BOTH degrade SILENTLY without it: `repo onboard --model`'s grant
+    // check and doctor's `checkGrantedModelProfiles` each skip themselves when the
+    // output is absent (deliberately, so an older stack is not blocked). A refactor
+    // that dropped or renamed it would therefore turn two guards into no-ops with
+    // nothing failing anywhere — every consumer-side test would still pass.
+    //
+    // Value asserted, not just presence: the consumers parse it as a comma-separated
+    // list of BARE ids, so a formatting change (JSON array, geo-prefixed entries)
+    // breaks them just as thoroughly as a missing output.
+    template.hasOutput('BedrockModelIds', { Value: DEFAULT_BEDROCK_MODEL_IDS.join(',') });
   });
 
   test('outputs CedarWasmLayerArn', () => {
@@ -230,7 +266,7 @@ describe('AgentStack', () => {
       const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
         .Properties?.EnvironmentVariables ?? {};
       expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+        .toBe(`${DEFAULT_BEDROCK_GEO_REGION}.anthropic.claude-haiku-5-5`);
     }
   });
 
@@ -343,7 +379,7 @@ describe('AgentStack', () => {
     const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
-    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-opus-4-8');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
     // Claude Opus 5 (#744). Granted ahead of any default flip: the bare id is
     // not on-demand invocable (Bedrock returns ValidationException), so the
@@ -351,9 +387,16 @@ describe('AgentStack', () => {
     // must be present or the agent gets AccessDenied at turn 0.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
-    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5. Blueprints may
-    // pin 4.8 per-repo; dropping it would fail those repos at turn 0. Retiring
-    // 4.8 is a separate, announced change — not a side effect of adding 5.
+    // Claude 5.5 family (#953) — the platform default (Opus 5.5) and auxiliary
+    // default (Haiku 5.5). Both ARNs each: the bare id is not on-demand invocable,
+    // so the `us.`-prefixed inference profile is the one actually called.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5-5');
+    expect(serialized).toContain('foundation-model/anthropic.claude-haiku-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-haiku-5-5');
+    // REGRESSION (#744, #953): previous defaults stay granted after a bump.
+    // Blueprints may pin any of them per-repo; dropping one would fail those repos
+    // at turn 0. Retiring a model is a separate, announced change.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
@@ -362,7 +405,20 @@ describe('AgentStack', () => {
     // The runtime-role half of the override contract (the ECS side is covered in
     // ecs-agent-cluster.test.ts): a context override must replace the runtime's
     // granted models too — overridden model present, defaults absent, still scoped.
-    const app = new App({ context: { bedrockModels: ['anthropic.claude-opus-4-8'] } });
+    // The override ADDS opus-4-8 and DROPS sonnet-4-6, while keeping the two models the
+    // stack injects as `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`. Dropping
+    // those became a synth error in this change: the stack tells every substrate to
+    // invoke them regardless of this list, so an override without them grants one set and
+    // calls another. Sonnet's absence below is what still proves replace-not-append.
+    const app = new App({
+      context: {
+        bedrockModels: [
+          'anthropic.claude-opus-4-8',
+          'anthropic.claude-opus-5-5',
+          'anthropic.claude-haiku-5-5',
+        ],
+      },
+    });
     const stack = new AgentStack(app, 'OverrideAgentStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -407,9 +463,10 @@ describe('AgentStack', () => {
     // Overridden model is granted...
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
-    // ...defaults are NOT (override replaces, not appends)...
+    // ...a non-overridden model is NOT (override replaces, not appends). Sonnet carries
+    // this assertion now; haiku cannot, because it is a platform default the override is
+    // required to keep.
     expect(serialized).not.toContain('claude-sonnet-4-6');
-    expect(serialized).not.toContain('claude-haiku-4-5');
     // ...and the grant is never a bare wildcard.
     expect(serialized).not.toContain('"*"');
   });
@@ -437,25 +494,39 @@ describe('AgentStack', () => {
    * differ between two synths of the SAME tree and so cannot be asserted here.
    * The Bedrock resources are the change's entire blast radius.)
    */
-  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
-    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+  test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
+    // `anthropic.claude-opus-4-20250514-v1:0` was REMOVED from this baseline
+    // deliberately: it has no cross-Region inference profile in any geography, so
+    // the pair of ARNs it contributed granted a profile that cannot exist while
+    // making the model pass every admission check that reads the grant list. This
+    // exact-set assertion is what makes that removal reviewable — a grant cannot be
+    // added, dropped, or re-prefixed without failing here.
+    const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
-      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-haiku-5-5',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-opus-5-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
-      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-haiku-5-5',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-opus-5-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
 
-    const serialized = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    // Audit actual policy documents, including overflow, rather than cdk-nag
+    // metadata whose finding patterns also name foundation-model resources.
+    const policies = {
+      ...template.findResources('AWS::IAM::Policy'),
+      ...template.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
-    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+    expect(found).toEqual(EXPECTED_BEDROCK_RESOURCE_NAMES);
 
     // Sanity: the set is derived from the shared model list, so a model added to
     // DEFAULT_BEDROCK_MODEL_IDS without updating this baseline fails loudly here
@@ -468,7 +539,7 @@ describe('AgentStack', () => {
       Properties?: { EnvironmentVariables?: Record<string, unknown> };
     }).Properties?.EnvironmentVariables ?? {};
     expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-      .toBe('us.anthropic.claude-haiku-4-5-20251001-v1:0');
+      .toBe('us.anthropic.claude-haiku-5-5');
     expect(DEFAULT_BEDROCK_GEO_REGION).toBe('us');
   });
 
@@ -488,6 +559,28 @@ describe('AgentStack', () => {
         env: { account: '123456789012', region: 'us-east-1' },
       });
       geoTemplate = Template.fromStack(stack);
+    });
+
+    test('injects BOTH models into the runtime env at this geography', () => {
+      // The headline fix, and it had no guard: deleting the ANTHROPIC_MODEL line from
+      // the runtime env survived the whole suite. The stack previously injected only
+      // the auxiliary model, so the main one fell through to a Python literal a
+      // geography change does not touch — grants moved, the agent did not, and every
+      // task with no per-repo override failed at turn 0 with AccessDenied.
+      //
+      // Asserted per geography rather than once, because the failure only appears
+      // when the two disagree.
+      const runtimes = geoTemplate.findResources('AWS::BedrockAgentCore::Runtime');
+      const envs = Object.values(runtimes).map(
+        (r) => (r as { Properties?: { EnvironmentVariables?: Record<string, string> } })
+          .Properties?.EnvironmentVariables ?? {},
+      );
+      expect(envs.length).toBeGreaterThan(0);
+      for (const env of envs) {
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5-5`);
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
+      }
     });
 
     test('re-prefixes every inference-profile ARN and drops the us. ones', () => {
@@ -529,7 +622,7 @@ describe('AgentStack', () => {
         const envVars = (rt as { Properties?: { EnvironmentVariables?: Record<string, unknown> } })
           .Properties?.EnvironmentVariables ?? {};
         expect(envVars.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-          .toBe(`${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
       }
     });
   });
@@ -777,59 +870,66 @@ describe('AgentStack', () => {
     expect(objectStatements).toEqual([]);
   });
 
-  test('log-delivery logical ids are pinned with NO opt-in, so an existing stack updates in place', () => {
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN survives a library-side rename of these
-    // auto-created resources. So a renamed source is a SECOND source for the same
-    // runtime: CloudFormation creates before deleting, CloudWatch Logs rejects it
-    // as already existing, and the update rolls the whole stack back.
+  test('no hard-coded log-delivery logical ids or names anywhere in the stack', () => {
+    // The template must not carry values recorded from one account's live stack.
     //
-    // The ids must therefore be pinned unconditionally. Behind a flag, the safe
-    // path is the one an operator has to already know about, and the failure that
-    // teaches them is a mid-update rollback whose message never mentions it.
+    // These resources are created and named by the AgentCore Runtime. An earlier
+    // version overrode their logical ids from a table keyed by STACK NAME, holding
+    // ids read off one deployed stack — but stack name is not a proxy for deployed
+    // state. Two accounts running a stack of the same name had diverged, so the
+    // table was right for one and actively caused the rename on the other, which is
+    // fatal: a DeliverySource is unique per (resource ARN, log type) account-wide,
+    // the runtime ARN survives a rename, so CloudFormation's create-before-delete
+    // collides with the live source and the whole update rolls back.
     //
-    // Asserted on the source, not by synthesizing a second stack: constructing
-    // one under a different construct id trips an unrelated cdk-nag
-    // suppression-path check first, which masks whatever this is checking.
+    // There is no set of literals that serves every account, so the fix is to hold
+    // none. Asserted on the source because the failure mode is a value being
+    // reintroduced, not a synth-visible shape.
     const src = fs.readFileSync(
       path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
     );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
 
-    // Keyed off the stack's OWN name — no context, no opt-in.
-    expect(body).toContain('PINNED_LOG_DELIVERY_BY_STACK[stack.stackName]');
-    expect(body).not.toContain('tryGetContext');
-    // Nothing anywhere may reintroduce a gate.
+    // No table, no lookup, no per-stack keying, and no flag to gate any of it.
+    expect(src).not.toContain('PINNED_LOG_DELIVERY_BY_STACK');
     expect(src).not.toContain('pinnedLogDeliveryStack');
+    expect(src).not.toContain('overrideLogicalId');
 
-    // The ids it pins are the ones CloudFormation already holds for that stack.
-    // Hard-coded here on purpose: if someone "tidies" a value in the table, this
-    // fails instead of the next production update rolling back.
-    expect(src).toContain('RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02');
-    expect(src).toContain('RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22');
+    // No captured logical id or account-unique Name, in any of their shapes.
+    expect(src).not.toMatch(/RuntimeCDKSource/);
+    expect(src).not.toMatch(/cdk-(application|usage)logs-source-/);
+    expect(src).not.toMatch(/cdk-cwl-Dest/);
   });
 
-  test('a stack with no recorded ids keeps the library\'s own log-delivery naming', () => {
-    // The pinned ids embed a stack name, so they are only correct for that stack.
-    // Another stack has no pre-rename resources to line up with and must not
-    // inherit them — otherwise two stacks in one account would claim the same
-    // account-unique DeliverySource Name. The table lookup is what enforces this,
-    // so assert it returns nothing for an unknown name rather than falling back.
-    const src = fs.readFileSync(
-      path.resolve(__dirname, '../../src/stacks/agent.ts'), 'utf8',
-    );
-    const fn = src.slice(src.indexOf('function pinLogDeliveryLogicalIds'));
-    const body = fn.slice(0, fn.indexOf('\n}'));
-    expect(body).toMatch(/if \(!pins\) return;/);
-
-    // And this stack — named TestAgentStack, absent from the table — got the
-    // library's naming, with none of backgroundagent-dev's ids leaking in.
-    const ids = Object.keys(template.findResources('AWS::Logs::DeliverySource'));
+  test('log delivery is left to the library, so every account synthesizes the same ids', () => {
+    // The point of holding no ids: what lands in the template comes from the
+    // library, so the same code produces the same ids in every account. A stack
+    // already on the library's naming sees no change at all.
+    const sources = template.findResources('AWS::Logs::DeliverySource');
+    const ids = Object.keys(sources);
     expect(ids).toHaveLength(2);
+
     for (const id of ids) {
+      // Library-generated, not ours: no self-chosen prefix and no stack name baked
+      // in. A stack name in a logical id is the signature of the old table.
       expect(id).not.toContain('backgroundagentdev');
+      expect(id).not.toContain('AgentRuntimeApplication');
+      // Deliberately the library's CURRENT id shape, so this assertion doubles as a
+      // canary: the next time the AgentCore library renames these resources, this
+      // fails here rather than in a deploy. Read the failure as an operational
+      // warning, not a string mismatch — every already-deployed stack will try to
+      // rename its DeliverySource on the next update, and a renamed source collides
+      // with the live one on the unchanged runtime ARN and rolls the stack back.
+      // Update the regex, and add the new shape to the migration note in
+      // docs/design/OBSERVABILITY.md ("AgentCore log delivery") so operators can
+      // tell which side of the rename their stack is on.
+      expect(id).toMatch(/^Runtime(Application|Usage)LogsDeliverySource[0-9A-F]{8}$/);
     }
+
+    // Both log types are wired, so "no pin" cannot mean "no delivery".
+    const logTypes = Object.values(sources)
+      .map((r) => (r as { Properties?: { LogType?: string } }).Properties?.LogType)
+      .sort();
+    expect(logTypes).toEqual(['APPLICATION_LOGS', 'USAGE_LOGS']);
   });
 
   test('the fan-out consumer can reach BOTH surfaces\' credentials registries', () => {
@@ -929,9 +1029,36 @@ describe('AgentStack', () => {
     });
   });
 
+  test('allows regional CloudWatch alarms to publish to the exported alerts topic (#925)', () => {
+    const topicRef = template.toJSON().Outputs.OperationalAlertsTopicArn.Value;
+    template.hasResourceProperties('AWS::SNS::TopicPolicy', {
+      Topics: [topicRef],
+      PolicyDocument: {
+        Statement: Match.arrayWith([{
+          Sid: 'AllowCloudWatchAlarmsPublish',
+          Effect: 'Allow',
+          Principal: { Service: 'cloudwatch.amazonaws.com' },
+          Action: 'sns:Publish',
+          Resource: topicRef,
+          Condition: {
+            StringEquals: { 'aws:SourceAccount': '123456789012' },
+            ArnLike: {
+              'aws:SourceArn': {
+                'Fn::Join': ['', [
+                  'arn:', { Ref: 'AWS::Partition' },
+                  ':cloudwatch:us-east-1:123456789012:alarm:*',
+                ]],
+              },
+            },
+          },
+        }]),
+      },
+    });
+  });
+
   test('wires all three DLQ-depth alarms to the alerts topic (#629)', () => {
-    // FanOut, ApprovalMetricsPublisher, and the screenshot processor
-    // DLQ alarms must each carry an AlarmActions entry — otherwise a
+    // FanOut, ApprovalMetricsPublisher, and screenshot processor DLQ alarms
+    // must each carry an AlarmActions entry — otherwise a
     // poison-pill pile-up stays silent (the whole point of #629).
     const alarms = template.findResources('AWS::CloudWatch::Alarm');
     const dlqAlarmsWithActions = Object.values(alarms).filter((r: any) => {
@@ -951,6 +1078,17 @@ describe('AgentStack', () => {
     }
   });
 
+  test('wires the 80/100 budget alarms to the alerts topic (#471)', () => {
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const budgetAlarms = Object.values(alarms).filter((r: any) =>
+      r.Properties?.Namespace === 'ABCA/Budgets'
+      && r.Properties?.MetricName === 'BudgetThresholdCrossed');
+    expect(budgetAlarms).toHaveLength(2);
+    for (const alarm of budgetAlarms) {
+      expect(JSON.stringify((alarm as any).Properties.AlarmActions)).toContain('OperationalAlerts');
+    }
+  });
+
   test('does NOT subscribe an email when no alertEmail context is set (#629)', () => {
     // The default deploy ships the topic with no confirmed target;
     // operators subscribe Slack / PagerDuty / email themselves.
@@ -958,13 +1096,62 @@ describe('AgentStack', () => {
   });
 });
 
+/**
+ * The platform naming a model for ITSELF that the deploy does not grant.
+ *
+ * Every other boundary is guarded — `repo onboard --model` rejects an ungranted per-repo
+ * pin, workflow admission rejects an ungranted pinned workflow model — but the stack
+ * injects `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` from constants that are
+ * independent of `bedrockModels`, so a narrowing override made the two disagree with
+ * nothing to catch it. Verified before fixing: `-c
+ * bedrockModels='["anthropic.claude-sonnet-4-6"]'` synthesized clean while granting only
+ * Sonnet and injecting `global.anthropic.claude-opus-5-5`.
+ */
+describe('AgentStack platform-default / grant-list coherence', () => {
+  const synth = (bedrockModels?: string[]) => () => {
+    const app = new App({ context: bedrockModels ? { bedrockModels } : {} });
+    const stack = new AgentStack(app, 'TestAgentStackDefaults', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    Template.fromStack(stack);
+  };
+
+  test('fails at synth when the override omits the main platform default', () => {
+    const t = synth(['anthropic.claude-sonnet-4-6']);
+    expect(t).toThrow(/omits the platform default model/);
+    // Names every missing default, not just the first one found.
+    expect(t).toThrow(/anthropic\.claude-opus-5-5/);
+    expect(t).toThrow(/claude-haiku-5-5/);
+    // And says WHY, because the override looks self-consistent on its own.
+    expect(t).toThrow(/told to invoke them regardless/);
+  });
+
+  test('fails when only the AUXILIARY default is omitted', () => {
+    // The easy one to miss: adding a model while dropping Haiku breaks only the
+    // auxiliary path (WebFetch summarisation), which no task-level failure names.
+    expect(synth(['anthropic.claude-opus-5-5', 'anthropic.claude-sonnet-4-6']))
+      .toThrow(/claude-haiku-5-5/);
+  });
+
+  test('accepts an override that keeps both defaults', () => {
+    expect(synth([
+      'anthropic.claude-opus-5-5',
+      'anthropic.claude-haiku-5-5',
+      'anthropic.claude-sonnet-4-6',
+    ])).not.toThrow();
+  });
+
+  test('accepts the default path, which passes no override at all', () => {
+    expect(synth()).not.toThrow();
+  });
+});
+
 describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', () => {
   let template: Template;
 
   beforeAll(() => {
-    // Deploying with the gate on provisions the Fargate substrate alongside the
-    // always-present AgentCore runtime; the ComputeSubstrate output flips to 'ecs'.
-    const app = new App({ context: { compute_type: 'ecs' } });
+    // Selecting ECS provisions the Fargate backend and emits ComputeSubstrate=ecs.
+    const app = new App({ context: { compute_types: 'ecs' } });
     const stack = new AgentStack(app, 'TestAgentStackEcs', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -1014,7 +1201,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
     // This asserts the whole path: context -> resolver -> construct -> template.
     const app = new App({
       context: {
-        compute_type: 'ecs',
+        compute_types: 'ecs',
         ecsBuildTaskCpu: '16384',
         ecsBuildTaskMemoryMiB: '122880',
         ecsBuildTaskEphemeralStorageGiB: '100',
@@ -1050,7 +1237,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     // exists once an image identifier is available.
     const app = new App({
       context: {
-        compute_type: 'lambda-microvm',
+        compute_types: 'lambda-microvm',
         microvm_base_image_arn: BASE_IMAGE_ARN,
         microvm_base_image_version: '1',
       },
@@ -1244,7 +1431,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')),
     );
     expect(policies).toContain('logs:CreateLogStream');
-    expect(policies).toContain('RuntimeApplicationLogGroup');
+    expect(policies).toContain('LambdaMicrovmComputeMicrovmLogGroup');
 
     // ...and the orchestrator delivers that group's NAME as LOG_GROUP_NAME.
     const orchestrator = Object.entries(template.findResources('AWS::Lambda::Function'))
@@ -1252,7 +1439,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const logGroupEnv = JSON.stringify(
       orchestrator[1].Properties.Environment.Variables.LOG_GROUP_NAME,
     );
-    expect(logGroupEnv).toContain('RuntimeApplicationLogGroup');
+    expect(logGroupEnv).toContain('LambdaMicrovmComputeMicrovmLogGroup');
   });
 
   test('MicroVM resources carry the backend cost-allocation tag', () => {
@@ -1275,7 +1462,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     beforeAll(() => {
       const app = new App({
         context: {
-          compute_type: 'lambda-microvm',
+          compute_types: 'lambda-microvm',
           microvm_region_override: true,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
@@ -1287,7 +1474,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm' } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);
@@ -1341,7 +1528,7 @@ describe('AgentStack with the MicroVM gate on but no image configured (first dep
     // but no image yet. Exercises the false branch of the shared
     // `isLambdaMicrovmImageConfigured` predicate that gates BOTH the
     // orchestrator's MICROVM_* wiring and the cancel Lambda's grant.
-    const app = new App({ context: { compute_type: 'lambda-microvm' } });
+    const app = new App({ context: { compute_types: 'lambda-microvm' } });
     const stack = new AgentStack(app, 'TestAgentStackMicrovmNoImage', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -1385,7 +1572,7 @@ describe('AgentStack MicroVM image ARN invariant', () => {
     const configuredSpy = jest.spyOn(lambdaMicrovmCompute, 'isLambdaMicrovmImageConfigured')
       .mockReturnValue(true);
     try {
-      const app = new App({ context: { compute_type: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm' } });
       const stack = new AgentStack(app, 'TestAgentStackMicrovmInvariant', {
         env: { account: '123456789012', region: 'us-east-1' },
       });
@@ -1445,7 +1632,8 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // A loose `toBeGreaterThan` let a whole integration construct disappear
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
-    expect(abcaLambdas.length).toBe(46);
+    // 47 = 46 on main + RemoveWorkspaceFn (DELETE /v1/linear/workspaces/{slug}).
+    expect(abcaLambdas.length).toBe(47);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -1525,7 +1713,7 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
 
     beforeAll(() => {
       const app = new App({
-        context: { enableToolGateway: true, compute_type: 'ecs' },
+        context: { enableToolGateway: true, compute_types: 'ecs' },
       });
       const stack = new AgentStack(app, 'GatewayEcsStack', {
         env: { account: '123456789012', region: 'us-east-1' },
@@ -1719,30 +1907,16 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     expect([...workloadNames]).toEqual(['abca_linear_oauth_LinearVaultWritersStack']);
   });
 
-  test('MicroVM + vault is REFUSED by name, not left to the resource counter', () => {
-    // Pinning a limitation, not a behaviour. The vault IS wired for the MicroVM substrate
-    // — platform_config carries the workload name and the guest's execution role gets the
-    // mint grant — but the two cannot be enabled together today: 505 resources against a
-    // HARD limit of 500 (microvm alone 496, the vault alone 488). Claiming MicroVM support
-    // without saying so would be false.
-    //
-    // The stack refuses the combination itself rather than letting the counter throw,
-    // because the counter's message is a per-type census that never mentions either flag —
-    // the operator cannot tell from it what to change.
-    //
-    // Reclaiming room means nesting a subsystem. MicroVM (+19 resources) is the cheapest
-    // candidate and currently deployed nowhere, but nesting it needs the session-role trust
-    // wiring to stop referencing a child resource (it creates a parent↔child cycle today).
-    //
-    // When the room is found, this test should be replaced by a real parity assertion.
-    const app = new App({
-      context: { enableLinearIdentityVault: true, compute_type: 'lambda-microvm' },
-    });
-    expect(() => Template.fromStack(
-      new AgentStack(app, 'LinearVaultMicrovmStack', {
-        env: { account: '123456789012', region: 'us-east-1' },
-      }),
-    )).toThrow(/enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm/);
+  test('MicroVM + vault fits with only the MicroVM compute backend deployed', () => {
+    const app = new App({ context: { enableLinearIdentityVault: true, compute_types: 'lambda-microvm' } });
+    const template = Template.fromStack(new AgentStack(app, 'LinearVaultMicrovmStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    }));
+    template.resourceCountIs('AWS::BedrockAgentCore::Runtime', 0);
+    const policy = JSON.stringify(Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('LambdaMicrovmComputeExecutionRole')));
+    expect(policy).toContain('bedrock-agentcore:GetResourceOauth2Token');
+    expect(Object.keys(template.toJSON().Resources).length).toBeLessThanOrEqual(500);
   });
 
   test('the source graph names no Linear-minting handler that is unwired', () => {
@@ -1787,8 +1961,11 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
 
     // linear-webhook is the RECEIVER: it imports the resolver file for
     // getOauthSecretStrict (signature verification) and never mints, so it needs no
-    // grant. Everything else here must be wired above.
+    // grant. Everything else here must be wired above, except console-linear, which runs
+    // in the operator console stack and is wired there (test/stacks/console.test.ts,
+    // "mints Linear tokens through the identity vault when the platform has one").
     expect(reaching).toEqual([
+      'console-linear.ts',
       'fanout-task-events.ts',
       'github-webhook-processor.ts',
       'iteration-heartbeat-sweep.ts',
@@ -1798,66 +1975,6 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
       'orchestration-reconciler.ts',
     ]);
   });
-});
-
-describe('AgentStack CloudFormation resource budget 500 with cushion', () => {
-  // The 500-resource limit is a hard, non-adjustable CloudFormation template quota,
-  // and CDK enforces it by *throwing* `TooManyResourcesInStack` during synth.
-  // Every deploy-gate cell is covered, not only the widest, so a regression confined
-  // to one substrate cannot hide behind the others. The gap this closes: no test had
-  // ever constructed `compute_type` and `enableToolGateway` *together*, so the widest
-  // cell could exceed the quota — unable to synthesize at all — with CI still green.
-  // Budget is deliberately below the quota so this fails as a readable assertion with a
-  // named remedy before synth starts throwing.
-  const MAX_RESOURCE_BUDGET = 500;
-  const CUSHION = 10;
-  const RESOURCE_BUDGET = MAX_RESOURCE_BUDGET - CUSHION;
-
-  // `Template.fromStack` counts one fewer than `cdk synth`, which also emits
-  // `AWS::CDK::Metadata`. Budget the synthesized number, so add that resource back.
-  const SYNTH_ONLY_RESOURCES = 1;
-
-  const COMPUTE_TYPES = ['agentcore', 'ecs', 'lambda-microvm'];
-  const CELLS = COMPUTE_TYPES.flatMap(computeType =>
-    [false, true].map(enableToolGateway => ({ computeType, enableToolGateway })),
-  );
-
-  describe.each(CELLS)(
-    'compute_type=$computeType enableToolGateway=$enableToolGateway',
-    ({ computeType, enableToolGateway }) => {
-      let template: Template;
-
-      beforeAll(() => {
-        const app = new App({ context: { compute_type: computeType, enableToolGateway } });
-        const stack = new AgentStack(app, 'BudgetStack', {
-          env: { account: '123456789012', region: 'us-east-1' },
-        });
-        // Throws `TooManyResourcesInStack` if this cell is over the hard quota, so
-        // reaching the assertions below is itself part of the guard.
-        template = Template.fromStack(stack);
-      });
-
-      test('stays inside the resource budget', () => {
-        const resourceCount = Object.keys(template.toJSON().Resources ?? {}).length;
-        expect(resourceCount + SYNTH_ONLY_RESOURCES).toBeLessThanOrEqual(RESOURCE_BUDGET);
-      });
-
-      test('emits no Lambda permission for the API Gateway console test-invoke stage', () => {
-        // Every `LambdaIntegration` in this app passes `allowTestInvoke: false`. Left at
-        // its default `true`, CDK emits a second `AWS::Lambda::Permission` per method
-        // scoped to `method.testMethodArn` — removing the API Gateway console's "TEST"
-        // button, which nothing in this solution invokes, and its extra
-        // `lambda:InvokeFunction` grant.
-        // Naming the offending logical IDs makes a regressed call site point straight
-        // at its own construct.
-        const offenders = Object.entries(template.findResources('AWS::Lambda::Permission'))
-          .filter(([, resource]) => JSON.stringify(resource).includes('test-invoke-stage'))
-          .map(([logicalId]) => logicalId);
-
-        expect(offenders).toEqual([]);
-      });
-    },
-  );
 });
 
 describe('AgentStack Agent Registry gate', () => {

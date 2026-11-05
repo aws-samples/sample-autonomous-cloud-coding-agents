@@ -19,10 +19,10 @@ ARG GH_VERSION=2.93.0
 #
 # To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
-FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:b2297770273f71e685b8056e3b07bfda4ffc35f0fb62e0339b3cdc1e5766e2fe AS mise
+FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:df5adf538c92d86f9807e738c7c7a9b32a1ae06edf441ede141333e3fe6a2cd9 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
-FROM --platform=$TARGETPLATFORM golang:1.26.4-bookworm@sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b AS gh-builder
+FROM --platform=$TARGETPLATFORM golang:1.27.1-bookworm@sha256:648f440f42a0958804efb24df176f806f9d353b41f1c0627f666428e40310f6b AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
@@ -73,10 +73,13 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
-# Pinned 2.1.191 to match the CLI bundled by claude-agent-sdk 0.2.110 (see
+# Pinned 2.1.301 to match the CLI bundled by claude-agent-sdk 0.2.168 (see
 # agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
-# protocol. This version also has the awsCredentialExport behavior #215 needs:
-# returned creds are cached until 5 min before the JSON's `Expiration`, so an
+# protocol. The Claude 5.5 models the platform defaults to (#953) are rejected
+# by CLI builds older than 2.1.280 ("does not support this model"), so this pin
+# is also what makes the default model invocable at all. It also keeps the
+# awsCredentialExport behavior #215 needs (present since 2.1.176): returned
+# creds are cached until 5 min before the JSON's `Expiration`, so an
 # 8 h task re-assumes the 1 h-capped SessionRole before expiry. Older builds
 # only refreshed hourly on a timer, racing the role-chaining cap.
 # claude-code@2.1.x ships an error-shim at bin/claude.exe that its postinstall
@@ -87,7 +90,7 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # after the install so the native binary is placed at build time, and hard-verify
 # it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.191 && \
+    npm install -g @anthropic-ai/claude-code@2.1.301 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \

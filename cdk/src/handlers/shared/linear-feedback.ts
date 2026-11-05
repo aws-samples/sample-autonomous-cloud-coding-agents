@@ -20,6 +20,7 @@
 import { isTerminalMaturingReply, preservePreviewSuffix } from './iteration-reply';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound, lookupValueOr } from './lookup-result';
 import { isBotAuthoredComment } from './orchestration-comment-trigger';
 
 /**
@@ -249,11 +250,24 @@ interface TeamState {
   readonly position: number;
 }
 
+/**
+ * Read side of the Linear GraphQL API (the write side is {@link graphqlRequest}).
+ * Returns a {@link LookupResult}: ``found`` with the ``data`` payload, ``absent``
+ * when the call succeeded but carried no ``data`` (an anomalous but non-error
+ * shape), or ``failed`` on any error layer (non-2xx, GraphQL errors, a thrown
+ * fetch/timeout). The failure used to collapse into the same ``null`` as a
+ * genuinely-empty payload (#756 Cat 2); encoding it in the type lets a caller
+ * that cares distinguish the two. The many best-effort/fail-open callers here
+ * deliberately collapse it back with ``lookupValueOr(result, null)`` — an
+ * explicit choice at the call site, not a swallowed catch — because their
+ * documented contract is to proceed on any failure (advisory context, cosmetic
+ * cleanup, a skipped transition). Never throws.
+ */
 async function graphqlData(
   accessToken: string,
   query: string,
   variables: Record<string, unknown>,
-): Promise<Record<string, unknown> | null> {
+): Promise<LookupResult<Record<string, unknown>>> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -265,19 +279,19 @@ async function graphqlData(
     });
     if (!resp.ok) {
       logger.warn('Linear feedback GraphQL non-2xx', { status: resp.status });
-      return null;
+      return lookupFailed(new Error(`Linear feedback GraphQL returned HTTP ${resp.status}`));
     }
     const body = (await resp.json()) as { data?: Record<string, unknown>; errors?: unknown };
     if (body.errors) {
       logger.warn('Linear feedback GraphQL errors', { errors: body.errors });
-      return null;
+      return lookupFailed(body.errors);
     }
-    return body.data ?? null;
+    return body.data ? lookupFound(body.data) : LOOKUP_ABSENT;
   } catch (err) {
     logger.warn('Linear feedback request failed', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   } finally {
     clearTimeout(timer);
   }
@@ -419,7 +433,7 @@ export async function upsertStatusComment(
     return ok ? existingCommentId : null;
   }
 
-  const data = await graphqlData(token, COMMENT_CREATE_RETURNING_ID_MUTATION, { issueId, body });
+  const data = lookupValueOr(await graphqlData(token, COMMENT_CREATE_RETURNING_ID_MUTATION, { issueId, body }), null);
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
@@ -473,7 +487,7 @@ export async function sweepTransientNotes(
 ): Promise<number> {
   const token = await resolveToken(ctx);
   if (!token) return 0;
-  const data = await graphqlData(token, ISSUE_COMMENTS_QUERY, { issueId });
+  const data = lookupValueOr(await graphqlData(token, ISSUE_COMMENTS_QUERY, { issueId }), null);
   const issue = data?.issue as { comments?: { nodes?: Array<{ id?: string; body?: string }> } } | undefined;
   const nodes = issue?.comments?.nodes ?? [];
   let deleted = 0;
@@ -532,7 +546,7 @@ export async function fetchRecentComments(
 ): Promise<RenderedComment[]> {
   const token = await resolveToken(ctx);
   if (!token) return [];
-  const data = await graphqlData(token, RECENT_COMMENTS_QUERY, { issueId });
+  const data = lookupValueOr(await graphqlData(token, RECENT_COMMENTS_QUERY, { issueId }), null);
   const issue = data?.issue as { comments?: { nodes?: RawLinearComment[] } } | undefined;
   const nodes = issue?.comments?.nodes ?? [];
 
@@ -622,9 +636,9 @@ export async function replyToComment(
 ): Promise<string | null> {
   const token = await resolveToken(ctx);
   if (!token) return null;
-  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
+  const data = lookupValueOr(await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
     issueId, parentId: parentCommentId, body,
-  });
+  }), null);
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
@@ -658,7 +672,7 @@ export async function upsertThreadedReply(
     // Both options below need the CURRENT body, so read it once.
     let current: string | undefined;
     if (options?.preservePreview || options?.skipIfSettled) {
-      const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId });
+      const data = lookupValueOr(await graphqlData(token, COMMENT_BODY_QUERY, { commentId: existingReplyId }), null);
       current = (data?.comment as { body?: string } | undefined)?.body;
     }
     // A PROGRESS edit must never overwrite an outcome. The terminal settle and the
@@ -698,9 +712,9 @@ export async function upsertThreadedReply(
     return existingReplyId;
   }
 
-  const data = await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
+  const data = lookupValueOr(await graphqlData(token, COMMENT_REPLY_RETURNING_ID_MUTATION, {
     issueId, parentId: parentCommentId, body,
-  });
+  }), null);
   const created = data?.commentCreate as { success?: boolean; comment?: { id?: string } } | undefined;
   return created?.success && created.comment?.id ? created.comment.id : null;
 }
@@ -730,7 +744,7 @@ async function repairOverwrittenOutcome(
   outcomeBody: string,
 ): Promise<void> {
   if (!isTerminalMaturingReply(outcomeBody)) return; // only outcomes are worth defending
-  const data = await graphqlData(accessToken, COMMENT_BODY_QUERY, { commentId });
+  const data = lookupValueOr(await graphqlData(accessToken, COMMENT_BODY_QUERY, { commentId }), null);
   const current = (data?.comment as { body?: string } | undefined)?.body;
   // Unreadable → leave it alone: acting on an unknown body could overwrite
   // something newer, and the reply most likely still holds the outcome.
@@ -771,7 +785,7 @@ export async function appendOnceToComment(
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
-  const data = await graphqlData(token, COMMENT_BODY_QUERY, { commentId });
+  const data = lookupValueOr(await graphqlData(token, COMMENT_BODY_QUERY, { commentId }), null);
   const current = (data?.comment as { body?: string } | undefined)?.body;
   if (typeof current !== 'string') return false;
   if (current.includes(marker)) return false; // already appended (idempotent)
@@ -821,7 +835,7 @@ export async function swapIssueReaction(
   const token = await resolveToken(ctx);
   if (!token) return false;
 
-  const data = await graphqlData(token, ISSUE_REACTIONS_QUERY, { issueId });
+  const data = lookupValueOr(await graphqlData(token, ISSUE_REACTIONS_QUERY, { issueId }), null);
   const reactions = ((data?.issue as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
 
   // Delete our stale markers (any bgagent emoji that isn't the target).
@@ -870,7 +884,7 @@ export async function swapCommentReaction(
   const token = await resolveToken(ctx);
   if (!token) return false;
 
-  const data = await graphqlData(token, COMMENT_REACTIONS_QUERY, { commentId });
+  const data = lookupValueOr(await graphqlData(token, COMMENT_REACTIONS_QUERY, { commentId }), null);
   const reactions = ((data?.comment as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
 
   let targetPresent = false;
@@ -966,7 +980,7 @@ export async function transitionIssueState(
   const token = await resolveToken(ctx);
   if (!token) return false;
 
-  const data = await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId });
+  const data = lookupValueOr(await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId }), null);
   const issue = data?.issue as
     | { state?: TeamState; team?: { states?: { nodes?: TeamState[] } } }
     | undefined;
@@ -1052,7 +1066,7 @@ export async function revertIssueToNotStarted(
   const token = await resolveToken(ctx);
   if (!token) return false;
 
-  const data = await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId });
+  const data = lookupValueOr(await graphqlData(token, ISSUE_TEAM_STATES_QUERY, { issueId }), null);
   const issue = data?.issue as
     | { state?: TeamState; team?: { states?: { nodes?: TeamState[] } } }
     | undefined;

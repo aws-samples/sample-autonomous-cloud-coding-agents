@@ -29,6 +29,7 @@
  */
 
 import { logger } from './logger';
+import { type LookupResult, LOOKUP_ABSENT, lookupFailed, lookupFound } from './lookup-result';
 import type { Channel, IssueRef } from './orchestration-channel';
 import { isIntegrationNode } from './orchestration-integration-node';
 import { ORCH_LOG } from './orchestration-log-events';
@@ -444,7 +445,15 @@ export interface UpsertEpicPanelParams {
 /**
  * Render + upsert the single maturing epic panel, and (optionally) mirror the
  * outcome on the parent issue's state + reaction. The ONE place the parent panel
- * is written. Returns the panel comment id (new or existing), or null on failure.
+ * is written.
+ *
+ * Returns a {@link LookupResult}: ``found`` with the panel comment id (new or
+ * existing), ``absent`` when the surface accepted the upsert but handed back no
+ * usable id (nothing to persist — the next edit would address a comment that
+ * doesn't exist), or ``failed`` when the upsert threw. The failure used to
+ * collapse into the same ``null`` as "no id" (#756 Cat 2); callers persist only a
+ * ``found`` id, so they collapse this with ``lookupValueOr(result, null)`` — the
+ * failure is already logged at source and never overwrites a stored id.
  *
  * - Edits ``statusCommentId`` in place when given; else posts a fresh comment.
  * - Header/rows via {@link renderEpicPanel}; ``inProgress`` derived if omitted.
@@ -456,7 +465,7 @@ export interface UpsertEpicPanelParams {
  *   transition silently no-op'd and left the epic stuck.
  * Best-effort: a surface hiccup never throws out of the reconcile.
  */
-export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<string | null> {
+export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<LookupResult<string>> {
   const { channel, parent } = params;
   const rows = buildPanelRows(params.children, params.prUrls ?? {}, params.updating ?? {}, params.failureReasons ?? {});
   const terminal = (s: string) => s === 'succeeded' || s === 'failed' || s === 'skipped';
@@ -487,7 +496,7 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
       parent_issue_id: parent.issueId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 
   // Mirror parent state + reaction, sequentially (see the note above).
@@ -517,7 +526,7 @@ export async function upsertEpicPanel(params: UpsertEpicPanelParams): Promise<st
       });
     }
   }
-  return commentId;
+  return commentId ? lookupFound(commentId) : LOOKUP_ABSENT;
 }
 
 export interface PostRollupParams {

@@ -233,6 +233,12 @@ export interface TaskApiProps {
    */
   readonly userConcurrencyTable?: dynamodb.ITable;
 
+  /**
+   * Monthly user/team budget configuration and spend table. When provided,
+   * task creation resolves Cognito groups and enforces hard-stop budgets.
+   */
+  readonly budgetTable?: dynamodb.ITable;
+
 }
 
 /**
@@ -242,6 +248,7 @@ export interface TaskApiProps {
  * Exposes endpoints:
  * - POST   /tasks                → createTask (Cognito)
  * - GET    /tasks                → listTasks (Cognito)
+ * - GET    /tasks?view=budget    → personal monthly budget status (Cognito)
  * - GET    /tasks/{task_id}      → getTask (Cognito)
  * - DELETE /tasks/{task_id}      → cancelTask (Cognito)
  * - GET    /tasks/{task_id}/events → getTaskEvents (Cognito)
@@ -329,6 +336,10 @@ export class TaskApi extends Construct {
       defaultCorsPreflightOptions: {
         allowOrigins: apigw.Cors.ALL_ORIGINS,
         allowMethods: apigw.Cors.ALL_METHODS,
+        // Browsers send only the request headers listed here. `POST /tasks` takes an
+        // `Idempotency-Key`; without it in the list the browser blocks the request
+        // before it is sent (the CLI is not a browser, so it never hit this).
+        allowHeaders: [...apigw.Cors.DEFAULT_HEADERS, 'Idempotency-Key'],
       },
     });
 
@@ -603,6 +614,10 @@ export class TaskApi extends Construct {
     if (props.attachmentsBucket) {
       createTaskEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
     }
+    if (props.budgetTable) {
+      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+      createTaskEnv.USER_POOL_ID = this.userPool.userPoolId;
+    }
 
     const createTaskFn = new lambda.NodejsFunction(this, 'CreateTaskFn', {
       entry: path.join(handlersDir, 'create-task.ts'),
@@ -629,12 +644,16 @@ export class TaskApi extends Construct {
       bundling: commonBundling,
     });
 
+    const listTasksEnv: Record<string, string> = { ...commonEnv };
+    if (props.budgetTable) {
+      listTasksEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+    }
     const listTasksFn = new lambda.NodejsFunction(this, 'ListTasksFn', {
       entry: path.join(handlersDir, 'list-tasks.ts'),
       handler: 'handler',
       runtime: Runtime.NODEJS_24_X,
       architecture: Architecture.ARM_64,
-      environment: commonEnv,
+      environment: listTasksEnv,
       bundling: commonBundling,
     });
 
@@ -749,6 +768,10 @@ export class TaskApi extends Construct {
     if (props.repoTable) {
       props.repoTable.grantReadData(createTaskFn);
     }
+    if (props.budgetTable) {
+      props.budgetTable.grantReadData(createTaskFn);
+      props.budgetTable.grantReadData(listTasksFn);
+    }
 
     // Read-only for get, list, and events
     props.taskTable.grantReadData(getTaskFn);
@@ -849,8 +872,8 @@ export class TaskApi extends Construct {
     // API Gateway console's "TEST" button, which nothing here invokes. Real traffic is
     // unaffected: `scopePermissionToMethod` stays at its default `true`, so each route
     // keeps its own narrowly-scoped `SourceArn`. Keep new routes consistent;
-    // `test/stacks/agent.test.ts` asserts no `test-invoke-stage` permission is ever
-    // emitted.
+    // `test/synthesis/deployment.test.ts` checks method-scoped permissions and
+    // rejects `test-invoke-stage` grants in every parent/nested deployment template.
 
     // --- API resource tree: /tasks ---
     const tasks = this.api.root.addResource('tasks');
@@ -1283,6 +1306,13 @@ export class TaskApi extends Construct {
       props.taskEventsTable.grantReadWriteData(webhookCreateTaskFn);
       if (props.repoTable) {
         props.repoTable.grantReadData(webhookCreateTaskFn);
+      }
+      if (props.budgetTable) {
+        props.budgetTable.grantReadData(webhookCreateTaskFn);
+        webhookCreateTaskFn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ['cognito-idp:AdminListGroupsForUser'],
+          resources: [this.userPool.userPoolArn],
+        }));
       }
 
       if (props.orchestratorFunctionArn) {

@@ -24,7 +24,7 @@ One of two places, chosen automatically at setup time:
 | **AgentCore Identity vault** | The stack was deployed with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
 | **Secrets Manager** | Otherwise — including regions where AgentCore Identity isn't available | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA. |
 
-The vault is unavailable on the `lambda-microvm` substrate — see [Not available with `compute_type=lambda-microvm`](#not-available-with-compute_typelambda-microvm) below.
+The vault can be configured with any selected backend. Lambda MicroVMs remains experimental; its image must include the current shared configuration contract.
 
 `bgagent linear setup` picks whichever the deployment supports and tells you which one it used. There is no flag. If the vault isn't available it prints one line and continues on Secrets Manager:
 
@@ -36,9 +36,9 @@ A workspace that started on Secrets Manager and later moves to the vault **keeps
 
 When a workspace's authorization dies, ABCA records it on the registry row and publishes to the stack's operational alert topic. That topic has **no subscribers unless you deployed with `alertEmail`**, so set it if you want to hear about a dead workspace rather than discover it from `bgagent platform doctor`.
 
-#### Not available with `compute_type=lambda-microvm`
+#### Using the vault with Lambda MicroVMs
 
-The vault and the Lambda MicroVMs substrate cannot be enabled on the same stack. Together they synthesize 505 CloudFormation resources against a hard limit of 500 (MicroVM alone is 496, the vault alone 488), so `cdk deploy` refuses the combination by name at synth rather than failing partway through. Use the vault on the `agentcore` or `ecs` substrate; a MicroVM stack stays on Secrets Manager until the stack reclaims room.
+Use split networking when the full MicroVM-plus-vault configuration exceeds the 490-resource budget. `compute_types` can include MicroVM alongside AgentCore or ECS, or select MicroVM alone; an unchanged legacy `compute_type=lambda-microvm` keeps AgentCore. The guest execution role receives the mint grant, and the `/run` configuration carries `LINEAR_VAULT_ENABLED` and `LINEAR_WORKLOAD_IDENTITY_NAME`. Rebuild the MicroVM image from this checkout before enabling the vault. Verify consent and token minting in a live rehearsal; synthesis alone does not qualify this experimental backend.
 
 #### One workload identity per stack
 
@@ -70,7 +70,7 @@ This prints the exact field values to paste, with the URLs already resolved from
 
 Two fields deserve attention:
 
-- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries.
+- **Redirect URIs** — paste exactly what the template prints, one per line. Linear compares these as exact strings, and reports any mismatch as a cryptic `Invalid redirect_uri parameter for the application`. Don't retype them, don't add variants, and don't let a line wrap into two entries. On a stack with the Identity vault, a **first** run has nothing to paste yet: the URI Linear needs is the vault's callback, which `bgagent linear setup` creates, prints, and asks you to add before re-running. If setup instead falls back to Secrets Manager, it tells you to register the hosted consent page — the template lists that page separately for this reason.
 - **Webhooks** — turn this ON and fill in the URL the template prints, with **Issues** and **Comments** both ticked under *Data change events*. Leave every **App events** checkbox off (see the warning below). Then copy the **Webhook signing secret** (`lin_wh_…`); setup asks for it.
 
 Click **Create** and copy the **Client ID** and **Client Secret**.
@@ -127,6 +127,20 @@ bgagent linear onboard-project <project-uuid> --repo owner/repo
 ```
 
 Pass `--label <name>` to use a trigger label other than `bgagent`. Also available: `--team-id` (debug only), `--region`, `--stack-name`.
+
+`onboard-project` asks Linear which workspace owns the project and records it on the mapping, so a later webhook naming that project can be checked against the workspace whose signature it arrived with. Narrow the search with `--slug <slug>` when you know the workspace. If the Linear API is unreachable, `--workspace-id <uuid>` records an owner without verifying it — a wrong value routes the project's tasks nowhere.
+
+Mappings created before this was recorded have no owning workspace. `bgagent platform doctor` reports them. That is harmless while a stack has one workspace, since there is no other tenant a project could be steered at — but re-run `onboard-project` for each of them before onboarding a second workspace.
+
+### Signing secrets in a multi-workspace install
+
+Every workspace must have its own webhook signing secret, read from its own Linear app. `setup` asks for it and refuses to continue without one, and records on the workspace's registry row that the secret is genuinely that workspace's.
+
+A workspace onboarded by an older release may instead be holding a copy of the first workspace's secret. Two workspaces sharing one secret means either can produce a delivery the other's signature check accepts, so **on a stack with more than one active workspace those deliveries are rejected with a 401** until each workspace has its own. Fix it per workspace with `bgagent linear update-webhook-secret <slug>`, which also records that the secret is that workspace's own — pass `--stack-name` if you are not using the default.
+
+On an existing multi-workspace stack, run `bgagent linear backfill-secret-provenance --dry-run` before deploying this change. It records ownership automatically for every workspace whose stored secret differs from the stack-wide value — which proves the secret was never copied from it, since copying is the only way a workspace ends up with someone else's — and names the ones that still need `update-webhook-secret`. `bgagent platform doctor` reports the same thing, and stays quiet on a single-workspace stack where a shared secret cannot reach another tenant.
+
+For the same reason, the stack-wide back-compat secret is only accepted on a single-workspace stack. It cannot say which workspace sent a delivery, and with two or more tenants there is no safe way to guess, so a stack-wide-signed delivery is rejected instead. Single-workspace installs are unaffected: every check here compares against the number of active workspaces first, and with one tenant none of them changes behaviour.
 
 ### 6. Test
 
@@ -307,9 +321,35 @@ A `WARN … Ignoring Linear agent-mode webhook …` line names the offending wor
 - `resolve_linear_api_token: invalid_grant` — Linear permanently rejected the refresh token. Re-run setup to issue a new one.
 - On the vault path, a "consent required" outcome means the grant is gone; re-run setup.
 
-## Removing the integration
+## Removing a workspace
 
-Deactivate a project mapping:
+Deregister a workspace with a single command — the inverse of `setup` / `add-workspace`:
+
+```bash
+bgagent linear remove-workspace <slug>
+```
+
+This runs server-side (through an authenticated `DELETE /v1/linear/workspaces/{slug}` call, so the DynamoDB and Secrets Manager permissions stay on the API role, not on your local IAM identity) and by default:
+
+- Marks the registry row `status=revoked` with `revoked_reason=admin_removed` (preserves the audit trail), so the workspace stops resolving tokens and routing webhooks the instant the command returns. The OAuth resolver refuses every non-`active` row except one it re-probes — a `revoked` row whose reason is `vault_consent_required` — and `admin_removed` is deliberately not that reason, so an admin removal is terminal rather than a latch a later vault probe can clear.
+- Deletes the per-workspace `bgagent-linear-oauth-<slug>` secret from Secrets Manager, and reports which of three things happened: `deleted` (a live secret was destroyed), `absent` (already gone — a re-run, or a prior partial teardown), or `not_applicable` (this workspace is vault-managed and has no Secrets Manager secret of its own).
+
+Only the workspace **admin** — the platform user who ran `setup` / `add-workspace` for the slug — may remove it. You are prompted to re-type the slug before anything is torn down.
+
+> **Vault-managed workspaces are not fully torn down by this command.** If the registry row has a `provider_name`, the workspace's credential lives in an AgentCore OAuth2 credential provider created outside CloudFormation, and this command does not delete it — it names it. The CLI prints the exact `delete-oauth2-credential-provider` follow-up; see [Vault-managed workspaces: the credential provider outlives the stack](#vault-managed-workspaces-the-credential-provider-outlives-the-stack) below.
+
+Flags:
+
+- `--purge` — delete the registry row entirely instead of keeping it with `status=revoked` (drops the audit trail). The row is still revoked first (fail-closed) and is only hard-deleted after the OAuth secret is confirmed gone.
+- `--yes` — skip the slug-confirmation prompt (for scripted use).
+
+> **Project→repo mappings are not removed by this command.** Mapping rows carry no workspace identifier, so they cannot be attributed to a workspace. Remove a workspace's mappings by project id (see below).
+
+Then delete the Linear webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the OAuth app from [Workspace Settings → Integrations](https://linear.app/settings/integrations) on the Linear side.
+
+### Deactivating a single project mapping
+
+To remove one project→repo mapping (the only supported way to tear a mapping down):
 
 ```bash
 aws dynamodb update-item \
@@ -320,20 +360,27 @@ aws dynamodb update-item \
   --expression-attribute-values '{":removed":{"S":"removed"}}'
 ```
 
-Revoke a workspace install:
+### Manual fallback
+
+If `remove-workspace` returns the `SECRET_DELETE_FAILED` error code, the workspace is already revoked (fail-closed, so it no longer resolves tokens or routes webhooks), but its OAuth secret was orphaned. The handler records this durably on the registry row: `secret_deletion_failed = true`, `secret_deletion_error` (the failing error name), and `orphaned_oauth_secret_arn` (the exact secret ARN to purge). When you see that marker — or the error code — run the `delete-secret` step below against `orphaned_oauth_secret_arn` to finish teardown.
+
+If the CLI is unavailable, you can revoke a workspace directly (equivalent to the default `remove-workspace` flow). **Run the registry revoke first, then delete the secret** — the same order the handler uses. Deleting the secret first leaves an `active` registry row with no credential behind it: token resolution then fails per-event without latching the row (the resolver deliberately declines to infer a revocation from a missing secret), so the workspace keeps advertising itself as active, and webhook signature verification — which lets Secrets Manager errors bubble so a transient failure can't silently downgrade to the stack-wide secret — makes the receiver return 500 and Linear retry the delivery. Revoking first shuts the workspace off deterministically at the registry, and the secret delete is then pure cleanup.
 
 ```bash
-aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
-
 aws dynamodb update-item \
   --table-name <LinearWorkspaceRegistryTableName> \
   --key '{"linear_workspace_id":{"S":"<linear-org-uuid>"}}' \
-  --update-expression 'SET #s = :revoked' \
+  --update-expression 'SET #s = :revoked, revoked_reason = :reason' \
+  --condition-expression '#s = :active' \
   --expression-attribute-names '{"#s":"status"}' \
-  --expression-attribute-values '{":revoked":{"S":"revoked"}}'
+  --expression-attribute-values '{":revoked":{"S":"revoked"},":active":{"S":"active"},":reason":{"S":"admin_removed"}}'
+
+aws secretsmanager delete-secret --secret-id bgagent-linear-oauth-<slug> --force-delete-without-recovery
 ```
 
-Then delete the webhook from [Linear Settings → API](https://linear.app/settings/api) and uninstall the app from [Workspace Settings → Integrations](https://linear.app/settings/integrations).
+The `--condition-expression` mirrors the handler's, so a second run against an already-revoked row fails with `ConditionalCheckFailedException` instead of silently re-revoking. `remove-workspace` behaves the same way: because it only matches `status='active'` rows, **re-running it on an already-removed workspace returns 404**, not a second success. That 404 does not distinguish "revoked" from "never existed".
+
+Vault-managed workspaces need one more step after these two — see [the credential-provider section](#vault-managed-workspaces-the-credential-provider-outlives-the-stack).
 
 ### Vault-managed workspaces: the credential provider outlives the stack
 

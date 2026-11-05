@@ -49,7 +49,7 @@ interface BlueprintProps {
   repo: string;                        // "owner/repo"
   repoTable: dynamodb.ITable;
   compute?: {
-    type?: 'agentcore' | 'ecs';        // default: 'agentcore'
+    type?: 'agentcore' | 'ecs' | 'lambda-microvm'; // inherits first deployed backend
     runtimeArn?: string;
     config?: Record<string, unknown>;
   };
@@ -122,9 +122,9 @@ From lowest to highest priority:
 
 | Field | Default | Source |
 |---|---|---|
-| `compute_type` | `agentcore` | Platform constant |
+| `compute_type` | First deployed backend (`agentcore` with legacy context) | Ordered `DEPLOYED_COMPUTE_TYPE` list on the orchestrator; `ComputeTypes`, `ComputeSubstrate` and `ComputeDeploymentMode` outputs for CLI discovery |
 | `runtime_arn` | Stack-level env var | CDK stack props |
-| `model_id` | `us.anthropic.claude-opus-5` | Python literal in `agent/src/config.py` (no CDK prop or env knob today) — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
+| `model_id` | `global.anthropic.claude-opus-5-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
 | `memory_token_budget` | 2000 | Platform constant |
@@ -243,7 +243,7 @@ interface ComputeStrategy {
 }
 ```
 
-The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The backend is selected per repo via `compute_type` in the Blueprint.
+The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The deployment selects one or more backends with `compute_types`. A Blueprint `compute_type` override must name one of them; omit the override to inherit the first backend in the list. Legacy `compute_type` deployment contexts continue to include AgentCore as the default. See [Compute](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before changing an existing deployment.
 
 ## Re-onboarding
 

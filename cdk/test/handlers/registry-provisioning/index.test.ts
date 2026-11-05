@@ -59,6 +59,13 @@ class InternalServerException extends Error {
   }
 }
 
+class ValidationException extends Error {
+  constructor() {
+    super('1 validation error detected: Value at \'registryId\' failed to satisfy constraint');
+    this.name = 'ValidationException';
+  }
+}
+
 jest.mock('@aws-sdk/client-agent-registry-control', () => ({
   AgentRegistryControlClient: jest.fn(() => ({ send: mockSend })),
   ConflictException,
@@ -69,6 +76,7 @@ jest.mock('@aws-sdk/client-agent-registry-control', () => ({
   ResourceNotFoundException,
   ThrottlingException,
   UpdateRegistryCommand: jest.fn((input: unknown) => ({ _type: 'UpdateRegistry', input })),
+  ValidationException,
 }));
 
 import { isComplete, onEvent } from '../../../src/handlers/registry-provisioning/index';
@@ -220,6 +228,212 @@ describe('onEvent Delete', () => {
       }),
     ).rejects.toThrow('AccessDenied');
   });
+
+  // A cancelled create (a sibling resource failed first, so CreateRegistry never
+  // returned) still gets a Delete during rollback, carrying a CFN placeholder rather
+  // than a registry id. Calling DeleteRegistry with it earns a ValidationException,
+  // which is neither absent nor retryable — the resource sticks in DELETE_FAILED and
+  // the stack then needs `--retain-resources` to remove at all.
+  //
+  // Each row asserts the returned PhysicalResourceId explicitly. The framework rejects
+  // a Delete response whose id differs from the request's, so echoing verbatim —
+  // including `undefined` — is the contract, and a synthesized value would itself wedge
+  // the delete.
+  // Fixtures taken from the framework's own constants where possible. Note it filters
+  // CREATE_FAILED upstream — `safeHandler` answers SUCCESS for a Delete carrying
+  // `AWSCDK::CustomResourceProviderFramework::CREATE_FAILED` without invoking this
+  // handler at all — so the reachable marker is MISSING_PHYSICAL_ID, which a prior
+  // response with no id can leave as the stored physical id.
+  test.each([
+    ['the MISSING_PHYSICAL_ID marker', 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID'],
+    ['a hyphenated non-id', 'AgentReg-1234'],
+    ['an empty string', ''],
+    ['undefined', undefined],
+  ])('treats a Delete for a never-created registry (%s) as a no-op', async (_label, physicalId) => {
+    routeSend({});
+    await expect(
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: physicalId,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ PhysicalResourceId: physicalId });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('passes the bare id to DeleteRegistry when given a full registry ARN', async () => {
+    routeSend({ DeleteRegistry: () => ({ status: 'DELETING' }) });
+    const res = await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: ARN,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    // Normalised for the API...
+    expect((mockSend.mock.calls[0][0] as TaggedCommand).input.registryId).toBe(REGISTRY_ID);
+    // ...but echoed verbatim back to CloudFormation, which requires an exact match.
+    expect(res.PhysicalResourceId).toBe(ARN);
+  });
+
+  test('passes a bare id through to DeleteRegistry unchanged', async () => {
+    routeSend({ DeleteRegistry: () => ({ status: 'DELETING' }) });
+    await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect((mockSend.mock.calls[0][0] as TaggedCommand).input.registryId).toBe(REGISTRY_ID);
+  });
+
+  // Pins both ends of the length bound. Without these, {12,64} could drift to {1,64}
+  // (placeholders start being deleted against) or back to {12,16} (real ids start being
+  // skipped and orphaned) with the rest of the suite still green.
+  test.each([
+    ['11 chars — below the minimum', 'AbCdEfGh123', false],
+    ['12 chars — at the minimum', 'AbCdEfGh1234', true],
+    ['16 chars — the service maximum', 'AbCdEfGh12345678', true],
+    ['64 chars — our widened bound', 'a'.repeat(64), true],
+    ['65 chars — past our bound', 'a'.repeat(65), false],
+    ['hyphenated, 13 chars', 'AgentReg-1234', false],
+    ['contains colons (framework marker shape)', 'AWSCDK::Foo::BAR', false],
+  ])('%s: deletes = %s', async (_label, physicalId, shouldCallApi) => {
+    routeSend({ DeleteRegistry: () => ({ status: 'DELETING' }) });
+    await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: physicalId,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(mockSend).toHaveBeenCalledTimes(shouldCallApi ? 1 : 0);
+  });
+
+  // The guard fails open on shape drift; this fails open on a request the service
+  // rejects. Delete-only — Create and Update must still fail closed on a bad request.
+  test('treats a service-rejected id as absent rather than wedging the delete', async () => {
+    routeSend({
+      DeleteRegistry: () => {
+        throw new ValidationException();
+      },
+    });
+    await expect(
+      onEvent({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ PhysicalResourceId: REGISTRY_ID });
+  });
+});
+
+// N-1/N-2 from review round 2: both were mutation-proven gaps — deleting the isComplete
+// normalisation, or any of the three warns, left the suite green. The warns are not
+// cosmetic: they are what makes a skipped delete (a possible billable orphan) visible, so
+// nothing should be able to downgrade them to info or drop them with CI still passing.
+describe('isComplete Delete — normalisation and orphan visibility', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const loggerModule = require('../../../src/handlers/shared/logger') as {
+    logger: {
+      info: (m: string, d?: Record<string, unknown>) => void;
+      warn: (m: string, d?: Record<string, unknown>) => void;
+    };
+  };
+
+  let warnSpy: jest.SpyInstance;
+  let infoSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
+    infoSpy = jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  test('passes the bare id to GetRegistry when given a full registry ARN', async () => {
+    routeSend({ GetRegistry: () => ({ status: 'DELETING' }) });
+    await isComplete({
+      RequestType: 'Delete',
+      PhysicalResourceId: ARN,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect((mockSend.mock.calls[0][0] as TaggedCommand).input.registryId).toBe(REGISTRY_ID);
+  });
+
+  test('warns (not infos) when skipping the delete, naming the registry', async () => {
+    routeSend({});
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID',
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ IsComplete: true });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][1]).toMatchObject({ registryName: 'abca' });
+    expect(infoSpy).not.toHaveBeenCalled();
+  });
+
+  test('treats a service-rejected id as complete rather than wedging the poll', async () => {
+    routeSend({
+      GetRegistry: () => {
+        throw new ValidationException();
+      },
+    });
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: REGISTRY_ID,
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ IsComplete: true });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('onEvent Delete — orphan visibility', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const loggerModule = require('../../../src/handlers/shared/logger') as {
+    logger: {
+      info: (m: string, d?: Record<string, unknown>) => void;
+      warn: (m: string, d?: Record<string, unknown>) => void;
+    };
+  };
+
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(loggerModule.logger, 'warn').mockImplementation(() => { /* silence */ });
+    jest.spyOn(loggerModule.logger, 'info').mockImplementation(() => { /* silence */ });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test('warns with the registry name when skipping the delete', async () => {
+    routeSend({});
+    await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID',
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][1]).toMatchObject({ registryName: 'abca' });
+  });
+
+  test('warns when the service rejects the id on the delete call', async () => {
+    routeSend({
+      DeleteRegistry: () => {
+        throw new ValidationException();
+      },
+    });
+    await onEvent({
+      RequestType: 'Delete',
+      PhysicalResourceId: REGISTRY_ID,
+      ResourceProperties: { RegistryName: 'abca' },
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('isComplete Create/Update', () => {
@@ -259,6 +473,21 @@ describe('isComplete Create/Update', () => {
 });
 
 describe('isComplete Delete', () => {
+  // Companion to the onEvent no-op guard: the Provider polls isComplete after
+  // onEvent, so a never-created registry must terminate here too rather than
+  // reaching GetRegistry with a placeholder id.
+  test('reports a never-created registry as already deleted without calling GetRegistry', async () => {
+    routeSend({});
+    await expect(
+      isComplete({
+        RequestType: 'Delete',
+        PhysicalResourceId: 'AWSCDK::CustomResourceProviderFramework::MISSING_PHYSICAL_ID',
+        ResourceProperties: { RegistryName: 'abca' },
+      }),
+    ).resolves.toEqual({ IsComplete: true });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   test('is complete once GetRegistry 404s (registry gone)', async () => {
     routeSend({
       GetRegistry: () => {

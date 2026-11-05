@@ -47,6 +47,7 @@
  */
 
 import { logger } from './logger';
+import { lookupValueOr } from './lookup-result';
 import {
   type Channel,
   type IssueRef,
@@ -126,11 +127,11 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
     async postComment(issue, body) {
       const ctx = await contextFor(issue);
       if (!ctx) return null;
-      const ts = await slackFetchTs(ctx.token, 'chat.postMessage', {
+      const ts = lookupValueOr(await slackFetchTs(ctx.token, 'chat.postMessage', {
         channel: ctx.channel,
         thread_ts: ctx.threadTs,
         text: body,
-      });
+      }), null);
       return ts ? { commentId: ts } : null;
     },
 
@@ -140,18 +141,18 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       if (existing?.commentId) {
         // Edit in place — this is what makes the maturing panel one message
         // rather than a stream. chat.update echoes the ts it edited.
-        const ts = await slackFetchTs(ctx.token, 'chat.update', {
+        const ts = lookupValueOr(await slackFetchTs(ctx.token, 'chat.update', {
           channel: ctx.channel,
           ts: existing.commentId,
           text: body,
-        });
+        }), null);
         return ts ? { commentId: ts } : null;
       }
-      const ts = await slackFetchTs(ctx.token, 'chat.postMessage', {
+      const ts = lookupValueOr(await slackFetchTs(ctx.token, 'chat.postMessage', {
         channel: ctx.channel,
         thread_ts: ctx.threadTs,
         text: body,
-      });
+      }), null);
       return ts ? { commentId: ts } : null;
     },
 
@@ -233,11 +234,11 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       // Slack threads are one level deep: a reply goes to the thread the parent
       // belongs to. Using the parent's own ts as thread_ts starts a thread on it
       // when the parent is a root, and stays in-thread otherwise.
-      const ts = await slackFetchTs(ctx.token, 'chat.postMessage', {
+      const ts = lookupValueOr(await slackFetchTs(ctx.token, 'chat.postMessage', {
         channel: ctx.channel,
         thread_ts: parent.commentId,
         text: body,
-      });
+      }), null);
       return ts ? { commentId: ts } : null;
     },
 
@@ -253,11 +254,11 @@ export function makeSlackChannel(secretPrefix: string = SLACK_SECRET_PREFIX): Ch
       const ctx = await contextFor(issue);
       if (!ctx) return null;
       if (existing?.commentId) {
-        const ts = await slackFetchTs(ctx.token, 'chat.update', {
+        const ts = lookupValueOr(await slackFetchTs(ctx.token, 'chat.update', {
           channel: ctx.channel,
           ts: existing.commentId,
           text: body,
-        });
+        }), null);
         return ts ? { commentId: ts } : null;
       }
       return this.postThreadedReply!(issue, parent, body);

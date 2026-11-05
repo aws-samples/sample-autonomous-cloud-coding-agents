@@ -75,17 +75,17 @@ describe('IterationHeartbeat', () => {
     expect(vars.TASK_STATUS_INDEX_NAME).toBeDefined();
   });
 
-  test('is granted READ on the task table and never write', () => {
-    // The construct's own comment claims read-only. The sweep edits a Linear
-    // comment, not a task row, so a write grant here would be unexplained
-    // privilege on the platform's most sensitive table.
+  test('can read tasks and update comment state without creating or deleting tasks', () => {
+    // Jira heartbeat bodies are durable so overlapping preview/terminal writers
+    // converge. Only UpdateItem is added to the existing read grants.
     const template = synth();
     const policies = template.findResources('AWS::IAM::Policy');
     const actions = JSON.stringify(Object.values(policies)
       .flatMap((p) => (p as { Properties: { PolicyDocument: { Statement: unknown[] } } })
         .Properties.PolicyDocument.Statement));
     expect(actions).toContain('dynamodb:Query');
-    for (const write of ['dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem']) {
+    expect(actions).toContain('dynamodb:UpdateItem');
+    for (const write of ['dynamodb:PutItem', 'dynamodb:DeleteItem', 'dynamodb:BatchWriteItem']) {
       expect(actions).not.toContain(write);
     }
   });

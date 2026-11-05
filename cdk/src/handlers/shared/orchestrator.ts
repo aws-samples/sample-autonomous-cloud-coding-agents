@@ -20,6 +20,7 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { resolveRepositoryBackend } from './compute-backend';
 import type { SessionHandle, SessionStatus } from './compute-strategy';
 import { AttachmentBudgetExceededError, AttachmentConfigurationError, AttachmentResolutionError, hydrateContext, resolveGitHubToken } from './context-hydration';
 import { logger, type Logger } from './logger';
@@ -46,6 +47,9 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT_TASKS_PER_USER ?? '3');
 const TASK_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90');
 const MEMORY_ID = process.env.MEMORY_ID;
 const ATTACHMENTS_BUCKET_NAME = process.env.ATTACHMENTS_BUCKET_NAME;
+
+/** GitHub caps issue titles at 256 characters; store no more than that. */
+export const ISSUE_TITLE_MAX_LENGTH = 256;
 
 /** Conservative fallback token count for images where metadata could not be read. */
 const MAX_IMAGE_TOKENS_FALLBACK = 1568;
@@ -582,19 +586,10 @@ export async function loadBlueprintConfig(task: TaskRecord): Promise<BlueprintCo
     }
   }
 
-  // Compute substrate is a per-repo property (``compute_type``, default
-  // ``agentcore``). It applies to ALL workflows on the repo — including a
-  // read-only pr-review task, because that task CLONES and
-  // READS the same repository the coding agent does, so its context/memory
-  // footprint is the same: a repo big enough to need the context-gated ECS
-  // tier for building is also big enough to OOM the fixed AgentCore microVM just
-  // reading it. So planning must run on the same substrate as the agent — do NOT
-  // special-case read-only workflows to agentcore. (An ecs-configured repo on a
-  // stack that hasn't wired the ECS substrate fails at session start; that's a
-  // stack-config gap surfaced by the honest "couldn't plan, nothing run — re-apply
-  // or run as single" note, not something to paper over by mis-routing compute.)
+  // All workflows inherit the deployment backend, including repo-less and read-only tasks.
+  // A conflicting repository pin fails before concurrency admission.
   return {
-    compute_type: repoConfig?.compute_type ?? 'agentcore',
+    compute_type: resolveRepositoryBackend(repoConfig?.compute_type, process.env.DEPLOYED_COMPUTE_TYPE),
     runtime_arn: repoConfig?.runtime_arn ?? RUNTIME_ARN,
     model_id: repoConfig?.model_id,
     max_turns: repoConfig?.max_turns,
@@ -769,6 +764,24 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     } catch (err) {
       log.error('Failed to update branch_name from PR head_ref — task record will show stale placeholder', {
         resolved_branch: hydratedContext.resolved_branch_name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Keep the issue title on the record so task lists can name the task.
+  const issueTitle = hydratedContext.issue?.title.trim().slice(0, ISSUE_TITLE_MAX_LENGTH);
+  if (issueTitle) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: TABLE_NAME,
+        Key: { task_id: task.task_id },
+        UpdateExpression: 'SET #it = :it, #ua = :now',
+        ExpressionAttributeNames: { '#it': 'issue_title', '#ua': 'updated_at' },
+        ExpressionAttributeValues: { ':it': issueTitle, ':now': new Date().toISOString() },
+      }));
+    } catch (err) {
+      log.warn('Failed to store issue_title on task record', {
         error: err instanceof Error ? err.message : String(err),
       });
     }

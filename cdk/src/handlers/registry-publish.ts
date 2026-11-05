@@ -113,6 +113,7 @@ function parseBody(raw: string | null): RegistryPublishRequest | null {
   try {
     return JSON.parse(raw) as RegistryPublishRequest;
   } catch {
+    // nosemgrep: ts-silent-success-masking -- malformed JSON is an expected client-input class, not a swallowed fault; null IS the failure encoding and the caller turns it into a 400 VALIDATION_ERROR.
     return null;
   }
 }

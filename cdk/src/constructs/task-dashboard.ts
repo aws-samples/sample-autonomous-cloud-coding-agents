@@ -39,7 +39,7 @@ export interface TaskDashboardProps {
    * The ARN of the AgentCore runtime, used as the ``Resource`` dimension
    * for native CloudWatch metrics under the ``AWS/Bedrock`` namespace.
    */
-  readonly runtimeArn: string;
+  readonly runtimeArn?: string;
 }
 
 /**
@@ -255,72 +255,74 @@ export class TaskDashboard extends Construct {
       }),
     );
 
-    // --- Row 7: AgentCore Runtime native metrics ---
-    // Namespace AWS/Bedrock, dimensions { Service, Resource } scoped to this
-    // runtime.  Metrics are batched at 1-minute intervals by the runtime.
-    const metricDimensions = {
-      Service: 'AgentCore.Runtime',
-      Resource: props.runtimeArn,
-    };
+    if (props.runtimeArn) {
+      // --- Row 7: AgentCore Runtime native metrics ---
+      // Namespace AWS/Bedrock, dimensions { Service, Resource } scoped to this
+      // runtime.  Metrics are batched at 1-minute intervals by the runtime.
+      const metricDimensions = {
+        Service: 'AgentCore.Runtime',
+        Resource: props.runtimeArn,
+      };
 
-    this.dashboard.addWidgets(
-      new cloudwatch.GraphWidget({
-        title: 'Runtime Invocations',
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/Bedrock',
-            metricName: 'Invocations',
-            dimensionsMap: metricDimensions,
-            statistic: 'Sum',
-            period: Duration.hours(1),
-          }),
-        ],
-        width: 8,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Runtime Errors',
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/Bedrock',
-            metricName: 'SystemErrors',
-            dimensionsMap: metricDimensions,
-            statistic: 'Sum',
-            period: Duration.hours(1),
-          }),
-          new cloudwatch.Metric({
-            namespace: 'AWS/Bedrock',
-            metricName: 'UserErrors',
-            dimensionsMap: metricDimensions,
-            statistic: 'Sum',
-            period: Duration.hours(1),
-          }),
-        ],
-        width: 8,
-        height: 6,
-      }),
-      new cloudwatch.GraphWidget({
-        title: 'Runtime Latency (p50 / p99)',
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/Bedrock',
-            metricName: 'Latency',
-            dimensionsMap: metricDimensions,
-            statistic: 'p50',
-            period: Duration.hours(1),
-          }),
-          new cloudwatch.Metric({
-            namespace: 'AWS/Bedrock',
-            metricName: 'Latency',
-            dimensionsMap: metricDimensions,
-            statistic: 'p99',
-            period: Duration.hours(1),
-          }),
-        ],
-        width: 8,
-        height: 6,
-      }),
-    );
+      this.dashboard.addWidgets(
+        new cloudwatch.GraphWidget({
+          title: 'Runtime Invocations',
+          left: [
+            new cloudwatch.Metric({
+              namespace: 'AWS/Bedrock',
+              metricName: 'Invocations',
+              dimensionsMap: metricDimensions,
+              statistic: 'Sum',
+              period: Duration.hours(1),
+            }),
+          ],
+          width: 8,
+          height: 6,
+        }),
+        new cloudwatch.GraphWidget({
+          title: 'Runtime Errors',
+          left: [
+            new cloudwatch.Metric({
+              namespace: 'AWS/Bedrock',
+              metricName: 'SystemErrors',
+              dimensionsMap: metricDimensions,
+              statistic: 'Sum',
+              period: Duration.hours(1),
+            }),
+            new cloudwatch.Metric({
+              namespace: 'AWS/Bedrock',
+              metricName: 'UserErrors',
+              dimensionsMap: metricDimensions,
+              statistic: 'Sum',
+              period: Duration.hours(1),
+            }),
+          ],
+          width: 8,
+          height: 6,
+        }),
+        new cloudwatch.GraphWidget({
+          title: 'Runtime Latency (p50 / p99)',
+          left: [
+            new cloudwatch.Metric({
+              namespace: 'AWS/Bedrock',
+              metricName: 'Latency',
+              dimensionsMap: metricDimensions,
+              statistic: 'p50',
+              period: Duration.hours(1),
+            }),
+            new cloudwatch.Metric({
+              namespace: 'AWS/Bedrock',
+              metricName: 'Latency',
+              dimensionsMap: metricDimensions,
+              statistic: 'p99',
+              period: Duration.hours(1),
+            }),
+          ],
+          width: 8,
+          height: 6,
+        }),
+      );
+    }
 
     // --- Row 8+9: Cedar HITL approval widgets (§11.3, IMPL-28) --------------
     //

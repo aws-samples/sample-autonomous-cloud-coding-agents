@@ -17,6 +17,11 @@
   <br />
 </div>
 
+> [!NOTE]
+> **The current version of ABCA remains available for use and is not deprecated.** It is in maintenance mode and will continue to receive updates and security fixes.
+>
+> The team is investing in **the next version of ABCA (V2)**, informed by customer feedback, lessons learned, and advances across the industry. We are sharing this direction early to signal a future transition. **No migration is required at this time.**
+
 ## What is ABCA
 
 **ABCA (Autonomous Background Coding Agents on AWS)** is a sample of what a self-hosted background coding agents platform might look like on AWS. You submit a coding task (via Slack, Linear, Jira, CLI, or webhook), walk away, and come back to a ready-to-review PR. The agent clones the repo, writes code, runs tests, and opens the PR autonomously in an isolated cloud environment. No babysitting, no IDE sessions, no back-and-forth.
@@ -26,37 +31,42 @@
 - **Reclaim engineer time** — routine work runs in the background while humans focus on design and decisions
 - **Faster cycle time** — tasks execute 24/7, no queue behind a human's calendar
 - **Consistent quality** — every run includes lint, tests, and policy checks by default
-- **Learns over time** — memory system captures PR feedback and improves future runs
-- **Cost-controlled** — per-task budgets, concurrency limits, and blast-radius enforcement built in
+- **Learns over time** — memory records task outcomes and per-repo learnings and feeds them into future runs
+- **Cost-controlled** — per-task budgets, concurrency limits, and Cedar policy enforcement built in
 
 ## The Use Case
 
-Users submit tasks through webhooks, CLI, Slack, Linear, Jira,... For each task, the orchestrator executes the blueprint: an isolated environment is provisioned, an agent clones the target GitHub repository, creates a branch, works on the task, and opens a pull request.
+Users submit tasks through webhooks, CLI, Slack, Linear, or Jira. For each task, the orchestrator runs a **workflow**: an isolated environment is provisioned, an agent clones the target GitHub repository and works on the task. Depending on the workflow, the agent opens a new pull request (`coding/new-task-v1`), iterates on an existing PR to address review feedback (`coding/pr-iteration-v1`), or posts a read-only review on a PR (`coding/pr-review-v1`).
 
 Key characteristics:
 
 - **Ephemeral environments** — each task starts fresh, no in-process state carries over
 - **Asynchronous** — no real-time conversation during execution
-- **Repository-scoped** — each task targets a specific repo
+- **Repository-scoped** — coding tasks target a specific repo (some workflows, such as `knowledge/web-research-v1`, run without one)
 - **Outcome-measurable** — the PR is either merged, revised, or rejected
 - **Fire and forget** — submit, forget, review the outcome
-- **Learns over time** — the more you use it, the more it self-improves
 
 ## How it works
 
-Each task follows a **blueprint** — a hybrid workflow that mixes deterministic steps (no LLM, predictable, cheap) with agentic steps (LLM-driven, flexible, expensive):
+Each task follows a **workflow** — a declarative definition (see [`agent/workflows/`](./agent/workflows/) and [WORKFLOWS.md](./docs/design/WORKFLOWS.md)) that mixes deterministic steps (no LLM, predictable, cheap) with agentic steps (LLM-driven, flexible, expensive). Per-repo settings such as compute, model, and turn limits come from the repository's Blueprint configuration.
 
 1. **Admission** — the orchestrator validates the request, checks concurrency limits, and queues the task if needed.
-2. **Context hydration** — the platform gathers context: task description, GitHub issue body, repo-intrinsic knowledge (CLAUDE.md, README), and memory from past tasks on the same repo.
+2. **Context hydration** — the platform gathers context: task description, GitHub issue or PR review context, and memory from past tasks on the same repo. The agent also loads the repository's `CLAUDE.md` instructions.
 3. **Pre-flight** — fail-closed readiness checks verify GitHub API reachability and repository access before consuming compute. Doomed tasks fail fast with a clear reason (`GITHUB_UNREACHABLE`, `REPO_NOT_FOUND_OR_NO_ACCESS`) instead of burning runtime.
 4. **Agent execution** — the agent runs in an isolated MicroVM with persistent session storage for select caches: clones the repo, creates a branch, edits code, commits, runs tests and lint. The orchestrator polls for completion without blocking compute.
-5. **Finalization** — the orchestrator infers the result (PR created or not), runs optional validation (lint, tests), extracts learnings into memory, and updates task status.
+5. **Finalization** — build and lint results are verified and reported in the PR body (a failing build marks the task `FAILED`), the task outcome and learnings are written to memory, and the orchestrator infers the result (PR or commits found) and updates task status.
+
+Beyond single tasks:
+
+- **Sub-issue orchestration** — a Linear parent issue or Jira ticket with sub-issues runs as a dependency graph, releasing each child task in order.
+- **Operator console** — an optional web console ([`web/`](./web/README.md)) shows running tasks, stuck tasks, and pending approvals.
+- **Agent Registry** — versioned MCP servers, Cedar policy modules, and skills that tasks can load at runtime ([REGISTRY.md](./docs/design/REGISTRY.md)).
 
 For the full architecture, see [ARCHITECTURE.md](./docs/design/ARCHITECTURE.md).
 
 ## Current status
 
-ABCA is under active development. The platform ships iteratively — each iteration adds features and builds on the previous one.
+See the note above for maintenance status and the planned transition to V2.
 
 See [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues) for planned work; use priority labels (`P0`, `P1`, etc.) to indicate urgency.
 

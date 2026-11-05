@@ -73,7 +73,12 @@ export interface TaskOrchestratorProps {
   /**
    * ARN of the AgentCore runtime.
    */
-  readonly runtimeArn: string;
+  readonly runtimeArn?: string;
+  /**
+   * Backends deployed by this stack; the first is the repository default.
+   * Omit only for legacy composition.
+   */
+  readonly deployedComputeTypes?: ReadonlyArray<'agentcore' | 'ecs' | 'lambda-microvm'>;
 
   /**
    * The DynamoDB repo config table. When provided, the orchestrator loads
@@ -263,10 +268,24 @@ export interface TaskOrchestratorProps {
      *
      * The prefix is whichever geography `resolveBedrockGeoRegion` resolves for the
      * deployment (`bedrockGeoRegion` context, default `us`), NOT a hardcoded `us.`:
-     * pass `haikuInferenceProfileId(bedrockGeoRegion)` so this value and the
+     * pass `inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID)` so this value and the
      * inference-profile ARNs the roles are granted come from the same source (#764).
      */
     readonly anthropicDefaultHaikuModel: string;
+
+    /**
+     * The MAIN coding model (`ANTHROPIC_MODEL`), same rules as the auxiliary one
+     * above: geo-prefixed profile id from the deployment's resolved geography.
+     *
+     * Delivered alongside it because only the auxiliary model was, which left the
+     * main model coming from a literal in `agent/src/config.py` that a geography
+     * change does not touch — so a non-default `bedrockGeoRegion` granted one
+     * geography's profiles while the agent asked for another's, and every task with
+     * no per-repo override failed at turn 0 with AccessDenied.
+     */
+    readonly anthropicModel: string;
+    /** Optional SigV4 tool gateway, forwarded to the MicroVM guest. */
+    readonly toolGatewayUrl?: string;
   };
 
   /**
@@ -376,6 +395,18 @@ export class TaskOrchestrator extends Construct {
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 
+    if (props.deployedComputeTypes) {
+      const backends = props.deployedComputeTypes;
+      const agentcore = backends.includes('agentcore');
+      const ecs = backends.includes('ecs');
+      if (agentcore !== Boolean(props.runtimeArn)
+        || (!agentcore && props.additionalRuntimeArns?.length)
+        || ecs !== Boolean(props.ecsConfig)
+        || (!backends.includes('lambda-microvm') && props.microvmConfig)) {
+        throw new Error(`TaskOrchestrator configuration must match the deployed '${backends.join(', ')}' backends`);
+      }
+    }
+
     if (props.guardrailId && !props.guardrailVersion) {
       throw new Error('guardrailVersion is required when guardrailId is provided');
     }
@@ -434,7 +465,8 @@ export class TaskOrchestrator extends Construct {
         TASK_TABLE_NAME: props.taskTable.tableName,
         TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
         USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
-        RUNTIME_ARN: props.runtimeArn,
+        ...(props.runtimeArn && { RUNTIME_ARN: props.runtimeArn }),
+        ...(props.deployedComputeTypes && { DEPLOYED_COMPUTE_TYPE: props.deployedComputeTypes.join(',') }),
         MAX_CONCURRENT_TASKS_PER_USER: String(maxConcurrent),
         TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
         ...(props.repoTable && { REPO_TABLE_NAME: props.repoTable.tableName }),
@@ -496,6 +528,16 @@ export class TaskOrchestrator extends Construct {
           TRACE_ARTIFACTS_BUCKET_NAME: props.agentPlatformConfig.traceArtifactsBucketName,
           AGENT_SESSION_ROLE_ARN: props.agentPlatformConfig.agentSessionRoleArn,
           ANTHROPIC_DEFAULT_HAIKU_MODEL: props.agentPlatformConfig.anthropicDefaultHaikuModel,
+          // The MAIN model belongs here for the same reason the auxiliary one does,
+          // and its absence was invisible: `anthropicModel` was declared on the prop
+          // interface and passed by the stack, but never read, so the compiler was
+          // satisfied while the value went nowhere. The two substrates that inject it
+          // directly (the AgentCore runtime env, the ECS task definitions) were
+          // unaffected, which is why every synth assertion still passed — MicroVM is
+          // the backend that depends on this block, and it fell back to the Python
+          // literal in `agent/src/config.py` regardless of the deployed geography.
+          ANTHROPIC_MODEL: props.agentPlatformConfig.anthropicModel,
+          ...(props.agentPlatformConfig.toolGatewayUrl && { ABCA_TOOL_GATEWAY_URL: props.agentPlatformConfig.toolGatewayUrl }),
         }),
       },
       bundling: orchestratorBundling,
@@ -556,16 +598,18 @@ export class TaskOrchestrator extends Construct {
     // `BedrockAgentCoreContext.get_workload_access_token()` returns
     // non-None). Without this grant, `InvokeAgentRuntimeCommand` with
     // `runtimeUserId` set fails with AccessDenied.
-    const runtimeArns = [props.runtimeArn, ...(props.additionalRuntimeArns ?? [])];
+    const runtimeArns = [...(props.runtimeArn ? [props.runtimeArn] : []), ...(props.additionalRuntimeArns ?? [])];
     const runtimeResources = runtimeArns.flatMap(arn => [arn, `${arn}/*`]);
-    this.fn.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock-agentcore:InvokeAgentRuntime',
-        'bedrock-agentcore:InvokeAgentRuntimeForUser',
-        'bedrock-agentcore:StopRuntimeSession',
-      ],
-      resources: runtimeResources,
-    }));
+    if (runtimeResources.length) {
+      this.fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'bedrock-agentcore:InvokeAgentRuntime',
+          'bedrock-agentcore:InvokeAgentRuntimeForUser',
+          'bedrock-agentcore:StopRuntimeSession',
+        ],
+        resources: runtimeResources,
+      }));
+    }
 
     // Registry (#246): read-only access so the orchestrator can resolve the
     // Blueprint's registry:// asset refs at task start. Scoped to THIS registry

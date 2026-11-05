@@ -80,6 +80,7 @@ export function makeGithubCommand(): Command {
         console.log('  Content type:  application/json');
         console.log('  Secret:        (generate any random string and paste it both here AND below)');
         console.log('  Events:        Let me select individual events → Deployment statuses');
+        console.log('                 For AWS Amplify PR previews, also select Check runs.');
         console.log();
         console.log('Save the webhook in GitHub, then mirror the same secret into AWS so the');
         console.log('receiver can verify the HMAC:');
@@ -92,9 +93,8 @@ export function makeGithubCommand(): Command {
           console.log('  (Stack output GitHubWebhookSecretArn not found — check `aws cloudformation describe-stacks`.)');
         }
         console.log();
-        console.log('Note: deploy providers (Vercel, Amplify Hosting, Netlify, GitHub Actions');
-        console.log('custom CD, etc.) post deployment_status events via the GitHub Deployments');
-        console.log('API, so this single webhook covers every preview your provider builds.');
+        console.log('Vercel and custom CI use deployment statuses. Amplify Hosting publishes');
+        console.log('successful PR previews as check runs; both use this webhook URL.');
         console.log(bar);
       }),
   );

@@ -31,6 +31,7 @@ jest.mock('../../../src/handlers/shared/slack-verify', () => ({
 const loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 jest.mock('../../../src/handlers/shared/logger', () => ({ logger: loggerMock }));
 
+import { LOOKUP_ABSENT, isLookupFailure, lookupFound } from '../../../src/handlers/shared/lookup-result';
 import type { IssueRef } from '../../../src/handlers/shared/orchestration-channel';
 import { channelForSource, registerChannelFactory } from '../../../src/handlers/shared/orchestration-channel-factory';
 import { makeSlackChannel, slackThreadRef } from '../../../src/handlers/shared/orchestration-channel-slack';
@@ -233,7 +234,7 @@ const row = (sub: string, status: string): OrchestrationChildRow => ({
 describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
   beforeEach(() => {
     slackFetchMock.mockReset().mockResolvedValue(true);
-    slackFetchTsMock.mockReset().mockResolvedValue('1700000000.002');
+    slackFetchTsMock.mockReset().mockResolvedValue(lookupFound('1700000000.002'));
     channel = makeFakeChannel();
     loggerMock.info.mockReset();
     loggerMock.warn.mockReset();
@@ -243,7 +244,7 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     const id = await upsertEpicPanel({
       channel, parent, statusCommentId: 'panel-1', children: [row('a', 'running')],
     });
-    expect(id).toBe('cmt-1');
+    expect(id).toEqual(lookupFound('cmt-1'));
     const [, , existing] = channel.upsertComment.mock.calls[0];
     expect(existing).toEqual({ commentId: 'panel-1' });
   });
@@ -252,7 +253,7 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     // A blank id must not be persisted — the next edit would address a comment
     // that doesn't exist. "No id" is the honest answer.
     channel.upsertComment.mockResolvedValue({ commentId: '' });
-    expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toBeNull();
+    expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toEqual(LOOKUP_ABSENT);
   });
 
   test('in progress → re-opens the parent to running (regression allowed) + 👀', async () => {
@@ -310,7 +311,7 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
       mirrorParentState: true, // asks for a state mirror Slack cannot do
     });
     // The panel landed...
-    expect(id).toBe('1700000000.002');
+    expect(id).toEqual(lookupFound('1700000000.002'));
     expect(slackFetchTsMock).toHaveBeenCalled();
     // ...the ✅ marker went on the thread root...
     const adds = slackFetchMock.mock.calls.filter((c) => c[1] === 'reactions.add');
@@ -357,7 +358,7 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
         mirrorParentState: true, // asks for a transition this surface cannot do
       });
 
-      expect(id).toBe('acme-panel-1');
+      expect(id).toEqual(lookupFound('acme-panel-1'));
       expect(posted).toHaveLength(1);
       expect(posted[0].issue).toBe('acme-epic-1');
       // The panel body is the engine's own rendering — the surface supplied none of it.
@@ -374,12 +375,12 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     const id = await upsertEpicPanel({
       channel: commentOnly, parent, children: [row('a', 'succeeded')], mirrorParentState: true,
     });
-    expect(id).toBe('cmt-1');
+    expect(id).toEqual(lookupFound('cmt-1'));
   });
 
-  test('a panel-comment failure is swallowed and reported as no id', async () => {
+  test('a panel-comment failure is reported as a lookup failure', async () => {
     channel.upsertComment.mockRejectedValue(new Error('surface hiccup'));
-    expect(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] })).toBeNull();
+    expect(isLookupFailure(await upsertEpicPanel({ channel, parent, children: [row('a', 'running')] }))).toBe(true);
     expect(loggerMock.warn).toHaveBeenCalled();
   });
 
@@ -388,7 +389,7 @@ describe('upsertEpicPanel — the maturing panel + parent-state mirror', () => {
     const id = await upsertEpicPanel({
       channel, parent, children: [row('a', 'succeeded')], inProgress: false, mirrorParentState: true,
     });
-    expect(id).toBe('cmt-1');
+    expect(id).toEqual(lookupFound('cmt-1'));
   });
 });
 

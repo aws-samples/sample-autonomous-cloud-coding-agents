@@ -20,7 +20,7 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { createTaskCore } from './shared/create-task-core';
-import { buildChannelMetadata, extractUserId } from './shared/gateway';
+import { buildChannelMetadata, extractUserGroups, extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse } from './shared/response';
 import type { CreateTaskRequest } from './shared/types';
@@ -51,6 +51,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // 4. Delegate to shared core
     return await createTaskCore(body, {
       userId,
+      teamIds: extractUserGroups(event),
       channelSource: 'api',
       channelMetadata: buildChannelMetadata(event),
       idempotencyKey: idempotencyKey ?? undefined,

@@ -162,11 +162,16 @@ export type ChannelSource = 'api' | 'webhook' | 'slack' | 'linear' | 'jira';
 export interface TaskRecord {
   readonly task_id: string;
   readonly user_id: string;
+  /** Cognito group names captured at admission for team-budget rollups. */
+  readonly team_ids?: readonly string[];
   readonly status: TaskStatusType;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) runs with no repo. */
   readonly repo?: string;
   readonly issue_number?: number;
+  /** GitHub issue title, stored when the issue is read at hydration so lists can
+   *  name the task. Display only; never fed back into the prompt. */
+  readonly issue_title?: string;
   /** The ref the caller supplied (if any); resolution may fall back to a
    *  default when absent. Persisted for audit alongside ``resolved_workflow``. */
   readonly workflow_ref?: string;
@@ -327,6 +332,11 @@ export interface TaskRecord {
    * marker. Absent until the first successful ordinary-task post.
    */
   readonly jira_final_comment_event_id?: string;
+  /** Durable Jira iteration body, merged with preview metadata by every writer. */
+  readonly jira_iteration_status?: { readonly body: Record<string, unknown>; readonly terminal: boolean };
+  /** At-most-once claim for the standalone preview comment POST. */
+  readonly jira_preview_claimed?: boolean;
+  readonly jira_preview_comment_id?: string;
   readonly attachments?: AttachmentRecord[];
   /**
    * Cedar HITL: per-task default approval timeout (design §10.2).
@@ -444,6 +454,7 @@ export interface TaskDetail {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -548,6 +559,7 @@ export interface TaskSummary {
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
   readonly repo: string | null;
   readonly issue_number: number | null;
+  readonly issue_title: string | null;
   readonly resolved_workflow: ResolvedWorkflow | null;
   /** Registry assets resolved for this task (#246); null when none pinned. */
   readonly resolved_assets: ResolvedAssetTriple[] | null;
@@ -572,6 +584,37 @@ export interface TaskSummary {
    * other package's `types.ts`.
    */
   readonly agent_heartbeat_at: string | null;
+  /**
+   * Estimated spend in USD (null until the agent reports one). On the summary so a
+   * cost view can total a page of tasks without one detail call per task.
+   */
+  readonly cost_usd: number | null;
+  /** When the task reached a terminal state (null while it runs). */
+  readonly completed_at: string | null;
+  /** Where the task was submitted from (console/CLI API, webhook, Slack, Linear, Jira). */
+  readonly channel_source: ChannelSource;
+}
+
+/** Authenticated caller's personal monthly budget status. */
+export interface PersonalBudgetStatus {
+  /** UTC calendar month in ``YYYY-MM`` form. */
+  readonly period: string;
+  /** First instant of the next UTC calendar month. */
+  readonly resets_at: string;
+  /** Whether an administrator configured a recurring personal limit. */
+  readonly configured: boolean;
+  /** Estimated terminal-task spend attributed to the caller this month. */
+  readonly spend_usd: number;
+  /** Configured recurring limit, or null when no personal limit exists. */
+  readonly monthly_limit_usd: number | null;
+  /** Non-negative estimated amount remaining, or null without a limit. */
+  readonly remaining_usd: number | null;
+  /** Percentage of the configured limit used, or null without a limit. */
+  readonly utilization_percent: number | null;
+  /** Whether the administrator enabled admission hard-stop enforcement. */
+  readonly hard_stop: boolean;
+  /** Whether the configured hard stop is currently blocking new tasks. */
+  readonly hard_stop_active: boolean;
 }
 
 /**
@@ -945,6 +988,7 @@ export function toTaskDetail(
     status: record.status,
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
+    issue_title: record.issue_title ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
@@ -1221,6 +1265,7 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     status: record.status,
     repo: record.repo ?? null,
     issue_number: record.issue_number ?? null,
+    issue_title: record.issue_title ?? null,
     resolved_workflow: record.resolved_workflow ?? null,
     resolved_assets: record.resolved_assets ?? null,
     pr_number: record.pr_number ?? null,
@@ -1230,6 +1275,9 @@ export function toTaskSummary(record: TaskRecord): TaskSummary {
     created_at: record.created_at,
     updated_at: record.updated_at,
     agent_heartbeat_at: record.agent_heartbeat_at ?? null,
+    cost_usd: coerceNumericOrNull(record.cost_usd, { task_id: record.task_id, field: 'cost_usd' }, logger),
+    completed_at: record.completed_at ?? null,
+    channel_source: record.channel_source,
   };
 }
 
@@ -1457,6 +1505,21 @@ export interface PolicyRuleSummary {
 /**
  * `GET /v1/repos/{repo_id}/policies` response body.
  */
+/** One open issue in GET /v1/repos/{repo_id}/issues. Titles and metadata only, no body. */
+export interface RepoIssueSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly url: string;
+  readonly updated_at: string;
+  readonly labels: readonly string[];
+}
+
+/** GET /v1/repos/{repo_id}/issues response (console issue picker). */
+export interface ListRepoIssuesResponse {
+  readonly repo: string;
+  readonly issues: readonly RepoIssueSummary[];
+}
+
 export interface GetPoliciesResponse {
   readonly repo_id: string;
   readonly policies: {

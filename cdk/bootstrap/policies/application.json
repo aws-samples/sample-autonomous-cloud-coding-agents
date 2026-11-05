@@ -118,11 +118,20 @@
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
-        "cognito-idp:GetUserPoolMfaConfig"
+        "cognito-idp:GetUserPoolMfaConfig",
+        "cognito-idp:CreateUserPoolDomain",
+        "cognito-idp:UpdateUserPoolDomain",
+        "cognito-idp:DeleteUserPoolDomain"
       ],
       "Effect": "Allow",
       "Resource": "arn:aws:cognito-idp:*:*:userpool/*",
       "Sid": "Cognito"
+    },
+    {
+      "Action": "cognito-idp:DescribeUserPoolDomain",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "CognitoDomainRead"
     },
     {
       "Action": [

@@ -124,6 +124,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
+import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -687,7 +688,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       sub_issue_id: '#meta',
       orchestration_id: 'orch_x',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       repo: 'o/r',
       child_count: 1,
       platform_user_id: 'release-user',
@@ -699,12 +700,12 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'succeeded',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
     };
     if (opts.childTaskId) child.child_task_id = opts.childTaskId;
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
-        return { Items: opts.standalone ? [opts.standalone] : [] }; // resolveTaskByLinearIssue
+        return { Items: opts.standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...opts.standalone }] : [] }; // resolveTaskByLinearIssue
       }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
       // Comment-trigger authorization: lookupPlatformUser Gets the user-mapping
@@ -720,10 +721,10 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
 
   /** Mock for a PLAIN (non-orchestration) issue: no parent, no orchestration snapshot, only the GSI hit. */
   function mockStandaloneOnly(standalone: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number; status?: string } | null): void {
-    fetchIssueParentIdMock.mockResolvedValue(null); // no parent ⇒ not a sub-issue
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT); // no parent ⇒ not a sub-issue
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
-        return { Items: standalone ? [standalone] : [] };
+        return { Items: standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...standalone }] : [] };
       }
       // Comment-trigger authorization: the commenter resolves to a mapped user.
       if (cmd._type === 'Get' && (cmd.input.Key as { linear_identity?: string })?.linear_identity) {
@@ -738,11 +739,58 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     createTaskCoreMock.mockReset().mockResolvedValue({ statusCode: 201, body: '{}' });
     resolveLinearOauthTokenMock.mockReset()
       .mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
-    fetchIssueParentIdMock.mockReset().mockResolvedValue('PARENT');
+    fetchIssueParentIdMock.mockReset().mockResolvedValue(lookupFound('PARENT'));
     discoverOrchestrationMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue(true);
     upsertThreadedReplyMock.mockReset().mockResolvedValue('reply-1');
+  });
+
+  // A comment only acts on work recorded under the workspace the delivery came from.
+  // The other fixtures in this file are single-workspace (org-1).
+  describe('a comment cannot act on another workspace\'s work', () => {
+    function expectSilentDrop(): void {
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // No ack or reply, matching the project-mapping check.
+      expect(reactToCommentMock).not.toHaveBeenCalled();
+      expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+      expect(replyToCommentMock).not.toHaveBeenCalled();
+    }
+
+    test('a sub-issue of another workspace\'s orchestration starts no iteration', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+      await handler(eventWith(comment({ organizationId: 'org-2' })));
+      expectSilentDrop();
+    });
+
+    test('another workspace\'s parent epic starts no iteration, even naming a child', async () => {
+      // A comment on the epic itself is routed without a Linear API call, so the
+      // workspace match is checked on this path too.
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+      await handler(eventWith(comment({
+        organizationId: 'org-2',
+        data: { id: 'comment-1', body: '@bgagent sub-issue-1: change the timeout', issueId: 'PARENT' },
+      })));
+      expectSilentDrop();
+    });
+
+    test('a standalone task from another workspace starts no iteration', async () => {
+      mockStandaloneOnly({ task_id: 'task-p', user_id: 'other-user', repo: 'o2/r2', pr_number: 7 });
+      await handler(eventWith(comment({ organizationId: 'org-2' })));
+      expectSilentDrop();
+    });
+
+    test('a standalone task that records no workspace is not acted on', async () => {
+      mockStandaloneOnly({
+        task_id: 'task-p',
+        user_id: 'other-user',
+        repo: 'o2/r2',
+        pr_number: 7,
+        channel_metadata: {},
+      } as Parameters<typeof mockStandaloneOnly>[0]);
+      await handler(eventWith(comment()));
+      expectSilentDrop();
+    });
   });
 
   test('@bgagent on a started sub-issue → pr-iteration task on its PR with cascade marker', async () => {
@@ -792,7 +840,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       sub_issue_id: '#meta',
       orchestration_id: 'orch_x',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       repo: 'o/r',
       child_count: 2,
       platform_user_id: 'release-user',
@@ -806,7 +854,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'succeeded',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       child_task_id: 'task-sub-1',
     };
     const badSibling = {
@@ -816,7 +864,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       child_status: 'failed',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
-      linear_workspace_id: 'WS',
+      linear_workspace_id: 'org-1',
       child_task_id: 'task-bad-1',
     };
     const claimed = new Set<string>();
@@ -925,7 +973,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     // A Query failure and a genuine miss are different facts. Collapsing them told
     // the user their issue is not ours, which is a guess dressed as a conclusion —
     // and it hides a real fault (throttling, a missing GSI) behind a silent no-op.
-    fetchIssueParentIdMock.mockResolvedValue(null);
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       // ONLY the GSI query fails — everything else (the redelivery claim, the
       // commenter authorization) must still work, or the nudge would be skipped
@@ -948,12 +996,47 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
   });
 
   test('@bgagent on a sub-issue whose parent is not an orchestration AND no ABCA task → no task', async () => {
-    fetchIssueParentIdMock.mockResolvedValue('PARENT');
+    fetchIssueParentIdMock.mockResolvedValue(lookupFound('PARENT'));
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
       return { Items: [] }; // loadOrchestration → no snapshot
     });
     await handler(eventWith(comment()));
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  // The two behaviour changes the LookupResult conversion actually makes: a
+  // *failed* issue-parent lookup must not be treated like "this issue has no
+  // parent". These two tests pin the difference — same standalone fallback
+  // available in both, opposite outcomes.
+  test('an ABSENT parent (genuinely top-level) still falls through to the standalone path', async () => {
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
+    mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+
+    await handler(eventWith(comment()));
+
+    expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+    expect(createTaskCoreMock.mock.calls[0][0].pr_number).toBe(99);
+  });
+
+  test('a FAILED parent lookup THROWS to earn a retry — no silent downgrade to standalone', async () => {
+    // Two regressions in one. (1) Falling through would iterate this issue's PR
+    // via the standalone path — no dependency cascade — on nothing worse than a
+    // Linear 503, silently downgrading an orchestration child. (2) Returning
+    // instead of throwing would be a *successful* async invocation: Lambda
+    // discards the event, the receiver's dedup row (8h TTL) already suppressed
+    // Linear's own redelivery, and the @bgagent comment is dropped with no 👀,
+    // no reply, and no retry. Only a throw spends the async-invoke retry budget,
+    // and nothing user-visible has been posted at this point, so a retry is safe.
+    const err = new Error('Linear issue-parent fetch returned HTTP 503');
+    fetchIssueParentIdMock.mockResolvedValue(lookupFailed(err));
+    // A standalone task IS resolvable — so "no task created" can only mean the
+    // fall-through was refused, not that there was nothing to fall through to.
+    mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+    fetchIssueParentIdMock.mockResolvedValue(lookupFailed(err)); // mockStandaloneOnly resets it to ABSENT
+
+    await expect(handler(eventWith(comment()))).rejects.toThrow(err);
+
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
@@ -967,7 +1050,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     // Even with a fully actionable iteration target, a commenter with NO linked
     // platform user must not be able to start a code-pushing run billed to the
     // requester. The mapping Get returns nothing → the gate blocks before dispatch.
-    fetchIssueParentIdMock.mockResolvedValue(null);
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
         return { Items: [{ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 }] };
@@ -1093,7 +1176,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_x',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 2,
         platform_user_id: 'release-user',
@@ -1105,7 +1188,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-305',
         title: 'Add a site-wide footer',
         child_task_id: 'task-footer',
@@ -1117,7 +1200,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-306',
         title: 'Add a newsletter signup section',
         child_task_id: 'task-news',
@@ -1162,13 +1245,13 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
       };
       const meta = {
         orchestration_id: 'orch_x',
         sub_issue_id: '#meta',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 3,
         platform_user_id: 'u1',
@@ -1347,6 +1430,38 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
     });
 
+    test('a FAILED sub-issue PR read ANSWERS the user and flips 👀 → ❓ (never a permanent 👀)', async () => {
+      // The counterpart to the issue-parent site, which throws to earn a retry.
+      // Here the one-time ack claim is already won and the 👀 already posted, and
+      // `claimCommentAck` is never released — so a throw would be re-driven into
+      // the `!won` no-op branch, leaving the comment marked "being worked on"
+      // forever with no reply. The only durable outcome is a visible one.
+      mockParentEpic('PARENT-EPIC');
+      const epicImpl = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        const key = cmd.input.Key as { task_id?: string } | undefined;
+        if (cmd._type === 'Get' && key?.task_id === 'task-footer') {
+          throw new Error('ProvisionedThroughputExceededException');
+        }
+        return epicImpl(cmd);
+      });
+
+      await handler(eventWith(parentComment('@bgagent for the footer change the tagline', 'pc-prfail')));
+
+      // Did not iterate on a PR number it could not read, and did not throw.
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // Answered on the epic, threaded under the triggering comment.
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, , replyBody] = replyToCommentMock.mock.calls[0];
+      expect(issueId).toBe('PARENT-EPIC');
+      expect(String(replyBody)).toMatch(/couldn't read/i);
+      expect(String(replyBody)).toMatch(/comment again/i);
+      // Must NOT report the distinct, misleading "no PR yet" state.
+      expect(String(replyBody)).not.toMatch(/nothing to iterate/i);
+      // 👀 → ❓, so the comment does not read as still-in-progress.
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-prfail', 'question');
+    });
+
     test('webhook REDELIVERY of the same parent comment posts EXACTLY ONE reply (no spam)', async () => {
       mockParentEpic('PARENT-EPIC');
       const evt = eventWith(parentComment('@bgagent looks great, ship it', 'pc-dup'));
@@ -1378,7 +1493,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_f',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         repo: 'o/r',
         child_count: 2,
         platform_user_id: 'release-user',
@@ -1391,7 +1506,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'succeeded',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-1',
         title: 'Step A',
         child_task_id: 'task-ok',
@@ -1403,7 +1518,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         child_status: 'failed',
         repo: 'o/r',
         parent_linear_issue_id: parentIssueId,
-        linear_workspace_id: 'WS',
+        linear_workspace_id: 'org-1',
         linear_identifier: 'ABCA-2',
         title: 'Step B',
         child_task_id: 'task-bad-1',

@@ -29,19 +29,24 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, IConstruct } from 'constructs';
+import { BlueprintDefinition, blueprintEgressDomains, resolveBlueprintDefinitions } from '../blueprints/definitions';
 import { AdmissionQueuePickup } from '../constructs/admission-queue-pickup';
 import { AgentMemory } from '../constructs/agent-memory';
 import { AgentSessionRole } from '../constructs/agent-session-role';
-import { AgentVpc } from '../constructs/agent-vpc';
+import { AgentNetwork, AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
-  haikuInferenceProfileId,
+  PLATFORM_DEFAULT_AUX_MODEL_ID,
+  PLATFORM_DEFAULT_MODEL_ID,
+  inferenceProfileId,
   resolveBedrockGeoRegion,
   resolveBedrockModelIds,
 } from '../constructs/bedrock-models';
 import { Blueprint } from '../constructs/blueprint';
+import { BudgetAlerts } from '../constructs/budget-alerts';
+import { BudgetTable } from '../constructs/budget-table';
 import { CedarWasmLayer } from '../constructs/cedar-wasm-layer';
 import { ConcurrencyReconciler } from '../constructs/concurrency-reconciler';
 import { DnsFirewall } from '../constructs/dns-firewall';
@@ -81,6 +86,7 @@ import { ToolGateway } from '../constructs/tool-gateway';
 import { TraceArtifactsBucket } from '../constructs/trace-artifacts-bucket';
 import { UserConcurrencyTable } from '../constructs/user-concurrency-table';
 import { WebhookTable } from '../constructs/webhook-table';
+import { resolveComputeBackends } from '../handlers/shared/compute-backend';
 
 /** Max length of the Bedrock Guardrail name (CloudFormation constraint). */
 const GUARDRAIL_NAME_MAX_LENGTH = 50;
@@ -147,9 +153,26 @@ export interface AgentStackProps extends StackProps {
    * values under one name in one class is a trap for `Stack.of(x)` callers.
    */
   readonly agentCoreAvailabilityZones?: string[];
+  /** Network owned by a separate stack. Omit to preserve the inline topology. */
+  readonly network?: AgentNetwork;
+  /** Shared plain configuration, resolved before network/application construction. */
+  readonly blueprints?: readonly BlueprintDefinition[];
 }
 
 export class AgentStack extends Stack {
+  /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
+  public readonly taskApi: TaskApi;
+  /** Onboarded repositories; the console's issue picker serves only these. */
+  public readonly repoTable: RepoTable;
+  /** Platform GitHub token, read server-side by the console's issue picker. */
+  public readonly githubTokenSecret: secretsmanager.ISecret;
+  /** Linear tables and webhook wiring; the console lists and starts Linear issues through them. */
+  public readonly linearIntegration: LinearIntegration;
+  /** The task table (its Linear-issue index tells the console which issues already have a task). */
+  public readonly taskTable: TaskTable;
+  /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
+  public readonly linearIdentityVault?: LinearIdentityVault;
+
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -176,12 +199,14 @@ export class AgentStack extends Stack {
     // changes. Pattern lifted from ``merge/akw-integration``.
     const repoRoot = path.join(__dirname, '..', '..', '..');
 
-    const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, {
-      file: 'agent/Dockerfile',
-    });
+    const computeTypes = resolveComputeBackends(
+      this.node.tryGetContext('compute_types'), this.node.tryGetContext('compute_type'));
+    const agentCoreEnabled = computeTypes.includes('agentcore');
+    const ecsEnabled = computeTypes.includes('ecs');
+    const lambdaMicrovmEnabled = computeTypes.includes('lambda-microvm');
 
     // Task state persistence
-    const taskTable = new TaskTable(this, 'TaskTable');
+    const taskTable = this.taskTable = new TaskTable(this, 'TaskTable');
     const taskEventsTable = new TaskEventsTable(this, 'TaskEventsTable');
     const taskNudgesTable = new TaskNudgesTable(this, 'TaskNudgesTable');
     // Parent/sub-issue orchestration DAG state.
@@ -201,9 +226,11 @@ export class AgentStack extends Stack {
     // dual-index pattern is preferred (see §10.1 of the design doc).
     const taskApprovalsTable = new TaskApprovalsTable(this, 'TaskApprovalsTableV2');
     const userConcurrencyTable = new UserConcurrencyTable(this, 'UserConcurrencyTable');
+    const budgetTable = new BudgetTable(this, 'BudgetTable');
+    const budgetAlerts = new BudgetAlerts(this, 'BudgetAlerts');
     const webhookTable = new WebhookTable(this, 'WebhookTable');
     const apiKeyTable = new ApiKeyTable(this, 'ApiKeyTable');
-    const repoTable = new RepoTable(this, 'RepoTable');
+    const repoTable = this.repoTable = new RepoTable(this, 'RepoTable');
 
     // Standalone Agent Registry asset registry (#246). Provisioned via a custom
     // resource because CreateRegistry is async and has no CDK L2. Enabled by
@@ -267,64 +294,17 @@ export class AgentStack extends Stack {
     ]);
 
     // --- Repository onboarding ---
-    const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
-    const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-      repo: blueprintRepo,
-      repoTable: repoTable.table,
-    });
-
-    const blueprints = [agentPluginsBlueprint];
-
-    // Optional per-repo blueprint pinning registry assets (#246), opt-in via
-    // context/env so it does not hardcode a specific fork for other contributors.
-    // Set ``forkBlueprintRepo`` (e.g. ``--context forkBlueprintRepo=owner/repo``)
-    // to onboard a repo with the AWS Knowledge MCP asset pinned.
-    const forkBlueprintRepo = process.env.FORK_BLUEPRINT_REPO ?? this.node.tryGetContext('forkBlueprintRepo');
-    if (forkBlueprintRepo) {
-      blueprints.push(new Blueprint(this, 'ForkBlueprint', {
-        repo: forkBlueprintRepo,
-        repoTable: repoTable.table,
-        assets: {
-          mcpServers: ['registry://mcp_server/acme/aws-knowledge@^1.0.0'],
-          cedarPolicyModules: ['registry://cedar_policy_module/acme/guard@^1.0.0'],
-          skills: ['registry://skill/acme/readme-helper@^1.0.0'],
-        },
-      }));
+    const blueprintDefinitions = props.blueprints ?? resolveBlueprintDefinitions(this.node);
+    for (const { id: blueprintId, ...definition } of blueprintDefinitions) {
+      new Blueprint(this, blueprintId, { ...definition, repoTable: repoTable.table });
     }
-
-    // The AwsCustomResource singleton Lambda used by Blueprint constructs
-    NagSuppressions.addResourceSuppressionsByPath(this, [
-      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
-      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,
-    ], [
-      {
-        id: 'AwsSolutions-IAM4',
-        reason: 'AwsCustomResource singleton Lambda uses AWS managed AWSLambdaBasicExecutionRole — required by CDK custom-resources framework',
-      },
-      {
-        id: 'AwsSolutions-L1',
-        reason: 'AwsCustomResource singleton Lambda runtime is managed by the CDK custom-resources framework',
-      },
-    ]);
-
-    // Log groups (created before runtime so we can reference the name in env vars)
-    const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: RemovalPolicy.DESTROY,
-    });
-
-    const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
-      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
-      retention: logs.RetentionDays.THREE_MONTHS,
-      removalPolicy: RemovalPolicy.DESTROY,
-    });
 
     // GitHub token stored in Secrets Manager — agent fetches at startup via ARN
     const githubTokenSecret = new secretsmanager.Secret(this, 'GitHubTokenSecret', {
       description: 'GitHub personal access token for the background agent',
       removalPolicy: RemovalPolicy.DESTROY,
     });
+    this.githubTokenSecret = githubTokenSecret;
 
     NagSuppressions.addResourceSuppressions(githubTokenSecret, [
       {
@@ -332,16 +312,6 @@ export class AgentStack extends Stack {
         reason: 'GitHub PAT is managed externally — automatic rotation is not applicable',
       },
     ]);
-
-    // --- Compute-backend deploy gate (read early) ---
-    // Which optional compute substrate this deploy provisions, from the
-    // ``compute_type`` deploy context (default 'agentcore' — the AgentCore
-    // runtime is always present, the other backends are additive). Read HERE,
-    // well above the constructs it gates, because TaskApi is instantiated
-    // before them and needs to know whether to wire the cancel Lambda's
-    // MicroVM termination grant (ADR-021 sub-decision 4).
-    const computeType = this.node.tryGetContext('compute_type') ?? 'agentcore';
-    const lambdaMicrovmEnabled = computeType === 'lambda-microvm';
 
     // --- Tool-federation Gateway deploy gate (ADR-019 P1) ---
     // Whether to provision the AgentCore Gateway that federates the agent's MCP
@@ -364,20 +334,6 @@ export class AgentStack extends Stack {
     // name the SAME workload identity, and a second copy of the derivation is a
     // second chance to disagree.
     const linearVaultWorkload = linearVaultWorkloadName(this);
-
-    // Fail here, naming both flags, rather than 500 resources later. The two features
-    // together synthesize 505 resources against CloudFormation's hard 500 limit (MicroVM
-    // alone 496, the vault alone 488), so the combination is not deployable today. Left to
-    // the resource counter, the operator gets a per-type census and no hint that two
-    // context flags are the cause.
-    if (linearIdentityVaultEnabled && computeType === 'lambda-microvm') {
-      throw new Error(
-        'enableLinearIdentityVault cannot be combined with compute_type=lambda-microvm: the two '
-        + 'together exceed CloudFormation\'s 500-resource limit for this stack (505). Deploy the '
-        + 'vault on the agentcore or ecs substrate, or omit enableLinearIdentityVault. See '
-        + 'docs/design/ADR-016 and the LINEAR_SETUP_GUIDE.',
-      );
-    }
 
     // The operator-supplied MicroVM image inputs, resolved HERE (pure context
     // reads, no construct dependency) rather than at the construct's call site
@@ -424,19 +380,20 @@ export class AgentStack extends Stack {
     // override, else auto-selected from the account's AgentCore-supported zones
     // when synth has a concrete account/region. Left undefined otherwise, so the
     // construct keeps CDK's default AZ selection. See constructs/agentcore-azs.ts.
-    const agentVpc = new AgentVpc(this, 'AgentVpc', {
+    const agentVpc = props.network ?? new AgentVpc(this, 'AgentVpc', {
       ...(props.agentCoreAvailabilityZones?.length
         ? { availabilityZones: props.agentCoreAvailabilityZones }
         : {}),
     });
 
-    // DNS Firewall — domain-level egress filtering (observation mode for initial deployment)
-    const additionalDomains = [...new Set(blueprints.flatMap(b => b.egressAllowlist))];
-    new DnsFirewall(this, 'DnsFirewall', {
-      vpc: agentVpc.vpc,
-      additionalAllowedDomains: additionalDomains,
-      observationMode: true,
-    });
+    if (!props.network) {
+      // The default topology retains the original ownership and construct paths.
+      new DnsFirewall(this, 'DnsFirewall', {
+        vpc: agentVpc.vpc,
+        additionalAllowedDomains: blueprintEgressDomains(blueprintDefinitions),
+        observationMode: true,
+      });
+    }
 
     // --- AgentCore Memory (cross-task learning) ---
     const agentMemory = new AgentMemory(this, 'AgentMemory');
@@ -509,8 +466,15 @@ export class AgentStack extends Stack {
       },
     });
 
+    let ecsClusterArnHolder: string | undefined;
+    const lazyEcsClusterArn = Lazy.string({
+      produce: () => {
+        if (!ecsClusterArnHolder) throw new Error('ECS cluster ARN was accessed before compute was created');
+        return ecsClusterArnHolder;
+      },
+    });
     // --- Task API (REST API + Cognito + Lambda handlers) ---
-    const taskApi = new TaskApi(this, 'TaskApi', {
+    const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       taskNudgesTable: taskNudgesTable.table,
@@ -522,10 +486,12 @@ export class AgentStack extends Stack {
       orchestratorFunctionArn: lazyOrchestratorArn,
       guardrailId: inputGuardrail.guardrailId,
       guardrailVersion: inputGuardrail.guardrailVersion,
-      agentCoreStopSessionRuntimeArn: lazyRuntimeArn,
+      ...(agentCoreEnabled && { agentCoreStopSessionRuntimeArn: lazyRuntimeArn }),
+      ...(ecsEnabled && { ecsClusterArn: lazyEcsClusterArn }),
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      budgetTable: budgetTable.table,
       // ADR-021: gives the cancel Lambda `lambda:TerminateMicrovm`, scoped to the
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
       // immediately. Omitted when no image is configured — there can be no
@@ -574,184 +540,215 @@ export class AgentStack extends Stack {
     // geography's profiles while telling the agent to call another's.
     const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
 
-    const runtimeEnvironmentVariables = {
-      GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
-      AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
-      CLAUDE_CODE_USE_BEDROCK: '1',
-      ANTHROPIC_LOG: 'debug',
-      // Cross-region inference-profile id (geo prefix, `us.` by default), NOT
-      // the bare foundation-model id: Claude 4.x can't be invoked on-demand by
-      // bare id (400 "on-demand throughput isn't supported"). Derived through
-      // bedrock-models.ts's `haikuInferenceProfileId` so (a) the prefix comes from
-      // `bedrockGeoRegion` rather than a second hardcode that would silently split
-      // this auxiliary model from the granted profiles on any non-`us` deploy, and
-      // (b) the model id itself comes from the same constant the grant list
-      // interpolates. The lambda-microvm `platform_config` block below calls the
-      // same helper with the same geography. runner.py re-sets this at spawn time.
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: haikuInferenceProfileId(bedrockGeoRegion),
-      TASK_TABLE_NAME: taskTable.table.tableName,
-      TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
-      NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
-      // Cedar HITL approval gates (§6.5). Agent's task_state primitives
-      // use this to write PENDING rows + transition tasks to
-      // AWAITING_APPROVAL; absent → hook fails closed with
-      // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
-      TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
-      // Hint for the hook's remaining-maxLifetime calculation (§6.5
-      // pseudocode line 793). Kept in sync with the AgentCore
-      // lifecycle configuration below so drift is visible. 8 hours.
-      AGENTCORE_MAX_LIFETIME_S: '28800',
-      USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
-      // Per-task SessionRole: the agent assumes this with session tags
-      // {user_id, repo, task_id} and uses the scoped creds for tenant-data
-      // (DDB/S3) access. Resolved lazily — the role lists runtime.role as an
-      // assuming principal, so it is created after the runtime.
-      AGENT_SESSION_ROLE_ARN: lazySessionRoleArn,
-      // --trace artifact store (§10.1). The agent writes the JSONL
-      // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
-      // terminal state when the submit payload enabled ``trace``.
-      TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
-      // Repo-less deliverable artifacts: a deliver_artifact step
-      // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
-      ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
-      LOG_GROUP_NAME: applicationLogGroup.logGroupName,
-      MEMORY_ID: agentMemory.memory.memoryId,
-      MAX_TURNS: '100',
-      // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
-      // support flock(). Only caches whose tools never call flock() go there.
-      // Everything else stays on local ephemeral disk.
+    // Keep the AgentCore log groups owned across explicit backend switches,
+    // with the existing destroy policy so rollback and same-name reinstall work.
+    const applicationLogGroup = new logs.LogGroup(this, 'RuntimeApplicationLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${this.stackName}`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    const usageLogGroup = new logs.LogGroup(this, 'RuntimeUsageLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/runtime/USAGE_LOGS/${this.stackName}`,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    let runtime: agentcore.Runtime | undefined;
+    let agentLogGroup: logs.ILogGroup | undefined;
+    if (agentCoreEnabled) {
+      const artifact = agentcore.AgentRuntimeArtifact.fromAsset(repoRoot, { file: 'agent/Dockerfile' });
+      const runtimeEnvironmentVariables = {
+        GITHUB_TOKEN_SECRET_ARN: githubTokenSecret.secretArn,
+        AWS_REGION: process.env.AWS_REGION ?? 'us-east-1',
+        CLAUDE_CODE_USE_BEDROCK: '1',
+        ANTHROPIC_LOG: 'debug',
+        // Cross-region inference-profile ids (geo prefix), NOT bare foundation-model
+        // ids: Claude 4.x can't be invoked on-demand by bare id (400 "on-demand
+        // throughput isn't supported"). Both are derived from `bedrockGeoRegion` rather
+        // than hardcoded, so neither can silently split from the granted profiles on a
+        // non-default deploy, and the model ids come from the same constants the grant
+        // list interpolates.
+        //
+        // The MAIN model is set here deliberately, and was previously absent: only the
+        // auxiliary var was injected, so the main model fell through to a literal in
+        // agent/src/config.py that a geography change does not touch. A deploy with a
+        // different `bedrockGeoRegion` therefore granted one geography's profiles while
+        // the agent asked for another's, and every task with no per-repo override failed
+        // at turn 0 with AccessDenied.
+        //
+        // The lambda-microvm `platform_config` block below derives the same two values
+        // from the same geography. runner.py re-sets both at spawn time; a per-repo
+        // `model_id` still overrides.
+        ANTHROPIC_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
+        TASK_TABLE_NAME: taskTable.table.tableName,
+        TASK_EVENTS_TABLE_NAME: taskEventsTable.table.tableName,
+        NUDGES_TABLE_NAME: taskNudgesTable.table.tableName,
+        // Cedar HITL approval gates (§6.5). Agent's task_state primitives
+        // use this to write PENDING rows + transition tasks to
+        // AWAITING_APPROVAL; absent → hook fails closed with
+        // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
+        TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+        // Hint for the hook's remaining-maxLifetime calculation (§6.5
+        // pseudocode line 793). Kept in sync with the AgentCore
+        // lifecycle configuration below so drift is visible. 8 hours.
+        AGENTCORE_MAX_LIFETIME_S: '28800',
+        USER_CONCURRENCY_TABLE_NAME: userConcurrencyTable.table.tableName,
+        // Per-task SessionRole: the agent assumes this with session tags
+        // {user_id, repo, task_id} and uses the scoped creds for tenant-data
+        // (DDB/S3) access. Resolved lazily — the role lists runtime.role as an
+        // assuming principal, so it is created after the runtime.
+        AGENT_SESSION_ROLE_ARN: lazySessionRoleArn,
+        // --trace artifact store (§10.1). The agent writes the JSONL
+        // trajectory to ``traces/<user_id>/<task_id>.jsonl.gz`` on
+        // terminal state when the submit payload enabled ``trace``.
+        TRACE_ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
+        // Repo-less deliverable artifacts: a deliver_artifact step
+        // uploads its product to ``artifacts/<task_id>/`` in the same bucket.
+        ARTIFACTS_BUCKET_NAME: traceArtifactsBucket.bucket.bucketName,
+        LOG_GROUP_NAME: applicationLogGroup.logGroupName,
+        MEMORY_ID: agentMemory.memory.memoryId,
+        MAX_TURNS: '100',
+        // Session storage: the S3-backed FUSE mount at /mnt/workspace does NOT
+        // support flock(). Only caches whose tools never call flock() go there.
+        // Everything else stays on local ephemeral disk.
+        //
+        // Local disk (tools use flock):
+        //   AGENT_WORKSPACE — omitted, defaults to /workspace
+        //   MISE_DATA_DIR — mise's pipx backend sets UV_TOOL_DIR inside installs/,
+        //     and uv flocks that directory → must be local.
+        MISE_DATA_DIR: '/tmp/mise-data',
+        UV_CACHE_DIR: '/tmp/uv-cache',
+        // Persistent mount (no flock):
+        CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
+        npm_config_cache: '/mnt/workspace/.npm-cache',
+        // ENABLE_CLI_TELEMETRY: '1',
+        // Outbound SDK solution attribution (#319): botocore reads
+        // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
+        // Lambda-only Aspect can't reach this runtime, so set it explicitly.
+        ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
+        // ADR-019 P1: the federated-tool Gateway URL (context-gated). Present only
+        // when ``--context enableToolGateway=true``; the agent's in-process SigV4
+        // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
+        // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
+        ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
+        // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
+        // agent's Linear token resolver to mint via the AgentCore Token Vault when
+        // a task carries a provider name. Absent → the agent stays on the
+        // Secrets-Manager path. The workload name is the stack-derived value computed
+        // above and passed INTO the construct — the construct has no default of its own,
+        // and a rename orphans every consent already given.
+        ...(linearIdentityVaultEnabled
+          ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
+          : {}),
+      };
+
+      const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
+        vpc: agentVpc.vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [agentVpc.runtimeSecurityGroup],
+      });
+
+      // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
+      // long-running tasks (approval waits, heavy builds) are not evicted.
+      const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
+        idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+        maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
+      };
+
+      // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
+      // CREATE the new resource before DELETING the old one, violating
+      // AgentCore's account-level runtimeName uniqueness and triggering an
+      // UPDATE_ROLLBACK.
+      runtime = new agentcore.Runtime(this, 'Runtime', {
+        agentRuntimeArtifact: artifact,
+        networkConfiguration: runtimeNetworkConfig,
+        environmentVariables: runtimeEnvironmentVariables,
+        lifecycleConfiguration: lifecycleConfiguration,
+        loggingConfigs: [
+          {
+            logType: agentcore.LogType.APPLICATION_LOGS,
+            destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+          },
+          {
+            logType: agentcore.LogType.USAGE_LOGS,
+            destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
+          },
+        ],
+      });
+
+      runtimeArnHolder = runtime.agentRuntimeArn;
+      agentLogGroup = applicationLogGroup;
+
+      // --- AgentCore log delivery: the library owns these logical ids, not us ---
       //
-      // Local disk (tools use flock):
-      //   AGENT_WORKSPACE — omitted, defaults to /workspace
-      //   MISE_DATA_DIR — mise's pipx backend sets UV_TOOL_DIR inside installs/,
-      //     and uv flocks that directory → must be local.
-      MISE_DATA_DIR: '/tmp/mise-data',
-      UV_CACHE_DIR: '/tmp/uv-cache',
-      // Persistent mount (no flock):
-      CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
-      npm_config_cache: '/mnt/workspace/.npm-cache',
-      // ENABLE_CLI_TELEMETRY: '1',
-      // Outbound SDK solution attribution (#319): botocore reads
-      // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
-      // Lambda-only Aspect can't reach this runtime, so set it explicitly.
-      ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
-      // ADR-019 P1: the federated-tool Gateway URL (context-gated). Present only
-      // when ``--context enableToolGateway=true``; the agent's in-process SigV4
-      // MCP bridge (gateway_tools.build_gateway_server) reads it to register the
-      // ``abca_gateway`` SDK server. Absent → no gateway tool, unchanged.
-      ...(toolGateway ? { ABCA_TOOL_GATEWAY_URL: toolGateway.gatewayUrl } : {}),
-      // RFC #249 Phase 1 (context-gated `enableLinearIdentityVault`): tell the
-      // agent's Linear token resolver to mint via the AgentCore Token Vault when
-      // a task carries a provider name. Absent → the agent stays on the
-      // Secrets-Manager path. The workload name is the stack-derived value computed
-      // above and passed INTO the construct — the construct has no default of its own,
-      // and a rename orphans every consent already given.
-      ...(linearIdentityVaultEnabled
-        ? { LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: linearVaultWorkload }
-        : {}),
-    };
+      // The Runtime above creates a DeliverySource / DeliveryDestination / Delivery
+      // trio per loggingConfig, naming them from its own construct path. We
+      // deliberately leave those names alone, and that is load-bearing.
+      //
+      // Renaming any of them is fatal on an existing stack. A DeliverySource is
+      // unique per (resource ARN, log type) account-wide and the runtime ARN does not
+      // change, so CloudFormation's create-before-delete produces a second source for
+      // the same runtime, CloudWatch Logs rejects it as already existing, and the
+      // whole update rolls back. Note what that implies: no choice of name avoids the
+      // collision, because the conflict is on the ARN they point at rather than on
+      // their own names. Only leaving a logical id untouched updates in place.
+      //
+      // An earlier version overrode them from a table of ids recorded off a live
+      // stack, keyed by stack NAME. Stack name is not a proxy for deployed state:
+      // two accounts running a stack of the same name had diverged, so the table was
+      // correct for one and caused the rename on the other. No set of literals can
+      // describe every account, so we hold none and let the library generate them —
+      // deterministically, identically in every account, with nothing to keep in sync.
+      //
+      // The one cost: a stack deployed before a library-side rename, or held on older
+      // ids by that table, converges once and needs a one-time operator step first,
+      // since the old resources must be gone before the new ones are created. That
+      // step, and how to tell whether a stack needs it, are in
+      // docs/design/OBSERVABILITY.md ("AgentCore log delivery").
 
-    const runtimeNetworkConfig = agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
-      vpc: agentVpc.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [agentVpc.runtimeSecurityGroup],
-    });
-
-    // LifecycleConfiguration — both timers set to the AgentCore 8h maximum so
-    // long-running tasks (approval waits, heavy builds) are not evicted.
-    const lifecycleConfiguration: agentcore.LifecycleConfiguration = {
-      idleRuntimeSessionTimeout: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
-      maxLifetime: Duration.hours(RUNTIME_SESSION_TIMEOUT_HOURS),
-    };
-
-    // Construct id 'Runtime' is load-bearing — renaming it forces CFN to
-    // CREATE the new resource before DELETING the old one, violating
-    // AgentCore's account-level runtimeName uniqueness and triggering an
-    // UPDATE_ROLLBACK.
-    const runtime = new agentcore.Runtime(this, 'Runtime', {
-      agentRuntimeArtifact: artifact,
-      networkConfiguration: runtimeNetworkConfig,
-      environmentVariables: runtimeEnvironmentVariables,
-      lifecycleConfiguration: lifecycleConfiguration,
-      loggingConfigs: [
+      // --- Session storage (preview) ---
+      // The L2 construct does not yet expose filesystemConfigurations; use the
+      // CFN escape hatch. /mnt/workspace mount backs the persistent cache
+      // shared across tasks in the same repo.
+      const cfnRuntime = runtime.node.defaultChild as CfnResource;
+      cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
         {
-          logType: agentcore.LogType.APPLICATION_LOGS,
-          destination: agentcore.LoggingDestination.cloudWatchLogs(applicationLogGroup),
+          SessionStorage: {
+            MountPath: '/mnt/workspace',
+          },
         },
-        {
-          logType: agentcore.LogType.USAGE_LOGS,
-          destination: agentcore.LoggingDestination.cloudWatchLogs(usageLogGroup),
-        },
-      ],
-    });
+      ]);
 
-    runtimeArnHolder = runtime.agentRuntimeArn;
+      // --- IAM grants ---
+      // Per-session IAM scoping: tenant-data access (the four
+      // task_id-partitioned tables + the agent's trace/attachment S3 objects)
+      // is NOT granted to the runtime ExecutionRole. Instead the agent assumes a
+      // per-task SessionRole (created below) with session tags
+      // {user_id, repo, task_id}, and that role carries the tenant-data grants
+      // constrained by aws:PrincipalTag conditions. The runtime role keeps only
+      // non-tenant / shared access:
+      //   - UserConcurrencyTable: user-scoped counter (agent path does not write
+      //     it today; left here for the reconciler/orchestrator parity).
+      //   - GitHub PAT secret: read once at startup, before the agent assumes the
+      //     SessionRole.
+      //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
+      userConcurrencyTable.table.grantReadWriteData(runtime);
+      githubTokenSecret.grantRead(runtime);
+      applicationLogGroup.grantWrite(runtime);
+      agentMemory.grantReadWrite(runtime);
 
-    // --- AgentCore log-delivery: keep the logical ids STABLE across library
-    //     renames, so updating an existing stack never has to be opted into ---
-    //
-    // The AgentCore Runtime auto-creates AWS::Logs::DeliverySource + Delivery +
-    // DeliveryDestination per loggingConfig, naming them from the construct path
-    // the library happens to use. When that path changes — as it did between
-    // library versions here — the CFN logical ids change with it, and CFN treats
-    // renamed resources as new ones: it CREATES before it DELETES.
-    //
-    // A DeliverySource is unique per (resource ARN, log type) for the whole
-    // account, and the runtime ARN does not change across the rename. So the new
-    // source collides with the live one that is still there, CloudWatch Logs
-    // rejects it with ``AlreadyExists``, and the whole stack rolls back. Note
-    // what this means: renaming the resources cannot avoid the collision, because
-    // the conflict is on the ARN they point at, not on their own names. Only
-    // keeping the logical id stable avoids it, since that is what makes CFN
-    // update in place rather than create a second source for the same runtime.
-    //
-    // Hence: pinned ALWAYS, for every stack, with no context flag. A flag would
-    // mean the safe path is the one you have to know to ask for, and the failure
-    // it prevents is a mid-update rollback that says nothing about the flag's
-    // existence. A fresh stack is unaffected either way — it has no live sources
-    // to collide with, and these ids are as valid for it as the library's own.
-    pinLogDeliveryLogicalIds(runtime);
-
-    // --- Session storage (preview) ---
-    // The L2 construct does not yet expose filesystemConfigurations; use the
-    // CFN escape hatch. /mnt/workspace mount backs the persistent cache
-    // shared across tasks in the same repo.
-    const cfnRuntime = runtime.node.defaultChild as CfnResource;
-    cfnRuntime.addPropertyOverride('FilesystemConfigurations', [
-      {
-        SessionStorage: {
-          MountPath: '/mnt/workspace',
-        },
-      },
-    ]);
-
-    // --- IAM grants ---
-    // Per-session IAM scoping: tenant-data access (the four
-    // task_id-partitioned tables + the agent's trace/attachment S3 objects)
-    // is NOT granted to the runtime ExecutionRole. Instead the agent assumes a
-    // per-task SessionRole (created below) with session tags
-    // {user_id, repo, task_id}, and that role carries the tenant-data grants
-    // constrained by aws:PrincipalTag conditions. The runtime role keeps only
-    // non-tenant / shared access:
-    //   - UserConcurrencyTable: user-scoped counter (agent path does not write
-    //     it today; left here for the reconciler/orchestrator parity).
-    //   - GitHub PAT secret: read once at startup, before the agent assumes the
-    //     SessionRole.
-    //   - CloudWatch Logs + AgentCore Memory: shared/non-tenant.
-    userConcurrencyTable.table.grantReadWriteData(runtime);
-    githubTokenSecret.grantRead(runtime);
-    applicationLogGroup.grantWrite(runtime);
-    agentMemory.grantReadWrite(runtime);
-
-    // ADR-019 P1 (context-gated): let the runtime SigV4-invoke the tool Gateway
-    // (``bedrock-agentcore:InvokeGateway``). No-op unless the gateway is
-    // provisioned. The ECS task role gets the parallel grant via the
-    // EcsAgentCluster prop below (substrate parity).
-    toolGateway?.grantInvoke(runtime);
+      // ADR-019 P1 (context-gated): let the runtime SigV4-invoke the tool Gateway
+      // (``bedrock-agentcore:InvokeGateway``). No-op unless the gateway is
+      // provisioned. The ECS task role gets the parallel grant via the
+      // EcsAgentCluster prop below (substrate parity).
+      toolGateway?.grantInvoke(runtime);
+    }
 
     // Grant the runtime invoke on each configured foundation model + its
     // cross-Region inference profile in the configured geography
-    // (`bedrockGeoRegion`, default `us`). The model set is a single source of
+    // (`bedrockGeoRegion` — `global` in the shipped cdk.json, `us` absent any context). The model set is a single source of
     // truth (constructs/bedrock-models.ts), shared with the ECS task role and
     // overridable via the `bedrockModels` CDK context. Each invokable is also
     // collected so the same set is granted to the SessionRole below (for cost
@@ -759,7 +756,37 @@ export class AgentStack extends Stack {
     // Scoping stays per-model (no Resource:'*'); account-level Bedrock access
     // remains the outer gate.
     const invokableBedrockModels: bedrock.IBedrockInvokable[] = [];
-    for (const modelId of resolveBedrockModelIds(this.node)) {
+    const grantedModelIds = resolveBedrockModelIds(this.node);
+
+    // The platform's OWN defaults must be inside the set this deploy grants.
+    //
+    // Asserted HERE rather than in `resolveBedrockModelIds` because this stack is where
+    // the two facts meet: it builds the grant from that list AND injects
+    // `PLATFORM_DEFAULT_MODEL_ID` / `PLATFORM_DEFAULT_AUX_MODEL_ID` as `ANTHROPIC_MODEL`
+    // / `ANTHROPIC_DEFAULT_HAIKU_MODEL` on all three substrates. The resolver only
+    // validates the list's shape and has no business knowing the defaults.
+    //
+    // Without this, `-c bedrockModels='["anthropic.claude-sonnet-4-6"]'` — a documented,
+    // code-change-free override — synthesizes clean while granting only Sonnet profiles
+    // and telling every substrate to invoke Opus 5. Every task with no per-repo pin then
+    // fails at turn 0 with AccessDenied naming no cause. Verified before fixing.
+    //
+    // This is the boundary the PR's other guards missed: a repo naming an ungranted model
+    // is rejected by `repo onboard --model`, a workflow naming one by admission — the
+    // platform naming one for itself was checked nowhere.
+    const ungrantedDefaults = [PLATFORM_DEFAULT_MODEL_ID, PLATFORM_DEFAULT_AUX_MODEL_ID]
+      .filter((m) => !grantedModelIds.includes(m));
+    if (ungrantedDefaults.length > 0) {
+      throw new Error(
+        'Context \'bedrockModels\' omits the platform default model(s) '
+        + `${ungrantedDefaults.map((m) => `'${m}'`).join(' and ')}. Every substrate is told to `
+        + 'invoke them regardless of that list, so tasks with no per-repo model would fail at '
+        + 'turn 0 with AccessDenied. Add them to the override, or change the platform default '
+        + 'in cdk/src/handlers/shared/bedrock-model-constants.ts alongside it.',
+      );
+    }
+
+    for (const modelId of grantedModelIds) {
       const foundationModel = new bedrock.BedrockFoundationModel(modelId, {
         supportsAgents: true,
         supportsCrossRegion: true,
@@ -768,8 +795,10 @@ export class AgentStack extends Stack {
         geoRegion: bedrockGeoRegion,
         model: foundationModel,
       });
-      foundationModel.grantInvoke(runtime);
-      crossRegionProfile.grantInvoke(runtime);
+      if (runtime) {
+        foundationModel.grantInvoke(runtime);
+        crossRegionProfile.grantInvoke(runtime);
+      }
       invokableBedrockModels.push(foundationModel, crossRegionProfile);
     }
 
@@ -779,10 +808,10 @@ export class AgentStack extends Stack {
     // by aws:PrincipalTag conditions so a compromised session reaches only its
     // own task's data. The agent assumes this with refreshable credentials
     // (1h role-chaining cap, tasks run to 8h). Trust admits the runtime
-    // ExecutionRole as the assuming principal; the ECS task role is added in
-    // the ECS block below when that backend is enabled.
+    // roles of the deployed backends as assuming principals. ECS and MicroVM
+    // admit their role during construction below.
     const agentSessionRole = new AgentSessionRole(this, 'AgentSessionRole', {
-      assumingRoles: [runtime.role],
+      ...(runtime ? { assumingRoles: [runtime.role] } : { deferComputeRoleBinding: true }),
       taskScopedTables: [
         taskTable.table,
         taskEventsTable.table,
@@ -802,12 +831,14 @@ export class AgentStack extends Stack {
     // which needs CloudWatch Logs resource policy propagation. Re-enable via
     // tracingEnabled: true once resolved.
 
-    NagSuppressions.addResourceSuppressions(runtime, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
-      },
-    ], true);
+    if (runtime) {
+      NagSuppressions.addResourceSuppressions(runtime, [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'AgentCore runtime requires wildcard permissions for CloudWatch Logs, Bedrock model invocation, and cross-region inference profiles — generated by CDK L2 construct grants',
+        },
+      ], true);
+    }
 
     // Chunk 10 deploy-prep: the Cedar HITL additions (TaskApprovalsTable
     // grant + extra env vars) pushed the runtime
@@ -861,10 +892,12 @@ export class AgentStack extends Stack {
     // ``main.ts``) and the suppression would arrive too late.
     Aspects.of(this).add(overflowSuppressionAspect, { priority: AspectPriority.MUTATING });
 
-    new CfnOutput(this, 'RuntimeArn', {
-      value: runtime.agentRuntimeArn,
-      description: 'ARN of the AgentCore runtime',
-    });
+    if (runtime) {
+      new CfnOutput(this, 'RuntimeArn', {
+        value: runtime.agentRuntimeArn,
+        description: 'ARN of the AgentCore runtime',
+      });
+    }
 
     new CfnOutput(this, 'TaskTableName', {
       value: taskTable.table.tableName,
@@ -874,6 +907,11 @@ export class AgentStack extends Stack {
     new CfnOutput(this, 'TaskEventsTableName', {
       value: taskEventsTable.table.tableName,
       description: 'Name of the DynamoDB task events audit table',
+    });
+
+    new CfnOutput(this, 'BudgetTableName', {
+      value: budgetTable.table.tableName,
+      description: 'Name of the monthly user/team budget configuration and spend table',
     });
 
     new CfnOutput(this, 'TaskNudgesTableName', {
@@ -939,18 +977,15 @@ export class AgentStack extends Stack {
     // gives a bigger, tunable task (see EcsAgentCluster for the exact vCPU/memory
     // sizing and the measurements behind it — a 32 GB task was OOM-killed by a
     // fully parallel build, which is why the build tier serialises with MISE_JOBS=1)
-    // for repos that set ``compute_type: 'ecs'``. GATED on the ``compute_type`` deploy context
-    // (default 'agentcore') — ECS resources only synthesize when you deploy with
-    // ``--context compute_type=ecs``, so the default synth (and the
-    // bootstrap-coverage test that synths with default context) stays
-    // agentcore-only, matching how other optional constructs are context-gated.
-    // (``computeType`` is read near the top of the constructor — TaskApi needs it
-    // for the conditional MicroVM cancel grant.)
+    // for repositories selecting ECS. Resources synthesize when `compute_types`
+    // includes ecs or the legacy `compute_type=ecs` context is used. Default
+    // synthesis remains AgentCore-only. The backend list is resolved near the
+    // top of this constructor so TaskApi can apply the same cancellation gates.
     // Ephemeral bucket for ECS task payloads — the orchestrator writes the
     // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
     // passes only an S3 URI pointer; the container fetches it on boot, the
     // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
-    const ecsPayloadBucket = computeType === 'ecs'
+    const ecsPayloadBucket = ecsEnabled
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
     if (ecsPayloadBucket) {
@@ -965,8 +1000,8 @@ export class AgentStack extends Stack {
     // deliberately modest so an adopter who changes nothing does not pay for the
     // Fargate ceiling — but a large monorepo genuinely needs more, so the knobs
     // have to be reachable WITHOUT editing the construct. Same shape as
-    // ``compute_type`` above:
-    //   cdk deploy -c compute_type=ecs -c ecsBuildTaskCpu=16384 \
+    // ``compute_types`` above:
+    //   cdk deploy -c compute_types=agentcore,ecs -c ecsBuildTaskCpu=16384 \
     //     -c ecsBuildTaskMemoryMiB=122880 -c ecsBuildTaskEphemeralStorageGiB=100
     //   cdk deploy -c ecsExtraBuildEnv='{"MISE_JOBS":"8"}'
     const ecsTaskSizing = resolveEcsTaskSizing(this.node);
@@ -1003,7 +1038,7 @@ export class AgentStack extends Stack {
       // Return URLs the 3LO consent flow may bounce back to (spike F9: allowlist
       // enforced; F11: localhost + hosted coexist so either onboarding mode works
       // off one identity). Both are registered: the CLI picks per call.
-      linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
+      linearIdentityVault = this.linearIdentityVault = new LinearIdentityVault(this, 'LinearIdentityVault', {
         workloadName: linearVaultWorkload,
         allowedReturnUrls: [
           'http://localhost:8080/oauth/callback',
@@ -1029,7 +1064,7 @@ export class AgentStack extends Stack {
       }
     }
 
-    const ecsCluster = computeType === 'ecs'
+    const ecsCluster = ecsEnabled
       ? new EcsAgentCluster(this, 'EcsAgentCluster', {
         ...(ecsTaskSizing !== undefined && { taskSizing: ecsTaskSizing }),
         ...(linearIdentityVault && { linearIdentityVault }),
@@ -1075,10 +1110,9 @@ export class AgentStack extends Stack {
     // task parked on a HITL approval gate stops billing compute while keeping
     // its cloned repo and warm build caches in memory.
     //
-    // Gated exactly like the ECS backend above: resources synthesize only under
-    // ``--context compute_type=lambda-microvm``, so the default synth — and the
-    // bootstrap-coverage test that synths with default context — stays
-    // agentcore-only. The construct itself enforces the ADR's Region gate, so a
+    // Resources synthesize when `compute_types` includes lambda-microvm or the
+    // legacy `compute_type=lambda-microvm` context is used. Default synthesis
+    // remains AgentCore-only. The construct enforces the ADR's Region gate, so a
     // deploy into a Region without Lambda MicroVMs fails at synth rather than on
     // the first task.
     const lambdaMicrovm = lambdaMicrovmEnabled
@@ -1096,14 +1130,6 @@ export class AgentStack extends Stack {
         // AZ describe) need no stack input and are wired inside the construct.
         githubTokenSecret,
         agentMemory,
-        // ADR-021 P2-F4: the SAME log group whose name travels to the guest in
-        // `agentPlatformConfig.logGroupName` below (→ `LOG_GROUP_NAME`). P2
-        // delivered the name without the grant, so the agent's structured per-task
-        // lines and its METRICS_REPORT were AccessDenied on
-        // logs:CreateLogStream and the platform's canonical observability streams
-        // were empty on this backend. Passing the construct (not the name) keeps the
-        // grant and the delivered value derived from one object.
-        applicationLogGroup,
         // Resolved above TaskApi — see `microvmImageInputs`.
         ...microvmImageInputs,
       })
@@ -1116,19 +1142,45 @@ export class AgentStack extends Stack {
     // unconfigured one never asks for it.
     microvmImageArnHolder = lambdaMicrovm?.imageArn;
 
-    // Advertise which compute substrate this deploy actually provisioned, so the
-    // CLI can refuse to onboard a repo as ``compute_type: ecs`` when the ECS gate
-    // wasn't on (``--context compute_type=ecs``) — otherwise that mismatch only
-    // surfaces per-task as "ECS compute strategy requires ECS_CLUSTER_ARN…" at
-    // runtime. ``ecs`` implies the AgentCore runtime is ALSO available (the ECS
-    // gate is additive), so an agentcore repo works on either substrate — and the
-    // same holds for ``lambda-microvm`` (ADR-021).
+    const computeRoles = [runtime?.role, ecsCluster?.taskDefinition.taskRole, lambdaMicrovm?.executionRole]
+      .filter((role): role is iam.IRole => role !== undefined);
+    const selectedComputeRole = computeRoles[0];
+    ecsClusterArnHolder = ecsCluster?.cluster.clusterArn;
+    agentLogGroup ??= ecsCluster?.logGroup ?? lambdaMicrovm?.logGroup;
+    if (!selectedComputeRole || !agentLogGroup) throw new Error('Selected compute backend did not provide its role and logs');
+    if (lambdaMicrovm) {
+      agentLogGroup.grantWrite(lambdaMicrovm.executionRole);
+      toolGateway?.grantInvoke(lambdaMicrovm.executionRole);
+    }
+
+    // Additive stacks keep the comma-list contract existing CLIs parse; exclusive
+    // stacks name their only backend.
     new CfnOutput(this, 'ComputeSubstrate', {
-      value: ecsCluster ? 'ecs' : (lambdaMicrovm ? 'lambda-microvm' : 'agentcore'),
-      description: 'Compute substrate provisioned by this deploy: "agentcore" (default), "ecs" '
-        + '(deployed with --context compute_type=ecs; adds the Fargate substrate alongside AgentCore) '
-        + 'or "lambda-microvm" (--context compute_type=lambda-microvm; adds the Lambda MicroVMs '
-        + 'substrate alongside AgentCore).',
+      value: computeTypes.join(','),
+      description: 'Deployed compute backends; with ComputeDeploymentMode=exclusive, the only one.',
+    });
+    new CfnOutput(this, 'ComputeTypes', {
+      value: computeTypes.join(','),
+      description: 'Every deployed compute backend in order; the first is the repository default.',
+    });
+    new CfnOutput(this, 'ComputeDeploymentMode', {
+      value: computeTypes.length === 1 ? 'exclusive' : 'additive',
+      description: 'exclusive: ComputeSubstrate is the only deployed backend. additive: see ComputeTypes.',
+    });
+
+    // Both outputs are consumed by `platform doctor` and `repo onboard --model` to
+    // reject an ungranted or wrong-geography model before a task reaches turn 0.
+    new CfnOutput(this, 'BedrockModelIds', {
+      value: resolveBedrockModelIds(this.node).join(','),
+      description: 'Comma-separated BARE foundation-model ids this deploy grants. '
+        + 'Invoked as `<BedrockGeoRegion>.<modelId>`.',
+    });
+
+    new CfnOutput(this, 'BedrockGeoRegion', {
+      value: bedrockGeoRegion,
+      description: 'Cross-Region inference-profile geography this deploy grants (the '
+        + '`bedrockGeoRegion` context key; "global" in the shipped cdk.json, "us" if no '
+        + 'context is supplied at all). Model ids are invoked as `<geo>.<modelId>`.',
     });
 
     if (lambdaMicrovm) {
@@ -1180,7 +1232,8 @@ export class AgentStack extends Stack {
       userConcurrencyTable: userConcurrencyTable.table,
       maxConcurrentTasksPerUser,
       repoTable: repoTable.table,
-      runtimeArn: runtime.agentRuntimeArn,
+      deployedComputeTypes: computeTypes,
+      runtimeArn: runtime?.agentRuntimeArn,
       githubTokenSecretArn: githubTokenSecret.secretArn,
       memoryId: agentMemory.memory.memoryId,
       guardrailId: inputGuardrail.guardrailId,
@@ -1203,7 +1256,7 @@ export class AgentStack extends Stack {
       agentPlatformConfig: {
         taskApprovalsTableName: taskApprovalsTable.table.tableName,
         nudgesTableName: taskNudgesTable.table.tableName,
-        logGroupName: applicationLogGroup.logGroupName,
+        logGroupName: agentLogGroup.logGroupName,
         // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket
         // (`traceArtifactsBucket`), exactly as `ARTIFACTS_BUCKET_NAME` and
         // `TRACE_ARTIFACTS_BUCKET_NAME` do in the AgentCore runtime env block above
@@ -1223,22 +1276,20 @@ export class AgentStack extends Stack {
         // Same helper, same resolved geography as the AgentCore runtime env
         // above (#764) — the two substrates cannot be told to call different
         // inference profiles.
-        anthropicDefaultHaikuModel: haikuInferenceProfileId(bedrockGeoRegion),
-        // Substrate parity for the Identity vault: the AgentCore runtime gets these
-        // as env and the ECS container via EcsAgentCluster, so a MicroVM guest must
-        // receive them too or its agent skips vault minting and falls back to a
-        // Secrets-Manager token a vault-managed workspace does not have — losing
-        // reactions and state transitions on work that otherwise succeeds. Forwarded
-        // as platform_config because a snapshot must not bake configuration in.
-        ...(linearIdentityVault
-          ? {
-            linearVaultEnabled: 'true',
-            linearWorkloadIdentityName: linearVaultWorkload,
-          }
-          : {}),
+        // `inferenceProfileId(geo, AUX)` rather than main's `haikuInferenceProfileId(geo)`:
+        // that helper was removed on this branch when the two duplicate haiku paths were
+        // collapsed into one, so main's call site no longer resolves.
+        anthropicDefaultHaikuModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
+        // The MAIN model, delivered the same way for the same reason. Only the auxiliary
+        // one was, so on this substrate the main model came from a literal in
+        // agent/src/config.py that a geography change does not touch: a non-default
+        // `bedrockGeoRegion` granted one geography while the agent asked for another,
+        // and every task with no per-repo override failed at turn 0 with AccessDenied.
+        anthropicModel: inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_MODEL_ID),
+        ...(toolGateway && { toolGatewayUrl: toolGateway.gatewayUrl }),
       },
       // Route ``compute_type: 'ecs'`` repos to the Fargate cluster above —
-      // only when the cluster was synthesized (deploy --context compute_type=ecs).
+      // only when ECS is included in the deployment's backend list.
       ...(ecsCluster && {
         ecsConfig: {
           clusterArn: ecsCluster.cluster.clusterArn,
@@ -1343,8 +1394,8 @@ export class AgentStack extends Stack {
 
     // --- Operator dashboard ---
     new TaskDashboard(this, 'TaskDashboard', {
-      applicationLogGroup,
-      runtimeArn: runtime.agentRuntimeArn,
+      applicationLogGroup: agentLogGroup,
+      runtimeArn: runtime?.agentRuntimeArn,
     });
 
     // --- Slack integration (always deployed — secrets populated post-deploy) ---
@@ -1353,6 +1404,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
       guardrailId: inputGuardrail.guardrailId,
@@ -1428,7 +1480,7 @@ export class AgentStack extends Stack {
     // ambient credentials. The ECS task-role grant is wired inside
     // EcsAgentCluster, and the webhook-processor grant inside LinearIntegration.
     if (linearIdentityVault) {
-      linearIdentityVault.grantMintToken(runtime.role);
+      if (runtime) linearIdentityVault.grantMintToken(runtime.role);
       // MicroVM parity: the guest self-mints with its AMBIENT identity, which is the
       // compute's execution role — not the tenant-scoped session role. Without this
       // the platform_config above would tell the agent to use the vault and the call
@@ -1439,12 +1491,13 @@ export class AgentStack extends Stack {
     }
 
     // --- Linear integration (inbound webhook + agent-side MCP outbound) ---
-    const linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
+    const linearIntegration = this.linearIntegration = new LinearIntegration(this, 'LinearIntegration', {
       identityVault: linearIdentityVault,
       api: taskApi.api,
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       repoTable: repoTable.table,
       // Enables the webhook processor's orchestration path
       // (seed DAG + release roots). Sets ORCHESTRATION_TABLE_NAME.
@@ -1472,6 +1525,7 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       orchestrationTable: orchestrationTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
     });
     // createTaskCore (run inside the reconciler) screens descriptions with
@@ -1503,6 +1557,11 @@ export class AgentStack extends Stack {
       'MAX_CONCURRENT_TASKS_PER_USER',
       String(maxConcurrentTasksPerUser),
     );
+    orchestrationReconciler.fn.addEnvironment('USER_POOL_ID', taskApi.userPool.userPoolId);
+    orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [taskApi.userPool.userPoolArn],
+    }));
     orchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ['lambda:InvokeFunction'],
       resources: [orchestrator.alias.functionArn],
@@ -1593,6 +1652,13 @@ export class AgentStack extends Stack {
       'MAX_CONCURRENT_TASKS_PER_USER',
       String(maxConcurrentTasksPerUser),
     );
+    budgetTable.table.grantReadData(strandedOrchestrationReconciler.fn);
+    strandedOrchestrationReconciler.fn.addEnvironment('BUDGET_TABLE_NAME', budgetTable.table.tableName);
+    strandedOrchestrationReconciler.fn.addEnvironment('USER_POOL_ID', taskApi.userPool.userPoolId);
+    strandedOrchestrationReconciler.fn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:AdminListGroupsForUser'],
+      resources: [taskApi.userPool.userPoolArn],
+    }));
 
     // Phase 2.0b-O2: agent runtime reads the per-workspace Linear OAuth
     // token directly from Secrets Manager. The CLI (`bgagent linear setup`)
@@ -1611,17 +1677,19 @@ export class AgentStack extends Stack {
     // For a 24h Linear access-token TTL, the practical impact is that
     // a stale token in the cache forces the agent's next call to fail
     // closed — preferable to a trust gap.
-    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-      ],
-    }));
+    for (const role of computeRoles) {
+      role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bgagent-linear-oauth-*',
+          }),
+        ],
+      }));
+    }
 
     // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
     // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
@@ -1699,6 +1767,7 @@ export class AgentStack extends Stack {
       userPool: taskApi.userPool,
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
+      budgetTable: budgetTable.table,
       orchestrationTable: orchestrationTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
       maxConcurrentTasksPerUser: maxConcurrentTasksPerUser,
@@ -1744,17 +1813,19 @@ export class AgentStack extends Stack {
     // any tenant's OAuth bundle. Lambdas (trusted code in this stack)
     // own the in-place refresh path; the agent proceeds with whatever
     // token Lambdas have most-recently written.
-    runtime.role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+    for (const role of computeRoles) {
+      role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          Stack.of(this).formatArn({
+            service: 'secretsmanager',
+            resource: 'secret',
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+            resourceName: 'bgagent-jira-oauth-*',
+          }),
+        ],
+      }));
+    }
 
     // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
     // grant into the orchestrator so the concurrency-cap rejection path
@@ -1890,6 +1961,7 @@ export class AgentStack extends Stack {
       // workspace registry so token resolution reuses the per-workspace
       // OAuth secrets created by `bgagent linear setup`.
       linearWorkspaceRegistryTable: linearIntegration.workspaceRegistryTable,
+      jiraWorkspaceRegistryTable: jiraIntegration.workspaceRegistryTable,
       // Persist screenshot_url on the deploy task so the
       // orchestration reconciler can embed the integration node's combined
       // preview in the parent epic panel.
@@ -1953,6 +2025,9 @@ export class AgentStack extends Stack {
       fanOutConsumer.dlqDepthAlarm,
       approvalMetricsPublisher.dlqAlarm,
       githubScreenshot.processorDlqDepthAlarm,
+      budgetAlerts.warningAlarm,
+      budgetAlerts.exceededAlarm,
+      budgetAlerts.teamMembershipUnresolvedAlarm,
     );
 
     // #812: the Linear webhook processor announces a revoked authorization here.
@@ -2086,6 +2161,22 @@ export class AgentStack extends Stack {
       ]),
     });
 
+    // Apply after all consumers exist: with no Blueprint definitions, DNS or
+    // model logging creates the shared AwsCustomResource provider instead.
+    NagSuppressions.addResourceSuppressionsByPath(this, [
+      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource`,
+      `${this.stackName}/AWS679f53fac002430cb0da5b7982bd2287/Resource`,
+    ], [
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'AwsCustomResource singleton Lambda uses AWS managed AWSLambdaBasicExecutionRole — required by CDK custom-resources framework',
+      },
+      {
+        id: 'AwsSolutions-L1',
+        reason: 'AwsCustomResource singleton Lambda runtime is managed by the CDK custom-resources framework',
+      },
+    ]);
+
     NagSuppressions.addResourceSuppressions(invocationLogging, [
       {
         id: 'AwsSolutions-IAM5',
@@ -2121,109 +2212,5 @@ export class AgentStack extends Stack {
       value: taskApi.appClientId,
       description: 'Cognito App Client ID',
     });
-  }
-}
-
-/**
- * A churned log-delivery resource to re-pin: the construct child id under the
- * Runtime, the logical id CFN already has deployed, and (for the account-unique
- * Source/Destination kinds) the deployed ``Name``. ``liveName`` is omitted for
- * Delivery links, which have no Name.
- */
-interface PinnedLogResource {
-  readonly childId: string;
-  readonly liveLogicalId: string;
-  readonly liveName?: string;
-}
-
-/**
- * Log-delivery logical ids to keep stable, keyed by stack name. Consulted on
- * every synth — see {@link pinLogDeliveryLogicalIds} for why there is no flag.
- *
- * Each entry records what CloudFormation already has for a stack deployed before
- * the library renamed these resources. Read from `aws cloudformation
- * list-stack-resources` against the live stack, so the ids are observed, not
- * constructed — the hash in each one is not reproducible from the construct path
- * alone, which is precisely why they have to be written down.
- *
- * An entry stays until its stack is gone. Removing one while the stack still
- * exists re-introduces the rename and the failed update that comes with it.
- */
-const PINNED_LOG_DELIVERY_BY_STACK: Record<string, readonly PinnedLogResource[]> = {
-  'backgroundagent-dev': [
-    {
-      childId: 'ApplicationLogsDeliverySource',
-      liveLogicalId: 'RuntimeCDKSourceAPPLICATIONLOGSbackgroundagentdevRuntimeBC0AE9ED96A02E02',
-      liveName: 'cdk-applicationlogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    },
-    {
-      childId: 'UsageLogsDeliverySource',
-      liveLogicalId: 'RuntimeCDKSourceUSAGELOGSbackgroundagentdevRuntimeBC0AE9ED544FBB22',
-      liveName: 'cdk-usagelogs-source-backgroundagentdevRuntimeBC0AE9ED',
-    },
-    {
-      childId: 'ApplicationLogsDest',
-      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8DestapplicationlogsE09F77DC',
-      liveName: 'cdk-cwl-Destapplication-logs-dest-backgrounp454A95E829BF8A27',
-    },
-    {
-      childId: 'UsageLogsDest',
-      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Destusagelogs9AB608D0',
-      liveName: 'cdk-cwl-Destusage-logs-dest-backgroundagroup7FA1FA67A8A16CEE',
-    },
-    // Delivery links: logical-id pin only (no Name — unique per source/dest pair).
-    {
-      childId: 'ApplicationLogsDelivery',
-      liveLogicalId: 'RuntimeCdkLogGroupApplicationLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeApplicationLogGroup454A95E8Delivery92FE492C',
-    },
-    {
-      childId: 'UsageLogsDelivery',
-      liveLogicalId: 'RuntimeCdkLogGroupUsageLogsDeliverybackgroundagentdevRuntimeBC0AE9EDbackgroundagentdevRuntimeUsageLogGroup7FA1FA67Delivery40F023D7',
-    },
-  ],
-};
-
-/**
- * Pin the auto-created log-delivery resources to stable logical ids, ALWAYS.
- *
- * These resources are created for us by the AgentCore Runtime and named after
- * whatever construct path the library uses internally, so a library-side rename
- * silently renames them — and a renamed resource is, to CloudFormation, a new
- * one to create before the old is deleted. That is fatal here: a DeliverySource
- * is unique per (resource ARN, log type) account-wide, the runtime ARN is
- * unchanged by a rename, so the create collides with the live source and the
- * update rolls the whole stack back. Owning the ids ourselves decouples us from
- * the library's internal naming.
- *
- * Applied unconditionally rather than behind a flag. Three cases, all safe:
- *
- *  - An existing stack in the account that owns these resources: the ids match
- *    what CloudFormation already recorded, so it updates them in place. This is
- *    the case that was broken.
- *  - A fresh stack or account: nothing owns these names yet, so they create
- *    normally. The ids are ours rather than the library's, which is the point;
- *    the values themselves carry no meaning beyond being stable.
- *  - Any other name: the ids embed the stack name, so each stack gets its own.
- *
- * The values were read off a stack deployed before the rename. Do not "tidy"
- * them — they are a record of what CloudFormation already has, and editing one
- * re-breaks exactly the update path this exists to protect.
- */
-function pinLogDeliveryLogicalIds(runtime: agentcore.Runtime): void {
-  const stack = Stack.of(runtime);
-  const pins = PINNED_LOG_DELIVERY_BY_STACK[stack.stackName];
-  // Only the stack these ids were recorded from can use them: they embed that
-  // stack's name. Any other stack keeps the library's own naming, which is
-  // correct for it — it has no pre-rename resources to line up with.
-  if (!pins) return;
-
-  for (const pin of pins) {
-    const res = runtime.node.tryFindChild(pin.childId) as CfnResource | undefined;
-    // A future library rename moves the child, so the pin stops matching. Skip
-    // rather than throw: the stack still deploys, and the next update that hits
-    // the collision is the signal to re-record the ids from the live stack.
-    if (!res) continue;
-    res.overrideLogicalId(pin.liveLogicalId);
-    if (pin.liveName !== undefined) res.addPropertyOverride('Name', pin.liveName);
   }
 }

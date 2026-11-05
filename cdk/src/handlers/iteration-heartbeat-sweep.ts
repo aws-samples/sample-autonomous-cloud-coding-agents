@@ -39,6 +39,8 @@ import { DynamoDBClient, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { planHeartbeat, type HeartbeatTaskView } from './shared/iteration-heartbeat';
 import { terminalReplyClaimed } from './shared/iteration-reply-claim';
+import { buildAdfDocument, parseMarkdownRuns } from './shared/jira-feedback';
+import { updateJiraIterationComment } from './shared/jira-preview';
 import { logger } from './shared/logger';
 import {
   channelForSource,
@@ -147,6 +149,16 @@ export async function handler(): Promise<void> {
       const channel = channelForSource(plan.channelSource, CHANNEL_REGISTRY_TABLES);
       if (!channel) continue;
       const issue = { issueId: plan.issueId, credentialsRef: plan.credentialsRef };
+      if (plan.channelSource === 'jira') {
+        const result = await updateJiraIterationComment(
+          docDdb, TASK_TABLE, plan.taskId,
+          { cloudId: plan.credentialsRef, registryTableName: CHANNEL_REGISTRY_TABLES.jira! },
+          plan.issueId, plan.replyId,
+          { body: buildAdfDocument(plan.body.split('\n').map(parseMarkdownRuns)), terminal: false },
+        );
+        if (result.ok) edited += 1;
+        continue;
+      }
       const ref = plan.channelSource === 'linear' && plan.parentCommentId
         ? await channel.upsertThreadedReply?.(
           issue,

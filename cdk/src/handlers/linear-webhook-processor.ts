@@ -27,6 +27,7 @@ import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-r
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
+import { readStartClaim, releaseStartClaim } from './shared/linear-console';
 import {
   deleteComment,
   fetchRecentComments,
@@ -46,10 +47,11 @@ import {
   renderTaskLookupFailedNudge,
   renderWrongMentionNudge,
 } from './shared/linear-notes';
-import { resolveLinearOauthToken } from './shared/linear-oauth-resolver';
+import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
 import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
+import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
 import { makeLinearChannel } from './shared/orchestration-channel-linear';
 import {
@@ -74,6 +76,7 @@ import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
@@ -86,6 +89,8 @@ const ddb = makeDocClient();
 const PROJECT_MAPPING_TABLE = process.env.LINEAR_PROJECT_MAPPING_TABLE_NAME!;
 const USER_MAPPING_TABLE = process.env.LINEAR_USER_MAPPING_TABLE_NAME!;
 const WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
+/** Holds console "start" claims (see shared/linear-console.ts); optional so older wiring keeps working. */
+const WEBHOOK_DEDUP_TABLE = process.env.LINEAR_WEBHOOK_DEDUP_TABLE_NAME;
 // Sub-issue orchestration: name of OrchestrationTable. Unset until the
 // orchestration stack is deployed — while unset, the parent/sub-issue path is
 // fully dormant and the handler behaves exactly as one-issue → one-task.
@@ -515,7 +520,7 @@ async function postIterationAck(
   registryTableName: string,
   issueId: string,
   replyTargetId: string,
-): Promise<string | null> {
+): Promise<LookupResult<string>> {
   try {
     const ref = await channelFor(registryTableName).upsertThreadedReply?.(
       issueRef(issueId, workspaceId),
@@ -524,12 +529,12 @@ async function postIterationAck(
     );
     // An empty id means the surface posted but can't address the reply later —
     // report "no reply to mature" rather than stamping a blank id on the task.
-    return ref?.commentId || null;
+    return ref?.commentId ? lookupFound(ref.commentId) : LOOKUP_ABSENT;
   } catch (err) {
     logger.warn('Iteration ack reply failed (non-fatal)', {
       issue_id: issueId, error: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return lookupFailed(err);
   }
 }
 
@@ -621,6 +626,16 @@ interface LinearCommentEvent {
 
 interface ProcessorEvent {
   readonly raw_body: string;
+  /**
+   * Whether the stack-wide secret — bound to no workspace — is what verified this
+   * delivery, as reported by the receiver.
+   *
+   * On that path the body's `organizationId` is claimed rather than attested, so it must
+   * not be used to select a tenant. Absent is read as `false`, which is correct for the
+   * per-workspace path and is also what an in-flight invocation from a previous version
+   * looks like during a deploy.
+   */
+  readonly verified_via_stack_wide?: boolean;
 }
 
 /**
@@ -643,10 +658,11 @@ interface ProcessorEvent {
  * workspace does not have: no reactions and no state transitions, on work that
  * otherwise succeeded.
  *
- * Two checks guard it, because they fail for different reasons. The source-level one
- * (in the test file) catches a builder nobody exercised, but keys off the object-literal
- * form and cannot see a builder that assigns onto an existing object; the behavioural
- * one asserts the fields actually reach `channel_metadata`.
+ * Three checks guard it, because they fail for different reasons. Two source-level ones
+ * (in the test file) catch a builder nobody exercised — one keys off the object-literal
+ * form, the other off the assignment form, so a builder that writes onto an existing
+ * object is covered too (#879). The behavioural one asserts the fields actually reach
+ * `channel_metadata`.
  */
 function vaultMetadata(resolved: { providerName?: string; vaultUserId?: string }): Record<string, string> {
   return {
@@ -687,6 +703,33 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
+  // A delivery verified by the stack-wide secret carries no proof of WHICH workspace
+  // sent it — that secret is bound to none of them — so the body's `organizationId`
+  // is a claim. Replace it with the only workspace it could mean, and drop the delivery
+  // when there is no single answer.
+  //
+  // Rewritten on the payload rather than threaded as a parameter because the workspace
+  // id is read from ~6 places downstream (task attribution, feedback, the comment path).
+  // Passing it alongside would leave every one of those a site where the claimed value
+  // could still be picked up by mistake; overwriting the untrusted field means the
+  // attested value is the only one reachable.
+  if (event.verified_via_stack_wide) {
+    const bound = await resolveSoleActiveLinearWorkspace(ddb, WORKSPACE_REGISTRY_TABLE);
+    if (!bound) {
+      logger.warn('Dropping stack-wide-verified Linear delivery: cannot determine the sending workspace', {
+        claimed_workspace_id: payload.organizationId,
+      });
+      return;
+    }
+    if (payload.organizationId && payload.organizationId !== bound) {
+      logger.warn('Ignoring body organizationId on a stack-wide-verified delivery; binding to the sole active workspace', {
+        claimed_workspace_id: payload.organizationId,
+        bound_workspace_id: bound,
+      });
+    }
+    (payload as { organizationId?: string }).organizationId = bound;
+  }
+
   // A Comment with an @bgagent mention on an orchestrated sub-issue
   // re-iterates that sub-issue's PR (the reconciler then cascades the
   // re-stack). Handled on a separate path from Issue → task creation.
@@ -718,6 +761,38 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       mappingItem = mapping.Item;
     }
   }
+
+  // The mapping table is keyed on the project id alone, so `projectId` selects a
+  // repository on its own — and it arrives in the request body. Check the mapping
+  // against the workspace the delivery claims to be from, so naming another
+  // workspace's project cannot steer a task at that workspace's repository.
+  //
+  // Drop rather than reply. The reply would go to the sender's own workspace, and
+  // "that project belongs to someone else" both confirms the project exists and tells
+  // a prober the attempt was seen. The log line is the diagnostic surface instead.
+  const mappedWorkspaceId = mappingItem?.linear_workspace_id as string | undefined;
+  if (mappingItem && mappedWorkspaceId && mappedWorkspaceId !== payload.organizationId) {
+    logger.warn('Linear project is mapped to a different workspace than this webhook — dropping', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+      mapped_workspace_id: mappedWorkspaceId,
+    });
+    return;
+  }
+  if (mappingItem && !mappedWorkspaceId) {
+    // Allowed for now: rows written before the owning workspace was recorded have
+    // nothing to check against, and rejecting them would break working installs on
+    // deploy. Re-running `bgagent linear onboard-project` records the owner, and
+    // `bgagent platform doctor` reports what is left (failing once more than one
+    // workspace is active), which is what makes it safe to turn this into a rejection later.
+    logger.warn('Linear project mapping records no owning workspace — cannot verify the tenant', {
+      issue_id: issue.id,
+      linear_project_id: projectId,
+      event_workspace_id: payload.organizationId,
+    });
+  }
+
   const labelFilter = (mappingItem?.label_filter as string | undefined) ?? DEFAULT_LABEL_FILTER;
 
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do
@@ -841,7 +916,18 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const platformUserId = await lookupPlatformUser(workspaceId, actorId);
+  // A label added from the operator console arrives with ABCA's own Linear app as the
+  // actor, which no ABCA user is linked to. The console left a single-use claim naming
+  // the user who clicked Start; it is consulted only when the actor is unlinked, so a
+  // linked person adding the label is always attributed to themselves.
+  const linkedUser = await lookupPlatformUser(workspaceId, actorId);
+  const claimUser = linkedUser ? null : await readConsoleStartClaim(issue.id, workspaceId);
+  const platformUserId = linkedUser ?? claimUser;
+  // The claim is released only once the work is dispatched, so a retried delivery after
+  // a failure below can still attribute the task; the claim's TTL covers the rest.
+  const releaseClaim = async () => {
+    if (claimUser) await releaseConsoleStartClaim(issue.id, claimUser);
+  };
   if (!platformUserId) {
     logger.warn('Linear actor has no linked platform user — skipping task creation', {
       linear_workspace_id: workspaceId,
@@ -856,7 +942,9 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     return;
   }
 
-  const channelMetadata: Record<string, string> = {
+  // `let` because the vault branch below re-derives it by spread rather than mutating
+  // it in place; see the comment there for why spread and not `Object.assign` (#879).
+  let channelMetadata: Record<string, string> = {
     linear_issue_id: issue.id,
     linear_workspace_id: workspaceId,
     linear_project_id: projectId,
@@ -914,16 +1002,20 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // (config.py) can mint its own Linear token via the vault. Absent ⇒ the
     // agent stays on the Secrets-Manager path.
     if (resolved.providerName) {
-      // Through the shared helper, not hand-rolled. This builder assigns onto an
-      // existing object rather than constructing a literal, which is what hid it from
-      // the source-level guard in cdk/test/handlers/linear-webhook-processor.test.ts —
-      // that guard keys off the literal
-      // form, so the ONE path it was written for was the one path it never covered.
-      // The subject inside the helper is recorded rather than derived from the
-      // workspace id, so a single consent can onboard a workspace whose org UUID is
-      // not yet known; absent ⇒ the agent derives the legacy form.
-      channelMetadata.linear_workspace_id = workspaceId;
-      Object.assign(channelMetadata, vaultMetadata(resolved));
+      // Spread the helper rather than restating its fields: `vaultMetadata` is the one
+      // place that says which vault fields a task carries, so a builder that hand-rolls
+      // them drops whatever field is added there next. (The subject it emits is the
+      // recorded one, not derived from the workspace id, so a single consent can onboard
+      // a workspace whose org UUID is not yet known; absent ⇒ the agent derives the
+      // legacy form.)
+      //
+      // SPREAD, not `Object.assign` — a security property, not a style choice.
+      // `Object.assign` copies via [[Set]], which invokes the `__proto__` setter, so a
+      // source carrying that key would repoint this object's prototype; spread defines
+      // own properties, where the same key lands inert. Unreachable today (the helper
+      // returns a literal with two hard-coded keys), but the capability is what semgrep
+      // rates Blocking. Guard history and the pre-push consequence: #879.
+      channelMetadata = { ...channelMetadata, ...vaultMetadata(resolved) };
     }
     resolvedAccessToken = resolved.accessToken;
     // Probe the issue once for native paperclip attachments + project docs. The
@@ -1173,14 +1265,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
             const settled = seedHadTerminalFailure && postReleaseSnapshot.children.every(
               (c) => c.child_status === 'succeeded' || c.child_status === 'failed' || c.child_status === 'skipped',
             );
-            const commentId = await upsertEpicPanel({
+            const commentId = lookupValueOr(await upsertEpicPanel({
               channel: channelFor(WORKSPACE_REGISTRY_TABLE),
               parent: issueRef(issue.id, workspaceId),
               children: postReleaseSnapshot.children,
               ...seedFailureReasons(postReleaseSnapshot.children),
               inProgress: !settled,
               mirrorParentState: true,
-            });
+            }), null);
             if (commentId) {
               await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, commentId);
             }
@@ -1195,6 +1287,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
       // The parent issue itself spawns no task; the reconciler (off the
       // TaskTable stream) releases downstream children as roots succeed.
+      await releaseClaim();
       return;
     }
     if (discovery.kind === 'extended') {
@@ -1214,6 +1307,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         logger.info('Linear orchestration re-trigger — no new sub-issues to add', {
           issue_id: issue.id, orchestration_id: discovery.orchestrationId,
         });
+        await releaseClaim();
         return;
       }
       let snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
@@ -1283,13 +1377,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           const fresh = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
           const children = fresh?.children ?? snapshot.children;
           const meta = (fresh ?? snapshot).meta;
-          const newId = await upsertEpicPanel({
+          const newId = lookupValueOr(await upsertEpicPanel({
             channel: channelFor(WORKSPACE_REGISTRY_TABLE),
             parent: issueRef(issue.id, workspaceId),
             ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
             children,
             inProgress: true, // the extend re-opened the epic
-          });
+          }), null);
           if (newId && meta.status_comment_id === undefined) {
             await setStatusCommentId(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId, newId);
           }
@@ -1301,6 +1395,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
           });
         }
       }
+      await releaseClaim();
       return;
     }
     // discovery.kind === 'single_task' → the issue had no sub-issues, so fall
@@ -1433,6 +1528,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     repo,
     request_id: requestId,
   });
+  await releaseClaim();
 
   // ADR-016 P4.5: post the first-run "🤖 Starting" courtesy comment from the
   // Lambda tier. This used to be the agent's own `mcp__linear-server__save_comment`
@@ -1679,13 +1775,13 @@ async function maybeRetryTerminalEpic(
         );
       }
       // Post the panel FRESH (no statusCommentId → new comment, below the note).
-      const newPanelId = await upsertEpicPanel({
+      const newPanelId = lookupValueOr(await upsertEpicPanel({
         channel,
         parent: parentRef,
         children,
         inProgress: true,
         mirrorParentState: true,
-      });
+      }), null);
       if (newPanelId) {
         await setStatusCommentId(ddb, ORCHESTRATION_TABLE, orchestrationId, newPanelId);
       }
@@ -1831,6 +1927,33 @@ async function handleNearMissMention(payload: LinearCommentEvent): Promise<void>
  * a non-orchestration comment, a missing mention, or an un-started sub-issue is
  * a clean no-op (no failure comment — comments are conversational).
  */
+/**
+ * Whether the work a comment would act on belongs to the workspace that sent it.
+ *
+ * The comment path finds its target by issue id: an orchestration (keyed on a hash of
+ * that id) or the newest task on it. Those lookups are not scoped to a workspace, and
+ * the work that follows runs on the target's repo as its original requester, so the
+ * target's recorded workspace is matched against the delivery's here. This keeps the
+ * comment path consistent with the project-mapping check in the handler.
+ *
+ * A target that records no workspace is not acted on: every orchestration and Linear
+ * task records one, so absence means the row is not one this path should act on.
+ * No reply is posted, matching the project-mapping check.
+ */
+function commentTargetBelongsToWorkspace(
+  ownerWorkspaceId: string | undefined,
+  workspaceId: string,
+  issueId: string,
+): boolean {
+  if (ownerWorkspaceId && ownerWorkspaceId === workspaceId) return true;
+  logger.warn('Comment trigger: commented issue belongs to a different workspace than this webhook — dropping', {
+    linear_issue_id: issueId,
+    event_workspace_id: workspaceId,
+    owner_workspace_id: ownerWorkspaceId,
+  });
+  return false;
+}
+
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
@@ -1910,6 +2033,7 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   const ownOrchestrationId = deriveOrchestrationId(commentedIssueId);
   const parentSnapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, ownOrchestrationId);
   if (parentSnapshot && parentSnapshot.meta.parent_issue_ref === commentedIssueId) {
+    if (!commentTargetBelongsToWorkspace(parentSnapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
     await handleParentEpicCommentTrigger({
       orchestrationId: ownOrchestrationId,
       snapshot: parentSnapshot,
@@ -1929,12 +2053,37 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
   // the issue may still be a plain (non-orchestration) issue that ABCA opened
   // a PR for — fall through to the standalone path, which iterates
   // on that PR with the same 👀/reply ack but no dependency cascade.
-  const parentId = await fetchIssueParentId(resolved.accessToken, commentedIssueId);
+  const parentResult = await fetchIssueParentId(resolved.accessToken, commentedIssueId);
+  if (isLookupFailure(parentResult)) {
+    // The parent lookup broke (Linear outage / GraphQL error). Do NOT fall
+    // through to the standalone path — that would silently downgrade an
+    // orchestration child (no dependency cascade) on a transient error.
+    //
+    // THROW rather than return: this processor is async-invoked
+    // (`InvocationType: 'Event'` in linear-webhook.ts), so a plain `return` is a
+    // SUCCESSFUL invocation — Lambda discards the event and the comment is
+    // dropped permanently and invisibly. Only a thrown error spends the
+    // async-invoke retry budget. And the processor's retries are the ONLY replay
+    // available: the receiver already wrote the dedup row (8h TTL) and 200'd
+    // Linear, and it rolls that row back only on *invoke* failure — so Linear's
+    // own redelivery is deduped away, and no reconciler re-drives webhook
+    // deliveries. Nothing user-visible has been posted on this path yet (the 👀
+    // is posted downstream), and everything above is a read, so a retry is safe.
+    logger.warn('Comment trigger: issue-parent lookup failed — retrying the delivery (not downgrading to standalone)', {
+      issue_id: commentedIssueId,
+      error: parentResult.error instanceof Error ? parentResult.error.message : String(parentResult.error),
+    });
+    throw parentResult.error instanceof Error
+      ? parentResult.error
+      : new Error(`Linear issue-parent lookup failed: ${String(parentResult.error)}`);
+  }
+  const parentId = lookupValueOr(parentResult, null);
   const orchestrationId = parentId ? deriveOrchestrationId(parentId) : null;
   const snapshot = orchestrationId
     ? await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId)
     : null;
   const child = snapshot?.children.find((c) => c.sub_issue_id === commentedIssueId);
+  if (snapshot && !commentTargetBelongsToWorkspace(snapshot.meta.credentials_ref, workspaceId, commentedIssueId)) return;
   if (!snapshot || !child || !child.child_task_id) {
     await handleStandaloneCommentTrigger({
       subIssueId: commentedIssueId,
@@ -2083,8 +2232,34 @@ async function handleParentEpicCommentTrigger(args: {
     return;
   }
 
-  const prNumber = await resolveChildPrNumber(target.child_task_id);
-  if (prNumber === null) {
+  const prNumberResult = await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id);
+  if (isLookupFailure(prNumberResult)) {
+    // The read broke — don't tell the user "no PR yet" (a distinct, misleading
+    // state), and don't iterate on a PR number we couldn't read.
+    //
+    // ANSWER rather than retry. Unlike the issue-parent site above, this path has
+    // already won the one-time ack claim and posted the 👀, and `claimCommentAck`
+    // is never released — so throwing to spend the async-invoke retry budget
+    // would land on `!won` and no-op, leaving a permanent 👀 with no reply. The
+    // only durable outcome here is a visible one: say what happened and flip
+    // 👀 → ❓ so the comment doesn't read as still-in-progress, exactly as the
+    // "no PR yet" branch below does.
+    logger.warn('Comment trigger (parent epic): sub-issue PR read failed — asked the user to re-comment', {
+      orchestration_id: orchestrationId,
+      sub_issue_id: target.sub_issue_id,
+      child_task_id: target.child_task_id,
+      error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+    });
+    await channel.postThreadedReply?.(
+      parentRef, { commentId: replyTargetId },
+      `⚠️ I couldn't read **${nodeDisplayId(target) ?? target.sub_issue_id}**'s pull request just now `
+        + '(a transient error reading its task record), so I stopped rather than guess. Nothing was '
+        + 'started. Please comment again to retry.',
+    );
+    await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
+    return;
+  }
+  if (!prNumberResult.ok) {
     // Matched a node but it has no PR to iterate. If that node FAILED, the user
     // named it to fix it — there's nothing to iterate (no PR), so point them
     // straight at retry instead of the generic disambiguation. Observed in
@@ -2106,6 +2281,7 @@ async function handleParentEpicCommentTrigger(args: {
     });
     return;
   }
+  const prNumber = prNumberResult.value;
 
   // Resolve the FULL child row (the matcher returns a trimmed view without
   // ``repo``) so the iteration carries the sub-issue's repo.
@@ -2173,12 +2349,32 @@ async function iterateOrchestrationChild(args: {
   const subIssueId = child.sub_issue_id;
   const triggerCommentIssueId = args.triggerCommentIssueId ?? subIssueId;
 
-  const prNumber = args.prNumber ?? (child.child_task_id ? await resolveChildPrNumber(child.child_task_id) : null);
-  if (prNumber === null || prNumber === undefined) {
-    logger.warn('Comment trigger: sub-issue has no resolvable PR — cannot iterate', {
-      orchestration_id: orchestrationId, sub_issue_id: subIssueId, child_task_id: child.child_task_id,
-    });
-    return;
+  let prNumber: number;
+  if (args.prNumber !== undefined) {
+    prNumber = args.prNumber;
+  } else {
+    const prNumberResult = child.child_task_id
+      ? await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, child.child_task_id)
+      : LOOKUP_ABSENT;
+    if (!prNumberResult.ok) {
+      // Can't iterate without a PR either way, but log an outage distinctly
+      // from a genuinely-absent PR so it isn't misread as "nothing to do".
+      logger.warn(
+        isLookupFailure(prNumberResult)
+          ? 'Comment trigger: sub-issue PR read failed — cannot iterate'
+          : 'Comment trigger: sub-issue has no resolvable PR — cannot iterate',
+        {
+          orchestration_id: orchestrationId,
+          sub_issue_id: subIssueId,
+          child_task_id: child.child_task_id,
+          ...(isLookupFailure(prNumberResult) && {
+            error: prNumberResult.error instanceof Error ? prNumberResult.error.message : String(prNumberResult.error),
+          }),
+        },
+      );
+      return;
+    }
+    prNumber = prNumberResult.value;
   }
 
   // Attribute to the orchestration's release user (the comment author may not
@@ -2198,7 +2394,7 @@ async function iterateOrchestrationChild(args: {
   // silence) and persist its id so the fanout dispatcher matures THIS reply
   // (🔄→✅/💬) instead of posting new top-level comments. The reply threads under
   // the conversation root (replyTargetId) on the issue the comment lives on.
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, triggerCommentIssueId, replyTargetId), null);
 
   // Idempotency: one iteration per (sub-issue, comment). The comment id is
   // unique per comment, so a webhook retry of the same comment dedups.
@@ -2393,6 +2589,7 @@ async function handleStandaloneCommentTrigger(args: {
     return;
   }
   const task = lookup.task;
+  if (!commentTargetBelongsToWorkspace(task.linear_workspace_id, workspaceId, issueId)) return;
   const prNumber = prNumberFromTask(task);
   if (prNumber === null || !task.repo) {
     // Clarify-resume: a task with no PR MIGHT be a clarify-HOLD (a
@@ -2433,7 +2630,7 @@ async function handleStandaloneCommentTrigger(args: {
   await channel.reactToComment?.({ commentId }, target, 'started');
   // Immediate "👀 On it" threaded reply + persist its id so the fanout dispatcher
   // matures THIS reply instead of posting new comments.
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   const idempotencyKey = `iterate_${issueId}_${commentId}`.replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_IDEMPOTENCY_KEY_LENGTH);
   const channelMetadata: Record<string, string> = {
@@ -2600,7 +2797,7 @@ async function maybeStartStandaloneNewWork(args: {
   // ACK immediately (👀 reaction + threaded "On it"), same as the iteration and
   // clarify-resume paths.
   await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   // Idempotency: key on (issue, comment) so a webhook redelivery of the SAME
   // comment doesn't spawn a second task. Distinct prefix from iterate_/clarify_.
@@ -2729,7 +2926,7 @@ async function maybeResumeClarifyHold(args: {
   const channel = channelFor(registryTableName);
   const target = issueRef(issueId, workspaceId);
   await channel.reactToComment?.({ commentId }, target, 'started');
-  const iterationReplyId = await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId);
+  const iterationReplyId = lookupValueOr(await postIterationAck(workspaceId, registryTableName, issueId, replyTargetId), null);
 
   const resumeDescription = buildClarifyResumeDescription(
     typeof row.task_description === 'string' ? row.task_description : undefined,
@@ -2800,27 +2997,6 @@ async function maybeResumeClarifyHold(args: {
     });
   }
   return true;
-}
-
-/** Read a child task's PR number (numeric pr_number, else parse pr_url). Null if neither. */
-async function resolveChildPrNumber(taskId: string): Promise<number | null> {
-  try {
-    const res = await ddb.send(new GetCommand({ TableName: process.env.TASK_TABLE_NAME!, Key: { task_id: taskId } }));
-    const pr = res.Item?.pr_number;
-    if (typeof pr === 'number') return pr;
-    const url = res.Item?.pr_url;
-    if (typeof url === 'string') {
-      const m = url.match(/\/pull\/(\d+)\b/);
-      if (m) return Number(m[1]);
-    }
-    return null;
-  } catch (err) {
-    logger.warn('Comment trigger: failed to read sub-issue task record for PR number', {
-      task_id: taskId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
 }
 
 /**
@@ -3228,6 +3404,28 @@ function isLinearUploadsUrl(url: string): boolean {
     return host === 'uploads.linear.app' || host.endsWith('.uploads.linear.app');
   } catch {
     return false;
+  }
+}
+
+async function readConsoleStartClaim(issueId: string, workspaceId: string): Promise<string | null> {
+  if (!WEBHOOK_DEDUP_TABLE) return null;
+  try {
+    const user = await readStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, workspaceId);
+    if (user) logger.info('Linear label from the operator console attributed via start claim', { issue_id: issueId, linear_workspace_id: workspaceId });
+    return user;
+  } catch (err) {
+    logger.warn('Could not read a console start claim', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
+    return null; // nosemgrep: ts-silent-success-masking -- falls through to the existing "not linked" reply, which is the correct outcome without a claim
+  }
+}
+
+/** Best-effort: the work is already dispatched, and an unreleased claim expires on its own. */
+async function releaseConsoleStartClaim(issueId: string, platformUserId: string): Promise<void> {
+  if (!WEBHOOK_DEDUP_TABLE) return;
+  try {
+    await releaseStartClaim(ddb, WEBHOOK_DEDUP_TABLE, issueId, platformUserId);
+  } catch (err) {
+    logger.warn('Could not release a console start claim (it expires on its own)', { issue_id: issueId, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

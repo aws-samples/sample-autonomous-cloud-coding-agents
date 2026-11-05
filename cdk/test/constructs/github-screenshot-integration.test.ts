@@ -244,3 +244,26 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
     });
   });
 });
+
+describe('Jira screenshot delivery wiring', () => {
+  let template: Template;
+  beforeAll(() => {
+    const stack = new Stack(new App(), 'JiraScreenshots');
+    new GitHubScreenshotIntegration(stack, 'Screenshots', {
+      api: new apigw.RestApi(stack, 'Api'),
+      githubTokenSecret: new secretsmanager.Secret(stack, 'Token'),
+      taskTable: dynamodb.Table.fromTableName(stack, 'Tasks', 'Tasks'),
+      jiraWorkspaceRegistryTable: dynamodb.Table.fromTableName(stack, 'Jira', 'JiraRegistry'),
+    });
+    template = Template.fromStack(stack);
+  });
+  test('configures the registry and scoped Jira index/OAuth grants', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ JIRA_WORKSPACE_REGISTRY_TABLE_NAME: 'JiraRegistry' }) },
+    });
+    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('Tasks/index/JiraIssueIndex');
+    expect(policies).toContain('bgagent-jira-oauth-*');
+    expect(policies).toContain('secretsmanager:PutSecretValue');
+  });
+});

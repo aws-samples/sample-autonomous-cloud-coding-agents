@@ -64,6 +64,9 @@ export interface SlackIntegrationProps {
   /** The DynamoDB task events table (must have DynamoDB Streams enabled). */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /** Monthly user/team budget configuration and spend table. */
+  readonly budgetTable?: dynamodb.ITable;
+
   /** The DynamoDB repo config table (optional — for repo onboarding checks). */
   readonly repoTable?: dynamodb.ITable;
 
@@ -210,6 +213,10 @@ export class SlackIntegration extends Construct {
       createTaskEnv.GUARDRAIL_ID = props.guardrailId;
       createTaskEnv.GUARDRAIL_VERSION = props.guardrailVersion;
     }
+    if (props.budgetTable) {
+      createTaskEnv.BUDGET_TABLE_NAME = props.budgetTable.tableName;
+      createTaskEnv.USER_POOL_ID = props.userPool.userPoolId;
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Lambda Handlers
@@ -303,6 +310,13 @@ export class SlackIntegration extends Construct {
     props.taskEventsTable.grantReadWriteData(commandProcessorFn);
     if (props.repoTable) {
       props.repoTable.grantReadData(commandProcessorFn);
+    }
+    if (props.budgetTable) {
+      props.budgetTable.grantReadData(commandProcessorFn);
+      commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['cognito-idp:AdminListGroupsForUser'],
+        resources: [props.userPool.userPoolArn],
+      }));
     }
     if (props.orchestratorFunctionArn) {
       commandProcessorFn.addToRolePolicy(new iam.PolicyStatement({

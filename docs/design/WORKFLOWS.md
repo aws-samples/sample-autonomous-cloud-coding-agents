@@ -100,7 +100,8 @@ A workflow file has the following top-level fields. (Full machine-readable schem
 | `repo_config` | object | – | How this workflow relates to a **source-control repository**: `{ provider (default github), discover (default true), ignore: [claude_md\|rules\|subagents\|settings\|mcp] }`. `provider` is a VCS abstraction (see [VCS provider abstraction](#vcs-provider-abstraction)); `discover`/`ignore` gate config discovered from the cloned repo (`CLAUDE.md`, `.claude/`, `.mcp.json`). Must be `discover:false` (and `provider` is N/A) when `requires_repo:false`. |
 | `steps` | Step[] | ✓ | Ordered pipeline phases (see [Step kinds](#step-kinds)). |
 | `required_inputs` | object | – | Validation contract, e.g. `{ one_of: [issue_number, task_description] }` or `{ all_of: [pr_number] }`. Replaces the scattered required-input checks. |
-| `terminal_outcomes` | object | ✓ | What "done" *produces* — `pr_url` \| `review_posted` \| `artifact` \| `comment`. Records the expected artifact; it does **not** override success inference (see [Success inference](#success-inference-and-terminal-outcomes)). |
+| `terminal_outcomes` | object | ✓ | What "done" *produces* — `pr_url` \| `review_posted` \| `artifact` \| `comment`. Records the expected artifact; it does **not** override success inference (see [Success inference](#success-inference-terminal-outcomes-and-convergence)). |
+| `convergence` | object | – | How a harness decides the task is done: `{ mode, required_sensors?, terminal_outcomes, early_exit? }`. Optional for backward compatibility; validated at workflow load. In v1 this is declarative metadata and does not change runtime finalization. |
 | `limits` | object | – | `{ max_turns, max_budget_usd }` defaults (per-task / per-repo still override, per [override precedence](./REPO_ONBOARDING.md#override-precedence)). |
 | `promotion_gate` | object | – | The check contract a version must pass to reach `production` (see [Promotion is earned, not set](#promotion-is-earned-not-set)). `{ requires: [<check ids>] }` — pre-#236 a concrete test target (`tests:agent/new_task`); post-#236 an eval id (`eval:web-research-quality`). Optional until #236; absent ⇒ test-tier fallback. |
 | `status` | enum | ✓ | `draft` \| `validated` \| `production` \| `deprecated`. Only `production` resolves for normal tasks. |
@@ -125,6 +126,21 @@ Steps are the unit the runner interprets. Each has a `kind`, an optional `name`,
 Each step declares `on_failure: fail | continue | skip_remaining` (default `fail`) so the runner's error behavior is explicit and matches today's fail-closed default.
 
 **The `gate` field (`verify_build` / `verify_lint`).** A verify step declares how its result affects the task verdict: `strict` (any failure gates), `regression_only` (gates only when the check was passing before the agent ran and fails after — the default when unset, matching the legacy pipeline behavior), or `informational` (never gates). A `read_only` workflow never gates regardless of `gate`. The semantics live in exactly one place — `gate_status` in `agent/src/workflow/runner.py` — used by both lanes (#301): the repo-less lane through the runner's `verify_*` step handlers, and the coding lane through the inline post-hook resolution (`pipeline._apply_post_hook_gates`), which consults each declared step's `gate` and `on_failure` (`continue`/`skip_remaining` steps are advisory for the verdict, matching the runner). On the coding lane an *undeclared* `verify_lint` never gates (the legacy behavior — lint is advisory unless a workflow opts in by declaring the step), and the inline ordering is preserved: `ensure_pr` still runs after a gating verify failure so the agent's work surfaces as a reviewable PR even when the task is marked failed. Routing the coding post-hooks bodily through the runner's step handlers (which would stop *before* `ensure_pr` on a gating failure) is the broader runner unification deferred out of #301's scope.
+
+### Convergence contract
+
+`convergence` makes the workflow's stopping contract explicit for conformance tests and future harnesses. The loader validates the block before the step runner receives the workflow:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `mode` | ✓ | `test_gated` \| `artifact_delivered` \| `human_approved` \| `review_submitted`. Non-test modes require their matching terminal outcome. |
+| `required_sensors` | For `test_gated` | Verification results a conforming harness would evaluate using their step's existing `gate` semantics. Current sensors are `verify_build` and `verify_lint`; each must have a matching step, enforced at load. |
+| `terminal_outcomes` | ✓ | Observable convergence signals: `pr_opened` \| `review_published` \| `artifact_delivered` \| `human_approved`. At least one is required. |
+| `early_exit.allow_on_policy_deny` | – | Declares that a policy denial may terminate without the normal terminal outcome. Defaults to `false`. |
+
+This field is distinct from the required top-level `terminal_outcomes` object. The top-level object identifies the result artifact consumed by existing finalization (`pr_url`, `review_posted`, `artifact`, or `comment`). `convergence.terminal_outcomes` names the external signal a harness should observe before considering the workflow complete. For example, a coding workflow can produce a `pr_url` and declare `pr_opened` as its convergence signal.
+
+The v1 implementation is intentionally descriptive: it parses and exposes the contract but does not branch on it in `runner.py`, emit a new event, or replace `_resolve_overall_task_status`. Existing workflows without the optional block retain their current behavior.
 
 ### Example: shipped coding workflow (`new_task`)
 
@@ -156,6 +172,10 @@ steps:
   - { kind: verify_build,   name: build, gate: regression_only }
   - { kind: ensure_pr,      name: open_pr, strategy: create }
 terminal_outcomes: { primary: pr_url }
+convergence:
+  mode: test_gated
+  required_sensors: [verify_build]
+  terminal_outcomes: [pr_opened]
 limits: { max_turns: 100 }
 promotion_gate: { requires: [tests:agent/new_task] }   # concrete test target; becomes eval:new_task once #236 lands
 status: production
@@ -190,6 +210,9 @@ steps:
   - { kind: run_agent,        name: research }
   - { kind: deliver_artifact, name: deliver, target: s3_and_comment }
 terminal_outcomes: { primary: artifact }
+convergence:
+  mode: artifact_delivered
+  terminal_outcomes: [artifact_delivered]
 limits: { max_turns: 25, max_budget_usd: 5 }
 promotion_gate: { requires: [eval:web-research-quality] }   # min-sources / citation-quality eval
 status: production
@@ -451,15 +474,15 @@ The gate verifies the workflow does the *right* thing — not that it reproduces
 
 Where a migration deliberately changes behavior, the gate's expected output is updated alongside the change as a recorded decision. New non-coding workflows declare their own check (e.g. `web-research` → a minimum-sources / citation-quality eval once #236 exists).
 
-## Success inference and terminal outcomes
+## Success inference, terminal outcomes, and convergence
 
-`terminal_outcomes` declares what a workflow is *expected to produce*; it does not replace the agent's deliberately-defensive success model. Today `_resolve_overall_task_status` (`pipeline.py`) keys success off the agent SDK result status plus the build gate, and explicitly refuses to infer success from PR/build presence when the SDK never emitted a `ResultMessage` (so a crashed agent that happens to have left a branch is not reported `COMPLETED`). That refusal stays. `terminal_outcomes` layers on top as the *artifact* check, not a replacement:
+Top-level `terminal_outcomes` declares what a workflow is *expected to produce*. `convergence` separately declares which sensor and external signals define completion for conformance tooling. Neither replaces the agent's deliberately-defensive success model in v1. Today `_resolve_overall_task_status` (`pipeline.py`) keys success off the agent SDK result status plus the build gate, and explicitly refuses to infer success from PR/build presence when the SDK never emitted a `ResultMessage` (so a crashed agent that happens to have left a branch is not reported `COMPLETED`). That refusal stays. `terminal_outcomes` layers on top as the *artifact* check, not a replacement:
 
 - **`pr_url` / `review_posted`** — agent status is authoritative; the terminal outcome is the artifact the orchestrator's existing finalization decision matrix (ORCHESTRATOR.md) already inspects (PR exists? commits?). No change to that matrix.
 - **`artifact` (repo-less)** — there is no PR/branch to fall back on, so success = agent status `success`/`end_turn` **and** the `deliver_artifact` step recorded a delivered artifact (S3 key present). If the agent reports success but no artifact was delivered, the task is `FAILED` (nothing produced) — the repo-less analog of "success, no commits, no PR ⇒ FAILED."
 - **`comment`** — success = agent status success **and** the comment post succeeded.
 
-The point: `terminal_outcomes` makes "what counts as done" declarative *per workflow* without weakening the existing guard against false-positive completion.
+The point: `convergence` now documents "what counts as done" per workflow without weakening or silently changing the existing guard against false-positive completion. A later runtime adoption can consume the same declaration explicitly rather than infer policy from workflow IDs.
 
 ## Observability & metadata
 

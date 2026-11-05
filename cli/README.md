@@ -119,6 +119,16 @@ bgagent list \
   --output <text|json>        Output format (default: text)
 ```
 
+### `bgagent budget status --me`
+
+Show the logged-in user's personal monthly estimated spend and administrator-configured limit:
+
+```
+bgagent budget status --me [--output text|json]
+```
+
+This path uses Cognito authentication and requires no operator AWS credentials. It is read-only, does not expose team budgets, and reports personal spend even when no personal limit is configured.
+
 The `HEARTBEAT` column is the age of the agent's last in-guest liveness beat, so `is anything still alive?` can be answered across tasks rather than one `bgagent status` at a time. The agent beats every 45 s on the `agentcore` and `lambda-microvm` backends, so anything much past that on a `RUNNING` task means the agent is hung. It shows `—` for terminal tasks (the last beat is noise next to a final status), and on `ecs`, where the agent runs the pipeline directly instead of serving HTTP and so beats only once at start.
 
 ### `bgagent status <task-id>`
@@ -190,6 +200,18 @@ Shared flags:
 |------|-------------|
 | `--region <region>` | AWS region (defaults to `bgagent configure` region or `AWS_REGION`) |
 | `--stack-name <name>` | CloudFormation stack name (default: `backgroundagent-dev`) |
+
+### `bgagent budget status|set`
+
+Inspect or configure recurring monthly user/team USD limits with operator AWS credentials:
+
+```
+bgagent budget status [--user <email-or-id> | --team <cognito-group>] [--output text|json]
+bgagent budget set (--user <email-or-id> | --team <cognito-group>) \
+  --monthly-usd <amount> [--hard-stop]
+```
+
+`set` replaces the scope's recurring limit. Omitting `--hard-stop` keeps admission open after 100% while retaining 80%/100% alerts. Team scopes are existing Cognito groups; the command does not create groups or manage membership.
 
 ### `bgagent platform outputs`
 

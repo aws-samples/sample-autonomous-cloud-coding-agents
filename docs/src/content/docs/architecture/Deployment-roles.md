@@ -54,6 +54,15 @@ aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].Pa
 
 Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootstrap/bootstrap-template.yaml` (see `cdk/mise.toml`). The generated template defines six inline `AWS::IAM::ManagedPolicy` resources that **replace** the default `AdministratorAccess` on the CloudFormation execution role; the `IaCRole-ABCA-Compute-ECS` and `IaCRole-ABCA-Compute-LambdaMicrovms` policies are conditional on the `ComputeTypes` parameter including their respective backend. The policy sources are `cdk/src/bootstrap/policies/{infrastructure,application,observability,compute-agentcore,compute-ecs,compute-lambda-microvm}.ts`, compiled to `cdk/bootstrap/policies/*.json` by `cdk/scripts/generate-bootstrap-artifacts.ts`.
 
+> **CloudFormation inline-template limit — 51,200 characters**: This is a second, independent size ceiling, distinct from the per-policy IAM 6,144-character limit above. `cdk bootstrap --template` sends the template inline as `TemplateBody`; above 51,200 characters the CLI has to stage it in S3 instead, which it **cannot** do while bootstrapping a fresh account, because that bucket is one of the resources bootstrap creates. The result is a hard `BootstrapStackRequired` failure with no way through `cdk bootstrap`, `--force` included ([#864](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/864)).
+>
+> Two consequences for anyone editing the policies:
+>
+> - **The gated size is not the file's size on disk.** The CLI parses the file, discards its formatting, and re-serialises the parsed object before measuring. Reformatting `bootstrap-template.yaml` therefore changes nothing; only the *content* moves the number. Check it with `npx cdk bootstrap --show-template --template bootstrap/bootstrap-template.yaml | wc -c`.
+> - **Each `PolicyDocument` is emitted as a minified JSON string**, not a nested YAML mapping. Both are valid for this `Json`-typed property and IAM stores the string parsed, but a string scalar survives the CLI's re-serialisation on one line — which is what keeps the body under the ceiling (45,743 characters, versus 53,369 as mappings).
+>
+> `cdk/scripts/generate-bootstrap-template.ts` fails the build when the body exceeds the budget in `cdk/src/bootstrap/template-size.ts`, so adding statements surfaces the problem at generation time rather than against somebody's fresh account. Both the guard and its regression test obtain the size by invoking `cdk bootstrap --show-template` on the committed artifact — the CLI is the component that makes the inline-vs-S3 decision, so asking it directly cannot drift the way a local copy of its serialiser would. No AWS credentials are required.
+
 ## Trust policy
 
 ```json
@@ -85,7 +94,7 @@ Under the hood, `mise //cdk:bootstrap` runs `npx cdk bootstrap --template bootst
 
 ## IaCRole-ABCA
 
-For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure.
+For deploying the `backgroundagent-dev` stack. This single stack contains all platform resources including the AgentCore runtime, ECS compute (when enabled), API Gateway, Cognito, DynamoDB tables, VPC, DNS Firewall, and observability infrastructure. The operator console (`backgroundagent-dev-console`: S3 bucket, CloudFront distribution, Cognito app client and managed-login domain) is an optional separate stack (`-c operatorConsole=true`, deployed with `--all`) under the same roles.
 
 > **IAM managed policy size limit**: A single managed policy cannot exceed 6,144 characters. The permissions below are split into six policies to stay under this limit (three always-applied, plus three compute-variant policies). They are wired into the CloudFormation execution role by the generated bootstrap template; see [Using these policies](#using-these-policies).
 
@@ -183,6 +192,17 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
       }
     },
     {
+      "Sid": "NestedStackPassRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::*:role/cdk-*-cfn-exec-role-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "cloudformation.amazonaws.com"
+        }
+      }
+    },
+    {
       "Sid": "VPCNetworking",
       "Effect": "Allow",
       "Action": [
@@ -276,6 +296,18 @@ CloudFormation stack operations, IAM roles/policies, VPC networking, and Route 5
   ]
 }
 ```
+
+`NestedStackPassRole` (bundle 1.7.0) exists because the app contains nested stacks. CloudFormation creates them *as* the execution role and passes that same role on to each child stack, which needs `iam:PassRole` on the role itself. Without it, every deploy fails at change-set creation with `cfn-exec-role ... is not authorized to perform: iam:PassRole on resource: ...cfn-exec-role...`. The statement is limited to the CDK execution role and to `cloudformation.amazonaws.com`, so it grants nothing the role does not already hold (#865). `test/bootstrap/synth-coverage.test.ts` now walks every nested stack (#757) and pins this statement's resource and condition, which an action-level check cannot distinguish from `IAMPassRole`.
+
+Before deploying, `mise //cdk:deploy` runs the bootstrap preflight (#126; also `mise //cdk:preflight`, read-only, `--json` for CI). It compares the `CDKToolkit` outputs with the checkout and needs only `cloudformation:DescribeStacks`:
+
+| Result | When | Deploy |
+|---|---|---|
+| PASS | `BootstrapPolicyVersion` matches (or is newer) and `BootstrapPolicySet` includes every policy the app's compute backends need | continues |
+| WARN | Same version, different `BootstrapPolicyHash` (console drift, or a policy change without a version bump) | continues |
+| FAIL | No `CDKToolkit`; a default CDK bootstrap (no ABCA outputs); an older bundle; or a missing compute policy | stops, with the fix |
+
+`ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` bypasses it.
 
 ### IaCRole-ABCA-Application
 
@@ -405,9 +437,18 @@ DynamoDB tables, Lambda functions, API Gateway, Cognito, WAFv2, EventBridge, SQS
         "cognito-idp:TagResource",
         "cognito-idp:UntagResource",
         "cognito-idp:ListTagsForResource",
-        "cognito-idp:GetUserPoolMfaConfig"
+        "cognito-idp:GetUserPoolMfaConfig",
+        "cognito-idp:CreateUserPoolDomain",
+        "cognito-idp:UpdateUserPoolDomain",
+        "cognito-idp:DeleteUserPoolDomain"
       ],
       "Resource": "arn:aws:cognito-idp:*:*:userpool/*"
+    },
+    {
+      "Sid": "CognitoDomainRead",
+      "Effect": "Allow",
+      "Action": "cognito-idp:DescribeUserPoolDomain",
+      "Resource": "*"
     },
     {
       "Sid": "WAFv2",

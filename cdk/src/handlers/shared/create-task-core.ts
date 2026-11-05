@@ -30,6 +30,7 @@ import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
+import { checkBudgetAdmission } from './budgets';
 import { generateBranchName } from './gateway';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
@@ -63,6 +64,12 @@ import { TaskStatus } from '../../constructs/task-status';
  */
 export interface TaskCreationContext {
   readonly userId: string;
+  /**
+   * Cognito group names used as team IDs for fleet budgets. The direct API
+   * supplies these from the authenticated JWT; headless channel adapters omit
+   * them and the budget helper resolves current membership from Cognito.
+   */
+  readonly teamIds?: readonly string[];
   readonly channelSource: ChannelSource;
   readonly channelMetadata: Record<string, string>;
   readonly idempotencyKey?: string;
@@ -387,7 +394,129 @@ export async function createTaskCore(
     initialApprovals = normalized;
   }
 
-  // 2. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
+  // 2. Check idempotency before budget enforcement or any content-screening
+  // spend. A valid replay returns the original task even if its scope has since
+  // exhausted a monthly hard stop.
+  if (context.idempotencyKey !== undefined && context.idempotencyKey !== null) {
+    if (!isValidIdempotencyKey(context.idempotencyKey)) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid Idempotency-Key format.', requestId);
+    }
+
+    const existing = await ddb.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: 'IdempotencyIndex',
+      KeyConditionExpression: 'idempotency_key = :key',
+      ExpressionAttributeValues: { ':key': context.idempotencyKey },
+      Limit: 1,
+    }));
+
+    if (existing.Items && existing.Items.length > 0) {
+      const existingTaskId = existing.Items[0].task_id as string;
+      const existingTask = await ddb.send(new GetCommand({
+        TableName: TABLE_NAME,
+        Key: { task_id: existingTaskId },
+      }));
+
+      if (existingTask.Item) {
+        const existingRecord = existingTask.Item as TaskRecord;
+        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
+        // repo-less workflow persists no repo and an empty
+        // ``branch_name`` (it never branches). Both are legitimately falsy on a
+        // valid repo-less record, so a falsy check would wrongly reject a valid
+        // repo-less replay as "incomplete" (500). Only the true identity/audit
+        // fields that every record must carry are required.
+        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
+        const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
+        if (missingFields.length > 0) {
+          logger.error('Idempotent replay: existing task record is incomplete', {
+            task_id: existingRecord.task_id,
+            missing_fields: missingFields,
+            present_fields: Object.keys(existingTask.Item),
+            request_id: requestId,
+          });
+          return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to retrieve existing task for idempotent replay.', requestId);
+        }
+        if (existingRecord.user_id !== context.userId) {
+          return errorResponse(409, ErrorCode.DUPLICATE_TASK, 'A task with this idempotency key already exists.', requestId);
+        }
+        logger.info('Idempotent task submit replay', {
+          task_id: existingRecord.task_id,
+          user_id: context.userId,
+          request_id: requestId,
+        });
+        return successResponse(200, toTaskDetail(existingRecord), requestId, { 'Idempotent-Replay': 'true' });
+      }
+      logger.warn('Idempotency key matched GSI but task record is gone (TTL/deletion race)', {
+        idempotency_key: context.idempotencyKey,
+        stale_task_id: existingTaskId,
+        user_id: context.userId,
+        request_id: requestId,
+      });
+    }
+  }
+
+  // 2b. Fleet budget admission runs before Bedrock screening and attachment
+  // processing, so an exhausted hard stop bounds rejection-path spend as well
+  // as task creation. Headless adapters resolve Cognito groups here; direct API
+  // calls pass the token's group claim through TaskCreationContext.
+  let budgetAdmission;
+  try {
+    budgetAdmission = await checkBudgetAdmission(context.userId, context.teamIds);
+  } catch (budgetErr) {
+    if (
+      budgetErr instanceof Error
+      && budgetErr.name === 'BudgetScopeLimitError'
+    ) {
+      logger.warn('Budget admission rejected unsupported team count', {
+        user_id: context.userId,
+        request_id: requestId,
+        error: budgetErr.message,
+      });
+      return errorResponse(
+        400,
+        ErrorCode.VALIDATION_ERROR,
+        budgetErr.message,
+        requestId,
+      );
+    }
+    logger.error('Budget admission check failed closed', {
+      user_id: context.userId,
+      request_id: requestId,
+      error: budgetErr instanceof Error ? budgetErr.message : String(budgetErr),
+      metric_type: 'budget_admission_failure',
+    });
+    return errorResponse(
+      503,
+      ErrorCode.SERVICE_UNAVAILABLE,
+      'Budget admission is temporarily unavailable. Please try again later.',
+      requestId,
+    );
+  }
+  if (budgetAdmission.blocked) {
+    const blocked = budgetAdmission.blocked;
+    logger.warn('Monthly hard-stop budget blocked task admission', {
+      user_id: context.userId,
+      request_id: requestId,
+      scope_type: blocked.scopeType,
+      scope_id: blocked.scopeId,
+      period: budgetAdmission.period,
+      spend_usd: blocked.spendUsd,
+      monthly_limit_usd: blocked.monthlyLimitUsd,
+      metric_type: 'budget_admission_blocked',
+    });
+    const owner = blocked.scopeType === 'user'
+      ? 'Your monthly budget'
+      : `The monthly budget for team '${blocked.scopeId}'`;
+    return errorResponse(
+      429,
+      ErrorCode.BUDGET_EXCEEDED,
+      `${owner} is exhausted ($${blocked.spendUsd.toFixed(2)} of `
+        + `$${blocked.monthlyLimitUsd.toFixed(2)}). New tasks are disabled until the next UTC month.`,
+      requestId,
+    );
+  }
+
+  // 3. Screen task description with Bedrock Guardrail (fail-closed: unscreened content
   //    must not reach the agent — a Bedrock outage blocks task submissions)
   if (bedrockClient && body.task_description) {
     try {
@@ -419,7 +548,7 @@ export async function createTaskCore(
   // match the eventual task record.
   const taskId = context.taskId ?? ulid();
 
-  // 2b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
+  // 3b. Process inline attachments: screen (with retry + EXIF strip), upload to S3, build records.
   // Presigned attachments are deferred to confirm-uploads; URL attachments are resolved during hydration.
   const attachmentRecords: AttachmentRecord[] = [];
   const uploadedS3Keys: string[] = [];
@@ -620,66 +749,6 @@ export async function createTaskCore(
     );
   }
 
-  // 3. Check idempotency key
-  if (context.idempotencyKey !== undefined && context.idempotencyKey !== null) {
-    if (!isValidIdempotencyKey(context.idempotencyKey)) {
-      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid Idempotency-Key format.', requestId);
-    }
-
-    const existing = await ddb.send(new QueryCommand({
-      TableName: TABLE_NAME,
-      IndexName: 'IdempotencyIndex',
-      KeyConditionExpression: 'idempotency_key = :key',
-      ExpressionAttributeValues: { ':key': context.idempotencyKey },
-      Limit: 1,
-    }));
-
-    if (existing.Items && existing.Items.length > 0) {
-      const existingTaskId = existing.Items[0].task_id as string;
-      const existingTask = await ddb.send(new GetCommand({
-        TableName: TABLE_NAME,
-        Key: { task_id: existingTaskId },
-      }));
-
-      if (existingTask.Item) {
-        const existingRecord = existingTask.Item as TaskRecord;
-        // ``repo`` and ``branch_name`` are intentionally NOT required here: a
-        // repo-less workflow persists no repo and an empty
-        // ``branch_name`` (it never branches). Both are legitimately falsy on a
-        // valid repo-less record, so a falsy check would wrongly reject a valid
-        // repo-less replay as "incomplete" (500). Only the true identity/audit
-        // fields that every record must carry are required.
-        const requiredReplayFields = ['task_id', 'user_id', 'status', 'channel_source', 'created_at', 'updated_at'] as const;
-        const missingFields = requiredReplayFields.filter(f => !existingRecord[f]);
-        if (missingFields.length > 0) {
-          logger.error('Idempotent replay: existing task record is incomplete', {
-            task_id: existingRecord.task_id,
-            missing_fields: missingFields,
-            present_fields: Object.keys(existingTask.Item),
-            request_id: requestId,
-          });
-          return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Failed to retrieve existing task for idempotent replay.', requestId);
-        }
-        if (existingRecord.user_id !== context.userId) {
-          return errorResponse(409, ErrorCode.DUPLICATE_TASK, 'A task with this idempotency key already exists.', requestId);
-        }
-        logger.info('Idempotent task submit replay', {
-          task_id: existingRecord.task_id,
-          user_id: context.userId,
-          request_id: requestId,
-        });
-        return successResponse(200, toTaskDetail(existingRecord), requestId, { 'Idempotent-Replay': 'true' });
-      } else {
-        logger.warn('Idempotency key matched GSI but task record is gone (TTL/deletion race)', {
-          idempotency_key: context.idempotencyKey,
-          stale_task_id: existingTaskId,
-          user_id: context.userId,
-          request_id: requestId,
-        });
-      }
-    }
-  }
-
   // 4. Generate identifiers and timestamps
   const now = new Date().toISOString();
   // A task with no repo never clones, branches, or opens a PR (the agent prompt
@@ -703,6 +772,7 @@ export async function createTaskCore(
   const taskRecord: TaskRecord = {
     task_id: taskId,
     user_id: context.userId,
+    ...(budgetAdmission.teamIds.length > 0 && { team_ids: budgetAdmission.teamIds }),
     status: initialStatus,
     ...(body.repo ? { repo: body.repo } : {}),
     ...(body.issue_number !== undefined && { issue_number: body.issue_number }),

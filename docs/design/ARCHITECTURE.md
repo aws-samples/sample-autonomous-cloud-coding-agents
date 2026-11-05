@@ -37,9 +37,20 @@ The orchestrator and agent are deliberately separated. The orchestrator handles 
 
 For the full orchestrator design, see [ORCHESTRATOR.md](./ORCHESTRATOR.md). For the API contract, see [API_CONTRACT.md](./API_CONTRACT.md).
 
+## Deployment boundaries
+
+`AgentStack` keeps the shared Task API, its route integrations, data stores and selected compute backends together. Registry, RegistryApi and the hosted Linear consent page retain their existing nested boundaries. Network ownership is selected by `networkTopology`:
+
+| Topology | Network ownership | Stack dependencies |
+|---|---|---|
+| `inline` (default) | AgentVpc and DnsFirewall inside the application stack | Existing parent/nested structure |
+| `split` | Separate `${stackName}-network` stack | Application imports network references; network has no application references |
+
+The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology) and [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md). Live migration has not been validated.
+
 ## Repository onboarding
 
-Onboarding is CDK-based. Each repository is an instance of the `Blueprint` construct in the stack. The construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time.
+Onboarding is CDK-based. Plain repository definitions in `cdk/src/blueprints/definitions.ts` feed both network egress policy and the `Blueprint` constructs in the application stack. Each construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time. Resolving configuration before stack construction keeps the optional network stack independent of repository resources.
 
 Blueprints configure how the orchestrator executes steps for each repo: compute strategy, model selection, turn limits, GitHub token, and optional custom steps. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the full design.
 
@@ -51,8 +62,8 @@ Different tasks and repos may benefit from different models. The `model_id` fiel
 |---|---|---|---|
 | `coding/new-task-v1` | Claude Sonnet 4 | `anthropic.claude-sonnet-4-6` | Good balance of quality and cost |
 | `coding/pr-iteration-v1` | Claude Sonnet 4 | `anthropic.claude-sonnet-4-6` | Needs to understand review feedback and make code changes |
-| `coding/pr-review-v1` | Claude Haiku | `anthropic.claude-haiku-4-5-20251001-v1:0` | Fast and cheap - review is read-only analysis |
-| Complex/critical repos | Claude Opus 4 | `anthropic.claude-opus-4-20250514-v1:0` | Highest quality, opt-in per repo |
+| `coding/pr-review-v1` | Claude Haiku 5.5 | `anthropic.claude-haiku-5-5` | Fast and cheap - review is read-only analysis |
+| Complex/critical repos | Claude Opus 5.5 | `anthropic.claude-opus-5-5` | Highest quality; also the platform default when a repo pins nothing |
 
 ## Cost model
 

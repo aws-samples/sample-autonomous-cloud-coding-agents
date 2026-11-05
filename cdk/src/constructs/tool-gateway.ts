@@ -18,11 +18,11 @@
  */
 
 import * as path from 'path';
-import { Duration } from 'aws-cdk-lib';
+import { Duration, Stack } from 'aws-cdk-lib';
 import * as agentcore from 'aws-cdk-lib/aws-bedrockagentcore';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import type { IGrantable } from 'aws-cdk-lib/aws-iam';
-import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, CfnFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -145,6 +145,16 @@ export class ToolGateway extends Construct {
         },
       ]),
     });
+
+    // The L2's grantInvoke includes this function's qualified versions.
+    // Keep its binding/permission contract, with an exception for only that
+    // generated ARN family. Other gateway wildcards must still fail the audit.
+    const functionId = Stack.of(this).getLogicalId(this.repoConfigFn.node.defaultChild as CfnFunction);
+    NagSuppressions.addResourceSuppressions(this.gateway.role, [{
+      id: 'AwsSolutions-IAM5',
+      reason: 'CDK Lambda target binding grants invoke on the single RepoConfig function and its qualified versions; it cannot invoke other functions.',
+      appliesTo: [`Resource::<${functionId}.Arn>:*`],
+    }], true);
 
     // grantReadData → dynamodb:GetItem/Query/... on the table AND index/* ARNs.
     NagSuppressions.addResourceSuppressions(this.repoConfigFn, [

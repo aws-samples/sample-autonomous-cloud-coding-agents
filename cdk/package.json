@@ -11,7 +11,8 @@
     "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test",
     "synth": "npx cdk synth",
-    "synth:quiet": "npx cdk synth -q"
+    "synth:quiet": "npx cdk synth -q",
+    "census": "node -r ts-node/register/transpile-only src/synthesis/cli.ts"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-alpha": "2.260.0-alpha.0",
@@ -20,6 +21,7 @@
     "@aws-sdk/client-bedrock-agentcore": "^3.1078.0",
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1078.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1078.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1078.0",
     "@aws-sdk/client-dynamodb": "^3.1078.0",
     "@aws-sdk/client-ec2": "^3.1078.0",
     "@aws-sdk/client-ecs": "^3.1078.0",
@@ -34,7 +36,7 @@
     "@aws-sdk/s3-presigned-post": "^3.1078.0",
     "@aws-sdk/s3-request-presigner": "^3.1078.0",
     "@aws/durable-execution-sdk-js": "^2.0.0",
-    "@cedar-policy/cedar-wasm": "4.8.2",
+    "@cedar-policy/cedar-wasm": "4.12.0",
     "@smithy/protocol-http": "^5.5.5",
     "@smithy/signature-v4": "^5.6.1",
     "aws-cdk-lib": "^2.260.0",
@@ -70,6 +72,7 @@
     "jest-junit": "^17",
     "ts-jest": "^29.4.11",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   },
   "resolutions": {},

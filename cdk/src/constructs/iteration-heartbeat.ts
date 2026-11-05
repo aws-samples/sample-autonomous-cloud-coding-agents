@@ -84,9 +84,10 @@ export class IterationHeartbeat extends Construct {
       },
     });
 
-    // Read-only on the TaskTable (StatusIndex query). No write — a heartbeat
-    // never mutates task state; it only edits a surface comment.
+    // Read running tasks and persist the Jira comment body for convergence with
+    // preview and terminal writers. The task lifecycle status is never changed.
     props.taskTable.grantReadData(this.fn);
+    props.taskTable.grant(this.fn, 'dynamodb:UpdateItem');
 
     const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);
     const rule = new events.Rule(this, 'HeartbeatSchedule', {

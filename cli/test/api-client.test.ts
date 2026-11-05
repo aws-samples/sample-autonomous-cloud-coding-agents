@@ -99,6 +99,33 @@ describe('ApiClient', () => {
     });
   });
 
+  describe('getPersonalBudget', () => {
+    test('uses the authenticated budget view on the existing tasks endpoint', async () => {
+      const budget = {
+        period: '2026-08',
+        resets_at: '2026-09-01T00:00:00.000Z',
+        configured: true,
+        spend_usd: 25,
+        monthly_limit_usd: 100,
+        remaining_usd: 75,
+        utilization_percent: 25,
+        hard_stop: true,
+        hard_stop_active: false,
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: budget }),
+      });
+
+      await expect(client.getPersonalBudget()).resolves.toEqual(budget);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks?view=budget',
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(mockGetAuthToken).toHaveBeenCalled();
+    });
+  });
+
   describe('getTask', () => {
     test('sends GET with task ID', async () => {
       const taskDetail = { task_id: 'abc' };
@@ -160,6 +187,42 @@ describe('ApiClient', () => {
         'https://api.example.com/tasks/abc',
         expect.objectContaining({ method: 'DELETE' }),
       );
+    });
+  });
+
+  describe('linearRemoveWorkspace', () => {
+    const okBody = {
+      ok: true,
+      json: async () => ({
+        data: {
+          workspace_slug: 'acme',
+          linear_workspace_id: 'ws-1',
+          status: 'revoked',
+          secret: 'deleted',
+        },
+      }),
+    };
+
+    test('sends DELETE to /linear/workspaces/{slug} with no query string by default', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('acme');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/linear/workspaces/acme',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+    });
+
+    test('maps --purge to the snake_case query param (matches handler reads)', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('acme', { purge: true });
+      const url = mockFetch.mock.calls[0][0] as string;
+      expect(url).toContain('purge=true');
+    });
+
+    test('URL-encodes the slug', async () => {
+      mockFetch.mockResolvedValue(okBody);
+      await client.linearRemoveWorkspace('a b');
+      expect(mockFetch.mock.calls[0][0]).toContain('/linear/workspaces/a%20b');
     });
   });
 

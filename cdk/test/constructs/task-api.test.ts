@@ -74,6 +74,28 @@ function createStackWithWebhooks(overrides?: Partial<TaskApiProps>): { stack: St
   return { stack, template };
 }
 
+function createStackWithBudget(): { stack: Stack; template: Template } {
+  const app = new App();
+  const stack = new Stack(app, 'TestStack');
+  const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+  });
+  const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+  });
+  const budgetTable = new dynamodb.Table(stack, 'BudgetTable', {
+    partitionKey: { name: 'scope_key', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'period', type: dynamodb.AttributeType.STRING },
+  });
+  new TaskApi(stack, 'TaskApi', {
+    taskTable,
+    taskEventsTable,
+    budgetTable,
+  });
+  return { stack, template: Template.fromStack(stack) };
+}
+
 // Full surface: webhookTable AND apiKeyTable both provided (all tables in the
 // same app/stack — CDK forbids cross-app resource references).
 function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template } {
@@ -107,10 +129,12 @@ function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template
 
 describe('TaskApi construct', () => {
   let baseTemplate: Template;
+  let budgetTemplate: Template;
   let webhookTemplate: Template;
 
   beforeAll(() => {
     baseTemplate = createStack().template;
+    budgetTemplate = createStackWithBudget().template;
     webhookTemplate = createStackWithWebhooks().template;
   });
 
@@ -140,6 +164,17 @@ describe('TaskApi construct', () => {
     });
   });
 
+  test('lets browsers send the Idempotency-Key header that POST /tasks accepts', () => {
+    // The operator console sends it; a preflight that omits it makes the browser drop the POST.
+    const options = baseTemplate.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } });
+    expect(Object.keys(options).length).toBeGreaterThan(0);
+    for (const method of Object.values(options)) {
+      const headers = method.Properties.Integration.IntegrationResponses[0].ResponseParameters['method.response.header.Access-Control-Allow-Headers'];
+      expect(headers).toContain('Idempotency-Key');
+      expect(headers).toContain('Authorization');
+    }
+  });
+
   test('creates a REST API with correct stage name', () => {
     baseTemplate.resourceCountIs('AWS::ApiGateway::RestApi', 1);
     baseTemplate.hasResourceProperties('AWS::ApiGateway::RestApi', {
@@ -153,6 +188,33 @@ describe('TaskApi construct', () => {
   test('creates 6 Lambda functions without webhookTable', () => {
     // 6 = create, get, list, cancel, get-events, get-replay (#515).
     baseTemplate.resourceCountIs('AWS::Lambda::Function', 6);
+  });
+
+  test('personal budget view reuses ListTasksFn with budget-table read access', () => {
+    budgetTemplate.resourceCountIs('AWS::Lambda::Function', 6);
+    const functions = budgetTemplate.findResources('AWS::Lambda::Function');
+    const listTasksFn = Object.entries(functions)
+      .find(([id]) => id.startsWith('TaskApiListTasksFn'));
+    expect(listTasksFn).toBeDefined();
+    expect(listTasksFn![1].Properties.Environment.Variables.BUDGET_TABLE_NAME).toEqual({
+      Ref: expect.stringMatching(/^BudgetTable/),
+    });
+
+    const policies = budgetTemplate.findResources('AWS::IAM::Policy');
+    const listTasksPolicy = Object.entries(policies)
+      .find(([id]) => id.startsWith('TaskApiListTasksFnServiceRoleDefaultPolicy'));
+    expect(listTasksPolicy).toBeDefined();
+    const statements = listTasksPolicy![1].Properties.PolicyDocument.Statement as Array<{
+      Action: string | string[];
+      Resource: unknown;
+    }>;
+    const budgetRead = statements.find(statement =>
+      JSON.stringify(statement.Resource).includes('BudgetTable'));
+    expect(budgetRead).toBeDefined();
+    expect(budgetRead!.Action).toEqual(expect.arrayContaining([
+      'dynamodb:BatchGetItem',
+      'dynamodb:GetItem',
+    ]));
   });
 
   test('creates 11 Lambda functions with webhookTable', () => {

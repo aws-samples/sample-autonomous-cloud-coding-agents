@@ -429,45 +429,65 @@ describe('EcsAgentCluster construct', () => {
     const serialized = JSON.stringify(bedrockStatement!.Resource);
     expect(serialized).toContain('foundation-model/anthropic.claude-sonnet-4-6');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-sonnet-4-6');
-    expect(serialized).toContain('anthropic.claude-opus-4-20250514-v1:0');
+    expect(serialized).toContain('anthropic.claude-opus-4-8');
     expect(serialized).toContain('anthropic.claude-haiku-4-5-20251001-v1:0');
     // Claude Opus 5 (#744) — AgentCore/ECS parity. Both ARNs: the bare id isn't
     // on-demand invocable, so the `us.` profile is the one actually called.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-5');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5');
-    // REGRESSION (#744): Opus 4.8 stays granted alongside Opus 5 — blueprints may
-    // pin it per-repo, so dropping it would fail those repos at turn 0.
+    // Claude 5.5 family (#953) — the platform default (Opus 5.5) and auxiliary
+    // default (Haiku 5.5). Both ARNs each: the bare id is not on-demand invocable,
+    // so the `us.`-prefixed inference profile is the one actually called.
+    expect(serialized).toContain('foundation-model/anthropic.claude-opus-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-5-5');
+    expect(serialized).toContain('foundation-model/anthropic.claude-haiku-5-5');
+    expect(serialized).toContain('inference-profile/us.anthropic.claude-haiku-5-5');
+    // REGRESSION (#744, #953): previous defaults stay granted after a bump.
+    // Blueprints may pin any of them per-repo; dropping one would fail those repos
+    // at turn 0.
     expect(serialized).toContain('foundation-model/anthropic.claude-opus-4-8');
     expect(serialized).toContain('inference-profile/us.anthropic.claude-opus-4-8');
   });
 
   /**
-   * TEMPLATE IDENTITY (#746), ECS half. The `us.` literal that used to be
+   * GRANT-SET PIN, ECS half. The `us.` literal that used to be
    * string-concatenated into this ARN is now the resolved `bedrockGeoRegion`
-   * (default `us`), so the default-context grant must be UNCHANGED. Exact set
-   * equality against the list captured from a pre-change `origin/main` synth
-   * (`fb1e007b`) — the AgentCore half is asserted the same way in
-   * `test/stacks/agent.test.ts`, and the two lists being identical is itself the
-   * substrate-parity invariant this construct exists to keep.
+   * (default `us`). Exact set equality — the AgentCore half is asserted the same
+   * way in `test/stacks/agent.test.ts`, and the two lists being identical is
+   * itself the substrate-parity invariant this construct exists to keep.
+   *
+   * `anthropic.claude-opus-4-20250514-v1:0` is absent by intent: it has no
+   * cross-Region inference profile in any geography, so its two ARNs granted a
+   * profile that cannot exist. Both halves of this pin must be edited together or
+   * the parity invariant above is what fails.
    */
-  test('default-context Bedrock grants are byte-identical to the pre-#746 template', () => {
-    const PRE_CHANGE_BEDROCK_RESOURCE_NAMES = [
+  test('default-context Bedrock grants are the exact expected set, nothing wider', () => {
+    const EXPECTED_BEDROCK_RESOURCE_NAMES = [
       'foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0',
-      'foundation-model/anthropic.claude-opus-4-20250514-v1:0',
+      'foundation-model/anthropic.claude-haiku-5-5',
       'foundation-model/anthropic.claude-opus-4-8',
       'foundation-model/anthropic.claude-opus-5',
+      'foundation-model/anthropic.claude-opus-5-5',
       'foundation-model/anthropic.claude-sonnet-4-6',
       'inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0',
-      'inference-profile/us.anthropic.claude-opus-4-20250514-v1:0',
+      'inference-profile/us.anthropic.claude-haiku-5-5',
       'inference-profile/us.anthropic.claude-opus-4-8',
       'inference-profile/us.anthropic.claude-opus-5',
+      'inference-profile/us.anthropic.claude-opus-5-5',
       'inference-profile/us.anthropic.claude-sonnet-4-6',
     ];
-    const serialized = JSON.stringify(baseTemplate.findResources('AWS::IAM::Policy'));
+    // Inline AND managed-policy overflow, matching the AgentCore half: CDK splits a
+    // role's default policy into managed-policy chunks past the IAM size limit, and
+    // a grant that spilled over must still count here rather than vanish from view.
+    const policies = {
+      ...baseTemplate.findResources('AWS::IAM::Policy'),
+      ...baseTemplate.findResources('AWS::IAM::ManagedPolicy'),
+    };
+    const serialized = JSON.stringify(Object.values(policies).map(policy => policy.Properties.PolicyDocument));
     const found = [...new Set(
       serialized.match(/(?:foundation-model|inference-profile)\/[^"]+/g) ?? [],
     )].sort();
-    expect(found).toEqual(PRE_CHANGE_BEDROCK_RESOURCE_NAMES);
+    expect(found).toEqual(EXPECTED_BEDROCK_RESOURCE_NAMES);
     expect(found).toHaveLength(DEFAULT_BEDROCK_MODEL_IDS.length * 2);
   });
 
@@ -479,6 +499,30 @@ describe('EcsAgentCluster construct', () => {
    * different profile than the same repo on AgentCore. Both reduce to
    * `<geo>.<modelId>`; that equivalence is what this asserts.
    */
+  test.each(['global', 'eu'])('bedrockGeoRegion=%s injects both models into BOTH task definitions', (geo) => {
+    // Neither variable was set here at all, so an ECS task read the Python literals
+    // regardless of the deployed geography — the same divergence as the runtime, on
+    // the other substrate. Deleting both lines survived this whole suite.
+    //
+    // Both task definitions, because they are separate resources: the build tier and
+    // the read-only planning tier. Setting only one leaves planning tasks calling a
+    // geography the grants do not cover.
+    const template = createStack({ bedrockGeoRegion: geo }).template;
+    const defs = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(defs.length).toBe(2);
+    for (const def of defs) {
+      const containers = (def as { Properties?: { ContainerDefinitions?: Array<{ Environment?: Array<{ Name: string; Value: string }> }> } })
+        .Properties?.ContainerDefinitions ?? [];
+      expect(containers.length).toBeGreaterThan(0);
+      for (const c of containers) {
+        const env = Object.fromEntries((c.Environment ?? []).map((e) => [e.Name, e.Value]));
+        expect(env.ANTHROPIC_MODEL).toBe(`${geo}.anthropic.claude-opus-5-5`);
+        expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
+          .toBe(`${geo}.anthropic.claude-haiku-5-5`);
+      }
+    }
+  });
+
   test.each(['global', 'eu'])('bedrockGeoRegion=%s re-prefixes the task role inference-profile ARNs', (geo) => {
     const template = createStack({ bedrockGeoRegion: geo }).template;
     const policies = template.findResources('AWS::IAM::Policy');

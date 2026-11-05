@@ -150,27 +150,37 @@ export async function upsertLinearCredentialProvider(args: {
 }
 
 /**
- * Read the callback URL of an EXISTING provider, or null if there isn't one.
+ * Outcome of reading an EXISTING provider's callback URL — the vault path's Linear
+ * `redirect_uri`, which `linear app-template` prints so the operator need not find it.
  *
- * Read-only and best-effort by design: this exists so `linear app-template` can
- * print the real vault redirect_uri instead of asking the operator to go and find
- * it. On a first run the provider does not exist yet, and the operator may have no
- * credentials at all, so every failure is reported as "unknown" rather than
- * raised — a template command must still work offline.
+ * Read-only and never throws: on a first run the provider does not exist yet and the
+ * operator may have no credentials at all, and a template command must still work.
+ *
+ * `absent` and `unreadable` used to be one `null`, which was harmless while every
+ * caller rendered the same text either way. They no longer do: `app-template` tells an
+ * operator to leave Linear's Redirect URIs field EMPTY when no provider exists, and that
+ * advice is wrong for a workspace whose provider exists but could not be read (expired
+ * credentials, wrong region). So the caller has to be able to tell them apart.
  */
-export async function lookupLinearVaultCallbackUrl(args: {
+export type VaultCallbackProbe =
+  | { readonly kind: 'found'; readonly callbackUrl: string }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly errorName: string };
+
+export async function probeLinearVaultCallbackUrl(args: {
   region: string;
   workspaceSlug: string;
-}): Promise<string | null> {
+}): Promise<VaultCallbackProbe> {
   try {
     const control = makeClient(BedrockAgentCoreControlClient, { region: args.region });
     const existing = await control.send(
       new GetOauth2CredentialProviderCommand({ name: linearVaultProviderName(args.workspaceSlug) }),
     );
-    return existing.callbackUrl ?? null;
-  } catch {
-    // nosemgrep: ts-silent-success-masking -- the only caller renders a template and prints a "NOT FOUND" line naming how to create the provider; "absent" and "unreadable" lead to identical output, and raising would make the command that explains onboarding unusable before onboarding
-    return null;
+    return existing.callbackUrl ? { kind: 'found', callbackUrl: existing.callbackUrl } : { kind: 'absent' };
+  } catch (err) {
+    const errorName = (err as { name?: string } | undefined)?.name ?? 'Error';
+    if (errorName === 'ResourceNotFoundException') return { kind: 'absent' };
+    return { kind: 'unreadable', errorName };
   }
 }
 
