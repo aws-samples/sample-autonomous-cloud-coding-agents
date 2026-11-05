@@ -25,6 +25,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
 }));
 
 const createTaskCoreMock = jest.fn();
@@ -116,6 +117,34 @@ function issue(overrides: Record<string, unknown> = {}): Record<string, unknown>
     ...overrides,
   };
 }
+
+describe('linear-webhook-processor scheduled grant health probe (#1004)', () => {
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset();
+    resolveLinearOauthTokenMock.mockReset();
+  });
+
+  test('the probe event resolves every active workspace and never takes the webhook path', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [
+        { linear_workspace_id: 'ws-live', workspace_slug: 'live', status: 'active' },
+        { linear_workspace_id: 'ws-dead', workspace_slug: 'dead', status: 'active' },
+        { linear_workspace_id: 'ws-latched', workspace_slug: 'latched', status: 'revoked' },
+      ],
+    });
+    resolveLinearOauthTokenMock.mockImplementation(async (id: string) => (id === 'ws-live' ? { access_token: 't' } : null));
+
+    await handler({ grant_health_probe: true });
+
+    expect(ddbSend.mock.calls[0][0]).toMatchObject({ _type: 'Scan', input: { TableName: 'LinearWorkspaceRegistry' } });
+    expect(resolveLinearOauthTokenMock.mock.calls).toEqual([
+      ['ws-live', 'LinearWorkspaceRegistry'],
+      ['ws-dead', 'LinearWorkspaceRegistry'],
+    ]);
+    expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+});
 
 describe('linear-webhook-processor handler', () => {
   beforeEach(() => {

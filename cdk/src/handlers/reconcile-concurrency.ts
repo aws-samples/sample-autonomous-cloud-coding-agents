@@ -18,6 +18,8 @@
  */
 
 import { DynamoDBClient, ScanCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { InvocationType, InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
+import { GRANT_HEALTH_PROBE_EVENT, isProbeTick } from './shared/linear-grant-health';
 import { logger } from './shared/logger';
 import { makeClient } from './shared/ua';
 
@@ -60,8 +62,37 @@ async function countActiveTasks(userId: string): Promise<number> {
  * Scheduled handler: scan the concurrency table and reconcile each user's
  * active_count against actual active tasks in the task table.
  */
+const LINEAR_GRANT_PROBE_FUNCTION_ARN = process.env.LINEAR_GRANT_PROBE_FUNCTION_ARN;
+const RECONCILER_TICK_MINUTES = Number(process.env.RECONCILER_TICK_MINUTES);
+const lambdaClient = LINEAR_GRANT_PROBE_FUNCTION_ARN ? makeClient(LambdaClient) : undefined;
+
+/**
+ * Kick the Linear grant health probe (#1004) on one tick per 12 h. Fire-and-forget
+ * (async invoke) and best-effort: a probe problem must never affect reconciliation.
+ */
+export async function triggerLinearGrantProbe(nowMs: number = Date.now()): Promise<boolean> {
+  if (!lambdaClient || !LINEAR_GRANT_PROBE_FUNCTION_ARN || !isProbeTick(nowMs, RECONCILER_TICK_MINUTES)) {
+    return false;
+  }
+  try {
+    await lambdaClient.send(new InvokeCommand({
+      FunctionName: LINEAR_GRANT_PROBE_FUNCTION_ARN,
+      InvocationType: InvocationType.Event,
+      Payload: Buffer.from(JSON.stringify(GRANT_HEALTH_PROBE_EVENT)),
+    }));
+    logger.info('Triggered the Linear grant health probe');
+    return true;
+  } catch (err) {
+    logger.warn('Could not trigger the Linear grant health probe', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 export async function handler(): Promise<void> {
   logger.info('Concurrency reconciler started');
+  await triggerLinearGrantProbe();
   let corrected = 0;
   let scanned = 0;
   let errors = 0;

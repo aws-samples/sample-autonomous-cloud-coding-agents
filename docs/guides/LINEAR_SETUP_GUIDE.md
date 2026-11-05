@@ -280,6 +280,18 @@ If the app has been edited repeatedly through failed saves, creating a fresh app
 - Is the label spelled as configured? Matching is case-insensitive but must be the same word.
 - Check CloudWatch for `WebhookFn` and `WebhookProcessorFn`. Common: `Invalid Linear webhook signature`, `Linear workspace is not onboarded`, `Linear project is not onboarded`, `Linear actor has no linked platform user`.
 
+### Linear stops responding and an "authorization revoked" alert arrives
+
+ABCA probes every registered workspace's grant every 12 hours, as well as whenever an event needs a token. The probe refreshes tokens that are about to expire, which keeps a grant alive even when nobody uses Linear for a while. If Linear rejects a grant, the workspace is marked `revoked` and one alert goes to the **OperationalAlerts** SNS topic (stack output `OperationalAlertsTopicArn`). Subscribe an email or chat endpoint to it, or deploy with `-c alertEmail=…`, because it ships with no subscribers.
+
+To recover, re-authorize the workspace:
+
+```bash
+bgagent linear setup <slug>
+```
+
+The probe's summary is in the `WebhookProcessorFn` logs ("Linear grant health probe"), listing any workspace without a usable token.
+
 ### Webhook signature verification fails repeatedly
 
 The stored signing secret doesn't match the subscription Linear is sending from — usually because the webhook was configured in Linear without telling ABCA, or the secret was rotated:
