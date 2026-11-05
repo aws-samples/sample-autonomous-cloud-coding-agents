@@ -19,7 +19,7 @@
 
 import { ECSClient, RunTaskCommand, DescribeTasksCommand, StopTaskCommand } from '@aws-sdk/client-ecs';
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import type { ComputeStrategy, SessionHandle, SessionStatus } from '../compute-strategy';
+import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionLifecycleResult, SessionStatus } from '../compute-strategy';
 import { logger } from '../logger';
 import type { BlueprintConfig } from '../repo-config';
 import { makeClient } from '../ua';
@@ -122,6 +122,16 @@ export async function deleteEcsPayload(taskId: string): Promise<void> {
 
 export class EcsComputeStrategy implements ComputeStrategy {
   readonly type = 'ecs';
+
+  async suspendSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'ecs') throw new Error('suspendSession called with non-ecs handle');
+    return { supported: false };
+  }
+
+  async resumeSession(handle: SessionHandle): Promise<SessionLifecycleResult> {
+    if (handle.strategyType !== 'ecs') throw new Error('resumeSession called with non-ecs handle');
+    return { supported: false };
+  }
 
   async startSession(input: {
     taskId: string;
@@ -312,16 +322,17 @@ export class EcsComputeStrategy implements ComputeStrategy {
     };
   }
 
-  async pollSession(handle: SessionHandle): Promise<SessionStatus> {
+  async pollSession(handle: SessionHandle, options?: SessionControlOptions): Promise<SessionStatus> {
     if (handle.strategyType !== 'ecs') {
       throw new Error('pollSession called with non-ecs handle');
     }
     const { clusterArn, taskArn } = handle;
 
+    options?.abortSignal?.throwIfAborted();
     const result = await getClient().send(new DescribeTasksCommand({
       cluster: clusterArn,
       tasks: [taskArn],
-    }));
+    }), options);
 
     const ecsTask = result.tasks?.[0];
     if (!ecsTask) {
@@ -348,18 +359,19 @@ export class EcsComputeStrategy implements ComputeStrategy {
     return { status: 'running' };
   }
 
-  async stopSession(handle: SessionHandle): Promise<void> {
+  async stopSession(handle: SessionHandle, options?: SessionControlOptions): Promise<void> {
     if (handle.strategyType !== 'ecs') {
       throw new Error('stopSession called with non-ecs handle');
     }
     const { clusterArn, taskArn } = handle;
 
     try {
+      options?.abortSignal?.throwIfAborted();
       await getClient().send(new StopTaskCommand({
         cluster: clusterArn,
         task: taskArn,
         reason: 'Stopped by orchestrator',
-      }));
+      }), options);
       logger.info('ECS task stopped', { task_arn: taskArn });
     } catch (err) {
       const errName = err instanceof Error ? err.name : undefined;

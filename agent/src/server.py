@@ -30,6 +30,15 @@ from pydantic import BaseModel
 
 import task_state
 from config import resolve_github_token
+from microvm_http import microvm_resume, microvm_suspend
+from microvm_lifecycle import (
+    LifecycleUnavailable,
+    get_context,
+    get_registered_context,
+    register_task,
+    reseed_random,
+    unregister_task,
+)
 from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
@@ -273,7 +282,16 @@ def _heartbeat_worker(task_id: str, stop: threading.Event) -> None:
     """Periodically refresh ``agent_heartbeat_at`` so the orchestrator can detect crashes."""
     while not stop.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
         try:
-            task_state.write_heartbeat(task_id)
+            lifecycle = get_context(task_id)
+            if lifecycle:
+                with lifecycle.activity():
+                    task_state.write_heartbeat(task_id)
+            else:
+                task_state.write_heartbeat(task_id)
+        except LifecycleUnavailable:
+            # An approval waiter has no liveness obligation while frozen.
+            # Resume must refresh credentials before another heartbeat writes.
+            continue
         except Exception as e:
             print(
                 f"[heartbeat] write_heartbeat error (will retry): {type(e).__name__}: {e}",
@@ -417,6 +435,7 @@ def _run_task_background(
     workload_access_token: str = "",
     attachments: list[dict] | None = None,
     resolved_assets: list[dict] | None = None,
+    microvm_id: str = "",
 ) -> None:
     """Run the agent task in a background thread."""
     global _background_pipeline_failed
@@ -456,6 +475,14 @@ def _run_task_background(
         task_id=task_id,
     )
 
+    lifecycle = register_task(task_id, microvm_id) if microvm_id else None
+    if lifecycle is not None:
+        # Sockets idle across a long suspend can be dropped silently (VPC
+        # endpoint/NAT idle timeout is 350 s), so the first model call after
+        # wake can wait for headers that never arrive. Claude Code's default
+        # wait is 300 s; fail fast and retry instead. Streamed bodies keep
+        # their own idle watchdog, so long generations are unaffected.
+        os.environ.setdefault("API_TIMEOUT_MS", "120000")
     stop_heartbeat = threading.Event()
     hb_thread: threading.Thread | None = None
     if task_id:
@@ -521,6 +548,8 @@ def _run_task_background(
             )
             task_state.write_terminal(task_id, "FAILED", backup.model_dump())
     finally:
+        if lifecycle:
+            unregister_task(lifecycle)
         stop_heartbeat.set()
         if hb_thread is not None and hb_thread.is_alive():
             hb_thread.join(timeout=3)
@@ -855,6 +884,11 @@ async def invoke_agent(request: Request, body: InvocationRequest):
 # build or lifecycle transition, which is why the construct declares exactly the
 # hooks served here.
 MICROVM_HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1"
+
+# ADR-021 P3: the guest answers /suspend and /resume (microvm_http). An unsafe
+# suspend is declined with 200 so the service never terminates the worker.
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/suspend", microvm_suspend, methods=["POST"])
+app.add_api_route(f"{MICROVM_HOOK_PREFIX}/resume", microvm_resume, methods=["POST"])
 
 #: ``s3://`` scheme prefix for the out-of-band payload pointer.
 _S3_URI_SCHEME = "s3://"
@@ -1929,7 +1963,8 @@ def microvm_validate():
     would fail every build. Names only — never values.
     """
     expected_routes = {
-        f"{MICROVM_HOOK_PREFIX}/{hook}" for hook in ("ready", "validate", "run", "terminate")
+        f"{MICROVM_HOOK_PREFIX}/{hook}"
+        for hook in ("ready", "validate", "run", "terminate", "suspend", "resume")
     }
     registered = {getattr(route, "path", None) for route in app.routes}
     missing_routes = sorted(expected_routes - registered)
@@ -1939,6 +1974,12 @@ def microvm_validate():
         "hook_routes_registered": not missing_routes,
         "python_version_supported": sys.version_info[:2] >= _MIN_PYTHON_VERSION,
         "platform_config_contract_loaded": bool(MICROVM_PLATFORM_CONFIG_ENV_BY_KEY),
+        # Absent markers support ordinary/legacy images. A marked image must
+        # actually contain the protocol it advertises, before AWS snapshots it.
+        "image_lifecycle_protocol_supported": os.environ.get(
+            SHARED_CONSTANTS["microvm_lifecycle"]["image_protocol_env"]
+        )
+        in (None, str(SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"])),
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
 
@@ -1983,6 +2024,11 @@ def microvm_validate():
     return body
 
 
+# The terminate body is only optional correlation data. Leave ample headroom
+# inside the image's 15-second hook timeout if the service stream stalls.
+_TERMINATE_BODY_BUDGET_SECONDS = 1.0
+
+
 @app.post(f"{MICROVM_HOOK_PREFIX}/terminate")
 async def microvm_terminate(request: Request):
     """MicroVM ``/terminate`` runtime hook — best-effort flush, always 200.
@@ -2017,10 +2063,20 @@ async def microvm_terminate(request: Request):
     than a flush loop. (ADR-021 sub-decision 2's "flush progress events before
     returning 200" applies to ``/suspend`` in P3 for the same reason: durability
     is per-write, so the hook only has to observe it.)
+
+    P3: close the local coding barrier first, so a slow suspend/resume thread
+    cannot release coding during teardown, and bound the body read.
     """
+    try:
+        lifecycle = get_registered_context()
+        if lifecycle is not None:
+            lifecycle.close()
+    except Exception as exc:
+        _emit_stdout_line(f"[server/warn] /terminate barrier close failed: {type(exc).__name__}")
     raw = b""
     try:
-        raw = await request.body()
+        async with asyncio.timeout(_TERMINATE_BODY_BUDGET_SECONDS):
+            raw = await request.body()
     except Exception as exc:
         # A truncated/aborted body must not become a 5xx: the VM is going away and
         # the id is only a correlation string. Logged, not swallowed.
@@ -2239,7 +2295,8 @@ def microvm_run(request: Request, body: MicrovmRunHookRequest):
             },
         )
 
-    _spawn_background(params)
+    reseed_random()
+    _spawn_background({**params, "microvm_id": body.microvmId})
     task_id = params["task_id"]
     # Carries microvm_id as well as task_id: the "/run hook received" line that
     # used to correlate the two is stdout-only now (pre-install), so this is the

@@ -284,11 +284,19 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
-- `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
+- `suspended` is healthy only while the task is `AWAITING_APPROVAL` and the supervisor recorded a suspend intent for that exact gate; any other suspension is woken.
 - A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
 - Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
+
+**Lambda MicroVM approval-wait supervision (ADR-021 P3).** For MicroVM tasks the durable poll runs a supervisor instead of the generic loop. It persists its state (worker ID, first observation, session deadline, failure counters) across durable replays, so later polls never extend the original service deadline. While the task is `AWAITING_APPROVAL` it decides, from the task row, the approval row and `GetMicrovm`, whether to keep waiting, suspend or resume:
+
+- **Suspend** after the task's `microvm_sleep_after_s` grace (default 60 s), only when the live suspend switch is on, the launched image version declares the lifecycle protocol, and at least 30 s of sleep remain before the wake time. It records a suspend intent for the gate before calling `SuspendMicrovm` and re-checks the gate immediately before the call.
+- **Resume** when the decision is recorded (inline from `ApproveTaskFn`/`DenyTaskFn`, with the supervisor as backstop), when the gate's original deadline is 60 s away, when a suspension does not match a recorded intent, or when the gate cannot be read. A failed inline wake records `microvm_resume_orphan`; the supervisor retries.
+- **Fail** the task, conditionally on its own worker ID, when the substrate is terminal before the agent wrote a result, the session deadline passes, or wake requests keep failing.
+
+At finalization the supervisor's worker is always stopped and confirmed, even if the database update fails.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
 

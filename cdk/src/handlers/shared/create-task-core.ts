@@ -48,6 +48,9 @@ import {
   type CreateTaskRequest,
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
+  MICROVM_SLEEP_AFTER_S_DEFAULT,
+  MICROVM_SLEEP_AFTER_S_MAX,
+  MICROVM_SLEEP_AFTER_S_MIN,
   type InlineAttachment,
   type PresignedAttachment,
   type TaskRecord,
@@ -334,6 +337,15 @@ export async function createTaskCore(
       );
     }
     approvalTimeoutS = body.approval_timeout_s;
+  }
+
+  const microvmSleepAfterS = body.microvm_sleep_after_s === undefined
+    ? MICROVM_SLEEP_AFTER_S_DEFAULT : body.microvm_sleep_after_s;
+  if (typeof microvmSleepAfterS !== 'number' || !Number.isInteger(microvmSleepAfterS)
+    || microvmSleepAfterS < MICROVM_SLEEP_AFTER_S_MIN || microvmSleepAfterS > MICROVM_SLEEP_AFTER_S_MAX) {
+    return errorResponse(400, ErrorCode.VALIDATION_ERROR,
+      `Invalid microvm_sleep_after_s. Must be an integer between ${MICROVM_SLEEP_AFTER_S_MIN} `
+        + `and ${MICROVM_SLEEP_AFTER_S_MAX} seconds (0 disables sleep).`, requestId);
   }
 
   // Cedar HITL — validate initial_approvals if supplied (§7.3 step 4).
@@ -811,6 +823,8 @@ export async function createTaskCore(
     // payload supplied them; ``approval_timeout_s`` defaults to the
     // engine default at agent runtime when absent here.
     ...(approvalTimeoutS !== undefined && { approval_timeout_s: approvalTimeoutS }),
+    // Capture the default so future deployments cannot change this task's preference.
+    microvm_sleep_after_s: microvmSleepAfterS,
     ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
     // Persisted counter the stranded-approval reconciler + agent
     // counter both read (§13.6). Seeded to 0 at task-create time.

@@ -18,9 +18,10 @@
  */
 
 import { TransactionCanceledException } from '@aws-sdk/client-dynamodb';
-import { PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { recordDecisionPostCommit } from './shared/approval-decision';
 import { VALID_APPROVAL_SCOPE_PREFIXES, parseApprovalScope } from './shared/approval-scope';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
@@ -64,7 +65,10 @@ const AUDIT_EVENT_RETENTION_DAYS = Number(process.env.TASK_RETENTION_DAYS ?? '90
  * @param event - API Gateway proxy event.
  * @returns API Gateway proxy result.
  */
-export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+export async function handler(
+  event: APIGatewayProxyEvent, context?: Pick<Context, 'getRemainingTimeInMillis'>,
+): Promise<APIGatewayProxyResult> {
+  const invocationStartedMs = Date.now();
   const requestId = ulid();
 
   try {
@@ -170,7 +174,8 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
               UpdateExpression:
                 'SET #status = :approved, decided_at = :now, #scope = :scope',
               ConditionExpression:
-                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller',
+                'attribute_exists(request_id) AND #status = :pending AND user_id = :caller '
+                  + 'AND (attribute_not_exists(deadline_epoch) OR deadline_epoch > :epoch)',
               ExpressionAttributeNames: {
                 '#status': 'status',
                 '#scope': 'scope',
@@ -181,6 +186,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
                 ':now': nowIso,
                 ':scope': scope,
                 ':caller': callerUserId,
+                ':epoch': nowEpoch,
               },
             },
           },
@@ -209,35 +215,22 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
-    // 5. Audit event (IMPL-6). Failure to write the audit is logged
-    // but does not fail the request — the decision is already
-    // committed on TaskApprovalsTable and the agent will see it on its
-    // next poll regardless.
-    try {
-      await ddb.send(new PutCommand({
-        TableName: EVENTS_TABLE_NAME,
-        Item: {
-          task_id: taskId,
-          event_id: ulid(),
-          event_type: 'approval_decision_recorded',
-          timestamp: nowIso,
-          ttl: nowEpoch + AUDIT_EVENT_RETENTION_DAYS * 86400,
-          metadata: {
-            request_id,
-            status: 'APPROVED',
-            scope,
-            decided_at: nowIso,
-            caller_user_id: callerUserId,
-          },
-        },
-      }));
-    } catch (auditErr) {
-      logger.warn('approval_decision_recorded audit write failed (decision already committed)', {
-        task_id: taskId,
-        request_id,
-        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-      });
-    }
+    // Audit + optional MicroVM wake are best-effort after commit (shared with
+    // deny); neither can turn an accepted human decision into an HTTP failure.
+    await recordDecisionPostCommit({
+      ddb,
+      eventsTableName: EVENTS_TABLE_NAME!,
+      taskId,
+      callerUserId,
+      requestId: request_id,
+      decision: 'APPROVED',
+      auditMetadata: { scope: scope },
+      decidedAt: nowIso,
+      nowEpoch,
+      retentionDays: AUDIT_EVENT_RETENTION_DAYS,
+      invocationStartedMs,
+      context,
+    });
 
     logger.info('Approval recorded', {
       task_id: taskId,

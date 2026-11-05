@@ -24,7 +24,9 @@ the contract. This is the neutral location both runtimes read.
 | `agent/src/server.py` | `SHARED_CONSTANTS["microvm_platform_config"]`, `SHARED_CONSTANTS["microvm_hook_budgets"]` | import-time |
 | `cdk/src/handlers/shared/types.ts`, `jira-app-actor.ts` | `../../../../contracts/constants.json` | synth-time `import` |
 | `cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts` | `microvm_platform_config` | synth-time `import`, read per session start |
-| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
+| `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets`, `microvm_lifecycle` | synth-time `import` |
+| `agent/src/microvm_http.py` | `SHARED_CONSTANTS["microvm_hook_budgets"]` (lifecycle handler/hook budgets) | import-time |
+| `cdk/src/handlers/shared/microvm/image-capability.ts` | `microvm_lifecycle` (protocol version, image marker) | synth-time `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
 
@@ -183,6 +185,21 @@ literal re-declaration on **either** side — the Python constants *and*
 `READY_HOOK_TIMEOUT_SECONDS` in the TypeScript construct — and
 `agent/src/server.py` re-checks the same ordering at import time, so a bad contract
 fails the drift check *and* the image build.
+
+- **`microvm_hook_budgets.lifecycle_hook_timeout_seconds` / `lifecycle_handler_budget_seconds`**
+  — the `/suspend` and `/resume` hook timeout declared to the image (30 s) and the
+  agent handler's own budget inside it (20 s). The handler must leave time to send
+  its answer, so `scripts/check-constants-sync.ts` and `microvm_http.py` both require
+  handler < hook.
+- **`microvm_lifecycle`** — the lifecycle protocol version and the image marker
+  environment name (`ABCA_MICROVM_LIFECYCLE_PROTOCOL`) the image declares and
+  `/validate` checks, the hook port, and the 28,800 s `maximumDurationInSeconds`.
+  The coordinator suspends only images whose launched version declares this protocol.
+- **`microvm_sleep_after_s`** — per-task approval-wait delay before MicroVM sleep
+  (`min` 0 = off, `max` 3,600, `default` 60). The default is chosen against
+  `approval_timeout_s.default` (300 s): the supervisor wakes 60 s before the
+  deadline and never suspends for less than 30 s, so a default gate sleeps from
+  60 s to 240 s.
 
 The published CLI package contains only `lib/`, so it cannot load the repository
 contract at runtime. It mirrors these values as literals and

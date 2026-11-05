@@ -987,14 +987,13 @@ class TestMicrovmReadyHook:
         with server._threads_lock:
             assert server._active_threads == []
 
-    def test_suspend_and_resume_are_NOT_served(self, client):
-        # Declaring a hook nothing answers fails the corresponding build or
-        # lifecycle transition, so the construct declares exactly the hooks the
-        # agent serves. /validate + /terminate joined that set in P2; /suspend +
-        # /resume need the ComputeStrategy interface widening (P3), so they must
-        # still 404 — the assertion that keeps the construct honest.
+    def test_suspend_and_resume_require_a_registered_task(self, client):
+        # Runtime routes exist before the image declares the P3 capability.
+        # Snapshot warm-up has no task and cannot authorize a lifecycle change.
         for hook in ("suspend", "resume"):
-            assert client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}").status_code == 404
+            response = client.post(f"{server.MICROVM_HOOK_PREFIX}/{hook}")
+            assert response.status_code == 409
+            assert response.json()["code"] == "MICROVM_LIFECYCLE_UNAVAILABLE"
 
 
 class TestMicrovmReadyHookWarmUp:
@@ -2723,6 +2722,7 @@ class TestMicrovmValidateHook:
             "hook_routes_registered": True,
             "python_version_supported": True,
             "platform_config_contract_loaded": True,
+            "image_lifecycle_protocol_supported": True,
         }
         assert body["hook_prefix"] == server.MICROVM_HOOK_PREFIX
         assert body["platform_config_keys"] == len(server.MICROVM_PLATFORM_CONFIG_ENV_BY_KEY)
@@ -2811,7 +2811,9 @@ class TestMicrovmValidateHook:
         assert "hook_routes_registered" in r.json()["failed_checks"]
         assert r.json()["missing_routes"] == [
             "/typo/prefix/ready",
+            "/typo/prefix/resume",
             "/typo/prefix/run",
+            "/typo/prefix/suspend",
             "/typo/prefix/terminate",
             "/typo/prefix/validate",
         ]
@@ -2866,6 +2868,28 @@ class TestMicrovmValidateHook:
             monkeypatch.delenv(name, raising=False)
         client.post(VALIDATE_HOOK)
         assert "/validate hook WARNING" not in capfd.readouterr().out
+
+    @pytest.mark.parametrize(
+        "marker",
+        [None, str(server.SHARED_CONSTANTS["microvm_lifecycle"]["protocol_version"]), "", "999"],
+    )
+    def test_build_rejects_an_image_marker_the_source_does_not_support(
+        self, client, monkeypatch, marker
+    ):
+        contract = server.SHARED_CONSTANTS["microvm_lifecycle"]
+        key = contract["image_protocol_env"]
+        if marker is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, marker)
+        forbidden = MagicMock(side_effect=AssertionError("image validation contacted AWS"))
+        monkeypatch.setattr("aws_session.platform_client", forbidden)
+        monkeypatch.setattr("aws_session.tenant_client", forbidden)
+        response = client.post(VALIDATE_HOOK)
+        expected = marker in (None, str(contract["protocol_version"]))
+        assert response.status_code == (200 if expected else 503)
+        assert response.json()["checks"]["image_lifecycle_protocol_supported"] is expected
+        forbidden.assert_not_called()
 
 
 class TestMicrovmTerminateHook:
@@ -3559,3 +3583,40 @@ class TestParseTerminateMicrovmId:
 
     def test_ignores_unrelated_fields(self):
         assert server._parse_terminate_microvm_id(b'{"reason": "idle", "x": 1}') == ""
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_microvm_pipeline_registers_identity_and_always_removes_lifecycle(monkeypatch, crash):
+    from microvm_lifecycle import get_context
+
+    monkeypatch.delenv("API_TIMEOUT_MS", raising=False)
+    observed = []
+
+    def run_task(**kwargs):
+        context = get_context("lifecycle-server-task")
+        assert context is not None
+        assert context.microvm_id == "microvm-server"
+        assert "microvm_id" not in kwargs
+        assert os.environ["API_TIMEOUT_MS"] == "120000"
+        observed.append(context)
+        if crash:
+            raise RuntimeError("pipeline crashed")
+
+    monkeypatch.setattr(server, "run_task", run_task)
+    monkeypatch.setattr(server, "_heartbeat_worker", lambda *_: None)
+    monkeypatch.setattr(server.task_state, "write_terminal", MagicMock())
+    server._run_task_background(
+        repo_url="owner/repo",
+        task_description="test",
+        issue_number="",
+        github_token="test-token",
+        anthropic_model="model",
+        max_turns=1,
+        max_budget_usd=None,
+        aws_region="us-west-2",
+        task_id="lifecycle-server-task",
+        microvm_id="microvm-server",
+    )
+    assert len(observed) == 1
+    assert get_context("lifecycle-server-task") is None
+    assert server._background_pipeline_failed is crash

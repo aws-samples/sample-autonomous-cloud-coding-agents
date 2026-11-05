@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import type { ApprovalStatus } from '../handlers/shared/types';
+
 /**
  * Valid task states in the task lifecycle state machine.
  *
@@ -57,6 +59,21 @@ export const TaskStatus = {
   CANCELLED: 'CANCELLED',
   TIMED_OUT: 'TIMED_OUT',
 } as const;
+
+/**
+ * TaskApprovalsTable row statuses: the runtime mirror of the `ApprovalStatus`
+ * type, for DynamoDB expression values the compiler cannot otherwise check.
+ */
+export const ApprovalStatusValue = {
+  PENDING: 'PENDING',
+  APPROVED: 'APPROVED',
+  DENIED: 'DENIED',
+  TIMED_OUT: 'TIMED_OUT',
+  STRANDED: 'STRANDED',
+} as const satisfies Record<ApprovalStatus, ApprovalStatus>;
+
+/** Every approval-row status, in declaration order. */
+export const APPROVAL_STATUSES: readonly ApprovalStatus[] = Object.values(ApprovalStatusValue);
 
 /**
  * Union type of all valid task status values.
@@ -112,7 +129,7 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
   // screening failure, CANCELLED on user cancel or 30-min auto-cancel.
   [TaskStatus.PENDING_UPLOADS]: [TaskStatus.SUBMITTED, TaskStatus.FAILED, TaskStatus.CANCELLED],
   // QUEUED (#441): admission-capped task awaiting a free concurrency
-  // slot. SUBMITTED on pickup (slot acquired), CANCELLED on user
+  // slot. SUBMITTED on pickup (orchestrator retries admission), CANCELLED on user
   // cancel, FAILED only via the queue-stranded backstop.
   [TaskStatus.QUEUED]: [TaskStatus.SUBMITTED, TaskStatus.CANCELLED, TaskStatus.FAILED],
   [TaskStatus.SUBMITTED]: [TaskStatus.QUEUED, TaskStatus.HYDRATING, TaskStatus.FAILED, TaskStatus.CANCELLED],
@@ -130,8 +147,8 @@ export const VALID_TRANSITIONS: Readonly<Record<TaskStatusType, readonly TaskSta
     TaskStatus.FAILED,
   ],
   // AWAITING_APPROVAL transitions back to RUNNING on approve or denial
-  // resume; CANCELLED on user cancel mid-approval; FAILED only via the
-  // stranded-approval reconciler.
+  // resume; CANCELLED on user cancel mid-approval; FAILED on infrastructure
+  // loss, an exhausted supervisor window or stranded-approval reconciliation.
   [TaskStatus.AWAITING_APPROVAL]: [
     TaskStatus.RUNNING,
     TaskStatus.CANCELLED,

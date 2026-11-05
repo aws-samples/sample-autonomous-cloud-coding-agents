@@ -62,7 +62,10 @@ const FIXTURE_FILES = [
   'agent/src/jira_reactions.py',
   'agent/src/server.py',
   'agent/src/config.py',
+  'agent/src/microvm_http.py',
   'cdk/src/constructs/lambda-microvm-compute.ts',
+  'cdk/src/handlers/shared/microvm/image-capability.ts',
+  'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
 ];
 
 interface RunResult {
@@ -125,6 +128,37 @@ describe('check-constants-sync', () => {
   // Node's type-stripping runs the script from source; the suite is a handful of
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
+
+  describe('MicroVM lifecycle image contract', () => {
+    test.each([
+      ['protocol_version', 0], ['protocol_version', 1.5], ['protocol_version', '1'],
+      ['hook_port', 0], ['hook_port', 65536], ['hook_port', 8080.5],
+      ['maximum_duration_seconds', 0], ['maximum_duration_seconds', 28801],
+      ['maximum_duration_seconds', 28800.5], ['maximum_duration_seconds', '28800'],
+      ['image_protocol_env', 'AWS_ACCESS_KEY_ID'], ['image_protocol_env', 'ABCA_MICROVM_bad'],
+    ])('rejects invalid %s=%s', (key, value) => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.microvm_lifecycle[key] = value;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('microvm_lifecycle');
+    });
+    test.each([
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'AGENT_HOOK_PORT', '8080'],
+      ['cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts', 'MICROVM_MAX_DURATION_SECONDS', '28_800'],
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'LIFECYCLE_HOOK_TIMEOUT_SECONDS', '30'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_IMAGE_PROTOCOL_ENV', '"ABCA_MICROVM_LIFECYCLE_PROTOCOL"'],
+    ])('rejects a literal %s/%s', (file, name, value) => {
+      const result = runInMutatedRepo(root => {
+        write(root, file, `${read(root, file)}\nexport const ${name} = ${value};\n`);
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(name);
+      expect(result.stderr).toContain('Cross-language constants drift detected');
+    });
+  });
 
   describe('the real repository', () => {
     test('passes, and says what it actually checked', () => {
@@ -367,6 +401,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('ARN-pinning contract (review B5)', () => {
+    test.each([
+      ['new_resource_arn', 'NEW_RESOURCE'],
+      ['new_resource', 'NEW_RESOURCE_ARN'],
+    ])('rejects an unvalidated ARN field %s → %s', (key, envName) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key[key] = envName;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`ARN-shaped key "${key}" is missing from arn_keys`);
+    });
+
+    test('accepts a new ARN field when its validation is also declared', () => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key.new_resource_arn = 'NEW_RESOURCE_ARN';
+          json.microvm_platform_config.arn_keys.push('new_resource_arn');
+        });
+      });
+      expect(result.status).toBe(0);
+    });
+
     test('rejects an arn_keys entry that is not a wire key', () => {
       const result = runInMutatedRepo((root) => {
         patchContract(root, (json) => {
@@ -417,6 +474,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('hook-budget invariant', () => {
+    test.each(['LIFECYCLE_HANDLER_BUDGET_S', 'LIFECYCLE_HOOK_TIMEOUT_S'])(
+      'rejects a hardcoded lifecycle budget %s',
+      (name) => {
+        const result = runInMutatedRepo((root) => {
+          write(root, 'agent/src/microvm_http.py',
+            `${read(root, 'agent/src/microvm_http.py')}\n${name}: float = 20\n`);
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(name);
+      },
+    );
+
+    test.each([0, 1])('rejects a lifecycle handler budget %s seconds beyond the service timeout', (offset) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_hook_budgets.lifecycle_handler_budget_seconds =
+            json.microvm_hook_budgets.lifecycle_hook_timeout_seconds + offset;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('lifecycle_handler_budget_seconds must be <');
+    });
+
     test('rejects a warm-up budget that does not fit inside the hook timeout', () => {
       // The relationship the two-sided contract exists for: a warm-up that cannot
       // answer inside the service's hook budget turns a runtime fix into a build

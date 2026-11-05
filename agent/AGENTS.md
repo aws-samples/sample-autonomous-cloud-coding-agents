@@ -27,6 +27,7 @@ Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`.
 | `progress_writer.py` | `agent/tests/test_progress_writer.py` |
 | `hooks.py`, `policy.py` | `agent/tests/test_hooks.py`, `test_policy.py` |
 | `pipeline.py`, `runner.py` | `agent/tests/test_pipeline.py`, etc. |
+| `microvm_lifecycle.py`, `microvm_checkpoint.py` | `test_microvm_lifecycle.py`, `test_microvm_checkpoint.py`; checkpoint transaction tests require `ABCA_DDB_LOCAL_ENDPOINT` in CI |
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
 

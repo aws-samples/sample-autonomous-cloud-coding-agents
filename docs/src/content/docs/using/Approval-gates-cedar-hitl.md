@@ -105,3 +105,15 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 6
 `--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
+
+For Lambda MicroVM tasks, a waiting approval can put the worker to sleep so it
+stops billing compute. With the defaults (a 300-second approval window and a
+60-second sleep delay) the worker sleeps after one minute and wakes when you
+answer, or 60 seconds before the deadline so a timeout is still recorded
+normally. `--microvm-sleep-after 120` selects two minutes and
+`--microvm-sleep-after off` keeps the worker awake. The delay starts when each
+approval request is created; sleep never extends the approval deadline. The API
+equivalent is `microvm_sleep_after_s` (zero means off), and task details return
+the saved setting. Automatic sleep is disabled by default for new deployments.
+An operator enables it after [verifying the deployed image and
+coordinator](/sample-autonomous-cloud-coding-agents/architecture/readme#live-acceptance-for-an-installation).

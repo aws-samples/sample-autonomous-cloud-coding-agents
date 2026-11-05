@@ -4,18 +4,18 @@ This guide covers deploying ABCA into an AWS account, including compute backend 
 
 ## Architecture overview
 
-ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
+ABCA deploys from the `backgroundagent-dev` application stack with nested stacks for selected subsystems, including registry infrastructure. Networking stays in that stack by default; `networkTopology=split` gives it a separate top-level stack. A deployment can provision one or more compute backends:
 
 | Aspect | AgentCore (default) | ECS Fargate (opt-in) | Lambda MicroVMs (experimental) |
 |--------|--------------------|--------------------|--------------------|
 | **Compute** | Bedrock AgentCore Runtime (Firecracker MicroVMs) | ECS Fargate containers | AWS Lambda MicroVMs |
-| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | 2 vCPU, 4 GB RAM | 8 GB baseline / 32 GB peak memory |
+| **Resources** | 2 vCPU, 8 GB RAM, 2 GB max image size | Build: 4 vCPU / 16 GiB; planning: 2 vCPU / 8 GiB (configurable) | 8 GiB baseline / 32 GiB peak memory |
 | **Orchestration** | Durable Lambda (checkpoint/replay) | Same durable Lambda via `ComputeStrategy` | Same durable Lambda via `ComputeStrategy` |
 | **Agent mode** | FastAPI server (HTTP invocation) | Batch (run-to-completion) | FastAPI server (lifecycle hooks) |
 | **Startup** | ~10s (warm MicroVM) | ~60-180s (Fargate cold start) | ~6s to `RUNNING` (live-measured) |
 | **Max duration** | 8 hours (AgentCore service limit) | 9 hours (orchestrator `executionTimeout`) | 8 hours (`maximumDurationInSeconds`) |
 
-All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. No Step Functions are used.
+All backends are orchestrated by the same durable Lambda function. The `ComputeStrategy` interface abstracts `startSession()`, `pollSession()`, and `stopSession()` -- the ECS strategy calls `ecs:RunTask` / `ecs:DescribeTasks` / `ecs:StopTask` directly from the Lambda. Task orchestration does not use Step Functions; other platform features may use them.
 
 AgentCore is the default. `compute_types` selects a comma-separated list (or a JSON array in `cdk/cdk.json`); its first entry is the repository default. For example, `-c compute_types=agentcore,ecs` deploys both, while `-c compute_types=ecs` deploys only ECS. Repository overrides can select any deployed backend. Memory, Gateway, Registry and the Linear vault remain independently configurable.
 
@@ -27,7 +27,7 @@ Without `compute_types`, legacy `compute_type=ecs` or `compute_type=lambda-micro
 
 Every local and pipeline synthesis enforces a **490-resource ceiling per parent or nested template**, including operator configurations outside the census. CDK fails synthesis with the stack name, resource count and ceiling when a template exceeds it. `@aws-cdk/core:stackResourceLimit` accepts a stricter integer from 1 to 490, as either a JSON number or CLI string; it cannot raise the production ceiling.
 
-The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. Wider inline combinations exceed 490 and fail synthesis; their split counterparts fit in the sampled matrix. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
+The budget covers complete configurations, including multiple backends, Gateway, Registry, the Linear vault, managed MicroVM images, alert email, a fork Blueprint, explicit three-zone pins and expanded model allowlists. With the approval, maintenance and MicroVM subsystems in nested stacks, every sampled combination fits inline (the widest, all three backends with every option, is 484); split reduces the application template further. The budget guard never changes topology automatically. The [offline census](./DEVELOPER_GUIDE.md#stack-decomposition-and-synthesis-budgets) reports counts for each supported profile.
 
 For a **new installation**:
 
@@ -92,13 +92,16 @@ Local synthesis tests verify the import ordering and unchanged remaining subnet 
 
 ### Lambda MicroVMs backend (experimental)
 
-> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits an unsuppressible warning to this effect whenever the backend is selected. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
+> **Not for production.** `lambda-microvm` carries no smoke-parity guarantee for an unattended deployment. Keep production repositories on `agentcore` or `ecs`. Synth emits a verification warning whenever a MicroVM image is configured; selecting the backend without an image emits a separate setup warning. Design detail: [COMPUTE.md](../design/COMPUTE.md) and [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
-Include it in the deployment's backend list, preserving any backends already in use:
+Include it in the deployment's backend list, preserving any backends already in use. A new installation also selects the nested layout:
 
 ```bash
-mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
+mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm --context microvm_nested_stack=true
 ```
+
+Existing flat installations must retain `microvm_nested_stack=false` until
+completing the [resource migration](../verification/645-p3-nested-stack.md).
 
 **You must re-bootstrap first.** This is the single most common way this backend fails, and the failure does not look like a configuration problem:
 
@@ -124,9 +127,11 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 
 Operational notes specific to this backend:
 
-- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check catches a hung guest inside a healthy VM -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
+- **Nothing self-terminates.** A MicroVM whose task finished, crashed, or hung stays `RUNNING` and billing until the 8-hour cap. The orchestrator calls `TerminateMicrovm` on finalize, and the heartbeat-staleness check detects loss of the in-guest heartbeat writer (a pipeline hang can leave that writer running) -- but a leaked handle is a cost incident. The one exception: the service reaps a VM whose `/run` hook returns 4xx (~12s).
 - **Logs** land in `/aws/lambda-microvms/<image-name>`. Guest stdout goes there too, which is the fallback path when the agent cannot reach the application log group.
-- **Deployment identifiers are not baked into the image.** The snapshot carries no configuration; table names, secret ARNs, and the per-task session-role ARN arrive in the `/run` payload as a `platform_config` block. A version-skewed orchestrator that does not send it is refused rather than run with tenant scoping disabled.
+- **Approval-wait sleep.** With `microvm_approval_suspend_enabled=true`, a task waiting for approval sleeps after its `microvm_sleep_after_s` delay (default 60 s, `--microvm-sleep-after off` keeps it awake) and wakes on the decision or 60 s before the gate deadline. A Parameter Store switch created by the stack can stop new suspensions without a redeploy; it never strands a suspended worker. Only images that declare the lifecycle protocol are suspended.
+- **Registry tools share the runtime network restriction.** Remote HTTP/SSE MCP assets need reachable HTTPS/443 endpoints. AgentCore and ECS defaults also block remote non-443 ports. `stdio` programs run locally but their outbound calls remain restricted; resolution does not test connectivity. The image builder's 80/443 access does not widen runtime egress. See [REGISTRY.md](../design/REGISTRY.md).
+- **Logging failures have a fallback record.** Debug/warn CloudWatch failures emit `cloudwatch_write_failed` to stdout with writer/task/error class, without another AWS call or sensitive log text. This is not a configured metric/alarm; verify collection in the guest log stream while the VM is running.
 
 ### Optional Agent Registry
 
@@ -323,6 +328,32 @@ Triggers via `workflow_run` when `build.yml` completes successfully. The pipelin
 - **Deploy via PR label**: Add the `deploy:<type>` label to a PR (e.g., `deploy:agentcore`).
 
 ## Known deployment issues
+
+### Scheduled maintenance stack
+
+Concurrency repair, admission-queue pickup, stranded-task repair and pending-upload
+cleanup run in the `ConcurrencyMaintenance` nested stack. An upgrade recreates the
+stateless functions, roles and schedules; their task tables and storage stay in
+the parent stack. This applies to every compute backend, including AgentCore,
+and replaces roughly twenty resources, depending on enabled features.
+CloudFormation creates the new schedules before deleting the old ones, so both
+can fire during the update. Task mutations use conditional writes to tolerate
+that overlap.
+
+Review the replacements in the change set. Existing Lambda log groups remain
+under their old generated names; use the new function's log group for post-upgrade
+invocations and retain the old groups when investigating earlier runs.
+Both flat and nested MicroVM layouts support the optional
+tool gateway and Linear Identity vault without exceeding the template budget.
+
+New MicroVM installations must explicitly select `microvm_nested_stack=true`
+(bootstrap bundle 1.9.0).
+Before upgrading an existing flat MicroVM deployment, save
+`"microvm_nested_stack": false` in its CDK context or pass
+`--context microvm_nested_stack=false` on every deploy. Keep this escape hatch
+until completing the [resource migration](../verification/645-p3-nested-stack.md).
+Omitting the setting fails synthesis. Selecting `true` does not migrate existing flat resources.
+
 
 ### Log-delivery rename on upgrade (pin-table removal, #703)
 

@@ -73,10 +73,13 @@ def _setup_bedrock_cost_attribution(config: TaskConfig) -> None:
 
     1. **Per-user/repo chargeback (CUR 2.0 / Cost Explorer).** Write the
        SessionRole ARN + ``{user_id, repo, task_id}`` STS tags to a 0600 file
-       that ``bedrock_creds_helper.py`` reads. Claude Code's managed-settings
-       ``awsCredentialExport`` runs that helper and signs Bedrock requests with
-       the tagged assumed-role credentials. Skipped when ``AGENT_SESSION_ROLE_ARN``
-       is unset (local/dev) — the helper then fails open to ambient creds.
+       that ``bedrock_creds_helper.py`` reads on AgentCore/ECS. Claude Code's
+       managed-settings ``awsCredentialExport`` runs that helper and signs
+       Bedrock requests with the tagged assumed-role credentials. MicroVM
+       instead uses the parent's scoped container-credential provider; its
+       export helper returns no credentials and cannot supply a wake barrier.
+       File writing is skipped when ``AGENT_SESSION_ROLE_ARN`` is unset
+       (local/dev); the non-MicroVM helper can fall back to ambient credentials.
 
     2. **Per-call forensics (model-invocation logs).** Set
        ``X-Amzn-Bedrock-Request-Metadata`` via ``ANTHROPIC_CUSTOM_HEADERS`` on the
@@ -638,12 +641,20 @@ async def run_agent(
     # standalone query() function.  This matches the official AWS sample:
     # https://github.com/aws-samples/sample-deploy-ClaudeAgentSDK-based-agents-to-AgentCore-Runtime
     client = ClaudeSDKClient(options=options)
-    log("AGENT", "Connecting to Claude Code CLI subprocess...")
-    await client.connect()
-    log("AGENT", "Connected. Sending prompt...")
-    await client.query(prompt=prompt)
-    log("AGENT", "Prompt sent. Receiving messages...")
+    from microvm_credentials import ScopedCredentialBroker
+    from microvm_lifecycle import get_context
+
+    broker = None
     try:
+        lifecycle = get_context(config.task_id or "")
+        if lifecycle is not None:
+            broker = ScopedCredentialBroker(lifecycle)
+            options.env.update(broker.environment)
+        log("AGENT", "Connecting to Claude Code CLI subprocess...")
+        await client.connect()
+        log("AGENT", "Connected. Sending prompt...")
+        await client.query(prompt=prompt)
+        log("AGENT", "Prompt sent. Receiving messages...")
         async for message in client.receive_response():
             if isinstance(message, SystemMessage):
                 message_counts["system"] += 1
@@ -797,8 +808,8 @@ async def run_agent(
 
                 log(
                     "DONE",
-                    f"status={result.status} turns={message.num_turns} "
-                    f"cost=${message.total_cost_usd or 0:.4f} "
+                    f"status={result.status} turns={result.num_turns} "
+                    f"cost=${result.cost_usd or 0:.4f} "
                     f"duration={message.duration_ms / 1000:.1f}s",
                 )
                 if message.is_error and message.result:
@@ -811,8 +822,8 @@ async def run_agent(
                 # Write trajectory result summary (use effective status after is_error remap)
                 trajectory.write_result(
                     subtype=result.status,
-                    num_turns=getattr(message, "num_turns", 0),
-                    cost_usd=getattr(message, "total_cost_usd", None),
+                    num_turns=result.num_turns,
+                    cost_usd=result.cost_usd,
                     duration_ms=getattr(message, "duration_ms", 0),
                     duration_api_ms=getattr(message, "duration_api_ms", 0),
                     session_id=getattr(message, "session_id", ""),
@@ -823,10 +834,10 @@ async def run_agent(
                 input_toks = usage.input_tokens if usage else 0
                 output_toks = usage.output_tokens if usage else 0
                 progress.write_agent_cost_update(
-                    cost_usd=getattr(message, "total_cost_usd", None),
+                    cost_usd=result.cost_usd,
                     input_tokens=input_toks,
                     output_tokens=output_toks,
-                    turn=getattr(message, "num_turns", 0),
+                    turn=result.num_turns,
                 )
 
             elif isinstance(message, UserMessage):
@@ -837,6 +848,12 @@ async def run_agent(
                 if isinstance(message.content, list):
                     for block in message.content:
                         if isinstance(block, ToolResultBlock):
+                            # A later project hook can deny a call our pre-hook
+                            # allowed without emitting either post-tool hook.
+                            # The CLI's error result retires only that call;
+                            # unrelated active/background work remains fenced.
+                            if lifecycle is not None and block.is_error:
+                                lifecycle.tool_finished(block.tool_use_id)
                             status, content = _format_tool_result(block)
                             log("RESULT", f"[{status}] {truncate(content)}")
                             tool_name = tool_use_id_to_name.get(
@@ -864,13 +881,21 @@ async def run_agent(
         # see it on the dashboard widget + ``bgagent status`` and not
         # just on the runtime-DEFAULT stream.
         log_error_cw(
-            f"Exception during receive_response(): {type(e).__name__}: {e}",
+            f"Exception during Claude session: {type(e).__name__}: {e}",
             task_id=config.task_id or None,
         )
         progress.write_agent_error(error_type=type(e).__name__, message=str(e))
         if result.status == "unknown":
             result.status = "error"
-            result.error = f"receive_response() failed: {e}"
+            result.error = f"Claude session failed: {e}"
+    finally:
+        # Also cover startup/query failure and cancellation, before pipeline
+        # teardown removes the task's lifecycle registry entry.
+        try:
+            await client.disconnect()
+        finally:
+            if broker is not None:
+                broker.close()
 
     log("AGENT", f"Generator finished. Messages received: {message_counts}")
     log("AGENT", f"CLI stderr lines received: {stderr_line_count}")

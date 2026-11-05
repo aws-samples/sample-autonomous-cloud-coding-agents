@@ -98,6 +98,13 @@ PRs labeled `auto-approve` are approved automatically by the `auto-approve` work
 
 If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
 
+The build's transaction tests use DynamoDB Local through
+`ABCA_DDB_LOCAL_ENDPOINT` (a loopback HTTP endpoint). CI starts a Docker service
+pinned by image digest and supplies its mapped port to both CDK and Python tests;
+those tests fail if `CI=true` without an endpoint. To reproduce locally, start
+DynamoDB Local with `-inMemory -sharedDb`, bind port 8000 to loopback, and run
+`ABCA_DDB_LOCAL_ENDPOINT=http://127.0.0.1:8000 mise run build`.
+
 ## Versioning
 
 The project uses semantic versioning based on [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):

@@ -41,7 +41,7 @@
  * iteration on the same PR. Pure and deterministic; no I/O.
  */
 
-import { classifyError, retryGuidance } from './error-classifier';
+import { classifyError, classifyMicrovmTerminalFailure, retryGuidance } from './error-classifier';
 import type { TaskStatusType } from '../../constructs/task-status';
 
 /** Max chars of the raw agent error surfaced inline (the rest is in CloudWatch). */
@@ -96,6 +96,7 @@ const BUILD_GATE_TIMEOUT_RE = /agent_status=['"]?(success|end_turn)['"]?.*build_
  *    that surfaces build_passed directly).
  */
 function isBuildFailure(input: Pick<FailureReplyInput, 'buildPassed' | 'errorMessage'>): boolean {
+  if (classifyMicrovmTerminalFailure(input.errorMessage)) return false;
   if (input.errorMessage && BUILD_GATE_FAILED_RE.test(input.errorMessage)) {
     return true;
   }
@@ -104,13 +105,14 @@ function isBuildFailure(input: Pick<FailureReplyInput, 'buildPassed' | 'errorMes
 
 /** True when the build gate failed specifically because it TIMED OUT (a subset of build failures). */
 function isBuildTimeout(input: Pick<FailureReplyInput, 'errorMessage'>): boolean {
+  if (classifyMicrovmTerminalFailure(input.errorMessage)) return false;
   return !!input.errorMessage && BUILD_GATE_TIMEOUT_RE.test(input.errorMessage);
 }
 
-/** Collapse whitespace + clip to EXCERPT_MAX chars with an ellipsis. Strips the
- *  internal `[auto-retried]` marker (it drives the guidance, not user-facing text). */
+/** Collapse whitespace and clip the raw detail; hide internal classification and retry markers. */
 function excerpt(raw: string): string {
-  const oneLine = raw.replace(/\s*\[auto-retried\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  const oneLine = raw.replace(/^MICROVM_(?:RUN_HOOK_REJECTED|SUBSTRATE_TERMINATED): /, '')
+    .replace(/\s*\[auto-retried\]\s*/gi, ' ').replace(/\s+/g, ' ').trim();
   return oneLine.length > EXCERPT_MAX ? `${oneLine.slice(0, EXCERPT_MAX)}…` : oneLine;
 }
 
@@ -165,6 +167,9 @@ export function renderFailureReply(input: FailureReplyInput): string {
 
 /** True when the orchestrator marked this failure as already auto-retried once. */
 function wasAutoRetried(errorMessage?: string | null): boolean {
+  // A terminal-state observation is not a session-start retry. Any matching
+  // text in its AWS diagnostic reason must not claim that ABCA retried it.
+  if (classifyMicrovmTerminalFailure(errorMessage)) return false;
   return !!errorMessage && /\[auto-retried\]/i.test(errorMessage);
 }
 

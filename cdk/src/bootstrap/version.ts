@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { nestedStackExecutionPolicy } from './nested-stack-policy';
 import { allPolicies } from './policies';
 
 /**
@@ -36,8 +37,7 @@ import { allPolicies } from './policies';
  * P2r2-F9), 1.6.0 → 1.7.0 adds the `infrastructure` policy's
  * `NestedStackPassRole` statement (CloudFormation passes the execution role to
  * nested stacks; without it a fresh-account deploy fails at change-set creation),
- * 1.7.0 → 1.8.0 grants the operator console stack's Cognito managed-login domain
- * (`cognito-idp:*UserPoolDomain`). Adding policies to the bundle is a minor bump — that is the precedent
+ * Adding policies to the bundle is a minor bump — that is the precedent
  * `compute-ecs` set.
  *
  * On the 1.6.0 bump specifically: it is a *statement* addition, not a new policy,
@@ -48,25 +48,55 @@ import { allPolicies } from './policies';
  * `policies/compute-lambda-microvm.ts`), which is exactly the class of breakage a
  * patch-level bump would under-advertise.
  *
- * It is 1.6.0 and not 1.4.0 because #629 and #246 landed on `main` first and took
+ * The 1.6.0 release was not 1.4.0 because #629 and #246 landed on `main` first and took
  * 1.4.0 and 1.5.0 in the interim. The number is an operator-visible contract (the
  * `CDKToolkit` stack's `BootstrapPolicyVersion` output), so re-using a published
  * version would make two different bundles indistinguishable to the `>=` check
  * operators are told to run.
+ *
+ * 1.6.0 → 1.7.0 adds an exact-self, CloudFormation-only PassRole inline policy
+ * for nested stacks (#645 clean deployment). The policy hash now includes that
+ * inline policy and every nested JSON field; the old root-key replacer omitted
+ * Action/Resource/Condition changes from its input.
+ *
+ * 1.7.0 → 1.8.0 adds scoped SSM parameter lifecycle/tag permissions for the P3
+ * MicroVM suspension switch. Re-bootstrap before deploying the live parameter.
+ *
+ * 1.8.0 → 1.9.0 admits the exact nested MicroVM build/operator role names to
+ * the backend-specific PassRole statement. Re-bootstrap before the nested split.
+ *
+ * 1.9.0 → 1.10.0 merges `main`'s 1.7.0 (#976), whose number collided with this
+ * branch's 1.7.0: the `infrastructure` policy gains its `NestedStackPassRole`
+ * statement for least-privilege fresh-account deploys. It overlaps the exact-self
+ * `PassSelfToCloudFormation` inline policy above; both remain until one is
+ * retired. Re-bootstrap: an account on 1.9.0 lacks the new statement.
+ *
+ * 1.10.0 → 1.11.0 merges `main`'s 1.8.0 (#987), whose number collided again: it
+ * grants the operator console stack's Cognito managed-login domain
+ * (`cognito-idp:*UserPoolDomain`). Re-bootstrap: an account on 1.10.0 lacks it.
  */
-export const BOOTSTRAP_VERSION = '1.8.0';
+export const BOOTSTRAP_VERSION = '1.11.0';
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === 'object') {
+    const entries = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(entries).sort().map((key) => [key, canonicalize(entries[key])]),
+    );
+  }
+  return value;
+}
 
 /**
- * Computes a SHA-256 hash over all bootstrap policies.
- * The hash is deterministic: policies are serialized with sorted keys
- * so that object property ordering does not affect the digest.
+ * Hashes all ABCA managed and inline execution policies. Sort object keys
+ * recursively without dropping nested fields; preserve array ordering.
  */
 export function computeBootstrapHash(): string {
-  const policies = allPolicies();
-  const normalized = policies.map((p) => {
-    const json = p.toJSON();
-    return JSON.stringify(json, Object.keys(json).sort());
-  });
-  const payload = JSON.stringify(normalized);
+  const policies = [
+    ...allPolicies().map((policy) => policy.toJSON()),
+    nestedStackExecutionPolicy(),
+  ];
+  const payload = JSON.stringify(canonicalize(policies));
   return createHash('sha256').update(payload).digest('hex');
 }

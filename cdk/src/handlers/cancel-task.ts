@@ -64,6 +64,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const result = await ddb.send(new GetCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
+      ConsistentRead: true,
     }));
 
     if (!result.Item) {
@@ -81,7 +82,11 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return errorResponse(409, ErrorCode.TASK_ALREADY_TERMINAL, `Task ${taskId} is already in terminal state ${record.status}.`, requestId);
     }
 
-    const wasRunning = record.status === TaskStatus.RUNNING;
+    // A task waiting for approval may own a suspended MicroVM: stop that too.
+    const mayHaveCompute = record.status === TaskStatus.HYDRATING
+      || record.status === TaskStatus.RUNNING
+      || record.status === TaskStatus.AWAITING_APPROVAL
+      || record.status === TaskStatus.FINALIZING;
     const runtimeSessionId = record.session_id;
     // Prefer the ARN recorded on the task record (agent container writes
     // this when the session starts). Fall back to the stack's single
@@ -117,7 +122,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // 6b. Stop the compute session so the container winds down (best-effort)
-    if (wasRunning && runtimeSessionId) {
+    if (mayHaveCompute && runtimeSessionId) {
       const computeType = record.compute_type;
       if (computeType === 'ecs') {
         // ECS-backed task — stop the Fargate task
@@ -203,7 +208,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
         // resource-leak risk: the container may still be running and
         // consuming tokens/concurrency. Emit a dedicated event so ops
         // dashboards / alarms can surface the orphan.
-        logger.error('Running task has no recognized compute backend to stop — possible orphan', {
+        logger.error('Active task has no recognized compute backend to stop — possible orphan', {
           task_id: taskId,
           request_id: requestId,
           compute_type: computeType,

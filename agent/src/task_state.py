@@ -746,6 +746,10 @@ def transact_resume_from_approval(
       - resuming with a stale request_id after a race with the
         reconciler / a concurrent approval.
 
+    Refresh the heartbeat in the same update: writes pause during approval waits,
+    so restoring RUNNING with the old timestamp could let an orchestrator poll
+    mark this healthy task lost before the next periodic heartbeat.
+
     Raises ``ApprovalResumeError`` on ``TransactionCanceledException`` so
     the hook can emit ``approval_resume_failed`` + DENY.
     """
@@ -760,7 +764,8 @@ def transact_resume_from_approval(
                         "TableName": task_table,
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
-                            "SET #s = :running REMOVE awaiting_approval_request_id"
+                            "SET #s = :running, agent_heartbeat_at = :heartbeat "
+                            "REMOVE awaiting_approval_request_id"
                         ),
                         "ConditionExpression": (
                             "#s = :awaiting AND awaiting_approval_request_id = :rid"
@@ -770,6 +775,7 @@ def transact_resume_from_approval(
                             ":running": {"S": _STATUS_RUNNING},
                             ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
                             ":rid": {"S": request_id},
+                            ":heartbeat": {"S": _now_iso()},
                         },
                     }
                 }
