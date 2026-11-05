@@ -2152,8 +2152,10 @@ describe('AgentStack solution attribution (#319): AWS_SDK_UA_APP_ID via stack-le
     // unnoticed; the exact count fails if a Lambda is dropped OR if a new one
     // is added without being attributed below.
     // 48 existing handlers (5 scheduled maintenance jobs nested) + 2 registry
-    // provisioning handlers + 4 registry API handlers in nested stacks.
-    expect(abcaLambdas.length).toBe(54);
+    // provisioning handlers + 4 registry API handlers in nested stacks, + 2 now
+    // that the Linear identity vault is on by default (its provider onEvent
+    // handler and the provider framework function).
+    expect(abcaLambdas.length).toBe(56);
     // Every ABCA-authored Lambda must carry the canonical `#` app-id. Collect
     // any offenders so a failure names the exact logical id(s) that are naked.
     const unattributed = abcaLambdas
@@ -2285,8 +2287,21 @@ describe('AgentStack tool-gateway gate (ADR-019 P1)', () => {
 });
 
 describe('AgentStack Linear identity vault gate (#809)', () => {
-  test('default synth omits the vault: no workload identity, no token grant, no agent env', () => {
-    const app = new App();
+  test('default synth (AgentCore) provisions the vault and its hosted consent page', () => {
+    const rendered = JSON.stringify(Template.fromStack(new AgentStack(new App(), 'LinearVaultDefaultStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toJSON());
+    expect(rendered).toContain('Custom::LinearWorkloadIdentity');
+    expect(rendered).toContain('GetResourceOauth2Token');
+    expect(rendered).toContain('LINEAR_WORKLOAD_IDENTITY_NAME');
+    expect(rendered).toContain('LinearVaultConsentUrl');
+  });
+
+  test.each([
+    ['explicit opt-out', { enableLinearIdentityVault: 'false' }],
+    ['a deployment without AgentCore', { compute_types: 'ecs' }],
+  ])('%s omits the vault: no workload identity, no token grant, no agent env', (_label, context) => {
+    const app = new App({ context });
     const stack = new AgentStack(app, 'LinearVaultOffStack', {
       env: { account: '123456789012', region: 'us-east-1' },
     });
@@ -2297,6 +2312,12 @@ describe('AgentStack Linear identity vault gate (#809)', () => {
     // The hosted consent page is part of the same gate.
     expect(rendered).not.toContain('LinearVaultConsentPage');
     expect(rendered).not.toContain('LinearVaultConsentUrl');
+  });
+
+  test('an unrecognised flag value fails synth instead of silently choosing a store', () => {
+    expect(() => new AgentStack(new App({ context: { enableLinearIdentityVault: 'yes' } }), 'LinearVaultBadStack', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    })).toThrow('enableLinearIdentityVault must be true or false');
   });
 
   test('flag on: agent runtime role gets the token data-plane grant + the agent env is set', () => {
