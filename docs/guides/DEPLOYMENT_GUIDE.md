@@ -167,7 +167,7 @@ Linear and Jira share the stranded-orchestration sweep and the iteration heartbe
 
 ### Choosing features with `bgagent setup`
 
-Run the wizard from your ABCA checkout:
+Run the wizard from your ABCA checkout. The examples use the short `bgagent` form. Without a global install, run `node lib/bin/bgagent.js setup …` from `cli/` instead, as the [Quick Start](./QUICK_START.mdx) Step 3 does. Setup prints its next steps in whichever form you launched it with.
 
 ```bash
 bgagent setup                                   # interactive
@@ -189,7 +189,7 @@ The wizard works in this order:
 5. Plans any one-time account preparation and lists it on the review screen:
    - **No `CDKToolkit` stack:** installs ABCA's least-privilege CDK bootstrap (`mise //cdk:bootstrap`). For ECS it also sets the bootstrap's `ComputeTypes` parameter, which `cdk bootstrap` cannot set.
    - **An older ABCA bootstrap:** updates it to the version this CLI requires, and adds missing backends to `ComputeTypes`.
-   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it.
+   - **A standard CDK bootstrap** (no ABCA policy outputs): left unchanged, because other apps in the account may depend on it. `mise //cdk:deploy` starts with a check that fails on a standard bootstrap, so setup passes `ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1` to that deploy, and the review screen says so. To switch to the least-privilege bootstrap instead, run `mise //cdk:bootstrap` before setup.
 
    Preparation runs only after you confirm the deploy.
 6. Shows a review screen of what you chose, then runs `cdk diff` against a temporary copy of the profile and summarizes it in one line (for example `317 to create · 0 to update · 0 to remove`). The full change list goes to `~/.bgagent/logs/<stack>/setup-changes.log`. Nothing in the repository changes until you confirm.
@@ -197,7 +197,7 @@ The wizard works in this order:
 8. Prepares the account, writes `abca.deployment.json` (or `abca.deployment.<stack>.json`), and deploys with `mise //cdk:deploy -- -c stackName=<name> -c deploymentProfile=<file> --all`. If preparation fails, nothing is written.
    - While deploying, it shows a progress bar and one line per component (Networking, Task API, Agent runtime, each enabled feature), with a check mark as each finishes. Raw CDK output goes to `~/.bgagent/logs/<stack>/setup-deploy.log`.
    - Your confirmation replaces CDK's own IAM approval prompt; the change summary says how many IAM roles and policies are included.
-   - On success it configures the CLI from the stack outputs and prints next steps. A new installation lists storing a GitHub token, creating a user, signing in and onboarding a repository. Any Slack, Linear or Jira feature added by this run lists its own setup command. If the CLI was previously signed in to another stack's user pool, the cached tokens are removed; run `bgagent login` again. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
+   - On success it configures the CLI from the stack outputs and prints next steps, in the same command form you launched setup with. A new installation lists storing a GitHub token, creating a user, signing in and onboarding a repository. Any Slack, Linear or Jira feature added by this run lists its own setup command. If the CLI was previously signed in to another stack's user pool, the cached tokens are removed; run `bgagent login` again. On failure it names the failed component and CloudFormation's reason, and keeps your selection so you can rerun.
 
 `--no-deploy` writes the profile without a diff. If it removes a stateful feature from an existing stack, it asks for the same data-loss confirmation, because the next `mise //cdk:deploy` or CI deploy applies the removal with no wizard in the loop.
 

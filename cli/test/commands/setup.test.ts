@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  cliInvocation,
   conflictingContextOverrides,
   ExistingStack,
   identityLabel,
@@ -676,6 +677,21 @@ describe('brand-new accounts', () => {
     expect(text()).toContain('uses the standard CDK bootstrap');
     expect(setBootstrapComputeTypes).not.toHaveBeenCalled();
     expect(runs.map(r => r.args[0])).toEqual(['//cdk:diff', '//cdk:deploy']);
+    // //cdk:deploy's bootstrap preflight fails on a standard bootstrap, so setup skips it and says so.
+    expect(runs[1].env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT).toBe('1');
+    expect(text()).toContain('ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1');
+  });
+
+  test('keeps the bootstrap preflight for an ABCA bootstrap', async () => {
+    const saved = process.env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT;
+    delete process.env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT;
+    try {
+      await setup({ features: 'none', yes: true }, deps());
+      expect(runs.every(run => run.env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT === undefined)).toBe(true);
+      expect(text()).not.toContain('ABCA_SKIP_BOOTSTRAP_PREFLIGHT');
+    } finally {
+      if (saved !== undefined) process.env.ABCA_SKIP_BOOTSTRAP_PREFLIGHT = saved;
+    }
   });
 
   test('fails early when no container engine is running', async () => {
@@ -705,6 +721,29 @@ describe('brand-new accounts', () => {
     await setup({ features: 'none', yes: true, stackName: 'backgroundagent-dev-fork' }, deps());
     expect(text()).toContain('bgagent github set-token --region us-east-1 --stack-name backgroundagent-dev-fork');
     expect(text()).toContain('bgagent repo onboard owner/repo --region us-east-1 --stack-name backgroundagent-dev-fork');
+  });
+
+  test('prints next steps in the form the CLI was launched with', async () => {
+    await setup({ features: 'none', yes: true }, deps({ cliCommand: 'node lib/bin/bgagent.js' }));
+    expect(text()).toContain('node lib/bin/bgagent.js github set-token --region us-east-1');
+    expect(text()).toContain('node lib/bin/bgagent.js login --username you@example.com');
+    expect(text()).not.toMatch(/^\s+bgagent /m);
+  });
+});
+
+describe('cliInvocation', () => {
+  test('uses the bare name for an installed binary', () => {
+    expect(cliInvocation('/usr/local/bin/bgagent', '/work')).toBe('bgagent');
+    expect(cliInvocation(undefined, '/work')).toBe('bgagent');
+  });
+
+  test('uses node with the script path relative to the working directory', () => {
+    expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/repo/cli')).toBe('node lib/bin/bgagent.js');
+    expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/repo')).toBe('node cli/lib/bin/bgagent.js');
+  });
+
+  test('keeps the absolute path when the script is outside the working directory', () => {
+    expect(cliInvocation('/repo/cli/lib/bin/bgagent.js', '/elsewhere')).toBe('node /repo/cli/lib/bin/bgagent.js');
   });
 });
 

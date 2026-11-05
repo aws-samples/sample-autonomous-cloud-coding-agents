@@ -187,6 +187,11 @@ export interface SetupDeps {
   readonly setBootstrapComputeTypes: (region: string, computeTypes: readonly ComputeBackend[]) => Promise<void>;
   /** Monotonic clock for durations. */
   readonly now: () => number;
+  /**
+   * How to invoke this CLI in printed commands: `bgagent` when installed on PATH,
+   * otherwise `node <path to bgagent.js>` exactly as the operator launched it.
+   */
+  readonly cliCommand?: string;
 }
 
 export interface SetupOptions {
@@ -566,6 +571,7 @@ const FEATURE_SETUP_STEPS: Partial<Record<DeploymentFeature, readonly [string, s
 
 function printNextSteps(
   ui: Ui,
+  cli: string,
   region: string,
   stackName: string,
   update: { readonly existing: boolean; readonly added: readonly DeploymentFeature[] },
@@ -574,14 +580,14 @@ function printNextSteps(
   const flags = `--region ${region}${stackName === DEFAULT_STACK_NAME ? '' : ` --stack-name ${stackName}`}`;
   // A new installation needs the full path to a first task; an update only the features it added.
   const steps: Array<readonly [string, string]> = update.existing ? [] : [
-    ['Store a GitHub token for the agent', `bgagent github set-token ${flags}`],
-    ['Create your user', `bgagent admin invite-user you@example.com ${flags}`],
-    ['Sign in', 'bgagent login --username you@example.com'],
-    ['Onboard a repository', `bgagent repo onboard owner/repo ${flags}`],
+    ['Store a GitHub token for the agent', `${cli} github set-token ${flags}`],
+    ['Create your user', `${cli} admin invite-user you@example.com ${flags}`],
+    ['Sign in', `${cli} login --username you@example.com`],
+    ['Onboard a repository', `${cli} repo onboard owner/repo ${flags}`],
   ];
   for (const feature of update.added) {
     const step = FEATURE_SETUP_STEPS[feature];
-    if (step) steps.push([step[0], `${step[1]} ${flags}`]);
+    if (step) steps.push([step[0], `${step[1].replace(/^bgagent/, cli)} ${flags}`]);
   }
   if (steps.length === 0) return;
   ui.title('Next steps');
@@ -634,6 +640,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   const ui = new Ui(deps);
   const { style } = ui;
   const repoRoot = findRepoRoot(opts.repoRoot ?? deps.cwd);
+  const cli = deps.cliCommand ?? 'bgagent';
   if (opts.stackName !== undefined && !STACK_NAME_PATTERN.test(opts.stackName)) {
     throw new CliError(`Invalid stack name '${opts.stackName}'.`);
   }
@@ -793,7 +800,8 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   printReview(ui, selection, removed, { backends: compute, deployed: deployedCompute }, preparation.steps);
   if (preparation.standardBootstrap) {
     ui.line();
-    ui.line(`  ${style.dim('This account uses the standard CDK bootstrap; setup deploys with it and leaves it unchanged.')}`);
+    ui.line(`  ${style.dim('This account uses the standard CDK bootstrap; setup deploys with it, leaves it unchanged')}`);
+    ui.line(`  ${style.dim('and skips the deploy\'s least-privilege bootstrap check (ABCA_SKIP_BOOTSTRAP_PREFLIGHT=1).')}`);
   }
 
   const conflicts = conflictingContextOverrides(repoRoot, selection, compute);
@@ -812,7 +820,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     const file = writeDeploymentProfile(repoRoot, chosen, stackName);
     ui.line();
     ui.line(`  ${style.green('✓')} Saved ${path.relative(deps.cwd, file) || file}`);
-    ui.line(`  ${style.dim('Commit it so local and CI deploys use the same features. Deploy later with `bgagent setup`.')}`);
+    ui.line(`  ${style.dim(`Commit it so local and CI deploys use the same features. Deploy later with \`${cli} setup\`.`)}`);
     return;
   }
 
@@ -833,6 +841,10 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
     FORCE_COLOR: '0',
     // CDK shells out to `docker` unless told otherwise; Finch is a drop-in CLI.
     ...(engine !== 'docker' ? { CDK_DOCKER: engine } : {}),
+    // `//cdk:deploy` first checks for ABCA's least-privilege bootstrap and fails on a standard
+    // one. Setup has already chosen to keep a standard bootstrap, so that check would only
+    // block the deploy it promised.
+    ...(preparation.standardBootstrap ? { ABCA_SKIP_BOOTSTRAP_PREFLIGHT: '1' } : {}),
   };
   const contextArgs = ['-c', `stackName=${stackName}`, ...[...extraContext].flatMap(([key, value]) => ['-c', `${key}=${value}`])];
   const persistentTopology = persistentContext(repoRoot).map(({ context }) => context.networkTopology).filter(Boolean).pop();
@@ -961,7 +973,7 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   } catch (err) {
     throw new CliError(
       `${stackName} deployed, but the CLI could not be pointed at it (${err instanceof Error ? err.message : String(err)}). `
-      + `Run \`bgagent configure --stack-name ${stackName} --region ${region}\`.`,
+      + `Run \`${cli} configure --stack-name ${stackName} --region ${region}\`.`,
     );
   }
   const { registry_api_url: _stale, ...previous } = tryLoadConfig() ?? ({} as Partial<CliConfig>);
@@ -973,7 +985,18 @@ export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<voi
   ui.field('API', bundle.api_url);
   ui.field('CLI', `now points at ${stackName}`);
   const added = enabledFeatures(selection).filter(feature => !deployedFeatures?.[feature]);
-  printNextSteps(ui, region, stackName, { existing: existing !== null, added });
+  printNextSteps(ui, cli, region, stackName, { existing: existing !== null, added });
+}
+
+/**
+ * The command an operator types to run this CLI again: `bgagent` for an installed binary,
+ * otherwise `node <script>` relative to the working directory (absolute when it is outside it).
+ * The Quick Start runs `node lib/bin/bgagent.js` from `cli/`, where a bare `bgagent` is not found.
+ */
+export function cliInvocation(script: string | undefined, cwd: string): string {
+  if (!script || path.basename(script) === 'bgagent') return 'bgagent';
+  const relative = path.relative(cwd, script);
+  return `node ${relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : script}`;
 }
 
 /* istanbul ignore next -- thin AWS/terminal adapters; runSetup is tested through SetupDeps */
@@ -984,6 +1007,7 @@ function defaultDeps(): SetupDeps {
   return {
     cwd: process.cwd(),
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    cliCommand: cliInvocation(process.argv[1], process.cwd()),
     screen: { tty: Boolean(process.stdout.isTTY), write: text => { process.stdout.write(text); } },
     describeStack: async (region, stackName) => {
       const cf = makeClient(CloudFormationClient, { region });

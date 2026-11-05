@@ -70,41 +70,37 @@ If `docker run --privileged` is blocked (security-managed hosts), deploy from a 
 
 ## Phase 4: First Deployment
 
-Guide through:
+Deploy with `bgagent setup`, not `mise //cdk:deploy`. Setup chooses the minimal deployment profile, checks Region support, installs ABCA's least-privilege CDK bootstrap when the account has none, reviews `cdk diff`, refuses to delete data without a typed confirmation, and points the CLI at the new stack. A bare `mise //cdk:deploy` skips all of that and deploys every optional feature.
 
-1. `mise //cdk:bootstrap` — Bootstrap CDK (if not already done for this account/region)
-2. `mise //cdk:deploy -- --require-approval never` — Deploy the stack (~9.5 minutes). The flag avoids the approval prompt hanging in a non-interactive shell.
-   - If the deploy rolls back on a missing IAM permission and lands in `ROLLBACK_COMPLETE`, the stack can't be updated — `mise //cdk:destroy` then redeploy. Teardown can stall in `DELETE_FAILED` for ~20–40 min while AgentCore's service-managed (Hyperplane) ENIs are reclaimed; wait, then retry destroy. Never force-delete past stuck VPC resources (orphans the VPC; VPCs are quota-capped per Region).
-3. Retrieve stack outputs:
+1. Ask the user (AskUserQuestion) for:
+   - the AWS Region;
+   - optional features: none (recommended for a first deployment) or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`;
+   - compute: `agentcore` (recommended), `ecs` or `agentcore,ecs`.
+2. Confirm the account with `aws sts get-caller-identity` and show it to the user before deploying.
+3. Run setup from `cli/`. Your shell has no terminal, so pass `--features` and `--yes`. Deploying takes about 10 minutes; run it in the background and report progress from the log under `~/.bgagent/logs/<stack>/`.
    ```bash
-   aws cloudformation describe-stacks --stack-name backgroundagent-dev \
-     --query 'Stacks[0].Outputs' --output table
+   cd cli
+   node lib/bin/bgagent.js setup --region <region> --features none --compute agentcore --yes
    ```
-4. Store the GitHub PAT in Secrets Manager using the `GitHubTokenSecretArn` output
-5. Create a Cognito user (self-signup is disabled):
-   ```bash
-   aws cognito-idp admin-create-user --user-pool-id $USER_POOL_ID \
-     --username user@example.com --temporary-password 'TempPass123!@#'
-   aws cognito-idp admin-set-user-password --user-pool-id $USER_POOL_ID \
-     --username user@example.com --password 'YourPermanentPass123!@#' --permanent
-   ```
+   - Use `--features none` for the minimal profile, or a comma-separated list.
+   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources, stop. Tell the user what it would remove and ask them to run `node lib/bin/bgagent.js setup` themselves in a terminal, where they confirm by typing the stack name.
+   - If the deploy rolls back and the stack lands in `ROLLBACK_COMPLETE`, it can't be updated: `mise //cdk:destroy`, then run setup again. Teardown can stall in `DELETE_FAILED` for ~20–40 min while AgentCore's service-managed (Hyperplane) ENIs are reclaimed; wait, then retry destroy. Never force-delete past stuck VPC resources (orphans the VPC; VPCs are quota-capped per Region).
+4. Setup prints next steps. Follow them in order, from `cli/`:
+   - store the GitHub PAT: `node lib/bin/bgagent.js github set-token --region <region>` (interactive, so ask the user to run it, or use `aws secretsmanager put-secret-value` on the `GitHubTokenSecretArn` output);
+   - create a user: `node lib/bin/bgagent.js admin invite-user <email> --region <region>` (the password is in `~/.bgagent/invites/<email>.txt`);
+   - sign in: `node lib/bin/bgagent.js login --username <email>`;
+   - onboard a repository: `node lib/bin/bgagent.js repo onboard <owner/repo> --region <region>` (see the `onboard-repo` skill).
+
+For a stack other than `backgroundagent-dev`, add `--stack-name <name>` to each command. ABCA's bootstrap only deploys `backgroundagent-dev` and `backgroundagent-dev-<suffix>`.
 
 ## Phase 5: Smoke Test
 
-1. Authenticate and get a JWT token
-2. Test the API: `curl -s -H "Authorization: $TOKEN" $API_URL/tasks`
-3. Configure the CLI:
-   ```bash
-   mise //cli:build
-   node cli/lib/bin/bgagent.js configure \
-     --api-url $API_URL --region $REGION \
-     --user-pool-id $USER_POOL_ID --client-id $APP_CLIENT_ID
-   node cli/lib/bin/bgagent.js login --username user@example.com
-   ```
+1. `node lib/bin/bgagent.js platform doctor --region <region>` from `cli/`: checks the API, Cognito, GitHub token, Bedrock model access and onboarded repositories.
+2. `node lib/bin/bgagent.js list` should return an empty task list.
 
 ## Completion
 
 After all phases pass, summarize:
 - Stack outputs (API URL, User Pool ID, etc.)
-- Next steps: onboard a repository (use the `onboard-repo` skill)
+- Next steps: submit a first task (use the `submit-task` skill)
 - Point to the Quick Start: https://aws-samples.github.io/sample-autonomous-cloud-coding-agents/getting-started/quick-start/
