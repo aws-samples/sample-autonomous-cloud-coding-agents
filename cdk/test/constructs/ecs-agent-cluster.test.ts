@@ -38,6 +38,7 @@ function createStack(overrides?: {
   bedrockGeoRegion?: string;
   withMemory?: boolean;
   withLinearVault?: boolean;
+  withApprovals?: boolean;
   taskSizing?: {
     buildTaskCpu?: number;
     buildTaskMemoryMiB?: number;
@@ -73,6 +74,12 @@ function createStack(overrides?: {
   const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
     partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
   });
+  const taskApprovalsTable = overrides?.withApprovals
+    ? new dynamodb.Table(stack, 'TaskApprovalsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+    })
+    : undefined;
 
   const githubTokenSecret = new secretsmanager.Secret(stack, 'GitHubTokenSecret');
 
@@ -90,6 +97,7 @@ function createStack(overrides?: {
     agentImageAsset,
     taskTable,
     taskEventsTable,
+    taskApprovalsTable,
     userConcurrencyTable,
     githubTokenSecret,
     memoryId: overrides?.memoryId,
@@ -729,6 +737,7 @@ describe('EcsAgentCluster construct', () => {
         });
       const taskTable = mk('TaskTable');
       const taskEventsTable = mk('TaskEventsTable');
+      const taskApprovalsTable = mk('TaskApprovalsTable');
       const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
         partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
       });
@@ -739,7 +748,7 @@ describe('EcsAgentCluster construct', () => {
             assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
           }),
         ],
-        taskScopedTables: [taskTable, taskEventsTable],
+        taskScopedTables: [taskTable, taskEventsTable, taskApprovalsTable],
         traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
         attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
       });
@@ -749,6 +758,7 @@ describe('EcsAgentCluster construct', () => {
         agentImageAsset,
         taskTable,
         taskEventsTable,
+        taskApprovalsTable,
         userConcurrencyTable,
         githubTokenSecret,
         agentSessionRole: sessionRole,
@@ -822,8 +832,49 @@ describe('EcsAgentCluster construct', () => {
           }
         }
       }
-      expect(conditioned).toBe(2);
+      expect(conditioned).toBe(3);
     });
+
+    test('both task definitions point at the approval table authorized by the SessionRole', () => {
+      const sessionTemplate = createWithSessionRole();
+      const tables = sessionTemplate.findResources('AWS::DynamoDB::Table');
+      const approvalId = Object.keys(tables).find(id => id.startsWith('TaskApprovalsTable'));
+      expect(approvalId).toBeDefined();
+      const definitions = Object.values(sessionTemplate.findResources('AWS::ECS::TaskDefinition'));
+      expect(definitions).toHaveLength(2);
+      for (const definition of definitions) {
+        expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+          Name: 'TASK_APPROVALS_TABLE_NAME',
+          Value: { Ref: approvalId },
+        });
+      }
+    });
+  });
+});
+
+describe('EcsAgentCluster approval wiring without a SessionRole', () => {
+  let template: Template;
+  beforeAll(() => { template = createStack({ withApprovals: true }).template; });
+
+  test('grants only the approval item operations used by the agent', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .flatMap(policy => policy.Properties.PolicyDocument.Statement);
+    const grants = statements.filter(statement =>
+      JSON.stringify(statement.Resource).includes(approvalId!),
+    );
+    expect(grants).toEqual([expect.objectContaining({
+      Effect: 'Allow',
+      Action: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+    })]);
+  });
+
+  test('rejects a build setting that would erase approval-table wiring', () => {
+    const node = new Stack(new App({
+      context: { ecsExtraBuildEnv: { TASK_APPROVALS_TABLE_NAME: '' } },
+    }), 'S').node;
+    expect(() => resolveEcsTaskSizing(node)).toThrow('TASK_APPROVALS_TABLE_NAME');
   });
 });
 
