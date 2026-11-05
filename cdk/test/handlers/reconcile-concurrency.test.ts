@@ -17,214 +17,127 @@
  *  SOFTWARE.
  */
 
-// --- Mocks ---
-const mockDdbSend = jest.fn();
-jest.mock('@aws-sdk/client-dynamodb', () => ({
-  DynamoDBClient: jest.fn(() => ({ send: mockDdbSend })),
-  ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
-  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
-  UpdateItemCommand: jest.fn((input: unknown) => ({ _type: 'UpdateItem', input })),
+const mockSend = jest.fn();
+const mockRelease = jest.fn();
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  ScanCommand: jest.fn((input: unknown) => ({ kind: 'scan', input })),
+  UpdateCommand: jest.fn((input: unknown) => ({ kind: 'update', input })),
 }));
-
-// Set env vars before importing
+jest.mock('../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
+jest.mock('../../src/handlers/shared/task-concurrency', () => ({
+  releaseTaskSlot: (...args: unknown[]) => mockRelease(...args),
+}));
 process.env.TASK_TABLE_NAME = 'Tasks';
-process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
-
+process.env.USER_CONCURRENCY_TABLE_NAME = 'Counters';
 import { handler } from '../../src/handlers/reconcile-concurrency';
 
+function held(id: string, user = 'user', status = 'RUNNING') {
+  return { task_id: id, user_id: user, status, concurrency_slot: { state: 'held' } };
+}
+function seed(counters: object[], tasks: object[]) {
+  mockSend.mockResolvedValueOnce({ Items: counters }).mockResolvedValueOnce({ Items: tasks }).mockResolvedValue({});
+}
+function updates() {
+  return mockSend.mock.calls.filter(([command]) => command.kind === 'update').map(([command]) => command.input);
+}
 beforeEach(() => {
-  jest.clearAllMocks();
+  mockSend.mockReset();
+  mockRelease.mockReset().mockResolvedValue(true);
 });
 
-describe('reconcile-concurrency handler', () => {
-  test('completes without errors when no users exist', async () => {
-    mockDdbSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: undefined });
-    await handler();
-    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+test('empty tables complete without writes', async () => {
+  seed([], []);
+  await handler();
+  expect(updates()).toEqual([]);
+  expect(mockRelease).not.toHaveBeenCalled();
+});
+
+test('approval waits count as held seats and a matching counter needs no repair', async () => {
+  seed([{ user_id: 'user', active_count: 2, reservation_version: 'v1' }],
+    [held('one'), held('two', 'user', 'AWAITING_APPROVAL')]);
+  await handler();
+  expect(updates()).toEqual([]);
+  expect(mockRelease).not.toHaveBeenCalled();
+});
+
+test('repairs drift only while the observed count and reservation revision still match', async () => {
+  seed([{ user_id: 'user', active_count: 5, reservation_version: 'v1' }], [held('one'), held('two')]);
+  await handler();
+  expect(updates()).toEqual([expect.objectContaining({
+    Key: { user_id: 'user' },
+    ConditionExpression: 'attribute_exists(user_id) AND active_count = :stored AND reservation_version = :observed',
+    ExpressionAttributeValues: expect.objectContaining({ ':count': 2, ':stored': 5, ':observed': 'v1' }),
+  })]);
+});
+
+test('missing counters are recreated only if no reservation writer has created them meanwhile', async () => {
+  seed([], [held('one')]);
+  await handler();
+  expect(updates()[0]).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(user_id)',
+    ExpressionAttributeValues: { ':count': 1 },
   });
+});
 
-  test('no update when stored count matches actual count', async () => {
-    // Scan returns one user with active_count=2
-    mockDdbSend
-      .mockResolvedValueOnce({
-        Items: [{ user_id: { S: 'user-1' }, active_count: { N: '2' } }],
-        LastEvaluatedKey: undefined,
-      })
-      // Query returns count=2 (matching)
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined });
+test('legacy counter repair checks that a version has not been installed concurrently', async () => {
+  seed([{ user_id: 'user', active_count: 4 }], [held('one')]);
+  await handler();
+  expect(updates()[0].ConditionExpression).toContain('attribute_not_exists(reservation_version)');
+});
 
-    await handler();
+test('ambiguous legacy active tasks prevent guessing a count', async () => {
+  seed([{ user_id: 'user', active_count: 5 }], [{ task_id: 'legacy', user_id: 'user', status: 'AWAITING_APPROVAL' }]);
+  await handler();
+  expect(updates()).toEqual([]);
+});
 
-    // 1 scan + 1 query = 2 calls, no UpdateItemCommand
-    expect(mockDdbSend).toHaveBeenCalledTimes(2);
-    const calls = mockDdbSend.mock.calls;
-    const updateCalls = calls.filter((c: any[]) => c[0]._type === 'UpdateItem');
-    expect(updateCalls).toHaveLength(0);
-  });
+test('queued and unadmitted terminal tasks do not inflate the count', async () => {
+  seed([{ user_id: 'user', active_count: 3 }], [
+    { task_id: 'queued', user_id: 'user', status: 'QUEUED' },
+    { task_id: 'failed', user_id: 'user', status: 'FAILED' },
+  ]);
+  await handler();
+  expect(updates()[0].ExpressionAttributeValues[':count']).toBe(0);
+});
 
-  test('fires UpdateItemCommand with ConditionExpression when count drifts', async () => {
-    // Scan returns one user with active_count=5
-    mockDdbSend
-      .mockResolvedValueOnce({
-        Items: [{ user_id: { S: 'user-1' }, active_count: { N: '5' } }],
-        LastEvaluatedKey: undefined,
-      })
-      // Query returns actual count=2 (drift)
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined })
-      // Update succeeds
-      .mockResolvedValueOnce({});
+test('counts terminal held markers before asking shared cleanup to release them', async () => {
+  seed([{ user_id: 'user', active_count: 0, reservation_version: 'v1' }], [held('done', 'user', 'FAILED'), held('live')]);
+  await handler();
+  expect(updates()[0].ExpressionAttributeValues[':count']).toBe(2);
+  expect(mockRelease).toHaveBeenCalledWith('done', 'user');
+  expect(mockSend.mock.invocationCallOrder.at(-1)!).toBeLessThan(mockRelease.mock.invocationCallOrder[0]);
+});
 
-    await handler();
+test('a changed revision skips stale repair and still tries terminal cleanup', async () => {
+  seed([{ user_id: 'user', active_count: 3, reservation_version: 'v1' }], [held('done', 'user', 'FAILED')]);
+  mockSend.mockRejectedValueOnce(Object.assign(new Error('changed'), { name: 'ConditionalCheckFailedException' }));
+  await handler();
+  expect(updates()).toHaveLength(1);
+  expect(mockRelease).toHaveBeenCalledWith('done', 'user');
+});
 
-    // 1 scan + 1 query + 1 update = 3 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(3);
-    const updateCall = mockDdbSend.mock.calls[2][0];
-    expect(updateCall._type).toBe('UpdateItem');
-    // Verify ConditionExpression for TOCTOU protection
-    expect(updateCall.input.ConditionExpression).toBe('active_count = :stored');
-    expect(updateCall.input.ExpressionAttributeValues[':stored']).toEqual({ N: '5' });
-    expect(updateCall.input.ExpressionAttributeValues[':count']).toEqual({ N: '2' });
-  });
+test('one user repair failure does not stop the next user', async () => {
+  seed([{ user_id: 'one', active_count: 3 }, { user_id: 'two', active_count: 3 }], []);
+  mockSend.mockRejectedValueOnce(new Error('unavailable'));
+  await handler();
+  expect(updates().map(update => update.Key.user_id)).toEqual(['one', 'two']);
+});
 
-  test('continues to next user on ConditionalCheckFailedException', async () => {
-    const condErr = new Error('Conditional check failed');
-    condErr.name = 'ConditionalCheckFailedException';
+test('scans every counter page before strongly scanning every task page', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ user_id: 'user', active_count: 2 }], LastEvaluatedKey: { user_id: 'user' } })
+    .mockResolvedValueOnce({ Items: [] })
+    .mockResolvedValueOnce({ Items: [held('one')], LastEvaluatedKey: { task_id: 'one' } })
+    .mockResolvedValueOnce({ Items: [held('two')] });
+  await handler();
+  expect(mockSend.mock.calls.map(([command]) => [command.input.TableName, command.input.ConsistentRead]))
+    .toEqual([['Counters', true], ['Counters', true], ['Tasks', true], ['Tasks', true]]);
+  expect(mockSend.mock.calls[3][0].input.ExclusiveStartKey).toEqual({ task_id: 'one' });
+});
 
-    mockDdbSend
-      // Scan returns two users
-      .mockResolvedValueOnce({
-        Items: [
-          { user_id: { S: 'user-1' }, active_count: { N: '5' } },
-          { user_id: { S: 'user-2' }, active_count: { N: '3' } },
-        ],
-        LastEvaluatedKey: undefined,
-      })
-      // User-1: query returns 2 (drift)
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined })
-      // User-1: update fails with CCF
-      .mockRejectedValueOnce(condErr)
-      // User-2: query returns 1 (drift)
-      .mockResolvedValueOnce({ Count: 1, LastEvaluatedKey: undefined })
-      // User-2: update succeeds
-      .mockResolvedValueOnce({});
-
-    await handler();
-
-    // 1 scan + 2 queries + 2 updates = 5 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(5);
-  });
-
-  test('continues to next user when query fails', async () => {
-    mockDdbSend
-      // Scan returns two users
-      .mockResolvedValueOnce({
-        Items: [
-          { user_id: { S: 'user-1' }, active_count: { N: '2' } },
-          { user_id: { S: 'user-2' }, active_count: { N: '3' } },
-        ],
-        LastEvaluatedKey: undefined,
-      })
-      // User-1: query throws
-      .mockRejectedValueOnce(new Error('DynamoDB timeout'))
-      // User-2: query returns 3 (matches)
-      .mockResolvedValueOnce({ Count: 3, LastEvaluatedKey: undefined });
-
-    await handler();
-
-    // 1 scan + 2 queries (one failed) = 3 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(3);
-  });
-
-  test('handles scan pagination', async () => {
-    mockDdbSend
-      // First scan page
-      .mockResolvedValueOnce({
-        Items: [{ user_id: { S: 'user-1' }, active_count: { N: '1' } }],
-        LastEvaluatedKey: { user_id: { S: 'user-1' } },
-      })
-      // User-1 query
-      .mockResolvedValueOnce({ Count: 1, LastEvaluatedKey: undefined })
-      // Second scan page
-      .mockResolvedValueOnce({
-        Items: [{ user_id: { S: 'user-2' }, active_count: { N: '2' } }],
-        LastEvaluatedKey: undefined,
-      })
-      // User-2 query
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined });
-
-    await handler();
-
-    // 2 scans + 2 queries = 4 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(4);
-  });
-
-  test('handles query pagination for countActiveTasks', async () => {
-    mockDdbSend
-      // Scan
-      .mockResolvedValueOnce({
-        Items: [{ user_id: { S: 'user-1' }, active_count: { N: '0' } }],
-        LastEvaluatedKey: undefined,
-      })
-      // First query page: count=3, has more
-      .mockResolvedValueOnce({
-        Count: 3,
-        LastEvaluatedKey: { user_id: { S: 'user-1' }, task_id: { S: 'T3' } },
-      })
-      // Second query page: count=2, done
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined })
-      // Update (drift: stored=0 vs actual=5)
-      .mockResolvedValueOnce({});
-
-    await handler();
-
-    // 1 scan + 2 queries + 1 update = 4 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(4);
-    const updateCall = mockDdbSend.mock.calls[3][0];
-    expect(updateCall._type).toBe('UpdateItem');
-    expect(updateCall.input.ExpressionAttributeValues[':count']).toEqual({ N: '5' });
-  });
-
-  test('skips items without user_id', async () => {
-    mockDdbSend.mockResolvedValueOnce({
-      Items: [{ active_count: { N: '1' } }], // no user_id
-      LastEvaluatedKey: undefined,
-    });
-
-    await handler();
-
-    // Only the scan call, no query or update
-    expect(mockDdbSend).toHaveBeenCalledTimes(1);
-  });
-
-  test('continues to next user when UpdateItemCommand fails with non-CCF error', async () => {
-    mockDdbSend
-      // Scan returns two users with drift
-      .mockResolvedValueOnce({
-        Items: [
-          { user_id: { S: 'user-1' }, active_count: { N: '5' } },
-          { user_id: { S: 'user-2' }, active_count: { N: '4' } },
-        ],
-        LastEvaluatedKey: undefined,
-      })
-      // User-1: query returns 2 (drift)
-      .mockResolvedValueOnce({ Count: 2, LastEvaluatedKey: undefined })
-      // User-1: update fails with non-CCF error
-      .mockRejectedValueOnce(new Error('InternalServerError'))
-      // User-2: query returns 1 (drift)
-      .mockResolvedValueOnce({ Count: 1, LastEvaluatedKey: undefined })
-      // User-2: update succeeds
-      .mockResolvedValueOnce({});
-
-    await handler();
-
-    // 1 scan + 2 queries + 2 updates = 5 calls
-    expect(mockDdbSend).toHaveBeenCalledTimes(5);
-    // Verify user-2's update was still attempted and succeeded
-    const updateCalls = mockDdbSend.mock.calls.filter((c: any[]) => c[0]._type === 'UpdateItem');
-    expect(updateCalls).toHaveLength(2);
-    // User-2's update should have the correct values
-    const user2Update = updateCalls[1][0];
-    expect(user2Update.input.Key).toEqual({ user_id: { S: 'user-2' } });
-    expect(user2Update.input.ExpressionAttributeValues[':count']).toEqual({ N: '1' });
-  });
+test('an incomplete task scan aborts before any partial count is installed', async () => {
+  mockSend.mockResolvedValueOnce({ Items: [{ user_id: 'user', active_count: 2 }] })
+    .mockResolvedValueOnce({ Items: [held('one')], LastEvaluatedKey: { task_id: 'one' } })
+    .mockRejectedValueOnce(new Error('scan unavailable'));
+  await expect(handler()).rejects.toThrow('scan unavailable');
+  expect(updates()).toEqual([]);
 });

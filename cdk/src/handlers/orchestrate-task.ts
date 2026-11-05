@@ -43,6 +43,7 @@ import { runPreflightChecks } from './shared/preflight';
 import { isAutoRetried, startSessionWithRetry } from './shared/session-start-retry';
 import { deleteEcsPayload } from './shared/strategies/ecs-strategy';
 import { deleteMicrovmPayload } from './shared/strategies/lambda-microvm-strategy';
+import { releaseTaskSlot } from './shared/task-concurrency';
 import type { TaskRecord } from './shared/types';
 import { workflowIsReadOnly, workflowRequiresRepo } from './shared/workflows';
 
@@ -95,7 +96,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   // up, flips QUEUED -> SUBMITTED, and re-invokes this orchestrator.
   const admitted = await context.step('admission-control', async () => {
     // Re-read status to detect external cancellation between steps
-    const current = await loadTask(taskId);
+    const current = await loadTask(taskId, true);
     if (TERMINAL_STATUSES.includes(current.status)) {
       return false;
     }
@@ -131,13 +132,16 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!admitted) {
+    // A task cancelled after its seat was taken returns it here; the marker
+    // makes this a no-op for a queued or never-admitted task.
+    await context.step('release-before-admission', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 
   // Step 2b: Pre-flight checks — verify external dependencies before consuming AgentCore runtime
   const preflightPassed = await context.step('pre-flight', async () => {
     try {
-      const current = await loadTask(taskId);
+      const current = await loadTask(taskId, true);
       if (TERMINAL_STATUSES.includes(current.status)) {
         return false;
       }
@@ -166,6 +170,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   });
 
   if (!preflightPassed) {
+    await context.step('release-before-work', () => releaseTaskSlot(taskId, task.user_id));
     return;
   }
 
