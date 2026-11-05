@@ -36,6 +36,7 @@ import { AgentSessionRole } from '../constructs/agent-session-role';
 import { AgentNetwork, AgentVpc } from '../constructs/agent-vpc';
 import { ApiKeyTable } from '../constructs/api-key-table';
 import { ApprovalMetricsPublisherConsumer } from '../constructs/approval-metrics-publisher-consumer';
+import { ApprovalRequestService } from '../constructs/approval-request-service';
 import { AttachmentsBucket } from '../constructs/attachments-bucket';
 import {
   PLATFORM_DEFAULT_AUX_MODEL_ID,
@@ -499,6 +500,17 @@ export class AgentStack extends Stack {
       ...(microvmImageConfigured && { lambdaMicrovmImageArn: lazyMicrovmImageArn }),
     });
 
+    // Trusted approval writer (ADR-025): workers create PENDING requests and
+    // record timeouts through this IAM-authenticated API instead of writing
+    // the approvals table directly. Its own nested stack keeps the API out of
+    // the root stack's resource budget.
+    const approvalRequests = new ApprovalRequestService(this, 'ApprovalRequests', {
+      taskTable: taskTable.table, approvalsTable: taskApprovalsTable.table,
+    });
+    // Reuse the parent's regional API Gateway logging configuration.
+    const apiLoggingAccount = taskApi.api.node.tryFindChild('Account');
+    if (apiLoggingAccount) approvalRequests.node.addDependency(apiLoggingAccount);
+
     // Agent asset registry API (#246) in its own NestedStack + RestApi so its
     // ~35 resources don't count against this root stack's 500-resource limit.
     // It authorizes against the SHARED Cognito user pool, so a caller's JWT works
@@ -590,6 +602,7 @@ export class AgentStack extends Stack {
         // AWAITING_APPROVAL; absent → hook fails closed with
         // ``approval_write_failed`` (the `ApprovalTablesUnavailable` path).
         TASK_APPROVALS_TABLE_NAME: taskApprovalsTable.table.tableName,
+        APPROVAL_REQUESTS_API_URL: approvalRequests.api.url,
         // Hint for the hook's remaining-maxLifetime calculation (§6.5
         // pseudocode line 793). Kept in sync with the AgentCore
         // lifecycle configuration below so drift is visible. 8 hours.
@@ -815,9 +828,10 @@ export class AgentStack extends Stack {
       taskScopedTables: [
         taskTable.table,
         taskEventsTable.table,
-        taskApprovalsTable.table,
         taskNudgesTable.table,
       ],
+      // Read-only: requests are written through the trusted approval writer.
+      approvalsTable: taskApprovalsTable.table,
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       // Session-tagged Bedrock grant for cost attribution — the same
@@ -826,6 +840,7 @@ export class AgentStack extends Stack {
       invokableModels: invokableBedrockModels,
     });
     sessionRoleArnHolder = agentSessionRole.role.roleArn;
+    approvalRequests.grantRequests(agentSessionRole.role);
 
     // X-Ray tracing disabled — requires account-level UpdateTraceSegmentDestination
     // which needs CloudWatch Logs resource policy propagation. Re-enable via
@@ -1098,6 +1113,7 @@ export class AgentStack extends Stack {
         // construct admits the task role to the trust and injects
         // AGENT_SESSION_ROLE_ARN into the container.
         agentSessionRole,
+        approvalRequestsApiUrl: approvalRequests.api.url,
         // ADR-019 P1: parity — grants the task role InvokeGateway + injects
         // ABCA_TOOL_GATEWAY_URL. Undefined unless --context enableToolGateway=true.
         toolGateway,
@@ -1255,6 +1271,7 @@ export class AgentStack extends Stack {
       // of the resources they identify.
       agentPlatformConfig: {
         taskApprovalsTableName: taskApprovalsTable.table.tableName,
+        approvalRequestsApiUrl: approvalRequests.api.url,
         nudgesTableName: taskNudgesTable.table.tableName,
         logGroupName: agentLogGroup.logGroupName,
         // INTENTIONAL, not a wiring bug: both keys resolve to the SAME bucket

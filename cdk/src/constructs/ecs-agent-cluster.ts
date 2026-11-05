@@ -100,6 +100,13 @@ export interface EcsAgentClusterProps {
   readonly agentSessionRole?: AgentSessionRole;
 
   /**
+   * Trusted approval writer base URL (ADR-025). The agent writes approval
+   * requests through it with its session credentials; required with
+   * `agentSessionRole`, which no longer writes the approvals table directly.
+   */
+  readonly approvalRequestsApiUrl?: string;
+
+  /**
    * AgentCore Memory for cross-task learning. When provided, the ECS task role
    * is granted read+write on it so the agent's memory writes (write_task_episode
    * / write_repo_learnings → ``bedrock-agentcore:CreateEvent``) succeed on the
@@ -254,6 +261,7 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   'ECS_PAYLOAD_BUCKET',
   'ARTIFACTS_BUCKET_NAME',
   'AGENT_SESSION_ROLE_ARN',
+  'APPROVAL_REQUESTS_API_URL',
   'CLAUDE_CODE_USE_BEDROCK',
   'AWS_REGION',
 ]);
@@ -422,6 +430,7 @@ export class EcsAgentCluster extends Construct {
       ...(props.agentSessionRole && {
         AGENT_SESSION_ROLE_ARN: props.agentSessionRole.role.roleArn,
       }),
+      ...(props.approvalRequestsApiUrl && { APPROVAL_REQUESTS_API_URL: props.approvalRequestsApiUrl }),
       // #319 outbound SDK solution attribution — set on the shared base so both
       // task defs emit `app/uksb-wt64nei4u6#{stack}`.
       ...(sdkUaAppId ? { AWS_SDK_UA_APP_ID: sdkUaAppId } : {}),
