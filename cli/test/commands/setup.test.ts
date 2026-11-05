@@ -732,6 +732,14 @@ describe('account and deployment selection', () => {
     await expect(pick({ callerIdentity })({ yes: true })).rejects.toThrow(/could not be verified \(ExpiredToken\)\. Sign in/);
   });
 
+  test('keeps a gap between long deployment names and their status', async () => {
+    const longName = 'backgroundagent-dev-pr973ecs';
+    const listDeployments = async () => [...deployed, { name: longName, status: 'CREATE_COMPLETE', features: 'slack' }];
+    await pick({ answers: [ACCOUNT_OK, '2', 'y'], listDeployments, describeStack: existingStacks })();
+    expect(text()).toMatch(/3\) backgroundagent-dev-pr973ecs {2}CREATE_COMPLETE · Slack/);
+    expect(text()).toMatch(/1\) backgroundagent-dev {11}UPDATE_COMPLETE/);
+  });
+
   test('lists existing deployments and updates the chosen one', async () => {
     await pick({ answers: [ACCOUNT_OK, '2', 'y'], listDeployments: async () => deployed, describeStack: existingStacks })();
     expect(text()).toContain('Existing deployments in this account');

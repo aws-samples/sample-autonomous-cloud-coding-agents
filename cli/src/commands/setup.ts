@@ -470,11 +470,13 @@ async function chooseDeployment(
     return { stackName: await askNewStackName(deps, ui, region, taken, abcaBootstrap), additional: false };
   }
   ui.title('Existing deployments in this account');
+  // Long stack names widen the column so the status never runs into the name.
+  const nameWidth = Math.max(DEPLOYMENT_NAME_WIDTH, ...deployments.map(deployment => deployment.name.length + 2));
   deployments.forEach((deployment, index) => {
     const features = deployment.features === undefined ? 'features not recorded'
       : deployment.features === 'none' ? 'core only'
         : deployment.features.split(',').map(f => CAPABILITY_CATALOG.features[f as DeploymentFeature]?.label ?? f).join(', ');
-    ui.line(`  ${index + 1}) ${deployment.name.padEnd(DEPLOYMENT_NAME_WIDTH)}${ui.style.dim(`${deployment.status} · ${features}`)}`);
+    ui.line(`  ${index + 1}) ${deployment.name.padEnd(nameWidth)}${ui.style.dim(`${deployment.status} · ${features}`)}`);
   });
   const createIndex = deployments.length + 1;
   ui.line(`  ${createIndex}) ${ui.style.bold('Create a new deployment')}`);
