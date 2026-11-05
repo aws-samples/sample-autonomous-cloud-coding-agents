@@ -47,7 +47,7 @@ import {
   resolveStoredGrantFields,
   readExistingWebhookSecret,
   resolveWebhookSecretAction,
-  StoredLinearOauthToken,
+  StoredLinearOauthToken, describePreservedFallback,
 } from '../linear-oauth';
 import {
   clearPendingConsent,
@@ -1615,7 +1615,7 @@ export function makeLinearCommand(): Command {
         console.log(` ✓ (${secretName})`);
         // After the progress line closes, not during it.
         if (preservedTokens) {
-          console.log('  ✓ Kept the existing Secrets Manager token as a fallback');
+          console.log(`  ${describePreservedFallback(preservedTokens).message}`);
         }
 
         // ─── Step 5: Persist registry + user-mapping rows ─────────────
@@ -2550,10 +2550,9 @@ export function makeLinearCommand(): Command {
           console.log(`    ${i + 1}. ${m.name ?? m.id}${email}`);
         });
         console.log();
-        const pickRaw = (await promptLine(`  Which one is the teammate? [1-${humans.length}]`)).trim();
-        const pickIdx = parseInt(pickRaw, 10) - 1;
-        if (Number.isNaN(pickIdx) || pickIdx < 0 || pickIdx >= humans.length) {
-          throw new CliError(`Invalid selection '${pickRaw}'.`);
+        const pickIdx = await promptChoice(`  Which one is the teammate? [1-${humans.length}]`, humans.length);
+        if (pickIdx === undefined) {
+          throw new CliError('No valid selection.');
         }
         const picked = humans[pickIdx];
         const pickedLabel = `${picked.name ?? picked.id}${picked.email ? ` (${picked.email})` : ''}`;
@@ -3088,6 +3087,26 @@ function promptLine(label: string, defaultValue?: string): Promise<string> {
   });
 }
 
+/**
+ * Ask for a 1-based choice, re-asking on an empty or invalid answer. A paste that
+ * ends in a newline followed by Enter leaves a stray line for the NEXT prompt;
+ * failing on it would silently skip the choice. Returns undefined after `attempts`.
+ */
+export async function promptChoice(
+  label: string,
+  count: number,
+  ask: (label: string) => Promise<string> = promptLine,
+  attempts = 3,
+): Promise<number | undefined> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const raw = (await ask(label)).trim();
+    const idx = /^\d+$/.test(raw) ? parseInt(raw, 10) - 1 : -1;
+    if (idx >= 0 && idx < count) return idx;
+    if (attempt < attempts - 1) process.stderr.write(raw ? `  '${raw}' is not between 1 and ${count}.\n` : '');
+  }
+  return undefined;
+}
+
 // ─── Auto-link ───────────────────────────────────────────────────────────────
 
 interface LinearViewer {
@@ -3264,10 +3283,9 @@ async function runSelfLinkPicker(args: {
     console.log(`    ${i + 1}. ${m.name ?? m.id}${email}`);
   });
   console.log();
-  const pickRaw = (await promptLine(`  Which one is you? [1-${humans.length}]`)).trim();
-  const pickIdx = parseInt(pickRaw, 10) - 1;
-  if (Number.isNaN(pickIdx) || pickIdx < 0 || pickIdx >= humans.length) {
-    console.log(`  ⚠ Invalid selection '${pickRaw}'; skipping self-link.`);
+  const pickIdx = await promptChoice(`  Which one is you? [1-${humans.length}]`, humans.length);
+  if (pickIdx === undefined) {
+    console.log('  ⚠ No valid selection; skipping self-link.');
     console.log('    Re-run setup or pick yourself later via the picker that fires on first failed trigger.');
     return false;
   }
