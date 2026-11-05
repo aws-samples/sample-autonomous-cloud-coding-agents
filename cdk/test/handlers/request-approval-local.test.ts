@@ -17,13 +17,16 @@
  *  SOFTWARE.
  */
 
-/** Real transaction conditions; loopback endpoint and dummy credentials only. */
+/**
+ * Real transaction conditions; loopback endpoint and dummy credentials only.
+ * Opt-in: start DynamoDB Local and set ABCA_DDB_LOCAL_ENDPOINT=http://127.0.0.1:8000 to run.
+ * Without it the suite is skipped; request-approval.test.ts covers the handler with mocks.
+ */
 import { randomUUID } from 'node:crypto';
 import { CreateTableCommand, DeleteTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 
 const endpoint = process.env.ABCA_DDB_LOCAL_ENDPOINT;
-if (process.env.CI === 'true' && !endpoint) throw new Error('CI requires ABCA_DDB_LOCAL_ENDPOINT');
 if (endpoint && (new URL(endpoint).hostname !== '127.0.0.1' || new URL(endpoint).protocol !== 'http:')) {
   throw new Error('Approval integration tests require an http://127.0.0.1 endpoint');
 }
