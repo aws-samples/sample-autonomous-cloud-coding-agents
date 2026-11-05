@@ -25,7 +25,7 @@ One of two places, chosen automatically at setup time:
 
 | | When it's used | What's stored |
 |---|---|---|
-| **AgentCore Identity vault** | **Default** whenever the stack deploys AgentCore (the standard deployment). Force it on with `--context enableLinearIdentityVault=true` | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
+| **AgentCore Identity vault** | **Default** whenever the stack deploys AgentCore (the standard deployment). A deployment without AgentCore (for example `compute_types=ecs`) can opt in with `--context enableLinearIdentityVault=true`, provided its region has AgentCore Identity | Nothing long-lived. AgentCore holds the refresh token and mints short-lived access tokens on demand. |
 | **Secrets Manager** | Deployments without AgentCore, or `--context enableLinearIdentityVault=false` | An OAuth token bundle in `bgagent-linear-oauth-<slug>`, refreshed and rotated by ABCA only when ABCA uses Linear. |
 
 Prefer the vault. With Secrets Manager, a workspace that ABCA does not use for long enough can be left with an expired refresh token, and re-authorizing needs a browser that can reach the CLI's `localhost` callback. The vault's hosted consent page works from any machine.
