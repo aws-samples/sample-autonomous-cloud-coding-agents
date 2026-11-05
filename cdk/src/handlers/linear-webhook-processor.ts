@@ -29,6 +29,7 @@ import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { AGENT_SESSION_EVENT_TYPE, isLinearAgentSessionsEnabled, type LinearAgentSessionEvent } from './shared/linear-agent-session-event';
 import { handleAgentSessionEvent } from './shared/linear-agent-session-handler';
+import { handleLinearApprovalReply } from './shared/linear-approval-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
 import {
   lookupLinearPlatformUser,
@@ -2046,6 +2047,17 @@ function commentTargetBelongsToWorkspace(
 }
 
 async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> {
+  // A reply to an approval notice is a decision, not a task request. It is
+  // handled only for the exact thread ABCA created, and only for the owner.
+  if (process.env.TASK_APPROVALS_TABLE_NAME && WORKSPACE_REGISTRY_TABLE
+    && await handleLinearApprovalReply(payload, {
+      ddb,
+      approvalsTable: process.env.TASK_APPROVALS_TABLE_NAME,
+      taskTable: process.env.TASK_TABLE_NAME!,
+      registryTable: WORKSPACE_REGISTRY_TABLE,
+      lookupUser: lookupPlatformUser,
+    })) return;
+
   // Orchestration must be enabled + a workspace token resolvable.
   if (!ORCHESTRATION_TABLE || !WORKSPACE_REGISTRY_TABLE) {
     return;
