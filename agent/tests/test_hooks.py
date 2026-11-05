@@ -1276,6 +1276,13 @@ class TestTimedOutPath:
         assert fake_task_state.update_calls  # TIMED_OUT write attempted
         assert fake_task_state.update_calls[-1][2] == "TIMED_OUT"
         assert "write_approval_timed_out" in progress.milestones()
+        # A retry of the same call is fast-denied without a "None" reason leaking
+        # into the agent-visible message (seen live as "...within 60s: None").
+        retry = engine_with_soft_gate.evaluate_tool_use(
+            _hook_input()["tool_name"], _hook_input()["tool_input"]
+        )
+        assert retry.reason.startswith("Recent TIMED_OUT within")
+        assert "None" not in retry.reason
 
 
 class TestChunk8aOutcomeEventSchema:
