@@ -216,4 +216,10 @@ pids=()
 for s in "${scenarios[@]}"; do run_scenario "$s" & pids+=($!); done
 for pid in "${pids[@]}"; do wait "$pid" || true; done
 column -t -s $'\t' "$RESULTS" >&2
+# A run that recorded nothing (e.g. the CLI failed to start) is a failure, not a pass.
+recorded=$(($(wc -l < "$RESULTS") - 1))
+if (( recorded < ${#scenarios[@]} )); then
+  log "only $recorded of ${#scenarios[@]} scenarios recorded a result"
+  exit 1
+fi
 ! grep -q $'\tFAIL\t' "$RESULTS"
