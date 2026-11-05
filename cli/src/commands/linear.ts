@@ -346,8 +346,9 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
         ]
         : [
           `    ${callbackUrl}`,
-          '    (loopback — needs the browser on this machine; deploy with',
-          '    `--context enableLinearIdentityVault=true` for a hosted consent page)',
+          '    (loopback — needs the browser on this machine; the Identity vault provides a',
+          '    hosted consent page: on by default with AgentCore, or',
+          '    `--context enableLinearIdentityVault=true`)',
         ]),
     '',
     '  Public:              OFF',
@@ -1226,7 +1227,8 @@ export function makeLinearCommand(): Command {
               ? '  `--code` resumes the Secrets Manager authorization-code flow. A vault workspace '
                 + 'finishes its consent in one run — re-run without `--code`.'
               : `  The stack '${stackName}' publishes no LinearVaultConsentUrl, so its last deploy `
-                + 'omitted `--context enableLinearIdentityVault=true`. Re-deploy with it, or move '
+                + 'had no Identity vault (no AgentCore, or `--context enableLinearIdentityVault=false`). '
+                + 'Re-deploy with `--context enableLinearIdentityVault=true`, or move '
                 + 'this workspace off the vault deliberately by deleting its registry row first.'),
           );
         }
@@ -1235,8 +1237,8 @@ export function makeLinearCommand(): Command {
           // availability, only this stack's outputs. Naming the real cause is what lets
           // an operator fix it, and the wrong cause sends them to the AWS region table.
           console.log(
-            `  Stack '${stackName}' has no Identity vault (deployed without `
-            + '`--context enableLinearIdentityVault=true`) — using Secrets Manager.',
+            `  Stack '${stackName}' has no Identity vault (deployed without AgentCore, or with `
+            + '`--context enableLinearIdentityVault=false`) — using Secrets Manager.',
           );
         }
 
@@ -1460,8 +1462,8 @@ export function makeLinearCommand(): Command {
           console.log(`  Redirecting to: ${setupRedirectUri}`);
           console.log('  That exact URI must be one of the app\'s Redirect URIs, or consent');
           console.log('  fails with "Invalid redirect_uri parameter for the application".');
-          console.log('  No localhost on this machine? Deploy the consent page with');
-          console.log('  `--context enableLinearIdentityVault=true`.\n');
+          console.log('  No localhost on this machine? Re-deploy with');
+          console.log('  `--context enableLinearIdentityVault=true` for the hosted consent page.\n');
         }
         if (resumed || vaultAccessToken) {
           // nothing to open: consent already happened in the operator's browser.

@@ -159,6 +159,17 @@ export interface AgentStackProps extends StackProps {
   readonly blueprints?: readonly BlueprintDefinition[];
 }
 
+/**
+ * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
+ * otherwise the vault is on exactly when AgentCore is (see the call site).
+ */
+export function resolveLinearIdentityVault(context: unknown, agentCoreEnabled: boolean): boolean {
+  if (context === true || context === 'true') return true;
+  if (context === false || context === 'false') return false;
+  if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
+  return agentCoreEnabled;
+}
+
 export class AgentStack extends Stack {
   /** The REST API and its Cognito user pool; the operator console stack signs users in against these. */
   public readonly taskApi: TaskApi;
@@ -324,11 +335,15 @@ export class AgentStack extends Stack {
     const toolGatewayEnabled = this.node.tryGetContext('enableToolGateway') === true
       || this.node.tryGetContext('enableToolGateway') === 'true';
 
-    // RFC #249 Phase 1 (Linear OAuth token vault). Additive + default-off:
-    // resolved here (early) so the agent runtime env map + the LinearIdentityVault
-    // construct + the token grants all key off one predicate and cannot drift.
-    const linearIdentityVaultEnabled = this.node.tryGetContext('enableLinearIdentityVault') === true
-      || this.node.tryGetContext('enableLinearIdentityVault') === 'true';
+    // RFC #249 Linear OAuth token vault (AgentCore Identity). Default ON wherever
+    // AgentCore is deployed: that already proves the region has AgentCore, and the
+    // vault refreshes the Linear grant itself, so an idle workspace cannot strand
+    // an expired refresh token in Secrets Manager. Deployments without AgentCore
+    // default to Secrets Manager. `--context enableLinearIdentityVault=true|false`
+    // overrides either way. Resolved early so the runtime env map, the
+    // LinearIdentityVault construct and the token grants share one predicate.
+    const linearIdentityVaultEnabled = resolveLinearIdentityVault(
+      this.node.tryGetContext('enableLinearIdentityVault'), agentCoreEnabled);
     // Resolved once, next to the gate, for the same anti-drift reason: the construct,
     // the agent runtime env, the platform config and the CLI-facing output must all
     // name the SAME workload identity, and a second copy of the derivation is a
