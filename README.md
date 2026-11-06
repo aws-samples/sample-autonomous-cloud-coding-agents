@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="docs/video/abca-intro.mp4">
-    <img alt="Watch the 80-second ABCA intro video" width="800" src="docs/imgs/abca-intro-poster.jpg" />
+    <img alt="Watch the 95-second ABCA intro video" width="800" src="docs/imgs/abca-intro-poster.jpg" />
   </a>
 </p>
 
