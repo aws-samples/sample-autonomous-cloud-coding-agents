@@ -30,6 +30,9 @@ export type ResolvedWorkflow = {
   readonly version: string;
 };
 
+/** Git hosting provider. Defaults to 'github' for backward compatibility. */
+export type GitProviderType = 'github' | 'bitbucket';
+
 /**
  * A resolved registry-asset pin stamped on the TaskRecord for audit (#246).
  * Mirrors ``cdk/src/handlers/shared/types.ts::ResolvedAssetTriple``.

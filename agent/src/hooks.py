@@ -305,10 +305,11 @@ def _repo_slug_variants(repo_url: str) -> list[str]:
     """Return the ``owner/repo`` slug forms a clone command could name.
 
     ``config.repo_url`` is the canonical ``owner/repo``. A clone command may
-    reference it as ``owner/repo``, ``https://github.com/owner/repo(.git)``, or
-    ``git@github.com:owner/repo(.git)`` — all normalize to the same slug, so we
-    just need the bare ``owner/repo`` (with and without ``.git``) to substring-
-    match against the command text after normalization."""
+    reference it as ``owner/repo``, ``https://github.com/owner/repo(.git)``,
+    ``git@github.com:owner/repo(.git)``, ``https://bitbucket.org/owner/repo(.git)``,
+    or ``git@bitbucket.org:owner/repo(.git)`` — all normalize to the same slug,
+    so we just need the bare ``owner/repo`` (with and without ``.git``) to
+    substring-match against the command text after normalization."""
     slug = (repo_url or "").strip().removesuffix(".git").strip("/").lower()
     if not slug:
         return []
@@ -356,7 +357,12 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
         # The repo of a real clone always follows its verb. Normalize the URL
         # punctuation to the bare slug space so `.../owner/repo.git` and
         # `git@github.com:owner/repo` both reduce to text carrying `owner/repo`.
-        haystack = segment[clone.start() :].lower().replace("git@github.com:", "github.com/")
+        haystack = (
+            segment[clone.start() :]
+            .lower()
+            .replace("git@github.com:", "github.com/")
+            .replace("git@bitbucket.org:", "bitbucket.org/")
+        )
         if any(v in haystack for v in variants):
             return True
     return False

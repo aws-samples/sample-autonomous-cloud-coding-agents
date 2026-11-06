@@ -50,7 +50,9 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # Credentials embedded in git remote URLs (https://x-access-token:TOKEN@github.com/...).
     # The agent authenticates via env-based credential helper, but tool output
     # may still echo such URLs from other sources.
-    ("GITHUB_URL_TOKEN", re.compile(r"x-access-token:[^\s@\"']+@")),
+    ("GITHUB_URL_TOKEN", re.compile(r"x-access-token:[^\s@\"']+@github\.com")),
+    # Bitbucket credentials embedded in git remote URLs
+    ("BITBUCKET_URL_TOKEN", re.compile(r"x-token-auth:[^\s@\"']+@bitbucket\.org")),
     # Private keys (PEM blocks)
     (
         "PRIVATE_KEY",
