@@ -1,429 +1,83 @@
-# RFC 0001: Signed Decision Receipts for ABCA via AgentCore Gateway
+# RFC 0001: Signed receipts at the ABCA tool gateway
 
-**Status:** Draft for review. Prepared in response to [@krokoko](https://github.com/krokoko)'s feedback on the now-closed [#39](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/39).
+**Status:** Design proposal for review. Scope is buffered MCP `tools/call` requests routed through a configured Amazon Bedrock AgentCore Gateway. This PR changes documentation only.
 
-**Author:** Tom Farley (independent capacity; IETF draft author for `draft-farley-acta-signed-receipts`). **Disclosure:** I am the author of the receipt format specification and of [`protect-mcp`](https://www.npmjs.com/package/protect-mcp), one of four conformant implementations referenced below. The contract in this RFC is a format, not a vendor choice; any implementation of that format is interchangeable.
+**Author disclosure:** Tom Farley wrote the receipt-format Internet-Draft. Of the four implementations referenced in the original proposal, three are his (protect-mcp, protect-mcp-adk and sb-runtime); the APS implementation is independently authored. This design requires no particular package. It follows the [interceptor design proposed in review](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/40#issuecomment-4284866801).
 
-**Reviewers requested:** @krokoko and ABCA maintainers.
+## 1. What an operator can verify
 
-**Scope:** ABCA only. The receipt format, trust boundaries, and CDK patterns described here are portable, but the integration this document proposes is specific to ABCA + Amazon Bedrock AgentCore Gateway.
+An ABCA reviewer should be able to check, offline, that a signer outside the agent runtime recorded a particular tool request before allowing it to proceed, and see which response, if any, the gateway later presented to the response interceptor. The proposed signer is in the gateway's synchronous path; the existing native policy engine stays attached in `ENFORCE` mode.
 
----
+Three observations have different authorities:
 
-## 1. Problem statement
+| Observation | Authority and meaning |
+| --- | --- |
+| Request admitted or stopped by the interceptor | The request signer saw the effective request and made this local decision. Admission lets processing continue. |
+| Native Cedar allow or deny | The policy engine makes this decision. When tracing is enabled, its `AuthorizeAction` span can carry the native verdict. The documented request-interceptor payload contains no native verdict. Keep native evidence separate and attribute it to the policy engine only when reliably correlated. |
+| Response observed | The response signer saw the recorded response at this boundary. A returned value, error, or timeout does not by itself establish external side effects, successful delivery to the agent, or exactly-once execution. |
 
-ABCA agents run autonomously in MicroVMs, clone repositories, write code, execute tests, and open pull requests. Every consequential step is a tool call through AgentCore Gateway. By default, evidence that each call happened and under what authorization lives in CloudWatch logs, which are:
+A missing receipt leaves the call unobserved at that stage. Gateway authentication failures, upstream denials, calls outside this gateway, and local commands can fall outside the record. For coverage of a tool, restrict its target so the agent cannot invoke it directly. A complete claim about a whole agent run would also require an independent inventory of calls and a trusted terminal checkpoint.
 
-- **Operator-controlled.** CloudWatch entries can be redacted, amended, or deleted by the account that runs ABCA.
-- **Not externally verifiable.** A PR reviewer or regulator without AWS account access has no way to confirm what the agent did to produce the commit.
-- **Not tamper-evident as a whole.** Individual log entries are authenticated only to the extent that CloudTrail records CloudWatch writes; the log body itself is not cryptographically sealed.
+## 2. The request and response paths
 
-For regulated deployments of ABCA (financial services, healthcare, public sector, critical infrastructure), this is insufficient. Teams need a stronger guarantee: each Cedar policy decision AgentCore Gateway makes is signed at decision time with a key the agent cannot access, with a tamper-evident chain across the session, verifiable offline by anyone with the signing public key and no AWS credentials.
+Use the gateway's supported [REQUEST and RESPONSE Lambda interceptors](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors-types.html). A gateway supports one configured interceptor of each type. Compose this logic with any existing interceptor, preserving its validation and redaction, or use a dedicated pilot gateway. Start with one tool and exclude streaming.
 
-This RFC proposes that extension. It does **not** replace AgentCore Gateway's native policy engine; it adds a parallel signed-receipt output.
+1. **REQUEST** authenticates the run/attempt binding, applies the configured admission checks, and builds a receipt over the final request it would forward. The handler awaits signing **and** a successful durable append before returning `transformedGatewayRequest`. To stop a call it returns a `transformedGatewayResponse` carrying a protocol error. If signing or persistence fails it takes the stop path, even if it cannot issue a signed failure receipt. Native policy remains authoritative wherever the gateway evaluates it.
+2. **RESPONSE** resolves the request using a trusted per-attempt binding, applies any response transformation or redaction, and signs a receipt over precisely the response it proposes to return. It awaits the append before returning that response. A synthetic response from REQUEST also invokes RESPONSE. Track the disposition of this invocation, including local rejection of a duplicate attempt. Never attach that synthetic denial to the originally admitted attempt as its target outcome. Record a forwarded call's result as a **gateway response** unless its target origin is independently established. Leave it unattributed when correlation is ambiguous.
+3. A failed response write after forwarding produces an audit error and a pending request with unresolved outcome. Operators reconcile such requests with available gateway or target evidence. A response-stage failure must never trigger a fresh tool call. Signing and storage after the handler has returned cannot guard forwarding.
 
-## 2. What AgentCore Gateway already provides
+Correlation is an integration requirement. An orchestrator-issued attempt identifier must be authenticated and bound to the run, tool and request digest. Verify that both hooks can recover the same binding via a supported context or integrity-protected field that survives the gateway. A client-supplied JSON-RPC ID, header, timestamp or identical tool input alone is insufficient. The [documented MCP contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors-types.html) shows separate raw and effective request bodies. Leave request recording disabled for tools without a trusted binding, or reject them on a receipt-required gateway. Do not disclose authorization headers or use raw credentials as a run identity.
 
-Per the [AgentCore Gateway policy docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-getting-started.html), ABCA's existing gateway already supports:
+## 3. Receipt format and offline verification
 
-- A **policy engine** attached in `ENFORCE` mode (`agentcore add policy-engine --attach-to-gateways <gw> --attach-mode ENFORCE`) that evaluates every tool call against attached Cedar policies.
-- Cedar `permit` / `forbid` rules with entity types like `AgentCore::Action::"TargetName___toolname"` and `AgentCore::Gateway::"<gw-arn>"`.
-- Default-deny semantics: all actions denied unless a `permit` policy matches.
-- Forbid-wins semantics: if any `forbid` matches, access is denied.
-- Policy decision logging to CloudWatch.
-
-**This RFC does not propose reinventing any of the above.** The policy engine stays native. What this RFC adds is a signed-receipt output of each policy-engine decision, separate from CloudWatch, written to S3 by a new component whose identity is distinct from the agent's.
-
-## 3. Goals and non-goals
-
-### Goals
-
-- **G1.** Every Cedar policy decision AgentCore Gateway makes for an ABCA run is persisted as a signed receipt in addition to the native CloudWatch log entry.
-- **G2.** The signing identity is outside the agent's trust boundary. A compromised ABCA agent container or runtime role cannot forge, alter, or suppress receipts.
-- **G3.** The receipt chain is tamper-evident as a whole. Insertions, deletions, and reorderings across the session break verification.
-- **G4.** Verification is fully offline and does not require AWS credentials or ABCA runtime access. Any party with the signing public key verifies the chain using open-source tooling.
-- **G5.** The receipt format is tool-agnostic. ABCA can swap the signing implementation without changing the contract.
-- **G6.** Infrastructure is CDK-managed. Every IAM policy, KMS key, S3 bucket, and CloudTrail configuration is a code-reviewed artifact.
-
-### Non-goals
-
-- **NG1.** This RFC does not modify ABCA source code inside `agent/`. No new SDK, no library injection, no runtime changes.
-- **NG2.** This RFC does not propose a replacement for AgentCore Gateway's native policy engine. Cedar evaluation stays native.
-- **NG3.** This RFC does not cover policy-authoring at scale. Writing Cedar for regulated environments deserves its own guide.
-- **NG4.** This RFC does not require any specific signing implementation. Section 4 defines the contract; Section 9 lists four conformant implementations.
-- **NG5.** This RFC does not cover transparency-log anchoring (Sigstore Rekor). Anchoring is supported by the chain structure but out of scope here.
-- **NG6.** This RFC does not change PR body conventions, CI, or the GitHub App surfaces. It adds an S3 artifact and a verification instruction.
-
-## 4. Trust model
-
-Trust boundaries are the part most prior proposals got wrong, including my own earlier draft. This section is intentionally explicit.
-
-### 4.1 Entities
-
-| Entity | What it is | Trust anchor |
-|--------|-----------|--------------|
-| **Task submitter** | User or service requesting an ABCA run | Human review authority |
-| **ABCA Orchestrator** | AWS-hosted ABCA infrastructure (CDK-managed) | Trusted, code-reviewed |
-| **Agent Runtime** | The MicroVM where the AI agent executes | **Untrusted.** Prompt injection and container compromise assumed possible. |
-| **AgentCore Gateway** | The in-path tool-call gateway with a native Cedar policy engine | Trusted. The policy engine's evaluation is authoritative. |
-| **Receipt Signer** | New Lambda whose only job is to sign a receipt of each policy decision | **Trusted.** Its own IAM role, its own KMS access, its own log destination. Deliberately distinct from the agent runtime. |
-| **Signing Key** | Ed25519 key that signs receipts | **KMS-resident.** Scoped to the Receipt Signer IAM role only. Never materialized in the agent runtime or in any other process. |
-| **Receipt Storage** | S3 bucket holding the signed receipt chain | Write access scoped to the Receipt Signer; read access open or signed-URL gated per deployment |
-| **Verifier** | Any party wanting to confirm what the agent did | Needs only the public key + access to Receipt Storage |
-
-### 4.2 Core assumption: the agent is untrusted
-
-The Agent Runtime may be under the effective control of an adversary at any moment. Prompt injection, model compromise, or container escape are all in scope. Nothing the agent produces self-attests. The agent is the *subject* of receipts, never the *signer*.
-
-### 4.3 Receipt Signer as a distinct identity
-
-The Receipt Signer is a Lambda function with:
-
-- Its own IAM role with a tightly-scoped policy (only `kms:Sign` on the specific signing key, `s3:PutObject` on the receipt-bucket prefix for the active session, nothing else).
-- An explicit deny on the signing key for the Agent Runtime IAM role and for any other non-signer role.
-- CloudTrail records of every `kms:Sign` invocation, independent of the receipt system, providing a second-layer audit.
-
-A full compromise of the Agent Runtime does not yield signing-key access. A full compromise of the Receipt Signer Lambda yields forgery during the compromise window; CloudTrail cross-checks catch this.
-
-## 5. The receipt contract
-
-Wire format. Any conformant signing implementation produces receipts with these fields.
-
-### 5.1 Receipt structure
+Use the envelope form in [draft-farley-acta-signed-receipts-03, §§2, 5 and 6](https://www.ietf.org/archive/id/draft-farley-acta-signed-receipts-03.html). Pin the format version for the pilot. The following is illustrative **input to signing**, with fictional identifiers. The request digest covers `{"arguments":{"task":"demo"},"name":"repo___get_diff"}`. The namespaced type and gateway-specific fields are proposed ABCA extensions.
 
 ```json
 {
-  "receipt_id":          "rcpt-<unique id>",
-  "receipt_version":     "1.0",
-  "issuer_id":           "<logical id of the Receipt Signer, e.g. arn:aws:lambda:...>",
-  "event_time":          "<RFC 3339 UTC timestamp>",
-  "session_id":          "<opaque string, unique per ABCA run>",
-  "sequence":            <integer, monotonic within session, 1-indexed>,
-  "gateway_arn":         "<AgentCore Gateway ARN that produced the decision>",
-  "tool_name":           "<AgentCore tool identifier, e.g. RefundTarget___process_refund>",
-  "tool_input_digest":   "sha256:<JCS-canonical hash of the tool input>",
-  "decision":            "allow" | "deny",
-  "policy_engine_id":    "<AgentCore policy engine id>",
-  "policy_digest":       "sha256:<hash of the Cedar policy file evaluated>",
-  "reason":              "<short human-readable explanation, optional>",
-  "previousReceiptHash": "sha256:<SHA-256 of the previous receipt's JCS canonical form, signature included; omitted entirely for sequence=1>",
-  "public_key":          "<hex-encoded Ed25519 public key; informational only, see 5.2 (4)>",
-  "signature":           "<hex-encoded Ed25519 signature over the JCS-canonical receipt with `signature` removed (section 6.6)>"
+  "type": "abca:gateway-request",
+  "issued_at": "2026-04-18T01:40:00Z",
+  "issuer_id": "abca-pilot-k1",
+  "gateway_id": "pilot-gateway",
+  "run_id": "run-01",
+  "attempt_id": "attempt-01",
+  "sequence": 1,
+  "tool_name": "repo___get_diff",
+  "request_digest": "sha256:cc518448d1745a9f9a5997818c769e596088e1ab38e78d6a67dc1a973ac0cf03",
+  "disposition": "admit"
 }
 ```
 
-### 5.2 The three invariants
+- Canonicalize the payload with RFC 8785 JCS. Preserve Unicode code points. Sign its UTF-8 bytes with pure Ed25519, then emit the envelope with `payload` and `signature` (`alg`, `kid`, `sig`). The key ID matches the signed issuer. Keep raw arguments, prompts, headers and results out of the receipt. Document the exact digest input (JCS of the effective tool name and arguments for requests, JCS of the final MCP response body for responses); digests of guessable values can still disclose information.
+- For each subsequent entry in a run, put `previousReceiptHash` **inside the signed payload**. Its value is `sha256:` plus lowercase hex SHA-256 over the JCS bytes of the entire previous signed envelope. The first entry omits the member. A response payload of type `abca:gateway-response` separately carries the digest of its own request **receipt**, the attempt ID, response status and digest. Under concurrency, the preceding entry can belong to another call.
+- An offline verifier receives the allowed export plus an independently authenticated key set, rotation history and, when available, an independently retained terminal (run ID, sequence, hash). Verify signatures, supported algorithms and issuer bindings, contiguous sequence and chain links, and request/response associations. Flag duplicate phases and outstanding requests. A valid prefix can survive removal of the tail; only a trusted checkpoint can detect truncation to a shorter prefix. These checks authenticate signer statements. They do not validate a model's reasoning or confer trust on caller-supplied metadata.
 
-1. **JCS canonicalization (RFC 8785)** before signing. Sorted keys, minimal whitespace, NFC-normalized strings. Any two conformant implementations produce byte-identical signing payloads for semantically equal receipts.
-2. **Ed25519 signatures (RFC 8032)** over the canonical bytes. Deterministic, 64 bytes, widely implemented. A receipt signed by one implementation verifies against any other conformant verifier without coordination.
-3. **Hash chain linkage.** `previousReceiptHash` is the SHA-256 of the preceding receipt's JCS-canonical form with the `signature` member included, encoded as `"sha256:" + lowercase hex` (draft-farley-acta-signed-receipts-03, section 6.7). Including the signature binds the chain to the specific signed bytes, so a re-signed receipt is a visible chain event rather than an indistinguishable substitute. The first receipt of a session omits the member entirely; carrying `null` or `""` changes the canonical bytes and therefore the signature (section 2.2). Insertions, deletions, reorderings, and re-signing all break verification.
-4. **The verification key comes from outside the receipt.** A verifier MUST obtain the signer's public key from the out-of-band location in Section 7 (or a JWKS named by key id), never from the `public_key` field of the receipt it is checking. A receipt that carries its own key verifies against any key an attacker chooses to embed after re-signing; the field is informational only.
+## 4. Proposed CDK resources and persistence
 
-### 5.3 Optional outcome receipts
+| Resource | Configuration |
+| --- | --- |
+| Gateway and Lambda | Attach a request handler and a response handler with `interceptionPoints` set to `REQUEST` and `RESPONSE` respectively. The gateway role may invoke only the configured functions. Keep caller headers disabled unless the binding design needs specific trusted material. |
+| KMS | Use `ECC_NIST_EDWARDS25519`, key usage `SIGN_VERIFY`, algorithm `ED25519_SHA_512`, message type `RAW`. Bound the canonical payload to the [KMS Sign limit](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html) of 4,096 bytes. Reject oversized receipts. Prehashing would change this signature contract. |
+| Receipt bucket | Private, encrypted, versioned, bucket-owner enforced, CDK `s3.BlockPublicAccess.BLOCK_ALL`. Require TLS and conditional, create-only entry writes. The handlers need narrowly scoped read/list/put access to maintain the sequence, with no delete access. Provide authorized exports separately; the bucket stays private. Set retention and optional Object Lock under the deployment's own policy. |
+| IAM | Give only the designated handler identities signing access to this key. Deny agent runtime principals signing, receipt-store mutation and direct interceptor invocation. Keep key administration, handler updates and archive/retention administration separate from the agent. Check target IAM and alternate credentials for bypasses. |
+| Signing audit | Reuse one CloudTrail trail that includes KMS read and write **management events**, with KMS inclusion checked explicitly. The [CloudTrail example for Sign](https://docs.aws.amazon.com/kms/latest/developerguide/ct-sign.html) is classified read-only. Query `kms.amazonaws.com` / `Sign` for the signer and key. The signer can store the successful KMS request ID as operational metadata to aid reconciliation. There is no second trail or Lake store in this proposal. [CloudTrail Lake closed to new customers in May 2026](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-lake-service-availability-change.html). |
 
-For deployments that want to attest to tool outputs too, each `allow` decision receipt MAY be followed by an **outcome receipt** signed after the tool returns. The outcome receipt's `previousReceiptHash` points at its decision receipt; its body carries `tool_output_digest` over the (optionally redacted) response. Auditors get the full call boundary: what was authorized, what actually returned.
+For a low-volume pilot, use a session prefix and immutable, numbered S3 entry keys. Read the contiguous entries for the run, checking for an existing (attempt, phase) before choosing the next sequence and signing. Try appending that sequence using [S3 conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html) (`If-None-Match: *`). If another invocation wins, re-read and retry against the new predecessor within a bounded time. On an ambiguous timeout, read the entry before proceeding. An identical event can reuse its persisted receipt during reconciliation; a different payload for the same attempt/phase is a conflict. A duplicate request must not forward another tool call on the strength of the prior receipt. Reject ambiguous retries and leave resolution to the caller/operator. This favors a safe missing outcome over executing an irreversible action twice. Measure latency and contention before selecting any higher-throughput design.
 
-This RFC treats outcome receipts as optional. The minimum conformance bar is one decision receipt per policy-engine evaluation.
+A compromised signing role can sign false statements. A KMS invocation trail can flag unexpected key use; it cannot establish the truth of the signed content. Retries and losing a conditional append can legitimately produce more signatures than stored receipts. Review evidence accordingly.
 
-### 5.4 Reference verifier
+## 5. What to validate before an implementation PR
 
-The open-source verifier [`@veritasacta/verify`](https://www.npmjs.com/package/@veritasacta/verify) (v0.3.0) accepts receipts in this shape, walks the chain, and exits `0` (valid) or `1` (invalid). Verifier source is public; running it requires no AWS credentials, no network, and no ABCA deployment knowledge.
+- **Gateway lifecycle.** Exercise native permit and native deny, local rejection, target success and target error. Record which hooks run, what each receives, and whether both hooks can recover a trusted attempt binding. Verify that a local rejection invoking RESPONSE produces zero target invocations. Use a target with an independent invocation counter.
+- **Failure handling.** Inject faults before KMS signing, before and after S3 commit, after request commit but before target execution, and after a target side effect but before response commit. Check timeout and malformed Lambda return behavior, duplicate IDs, conflicting retries and concurrent calls in the same run. After a request is admitted, resend its ID and verify the locally generated duplicate denial cannot fill the original attempt’s pending outcome. Verify outstanding attempts can be reconciled without rerunning the tool.
+- **Native evidence.** If the deployment requires a receipt covering a Cedar verdict, validate the mapping from the actual [policy observability spans](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/observability-policy-metrics.html) to this attempt. If the trace is absent, sampled or ambiguous, report native decision unknown.
+- **Offline replay.** Run two interleaved calls. Verify the intact export against a pinned key, then test a substituted key, altered input digest, swapped entries, swapped responses, duplicate phase and a truncated export with and without a trusted checkpoint. Test timeouts and p95 added latency against an operator-agreed budget.
 
-## 6. Reference implementation: AgentCore Gateway + Receipt Signer
+The open questions for maintainers are which trusted ABCA run/attempt binding to use, whether existing gateway interceptors need composing, and which target and latency budget to use for a first integration test. No resources are deployed and the lifecycle tests above are proposed acceptance criteria.
 
-AgentCore Gateway already does Cedar policy evaluation natively. The RFC's contribution is a Receipt Signer Lambda that receives every policy-engine decision and signs a receipt for it.
+### Service references
 
-```
-                         ┌────────────────────────────────┐
-                         │ Agent Runtime (MicroVM)        │
-                         │  ─ untrusted ─                 │
-                         └───────────────┬────────────────┘
-                                         │ tool call
-                                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    AgentCore Gateway                                │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ Policy Engine (ENFORCE mode, native)                          │  │
-│  │   ─ attached Cedar policies                                    │  │
-│  │   ─ allow / deny decision per call                             │  │
-│  │   ─ CloudWatch log emission (native)                           │  │
-│  │   ─ EventBridge decision event emission (RFC-added)            │  │
-│  └──────────────┬────────────────────────────────┬────────────────┘  │
-│                 │ allow                          │ every decision    │
-│                 ▼                                ▼                   │
-│     ┌───────────────────────┐    ┌──────────────────────────────┐   │
-│     │ Lambda Target         │    │ Receipt Signer Lambda (new)  │   │
-│     │ (tool execution)      │    │                              │   │
-│     └───────────────────────┘    │ 1. Read decision from event   │   │
-│                                  │ 2. Compute prev_hash from     │   │
-│                                  │    last receipt in chain      │   │
-│                                  │ 3. Sign via KMS Ed25519       │   │
-│                                  │ 4. Write to S3 chain prefix   │   │
-│                                  └──────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-The Receipt Signer is triggered by an **EventBridge rule** that subscribes to the policy-engine decision events that AgentCore emits (or, in deployments where the events are not exposed, by a CloudWatch Logs subscription filter on the policy-engine log group). Either way the trigger is cloud-native: no custom gateway code, no middleware.
-
-This pattern keeps the Cedar evaluation and the decision authority inside AgentCore. The signer's only job is to attest to what AgentCore decided.
-
-### 6.1 Open question: AgentCore event surface
-
-The cleanest trigger for the Receipt Signer is an EventBridge decision event from the policy engine. The current AgentCore Gateway documentation does not explicitly enumerate the event names emitted by ENFORCE-mode decisions. Two fallbacks if native events are not available:
-
-- **CloudWatch Logs subscription filter** on the policy-engine log group, triggering the Receipt Signer Lambda for each decision line.
-- **Wrapper Lambda target** that calls the actual tool target and signs a receipt before returning to AgentCore. Less elegant but works with current features.
-
-I would appreciate @krokoko or the AgentCore team confirming which of these paths is most stable and whether a native decision-event API is on the roadmap.
-
-## 7. CDK infrastructure
-
-The following resources are required. All expressed in TypeScript CDK so they are code-reviewed and version-controlled.
-
-### 7.1 KMS signing key (Ed25519)
-
-```typescript
-import * as kms from 'aws-cdk-lib/aws-kms';
-import * as iam from 'aws-cdk-lib/aws-iam';
-
-const signingKey = new kms.Key(this, 'DecisionReceiptSigningKey', {
-  keySpec: kms.KeySpec.ED25519,
-  keyUsage: kms.KeyUsage.SIGN_VERIFY,
-  description: 'Ed25519 signing key for ABCA decision receipts',
-  enableKeyRotation: false,   // Ed25519 keys rotate by replacement, not schedule
-  removalPolicy: cdk.RemovalPolicy.RETAIN,
-});
-
-// Narrow grant: only the Receipt Signer can sign
-signingKey.grant(receiptSignerLambda.role!, 'kms:Sign');
-
-// Explicit deny for the agent runtime role
-signingKey.addToResourcePolicy(new iam.PolicyStatement({
-  effect: iam.Effect.DENY,
-  principals: [new iam.ArnPrincipal(agentRuntimeRole.roleArn)],
-  actions: ['kms:*'],
-  resources: ['*'],
-}));
-```
-
-### 7.2 Receipt storage S3 bucket
-
-```typescript
-import * as s3 from 'aws-cdk-lib/aws-s3';
-
-const receiptBucket = new s3.Bucket(this, 'AbcaDecisionReceipts', {
-  encryption: s3.BucketEncryption.S3_MANAGED,
-  versioned: true,
-  objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
-  blockPublicAccess: s3.BlockPublicAccess.BLOCK_ACLS,
-  lifecycleRules: [
-    { noncurrentVersionExpiration: cdk.Duration.days(7) },
-  ],
-});
-
-receiptBucket.grantWrite(receiptSignerLambda);
-// Explicit deny to the agent runtime role
-receiptBucket.addToResourcePolicy(new iam.PolicyStatement({
-  effect: iam.Effect.DENY,
-  principals: [new iam.ArnPrincipal(agentRuntimeRole.roleArn)],
-  actions: ['s3:*'],
-  resources: [receiptBucket.bucketArn, `${receiptBucket.bucketArn}/*`],
-}));
-```
-
-Public reads are off by default. Deployments that want external verifiers to fetch receipts without AWS credentials add a bucket policy with a narrow `s3:GetObject` allow on specific prefixes, or serve receipts through a signed-URL API endpoint.
-
-### 7.3 Receipt Signer Lambda
-
-```typescript
-import * as lambda from 'aws-cdk-lib/aws-lambda';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
-
-const receiptSignerLambda = new lambda.Function(this, 'ReceiptSigner', {
-  runtime: lambda.Runtime.NODEJS_20_X,
-  handler: 'index.handler',
-  code: lambda.Code.fromAsset('lambda/receipt-signer'),
-  environment: {
-    SIGNING_KEY_ID: signingKey.keyId,
-    RECEIPT_BUCKET: receiptBucket.bucketName,
-  },
-  timeout: cdk.Duration.seconds(10),
-  // No VPC; talks to KMS and S3 only. No outbound egress to the internet.
-});
-
-// Trigger: subscribe to policy-engine decision events
-const rule = new events.Rule(this, 'PolicyDecisionRule', {
-  eventPattern: {
-    source: ['aws.bedrock-agentcore'],
-    detailType: ['Policy Engine Decision'],
-    detail: {
-      gatewayArn: [abcaGateway.attrArn],
-    },
-  },
-});
-rule.addTarget(new targets.LambdaFunction(receiptSignerLambda));
-```
-
-The event pattern above is the shape I expect from AgentCore's EventBridge integration. If the actual event name or source differs, this is the one place to update.
-
-### 7.4 CloudTrail data-event logging for the signing key
-
-```typescript
-import * as cloudtrail from 'aws-cdk-lib/aws-cloudtrail';
-
-new cloudtrail.Trail(this, 'SigningKeyAuditTrail', {
-  bucket: auditBucket,
-  includeGlobalServiceEvents: true,
-  managementEvents: cloudtrail.ReadWriteType.ALL,
-});
-
-// Explicitly capture kms:Sign as a data event on the signing key
-new cdk.CfnResource(this, 'SigningKeyDataEventsRule', {
-  type: 'AWS::CloudTrail::EventDataStore',
-  properties: {
-    Name: 'DecisionReceiptSigningKeyDataEvents',
-    AdvancedEventSelectors: [{
-      FieldSelectors: [
-        { Field: 'eventCategory', Equals: ['Data'] },
-        { Field: 'resources.type', Equals: ['AWS::KMS::Key'] },
-        { Field: 'resources.ARN', StartsWith: [signingKey.keyArn] },
-      ],
-    }],
-  },
-});
-```
-
-Every `kms:Sign` on the signing key is recorded independently of the receipt chain. A verifier with access to CloudTrail data events can cross-check: every receipt should correspond to exactly one `kms:Sign` event. Forging a receipt requires forging a CloudTrail entry too, which is a significantly higher bar.
-
-### 7.5 Explicit denies on the Agent Runtime role
-
-The ABCA agent runtime role is already scoped. This RFC adds belt-and-suspenders denies:
-
-```typescript
-agentRuntimeRole.addToPolicy(new iam.PolicyStatement({
-  effect: iam.Effect.DENY,
-  actions: ['kms:Sign', 'kms:Verify', 's3:PutObject', 's3:DeleteObject'],
-  resources: [signingKey.keyArn, receiptBucket.bucketArn + '/*'],
-}));
-```
-
-An explicit deny overrides any inadvertent allow inherited from a broader policy attached elsewhere, and makes the intent unambiguous for future code reviewers.
-
-## 8. Verification flow
-
-External reviewer receiving an ABCA-produced PR:
-
-```bash
-# 1. Extract the receipt-chain location from the PR body
-CHAIN_URL=$(gh pr view <PR_URL> --json body --jq '.body' \
-  | grep 'decision-receipts:' \
-  | awk '{print $NF}')
-
-# 2. Fetch the chain (public read prefix; no AWS credentials required)
-curl -sL "$CHAIN_URL" -o receipts.jsonl
-
-# 3. Fetch the signing public key (committed alongside ABCA infra)
-curl -sL https://<abca-public-keys>/signing-key.hex -o signing-key.hex
-
-# 4. Offline verification
-npx @veritasacta/verify@0.9.6 --replay-chain receipts.jsonl --key "$(cat signing-key.hex)"
-# exit 0 = valid; exit 1 = tampered / invalid; exit 2 = malformed or unverifiable (e.g. no key)
-
-# Optional: CloudTrail cross-check (requires account read-access)
-aws cloudtrail lookup-events \
-  --lookup-attributes AttributeKey=ResourceName,AttributeValue=<signing-key-arn> \
-  --max-results 100 > signing-events.json
-python3 scripts/cross-check.py receipts.jsonl signing-events.json
-```
-
-Steps 1-4 require no AWS credentials. The CloudTrail cross-check is the second-layer audit defense for the most stringent reviews.
-
-## 9. Compromise analysis
-
-### 9.1 Agent Runtime compromised
-
-**Can do:** Run arbitrary code, exfiltrate data the agent has access to, attempt tool calls the policy allows.
-
-**Cannot do:** Forge receipts, modify existing receipts, skip the AgentCore policy engine (in-path at the gateway level), access the signing key, write to the receipt bucket.
-
-**Detection:** The Receipt Signer captures every attempted call; the chain contains a receipt for every decision (allow and deny). Unusual egress shows up in VPC Flow Logs and CloudWatch metrics.
-
-### 9.2 Receipt Signer IAM role compromised
-
-**Can do:** Sign arbitrary receipts over forged content, write to the receipt bucket.
-
-**Cannot do:** Affect the AgentCore policy decisions themselves (the gateway's policy engine is still authoritative for actual tool-call gating); forge CloudTrail data events that log the `kms:Sign` invocations.
-
-**Detection:** CloudTrail cross-check catches `kms:Sign` events without corresponding legitimate triggers. Rotation of the signing key invalidates future receipts from the compromised role.
-
-### 9.3 Signing key KMS access compromised
-
-**Can do:** Sign anything the attacker wants to forge.
-
-**Cannot do:** Modify receipts already signed with the (uncompromised) key.
-
-**Detection:** Unauthorized `kms:Sign` operations in CloudTrail. If the key material is ever exfiltrated and used offline, CloudTrail will not see it; at that point the deployment treats all receipts after the compromise window as untrusted and rotates the key.
-
-### 9.4 Receipt bucket write access compromised
-
-**Can do:** Append forged receipts, delete receipts (versioning retains prior versions for 7 days).
-
-**Cannot do:** Sign the forged receipts (signer identity is separate).
-
-**Detection:** Signature verification fails on the forgery. Gaps in the `sequence` field are detectable by the verifier.
-
-### 9.5 Operator collusion
-
-**What happens:** ABCA operator deliberately signs false receipts or stages a clean chain for a compromised run.
-
-**Defense:** Nothing in this RFC alone. Mitigated at a higher deployment tier by anchoring receipt hashes in a public transparency log (Sigstore Rekor) so retrospective forgery is detectable. Out of scope for v1.
-
-## 10. Open questions
-
-1. **AgentCore decision-event API.** Does AgentCore Gateway emit native EventBridge events per policy-engine decision, and if so what is the exact event shape and `detailType`? The RFC assumes `aws.bedrock-agentcore` + `Policy Engine Decision`; if the real shape differs, Section 7.3 updates accordingly. **Request for @krokoko or AgentCore docs.**
-2. **CloudWatch Logs subscription fallback.** If native events are not available, is a CloudWatch Logs subscription filter on the policy-engine log group the supported pattern?
-3. **Public-key distribution.** Where does the signing public key live for external verifiers? A dedicated S3 prefix in the receipt bucket? A JWKS endpoint? An SSM parameter? What fits ABCA deployment conventions best?
-4. **Cedar policy versioning.** The `policy_digest` field in each receipt assumes the Cedar policy is stable for a session. Does the AgentCore Gateway policy engine support pinning to a specific policy version per session, or is the deployed policy always the current attached version?
-5. **Session boundaries.** Is there an ABCA-native session identifier (task UUID, correlation ID) that the RFC should use for `session_id`, rather than introducing a new identifier?
-6. **Subagent handling.** ABCA supports coordinator + implementer patterns with subagents. Should a subagent's receipts live in the parent session's chain, or in its own chain linked by a parent reference? My default is "own chain with a parent reference field"; open to alternatives.
-7. **Output redaction.** For outcome receipts (optional per Section 5.3), AgentCore Gateway likely has its own redaction pipeline. The RFC assumes the receipt signs the redacted output that the agent saw. Is that consistent with AgentCore's redaction flow?
-
-## 11. References
-
-- IETF draft: [`draft-farley-acta-signed-receipts-03`](https://datatracker.ietf.org/doc/draft-farley-acta-signed-receipts/) — receipt wire format
-- [AgentCore Gateway policy getting started](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-getting-started.html) — native Cedar policy engine, this RFC composes with
-- [cedar-policy/cedar-for-agents](https://github.com/cedar-policy/cedar-for-agents) — Cedar WASM bindings and MCP schema generator
-- [SLSA for agents discussion](https://github.com/slsa-framework/slsa/issues/1594) — composition with build provenance
-- [agent-commit build type v0.2](https://refs.arewm.com/agent-commit/v0.2) — SLSA build type for agent-produced commits, references decision receipts via ResourceDescriptor byproducts
-- [in-toto attestation #549](https://github.com/in-toto/attestation/pull/549) — decision receipts as a standard in-toto predicate
-- [Microsoft Agent Governance Toolkit `examples/protect-mcp-governed/`](https://github.com/microsoft/agent-governance-toolkit/tree/main/examples/protect-mcp-governed) — reference of decision-receipt composition with an internal Merkle audit log
-- RFC 8032 — Ed25519 digital signatures
-- RFC 8785 — JCS canonicalization
-
-## 12. Conformant signing implementations
-
-Four codebases currently emit receipts in the Section 5 wire format. Any of them can serve as the Receipt Signer Lambda's implementation.
-
-| Implementation | Language | Source | Author |
-|----------------|----------|--------|--------|
-| `protect-mcp` | TypeScript | [npmjs.com/package/protect-mcp](https://www.npmjs.com/package/protect-mcp) | Tom Farley (RFC author) |
-| `protect-mcp-adk` | Python | [pypi.org/project/protect-mcp-adk](https://pypi.org/project/protect-mcp-adk/) | Tom Farley |
-| `sb-runtime` | Rust | [github.com/ScopeBlind/sb-runtime](https://github.com/ScopeBlind/sb-runtime) | Tom Farley |
-| APS governance hook | Python | Independent | @aeoess |
-
-Shared conformance test vectors for these implementations are at [ScopeBlind/agent-governance-testvectors](https://github.com/ScopeBlind/agent-governance-testvectors). A fifth implementation can prove conformance by running its output through the same fixtures.
-
-**ABCA is not required to use any specific implementation.** Section 5's contract is the interop surface. Whichever signer the ABCA team chooses to bundle in the Receipt Signer Lambda (or write from scratch), its receipts must verify via `@veritasacta/verify`.
-
----
-
-## Appendix A: How this RFC differs from the closed #39 guide
-
-The original guide on [#39](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/39) had three weaknesses, all raised by @krokoko in review:
-
-1. **Author transparency was implicit**, not explicit. This RFC names the author as the creator of most of the referenced tools in the header and notes the contract is tool-agnostic.
-2. **"No code changes" was wrong framing.** The guide prescribed infrastructure changes. This RFC is explicitly an infrastructure proposal, with CDK as the concrete form.
-3. **Trust boundaries were not drawn.** The guide put the signing key inside the agent container, creating a false sense of security because a container compromise compromised both the tool execution and the receipts. This RFC puts the signer explicitly outside the agent runtime, in a separate Lambda with its own IAM role, KMS key scope, and audit trail.
-
-Thank you @krokoko for pulling the proposal toward a materially better design.
+- [AgentCore gateway interceptor configuration and limits](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors.html)
+- [AgentCore gateway examples, including interceptor configurations](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-create-api.html)
+- [Native policy enforcement](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/policy-getting-started.html)
+- [KMS Ed25519 key and message types](https://docs.aws.amazon.com/kms/latest/developerguide/symm-asymm-choose-key-spec.html)
+- [KMS audit events and fields omitted from CloudTrail](https://docs.aws.amazon.com/kms/latest/developerguide/logging-using-cloudtrail.html)
