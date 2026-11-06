@@ -46,7 +46,7 @@ export default [
 
   // TypeScript source, test, and scripts files
   {
-    files: ['src/**/*.ts', 'test/**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts', 'scripts/**/*.ts'],
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -212,7 +212,7 @@ export default [
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
-        devDependencies: ['**/test/**', '**/build-tools/**'],
+        devDependencies: ['**/test/**', '**/build-tools/**', '**/scripts/**'],
         optionalDependencies: false,
         peerDependencies: true,
       }],
@@ -270,6 +270,16 @@ export default [
       // correctness-adjacent in test code — a shadowed `row` or `mock` inside a
       // nested describe is a common way to assert against the wrong fixture and
       // still pass. Rename the inner binding instead.
+    },
+  },
+
+  // Override: scripts/ are Node CLI tools invoked by mise (bootstrap generators,
+  // preflight checks), not CDK constructs. They print progress and results to
+  // the terminal, so console output is their interface.
+  {
+    files: ['scripts/**/*.ts'],
+    rules: {
+      'no-console': 'off',
     },
   },
 ];
