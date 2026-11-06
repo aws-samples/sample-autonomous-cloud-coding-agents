@@ -25,6 +25,7 @@ import {
 import { Command } from 'commander';
 import { loadConfig } from '../config';
 import { CliError } from '../errors';
+import { requireDeployedFeature } from '../feature-guard';
 import {
   isGithubTokenConfigured,
   putGithubToken,
@@ -224,5 +225,11 @@ export function makeGithubCommand(): Command {
       }),
   );
 
+  // `set-token` is core; only the screenshot webhook commands need the feature.
+  for (const sub of github.commands) {
+    if (sub.name() === 'webhook-info' || sub.name() === 'set-webhook-secret') {
+      requireDeployedFeature(sub, 'deployPreviewScreenshots');
+    }
+  }
   return github;
 }

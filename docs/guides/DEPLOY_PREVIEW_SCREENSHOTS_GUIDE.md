@@ -70,8 +70,8 @@ Architecture notes:
 
 ## Prerequisites
 
-- ABCA stack deployed (`mise //cdk:deploy`) — confirm `GitHubWebhookUrl` + `GitHubWebhookSecretArn` + `ScreenshotCloudFrontDomain` are listed in the stack outputs
-- (Optional) Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`) — only required if you want screenshots posted to Linear issues in addition to the GitHub PR
+- ABCA stack deployed with the `deployPreviewScreenshots` feature enabled in its [deployment profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) — confirm `GitHubWebhookUrl` + `GitHubWebhookSecretArn` + `ScreenshotCloudFrontDomain` are listed in the stack outputs
+- (Optional) Linear OAuth installed for at least one workspace (`bgagent linear setup <slug>`) — only required if you want screenshots posted to Linear issues in addition to the GitHub PR; the `linear` feature must also be enabled
 - A GitHub repo you own
 - Your deploy provider connected to that repo (the example uses Vercel)
 - AWS CLI logged in to the same account as the ABCA stack

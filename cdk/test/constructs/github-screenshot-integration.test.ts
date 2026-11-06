@@ -192,7 +192,10 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
       sortKey: { name: 'created_at', type: dynamodb.AttributeType.STRING },
     });
 
-    new GitHubScreenshotIntegration(stack, 'Screenshot', { api, githubTokenSecret, taskTable });
+    // The Linear index Query is part of Linear wiring (ADR-024), so the
+    // processor needs a Linear registry for the grant to exist.
+    const linearWorkspaceRegistryTable = dynamodb.Table.fromTableName(stack, 'LinearRegistry', 'LinearRegistry');
+    new GitHubScreenshotIntegration(stack, 'Screenshot', { api, githubTokenSecret, taskTable, linearWorkspaceRegistryTable });
     template = Template.fromStack(stack);
   });
 
@@ -242,6 +245,21 @@ describe('GitHubScreenshotIntegration — task-table grants (iteration-UX)', () 
         ]),
       },
     });
+  });
+});
+
+describe('GitHubScreenshotIntegration without a tracker', () => {
+  test('grants no issue-index Query, but keeps the base-table GetItem', () => {
+    const stack = new Stack(new App(), 'ScreenshotsOnly');
+    new GitHubScreenshotIntegration(stack, 'Screenshots', {
+      api: new apigw.RestApi(stack, 'Api'),
+      githubTokenSecret: new secretsmanager.Secret(stack, 'Token'),
+      taskTable: dynamodb.Table.fromTableName(stack, 'Tasks', 'Tasks'),
+    });
+    const text = JSON.stringify(Template.fromStack(stack).toJSON());
+    expect(text).not.toContain('/index/LinearIssueIndex');
+    expect(text).not.toContain('/index/JiraIssueIndex');
+    expect(text).toContain('dynamodb:GetItem');
   });
 });
 

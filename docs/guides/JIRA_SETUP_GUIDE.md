@@ -4,7 +4,7 @@ Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue tr
 
 ## Prerequisites
 
-- ABCA CDK stack deployed **at a version that includes the Jira integration** ([#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), merged 2026-06-17) — a stack deployed before that has no Jira resources and needs a sync + redeploy first (see [Developer guide](./DEVELOPER_GUIDE.md))
+- ABCA CDK stack deployed **at a version that includes the Jira integration** ([#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), merged 2026-06-17) — a stack deployed before that has no Jira resources and needs a sync + redeploy first (see [Developer guide](./DEVELOPER_GUIDE.md)), with the `jira` feature enabled in its [deployment profile](./DEPLOYMENT_GUIDE.md#deployment-profiles)
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
 - A Jira Cloud site where you have **admin** access (to create the OAuth app, install the Forge app, and create the webhook)
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)

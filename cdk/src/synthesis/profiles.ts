@@ -20,6 +20,9 @@
 import { DISABLE_ASSET_STAGING_CONTEXT } from 'aws-cdk-lib/cx-api';
 import { DEFAULT_BUDGETS } from './budgets';
 import { AGENTCORE_AZS_CONTEXT_KEY } from '../constructs/agentcore-azs';
+import {
+  DEPLOYMENT_FEATURES, DEPLOYMENT_PROFILE_CONTEXT, DeploymentFeature, FEATURE_CONTEXT_KEYS,
+} from '../deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
 
 /** Enough additional model grants to exercise the SessionRole's lazy policy split. */
@@ -53,6 +56,8 @@ export const STRUCTURAL_CONTEXT: Context = {
   'aws:cdk:version-reporting': true,
   'aws:cdk:enable-path-metadata': true,
   [DISABLE_ASSET_STAGING_CONTEXT]: true,
+  // Census profiles are explicit; a developer's abca.deployment.json must not change them.
+  [DEPLOYMENT_PROFILE_CONTEXT]: 'none',
   [`availability-zones:account=${FIXTURE.account}:region=${FIXTURE.region}`]: FIXTURE.zones.map(zone => zone.zoneName),
 };
 
@@ -201,6 +206,28 @@ export function synthesisProfiles(): readonly SynthesisProfile[] {
         ...base,
         name: `legacy-${compute}-${networkTopology}`,
         context: { ...context, compute_type: compute, networkTopology },
+      });
+    }
+  }
+  // Deployment-profile cells (#836): minimal, each optional feature alone, the
+  // shared issue-orchestration and screenshot-to-tracker pairings, and every
+  // feature at once. Each switch is explicit so the legacy default never leaks in.
+  const featureSets: ReadonlyArray<readonly [string, readonly DeploymentFeature[]]> = [
+    ['minimal', []],
+    ...DEPLOYMENT_FEATURES.map(feature => [feature, [feature]] as const),
+    ['linear+jira', ['linear', 'jira']],
+    ['linear+deployPreviewScreenshots', ['linear', 'deployPreviewScreenshots']],
+    ['all', DEPLOYMENT_FEATURES],
+  ];
+  for (const [label, selected] of featureSets) {
+    const base = profile('agentcore', false, false, false, 'none');
+    const switches = Object.fromEntries(DEPLOYMENT_FEATURES.map(feature =>
+      [FEATURE_CONTEXT_KEYS[feature], selected.includes(feature)]));
+    for (const networkTopology of ['inline', 'split'] as const) {
+      topologies.push({
+        ...base,
+        name: `features-${label}-${networkTopology}`,
+        context: { ...base.context, ...switches, networkTopology },
       });
     }
   }

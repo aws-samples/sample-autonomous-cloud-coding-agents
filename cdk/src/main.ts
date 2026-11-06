@@ -27,6 +27,8 @@ import {
   resolveAgentCoreAzs,
 } from './constructs/agentcore-azs';
 import { buildAppId, SolutionUaAspect } from './constructs/solution-ua-aspect';
+import { assertCapabilitiesAvailable } from './deployment/capabilities';
+import { readDeploymentProfile, resolveDeploymentFeatures } from './deployment/features';
 import { resolveComputeBackends } from './handlers/shared/compute-backend';
 import { AgentStack } from './stacks/agent';
 import { DEFAULT_CONSOLE_ASSET_DIRECTORY, OperatorConsoleStack } from './stacks/console';
@@ -53,6 +55,8 @@ export interface BuildAppOptions {
   readonly resolveCallerAccount?: ResolveCallerAccountFn;
   /** Repository configuration shared by provisioning and DNS policy. */
   readonly blueprints?: readonly BlueprintDefinition[];
+  /** Directory holding `abca.deployment.json`. @default the repository root */
+  readonly profileRoot?: string;
   /**
    * Built operator console (`web/dist`). When set, the app adds the `<stack>-console` stack
    * (opt out with `-c operatorConsole=false`). @default undefined — no console stack, so tests
@@ -107,6 +111,19 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
   const stackName = app.node.tryGetContext('stackName') ?? 'backgroundagent-dev';
   const networkTopology = resolveNetworkTopology(app.node.tryGetContext('networkTopology'));
   const blueprints = options.blueprints ?? resolveBlueprintDefinitions(app.node);
+  // One profile read for local and CI synthesis alike (ADR-024); context
+  // switches still override individual features.
+  const profile = readDeploymentProfile(app.node, options.profileRoot);
+  const features = resolveDeploymentFeatures(app.node, profile?.features);
+  // The profile's compute selection applies unless context chooses explicitly,
+  // so a plain `mise //cdk:deploy` keeps the backends `bgagent setup` deployed.
+  if (profile?.compute && app.node.tryGetContext('compute_types') === undefined
+    && app.node.tryGetContext('compute_type') === undefined) {
+    app.node.setContext('compute_types', profile.compute.join(','));
+  }
+  // Fail before any AWS lookup or network stack; AgentStack repeats the check
+  // for direct construction.
+  assertCapabilitiesAvailable(features, options.region ?? devEnv.region);
 
   const env = {
     account: options.account ?? devEnv.account,
@@ -147,6 +164,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       agentCoreAvailabilityZones: azResolution.zones,
       network,
       blueprints,
+      features,
       description: 'ABCA Development Stack (uksb-wt64nei4u6)',
     },
   );
@@ -168,13 +186,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<App> {
       repoTable: stack.repoTable.table,
       githubTokenSecret: stack.githubTokenSecret,
       repoGithubTokenSecretArns: blueprints.flatMap((b) => (b.credentials?.githubTokenSecretArn ? [b.credentials.githubTokenSecretArn] : [])),
-      linear: {
+      // The console's Linear routes exist only when the profile deploys Linear (ADR-024).
+      linear: stack.linearIntegration ? {
         projectMappingTable: stack.linearIntegration.projectMappingTable,
         workspaceRegistryTable: stack.linearIntegration.workspaceRegistryTable,
         webhookDedupTable: stack.linearIntegration.webhookDedupTable,
         taskTable: stack.taskTable.table,
         identityVault: stack.linearIdentityVault,
-      },
+      } : undefined,
       assetDirectory: options.operatorConsoleAssetDirectory,
       additionalOrigins: devOrigins,
       description: 'ABCA operator console (uksb-wt64nei4u6)',

@@ -4,7 +4,7 @@ This guide walks through setting up the ABCA Slack integration. Once configured,
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
+- ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md)) with the `slack` feature enabled in its [deployment profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) (`bgagent setup --features slack,…`)
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
 - A Slack workspace where you are authorized to install apps (if your workspace requires admin approval for app installs, request it through your Slack administrator)
 - AWS CLI configured with credentials for your ABCA account
@@ -167,4 +167,4 @@ The integration supports multiple Slack workspaces. Each workspace admin opens t
 
 To uninstall from a workspace: **Slack → Settings → Manage Apps → Shoof → Remove App**. The bot token is automatically scheduled for deletion.
 
-To remove the Slack integration from your ABCA deployment entirely, delete the Slack App and redeploy without it.
+To remove the Slack integration from your ABCA deployment entirely, delete the Slack App, then run `bgagent setup` and disable Slack. This deletes the installation, user and channel mapping tables (see [What disabling a feature removes](./DEPLOYMENT_GUIDE.md#what-disabling-a-feature-removes)).

@@ -70,6 +70,8 @@ This Quick Start does **not** assume a global `bgagent` install (`npm install -g
 
 If `lib/bin/bgagent.js` is missing, run `mise run build` from `cli/` (or repeat Step 1's full build from the repo root).
 
+Other guides write the short form `bgagent <command>`. If you prefer it, define an alias once from the repo root: `alias bgagent="node $PWD/cli/lib/bin/bgagent.js"`. `bgagent setup` (Step 3) prints its next steps in the same form you launched it with.
+
 :::
 
 > **Note:** `mise run build` includes CDK synthesis, which queries AWS for availability zones. Your active AWS credentials must have at least `ec2:DescribeAvailabilityZones` permission, or the build will fail. If you use named profiles, make sure `AWS_PROFILE` is set before running the build — the CDK CLI does not forward `--profile` to the app process, so an unexported profile can leave synth reading a different account.
@@ -84,7 +86,7 @@ The Quick Start uses [`awslabs/agent-plugins`](https://github.com/awslabs/agent-
 
 :::danger[Fork the sample repo — do not skip]
 
-The agent pushes branches and opens pull requests on whichever `owner/repo` you register in the Blueprint. If you skip forking and keep the default `awslabs/agent-plugins` name, or your PAT is scoped to a different repository, tasks fail with permission errors that look like platform bugs but are really a repo/token mismatch.
+The agent pushes branches and opens pull requests on whichever `owner/repo` you onboard. If you skip forking and keep the default `awslabs/agent-plugins` name, or your PAT is scoped to a different repository, tasks fail with permission errors that look like platform bugs but are really a repo/token mismatch.
 
 :::
 
@@ -93,53 +95,7 @@ The agent pushes branches and opens pull requests on whichever `owner/repo` you 
 1. Sign in to GitHub and open [github.com/awslabs/agent-plugins](https://github.com/awslabs/agent-plugins).
 2. Click **Fork** (top-right), choose **your personal account** (or an organization you admin), and confirm.
 3. Wait for the fork to finish. Your copy lives at `https://github.com/<your-username>/agent-plugins`.
-4. Note the **`owner/repo` slug** — for example `jane-doe/agent-plugins`. You will use this exact string in CDK context, the PAT repository scope, and every `submit --repo …` command in Step 6.
-
-### Register your fork in CDK
-
-Every repository the agent can work on must be **onboarded** as a `Blueprint` construct in the CDK stack. The Blueprint writes a configuration record to DynamoDB; the orchestrator checks this before accepting tasks.
-
-For the sample **AgentPlugins** blueprint, `cdk/src/stacks/agent.ts` resolves the GitHub `owner/repo` in this order: the **`BLUEPRINT_REPO`** environment variable, then CDK context **`blueprintRepo`**, then the default `awslabs/agent-plugins`:
-
-```typescript
-const blueprintRepo = process.env.BLUEPRINT_REPO ?? this.node.tryGetContext('blueprintRepo') ?? 'awslabs/agent-plugins';
-const agentPluginsBlueprint = new Blueprint(this, 'AgentPluginsBlueprint', {
-  repo: blueprintRepo,
-  repoTable: repoTable.table,
-});
-```
-
-**Recommended:** add your fork to `cdk/cdk.json` so the value is checked in and you do not have to export an environment variable in every shell session. Edit `cdk/cdk.json` and add a `"context"` block (create it if missing):
-
-```json
-{
-  "app": "npx ts-node -P tsconfig.json --prefer-ts-exts src/main.ts",
-  "context": {
-    "blueprintRepo": "your-username/agent-plugins"
-  }
-}
-```
-
-Replace `your-username/agent-plugins` with the slug from your fork in the previous step.
-
-After changing `cdk.json`, **recompile the CDK app** so the updated context is picked up before deploy:
-
-```bash
-export MISE_EXPERIMENTAL=1
-mise //cdk:compile
-```
-
-You can also run a full `mise run build` (includes compile). Then deploy in Step 3 with `mise //cdk:deploy`. If you already deployed once with the wrong repo name, edit `cdk.json` and **redeploy** — the Blueprint updates the DynamoDB record on stack update.
-
-Alternatively, for a one-off deploy without editing `cdk.json`:
-
-```bash
-export BLUEPRINT_REPO=your-username/agent-plugins
-```
-
-Or pass context on the command line: `cdk deploy -c blueprintRepo=your-username/agent-plugins`. The environment variable wins over context when both are set.
-
-The resolved `repo` value must match **exactly** what you pass to the CLI later (`owner/repo` format). To onboard **additional** repositories, add more `Blueprint` constructs in `agent.ts` and redeploy (see [Onboard your own repositories](#onboard-your-own-repositories) below).
+4. Note the **`owner/repo` slug** — for example `jane-doe/agent-plugins`. You will use this exact string in the PAT repository scope, when you onboard the repository in Step 6, and in every `submit --repo …` command.
 
 ### Create a GitHub personal access token
 
@@ -147,7 +103,7 @@ The agent authenticates to GitHub using a **fine-grained personal access token (
 
 :::caution[Scope the token to your fork]
 
-Under **Repository access**, choose **Only select repositories** and pick **the fork you created above** (`your-username/agent-plugins`). Do not scope the token to `awslabs/agent-plugins` unless you own that upstream repo. The token repository must match the `blueprintRepo` value you set in `cdk/cdk.json` (or `BLUEPRINT_REPO`).
+Under **Repository access**, choose **Only select repositories** and pick **the fork you created above** (`your-username/agent-plugins`). Do not scope the token to `awslabs/agent-plugins` unless you own that upstream repo. The token repository must match the repository you onboard in Step 6.
 
 :::
 
@@ -162,12 +118,6 @@ Grant these permissions on that repository:
 
 Keep the token value — you will store it in AWS Secrets Manager in Step 4.
 
-:::note[Already configured your fork?]
-
-If you have not yet added `blueprintRepo` to `cdk/cdk.json`, go back to [Register your fork in CDK](#register-your-fork-in-cdk), set `"blueprintRepo": "your-username/agent-plugins"`, run `mise //cdk:compile`, and redeploy before submitting tasks. The PAT, Blueprint repo name, and `--repo` argument in Step 6 must all refer to the **same** fork.
-
-:::
-
 :::note[Collaborator or cross-org repos?]
 
 Fine-grained tokens only work for repos you own (or orgs that have opted in). If you're a collaborator on someone else's repo, create a **classic PAT** with `repo` + `read:org` scopes instead. See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for details.
@@ -176,18 +126,40 @@ Fine-grained tokens only work for repos you own (or orgs that have opted in). If
 
 ## Step 3 - Deploy
 
-The CDK stack deploys the full platform: API Gateway, Lambda functions (orchestrator, task CRUD, webhooks), DynamoDB tables, AgentCore Runtime, VPC with network isolation, Cognito user pool, and CloudWatch dashboards.
+`bgagent setup` deploys the platform: API Gateway, Lambda functions (orchestrator, task CRUD, webhooks), DynamoDB tables, AgentCore Runtime, VPC with network isolation, Cognito user pool, and CloudWatch dashboards. Docker (or Finch) must be running, because the deploy builds the agent image locally.
 
 ```bash
-# Bootstrap CDK (first time only)
-mise //cdk:bootstrap
+cd cli
 
-# Deploy the stack (~10 minutes). --require-approval never lets it run
-# unattended; drop the flag if you want to review IAM/security-group changes.
+REGION=us-east-1  # your deployment region
+
+node lib/bin/bgagent.js setup --region "$REGION"
+```
+
+The wizard:
+
+1. Shows the AWS account your credentials resolve to and asks you to confirm it.
+2. Asks for a deployment name. Accept the default, `backgroundagent-dev`; the rest of this guide uses it.
+3. Asks which optional features to include (Slack, Linear, Jira, preview screenshots, Agent Registry, Tool Gateway). For a first deployment, accept the defaults: the **minimal profile**, which has everything this guide needs. You can add features later by running setup again.
+4. Asks where agents run. Accept **AgentCore Runtime**.
+5. Shows a review screen and a one-line `cdk diff` summary, then asks you to confirm.
+6. Installs ABCA's least-privilege CDK bootstrap if the account and Region have none (one time), deploys (around 10 minutes, mostly building the Docker image and provisioning the AgentCore Runtime), and points the CLI at the new stack.
+7. Prints the next steps, which are Steps 4–6 below in the same order: store a GitHub token, create your user, sign in, and onboard a repository.
+
+Setup checks that the Region supports each feature before deploying, and asks you to type the stack name before any later run deletes data (for example, removing a feature that has tables). It saves your choices to `abca.deployment.json` at the repo root; commit that file so later deploys keep the same features. See [Deployment profiles](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) for every option, including scripted runs (`--features none --yes`).
+
+:::note[Advanced: deploy with mise directly (CI, custom scripts)]
+
+You can also deploy without the wizard:
+
+```bash
+mise //cdk:bootstrap
 mise //cdk:deploy -- --require-approval never
 ```
 
-CDK bootstrap provisions the staging resources CDK needs (S3 bucket, IAM roles). The deploy itself takes around 10 minutes — most of the time is spent building the Docker image and provisioning the AgentCore Runtime.
+With no `abca.deployment.json`, this deploys the legacy topology, with every optional feature (about 463 resources against the minimal profile's 317). It has no Region check and no data-loss confirmation. Once setup has written `abca.deployment.json`, `mise //cdk:deploy` uses it. `--require-approval never` lets the deploy run unattended; drop it to review IAM and security-group changes.
+
+:::
 
 :::caution[Building on an x86 host? Register arm64 emulation first.]
 
@@ -337,9 +309,9 @@ The first command creates the user with a temporary password, pre-verifies the e
 
 </Tabs>
 
-## Step 6 - Configure and submit a task
+## Step 6 - Sign in, onboard your fork, and submit a task
 
-Authenticate, then submit your first task. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL — open it in your browser to review the agent's work.
+Sign in, register your fork with the platform, then submit your first task. A typical simple task takes 2-5 minutes. When it completes, you will see a PR URL — open it in your browser to review the agent's work.
 
 <Tabs syncKey="quickstart-submit">
 
@@ -347,19 +319,33 @@ Authenticate, then submit your first task. A typical simple task takes 2-5 minut
 
 The ABCA CLI handles Cognito authentication, token caching, and output formatting.
 
+`bgagent setup` already pointed the CLI at your stack, so go straight to `login`. If you deployed with `mise //cdk:deploy` instead, configure the CLI first, with either of these:
+
 ```bash
 cd cli
 
 REGION=us-east-1  # your deployment region (same as Step 4)
 
-# After Step 5 invite-user: paste the bundle from ~/.bgagent/invites/you@example.com.txt
+# Paste the bundle from ~/.bgagent/invites/you@example.com.txt (written by Step 5)
 node lib/bin/bgagent.js configure --from-bundle "<paste bundle from invite file>"
 
-# Or read ApiUrl / UserPoolId / AppClientId from CloudFormation (same as `platform outputs`)
+# Or read ApiUrl / UserPoolId / AppClientId from CloudFormation
 node lib/bin/bgagent.js configure --region "$REGION" --stack-name backgroundagent-dev
+```
+
+Then sign in, onboard your fork, and submit:
+
+```bash
+cd cli
+
+REGION=us-east-1  # your deployment region (same as Step 4)
 
 # Log in (password from ~/.bgagent/invites/you@example.com.txt)
 node lib/bin/bgagent.js login --username you@example.com
+
+# Register your fork with the platform (no redeploy needed)
+node lib/bin/bgagent.js repo onboard your-username/agent-plugins \
+  --region "$REGION" --stack-name backgroundagent-dev
 
 # Submit your first task and wait for it to complete
 node lib/bin/bgagent.js submit \
@@ -368,13 +354,15 @@ node lib/bin/bgagent.js submit \
   --wait
 ```
 
-The `--wait` flag polls until the task reaches a terminal state. You can still pass `--api-url`, `--user-pool-id`, or `--client-id` to override individual stack outputs.
+`repo onboard` registers the repository with the platform defaults: the GitHub token from Step 4, the default model, and the default egress allowlist. A repository that needs its own settings uses a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories). The `--wait` flag polls until the task reaches a terminal state.
 
 </TabItem>
 
 <TabItem label="AWS CLI">
 
-Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). Requires `curl` and the AWS CLI — no ABCA CLI build.
+Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). Requires `curl` and the AWS CLI.
+
+Onboard your fork first. It's a single ABCA CLI command, with no AWS CLI equivalent: `node lib/bin/bgagent.js repo onboard your-username/agent-plugins --region "$REGION"`, run from `cli/` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories).
 
 ```bash
 REGION=us-east-1  # your deployment region (same as Step 4)
@@ -513,8 +501,8 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 | `exec /bin/sh: exec format error` during image build | x86 host building the arm64 (Graviton) agent image without QEMU/binfmt | Run `docker run --privileged --rm tonistiigi/binfmt --install arm64`, or build from a native arm64 host (see Step 3 caution) |
 | `AccessDeniedException` on `update-trace-segment-destination` | X-Ray → CloudWatch Logs tracing is optional and the call may be SCP-blocked on Org accounts | **Skip it** — tracing is disabled by default and not required to deploy (see Step 3 note) |
 | `mise run build` fails with `ec2:DescribeAvailabilityZones` error | AWS credentials missing or insufficient for CDK synth | Set `AWS_PROFILE` or configure credentials with at least EC2 read access |
-| CDK deploy prompts for approval and hangs | Non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` to `cdk deploy` (Step 3 uses it) or use an interactive terminal |
-| Deploy rolled back; can't redeploy (`ROLLBACK_COMPLETE`) | A first-create failure leaves the stack un-updatable | `mise //cdk:destroy` (or delete the stack), then deploy again. Do **not** force-delete past stuck VPC resources — it orphans the VPC, and VPCs are quota-capped per Region |
+| CDK deploy prompts for approval and hangs | `mise //cdk:deploy` in a non-interactive terminal (CI/CD, scripts) | Pass `--require-approval never` (the Step 3 advanced note uses it), or use `bgagent setup`, which asks for confirmation itself |
+| Deploy rolled back; can't redeploy (`ROLLBACK_COMPLETE`) | A first-create failure leaves the stack un-updatable | `mise //cdk:destroy` (or delete the stack), then run setup again. Do **not** force-delete past stuck VPC resources — it orphans the VPC, and VPCs are quota-capped per Region |
 | Stack stuck in `DELETE_FAILED` on a security group / subnet | AgentCore's service-managed (Hyperplane) ENIs reclaim asynchronously after the runtime is gone | Wait ~20–40 min for AWS to release the ENIs, then retry `mise //cdk:destroy`. You cannot force-detach an `amazon-aws`-owned ENI |
 | Runtime fails with `ServiceLimitExceeded` / "Failed creating service linked role. Rate limit exceeded from IAM" | Fresh-account race: AgentCore auto-creates its service-linked role and IAM rate-limits the call. Reads like a quota problem but is not | Pre-create the role once, then redeploy: `aws iam create-service-linked-role --aws-service-name bedrock-agentcore.amazonaws.com` |
 | Nested stack stuck in `DELETE_FAILED` on a custom resource, parent in `ROLLBACK_FAILED` | A custom resource whose create was cancelled can reject its own rollback delete, leaving the stack unremovable by normal means | Delete the nested stack retaining the stuck resource, wait for it to drain, then delete the parent: `aws cloudformation delete-stack --stack-name <nested> --retain-resources <LogicalId>`. Deleting the parent before the nested delete finishes fails with "a delete stack operation is already in progress" |
@@ -522,7 +510,7 @@ Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
 | Synth fails with `[AgentCore AZs] Could not resolve …` or `… Synth credentials resolve to account …` | Auto-pin could not verify supported zones: missing `ec2:DescribeAvailabilityZones`, expired credentials, or the app process resolving a different account than the deploy target | Grant the permission / refresh credentials / `export AWS_PROFILE=<profile>`, or set the `agentcore:availabilityZones` override. Failing closed is intentional — a silent fallback yields a template that looks pinned but isn't |
 | `put-secret-value` returns double-dot endpoint | `REGION` variable is empty | Set `REGION=us-east-1` (or your actual region) before running the command |
 | Model / Bedrock errors in logs (`not available on your bedrock`, zero tokens) | Model not entitled for the account or Region, wrong `modelId` shape, or missing Marketplace / FTU steps | Follow **Amazon Bedrock before your first task** above; confirm [model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use an [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID prefixed with the geography the stack grants (its `BedrockGeoRegion` output); the model must be in the stack's `BedrockModelIds` output, which `bedrockModels` CDK context controls |
-| `REPO_NOT_ONBOARDED` on task submit | Blueprint `repo` does not match what you passed to the CLI | Confirm `BLUEPRINT_REPO`, CDK context `blueprintRepo`, or the `repo` prop on the `Blueprint` in `cdk/src/stacks/agent.ts` resolves to exactly the same `owner/repo` you pass to the CLI |
+| `REPO_NOT_ONBOARDED` on task submit | The repository was never onboarded, or was onboarded under a different `owner/repo` | Run `repo onboard owner/repo` (Step 6) with exactly the slug you pass to `submit`. For a Blueprint, confirm its `repo` (or `BLUEPRINT_REPO` / `blueprintRepo` context for the sample) resolves to that slug |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | PAT is missing required permissions or is scoped to the wrong repo | Regenerate the PAT with Contents (read/write) and Pull requests (read/write) scoped to your fork, then update Secrets Manager |
 | Task stuck in `SUBMITTED` | Orchestrator Lambda may not have been invoked | Check CloudWatch logs for the orchestrator Lambda; verify the stack deployed successfully |
 | `node: command not found` in `cli/` | mise shell activation missing | Run `eval "$(mise activate zsh)"` and confirm `node --version` shows v22.x |
@@ -533,7 +521,10 @@ Once you have the basic flow working, here are the main ways to customize the pl
 
 ### Onboard your own repositories
 
-Add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and redeploy. Each Blueprint registers one repository. You can onboard as many repos as you want - each one gets its own configuration record in DynamoDB.
+There are two ways to register a repository. Both write the same configuration record to DynamoDB, which the orchestrator checks before it accepts a task.
+
+- **`repo onboard` (runtime, no redeploy).** `node lib/bin/bgagent.js repo onboard owner/repo` from `cli/`, as in Step 6. Use it when the repository works with the platform defaults: the platform GitHub token, a model the runtime already has access to, and the default egress allowlist.
+- **A CDK `Blueprint` (checked in, redeploy).** Use it when the repository needs its own settings, such as a per-repo GitHub token, another model, extra egress domains, Cedar approval policies or system-prompt overrides, or when you want the registration in source control. Add a `Blueprint` construct in `cdk/src/stacks/agent.ts` and redeploy:
 
 ```typescript
 new Blueprint(this, 'MyServiceBlueprint', {
@@ -541,6 +532,8 @@ new Blueprint(this, 'MyServiceBlueprint', {
   repoTable: repoTable.table,
 });
 ```
+
+The stack's sample `AgentPluginsBlueprint` takes its repository from the `BLUEPRINT_REPO` environment variable, then the `blueprintRepo` CDK context, then defaults to `awslabs/agent-plugins`. To register your fork through it, add `"blueprintRepo": "your-username/agent-plugins"` to the `context` block of `cdk/cdk.json` and redeploy (run `bgagent setup` again, or `mise //cdk:deploy`). The environment variable wins when both are set.
 
 ### Per-repo configuration
 

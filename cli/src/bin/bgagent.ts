@@ -43,6 +43,7 @@ import { makeRegistryCommand } from '../commands/registry';
 import { makeReplayCommand } from '../commands/replay';
 import { makeRepoCommand } from '../commands/repo';
 import { makeRuntimeCommand } from '../commands/runtime';
+import { makeSetupCommand } from '../commands/setup';
 import { makeSlackCommand } from '../commands/slack';
 import { makeStatusCommand } from '../commands/status';
 import { makeSubmitCommand } from '../commands/submit';
@@ -68,6 +69,7 @@ program
     }
   });
 
+program.addCommand(makeSetupCommand());
 program.addCommand(makeConfigureCommand());
 program.addCommand(makeLoginCommand());
 program.addCommand(makeChangePasswordCommand());

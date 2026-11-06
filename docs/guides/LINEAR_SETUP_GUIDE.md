@@ -4,7 +4,7 @@ Set up the ABCA Linear integration so that applying a label to a Linear issue tr
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md))
+- ABCA CDK stack deployed (see [Developer guide](./DEVELOPER_GUIDE.md)) with the `linear` feature enabled in its [deployment profile](./DEPLOYMENT_GUIDE.md#deployment-profiles)
 - A Cognito user account configured (see [User guide](./USER_GUIDE.md))
 - A Linear workspace where you have **admin** access — `actor=app` installs are workspace-wide and Linear requires an admin to approve them
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)

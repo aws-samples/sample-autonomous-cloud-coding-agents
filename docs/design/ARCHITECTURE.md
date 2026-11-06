@@ -48,6 +48,8 @@ For the full orchestrator design, see [ORCHESTRATOR.md](./ORCHESTRATOR.md). For 
 
 The split gives networking an independent deployment lifecycle and reduces the application template's resource count. It preserves AZ selection, DNS observation mode and security rules. All stacks receive solution attribution and provenance tags, while existing removal policies remain in effect. The split is available for new installations; existing inline-to-split migration is deferred pending a populated rehearsal; see [deployment guidance](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology) and [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md). Live migration has not been validated.
 
+Optional modules (Slack, Linear, Jira, deploy-preview screenshots, Agent Registry, Tool Gateway) are selected by one validated `DeploymentFeatures` value, which is resolved from `abca.deployment.json` and the context switches. A disabled module is omitted rather than moved to another stack, because the integrations attach routes to the shared Task API. Synthesis rejects modules that the target Region does not support. See [deployment profiles](../guides/DEPLOYMENT_GUIDE.md#deployment-profiles) and [ADR-024](../decisions/ADR-024-deployment-profiles.md).
+
 ## Repository onboarding
 
 Onboarding is CDK-based. Plain repository definitions in `cdk/src/blueprints/definitions.ts` feed both network egress policy and the `Blueprint` constructs in the application stack. Each construct writes a `RepoConfig` record to DynamoDB; the orchestrator reads it at task time. Resolving configuration before stack construction keeps the optional network stack independent of repository resources.

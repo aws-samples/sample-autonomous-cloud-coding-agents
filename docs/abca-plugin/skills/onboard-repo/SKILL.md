@@ -107,7 +107,7 @@ editing the stack and redeploying.
    });
    ```
 
-3. Redeploy: `mise //cdk:compile` → `mise //cdk:diff` (show the diff) → `mise //cdk:deploy -- --require-approval never`.
+3. Redeploy with the `deploy` skill: `bgagent setup` with the stack's current features (`DeploymentFeatures` output) and `--yes`. Setup shows the diff and refuses to delete data without the user's confirmation.
 
 > **Sample-repo shortcut:** the stack's AgentPlugins blueprint resolves its `repo` from
 > `BLUEPRINT_REPO` (env) → CDK context `blueprintRepo` → default `awslabs/agent-plugins`.
