@@ -17,31 +17,36 @@ Both tiers use the same Cedar syntax. The annotation is all that differs.
 
 ## Where rules live
 
-A blueprint's `security.cedarPolicies` field in `blueprint.yaml` is concatenated with the platform's built-in rules:
+A repository's rules come from its `Blueprint` construct (`security.cedarPolicies`, an array of Cedar policy strings) and from any registry Cedar policy modules attached to it. They are appended to the platform's built-in rules. Each string declares its own tier:
 
-```yaml
-security:
-  cedarPolicies:
-    hard: |
-      @tier("hard")
-      @rule_id("block_prod_writes")
-      forbid (principal, action == Agent::Action::"write_file", resource)
-        when { context.file_path like "prod/**" };
-    soft: |
-      @tier("soft")
-      @rule_id("deploy_staging")
-      @severity("high")
-      @approval_timeout_s("900")
-      @category("destructive")
-      forbid (principal, action == Agent::Action::"execute_bash", resource)
-        when { context.command like "*terraform apply*" };
-    disable:
-      # Opt-out of built-in soft-deny rules you don't want.
-      # You CANNOT disable built-in hard-deny rules — the platform rejects that at task start.
-      - write_env_files
-  maxPreApprovalScope: "tool_type_session"   # optional cap on what --pre-approve can grant
-  approvalGateCap: 50                         # optional per-task gate budget (1–500, default 50)
+```ts
+new Blueprint(this, 'PaymentsBlueprint', {
+  repo: 'acme/payments-api',
+  repoTable,
+  security: {
+    cedarPolicies: [
+      `@tier("hard")
+       @rule_id("block_prod_writes")
+       forbid (principal, action == Agent::Action::"write_file", resource)
+         when { context.file_path like "prod/**" };`,
+      `@tier("soft")
+       @rule_id("deploy_staging")
+       @severity("high")
+       @approval_timeout_s("900")
+       @category("destructive")
+       forbid (principal, action == Agent::Action::"execute_bash", resource)
+         when { context.command like "*terraform apply*" };`,
+    ],
+    approvalGateCap: 50, // optional per-task gate budget (1–500, default 50)
+  },
+});
 ```
+
+- **`@tier("hard")`** rules always deny. **`@tier("soft")`** rules pause for approval.
+- Keep hard and soft rules in **separate entries**. An entry that declares both tiers, or `@rule_id` without a tier, fails task start rather than being guessed.
+- An entry with no annotations at all is treated as a legacy soft rule with a generated rule ID (`legacy_extra_<n>`).
+- `@approval_timeout_s` is **min-wins** with the task's own approval window (default 300 s; set `--approval-timeout` up to 3600 s on submit). The rule above therefore waits 300 s unless the task asks for 900 s or more.
+- Disabling built-in soft rules and capping `--pre-approve` scopes per repository are not supported yet.
 
 The built-in rule set is documented in [`agent/policies/hard_deny.cedar`](../../agent/policies/hard_deny.cedar) and [`agent/policies/soft_deny.cedar`](../../agent/policies/soft_deny.cedar). Run `bgagent policies list --repo owner/repo` against a deployed stack to see the effective rules for a repo.
 
@@ -140,18 +145,17 @@ The blueprint loader runs a probe Cedar evaluation before the task is admitted. 
 
 - Malformed Cedar syntax.
 - Duplicate `@rule_id` across hard + soft tiers.
-- `@tier` value that doesn't match the file section it was written in.
+- An entry that declares both `@tier("hard")` and `@tier("soft")`, or `@rule_id` without a `@tier`.
 - Missing `@rule_id` on a soft-deny rule.
 - `@approval_timeout_s` below the 30 s floor or non-integer.
-- `disable:` entry that names a built-in hard-deny rule (absolute by design) or a nonexistent rule ID.
 - Combined hard + soft Cedar text exceeding 64 KB.
 
-Fix the blueprint, redeploy (or update the `blueprint.yaml` if you're using a pulled blueprint), resubmit.
+Fix the Blueprint, redeploy, resubmit.
 
 ## Capacity and UX budgets
 
 - **`approvalGateCap`** (1–500, default 50) — per-task ceiling on how many gates can fire before the task is force-terminated. It's a circuit breaker for runaway policy matches, not a rate limit for humans. Raise it for long migrations; lower it for high-risk blueprints.
-- **`maxPreApprovalScope`** — optional upper bound on what `--pre-approve` is allowed to seed. If set to `tool_type_session`, a user can't pre-approve `all_session` from the CLI.
+- A per-repository cap on what `--pre-approve` may seed (`maxPreApprovalScope`) is designed but not implemented yet.
 
 ## Testing policies before shipping
 

@@ -241,6 +241,43 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     return otlp_endpoint, otlp_protocol
 
 
+_TIER_HARD = '@tier("hard")'
+_TIER_SOFT = '@tier("soft")'
+
+
+def split_blueprint_policies(policies: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Route Blueprint ``cedar_policies`` strings to the engine input their tier needs.
+
+    Annotated rules (``@tier("hard")`` / ``@tier("soft")``, as documented in the
+    Cedar policy guide) go to ``blueprint_hard_policies`` / ``blueprint_soft_policies``.
+    Unannotated rules keep the legacy ``extra_policies`` path, which wraps each one
+    as a soft rule. A string that declares both tiers, or ``@rule_id`` without a
+    tier, is rejected: guessing would silently change what a rule enforces.
+    """
+    legacy: list[str] = []
+    hard: list[str] = []
+    soft: list[str] = []
+    for idx, text in enumerate(policies):
+        is_hard, is_soft = _TIER_HARD in text, _TIER_SOFT in text
+        if is_hard and is_soft:
+            raise ValueError(
+                f'cedar_policies[{idx}] declares both @tier("hard") and @tier("soft"); '
+                "put hard and soft rules in separate entries"
+            )
+        if is_hard:
+            hard.append(text)
+        elif is_soft:
+            soft.append(text)
+        elif "@rule_id(" in text or "@tier(" in text:
+            raise ValueError(
+                f"cedar_policies[{idx}] has Cedar HITL annotations but no "
+                '@tier("hard") or @tier("soft"); declare the tier explicitly'
+            )
+        else:
+            legacy.append(text)
+    return legacy, hard, soft
+
+
 def _initialize_policy_engine_and_hooks(
     *,
     config: TaskConfig,
@@ -283,11 +320,14 @@ def _initialize_policy_engine_and_hooks(
     # DEFAULT_APPROVAL_GATE_CAP.
     if config.approval_gate_cap is not None:
         engine_kwargs["approval_gate_cap"] = config.approval_gate_cap
+    legacy, hard, soft = split_blueprint_policies(cedar_policies or [])
     policy_engine = PolicyEngine(
         task_type=config.policy_principal,
         repo=config.repo_url,
         read_only=config.read_only,
-        extra_policies=cedar_policies if cedar_policies else None,
+        extra_policies=legacy or None,
+        blueprint_hard_policies="\n".join(hard) or None,
+        blueprint_soft_policies="\n".join(soft) or None,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a
