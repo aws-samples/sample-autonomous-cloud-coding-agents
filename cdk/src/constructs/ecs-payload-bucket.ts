@@ -55,24 +55,17 @@ export interface EcsPayloadBucketProps {
 }
 
 /**
- * S3 bucket for ECS task payloads (#502).
+ * Storage for ECS v2 bootstrap manifests, task payloads and private references.
  *
- * The ECS compute strategy cannot pass the orchestrator payload (repo URL,
- * prompt, and the large ``hydrated_context``) inline: a Fargate ``RunTask``
- * caps the entire ``containerOverrides`` blob at 8192 bytes, and the hydrated
- * context routinely exceeds that, so the call is rejected with
- * ``InvalidParameterException``. (AgentCore is unaffected — it passes the
- * payload in the ``InvokeAgentRuntime`` request body, which has no comparable
- * limit.) Instead, the orchestrator writes the payload to
- * ``s3://<bucket>/<task_id>/payload.json`` and passes only a small
- * ``AGENT_PAYLOAD_S3_URI`` pointer in the override; the container fetches and
- * parses it on boot.
+ * RunTask caps the entire overrides object at 8192 bytes. The coordinator
+ * writes task instructions to <taskId>/payload.json and passes AGENT_PAYLOAD_REF,
+ * containing an authenticated-manifest URI and a signed one-object URL.
+ * EcsAgentCluster grants the worker only bootstrap/* reads and explicitly denies
+ * other object reads/listing. The coordinator owns writes, signing and cleanup.
  *
- * Dedicated (not co-tenant with attachments/traces) so the boundary is
- * structural: the ECS task role gets S3 **read** here and nowhere else, the
- * attachments feature can never collide with payload keys, and the tight
- * 1-day TTL is whole-bucket rather than a prefix-scoped rule grafted onto a
- * shared bucket.
+ * A dedicated bucket separates boot data from attachments/traces and gives it
+ * a one-day lifecycle backstop. Finalize deletes payload.json and launch.json;
+ * shared deployment manifests expire through the lifecycle rule.
  *
  * Security / hygiene (parity with TraceArtifactsBucket):
  *  - ``blockPublicAccess: BLOCK_ALL`` + ``enforceSSL: true`` — no public read,

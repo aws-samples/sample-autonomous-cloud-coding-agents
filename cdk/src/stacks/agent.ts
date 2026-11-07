@@ -881,6 +881,15 @@ export class AgentStack extends Stack {
         reason:
           'CDK-generated overflow policy on the Linear webhook processor role carries the kms:GenerateDataKey* that SNS Topic.grantPublish emits for the CMK-encrypted operational-alerts topic. Scoped to that single topic key; the wildcard only spans the GenerateDataKey/GenerateDataKeyWithoutPlaintext pair.',
       },
+      {
+        // #1002: payload bootstrap v2's coordinator grants (manifest/payload/launch
+        // object writes, signed-read GetObject, scoped ListBucket) pushed the
+        // orchestrator role over the same limit, spilling statements whose
+        // wildcards the base policy already justifies.
+        pathFragment: '/TaskOrchestrator/OrchestratorFn/ServiceRole/OverflowPolicy',
+        reason:
+          'CDK-generated overflow policy on the orchestrator role carries statements suppressed on its base policy: CDK-generated DynamoDB index/* and Secrets Manager wildcards, and the bgagent-linear-oauth-*/bgagent-jira-oauth-* prefix grant for per-workspace channel tokens created by the CLI at setup (names unknown at synth, GetSecretValue only). Payload object writes, reads and deletes are restricted to bootstrap manifests and per-task payload.json/launch.json keys.',
+      },
     ];
     const overflowSuppressionAspect = {
       visit(node: IConstruct) {
@@ -989,10 +998,10 @@ export class AgentStack extends Stack {
     // includes ecs or the legacy `compute_type=ecs` context is used. Default
     // synthesis remains AgentCore-only. The backend list is resolved near the
     // top of this constructor so TaskApi can apply the same cancellation gates.
-    // Ephemeral bucket for ECS task payloads — the orchestrator writes the
-    // payload here (it exceeds the 8 KB RunTask containerOverrides limit) and
-    // passes only an S3 URI pointer; the container fetches it on boot, the
-    // orchestrator deletes it at finalize. Only synthesized under the ecs gate.
+    // ECS v2 bootstrap storage: deployment manifests, task instructions and
+    // private launch references. Workers read manifests with IAM and download
+    // their task through a signed one-object URL. Finalize deletes task objects;
+    // the one-day lifecycle reaps leftovers. Synthesized only under the ECS gate.
     const ecsPayloadBucket = ecsEnabled
       ? new EcsPayloadBucket(this, 'EcsPayloadBucket')
       : undefined;
@@ -1000,7 +1009,7 @@ export class AgentStack extends Stack {
       NagSuppressions.addResourceSuppressions(ecsPayloadBucket.bucket, [
         {
           id: 'AwsSolutions-S1',
-          reason: 'Ephemeral per-task payloads with a 1-day TTL; writes confined to the orchestrator IAM role by grantPut, reads to the ECS task role by grantRead, both scoped to this bucket. Object deleted at finalize. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
+          reason: 'Ephemeral bootstrap storage with a 1-day TTL. The coordinator writes manifests and task objects, signs task reads and deletes task objects at finalize. Workers read only bootstrap/* with IAM and use single-object signed URLs for payloads; other object reads and bucket listing are explicitly denied. Object-level audit intentionally omitted — CloudTrail data events / a log bucket are not justified for transient boot payloads.',
         },
       ]);
     }
