@@ -157,6 +157,17 @@ Apply the trigger label to an issue in that project. Within ~30 seconds the agen
 - **Check status** — the issue's progress comments, or `bgagent list` / `bgagent status <task-id>`.
 - **Cancel** — `bgagent cancel <task-id>`. Removing the label does *not* cancel a running task.
 
+### Approval gates
+
+When a task on a Linear issue hits a [Cedar approval gate](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates), ABCA posts an **approval notice** on the issue: what the agent wants to run, why it is gated, and its decision deadline. When the gate resolves (approved, denied, timed out, or stranded), it posts one **outcome** comment. Each request gets exactly one notice and one outcome, even if events are redelivered.
+
+To decide from Linear, **reply to the notice comment** while signed in as the task owner:
+
+- `approve` — approves this one action (the same as `bgagent approve <task-id> <request-id>` with the default `this_call` scope).
+- `deny` or `deny <reason>` — denies it, and passes the reason to the agent. `deny: <reason>` and `deny - <reason>` also work.
+
+ABCA acknowledges the decision in the same thread. Only the Linear user linked to the task's owner (through [inviting teammates](#inviting-teammates)) can decide. A reply from anyone else, or to a request that has already been decided or has expired, gets a short explanation in the thread and changes nothing. Replies from bots and apps, replies whose text no longer matches what Linear holds (for example, edited before ABCA read them), and any other comments in the thread are ignored. Broader scopes (`--scope`) are available only through the CLI and API.
+
 ### Trigger labels
 
 | Label | What it does | Use it when |
