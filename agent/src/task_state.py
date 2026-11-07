@@ -7,7 +7,7 @@ operations are no-ops.
 
 import os
 import time
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from shell import log, log_error_cw
 
@@ -35,6 +35,7 @@ class ApprovalRow(TypedDict):
     created_at: str
     timeout_s: int
     ttl: int
+    deadline_epoch: NotRequired[int]
     user_id: str
     repo: str
 
@@ -664,6 +665,9 @@ def transact_write_approval_request(
 ) -> None:
     """Atomically record a pending approval + transition the task to AWAITING_APPROVAL.
 
+    The trusted approval service performs the transaction when configured. Direct
+    DynamoDB is retained only for unscoped local/legacy deployments.
+
     Two items:
       1. Put on ``TaskApprovalsTable`` with ``ConditionExpression:
          attribute_not_exists(request_id)`` — guards against ULID collisions
@@ -680,6 +684,23 @@ def transact_write_approval_request(
     DDB-layer exceptions propagate so the hook's outer try/except can
     fail-closed with a specific reason.
     """
+    import approval_requests
+
+    if approval_requests.configured():
+        try:
+            approval_requests.record_request(
+                "create", task_id, request_id, approval=dict(approval_row)
+            )
+            return
+        except Exception as exc:
+            if _extract_error_code(exc) == "TransactionCanceledException":
+                reasons = _extract_cancellation_reasons(exc)
+                raise ApprovalWriteError(
+                    f"approval write cancelled: reasons={reasons}", cancellation_reasons=reasons
+                ) from exc
+            raise
+    # Compatibility with unscoped legacy/local deployments. configured() rejects
+    # a missing service URL for cloud workers that use the session role.
     task_table, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 
@@ -804,6 +825,23 @@ def best_effort_update_approval_status(
     Returns ``True`` on successful write, ``False`` on
     ``ConditionalCheckFailedException``. All other errors propagate.
     """
+    import approval_requests
+
+    if new_status != "TIMED_OUT":
+        raise ValueError("Workers may record only non-human timeouts")
+    if approval_requests.configured():
+        try:
+            approval_requests.record_request("timeout", task_id, request_id, reason=reason)
+            return True
+        except Exception as exc:
+            reasons = _extract_cancellation_reasons(exc)
+            if _extract_error_code(exc) == "TransactionCanceledException" and (
+                reasons
+                and reasons[0].get("Code") == "ConditionalCheckFailed"
+                and all(reason.get("Code") == "None" for reason in reasons[1:])
+            ):
+                return False
+            raise
     _, approvals_table = _require_tables()
     ddb = _get_ddb_client(client=client)
 

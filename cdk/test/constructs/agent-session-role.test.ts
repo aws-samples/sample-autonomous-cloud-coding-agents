@@ -55,14 +55,14 @@ function createStack() {
     taskScopedTables: [
       taskTable,
       taskEventsTable,
-      taskApprovalsTable,
       taskNudgesTable,
     ],
+    approvalsTable: taskApprovalsTable,
     traceArtifactsBucket,
     attachmentsBucket,
   });
 
-  return { stack, template: Template.fromStack(stack), computeRole, sessionRole };
+  return { stack, template: Template.fromStack(stack), computeRole, sessionRole, taskApprovalsTable };
 }
 
 function findComputeRolePolicy(template: Template) {
@@ -108,7 +108,7 @@ describe('AgentSessionRole construct', () => {
       const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
       return actions.some((a: string) => a.startsWith('dynamodb:'));
     });
-    // Four task-scoped tables → four conditioned statements.
+    // Three read/write task-scoped tables + the read-only approvals table.
     expect(ddbStatements).toHaveLength(4);
     for (const s of ddbStatements) {
       expect(s.Condition).toEqual({
@@ -390,3 +390,37 @@ describe.each([false, true])('session-role IAM audit with concrete environment %
     }
   });
 });
+
+describe('AgentSessionRole approvals table (trusted approval writer, ADR-025)', () => {
+  test('workers may only read their own approval rows', () => {
+    const { template, taskApprovalsTable, stack } = createStack();
+    const statements = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([id]) => id.includes('AgentSessionRole'))
+      .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement);
+    const approvalsArn = stack.resolve(taskApprovalsTable.tableArn);
+    const onApprovals = statements.filter((s: { Resource: unknown }) =>
+      JSON.stringify(s.Resource) === JSON.stringify(approvalsArn));
+    expect(onApprovals).toHaveLength(1);
+    expect([onApprovals[0].Action].flat().sort()).toEqual([
+      'dynamodb:BatchGetItem', 'dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:Query',
+    ]);
+    expect(onApprovals[0].Condition).toEqual({
+      'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'] },
+    });
+  });
+
+  test('putting the approvals table back in taskScopedTables fails synth', () => {
+    const stack = new Stack(new App(), 'GuardStack');
+    const table = new dynamodb.Table(stack, 'Approvals', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    });
+    expect(() => new AgentSessionRole(stack, 'SR', {
+      assumingRoles: [new iam.Role(stack, 'C', { assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com') })],
+      taskScopedTables: [table],
+      approvalsTable: table,
+      traceArtifactsBucket: new s3.Bucket(stack, 'T'),
+      attachmentsBucket: new s3.Bucket(stack, 'A'),
+    })).toThrow('approvalsTable must not appear in taskScopedTables');
+  });
+});
+

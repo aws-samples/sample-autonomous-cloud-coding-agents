@@ -123,7 +123,11 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'bedrockGeoRegion': 'global',
           'enableToolGateway': true,
           'enableAgentRegistry': true,
-          'enableLinearIdentityVault': true,
+          // The vault adds no network resources. The MicroVM profile with every
+          // other option on sits at the 490-resource root budget on main (#852),
+          // so the trusted approval writer's nested stack (+1) would push the
+          // inline baseline over it. Leave the vault out there only.
+          'enableLinearIdentityVault': compute !== 'lambda-microvm',
           'github:sha': 'fixture-revision',
           ...(zones ? { [AGENTCORE_AZS_CONTEXT_KEY]: zones } : {}),
           ...(compute === 'lambda-microvm' ? {
