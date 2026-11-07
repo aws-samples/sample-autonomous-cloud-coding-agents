@@ -1160,7 +1160,7 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('provisions an ECS cluster + both Fargate task definitions (build + planning)', () => {
     template.resourceCountIs('AWS::ECS::Cluster', 1);
-    // Two task defs — the 64 GB build def and the 8 GB read-only planning def
+    // Two task defs — the 16 GB build def and the 8 GB read-only planning def
     // (a read-only workflow runs on the smaller one). See
     // docs/design/ECS_RIGHTSIZED_PLANNING.md.
     template.resourceCountIs('AWS::ECS::TaskDefinition', 2);
@@ -1168,6 +1168,21 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
 
   test('outputs ComputeSubstrate=ecs so the CLI allows compute_type=ecs onboarding', () => {
     template.hasOutput('ComputeSubstrate', { Value: 'ecs' });
+  });
+
+  test('both ECS task definitions receive the same approval table as AgentCore', () => {
+    const approvalId = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskApprovalsTable'));
+    expect(approvalId).toBeDefined();
+    const approvalTable = { Ref: approvalId };
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'TASK_APPROVALS_TABLE_NAME',
+        Value: approvalTable,
+      });
+    }
   });
 
   test('the orchestrator gets the PLANNING task-def ARN, not just the build one', () => {

@@ -47,6 +47,8 @@ export interface EcsAgentClusterProps {
   readonly agentImageAsset: ecr_assets.DockerImageAsset;
   readonly taskTable: dynamodb.ITable;
   readonly taskEventsTable: dynamodb.ITable;
+  /** Approval storage. Required for human approval gates; optional in isolated tests. */
+  readonly taskApprovalsTable?: dynamodb.ITable;
   readonly userConcurrencyTable: dynamodb.ITable;
   readonly githubTokenSecret: secretsmanager.ISecret;
   readonly memoryId?: string;
@@ -256,6 +258,7 @@ export interface EcsTaskSizing {
 const RESERVED_BUILD_ENV_KEYS = new Set([
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
+  'TASK_APPROVALS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
@@ -413,6 +416,9 @@ export class EcsAgentCluster extends Construct {
         inferenceProfileId(bedrockGeoRegion, PLATFORM_DEFAULT_AUX_MODEL_ID),
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
+      ...(props.taskApprovalsTable && {
+        TASK_APPROVALS_TABLE_NAME: props.taskApprovalsTable.tableName,
+      }),
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
@@ -557,6 +563,12 @@ export class EcsAgentCluster extends Construct {
     } else {
       props.taskTable.grantReadWriteData(taskRole);
       props.taskEventsTable.grantReadWriteData(taskRole);
+      props.taskApprovalsTable?.grant(
+        taskRole,
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+      );
     }
     // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is
     // touched by the reconciler/orchestrator path; keep it on the task role.
