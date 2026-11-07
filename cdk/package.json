@@ -9,7 +9,7 @@
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
     "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
-    "eslint": "eslint --fix src test",
+    "eslint": "eslint --fix src test scripts",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q",
     "census": "node -r ts-node/register/transpile-only src/synthesis/cli.ts"
