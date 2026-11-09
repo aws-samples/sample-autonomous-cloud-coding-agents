@@ -78,6 +78,13 @@ export interface LinearIntegrationProps {
   /** The DynamoDB task events table. */
   readonly taskEventsTable: dynamodb.ITable;
 
+  /**
+   * Enables task-owner approve/deny decisions from replies to Linear approval
+   * notices (#1001). The processor reads the reply thread mapping and records
+   * the decision through the same handler path as the API.
+   */
+  readonly taskApprovalsTable?: dynamodb.ITable;
+
   /** Monthly user/team budget configuration and spend table. */
   readonly budgetTable?: dynamodb.ITable;
 
@@ -245,6 +252,9 @@ export class LinearIntegration extends Construct {
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       TASK_RETENTION_DAYS: String(props.taskRetentionDays ?? DEFAULT_TASK_RETENTION_DAYS),
     };
+    if (props.taskApprovalsTable) {
+      createTaskEnv.TASK_APPROVALS_TABLE_NAME = props.taskApprovalsTable.tableName;
+    }
     if (props.repoTable) {
       createTaskEnv.REPO_TABLE_NAME = props.repoTable.tableName;
     }
@@ -396,6 +406,8 @@ export class LinearIntegration extends Construct {
     }
     props.taskTable.grantReadWriteData(webhookProcessorFn);
     props.taskEventsTable.grantReadWriteData(webhookProcessorFn);
+    // Approval replies: thread mapping, rate-limit counter and the decision.
+    props.taskApprovalsTable?.grantReadWriteData(webhookProcessorFn);
     if (props.repoTable) {
       props.repoTable.grantReadData(webhookProcessorFn);
     }

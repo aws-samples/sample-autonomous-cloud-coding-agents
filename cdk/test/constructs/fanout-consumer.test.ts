@@ -267,4 +267,46 @@ describe('FanOutConsumer', () => {
       expect(vars.TASK_TABLE_NAME).toBeUndefined();
     }
   });
+
+  test('approval notices (#1001): wires TASK_APPROVALS_TABLE_NAME with only GetItem + UpdateItem', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    const approvals = new dynamodb.Table(stack, 'ApprovalsTable', {
+      partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'request_id', type: dynamodb.AttributeType.STRING },
+    });
+    new FanOutConsumer(stack, 'FanOut', {
+      taskEventsTable: makeTaskEventsTable(stack),
+      taskApprovalsTable: approvals,
+    });
+    const template = Template.fromStack(stack);
+    const approvalsId = stack.getLogicalId(approvals.node.defaultChild as dynamodb.CfnTable);
+
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ TASK_APPROVALS_TABLE_NAME: { Ref: approvalsId } }) },
+    });
+    const approvalActions: string[] = [];
+    for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+      const stmts = (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: unknown; Resource: unknown }> } } })
+        .Properties.PolicyDocument.Statement;
+      for (const s of stmts) {
+        if (JSON.stringify(s.Resource).includes(approvalsId)) {
+          approvalActions.push(...(Array.isArray(s.Action) ? s.Action : [s.Action]) as string[]);
+        }
+      }
+    }
+    expect(approvalActions.sort()).toEqual(['dynamodb:GetItem', 'dynamodb:UpdateItem']);
+  });
+
+  test('approval notices (#1001): no approvals env or grant when the table is omitted', () => {
+    const app = new App();
+    const stack = new Stack(app, 'TestStack');
+    new FanOutConsumer(stack, 'FanOut', { taskEventsTable: makeTaskEventsTable(stack) });
+    const template = Template.fromStack(stack);
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const vars = ((fn as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } })
+        .Properties?.Environment?.Variables) ?? {};
+      expect(vars.TASK_APPROVALS_TABLE_NAME).toBeUndefined();
+    }
+  });
 });
