@@ -21,6 +21,7 @@ import { CliError } from '../src/errors';
 import {
   buildAuthorizationUrl,
   computeExpiresAt,
+  describePreservedFallback,
   exchangeAuthorizationCode,
   generatePkce,
   isAccessTokenExpiring,
@@ -703,3 +704,21 @@ describe('resolveStoredGrantFields — a preserved grant must never be overwritt
     });
   });
 });
+
+describe('describePreservedFallback', () => {
+  const now = new Date('2026-11-05T00:00:00Z');
+
+  test('an expired access token is reported as an unverified fallback, not a working one', () => {
+    const result = describePreservedFallback({ expires_at: '2026-07-29T10:09:20.000Z' }, now);
+    expect(result.usable).toBe(false);
+    expect(result.message).toContain('expired on 2026-07-29T10:09:20.000Z');
+    expect(result.message).not.toContain('✓');
+  });
+
+  test('a live access token is kept as a fallback', () => {
+    expect(describePreservedFallback({ expires_at: '2026-11-06T00:00:00Z' }, now)).toEqual({
+      usable: true, message: '✓ Kept the existing Secrets Manager token as a fallback',
+    });
+  });
+});
+

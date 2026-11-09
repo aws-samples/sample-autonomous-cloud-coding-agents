@@ -26,6 +26,7 @@ import {
   isWebhookSecretConfigured,
   queryLinearTeamKeys,
   parsePastedAuthorization,
+  promptChoice,
   renderLinearAppTemplate,
 } from '../../src/commands/linear';
 import * as config from '../../src/config';
@@ -874,3 +875,27 @@ describe('parsePastedAuthorization', () => {
     expect(parsePastedAuthorization('code=abc123&state=')).toEqual({ code: 'abc123' });
   });
 });
+
+describe('promptChoice', () => {
+  const answers = (...values: string[]) => {
+    const queue = [...values];
+    return jest.fn(async () => queue.shift() ?? '');
+  };
+
+  test('re-asks after a stray empty line left by a pasted newline', async () => {
+    const ask = answers('', '2');
+    expect(await promptChoice('Which one is you?', 2, ask)).toBe(1);
+    expect(ask).toHaveBeenCalledTimes(2);
+  });
+
+  test('re-asks on out-of-range or non-numeric answers', async () => {
+    expect(await promptChoice('Pick', 3, answers('9', 'x2', '3'))).toBe(2);
+  });
+
+  test('gives up after the attempt budget instead of looping forever', async () => {
+    const ask = answers('', '', '');
+    expect(await promptChoice('Pick', 2, ask)).toBeUndefined();
+    expect(ask).toHaveBeenCalledTimes(3);
+  });
+});
+

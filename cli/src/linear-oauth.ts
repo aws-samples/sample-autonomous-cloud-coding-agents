@@ -582,3 +582,27 @@ export async function verifyLinearRefreshAndPersist(args: {
   }
   return 'refreshed';
 }
+
+/**
+ * How setup should describe a Secrets-Manager token it kept when moving onto the
+ * vault. A refresh token cannot be checked without rotating it, so an expired
+ * access token is reported as unverified rather than as a working fallback:
+ * Linear rejects refresh tokens that went unused for too long.
+ */
+export function describePreservedFallback(
+  preserved: Pick<StoredLinearOauthToken, 'expires_at'>,
+  now: Date = new Date(),
+): { readonly usable: boolean; readonly message: string } {
+  const expiresAt = Date.parse(preserved.expires_at);
+  if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) {
+    return {
+      usable: false,
+      message:
+        `⚠ Kept the existing Secrets Manager token, but its access token expired on ${preserved.expires_at}. `
+        + 'It only works as a fallback if Linear still accepts its refresh token, which expires when '
+        + 'unused. Treat the vault as the only verified credential for this workspace.',
+    };
+  }
+  return { usable: true, message: '✓ Kept the existing Secrets Manager token as a fallback' };
+}
+
