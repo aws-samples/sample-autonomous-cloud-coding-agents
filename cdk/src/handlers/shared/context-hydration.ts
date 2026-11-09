@@ -976,6 +976,45 @@ export function assemblePrIterationPrompt(
   return parts.join('\n');
 }
 
+/**
+ * Build the text screened by the guardrail for an issue-based task: the sanitized
+ * issue title, body and comments only. Platform-authored wrapper text (task header,
+ * closing instructions) is excluded so it does not count toward the classifier score.
+ * @param issue - the GitHub issue context.
+ * @returns the external issue content, joined.
+ */
+export function buildIssueScreeningText(issue: GitHubIssueContext): string {
+  const parts: string[] = [sanitizeExternalContent(issue.title), sanitizeExternalContent(issue.body)];
+  for (const c of issue.comments) {
+    parts.push(sanitizeExternalContent(c.body));
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
+}
+
+/**
+ * Build the text screened by the guardrail for a PR task: the sanitized PR title, body,
+ * review and conversation comments, plus the diff hunks and diff summary. Platform-authored
+ * wrapper text (task header, branch lines, closing instructions) is excluded.
+ * @param pr - the GitHub PR context (after any token-budget trimming).
+ * @returns the external PR content, joined.
+ */
+export function buildPrScreeningText(pr: GitHubPullRequestContext): string {
+  const parts: string[] = [sanitizeExternalContent(pr.title), sanitizeExternalContent(pr.body)];
+  for (const c of pr.review_comments) {
+    parts.push(sanitizeExternalContent(c.body));
+    if (c.diff_hunk) {
+      parts.push(c.diff_hunk);
+    }
+  }
+  for (const c of pr.issue_comments) {
+    parts.push(sanitizeExternalContent(c.body));
+  }
+  if (pr.diff_summary) {
+    parts.push(pr.diff_summary);
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
+}
+
 // ---------------------------------------------------------------------------
 // Content trust classification
 // ---------------------------------------------------------------------------
@@ -1175,6 +1214,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
       userPrompt = assemblePrIterationPrompt(task.task_id, repo, prResult, effectiveTaskDescription);
+      let screenedPr: GitHubPullRequestContext = prResult;
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
@@ -1232,6 +1272,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         }
 
         userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, budgetResult.taskDescription);
+        screenedPr = trimmedPr;
         const finalEstimate = estimateTokens(userPrompt);
         if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
           logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
@@ -1246,8 +1287,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       resolvedBranchName = prResult.head_ref;
       resolvedBaseBranch = prResult.base_ref;
 
-      // Screen assembled PR prompt through Bedrock Guardrail for prompt injection
-      const screenResult = await screenWithGuardrail(userPrompt, task.task_id);
+      // Screen the external PR content through Bedrock Guardrail for prompt injection.
+      // The platform's own wrapper text is excluded so it does not push benign content over the threshold.
+      const screenResult = await screenWithGuardrail(buildPrScreeningText(screenedPr), task.task_id);
 
       const guardrailBlocked = formatGuardrailBlocked(screenResult, 'PR context');
 
@@ -1274,10 +1316,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     userPrompt = assembleUserPrompt(task.task_id, repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
 
-    // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
-    // Skipped when no issue is present — task_description is already screened at submission time.
+    // Screen GitHub issue content (attacker-controlled input) when present. Only the issue
+    // itself is screened, not the platform's wrapper text. Skipped when no issue is present —
+    // task_description is already screened at submission time.
     const screenResult = issue
-      ? await screenWithGuardrail(userPrompt, task.task_id)
+      ? await screenWithGuardrail(buildIssueScreeningText(issue), task.task_id)
       : undefined;
 
     const guardrailBlocked = formatGuardrailBlocked(screenResult, 'Task context');
