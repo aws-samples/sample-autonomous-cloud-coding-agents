@@ -1085,6 +1085,7 @@ export class AgentStack extends Stack {
         }),
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
+        taskApprovalsTable: taskApprovalsTable.table,
         userConcurrencyTable: userConcurrencyTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
@@ -1094,7 +1095,7 @@ export class AgentStack extends Stack {
         // without this grant. The AgentCore runtime gets the equivalent grant
         // where it is created above.
         agentMemory,
-        // Read-only grant so the container can fetch its payload from S3.
+        // The task role reads bootstrap manifests; a signed URL delivers its payload.
         payloadBucket: ecsPayloadBucket!.bucket,
         // ECS parity: the same bucket the runtime uses for ARTIFACTS_BUCKET_NAME —
         // a repo-bound artifact workflow delivers here. Wires the
