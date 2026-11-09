@@ -24,7 +24,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import nudge_reader
@@ -627,6 +627,17 @@ async def _handle_require_approval(
         "user_id": user_id or "",
         "repo": engine.repo,
     }
+    # The trusted approval writer cross-checks the deadline against
+    # created_at + timeout_s, so the row carries it explicitly.
+    if effective_timeout > 0:
+        row["deadline_epoch"] = (
+            int(
+                datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+                .replace(tzinfo=UTC)
+                .timestamp()
+            )
+            + effective_timeout
+        )
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on
     # subsequent gates reflect the attempt even if the DDB write itself

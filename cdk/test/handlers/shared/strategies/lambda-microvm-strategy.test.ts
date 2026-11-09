@@ -60,6 +60,7 @@ delete process.env.MICROVM_INGRESS_CONNECTOR_ARNS;
 
 process.env.TASK_TABLE_NAME = TASK_TABLE_NAME;
 process.env.TASK_EVENTS_TABLE_NAME = TASK_EVENTS_TABLE_NAME;
+process.env.APPROVAL_REQUESTS_API_URL = 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/';
 process.env.GITHUB_TOKEN_SECRET_ARN = GITHUB_TOKEN_SECRET_ARN;
 process.env.AGENT_SESSION_ROLE_ARN = AGENT_SESSION_ROLE_ARN;
 for (const optional of [
@@ -138,6 +139,7 @@ const BLUEPRINT: BlueprintConfig = { compute_type: 'lambda-microvm', runtime_arn
 const EXPECTED_PLATFORM_CONFIG = {
   task_table_name: TASK_TABLE_NAME,
   task_events_table_name: TASK_EVENTS_TABLE_NAME,
+  approval_requests_api_url: 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/',
   github_token_secret_arn: GITHUB_TOKEN_SECRET_ARN,
   agent_session_role_arn: AGENT_SESSION_ROLE_ARN,
 };
@@ -1229,6 +1231,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     TASK_TABLE_NAME: 'tasks',
     TASK_EVENTS_TABLE_NAME: 'events',
     TASK_APPROVALS_TABLE_NAME: 'approvals',
+    APPROVAL_REQUESTS_API_URL: 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/',
     NUDGES_TABLE_NAME: 'nudges',
     LOG_GROUP_NAME: '/aws/abca/application',
     ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
@@ -1265,6 +1268,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'task_table_name',
       'task_events_table_name',
       'task_approvals_table_name',
+      'approval_requests_api_url',
       'nudges_table_name',
       'log_group_name',
       'artifacts_bucket_name',
@@ -1286,17 +1290,18 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'linear_vault_enabled',
       'linear_workload_identity_name',
     ]);
-    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(17);
+    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(18);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
     }
   });
 
-  test('pins the REQUIRED subset — these four are what a task cannot start without', () => {
+  test('pins the REQUIRED subset — what a task cannot start without', () => {
     expect([...MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS]).toEqual([
       'task_table_name',
       'task_events_table_name',
+      'approval_requests_api_url',
       'github_token_secret_arn',
       'agent_session_role_arn',
     ]);
@@ -1328,6 +1333,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     const config = buildMicrovmPlatformConfig({
       TASK_TABLE_NAME: 'tasks',
       TASK_EVENTS_TABLE_NAME: 'events',
+      APPROVAL_REQUESTS_API_URL: 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/',
       GITHUB_TOKEN_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:gh-AbCdEf',
       AGENT_SESSION_ROLE_ARN: 'arn:aws:iam::123456789012:role/SessionRole',
     });
@@ -1337,6 +1343,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     expect(Object.keys(config)).toEqual([
       'task_table_name',
       'task_events_table_name',
+      'approval_requests_api_url',
       'github_token_secret_arn',
       'agent_session_role_arn',
     ]);
@@ -1373,6 +1380,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
   test.each([
     ['TASK_TABLE_NAME', 'task_table_name'],
     ['TASK_EVENTS_TABLE_NAME', 'task_events_table_name'],
+    ['APPROVAL_REQUESTS_API_URL', 'approval_requests_api_url'],
     ['GITHUB_TOKEN_SECRET_ARN', 'github_token_secret_arn'],
     ['AGENT_SESSION_ROLE_ARN', 'agent_session_role_arn'],
   ])('throws naming %s when it is missing', (envVar, wireKey) => {
@@ -1390,7 +1398,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     // One redeploy should fix all of them; reporting one per attempt turns a
     // misconfiguration into four round-trips.
     expect(() => buildMicrovmPlatformConfig({})).toThrow(
-      /task_table_name.*task_events_table_name.*github_token_secret_arn.*agent_session_role_arn/s,
+      /task_table_name.*task_events_table_name.*approval_requests_api_url.*github_token_secret_arn.*agent_session_role_arn/s,
     );
   });
 
@@ -1491,6 +1499,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
 describe('LambdaMicrovmComputeStrategy with the FULL platform_config environment', () => {
   const OPTIONAL_ENV: Record<string, string> = {
     TASK_APPROVALS_TABLE_NAME: 'approvals',
+    APPROVAL_REQUESTS_API_URL: 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/',
     NUDGES_TABLE_NAME: 'nudges',
     LOG_GROUP_NAME: '/aws/abca/application',
     ARTIFACTS_BUCKET_NAME: 'artifacts-bucket',
@@ -1523,7 +1532,7 @@ describe('LambdaMicrovmComputeStrategy with the FULL platform_config environment
     const expected = { ...EXPECTED_PLATFORM_CONFIG, ...buildMicrovmPlatformConfig() };
     const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
     expect(envelope.platform_config).toEqual(expected);
-    expect(Object.keys(envelope.platform_config)).toHaveLength(13);
+    expect(Object.keys(envelope.platform_config)).toHaveLength(14);
     expect(JSON.parse(mockS3Send.mock.calls[0][0].input.Body).platform_config).toEqual(expected);
   });
 });

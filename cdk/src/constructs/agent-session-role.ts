@@ -55,6 +55,14 @@ export interface AgentSessionRoleProps {
   readonly taskScopedTables: dynamodb.ITable[];
 
   /**
+   * Approvals table: READ-ONLY for the session (its own task's rows). Workers
+   * observe human decisions and use the rows in transaction condition checks,
+   * but write requests only through the trusted approval writer
+   * (`ApprovalRequestService`). Must not also appear in `taskScopedTables`.
+   */
+  readonly approvalsTable?: dynamodb.ITable;
+
+  /**
    * Trace-artifacts bucket. The agent writes `traces/<user_id>/<task_id>...`;
    * `s3:PutObject` is scoped to the `traces/${aws:PrincipalTag/user_id}/`
    * prefix.
@@ -170,6 +178,19 @@ export class AgentSessionRole extends Construct {
     // One statement per table keeps the resource ARNs explicit. The condition
     // requires the request's partition key (task_id) to equal the session's
     // task_id tag. ForAllValues is required by DynamoDB for LeadingKeys.
+    if (props.approvalsTable
+      && props.taskScopedTables.some((table) => table.tableArn === props.approvalsTable!.tableArn)) {
+      throw new Error('approvalsTable must not appear in taskScopedTables: workers may only read approval records');
+    }
+    if (props.approvalsTable) {
+      this.role.addToPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:ConditionCheckItem'],
+        resources: [props.approvalsTable.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['${aws:PrincipalTag/task_id}'] },
+        },
+      }));
+    }
     for (const table of props.taskScopedTables) {
       this.role.addToPolicy(
         new iam.PolicyStatement({
