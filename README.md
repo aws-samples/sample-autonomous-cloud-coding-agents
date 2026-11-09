@@ -22,11 +22,11 @@
 >
 > The team is investing in **the next version of ABCA (V2)**, informed by customer feedback, lessons learned, and advances across the industry. We are sharing this direction early to signal a future transition. **No migration is required at this time.**
 
-<p align="center">
-  <a href="docs/video/abca-intro.mp4">
-    <img alt="Watch the 95-second ABCA intro video" width="800" src="docs/imgs/abca-intro-poster.jpg" />
-  </a>
-</p>
+
+
+https://github.com/user-attachments/assets/7d7356fa-f9f6-43c4-a618-94b5aa4f3f16
+
+
 
 ## What is ABCA
 
