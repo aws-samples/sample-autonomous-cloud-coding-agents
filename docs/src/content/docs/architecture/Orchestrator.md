@@ -347,10 +347,18 @@ Each task runs in its own isolated compute session with no shared mutable state 
 
 ### Counter management
 
-- **UserConcurrency** - DynamoDB item per user with `active_count`. Incremented atomically (`active_count < max`) at admission, decremented at finalization.
+- **UserConcurrency** - DynamoDB item per user with `active_count` and a `reservation_version` that changes on every reservation mutation.
+- **Per-task reservation marker** - each admitted task carries `concurrency_slot` (`held` → `released`, with timestamps). The seat is taken and returned only in a DynamoDB transaction that changes the marker and the counter together (`shared/task-concurrency.ts`):
+  - **Acquire** requires the task to be `SUBMITTED` with no marker and the counter below the cap. A lost successful response is recovered by re-reading the marker, and a task can never acquire twice.
+  - **Release** requires the marker to be `held` and the task terminal. Every caller (finalization, `failTask`, the stranded-task reconciler, the concurrency reconciler) can therefore attempt it, and exactly one transaction returns the seat. An active task, including one in `AWAITING_APPROVAL`, keeps its seat.
+  - A task that holds a marker can never be moved back to `QUEUED`.
 - **SystemConcurrency** - Single DynamoDB item, same pattern.
 
-Concurrency is always released in `finalizeTask` (step 6), never inside the poll loop. ECS poll failure paths call `failTask` with `releaseConcurrency: false` to transition the task to `FAILED` without decrementing — `finalizeTask` handles the single decrement after re-reading the task state. The heartbeat-detected crash path also guards against double-decrement by only releasing the counter after a successful state transition. If the transition fails (task already terminal), it re-reads and acts accordingly.
+Finalization releases in a `finally` block after writing the outcome, so a crash, a failed event write or a durable replay still releases exactly once. A finalization that cannot reach a terminal state throws and is retried, and the task keeps its seat. An approval wait that outlives the poll window finalizes to `FAILED` (a valid transition from `AWAITING_APPROVAL`). Previously it attempted the invalid `TIMED_OUT` and freed the seat of a task that was still active.
+
+**Reconciliation** reads the counters first, then strongly reads every reservation, and repairs a counter only with a condition on the `reservation_version` it observed, so concurrent admissions and releases are never overwritten. It also releases terminal reservations left by interrupted cleanup. A user with an active task that has no marker (admitted before this scheme, or not yet admitted) is skipped until it settles. The reconciler never guesses a count.
+
+**Upgrading** a stack: tasks admitted by the previous code have no marker, so no release path returns a seat on their behalf, and the reconciler skips their user while they are active. Drain in-flight tasks before deploying, or expect those users' counters to be corrected only after their old tasks finish.
 
 ## Implementation
 

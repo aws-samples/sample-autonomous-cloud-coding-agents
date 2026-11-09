@@ -41,7 +41,7 @@ const RECONCILER_MEMORY_MB = 256;
  */
 export interface ConcurrencyReconcilerProps {
   /**
-   * The DynamoDB task table (has UserStatusIndex GSI).
+   * The DynamoDB task table (reservations are scanned from the base table).
    */
   readonly taskTable: dynamodb.ITable;
 
@@ -59,8 +59,8 @@ export interface ConcurrencyReconcilerProps {
 
 /**
  * Scheduled Lambda that reconciles user concurrency counters by comparing
- * the active_count in the concurrency table against actual active tasks
- * in the task table. Corrects drift caused by orchestrator crashes.
+ * active_count against saved task reservations, including approval waits.
+ * Releases terminal reservations left behind by interrupted cleanup.
  */
 export class ConcurrencyReconciler extends Construct {
   public readonly fn: lambda.NodejsFunction;
@@ -89,6 +89,7 @@ export class ConcurrencyReconciler extends Construct {
     });
 
     props.taskTable.grantReadData(this.fn);
+    props.taskTable.grant(this.fn, 'dynamodb:UpdateItem');
     props.userConcurrencyTable.grantReadWriteData(this.fn);
 
     const schedule = props.schedule ?? Duration.minutes(DEFAULT_SCHEDULE_MINUTES);
