@@ -1017,3 +1017,31 @@ class TestCeilingShrinkingLatch:
         e.mark_ceiling_shrinking_emitted()
         assert e.mark_ceiling_shrinking_emitted() is False
         assert e.mark_ceiling_shrinking_emitted() is False
+
+
+class TestRecentDecisionReasonText:
+    """A timed-out gate has no human reason; the retry deny must not print 'None'."""
+
+    def test_timed_out_retry_omits_the_missing_reason(self):
+        from policy import PolicyEngine, _sha256_tool_input
+
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        tool_input = {"file_path": "/workspace/t/docs/a.env", "content": "X=1\n"}
+        engine.recent_decisions.record(
+            "Write", _sha256_tool_input(tool_input), decision="TIMED_OUT", reason=""
+        )
+        decision = engine.evaluate_tool_use("Write", tool_input)
+        assert decision.outcome == "deny"
+        assert decision.reason == "Recent TIMED_OUT within 60s"
+
+    def test_denied_retry_keeps_the_human_reason(self):
+        from policy import PolicyEngine, _sha256_tool_input
+
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        tool_input = {"file_path": "/workspace/t/docs/b.env", "content": "X=1\n"}
+        engine.recent_decisions.record(
+            "Write", _sha256_tool_input(tool_input), decision="DENIED", reason="use .example"
+        )
+        assert engine.evaluate_tool_use("Write", tool_input).reason == (
+            "Recent DENIED within 60s: use .example"
+        )

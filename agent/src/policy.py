@@ -746,6 +746,11 @@ def _sha256_tool_input(tool_input: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _recent_reason(prefix: str, reason: str | None) -> str:
+    """Recent-decision deny text; omit the reason when the human gave none."""
+    return f"{prefix}: {reason}" if reason else prefix
+
+
 class PolicyEngine:
     """Evaluate tool-use requests against Cedar policies with three outcomes.
 
@@ -1220,7 +1225,9 @@ class PolicyEngine:
                 # engine pure — policy.py never calls the progress writer.
                 return PolicyDecision(
                     outcome=Outcome.DENY,
-                    reason=f"Recent {cached.decision} within {int(CACHE_TTL_S)}s: {cached.reason}",
+                    reason=_recent_reason(
+                        f"Recent {cached.decision} within {int(CACHE_TTL_S)}s", cached.reason
+                    ),
                     duration_ms=(time.monotonic() - start) * 1000,
                     cache_hit_metadata={
                         "tool_name": tool_name,
@@ -1272,9 +1279,10 @@ class PolicyEngine:
                     matched_rule_id, cached = rule_hit
                     return PolicyDecision(
                         outcome=Outcome.DENY,
-                        reason=(
+                        reason=_recent_reason(
                             f"Recent {cached.decision} on rule {matched_rule_id!r} "
-                            f"within {int(CACHE_TTL_S)}s: {cached.reason}"
+                            f"within {int(CACHE_TTL_S)}s",
+                            cached.reason,
                         ),
                         duration_ms=(time.monotonic() - start) * 1000,
                         cache_hit_metadata={
