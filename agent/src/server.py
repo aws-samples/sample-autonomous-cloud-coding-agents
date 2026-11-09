@@ -1444,6 +1444,7 @@ def _parse_terminate_microvm_id(raw: bytes) -> str:
         # Not silent: an unreadable body is worth a breadcrumb even though it
         # cannot change the outcome.
         _emit_stdout_line(f"[server/warn] /terminate hook body is not JSON ({exc}); ignoring it")
+        # nosemgrep: py-silent-success-masking -- /terminate must answer 200 for ANY body (see docstring); "" is the EXPECTED production id, raising would report a hook failure for a teardown that succeeded, and the unreadable body is logged above  # noqa: E501
         return ""
     if not isinstance(parsed, dict):
         _emit_stdout_line(
