@@ -11,9 +11,12 @@ repos:
     hooks:
       - id: trailing-whitespace
         # Skip generated trees and paths often checked in read-only (0444); mutating hooks must not touch them.
-        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
+        # `\.mdx?$` covers the .mdx mirrors too (Quick-start.mdx) — with a bare
+        # `\.md$` these fixers could reformat a generated file, which the next
+        # sync-starlight.mjs run then reverts, i.e. permanent CI self-mutation.
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.mdx?$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$|\.(snap|lock)$)
       - id: end-of-file-fixer
-        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
+        exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.mdx?$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
       - id: check-merge-conflict
       - id: check-yaml
         exclude: ^(cdk/cdk\.out/|cdk\.out/|node_modules/|agent/\.venv/)
@@ -59,7 +62,12 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && node scripts/sync-starlight.mjs && git add src/content/docs/'
         language: system
         pass_filenames: false
-        files: ^(docs/(design|guides)/.*\.md$|CONTRIBUTING\.md$)
+        # `.mdx?$`, not `.md$`: QUICK_START.mdx is an .mdx source that
+        # sync-starlight.mjs mirrors to getting-started/Quick-start.mdx, but the
+        # `$` after `\.md` meant this hook never selected it — so edits to it
+        # skipped mirror regeneration locally and could only fail in CI's
+        # "Files were changed during build" check (PR #780).
+        files: ^(docs/(design|guides)/.*\.mdx?$|CONTRIBUTING\.md$)
         stages: [pre-commit]
 
       - id: docs-astro-check
