@@ -21,7 +21,7 @@ world and must be adjusted by whoever runs this again:
 |---|---|---|
 | 1.2 | ~~unescaped `ParameterValue=agentcore,lambda-microvm`; bootstrap without `--force`~~ | **CORRECTED IN PLACE** — the comma is now escaped (`agentcore\,lambda-microvm`) and both bootstrap invocations carry `--force`. F14/F10 are the evidence; nothing is left to adjust here |
 | 2.2 | "a 443-only security group" and one `AWS::Lambda::NetworkConnector` | **two** security groups (443-only runtime, 443 + 80 build) and **two** connectors, plus a connector operator role; a seventh output `MicrovmBuildEgressConnectorArns` |
-| 2.3 | `list-stack-resources --query "…|[0]"` | needs `--no-paginate` (F14) |
+| 2.3 | `list-stack-resources --query "…\|[0]"` | needs `--no-paginate` (F14) |
 | 4.3 | `export IMAGE_VERSION=1` | the service returns `1.0`; there are two builds per version (one per chipset) |
 | 5.1 / 5.9 | `--image-identifier "$IMAGE_NAME"` | an **ARN** is required (F3); use the `imageArn` the script prints |
 | 5.9 | 16 384 / 16 385-byte probes | the real boundary is **4 096 / 4 097** (F6) |
