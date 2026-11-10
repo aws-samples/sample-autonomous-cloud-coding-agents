@@ -10,6 +10,45 @@ import pytest
 
 from models import TaskConfig
 
+# Session-wide git isolation (#855). Runs when pytest imports this conftest, which
+# is before it imports any test module — so it also covers test files that do not
+# exist yet, fixtures of every scope, and threads that outlive the test that
+# started them. Nothing below is ever restored: no test may see the inherited
+# values again.
+#
+# The leak: git hands GIT_DIR and GIT_INDEX_FILE to the hooks it runs in a linked
+# worktree, and the pre-commit and pre-push hooks run this suite. GIT_DIR
+# overrides repository discovery, so with it inherited a fixture's
+# `git -C <tmp_path> init`, `config` or `commit` acts on the contributor's real
+# repository while every test passes. The names are git's own list of
+# repository-local variables (`git rev-parse --local-env-vars`): what git itself
+# clears before it works on a different repository.
+for _var in (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+):
+    os.environ.pop(_var, None)
+# No user or machine configuration: a test repository gets no identity, hooks
+# path or signing setup from the host, and `git config --global` / `--system`
+# fails instead of writing to the contributor's files. GIT_CONFIG_NOSYSTEM is
+# what also switches off the extra system file Apple's git reads.
+os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+
 # Session-wide hang backstop. SIGALRM (pytest-timeout method="signal") fires only
 # in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER
 # thread, a fixture, collection, or a C-level socket read the main thread never
