@@ -3,10 +3,7 @@ title: Introduction
 description: ABCA  - Autonomous Background Coding Agents on AWS.
 ---
 
-# ABCA
-
-
-**Autonomous Background Coding Agents on AWS**
+**ABCA — Autonomous Background Coding Agents on AWS**
 
 
 ## What is ABCA
