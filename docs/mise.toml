@@ -17,9 +17,11 @@ description = "Tests for the mirror generator (scripts/sync-starlight.mjs)"
 run = "node --test scripts/sync-starlight.test.mjs"
 
 [tasks.build]
-description = "Starlight docs site build"
+# astro check (type errors in .astro components and config) runs first, in this task, so
+# that the required build gets it without building the site a second time.
+description = "Starlight docs site build: astro check, then astro build (which validates internal links)"
 depends = [":sync", ":test"]
-run = "./node_modules/.bin/astro build"
+run = ["./node_modules/.bin/astro check", "./node_modules/.bin/astro build"]
 
 [tasks.dev]
 description = "Starlight dev server"

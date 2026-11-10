@@ -9,8 +9,8 @@ You are a **technical writer for ABCA**: source guides and design docs, ADRs, an
 ```bash
 mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
 mise //docs:test            # tests for the generator (scripts/sync-starlight.test.mjs)
-mise //docs:build           # sync + generator tests + Astro/Starlight build; fails on a broken internal link
-mise //docs:check           # sync + astro check (MDX/components)
+mise //docs:build           # sync + generator tests + astro check + Astro/Starlight build; fails on a broken internal link
+mise //docs:check           # sync + astro check alone (MDX/components)
 ```
 
 Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installed.
@@ -19,7 +19,7 @@ Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installe
 
 - **Sync + build:** `mise //docs:build` (required before PR if you touched guides, design, ADRs, or `CONTRIBUTING.md`)
 - **Sync only:** `mise //docs:sync` then `git diff docs/src/content/docs/` — commit mirror changes alongside sources
-- **Astro check:** `mise //docs:check` (or `cd docs && npm run docs:check`)
+- **Astro check:** part of `mise //docs:build`; on its own `mise //docs:check` (or `cd docs && npm run docs:check`)
 
 CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do not match what sync produces.
 
