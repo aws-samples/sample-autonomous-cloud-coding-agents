@@ -64,19 +64,69 @@ jobs:
         id: scan
         run: |
           set -o pipefail
-          mise run security 2>&1 | tee security-log.txt
+          # --continue-on-error: every scanner runs even when an earlier one
+          # failed, and the command still exits non-zero when any of them did.
+          mise run --continue-on-error security 2>&1 | tee security-log.txt
         continue-on-error: true
 
-      - name: Open issue on failure
-        if: steps.scan.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # An osv-scanner ignore stops applying on its ignoreUntil date; from that
+      # day the required dependency scan (security-pr.yml) fails every pull
+      # request. Warn 21 days ahead. A date that cannot be read is reported too.
+      # osv-expiry.md is empty when there is nothing to warn about.
+      - name: Warn about osv-scanner ignores that expire within 21 days
         run: |
           set -euo pipefail
-          short="${GITHUB_SHA:0:7}"
+          node - > osv-expiry.md <<'EOF'
+          const { execFileSync } = require('node:child_process');
+          const { readFileSync } = require('node:fs');
+          const today = Date.parse(new Date().toISOString().slice(0, 10));
+          const files = execFileSync('git', ['ls-files', '--', 'osv-scanner.toml', '*/osv-scanner.toml'], { encoding: 'utf8' });
+          const warnings = [];
+          for (const file of files.split('\n').filter(Boolean)) {
+            let id = '';
+            readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+              if (line.startsWith('[[')) id = '';
+              id = line.match(/^\s*id\s*=\s*"([^"]+)"/)?.[1] ?? id;
+              const value = line.match(/^\s*(?:ignoreUntil|effectiveUntil)\s*=\s*(.*)$/)?.[1];
+              if (value === undefined) return;
+              const date = value.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+              const days = Math.round((Date.parse(date) - today) / 86400000);
+              if (days > 21) return;
+              const state = Number.isNaN(days) ? 'date not readable' : days <= 0 ? 'expired' : `${days} day(s) left`;
+              warnings.push(`- \`${file}:${index + 1}\` ${id || 'entry'}: ignored until ${date ?? value.trim()} (${state})`);
+            });
+          }
+          if (warnings.length > 0) {
+            console.log('### osv-scanner ignores that expire within 21 days\n');
+            console.log(warnings.join('\n'));
+            console.log('\nFrom the date shown, the required dependency scan fails every pull request. Fix the dependency, or renew the ignore with a reason that is still true, before that date.');
+          }
+          EOF
+          if [ -s osv-expiry.md ]; then
+            tee -a "$GITHUB_STEP_SUMMARY" < osv-expiry.md
+          else
+            echo "No osv-scanner ignore expires within 21 days."
+          fi
+
+      # One rolling issue instead of a new issue per failing run: comment on the
+      # open issue that has this exact title, or create it. `!cancelled()` so a
+      # failure of the step above cannot suppress the report of a failed suite.
+      - name: Report to the rolling issue
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${SCAN_OUTCOME}" = "success" ] && [ ! -s osv-expiry.md ]; then
+            echo "Suite passed and no ignore expires within 21 days: nothing to report."
+            exit 0
+          fi
+          title="Security suite needs attention"
           body_file="$(mktemp)"
           {
-            echo "The root \`mise run security\` suite failed in GitHub Actions. Use the log tail below and reproduce locally with the same command."
+            echo "The security suite (\`mise run --continue-on-error security\`) needs attention: suite outcome **${SCAN_OUTCOME}**. This is a rolling issue: every run that fails or finds an ignore close to expiry comments here instead of opening a new issue."
             echo ""
             echo "| Field | Value |"
             echo "| --- | --- |"
@@ -85,20 +135,34 @@ jobs:
             echo "| SHA | [\`${GITHUB_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |"
             echo "| Actor | @${GITHUB_ACTOR} |"
             echo "| Event | \`${GITHUB_EVENT_NAME}\` |"
+            if [ -s osv-expiry.md ]; then
+              echo ""
+              cat osv-expiry.md
+            fi
+            if [ "${SCAN_OUTCOME}" != "success" ]; then
+              echo ""
+              echo "### Failed scanners"
+              echo ""
+              echo '```text'
+              grep 'exited with status' security-log.txt || echo "(none listed: see the log tail and the workflow run)"
+              echo '```'
+              echo ""
+              echo "### Log tail (last 200 lines)"
+              echo ""
+              echo '```text'
+              tail -n 200 security-log.txt || true
+              echo '```'
+            fi
             echo ""
-            echo "### Log tail (last 200 lines)"
-            echo ""
-            echo '```text'
-            tail -n 200 security-log.txt || true
-            echo '```'
-            echo ""
-            echo "Close this issue after \`mise run security\` succeeds on \`${GITHUB_REF_NAME}\` (or the branch you merge to)."
+            echo "Close this issue after \`mise run security\` succeeds on \`${GITHUB_REF_NAME}\` and no ignore is within 21 days of expiry."
           } > "${body_file}"
 
-          gh issue create \
-            --title "Security suite failed (${GITHUB_REF_NAME} @ ${short})" \
-            --label bug \
-            --body-file "${body_file}"
+          number="$(gh issue list --state open --search "in:title \"${title}\"" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body-file "${body_file}"
+          else
+            gh issue create --title "${title}" --label bug --body-file "${body_file}"
+          fi
 
       - name: Fail job if security suite failed
         if: steps.scan.outcome == 'failure'

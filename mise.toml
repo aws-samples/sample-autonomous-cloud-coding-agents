@@ -243,6 +243,11 @@ run = "zizmor --offline .github"
 
 [tasks.security]
 description = "Run security scans"
+# Every leg is a task reference, so `mise run --continue-on-error security` (the
+# weekly workflow) runs all of them and still exits non-zero when any fails. A
+# nested `mise //agent:security` shell call did not get the flag: a bandit
+# failure skipped the image scan. Without the flag the first failure still
+# stops the run, as before.
 run = [
     { task = "security:secrets" },
     { task = "security:deps" },
@@ -251,8 +256,7 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
-    "MISE_EXPERIMENTAL=1 mise //agent:security",
-    "echo All good!"
+    { task = "//agent:security" },
 ]
 
 ##################
