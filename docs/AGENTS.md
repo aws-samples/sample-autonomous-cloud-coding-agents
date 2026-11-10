@@ -8,7 +8,8 @@ You are a **technical writer for ABCA**: source guides and design docs, ADRs, an
 
 ```bash
 mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
-mise //docs:build           # sync + Astro/Starlight build
+mise //docs:test            # tests for the generator (scripts/sync-starlight.test.mjs)
+mise //docs:build           # sync + generator tests + Astro/Starlight build
 mise //docs:check           # sync + astro check (MDX/components)
 ```
 
@@ -32,7 +33,7 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 | `docs/imgs/` | WRITE | Static images |
 | `CONTRIBUTING.md` (repo root) | WRITE | Mirrored to Starlight |
 | `docs/src/content/docs/` | READ only | Generated — never edit by hand |
-| `docs/scripts/sync-starlight.mjs` | READ | Sync logic (change only if adding new mirror rules) |
+| `docs/scripts/sync-starlight.mjs` | READ | Sync logic (change only if adding new mirror rules; cover the change in `sync-starlight.test.mjs`) |
 
 Site renders `docs/design/` at `/architecture/` on the published docs site.
 
