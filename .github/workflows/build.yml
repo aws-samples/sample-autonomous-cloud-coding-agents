@@ -373,12 +373,16 @@ jobs:
           name: test-reports-${{ matrix.compute_type }}
           path: "*/test-reports"
           if-no-files-found: ignore
+      # Information only, never a gate: the coverage floors are enforced by the
+      # test tasks themselves. Without disable_search the uploader also sends
+      # every file that looks like coverage, e.g. contracts/coverage-thresholds.json.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
+          disable_search: true
           fail_ci_if_error: false
       - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
