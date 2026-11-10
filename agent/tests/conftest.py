@@ -3,6 +3,7 @@
 import faulthandler
 import os
 import sys
+import tempfile
 import threading
 from types import SimpleNamespace
 
@@ -48,6 +49,16 @@ for _var in (
 os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+# A git command aimed at a directory that is not a repository must fail, not walk
+# up and adopt one: neither the checkout this suite runs from (pytest's working
+# directory is inside it) nor a repository that happens to contain the temp
+# directory, as a version-controlled home directory does.
+os.environ["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(
+    (
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
+        os.path.realpath(tempfile.gettempdir()),
+    )
+)
 
 # Session-wide hang backstop. SIGALRM (pytest-timeout method="signal") fires only
 # in the MAIN thread during a test's *call* phase, so a deadlock in a WORKER

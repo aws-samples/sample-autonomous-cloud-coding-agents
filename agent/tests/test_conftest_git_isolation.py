@@ -21,21 +21,27 @@ from pathlib import Path
 AGENT_DIR = Path(__file__).resolve().parent.parent
 
 _PROBE = """
-import json, subprocess, sys
+import json, os, subprocess, sys
 
 import tests.conftest  # the import under test: it must isolate git before anything else runs
 
-sandbox = sys.argv[1]
+sandbox, enclosing = sys.argv[1:]
 
 
-def git(*args):
-    return subprocess.run(["git", *args], cwd=sandbox, capture_output=True, text=True, check=False)
+def git(*args, cwd=sandbox):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
 git("init", "-q")
+git("init", "-q", cwd=enclosing)
 print(json.dumps({
     "identity_read": git("config", "--get", "user.email").stdout.strip(),
     "user_config_write": git("config", "--global", "user.name", "probe").returncode,
+    # Read-only on purpose: these two start OUTSIDE any repository of their own.
+    "found_from_suite_cwd": git("rev-parse", "--git-dir", cwd=os.getcwd()).stdout.strip(),
+    "found_from_temp_dir": git(
+        "rev-parse", "--git-dir", cwd=os.path.join(enclosing, "tmp", "not-a-repo")
+    ).stdout.strip(),
 }))
 """
 
@@ -48,10 +54,14 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
     system_config.write_text("[user]\n\temail = contributor@system-config.example\n")
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
+    # A repository that CONTAINS the temp directory, as a version-controlled $HOME does.
+    enclosing = tmp_path / "enclosing"
+    (enclosing / "tmp" / "not-a-repo").mkdir(parents=True)
 
     hostile: dict[str, str] = {
         **os.environ,
         "PYTHONPATH": str(AGENT_DIR / "src"),
+        "TMPDIR": str(enclosing / "tmp"),
         "GIT_DIR": str(hook_git_dir),
         "GIT_COMMON_DIR": str(hook_git_dir),
         "GIT_INDEX_FILE": str(hook_git_dir / "index"),
@@ -63,11 +73,12 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
         "GIT_CONFIG_KEY_0": "user.email",
         "GIT_CONFIG_VALUE_0": "contributor@command-line.example",
     }
-    # The child must establish this itself; do not let it inherit this session's.
+    # The child must establish these itself; do not let it inherit this session's.
     hostile.pop("GIT_CONFIG_NOSYSTEM", None)
+    hostile.pop("GIT_CEILING_DIRECTORIES", None)
 
     proc = subprocess.run(
-        [sys.executable, "-c", _PROBE, str(sandbox)],
+        [sys.executable, "-c", _PROBE, str(sandbox), str(enclosing)],
         cwd=str(AGENT_DIR),
         env=hostile,
         capture_output=True,
@@ -87,4 +98,12 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
     )
     assert seen["user_config_write"] != 0 and "probe" not in user_config.read_text(), (
         "`git config --global` wrote to the contributor's user configuration" + fix
+    )
+    assert seen["found_from_suite_cwd"] == "", (
+        f"git discovered the checkout this suite runs from ({seen['found_from_suite_cwd']}), "
+        "so a bare `git config` in a test would write to it" + fix
+    )
+    assert seen["found_from_temp_dir"] == "", (
+        "git walked up from a temp directory that is not a repository and adopted "
+        f"{seen['found_from_temp_dir']}" + fix
     )
