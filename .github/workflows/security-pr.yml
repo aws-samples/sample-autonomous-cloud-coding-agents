@@ -92,7 +92,12 @@ jobs:
           echo "Resolved GITLEAKS_RANGE='${range}'"
           echo "Resolved SEMGREP_MASKING_BASELINE='${baseline}'"
 
+      # Every scanner step carries `if: ${{ !cancelled() }}`, so one failing
+      # scanner does not hide the others. Without it a step runs only while every
+      # earlier step succeeded (the implicit `success()`). A failed step still
+      # fails the job. Put the same condition on every scanner step added here.
       - name: Secret scan (gitleaks, range-scoped)
+        if: ${{ !cancelled() }}
         env:
           GITLEAKS_RANGE: ${{ steps.range.outputs.range }}
         run: mise run security:secrets:range
@@ -103,12 +108,15 @@ jobs:
       # step to slip a masking regression past merge. Do not remove this step or
       # rename the job: the required-check binding is by job name.
       - name: Silent-success masking scan (semgrep, ratcheted to new findings)
+        if: ${{ !cancelled() }}
         env:
           SEMGREP_MASKING_BASELINE: ${{ steps.range.outputs.baseline }}
         run: mise run security:sast:masking:range
 
       - name: Dependency scan (osv-scanner)
+        if: ${{ !cancelled() }}
         run: mise run security:deps
 
       - name: Workflow static analysis (zizmor)
+        if: ${{ !cancelled() }}
         run: mise run security:gh-actions
