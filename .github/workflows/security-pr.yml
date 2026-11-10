@@ -1,17 +1,13 @@
 name: security-pr
-# Fast, required-on-PR security gate (issue #327). Catches the incident class
+# Required-on-PR security gate (issue #327). Catches the incident class
 # (#313: secrets reaching history because the scan only ran weekly) at PR time.
 #
-# Scope is deliberately the FAST scanners only — secrets (range-scoped),
-# dependencies, workflow static-analysis, and the silent-success-masking rule
-# (ratcheted to newly-introduced findings only) — so this stays off the slow
-# path (<~3 min) and can be a required status check without throttling the inner
-# loop. The masking scan is diff-scoped via --baseline-commit: it blocks a PR
-# that ADDS a finding without re-flagging the pre-existing debt on main (#756).
-# The heavy image + full SAST suite (trivy/grype/semgrep auto rules) runs in
-# security.yml and is tracked separately by #235; the full-repo blocking masking
-# scan (security:sast:masking) also runs there and in the pre-push hook. The
-# full-history secret sweep lives in security.yml too.
+# One step per check; the name and comment of each step say what it covers and
+# how it is scoped. The job is a required status check and runs on every pull
+# request and merge-queue entry, so only checks that stay quick belong here.
+# The slower sweeps (full registry SAST, grype, retire, bandit, the trivy image
+# scan and the full-history secret sweep) run weekly in security.yml and are
+# tracked by #235.
 on:
   pull_request: {}
   # Must also run on merge_group so this check reports inside the merge queue;
@@ -112,6 +108,13 @@ jobs:
         env:
           SEMGREP_MASKING_BASELINE: ${{ steps.range.outputs.baseline }}
         run: mise run security:sast:masking:range
+
+      # The same rule over the whole tree: any unsuppressed finding fails, not
+      # only one this pull request adds, so a finding cannot reach main and wait
+      # there for the weekly run. main has been clean since #909.
+      - name: Silent-success masking scan (semgrep, full repository)
+        if: ${{ !cancelled() }}
+        run: mise run security:sast:masking
 
       - name: Dependency scan (osv-scanner)
         if: ${{ !cancelled() }}
