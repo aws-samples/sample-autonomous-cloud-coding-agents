@@ -751,14 +751,6 @@ export type ApprovalScope =
   | `write_path:${string}`
   | `rule:${string}`;
 
-/** Approval row terminal / pending status. */
-export type ApprovalStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'TIMED_OUT'
-  | 'STRANDED';
-
 /** POST /v1/tasks/{task_id}/approve request body. */
 export interface ApprovalRequest {
   readonly request_id: string;
