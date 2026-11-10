@@ -33,7 +33,7 @@ depends = [":sync"]
 run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
 
 [tasks.link-check]
-# Scope: docs/guides/, docs/design/, docs/decisions/, and root *.md files.
-# Not scanned: docs/README.md, agent/, cli/, contracts/, docs/abca-plugin/.
-description = "Check for broken links in Markdown sources"
+# Scope: every Markdown file in the repository that git tracks.
+# Not scanned: the generated mirrors in src/content/docs (astro build validates those).
+description = "Check for broken relative links in all Markdown sources"
 run = "bash scripts/link-check.sh"

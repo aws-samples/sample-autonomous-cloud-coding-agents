@@ -11,6 +11,7 @@ mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
 mise //docs:test            # tests for the generator (scripts/sync-starlight.test.mjs)
 mise //docs:build           # sync + generator tests + astro check + Astro/Starlight build; fails on a broken internal link
 mise //docs:check           # sync + astro check alone (MDX/components)
+mise //docs:link-check      # relative links in every tracked Markdown file of the repository
 ```
 
 Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installed.
@@ -20,6 +21,7 @@ Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installe
 - **Sync + build:** `mise //docs:build` (required before PR if you touched guides, design, ADRs, or `CONTRIBUTING.md`)
 - **Sync only:** `mise //docs:sync` then `git diff docs/src/content/docs/` — commit mirror changes alongside sources
 - **Astro check:** part of `mise //docs:build`; on its own `mise //docs:check` (or `cd docs && npm run docs:check`)
+- **Links:** `mise //docs:link-check` checks relative links in all tracked Markdown sources, repository-wide (it reports the source file; it does not check an `#anchor` into another file). `mise //docs:build` checks links and anchors on the rendered site
 
 CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do not match what sync produces.
 
