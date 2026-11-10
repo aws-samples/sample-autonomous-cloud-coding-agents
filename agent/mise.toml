@@ -10,7 +10,7 @@ _.python.venv = { path = ".venv", create = true }
 PROJECT_NAME = "{{ config_root | basename }}"
 
 [tasks]
-install = "uv sync --all-groups"
+install = "uv sync --locked --all-groups"
 
 [tasks.upgrade]
 description = "Refresh uv.lock within the pins declared in pyproject.toml (exact pins, incl. cedarpy, are not rewritten)"
