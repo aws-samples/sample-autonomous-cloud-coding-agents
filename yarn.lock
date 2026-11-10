@@ -1738,6 +1738,11 @@
   resolved "https://registry.yarnpkg.com/@bruits/satteri-darwin-arm64/-/satteri-darwin-arm64-0.9.4.tgz#973c67ced8b8a7ce455648235c602a4f47027aa8"
   integrity sha512-W3MSUkr2mZRR8Stoe+lqNAyzQzRuFMU8WffV9IvFSxTok0LGWR0ZZQPLELU4QTRiUbhL2Y4VUP9vV7pj8rHjgg==
 
+"@bruits/satteri-darwin-arm64@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-darwin-arm64/-/satteri-darwin-arm64-0.9.5.tgz#a5c5965b9eaa1d06a8ea924fd9b4ab018f4b5673"
+  integrity sha512-iw4nZgx9v30lWo/MTngQqi1pI78KI0DnkSm+lVJGYdmPLgAyDNJigVhpG42/Iq55A6c1Ll8q66ljyyRiQUxwow==
+
 "@bruits/satteri-darwin-x64@0.10.5":
   version "0.10.5"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-darwin-x64/-/satteri-darwin-x64-0.10.5.tgz#8a7d49dea7e05b6756ddcd3e748afc7c76f6f158"
@@ -1747,6 +1752,11 @@
   version "0.9.4"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-darwin-x64/-/satteri-darwin-x64-0.9.4.tgz#3328e3ab3c6070b4d4df7db06778c6cc2b11e7dd"
   integrity sha512-DXOuuaE1lsv7mpk2mOvGrzqoEWEvOIZEO/fXVa7zfM23Iob+CBjBkRAMwpHA4pmZ3j6Gj7WJzPKw0kQ7w741AQ==
+
+"@bruits/satteri-darwin-x64@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-darwin-x64/-/satteri-darwin-x64-0.9.5.tgz#3bcf639c73c83828a7e37abbf8019f6a7eb9fe58"
+  integrity sha512-6T26Z5Kf3cFW2PSlk9p7zT7yVxvuBSiJvYyz9u8KjYwMTqZyIDOj2wDyNpxKV4+6yUVG7rddq2QwvG/8LJA2+Q==
 
 "@bruits/satteri-linux-arm64-gnu@0.10.5":
   version "0.10.5"
@@ -1758,6 +1768,11 @@
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-arm64-gnu/-/satteri-linux-arm64-gnu-0.9.4.tgz#4005b9d816d76f81ace2d0f448f412518a727117"
   integrity sha512-gJxU9rGGoqIznSEgEzpjxkry24jeHuMpoo1tCIAhHYh7WaD3j5F8zt3jmHxEaN1Uwa+K5+wFgIR2uIGOnMzEmw==
 
+"@bruits/satteri-linux-arm64-gnu@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-arm64-gnu/-/satteri-linux-arm64-gnu-0.9.5.tgz#085dd69c01f9f89f6413d802d018e304714b9572"
+  integrity sha512-u51id17uJwNEMK9nBlICsq6U31c+XVqQueVBkwRIzZG+gMpS8TOJctt5h5Wz33Z8xnMdTd+adtACVz0yHgGuOA==
+
 "@bruits/satteri-linux-arm64-musl@0.10.5":
   version "0.10.5"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-arm64-musl/-/satteri-linux-arm64-musl-0.10.5.tgz#3fed1da7f6a5da0f0659dd09a67816ac46b12e2e"
@@ -1767,6 +1782,11 @@
   version "0.9.4"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-arm64-musl/-/satteri-linux-arm64-musl-0.9.4.tgz#7cdbf7813c7d17e4e677cb5357dc2f849cd3c8ba"
   integrity sha512-Wjzu9hmmAbfmDkBfPI1VdZygJtYz9uYZQnkEyrXi6S2JFi+2pXQ1A5irj38bqm0IZmWcTbk0cVG4NZnPdtVNJA==
+
+"@bruits/satteri-linux-arm64-musl@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-arm64-musl/-/satteri-linux-arm64-musl-0.9.5.tgz#62db345e51a7a8aec204a0f36f38dcb5bd37ae9d"
+  integrity sha512-v39HxiwGC5Rqm01HksP6+5Y+xKLPlsuVFgIgpEAo+SiQ22c+mJVhS3u7Z6ePAKdhL5NJoK1xq70kLz3L13AhpQ==
 
 "@bruits/satteri-linux-x64-gnu@0.10.5":
   version "0.10.5"
@@ -1778,6 +1798,11 @@
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-x64-gnu/-/satteri-linux-x64-gnu-0.9.4.tgz#d31d2ab11e06f7fdbee806178ebf90051d7ed396"
   integrity sha512-MR1Q+wMx65FQlbSV7cRqWW87Knp0zkoaIV55Dt+xZl028wJABXEPEEmG3670SLq7lVZvcGIDwCgSg2kCYxvRwA==
 
+"@bruits/satteri-linux-x64-gnu@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-x64-gnu/-/satteri-linux-x64-gnu-0.9.5.tgz#42eab661d5281010b8f203be5feafcfd3a695204"
+  integrity sha512-F3uO8uFp3pAP5ZGXttwvh57GS7s0lL953tnNdyI2gRyP4kOOkp6pyGojNJzCjkDvWI2Cvb9iNrKok3aqQPauAw==
+
 "@bruits/satteri-linux-x64-musl@0.10.5":
   version "0.10.5"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-x64-musl/-/satteri-linux-x64-musl-0.10.5.tgz#af2a7ac9450513781707ab26d5e780e1bf630a84"
@@ -1787,6 +1812,11 @@
   version "0.9.4"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-x64-musl/-/satteri-linux-x64-musl-0.9.4.tgz#47bd2269e1a60f81eb871f016d24bfd31163cf41"
   integrity sha512-T4gxhXve3zyNAZesrXAd/rDZOGRkbfFIUFld4TGsw6BsjoIteCcDji6IMqeXyaWEVSykY2X8Eid2hr6aXGYAaw==
+
+"@bruits/satteri-linux-x64-musl@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-linux-x64-musl/-/satteri-linux-x64-musl-0.9.5.tgz#50e7648e9394f9b62c7d643024ef06a69a1d6452"
+  integrity sha512-bicEqglLlz++mWyADaZoP0JY20s4vDfLjaPYgQqC+NI4zZLTOOg1T4GB8aqtc822Pqji8SQBmSrTb7CrP8i08Q==
 
 "@bruits/satteri-wasm32-wasi@0.10.5":
   version "0.10.5"
@@ -1806,6 +1836,15 @@
     "@emnapi/runtime" "1.11.1"
     "@napi-rs/wasm-runtime" "^1.1.6"
 
+"@bruits/satteri-wasm32-wasi@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-wasm32-wasi/-/satteri-wasm32-wasi-0.9.5.tgz#cd24ffbe1650577e62bed7acd21c48b4c5ebad1d"
+  integrity sha512-zauAuMwfPnKPUkd4AFixRFpXdgKwP2mKgxrIIo2gJzW0/ZneF9dbHnLkojSpaBnCCp7VUL1hIi5WWZvB1CqmAQ==
+  dependencies:
+    "@emnapi/core" "1.11.1"
+    "@emnapi/runtime" "1.11.1"
+    "@napi-rs/wasm-runtime" "^1.1.6"
+
 "@bruits/satteri-win32-arm64-msvc@0.10.5":
   version "0.10.5"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-arm64-msvc/-/satteri-win32-arm64-msvc-0.10.5.tgz#3b6cab10dd12e4294adbcee9dcdb57b250d12a52"
@@ -1816,6 +1855,11 @@
   resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-arm64-msvc/-/satteri-win32-arm64-msvc-0.9.4.tgz#5a65f04cb258d52b27cb4a0c724ebd13d3310441"
   integrity sha512-E1ZPQbgCtFKiU7pFYVndynvY7ne4coeVDUgnVThErSFlJ2ceQCBZrfRTD1lzrIDy63Bbqo+g/cZY9duw+JYjIw==
 
+"@bruits/satteri-win32-arm64-msvc@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-arm64-msvc/-/satteri-win32-arm64-msvc-0.9.5.tgz#0d83852535f63c50ab90253fe209e5ce5cffeb09"
+  integrity sha512-SrfE7NEsgZjBvU3c+RR6oQRu0ToXY5uVJEbieXEF0YTctIV2zAVlbaMjWLts074QCgh3a+XHWkR/lWh2VH2LUg==
+
 "@bruits/satteri-win32-x64-msvc@0.10.5":
   version "0.10.5"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-x64-msvc/-/satteri-win32-x64-msvc-0.10.5.tgz#226e591e8c63d32e75a80d86343be7064e79c1a8"
@@ -1825,6 +1869,11 @@
   version "0.9.4"
   resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-x64-msvc/-/satteri-win32-x64-msvc-0.9.4.tgz#0fa6a1f1f9a3a11e73098075285c9323ac045088"
   integrity sha512-5I7SiarsNdAUuhJb50CXJPTwr/ECVrBoU+fymoLjChK5fW//+srhY4lstcNTzgFRtQSYfVtm4OQZz16CVMeTeA==
+
+"@bruits/satteri-win32-x64-msvc@0.9.5":
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/@bruits/satteri-win32-x64-msvc/-/satteri-win32-x64-msvc-0.9.5.tgz#1548a7573b58469dc633ecc3840aeac194893710"
+  integrity sha512-5Kw9ZAtTGS8WHizyn+CJhjjfIQrw+7jcZodpmpXJjefnO15M8UexIi6JR2E5thyvsmHyhL6ZDDMUNR4bKJPd4g==
 
 "@capsizecss/unpack@^4.0.0":
   version "4.0.1"
@@ -4141,6 +4190,11 @@
   dependencies:
     undici-types "~7.18.0"
 
+"@types/picomatch@^4.0.2":
+  version "4.0.3"
+  resolved "https://registry.yarnpkg.com/@types/picomatch/-/picomatch-4.0.3.tgz#d92bbf24166478c5457c8bb9ba41a7f49d55e094"
+  integrity sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==
+
 "@types/react-dom@^19.3.0":
   version "19.3.0"
   resolved "https://registry.yarnpkg.com/@types/react-dom/-/react-dom-19.3.0.tgz#90294a9266efd928a5266f2110d60d5dba5015d2"
@@ -4703,6 +4757,13 @@ ansi-escapes@^4.3.2:
   integrity sha512-gKXj5ALrKWQLsYG9jlTRmR/xKluxHV+Z9QEwNIgCfM1/uwPMCuzVVnh5mwTd+OuBZcwSIMbqssNWRm1lE51QaQ==
   dependencies:
     type-fest "^0.21.3"
+
+ansi-escapes@^7.0.0:
+  version "7.3.0"
+  resolved "https://registry.yarnpkg.com/ansi-escapes/-/ansi-escapes-7.3.0.tgz#5395bb74b2150a4a1d6e3c2565f4aeca78d28627"
+  integrity sha512-BvU8nYgGQBxcmMuEeUEmNTvrMVjJNSH7RgW24vXexN4Ven6qCvy4TntnvlnwnMLTVlcRQQdbRY8NKnaIoeWDNg==
+  dependencies:
+    environment "^1.0.0"
 
 ansi-regex@^5.0.1:
   version "5.0.1"
@@ -5652,6 +5713,11 @@ entities@^9.0.0:
   resolved "https://registry.yarnpkg.com/entities/-/entities-9.0.0.tgz#c45df3cdbc5ce805474759f4ec4ea7907d9d5477"
   integrity sha512-oJFNDJg3kTPwAD1cNn2+WmUq4wFoo09npc3Ydf1D7ED4smRiWrsKnaLxykrTWgyGEcusc87P5dxlAleol9kpkg==
 
+environment@^1.0.0:
+  version "1.1.0"
+  resolved "https://registry.yarnpkg.com/environment/-/environment-1.1.0.tgz#8e86c66b180f363c7ab311787e0259665f45a9f1"
+  integrity sha512-xUtoPkMggbz0MPyPiIWr1Kp4aeWJjDZ6SMvURhimjdZgsRuDplF5/s9hcgGhyXMhs+6vpnuoiZ2kFiu3FMnS8Q==
+
 error-ex@^1.3.1:
   version "1.3.4"
   resolved "https://registry.yarnpkg.com/error-ex/-/error-ex-1.3.4.tgz#b3a8d8bb6f92eecc1629e3e27d3c8607a8a32414"
@@ -6371,6 +6437,11 @@ has-flag@^4.0.0:
   resolved "https://registry.yarnpkg.com/has-flag/-/has-flag-4.0.0.tgz#944771fd9c81c81265c4d6941860da06bb59479b"
   integrity sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==
 
+has-flag@^5.0.1:
+  version "5.0.1"
+  resolved "https://registry.yarnpkg.com/has-flag/-/has-flag-5.0.1.tgz#5483db2ae02a472d1d0691462fc587d1843cd940"
+  integrity sha512-CsNUt5x9LUdx6hnk/E2SZLsDyvfqANZSUq4+D3D8RzDJ2M+HDTIkF60ibS1vHaK55vzgiZw1bEPFG9yH7l33wA==
+
 hast-util-embedded@^3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/hast-util-embedded/-/hast-util-embedded-3.0.0.tgz#be4477780fbbe079cdba22982e357a0de4ba853e"
@@ -6793,6 +6864,11 @@ is-absolute-url@^4.0.1:
   version "4.0.1"
   resolved "https://registry.yarnpkg.com/is-absolute-url/-/is-absolute-url-4.0.1.tgz#16e4d487d4fded05cfe0685e53ec86804a5e94dc"
   integrity sha512-/51/TKE88Lmm7Gc4/8btclNXWS+g50wXhYJq8HWIBAGUBnoAdRu1aXeh364t/O7wXDAcTJDP8PNuNKWUDWie+A==
+
+is-absolute-url@^5.0.0:
+  version "5.0.0"
+  resolved "https://registry.yarnpkg.com/is-absolute-url/-/is-absolute-url-5.0.0.tgz#284b172dc39b4697f0e7f8f58bda4e84c01eb206"
+  integrity sha512-sdJyNpBnQHuVnBunfzjAecOhZr2+A30ywfFvu3EnxtKLUWfwGgyWUmqHbGZiU6vTfHpCPm5GvLe4BAvlU9n8VQ==
 
 is-alphabetical@^2.0.0:
   version "2.0.1"
@@ -7854,6 +7930,24 @@ mdast-util-mdx-jsx@^3.0.0:
     unist-util-stringify-position "^4.0.0"
     vfile-message "^4.0.0"
 
+mdast-util-mdx-jsx@^3.2.0:
+  version "3.2.1"
+  resolved "https://registry.yarnpkg.com/mdast-util-mdx-jsx/-/mdast-util-mdx-jsx-3.2.1.tgz#40e60b71a5b822b7cb278fac4be2338ae64d7337"
+  integrity sha512-oXp1GIa+E9IwIs3a106+tr3Bz2MlTTBvlXjOZMoIat11kk7vjqgmBnksB9WHmWv+gZh7k3IUgpAHlwHB7DH4GQ==
+  dependencies:
+    "@types/estree-jsx" "^1.0.0"
+    "@types/hast" "^3.0.0"
+    "@types/mdast" "^4.0.0"
+    "@types/unist" "^3.0.0"
+    ccount "^2.0.0"
+    devlop "^1.1.0"
+    mdast-util-from-markdown "^2.0.0"
+    mdast-util-to-markdown "^2.0.0"
+    parse-entities "^4.0.0"
+    stringify-entities "^4.0.0"
+    unist-util-stringify-position "^4.0.0"
+    vfile-message "^4.0.0"
+
 mdast-util-mdx@^3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/mdast-util-mdx/-/mdast-util-mdx-3.0.0.tgz#792f9cf0361b46bee1fdf1ef36beac424a099c41"
@@ -7885,7 +7979,7 @@ mdast-util-phrasing@^4.0.0:
     "@types/mdast" "^4.0.0"
     unist-util-is "^6.0.0"
 
-mdast-util-to-hast@^13.0.0:
+mdast-util-to-hast@^13.0.0, mdast-util-to-hast@^13.2.1:
   version "13.2.1"
   resolved "https://registry.yarnpkg.com/mdast-util-to-hast/-/mdast-util-to-hast-13.2.1.tgz#d7ff84ca499a57e2c060ae67548ad950e689a053"
   integrity sha512-cctsq2wp5vTsLIcaymblUriiTcZd0CwWtCbLvrOzYCDZoWyMNV8sZ7krj09FSnsiJi3WVsHLM4k6Dq/yaPyCXA==
@@ -9479,6 +9573,26 @@ satteri@^0.9.1:
     "@bruits/satteri-win32-arm64-msvc" "0.9.4"
     "@bruits/satteri-win32-x64-msvc" "0.9.4"
 
+satteri@^0.9.3:
+  version "0.9.5"
+  resolved "https://registry.yarnpkg.com/satteri/-/satteri-0.9.5.tgz#27c87ebf7608bb161f4cb5108b961c8438c188b7"
+  integrity sha512-ZuWVl+vnM64y+/TtX8Kosv2c00W+hLQiiwnEL6H0UKVVrxFqMw4D2CJHHQaouVd89OAhtBBfjWLqhKi3TVUV4w==
+  dependencies:
+    "@types/estree-jsx" "^1.0.5"
+    "@types/hast" "^3.0.4"
+    "@types/mdast" "^4.0.4"
+    "@types/unist" "^3.0.3"
+  optionalDependencies:
+    "@bruits/satteri-darwin-arm64" "0.9.5"
+    "@bruits/satteri-darwin-x64" "0.9.5"
+    "@bruits/satteri-linux-arm64-gnu" "0.9.5"
+    "@bruits/satteri-linux-arm64-musl" "0.9.5"
+    "@bruits/satteri-linux-x64-gnu" "0.9.5"
+    "@bruits/satteri-linux-x64-musl" "0.9.5"
+    "@bruits/satteri-wasm32-wasi" "0.9.5"
+    "@bruits/satteri-win32-arm64-msvc" "0.9.5"
+    "@bruits/satteri-win32-x64-msvc" "0.9.5"
+
 sax@1.6.1:
   version "1.6.1"
   resolved "https://registry.yarnpkg.com/sax/-/sax-1.6.1.tgz#4c23cf608c0b693ab54b4b5888e92cfe977b9843"
@@ -9697,6 +9811,24 @@ stack-utils@^2.0.6:
   dependencies:
     escape-string-regexp "^2.0.0"
 
+starlight-links-validator@0.25.3:
+  version "0.25.3"
+  resolved "https://registry.yarnpkg.com/starlight-links-validator/-/starlight-links-validator-0.25.3.tgz#b4d8115df637f23e0a03bda4ad2ebd386df989dc"
+  integrity sha512-kNE2F8fwdq7r8l6Zx2nH3SDnLlVu2VRmbmyV/nSpbtWzf9+S81H2VBZ6GRevIKbm8qOoYSZvXzNATT8ZXw9bmw==
+  dependencies:
+    "@astrojs/markdown-satteri" "^0.3.2"
+    "@types/picomatch" "^4.0.2"
+    github-slugger "^2.0.0"
+    hast-util-from-html "^2.0.3"
+    is-absolute-url "^5.0.0"
+    mdast-util-mdx-jsx "^3.2.0"
+    mdast-util-to-hast "^13.2.1"
+    picomatch "^4.0.3"
+    satteri "^0.9.3"
+    terminal-link "^5.0.0"
+    unist-util-visit "^5.1.0"
+    yaml "^2.8.3"
+
 std-env@^4.3.0:
   version "4.3.0"
   resolved "https://registry.yarnpkg.com/std-env/-/std-env-4.3.0.tgz#4e7231b61fd83219aa7f76f71fa8818b07e41321"
@@ -9811,6 +9943,11 @@ style-to-object@1.0.14:
   dependencies:
     inline-style-parser "0.2.7"
 
+supports-color@^10.2.2:
+  version "10.2.2"
+  resolved "https://registry.yarnpkg.com/supports-color/-/supports-color-10.2.2.tgz#466c2978cc5cd0052d542a0b576461c2b802ebb4"
+  integrity sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g==
+
 supports-color@^7.1.0:
   version "7.2.0"
   resolved "https://registry.yarnpkg.com/supports-color/-/supports-color-7.2.0.tgz#1b7dcdcb32b8138801b3e478ba6a51caa89648da"
@@ -9824,6 +9961,14 @@ supports-color@^8.1.1:
   integrity sha512-MpUEN2OodtUzxvKQl72cUF7RQ5EiHsGvSsVG0ia9c5RbWGL2CI4C7EpPS8UTBIplnlzZiNuV56w+FuNxy3ty2Q==
   dependencies:
     has-flag "^4.0.0"
+
+supports-hyperlinks@^4.1.0:
+  version "4.6.0"
+  resolved "https://registry.yarnpkg.com/supports-hyperlinks/-/supports-hyperlinks-4.6.0.tgz#bf0067537e19a127f194a1d89fb24aaa151ad34b"
+  integrity sha512-FL/q/YePS4tFFTNiBOR+zPk2ZrKheqNtmTJ/9OUZ4e1wKHJofDbGQSmSsxS0XNnabSkqexryCaXGvEKz1vf9UQ==
+  dependencies:
+    has-flag "^5.0.1"
+    supports-color "^10.2.2"
 
 svgo@^4.0.2, svgo@^4.1.0:
   version "4.1.0"
@@ -9854,6 +9999,14 @@ tagged-tag@^1.0.0:
   version "1.0.0"
   resolved "https://registry.yarnpkg.com/tagged-tag/-/tagged-tag-1.0.0.tgz#a0b5917c2864cba54841495abfa3f6b13edcf4d6"
   integrity sha512-yEFYrVhod+hdNyx7g5Bnkkb0G6si8HJurOoOEgC8B/O0uXLHlaey/65KRv6cuWBNhBgHKAROVpc7QyYqE5gFng==
+
+terminal-link@^5.0.0:
+  version "5.0.0"
+  resolved "https://registry.yarnpkg.com/terminal-link/-/terminal-link-5.0.0.tgz#f0447c8940418ab49b9b9bbc47a4ad2fa8ba81e7"
+  integrity sha512-qFAy10MTMwjzjU8U16YS4YoZD+NQLHzLssFMNqgravjbvIPNiqkGFR4yjhJfmY9R5OFU7+yHxc6y+uGHkKwLRA==
+  dependencies:
+    ansi-escapes "^7.0.0"
+    supports-hyperlinks "^4.1.0"
 
 test-exclude@^6.0.0:
   version "6.0.0"

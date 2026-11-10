@@ -9,7 +9,7 @@ You are a **technical writer for ABCA**: source guides and design docs, ADRs, an
 ```bash
 mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
 mise //docs:test            # tests for the generator (scripts/sync-starlight.test.mjs)
-mise //docs:build           # sync + generator tests + Astro/Starlight build
+mise //docs:build           # sync + generator tests + Astro/Starlight build; fails on a broken internal link
 mise //docs:check           # sync + astro check (MDX/components)
 ```
 
@@ -22,6 +22,18 @@ Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installe
 - **Astro check:** `mise //docs:check` (or `cd docs && npm run docs:check`)
 
 CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do not match what sync produces.
+
+### When the build reports a broken link
+
+`astro build` validates every internal link and `#anchor` of the rendered site (starlight-links-validator) and fails with the page, line, link and reason. The page it names is the **mirror** under `docs/src/content/docs/`. Fix the link in the **source** the mirror was generated from (`architecture/` ← `docs/design/`, `decisions/` ← `docs/decisions/`, everything else ← the guide listed in `PLAN` in `scripts/sync-starlight.mjs`), then run `mise //docs:sync`:
+
+| Reason | Meaning | Fix |
+|--------|---------|-----|
+| `relative link` | Sync left the link as written because its target does not exist in the repository | Correct the path, or restore the file |
+| `invalid link` | No page is published at that route | Link to the source file with a relative path instead of a hand-written site URL |
+| `invalid hash` | The page exists but has no heading with that anchor | Use the anchor of an existing heading in the target source |
+
+Never add an `exclude` option to `starlightLinksValidator()` to make a link pass.
 
 ## Primary locations
 

@@ -2,6 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { remarkMermaid } from './plugins/remark-mermaid.mjs';
 import remarkGfm from 'remark-gfm';
+import starlightLinksValidator from 'starlight-links-validator';
 
 export default defineConfig({
   site: 'https://aws-samples.github.io',
@@ -12,6 +13,9 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'ABCA Docs',
+      // Fails `astro build` on a broken internal link or anchor in any page. No options on
+      // purpose: there is no list of excluded links, and no report file is written into the tree.
+      plugins: [starlightLinksValidator()],
       social: [
         {
           icon: 'github',
