@@ -88,26 +88,72 @@ stopwords = ["gitleaks:allow account-id"]
 # placeholder (unlike the four in the block above), so allowlisting it repo-wide
 # would mean a future real account that happens to match goes unflagged forever.
 # Confined to this path, the exemption cannot outlive its cause.
+#
+# `condition = "AND"` is what confines it. Without a condition gitleaks ORs
+# `regexes` and `paths`: the value was then allowed in every file, and every
+# 12-digit run was allowed in this test file. `.gitleaksignore` is listed because
+# a comment there quotes the value, and that line is in main's history (#733).
 description = "Retired foreign-account test fixture from #645; superseded by 111122223333 at HEAD."
+condition = "AND"
 regexes = [
     '''999988887777''',
 ]
 paths = [
     '''(.*/)?agent/tests/test_server\.py$''',
+    '''^\.gitleaksignore$''',
+]
+
+# False positives where a 12-digit run is NOT an AWS account ID. Each block
+# below exempts one shape in one place (`condition = "AND"`: the line or value
+# AND the path must match), so a real account ID in the same files is reported.
+
+[[rules.allowlists]]
+# GitHub Action commit-SHA pins contain digit runs (e.g. jdx/mise-action
+# `…981980618f…` matches `629881980618`). Only `uses:` lines pinned by a
+# 40-character SHA are exempt.
+description = "Workflow files: 12-digit runs inside action commit-SHA pins."
+condition = "AND"
+regexTarget = "line"
+regexes = [
+    '''uses:\s*\S+@[0-9a-f]{40}''',
+]
+paths = [
+    '''^\.github/workflows/.*\.ya?ml$''',
 ]
 
 [[rules.allowlists]]
-# False positives where a 12-digit run is NOT an AWS account ID:
-#  - GitHub Action commit-SHA pins contain digit runs (e.g. jdx/mise-action
-#    `…981980618f…` matches `629881980618`).
-#  - threat-composer artifacts use v4 UUIDs whose final node can be all digits
-#    (e.g. `f30d02f6-9750-46ad-b710-398303478932`).
-#  - Test fixtures use the RFC-4122 example UUID `…-446655440000`.
-# These files contain no real account IDs; scope the exemption by path.
-description = "Non-account 12-digit runs: workflow SHA pins, threat-composer UUIDs, test-fixture UUIDs."
-regexTarget = "line"
+# threat-composer artifacts use v4 UUIDs whose final node can be all digits
+# (e.g. `f30d02f6-9750-46ad-b710-398303478932`) and embed base64 images. These
+# generated files contain no real account IDs; the exemption stays path-wide.
+description = "threat-composer artifacts: UUIDs and embedded base64 images."
 paths = [
-    '''^\.github/workflows/.*\.ya?ml$''',
     '''^\.threat-composer/.*\.json$''',
+]
+
+[[rules.allowlists]]
+# CDK tests use UUID fixtures whose final node is all digits (e.g. the RFC-4122
+# example `…-446655440000`). Only lines that carry such a UUID are exempt.
+description = "CDK tests: UUID fixtures whose final node is all digits."
+condition = "AND"
+regexTarget = "line"
+regexes = [
+    '''[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9]{12}''',
+]
+paths = [
+    '''^cdk/test/.*\.test\.ts$''',
+]
+
+[[rules.allowlists]]
+# Two fixture values that CDK tests already use and that the path-wide exemption
+# used to cover: an all-nines stand-in account and a 12-digit GitHub deployment
+# id. Exempt by exact value in CDK tests only; new tests should use one of the
+# AWS-published placeholders listed at the top of this rule.
+description = "CDK tests: all-nines account fixture and a GitHub deployment id fixture."
+condition = "AND"
+regexes = [
+    '''^999999999999$''',
+    '''^104550173395$''',
+]
+paths = [
     '''^cdk/test/.*\.test\.ts$''',
 ]
