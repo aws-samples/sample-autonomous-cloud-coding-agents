@@ -26,19 +26,19 @@ echo "Project: $PROJECT_NAME"
 
 [tasks.lint]
 description = "Lint with ruff"
-run = "uvx ruff check"
+run = "uv run ruff check"
 
 [tasks."lint:fix"]
 description = "Lint and auto-fix"
-run = "uvx ruff check --fix"
+run = "uv run ruff check --fix"
 
 [tasks.format]
 description = "Format with ruff"
-run = "uvx ruff format"
+run = "uv run ruff format"
 
 [tasks."format:check"]
 description = "Check formatting"
-run = "uvx ruff format --check"
+run = "uv run ruff format --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
