@@ -116,6 +116,17 @@ jobs:
         if: ${{ !cancelled() }}
         run: mise run security:sast:masking
 
+      # The registry rule packs of security:sast, scoped with --baseline-commit
+      # to the findings this pull request adds; the full scan stays weekly. The
+      # packs are downloaded from semgrep.dev at run time, so this required job
+      # needs the registry: when it is unreachable the step fails, it never
+      # passes without rules.
+      - name: SAST (semgrep registry packs, ratcheted to new findings)
+        if: ${{ !cancelled() }}
+        env:
+          SEMGREP_SAST_BASELINE: ${{ steps.range.outputs.baseline }}
+        run: mise run security:sast:range
+
       - name: Dependency scan (osv-scanner)
         if: ${{ !cancelled() }}
         run: mise run security:deps

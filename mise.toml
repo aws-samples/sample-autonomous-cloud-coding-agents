@@ -167,6 +167,27 @@ run = "gitleaks git . --staged --no-banner --redact"
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
 
+[tasks."security:sast:range"]
+description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
+# The rule packs of security:sast (keep the two --config lists identical), but
+# --baseline-commit reports only findings a branch ADDS relative to the
+# baseline. A rule the registry adds or changes therefore cannot fail code a
+# pull request did not touch (#532, #540); the full scan stays in security.yml.
+# Defaults the baseline to origin/main so the task is safe to run anywhere; the
+# per-PR CI job sets SEMGREP_SAST_BASELINE to the PR base SHA.
+#
+# The packs are downloaded from semgrep.dev on every run, so the task must fail
+# when they do not arrive. Semgrep exits non-zero by itself when the registry is
+# unreachable or a pack cannot be loaded; there is no --quiet here because it
+# hides that error. A registry that answers with EMPTY packs leaves semgrep at
+# exit 0 with nothing checked, so the last command fails unless the SARIF
+# report lists at least one loaded rule.
+run = [
+  "mkdir -p test-reports && rm -f test-reports/semgrep-sast-range.sarif",
+  "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --baseline-commit \"${SEMGREP_SAST_BASELINE:-origin/main}\" --sarif-output=test-reports/semgrep-sast-range.sarif --error .",
+  '''node -e 'const sarif = JSON.parse(require("fs").readFileSync("test-reports/semgrep-sast-range.sarif", "utf8")); if (!sarif.runs[0].tool.driver.rules.length) { console.error("security:sast:range: semgrep loaded 0 rules, so nothing was checked (did semgrep.dev answer with empty rule packs?). Rerun the task; do not treat this run as a pass."); process.exit(1); }' ''',
+]
+
 [tasks."security:sast:masking"]
 description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
 # `semgrep test` validates the rules against their .semgrep/ fixtures first.
