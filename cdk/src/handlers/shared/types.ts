@@ -1443,10 +1443,6 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
 
-/** Default `approval_timeout_s` when the submit payload omits it.
- *  Sourced from ``contracts/constants.json`` (S9). */
-export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
-
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap
  * (design decision #13, §4 step 5). Blueprints may override via

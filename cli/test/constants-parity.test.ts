@@ -40,7 +40,6 @@ import {
 import { LINEAR_OAUTH_SCOPES } from '../src/linear-oauth';
 import { LINEAR_VAULT_CUSTOM_PARAMS_FOR_TEST } from '../src/linear-vault';
 import {
-  APPROVAL_TIMEOUT_S_DEFAULT,
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
   MAX_BUDGET_USD_MAX,
@@ -88,7 +87,6 @@ describe('CLI constants parity with contracts/constants.json', () => {
   test('approval_timeout_s bounds match the contract', () => {
     expect(APPROVAL_TIMEOUT_S_MIN).toBe(contracts.approval_timeout_s.min);
     expect(APPROVAL_TIMEOUT_S_MAX).toBe(contracts.approval_timeout_s.max);
-    expect(APPROVAL_TIMEOUT_S_DEFAULT).toBe(contracts.approval_timeout_s.default);
   });
 
   test('max_budget_usd bounds match the contract', () => {

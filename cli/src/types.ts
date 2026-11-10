@@ -844,9 +844,6 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 /** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
 
-/** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
-
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */
 export const MAX_BUDGET_USD_MIN = 0.01;
