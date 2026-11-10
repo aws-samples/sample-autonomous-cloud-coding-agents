@@ -389,7 +389,6 @@ describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', (
   function loadStrategyWithBucket(): {
     EcsComputeStrategy: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').EcsComputeStrategy;
     deleteEcsPayload: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').deleteEcsPayload;
-    ecsPayloadKey: typeof import('../../../../src/handlers/shared/strategies/ecs-strategy').ecsPayloadKey;
   } {
     let mod!: ReturnType<typeof loadStrategyWithBucket>;
     jest.isolateModules(() => {
@@ -466,14 +465,13 @@ describe('EcsComputeStrategy with ECS_PAYLOAD_BUCKET (S3-pointer path, #502)', (
 
   test('deleteEcsPayload deletes the task payload object', async () => {
     mockS3Send.mockResolvedValueOnce({});
-    const { deleteEcsPayload, ecsPayloadKey } = loadStrategyWithBucket();
+    const { deleteEcsPayload } = loadStrategyWithBucket();
     await deleteEcsPayload('TASK001');
     expect(mockS3Send).toHaveBeenCalledTimes(1);
     const del = mockS3Send.mock.calls[0][0];
     expect(del._type).toBe('DeleteObject');
     expect(del.input.Bucket).toBe(PAYLOAD_BUCKET);
-    expect(del.input.Key).toBe(ecsPayloadKey('TASK001'));
-    expect(ecsPayloadKey('TASK001')).toBe('TASK001/payload.json');
+    expect(del.input.Key).toBe('TASK001/payload.json');
   });
 
   test('deleteEcsPayload swallows S3 errors (best-effort — lifecycle is the backstop)', async () => {

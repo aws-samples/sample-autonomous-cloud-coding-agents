@@ -93,7 +93,7 @@ const INLINE_PAYLOAD_WARN_BYTES = 6144;
  * task-id prefix; deleted by the orchestrator at finalize (see
  * ``deleteEcsPayload``), with the bucket's 1-day lifecycle rule as a backstop.
  */
-export function ecsPayloadKey(taskId: string): string {
+function ecsPayloadKey(taskId: string): string {
   return `${taskId}/payload.json`;
 }
 
