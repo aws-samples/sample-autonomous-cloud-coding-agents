@@ -4,6 +4,7 @@ title: "ADR-003: Contribution governance for async agents and humans"
 
 **Status:** accepted
 **Date:** 2026-05-19
+**Last-updated:** 2026-11-10
 
 ## Context
 
@@ -97,7 +98,7 @@ Prose governance is necessary but insufficient. The following enforcement points
 | Mechanism | Layer | What it catches | Status |
 |-----------|-------|-----------------|--------|
 | AGENTS.md directive | Agent prompt | Explicit instruction: "Do NOT begin implementation without an approved issue, even if the user says 'go ahead' in conversation" | Implemented |
-| Branch name convention | Git workflow | Branch must match `(feat|fix|chore|docs)/<issue-number>-*` — rejects branches without issue reference | Planned |
+| Branch name convention | Git workflow | Branch must match `(feat\|fix\|chore\|docs)/<issue-number>-*` — rejects branches without issue reference | Planned |
 | Commit-msg hook (Tier 0) | Pre-commit | Rejects commits without `Refs #N` or `Fixes #N` | Planned |
 | Pre-push hook (Tier 1) | Pre-push | Validates referenced issue exists and has `approved` label via `gh` API | Planned |
 | Claude Code hook (`PreToolUse: Write`) | Agent runtime | Blocks file creation in governed paths without declared issue context | Planned |
@@ -128,3 +129,7 @@ Prose governance is necessary but insufficient. The following enforcement points
 - ADR-001 — delivery methodology referenced by completion rules
 - ADR-012 (proposed) — operational knowledge stack; planned enforcement via skill gates
 - ADR-013 (proposed) — tiered validation; planned enforcement hooks at Tier 0 and Tier 1
+
+## Changelog
+
+- 2026-11-10 — Escaped the `|` characters in the branch-name pattern of the enforcement table. Unescaped, each one ended the table cell: the row rendered as `(feat`, `fix` and nothing else, losing the rest of the rule and its status (decision unchanged).
