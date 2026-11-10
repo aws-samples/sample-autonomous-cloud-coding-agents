@@ -17,7 +17,9 @@ run = ["node scripts/fetch-live-config.mjs", "yarn vite"]
 
 [tasks.typecheck]
 description = "Type-check the console"
-run = "yarn tsc --noEmit"
+# The package script, not `yarn tsc`: a script runs this package's own TypeScript, while
+# `yarn tsc` runs the root node_modules/.bin/tsc, which Yarn can link to another package's copy.
+run = "yarn typecheck"
 
 [tasks.test]
 description = "Run Vitest component and unit tests"

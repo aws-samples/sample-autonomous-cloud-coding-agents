@@ -9,7 +9,9 @@ run = "cd .. && yarn install --check-files"
 
 [tasks.compile]
 description = "Compile TypeScript"
-run = "yarn tsc --build tsconfig.json"
+# The package script, not `yarn tsc`: a script runs this package's own TypeScript, while
+# `yarn tsc` runs the root node_modules/.bin/tsc, which Yarn can link to another package's copy.
+run = "yarn compile"
 
 [tasks.build]
 description = "Compile, test, and lint CLI"
