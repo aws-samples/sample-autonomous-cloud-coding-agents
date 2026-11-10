@@ -355,10 +355,13 @@ function listFiles(dir) {
  * renamed source (or `##` heading) takes its page off the site. In CI the mutation check
  * then fails on the stale file that is still committed.
  */
-function prune(dir, keep) {
-  for (const file of listFiles(dir)) {
+function prune(repoRoot, tree, keep) {
+  for (const file of listFiles(path.join(repoRoot, tree))) {
     if (!keep.has(file)) {
-      fs.rmSync(path.join(dir, file));
+      fs.rmSync(path.join(repoRoot, tree, file));
+      console.warn(
+        `sync-starlight: removed ${tree}/${file}: nothing generates it (its source was deleted or renamed, or the file was made by hand). Commit the removal, restore the source, or write the content in a source file.`,
+      );
     }
   }
 }
@@ -376,7 +379,7 @@ export function sync(repoRoot, plan = PLAN) {
     writeFile(path.join(contentRoot, page.target), `${frontmatter}${body}`);
     written.add(page.target);
   }
-  prune(contentRoot, written);
+  prune(repoRoot, contentDir, written);
 
   // --- Static assets: copy source image dir into the site's public/ ---
   // Guides reference images as `../imgs/foo.png`; resolveLink() turns
@@ -384,7 +387,7 @@ export function sync(repoRoot, plan = PLAN) {
   // public/. Copy the source dir here so every committed image is published —
   // otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
   copyAssetDir(path.join(repoRoot, assets.from), path.join(repoRoot, assets.to));
-  prune(path.join(repoRoot, assets.to), new Set(listFiles(path.join(repoRoot, assets.from))));
+  prune(repoRoot, assets.to, new Set(listFiles(path.join(repoRoot, assets.from))));
 
   // Guardrail: ensure target tree exists when running in a clean checkout.
   fs.mkdirSync(contentRoot, { recursive: true });
