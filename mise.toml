@@ -17,18 +17,22 @@ experimental = true
 
 [tools]
 node = "22"
-prek = "latest"
-gitleaks = "latest"
+# Gate tools are pinned to exact versions so that a required check changes only
+# with a commit (#722, #540). Nothing bumps these automatically (Dependabot has
+# no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
+# in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml.
+prek = "0.5.9"
+gitleaks = "8.30.1"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
 # present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
 # that breaks under the mise 2026.6.x default `minimum_release_age`
 # (jdx/mise#10279; see #320).
-uv = "latest"
-semgrep = "latest"
-osv-scanner = "latest"
-"grype" = "latest"
-"aqua:zizmorcore/zizmor" = "latest"
+uv = "0.13.7"
+semgrep = "1.183.0"
+osv-scanner = "2.7.0"
+"grype" = "0.121.1"
+"aqua:zizmorcore/zizmor" = "1.32.0"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
