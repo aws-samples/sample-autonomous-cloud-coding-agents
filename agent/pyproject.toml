@@ -119,6 +119,22 @@ select = [
     # Values shared across Python/TypeScript belong in contracts/constants.json
     # (see contracts/constants.md).
     "PLR2004",  # pylint magic-value-comparison
+    # Families this tree had no findings in when they were switched on
+    # (ruff 0.15.20). They are on so that it stays that way.
+    "A",     # flake8-builtins: a name that shadows a builtin
+    "DTZ",   # flake8-datetimez: naive datetimes
+    "FAST",  # FastAPI: route parameters and dependencies
+    "FLY",   # flynt: str.join over literals
+    "G",     # flake8-logging-format: strings formatted before the logging call
+    "INT",   # flake8-gettext
+    "ISC",   # flake8-implicit-str-concat
+    "LOG",   # flake8-logging: logger misuse
+    "PGH",   # pygrep-hooks: blanket `noqa` and `type: ignore`
+    "PIE",   # flake8-pie: statements and fields that do nothing
+    "PLE",   # pylint errors
+    "RSE",   # flake8-raise
+    "T10",   # flake8-debugger: breakpoints left behind
+    "YTT",   # flake8-2020: sys.version misuse
 ]
 ignore = [
     "S603",  # subprocess call — allowed for agent CLI operations
