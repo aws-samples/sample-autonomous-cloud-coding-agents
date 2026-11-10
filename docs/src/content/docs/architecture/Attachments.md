@@ -934,12 +934,12 @@ New `--attachment` flag (repeatable):
 
 ```bash
 # Local files (auto-detects inline vs presigned based on size)
-bgagent submit --repo org/app --description "Fix this bug" \
+bgagent submit --repo org/app --task "Fix this bug" \
   --attachment screenshot.png \
   --attachment error.log
 
 # URL reference
-bgagent submit --repo org/app --description "Implement this design" \
+bgagent submit --repo org/app --task "Implement this design" \
   --attachment https://figma.com/file/abc123/export.png
 ```
 
