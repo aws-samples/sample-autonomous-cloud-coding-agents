@@ -104,6 +104,22 @@ test('splits a guide into one page per ## section', () => {
   assert.equal(page(root, 'elsewhere/Moved-section.md'), '---\ntitle: "Moved section"\n---\n\nMoved text.');
 });
 
+test('every ## section is published; an introduction that is only the H1 is not', () => {
+  const root = repo({
+    'docs/guides/GUIDE.md': '# Guide\n\n## Overview\n\nOverview text.\n\n## Prerequisites\n\n- One bullet\n\n## Empty\n',
+    'docs/design/API.md': '# API\n\n[guide](../guides/GUIDE.md) [title](../guides/GUIDE.md#guide)\n',
+  });
+  sync(root, PLAN);
+
+  assert.deepEqual(
+    pages(root).filter((target) => target.startsWith('guide/')),
+    ['guide/Contributing.md', 'guide/Empty.md', 'guide/Overview.md', 'guide/Prerequisites.md'],
+  );
+  assert.equal(page(root, 'guide/Prerequisites.md'), '---\ntitle: "Prerequisites"\n---\n\n- One bullet');
+  // Without an introduction page, links to the guide land on its first section.
+  assert.deepEqual(links(root, 'architecture/Api.md'), [`[guide](${BASE}/guide/overview) [title](${BASE}/guide/overview)`]);
+});
+
 test('the source H1 becomes the quoted title and the only H1 of the page', () => {
   const root = repo({
     'docs/decisions/ADR-001-first.md': '# ADR-001: A "quoted" title: with colons\n\nDecision text.\n\n## Context\n',
