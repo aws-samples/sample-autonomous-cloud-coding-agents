@@ -70,10 +70,6 @@ export async function listStackOutputs(region: string, stackName: string): Promi
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** CloudFormation output keys written by `bgagent configure`. */
-/** Stack outputs read into the CLI config. `RegistryApiUrl` is optional (only
- *  present once the registry #246 is deployed); the rest are required. */
-export const CONFIGURE_STACK_OUTPUT_KEYS = ['ApiUrl', 'RegistryApiUrl', 'UserPoolId', 'AppClientId'] as const;
 const REQUIRED_CONFIGURE_OUTPUT_KEYS = ['ApiUrl', 'UserPoolId', 'AppClientId'] as const;
 
 /**
