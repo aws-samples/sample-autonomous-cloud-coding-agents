@@ -325,13 +325,54 @@ jobs:
           done
           exit "$drift"
       - name: build
+        id: build
+        shell: bash
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
+          # The output is copied for "Summarize build failure". pipefail is what
+          # keeps the pipe to tee from turning a failed build green: do not drop it.
+          set -o pipefail
           echo "::notice::Runner: $(nproc) cores, $(free -h | awk '/Mem:/{print $2}') RAM"
           SECONDS=0
-          mise run build
+          mise run build 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
+      # A failed build must say which mise task failed and why, without anyone
+      # reading a thousand interleaved log lines (#256, CA-06): the task name and
+      # the last lines of its own output go to the job summary and an annotation.
+      - name: Summarize build failure
+        if: failure() && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          esc="$(printf '\033')"
+          sed -E "s/${esc}\[[0-9;]*m//g" "$log" > "$log.clean"
+          # mise prints "[//pkg:task] ERROR task failed" for every task that failed.
+          failed="$(sed -n -E 's/^\[([^]]+)\] ERROR task failed$/\1/p' "$log.clean" | sort -u)"
+          {
+            echo "## Build failed"
+            if [ -z "$failed" ]; then
+              echo "mise named no failed task. Last 60 lines of the build output:"
+              echo '```text'
+              tail -n 60 "$log.clean"
+              echo '```'
+            fi
+            printf '%s\n' "$failed" | while IFS= read -r task; do
+              [ -n "$task" ] || continue
+              echo "\`mise run ${task}\` failed. Last 60 lines of its output (coverage table rows left out):"
+              echo '```text'
+              awk -v p="[${task}] " 'index($0, p) == 1 && split($0, cols, "[|]") < 5 { print substr($0, length(p) + 1) }' "$log.clean" | tail -n 60
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Build failed::Failed mise task(s): $(printf '%s' "${failed:-none named by mise}" | tr '\n' ' '). The job summary shows the last lines of their output."
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-${{ matrix.compute_type }}
+          path: "*/test-reports"
+          if-no-files-found: ignore
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         continue-on-error: true
