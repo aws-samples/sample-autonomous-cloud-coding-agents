@@ -37,11 +37,6 @@ git("init", "-q", cwd=enclosing)
 print(json.dumps({
     "identity_read": git("config", "--get", "user.email").stdout.strip(),
     "user_config_write": git("config", "--global", "user.name", "probe").returncode,
-    "creatable_config": [
-        path
-        for path in (os.environ["GIT_CONFIG_GLOBAL"], os.environ["GIT_CONFIG_SYSTEM"])
-        if os.path.lexists(path) or os.path.isdir(os.path.dirname(path))
-    ],
     # Read-only on purpose: these two start OUTSIDE any repository of their own.
     "found_from_suite_cwd": git("rev-parse", "--git-dir", cwd=os.getcwd()).stdout.strip(),
     "found_from_temp_dir": git(
@@ -49,6 +44,19 @@ print(json.dumps({
     ).stdout.strip(),
 }))
 """
+
+
+def test_git_config_is_pinned_where_nothing_can_be_created():
+    # git replaces a config file by renaming a new one over it, so a pinned path
+    # that exists — the null device included — or that could be created is one
+    # root can write. A path below the null device is not, for anyone.
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        path = os.environ.get(name, "")
+        assert path and not os.path.lexists(path) and not os.path.isdir(os.path.dirname(path)), (
+            f"{name} is {path!r}: tests/conftest.py must pin it to a path that neither exists "
+            "nor can be created — as root, `git config --global` / `--system` would otherwise "
+            "succeed and replace the file."
+        )
 
 
 def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
@@ -103,11 +111,6 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
     )
     assert seen["user_config_write"] != 0 and "probe" not in user_config.read_text(), (
         "`git config --global` wrote to the contributor's user configuration" + fix
-    )
-    assert seen["creatable_config"] == [], (
-        f"git's user or system config is pinned to {seen['creatable_config']}, which exists or "
-        "could be created: git replaces a config file by renaming a new one over it, so as "
-        "root that write succeeds — on the null device, it destroys it" + fix
     )
     assert seen["found_from_suite_cwd"] == "", (
         f"git discovered the checkout this suite runs from ({seen['found_from_suite_cwd']}), "
