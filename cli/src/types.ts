@@ -411,8 +411,8 @@ export interface TaskEvent {
  *
  * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
  * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
- * cursor used by the CLI to catch up on the next polling iteration. Keep in
- * sync with ``cdk/src/handlers/shared/types.ts``.
+ * cursor used by the CLI to catch up on the next polling iteration. The server
+ * side is ``cdk/src/handlers/get-task-events.ts``.
  */
 export interface GetTaskEventsQuery {
   readonly limit?: number;

@@ -138,9 +138,6 @@ export type RegistryListEntry = {
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
-/** Delivery mechanism — discriminant for the three upload paths. */
-export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
-
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -715,36 +712,6 @@ export interface ReplayBundle {
   readonly cost_usd: number | null;
   /** ISO8601 timestamp the bundle was assembled (server-side). */
   readonly collected_at: string;
-}
-
-/**
- * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
- *
- * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
- * used by CLI polling and webhook replay to resume from a known event id)
- * over ``next_token`` (an opaque DynamoDB pagination token). If both are
- * provided, the handler uses ``after`` and logs a WARN. Neither is required
- * — callers may start from the beginning of the task's event stream.
- *
- * When a page is truncated at ``limit``, the response includes a
- * ``next_token`` so the caller can continue paginating forward regardless
- * of which mode they started with.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  /** ULID event_id cursor. Returns events with ``event_id > after``. */
-  readonly after?: string;
-  /**
-   * When truthy (``"1"`` or ``"true"``), return events in descending
-   * ``event_id`` order (newest first). Used by ``bgagent status`` to
-   * render a recency-biased snapshot without walking the full event
-   * stream. Mutually exclusive with ``after`` — the handler rejects
-   * the combination with 400.
-   */
-  readonly desc?: string;
 }
 
 /**
@@ -1459,22 +1426,6 @@ export interface ApprovalDecisionRecordedEvent {
   readonly reason?: string;
   readonly decided_at: string;
   readonly caller_user_id: string;
-}
-
-/**
- * `CreateTaskRequest` extensions for HITL pre-approvals (§7.3).
- *
- * Old callers continue to work — every field is optional. New callers
- * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
- * status*`) to avoid hitting gates for trusted operations, and can
- * raise the per-task default approval timeout above the 300s default
- * within the `[30, min(3600, maxLifetime - 300)]` bound.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface CreateTaskApprovalExtensions {
-  readonly approval_timeout_s?: number;
-  readonly initial_approvals?: readonly ApprovalScope[];
 }
 
 /** Maximum `initial_approvals` entries per §7.3. */
