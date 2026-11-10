@@ -2,7 +2,7 @@ min_version = "2026.7.11"
 
 [tools]
 python = "3.13"
-uv = "latest"
+uv = "0.13.7"
 "aqua:aquasecurity/trivy" = "v0.70.0"
 
 [env]
