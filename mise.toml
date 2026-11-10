@@ -84,6 +84,25 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
 
+# What an ABCA agent runs by default to verify lint before and after its change
+# (`mise run lint`, DEFAULT_LINT_COMMAND in agent/src/post_hooks.py). Check-only
+# on purpose: no `--fix` and no formatter rewrite, so a pass means the tree is
+# clean as committed and a failure names the file, line and rule. Use
+# `mise run quality` for the auto-fixing variant.
+[tasks.lint]
+description = "Non-mutating lint and type checks of every package"
+depends = [
+  "//agent:lint",
+  "//agent:format:check",
+  "//agent:typecheck",
+  "//cdk:eslint:check",
+  "//cdk:compile",
+  "//cli:eslint:check",
+  "//cli:compile",
+  "//web:eslint:check",
+  "//web:typecheck",
+]
+
 [tasks."check:types-sync"]
 description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
