@@ -90,6 +90,10 @@
     "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "scripts/generate-bootstrap-template.ts"
+    ],
     "coverageReporters": [
       "json",
       "lcov",
