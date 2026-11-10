@@ -1,5 +1,5 @@
 ---
-title: Task lifecycle
+title: "Task lifecycle"
 ---
 
 When you create a task, the platform orchestrates it through these states:

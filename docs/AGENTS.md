@@ -56,6 +56,8 @@ Then run: `mise //docs:sync` and commit both source and `docs/src/content/docs/`
 
 **Cross-links** — prefer relative links in source (`../../AGENTS.md`, `../design/ARCHITECTURE.md`); sync rewrites them for the site.
 
+**Titles** — start every source with one `# H1`: sync turns it into the page title (and the sidebar label, unless `astro.config.mjs` sets one) and removes it from the body, so the page has a single H1.
+
 **ADRs** — add under `docs/decisions/`, follow existing naming (`ADR-NNN-title.md`), run sync.
 
 ## Boundaries

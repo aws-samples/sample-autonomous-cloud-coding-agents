@@ -1,5 +1,5 @@
 ---
-title: Roles
+title: "Roles"
 ---
 
 ABCA is a **shared-stack-per-organization** platform — one CDK deployment, used by everyone on the team. Like a self-hosted GitLab or Linear instance: one company → one stack → many users. You generally do **not** run your own deployment to use someone else's; you join theirs as a Cognito user.

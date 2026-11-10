@@ -206,15 +206,22 @@ function rewriteLinks(text, resolve) {
     .join('\n');
 }
 
-function ensureFrontmatter(content, title) {
-  const trimmed = content.trimStart();
-  if (trimmed.startsWith('---')) {
-    const closingIdx = trimmed.indexOf('\n---', 3);
-    if (closingIdx !== -1) {
-      return content;
-    }
+/**
+ * Starlight renders the frontmatter title as the page's only <h1>, so the source's own
+ * `# Heading` moves into the title instead of being repeated in the body.
+ */
+function takeH1(text) {
+  const h1 = headingsOf(text).find((heading) => heading.depth === 1);
+  if (!h1) {
+    return { body: text };
   }
-  return `---\ntitle: ${title}\n---\n\n${content}`;
+  const lines = text.split('\n');
+  lines.splice(h1.index, 1);
+  // The blank line after the heading goes with it, unless it separates two blocks of text.
+  if (lines[h1.index] === '' && (h1.index === 0 || lines[h1.index - 1] === '')) {
+    lines.splice(h1.index, 1);
+  }
+  return { h1: h1.text, body: lines.join('\n') };
 }
 
 function writeFile(targetPath, content) {
@@ -232,15 +239,20 @@ function writeFile(targetPath, content) {
   }
 }
 
-/** One page for a whole source file. The title falls back to the file name. */
+/** One page for a whole source file. The title is the source's H1 (fallback: the file name). */
 function filePage(repoRoot, source, target) {
   const sourcePath = path.join(repoRoot, source);
   if (!fs.existsSync(sourcePath)) {
     return [];
   }
+  const raw = fs.readFileSync(sourcePath, 'utf8');
+  // A source that brings its own frontmatter (MDX) keeps it verbatim.
+  const closing = raw.startsWith('---') ? raw.indexOf('\n---', 3) : -1;
+  const frontmatter = closing === -1 ? undefined : raw.slice(0, closing + 4);
+  const { h1, body } = takeH1(frontmatter ? raw.slice(frontmatter.length) : raw);
   const stem = path.basename(source, path.extname(source));
-  const title = normalizeFileStem(stem).replace(/-/g, ' ');
-  return [{ source, target, title, body: fs.readFileSync(sourcePath, 'utf8') }];
+  const title = h1 ?? normalizeFileStem(stem).replace(/-/g, ' ');
+  return [{ source, target, title, heading: h1, frontmatter, body }];
 }
 
 /** One page per `##` section of a guide. */
@@ -250,7 +262,8 @@ function splitPages(repoRoot, { split: source, to, introTitle, moved = {}, dropp
     return [];
   }
   const parts = fs.readFileSync(sourcePath, 'utf8').split(/\n##\s+/g);
-  const pages = [{ file: 'Introduction.md', title: introTitle, body: parts.shift() ?? '' }];
+  const intro = takeH1(parts.shift() ?? '');
+  const pages = [{ file: 'Introduction.md', title: introTitle, heading: intro.h1, body: intro.body }];
   for (const part of parts) {
     const firstNewline = part.indexOf('\n');
     const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
@@ -306,7 +319,9 @@ export function sync(repoRoot, plan = PLAN) {
   const docs = indexSources(pages);
   for (const page of pages.filter((candidate) => !candidate.skip)) {
     const body = rewriteLinks(page.body, (target) => resolveLink(target, page, docs, repoRoot));
-    writeFile(path.join(contentRoot, page.target), ensureFrontmatter(body, page.title));
+    // JSON quoting is valid YAML and keeps a colon in the title from breaking the frontmatter.
+    const frontmatter = page.frontmatter ?? `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n`;
+    writeFile(path.join(contentRoot, page.target), `${frontmatter}${body}`);
   }
 
   // --- Static assets: copy source image dir into the site's public/ ---

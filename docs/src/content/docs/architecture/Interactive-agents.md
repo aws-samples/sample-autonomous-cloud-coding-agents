@@ -1,8 +1,6 @@
 ---
-title: Interactive agents
+title: "Interactive Agents: Async Interaction Design"
 ---
-
-# Interactive Agents: Async Interaction Design
 
 > **Status:** Active design
 > **Branch:** `feature/interactive-background-agents`

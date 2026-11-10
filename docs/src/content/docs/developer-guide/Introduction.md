@@ -1,8 +1,6 @@
 ---
-title: Developer guide introduction
+title: "Developer guide introduction"
 ---
-
-# Developer guide
 
 This project is built in TypeScript with [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/), [mise](https://mise.jdx.dev/) for tasks and tool versions, and AWS CDK for infrastructure. There is project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
 

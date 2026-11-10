@@ -1,8 +1,6 @@
 ---
-title: Adr 003 contribution governance
+title: "ADR-003: Contribution governance for async agents and humans"
 ---
-
-# ADR-003: Contribution governance for async agents and humans
 
 **Status:** accepted
 **Date:** 2026-05-19

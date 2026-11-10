@@ -1,8 +1,6 @@
 ---
-title: Vision
+title: "Vision"
 ---
-
-# Vision
 
 This document states the long-term direction of **ABCA (Autonomous Background Coding Agents on AWS)** and the **tenets** that should guide design, implementation, and review. Use it when evaluating pull requests, RFCs, and ADRs: if a change clearly advances the vision and respects the tenets, it belongs; if it trades tenets away without an explicit, documented rationale, it needs more discussion.
 

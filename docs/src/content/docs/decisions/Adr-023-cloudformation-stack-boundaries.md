@@ -1,8 +1,6 @@
 ---
-title: Adr 023 cloudformation stack boundaries
+title: "ADR-023: Optional network stack and deployment budgets"
 ---
-
-# ADR-023: Optional network stack and deployment budgets
 
 **Status:** proposed
 **Date:** 2026-09-21

@@ -1,8 +1,6 @@
 ---
-title: Security
+title: "Security"
 ---
-
-# Security
 
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 

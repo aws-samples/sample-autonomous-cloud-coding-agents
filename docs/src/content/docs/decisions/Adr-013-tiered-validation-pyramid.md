@@ -1,8 +1,6 @@
 ---
-title: Adr 013 tiered validation pyramid
+title: "ADR-013: Tiered validation pyramid for agentic-first development"
 ---
-
-# ADR-013: Tiered validation pyramid for agentic-first development
 
 **Status:** proposed
 **Date:** 2026-05-19

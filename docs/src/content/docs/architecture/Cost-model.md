@@ -1,8 +1,6 @@
 ---
-title: Cost model
+title: "Cost model"
 ---
-
-# Cost model
 
 This document provides an order-of-magnitude cost model for the platform. Cost efficiency is a first-class design principle (see [ARCHITECTURE.md](/sample-autonomous-cloud-coding-agents/architecture/architecture)). The model covers infrastructure baseline costs, per-task variable costs, and cost attribution guidance.
 

@@ -1,5 +1,5 @@
 ---
-title: Using the CLI
+title: "Using the CLI"
 ---
 
 The `bgagent` CLI is the recommended way to interact with the platform. It authenticates via Cognito, manages token caching, and provides formatted output.

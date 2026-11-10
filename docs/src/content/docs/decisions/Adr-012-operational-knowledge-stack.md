@@ -1,8 +1,6 @@
 ---
-title: Adr 012 operational knowledge stack
+title: "ADR-012: Operational knowledge as a three-layer stack (Decision → Guide → Skill)"
 ---
-
-# ADR-012: Operational knowledge as a three-layer stack (Decision → Guide → Skill)
 
 **Status:** proposed
 **Date:** 2026-05-19

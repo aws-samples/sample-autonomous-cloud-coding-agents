@@ -1,5 +1,5 @@
 ---
-title: Overview
+title: "Overview"
 ---
 
 ABCA is a platform for running autonomous background coding agents on AWS. You submit a task (a GitHub repository + a task description or issue number), an agent works autonomously in an isolated environment, and delivers a pull request when done. This guide covers how to submit coding tasks, monitor their progress, and get the most out of the platform.

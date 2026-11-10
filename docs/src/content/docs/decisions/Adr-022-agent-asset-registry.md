@@ -1,8 +1,6 @@
 ---
-title: Adr 022 agent asset registry
+title: "ADR-022: Central agent asset registry"
 ---
-
-# ADR-022: Central agent asset registry
 
 **Status:** accepted
 **Date:** 2026-07-08

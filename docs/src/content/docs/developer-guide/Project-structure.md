@@ -1,5 +1,5 @@
 ---
-title: Project structure
+title: "Project structure"
 ---
 
 The repository is a monorepo with four packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.

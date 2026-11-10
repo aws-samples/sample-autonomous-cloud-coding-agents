@@ -1,8 +1,6 @@
 ---
-title: Architecture
+title: "Architecture"
 ---
-
-# Architecture
 
 This document outlines the overall architecture of the platform. Each component has its own deep-dive document in this folder.
 

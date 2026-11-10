@@ -1,8 +1,6 @@
 ---
-title: Input gateway
+title: "Input Gateway"
 ---
-
-# Input Gateway
 
 ## What is the Input Gateway?
 

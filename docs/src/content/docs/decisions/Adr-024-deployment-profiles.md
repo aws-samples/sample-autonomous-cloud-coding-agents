@@ -1,8 +1,6 @@
 ---
-title: Adr 024 deployment profiles
+title: "ADR-024: Deployment profiles and regional capability validation"
 ---
-
-# ADR-024: Deployment profiles and regional capability validation
 
 **Status:** proposed
 **Date:** 2026-10-25

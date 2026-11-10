@@ -1,8 +1,6 @@
 ---
-title: Attachments
+title: "Task Attachments (Multimodal)"
 ---
-
-# Task Attachments (Multimodal)
 
 End-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context — screenshots of bugs, design mockups, CSV data, log files, code snippets — that the agent can reference during execution. Every channel (CLI, webhook, Slack, Linear) feeds the same schema; every attachment passes through security screening before reaching the agent.
 

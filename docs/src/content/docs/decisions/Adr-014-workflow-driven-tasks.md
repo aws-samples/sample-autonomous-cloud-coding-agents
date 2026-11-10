@@ -1,8 +1,6 @@
 ---
-title: Adr 014 workflow driven tasks
+title: "ADR-014: Workflow-driven tasks with an agent-side step runner"
 ---
-
-# ADR-014: Workflow-driven tasks with an agent-side step runner
 
 **Status:** accepted
 **Date:** 2026-06-04

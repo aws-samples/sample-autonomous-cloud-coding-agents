@@ -1,8 +1,6 @@
 ---
-title: Adr 002 least privilege bootstrap policies
+title: "ADR-002: Least-privilege CDK bootstrap policies as code"
 ---
-
-# ADR-002: Least-privilege CDK bootstrap policies as code
 
 **Status:** accepted
 **Date:** 2026-05-19

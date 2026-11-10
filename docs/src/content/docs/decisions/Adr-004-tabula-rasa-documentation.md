@@ -1,8 +1,6 @@
 ---
-title: Adr 004 tabula rasa documentation
+title: "ADR-004: Tabula rasa documentation standard"
 ---
-
-# ADR-004: Tabula rasa documentation standard
 
 **Status:** accepted
 **Date:** 2026-05-19

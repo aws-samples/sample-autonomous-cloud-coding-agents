@@ -1,5 +1,5 @@
 ---
-title: Authentication
+title: "Authentication"
 ---
 
 The platform uses two authentication mechanisms depending on the channel:

@@ -1,8 +1,6 @@
 ---
-title: Adr 021 lambda microvms compute backend
+title: "ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend"
 ---
-
-# ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend
 
 > Number: candidate ADR-021 (ADR-020 is the highest accepted on `main`; ADR-018 is claimed by open PR [#548](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/548), ADR-019 by open PR [#663](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/663)). Numbers are never reused. If a lower number frees before merge, renumber and coordinate with those PRs.
 

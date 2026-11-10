@@ -1,8 +1,6 @@
 ---
-title: Slack setup guide
+title: "Slack integration setup guide"
 ---
-
-# Slack integration setup guide
 
 This guide walks through setting up the ABCA Slack integration. Once configured, your team can submit tasks by mentioning `@Shoof` in any channel and receive real-time notifications as tasks progress.
 

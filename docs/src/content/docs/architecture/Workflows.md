@@ -1,8 +1,6 @@
 ---
-title: Workflows
+title: "Workflows (workflow-driven tasks)"
 ---
-
-# Workflows (workflow-driven tasks)
 
 A **workflow** is a versioned, declarative document that describes how the agent should execute one *kind* of task: the ordered steps to run inside the container, the system prompt, the agent configuration (tools, MCP servers, skills, plugins, rules, Cedar policy), what context to hydrate, the post-execution gates, and what "done" means. Workflows replaced the hardcoded `task_type` branches that used to be scattered across the Python agent runtime (`pipeline.py`, `post_hooks.py`, `repo.py`, `prompts/`) with a single **step runner** that interprets the workflow file.
 

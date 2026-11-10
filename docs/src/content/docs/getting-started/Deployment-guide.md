@@ -1,8 +1,6 @@
 ---
-title: Deployment guide
+title: "Deployment guide"
 ---
-
-# Deployment guide
 
 This guide covers deploying ABCA into an AWS account, including compute backend choices, scale-to-zero characteristics, and the complete AWS service inventory. For day-to-day development workflow, see the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction). For a quick first deployment, see the [Quick start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start). For least-privilege IAM deployment roles, see [DEPLOYMENT_ROLES.md](/sample-autonomous-cloud-coding-agents/architecture/deployment-roles).
 

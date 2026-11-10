@@ -1,8 +1,6 @@
 ---
-title: Adr 016 pluggable identity and auth
+title: "ADR-016: Pluggable identity and authentication"
 ---
-
-# ADR-016: Pluggable identity and authentication
 
 > Number: candidate ADR-016 (next free on main; ADR-015 is claimed by open PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), the Jira integration). Numbers are never reused. If a lower number frees before merge, renumber and coordinate with PR #302 and the [#277](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/277) ADR-014 governance discussion.
 

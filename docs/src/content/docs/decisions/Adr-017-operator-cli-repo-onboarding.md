@@ -1,8 +1,6 @@
 ---
-title: Adr 017 operator cli repo onboarding
+title: "ADR-017: Operator CLI repo onboarding"
 ---
-
-# ADR-017: Operator CLI repo onboarding
 
 **Status:** accepted
 **Date:** 2026-06-22

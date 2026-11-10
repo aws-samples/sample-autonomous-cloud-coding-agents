@@ -1,8 +1,6 @@
 ---
-title: Cedar policy guide
+title: "Cedar policy guide"
 ---
-
-# Cedar policy guide
 
 This guide is for **blueprint authors** — repo owners writing the Cedar policies that govern what tool calls the agent can make unattended versus which ones pause for human approval.
 

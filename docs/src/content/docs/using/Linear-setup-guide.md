@@ -1,8 +1,6 @@
 ---
-title: Linear setup guide
+title: "Linear integration setup guide"
 ---
-
-# Linear integration setup guide
 
 Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works, and opens a pull request.
 

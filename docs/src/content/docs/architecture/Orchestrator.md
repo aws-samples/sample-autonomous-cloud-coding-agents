@@ -1,8 +1,6 @@
 ---
-title: Orchestrator
+title: "Orchestrator"
 ---
-
-# Orchestrator
 
 The orchestrator drives the task lifecycle from submission to completion. It runs every deterministic step (admission, context hydration, session start, result inference, cleanup) and delegates the non-deterministic step (the agent workload) to an isolated compute session. This separation keeps bookkeeping cheap and predictable while containing the expensive, unpredictable agent work inside the compute environment.
 

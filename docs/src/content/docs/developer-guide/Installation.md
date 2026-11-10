@@ -1,5 +1,5 @@
 ---
-title: Installation
+title: "Installation"
 ---
 
 Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.

@@ -1,8 +1,6 @@
 ---
-title: Identity and auth
+title: "Identity and authentication — worked examples"
 ---
-
-# Identity and authentication — worked examples
 
 ABCA today carries its own inbound identity (Amazon Cognito for the CLI and REST API, HMAC-SHA256 for webhooks) and resolves outbound credentials per integration through hand-rolled Secrets Manager resolvers (`resolve_github_token`, `resolve_linear_api_token`, and the Jira OAuth/Forge resolver). This doc maps each of those integration shapes onto the [Amazon Bedrock AgentCore Identity](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) primitives: workload identity, the token vault, and the three outbound flows. A contributor adding a new integration can then see which flow to pick and what the wire looks like at each hop. Every code block below is grounded in the [AgentCore developer guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity.html) and the [CreateOauth2CredentialProvider API reference](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_CreateOauth2CredentialProvider.html); the binding decision for ABCA is captured in [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth).
 

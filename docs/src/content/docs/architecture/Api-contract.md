@@ -1,8 +1,6 @@
 ---
-title: Api contract
+title: "API Contract"
 ---
-
-# API Contract
 
 The REST API is the single entry point for all platform interactions. The CLI, webhook integrations, and any future clients use this API to submit tasks, check status, and manage integrations. This is a design-level specification; the source of truth for types is `cdk/src/handlers/shared/types.ts`.
 

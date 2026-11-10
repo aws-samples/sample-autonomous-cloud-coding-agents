@@ -1,8 +1,6 @@
 ---
-title: Adr 019 agentcore gateway tool federation
+title: "ADR-019: Unify agent tools behind an AgentCore Gateway"
 ---
-
-# ADR-019: Unify agent tools behind an AgentCore Gateway
 
 **Status:** proposed
 **Date:** 2026-07-27

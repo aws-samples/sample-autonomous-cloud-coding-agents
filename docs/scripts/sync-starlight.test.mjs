@@ -99,17 +99,34 @@ test('splits a guide into one page per ## section', () => {
     'index.md',
     'start/Start.mdx',
   ]);
-  assert.equal(page(root, 'guide/Introduction.md'), '---\ntitle: Guide introduction\n---\n\n# Guide\n\nIntro text.');
-  assert.equal(page(root, 'guide/First-section.md'), '---\ntitle: First section\n---\n\nFirst text.');
-  assert.equal(page(root, 'elsewhere/Moved-section.md'), '---\ntitle: Moved section\n---\n\nMoved text.');
+  assert.equal(page(root, 'guide/Introduction.md'), '---\ntitle: "Guide introduction"\n---\n\nIntro text.');
+  assert.equal(page(root, 'guide/First-section.md'), '---\ntitle: "First section"\n---\n\nFirst text.');
+  assert.equal(page(root, 'elsewhere/Moved-section.md'), '---\ntitle: "Moved section"\n---\n\nMoved text.');
 });
 
-test('mirrors files under a title taken from the file name; a source keeps its own frontmatter', () => {
-  const root = repo();
+test('the source H1 becomes the quoted title and the only H1 of the page', () => {
+  const root = repo({
+    'docs/decisions/ADR-001-first.md': '# ADR-001: A "quoted" title: with colons\n\nDecision text.\n\n## Context\n',
+    'docs/design/API.md': 'No heading at all.\n',
+    'docs/guides/START.mdx':
+      "---\ntitle: Start\n---\n\nimport { Tabs } from '@astrojs/starlight/components';\n\n# Start\n\nStart text.\n",
+  });
   sync(root, PLAN);
 
-  assert.equal(page(root, 'decisions/Adr-001-first.md'), '---\ntitle: Adr 001 first\n---\n\n# ADR-001: First\n\nDecision text.\n');
-  assert.equal(page(root, 'start/Start.mdx'), SOURCES['docs/guides/START.mdx']);
+  assert.equal(
+    page(root, 'decisions/Adr-001-first.md'),
+    '---\ntitle: "ADR-001: A \\"quoted\\" title: with colons"\n---\n\nDecision text.\n\n## Context\n',
+  );
+  // No H1 in the source: the file name is the fallback.
+  assert.equal(page(root, 'architecture/Api.md'), '---\ntitle: "Api"\n---\n\nNo heading at all.\n');
+  // A source with its own frontmatter keeps it; its H1 would be a second one.
+  assert.equal(
+    page(root, 'start/Start.mdx'),
+    "---\ntitle: Start\n---\n\nimport { Tabs } from '@astrojs/starlight/components';\n\nStart text.\n",
+  );
+  for (const target of pages(root)) {
+    assert.doesNotMatch(page(root, target), /^# /m, `${target} has an H1 in its body`);
+  }
 });
 
 test('links to mirrored files become site routes (#920)', () => {
@@ -175,7 +192,7 @@ test('anchors into a split guide land on the page that holds the heading (#765)'
     'docs/guides/GUIDE.md': [
       '# Guide',
       '',
-      '[second](#second) [deep](#deep-heading)',
+      '[second](#second) [deep](#deep-heading) [the title](#guide)',
       '',
       '## First',
       '',
@@ -219,7 +236,7 @@ test('anchors into a split guide land on the page that holds the heading (#765)'
     `[unknown](${BASE}/guide/introduction#no-such-heading)`,
   ]);
   assert.deepEqual(links(root, 'guide/Introduction.md'), [
-    `[second](${BASE}/guide/second) [deep](${BASE}/guide/second#deep-heading)`,
+    `[second](${BASE}/guide/second) [deep](${BASE}/guide/second#deep-heading) [the title](#_top)`,
   ]);
   // On the page that holds the heading the anchor stays local; the section heading is the page title.
   assert.deepEqual(links(root, 'guide/First.md'), [

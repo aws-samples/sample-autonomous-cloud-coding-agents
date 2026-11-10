@@ -1,8 +1,6 @@
 ---
-title: Contributing
+title: "Contributing Guidelines"
 ---
-
-# Contributing Guidelines
 
 Thank you for your interest in contributing. Whether it's a bug report, new feature, or documentation improvement, we value contributions from the community.
 

@@ -1,8 +1,6 @@
 ---
-title: Compute
+title: "Compute"
 ---
-
-# Compute
 
 Every task runs in an isolated cloud compute environment. Nothing runs on the user's machine. The agent clones the repo, writes code, runs tests, and opens a PR inside a compute session that is created for the task and destroyed when it ends.
 

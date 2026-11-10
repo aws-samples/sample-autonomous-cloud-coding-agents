@@ -1,8 +1,6 @@
 ---
-title: Cedar hitl gates
+title: "Cedar HITL Approval Gates"
 ---
-
-# Cedar HITL Approval Gates
 
 > **Status:** Core implemented; this document remains the authoritative design reference.
 > **Companion:** [`INTERACTIVE_AGENTS.md`](/sample-autonomous-cloud-coding-agents/architecture/interactive-agents) §9.3 (pointing here), §7 (state machine).

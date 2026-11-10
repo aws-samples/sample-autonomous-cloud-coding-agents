@@ -1,8 +1,6 @@
 ---
-title: Jira setup guide
+title: "Jira integration setup guide"
 ---
-
-# Jira integration setup guide
 
 Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. After ABCA opens a pull request, reviewers can comment `@bgagent <instruction>` on the same Jira issue to request another iteration. A dedicated Forge app named `bgagent` writes progress comments and workflow transitions, while the human who triggered the task remains its platform owner.
 
