@@ -85,6 +85,7 @@
     "watchPathIgnorePatterns": [
       "/node_modules/"
     ],
+    "globalSetup": "<rootDir>/test/setup/isolate-environment.ts",
     "reporters": [
       "default",
       [
