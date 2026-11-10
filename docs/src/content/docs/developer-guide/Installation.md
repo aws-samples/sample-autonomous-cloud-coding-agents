@@ -114,17 +114,17 @@ By default, progress events and task state writes are silently skipped during lo
 
 ```bash
 # 1. Start DynamoDB Local and create tables
-cd agent && mise run local:up
+mise //agent:local:up
 
 # 2. Run the agent with --local-events
 ./agent/run.sh --local-events "owner/repo" 42
 
-# 4. In another terminal — query progress events
-mise run local:events          # table format
-mise run local:events:json     # JSON format
+# 3. In another terminal — query progress events
+mise //agent:local:events          # table format
+mise //agent:local:events:json     # JSON format
 
-# 5. When done — tear down DynamoDB Local
-mise run local:down
+# 4. When done — tear down DynamoDB Local
+mise //agent:local:down
 ```
 
 The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
