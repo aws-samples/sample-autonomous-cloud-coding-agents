@@ -92,7 +92,7 @@ stopwords = ["gitleaks:allow account-id"]
 # `condition = "AND"` is what confines it. Without a condition gitleaks ORs
 # `regexes` and `paths`: the value was then allowed in every file, and every
 # 12-digit run was allowed in this test file. `.gitleaksignore` is listed because
-# a comment there quotes the value, and that line is in main's history (#733).
+# main's history contains a comment in that file that quotes the value (#733).
 description = "Retired foreign-account test fixture from #645; superseded by 111122223333 at HEAD."
 condition = "AND"
 regexes = [
