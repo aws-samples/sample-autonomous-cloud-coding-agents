@@ -13,6 +13,7 @@ import test, { after } from 'node:test';
 import { sync } from './sync-starlight.mjs';
 
 const BASE = '/sample-autonomous-cloud-coding-agents';
+const GITHUB = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
 const CONTENT = 'docs/src/content/docs';
 
 const PLAN = [
@@ -36,6 +37,7 @@ const SOURCES = {
   'docs/design/API.md': '# API\n\n## Errors\n\nError text.\n',
   'docs/decisions/README.md': '# Decisions\n\n## Lifecycle\n\nLifecycle text.\n',
   'docs/decisions/ADR-001-first.md': '# ADR-001: First\n\nDecision text.\n',
+  [`${CONTENT}/index.md`]: '---\ntitle: Home\n---\n\nHand-written home page.\n',
 };
 
 const roots = [];
@@ -52,6 +54,12 @@ function repo(files = {}) {
 }
 
 const page = (root, target) => fs.readFileSync(path.join(root, CONTENT, target), 'utf8');
+
+/** The lines of a generated page that start with a link or an image. */
+const links = (root, target) =>
+  page(root, target)
+    .split('\n')
+    .filter((line) => /^!?\[/.test(line));
 
 function pages(root) {
   return fs
@@ -88,6 +96,7 @@ test('splits a guide into one page per ## section', () => {
     'guide/Contributing.md',
     'guide/First-section.md',
     'guide/Introduction.md',
+    'index.md',
     'start/Start.mdx',
   ]);
   assert.equal(page(root, 'guide/Introduction.md'), '---\ntitle: Guide introduction\n---\n\n# Guide\n\nIntro text.');
@@ -103,15 +112,148 @@ test('mirrors files under a title taken from the file name; a source keeps its o
   assert.equal(page(root, 'start/Start.mdx'), SOURCES['docs/guides/START.mdx']);
 });
 
-test('links between design documents become site routes', () => {
+test('links to mirrored files become site routes (#920)', () => {
   const root = repo({
-    'docs/design/API.md': '# API\n\n[other](./OTHER_DOC.md#errors) [external](https://example.com/a.md) [anchor](#errors)\n',
-    'docs/design/OTHER_DOC.md': '# Other\n\n## Errors\n',
+    'CONTRIBUTING.md': [
+      '# Contributing',
+      '',
+      '[mdx](./docs/guides/START.mdx)',
+      '[adr](./docs/decisions/ADR-001-first.md)',
+      '[readme](./docs/decisions/README.md#lifecycle)',
+      '[directory](./docs/decisions/)',
+      '[design](./docs/design/API.md#errors "with a title")',
+      '[home](./docs/src/content/docs/index.md)',
+      '[external](https://example.com/a.md) [absolute](/elsewhere/a.md) [mail](mailto:a@example.com)',
+      '',
+    ].join('\n'),
+    'docs/design/API.md': '# API\n\n[adr](../decisions/ADR-001-first.md) [same file](#errors) [unknown](#nowhere)\n\n## Errors\n',
   });
   sync(root, PLAN);
 
-  assert.match(
-    page(root, 'architecture/Api.md'),
-    new RegExp(`\\[other\\]\\(${BASE}/architecture/other-doc#errors\\) \\[external\\]\\(https://example.com/a.md\\) \\[anchor\\]\\(#errors\\)`),
-  );
+  assert.deepEqual(links(root, 'guide/Contributing.md'), [
+    `[mdx](${BASE}/start/start)`,
+    `[adr](${BASE}/decisions/adr-001-first)`,
+    `[readme](${BASE}/decisions/readme#lifecycle)`,
+    `[directory](${BASE}/decisions/readme)`,
+    `[design](${BASE}/architecture/api#errors "with a title")`,
+    `[home](${BASE}/)`,
+    '[external](https://example.com/a.md) [absolute](/elsewhere/a.md) [mail](mailto:a@example.com)',
+  ]);
+  assert.deepEqual(links(root, 'architecture/Api.md'), [
+    `[adr](${BASE}/decisions/adr-001-first) [same file](#errors) [unknown](#nowhere)`,
+  ]);
+});
+
+test('links to files that are not published point at GitHub; images are served from /imgs', () => {
+  const root = repo({
+    'AGENTS.md': '# Agents\n',
+    'agent/README.md': '# Agent\n\n## Setup\n',
+    'contracts/parity/case.json': '{}\n',
+    'docs/imgs/nested/arch.png': 'png',
+    'docs/design/API.md': [
+      '# API',
+      '',
+      '[agents](../../AGENTS.md) [setup](../../agent/README.md#setup) [fixtures](../../contracts/parity/)',
+      '![architecture](../imgs/nested/arch.png)',
+      '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
+      '',
+    ].join('\n'),
+  });
+  sync(root, PLAN);
+
+  assert.deepEqual(links(root, 'architecture/Api.md'), [
+    `[agents](${GITHUB}/blob/main/AGENTS.md) [setup](${GITHUB}/blob/main/agent/README.md#setup) [fixtures](${GITHUB}/tree/main/contracts/parity)`,
+    `![architecture](${BASE}/imgs/nested/arch.png)`,
+    // Left as written: the link checks report a target that does not exist.
+    '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
+  ]);
+  assert.equal(fs.readFileSync(path.join(root, 'docs/public/imgs/nested/arch.png'), 'utf8'), 'png');
+});
+
+test('anchors into a split guide land on the page that holds the heading (#765)', () => {
+  const root = repo({
+    'docs/guides/GUIDE.md': [
+      '# Guide',
+      '',
+      '[second](#second) [deep](#deep-heading)',
+      '',
+      '## First',
+      '',
+      '[deep](#deep-heading) [local](#local-heading) [myself](#first)',
+      '',
+      '### Local heading',
+      '',
+      '### Examples',
+      '',
+      '## Second',
+      '',
+      '### Deep heading',
+      '',
+      '### Examples',
+      '',
+      '### GitHub PAT — minimal `permissions` (v2)',
+      '',
+      '## Moved section',
+      '',
+      'Text.',
+      '',
+    ].join('\n'),
+    'docs/design/API.md': [
+      '# API',
+      '',
+      '[guide](../guides/GUIDE.md) [h2](../guides/GUIDE.md#second) [h3](../guides/GUIDE.md#deep-heading)',
+      '[first examples](../guides/GUIDE.md#examples) [second examples](../guides/GUIDE.md#examples-1)',
+      '[punctuation](../guides/GUIDE.md#github-pat--minimal-permissions-v2) [moved](../guides/GUIDE.md#moved-section)',
+      '[unknown](../guides/GUIDE.md#no-such-heading)',
+      '',
+    ].join('\n'),
+  });
+  sync(root, PLAN);
+
+  assert.deepEqual(links(root, 'architecture/Api.md'), [
+    `[guide](${BASE}/guide/introduction) [h2](${BASE}/guide/second) [h3](${BASE}/guide/second#deep-heading)`,
+    // GitHub numbers the second "Examples" of the file; on the site each page has its own.
+    `[first examples](${BASE}/guide/first#examples) [second examples](${BASE}/guide/second#examples)`,
+    `[punctuation](${BASE}/guide/second#github-pat--minimal-permissions-v2) [moved](${BASE}/elsewhere/moved-section)`,
+    // An anchor the guide does not have is passed through, so that the site link check reports it.
+    `[unknown](${BASE}/guide/introduction#no-such-heading)`,
+  ]);
+  assert.deepEqual(links(root, 'guide/Introduction.md'), [
+    `[second](${BASE}/guide/second) [deep](${BASE}/guide/second#deep-heading)`,
+  ]);
+  // On the page that holds the heading the anchor stays local; the section heading is the page title.
+  assert.deepEqual(links(root, 'guide/First.md'), [
+    `[deep](${BASE}/guide/second#deep-heading) [local](#local-heading) [myself](#_top)`,
+  ]);
+});
+
+test('links inside code are left alone', () => {
+  const root = repo({
+    'docs/design/API.md': [
+      '# API',
+      '',
+      '[rewritten](./OTHER.md) but not `[code](./OTHER.md)` or ``[more `code`](./OTHER.md)``',
+      '',
+      '```markdown',
+      '[fenced](./OTHER.md)',
+      '```',
+      '',
+      '~~~~',
+      '```',
+      '[still fenced](./OTHER.md)',
+      '~~~~',
+      '',
+      '[after the fences](./OTHER.md)',
+      '',
+    ].join('\n'),
+    'docs/design/OTHER.md': '# Other\n',
+  });
+  sync(root, PLAN);
+
+  assert.deepEqual(links(root, 'architecture/Api.md'), [
+    `[rewritten](${BASE}/architecture/other) but not \`[code](./OTHER.md)\` or \`\`[more \`code\`](./OTHER.md)\`\``,
+    '[fenced](./OTHER.md)',
+    '[still fenced](./OTHER.md)',
+    `[after the fences](${BASE}/architecture/other)`,
+  ]);
 });

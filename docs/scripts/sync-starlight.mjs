@@ -2,11 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const docsBase = '/sample-autonomous-cloud-coding-agents';
+const repoUrl = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
 /** Generated pages are written here. All paths in this file are relative to the repository root. */
 const contentDir = 'docs/src/content/docs';
+/** Pages under `contentDir` that are written by hand, not generated. */
+const handAuthored = ['index.md'];
+/** Images are copied from `from` to `to`; Astro serves them at `${docsBase}${route}/`. */
+const assets = { from: 'docs/imgs', to: 'docs/public/imgs', route: '/imgs' };
 
 /**
- * The mirror plan: which source becomes which page under `contentDir`.
+ * The mirror plan: which source becomes which page under `contentDir`. Link rewriting reads
+ * the same table, so a rewritten link can only point at a page that is generated.
  *   split  one page per `##` section; the text before the first `##` becomes Introduction.md
  *   file   one source file, one page
  *   dir    every *.md of a directory, under a normalized file name
@@ -54,115 +60,161 @@ function normalizeFileStem(input) {
   return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)}`;
 }
 
-function rewriteDocsLinkTarget(target) {
-  if (!target || target.startsWith('#') || target.startsWith('/')) {
-    return undefined;
-  }
-  if (/^[a-z]+:/i.test(target)) {
-    return undefined;
-  }
+/** The route Starlight serves a page at: `using/Slack-setup-guide.md` -> `/using/slack-setup-guide`. */
+function routeOf(target) {
+  const slug = target.replace(/\.mdx?$/i, '').toLowerCase();
+  return slug === 'index' ? '/' : `/${slug}`;
+}
 
-  const [pathPart, anchor] = target.split('#');
-  if (!pathPart.toLowerCase().endsWith('.md')) {
-    return undefined;
-  }
+/** Marks the lines that belong to a fenced code block (the fence lines included). */
+function fencedLines(lines) {
+  let open;
+  return lines.map((line) => {
+    const fence = line.match(/^\s*(`{3,}(?=[^`]*$)|~{3,})/)?.[1];
+    if (!open) {
+      open = fence;
+      return Boolean(fence);
+    }
+    if (fence && fence[0] === open[0] && fence.length >= open.length && line.trim() === fence) {
+      open = undefined;
+    }
+    return true;
+  });
+}
 
-  const normalizedPath = pathPart.replaceAll('\\', '/');
-  const stem = path.basename(normalizedPath, '.md');
-  const slug = normalizeFileStem(stem).toLowerCase();
-  const anchorSuffix = anchor ? `#${anchor}` : '';
+/** ATX headings outside code fences, in document order. */
+function headingsOf(text) {
+  const lines = text.split('\n');
+  const fenced = fencedLines(lines);
+  return lines.flatMap((line, index) => {
+    const match = fenced[index] ? null : line.match(/^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/);
+    return match ? [{ index, depth: match[1].length, text: match[2] }] : [];
+  });
+}
 
-  const explicitGuideRoutes = {
-    PROMPT_GUIDE: '/customizing/prompt-engineering',
-    QUICK_START: '/getting-started/quick-start',
-    DEVELOPER_GUIDE: '/developer-guide/introduction',
-    USER_GUIDE: '/using/overview',
-    CONTRIBUTING: '/developer-guide/contributing',
-    SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
-    LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
-    JIRA_SETUP_GUIDE: '/using/jira-setup-guide',
-    DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
-    CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
-    DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
-    // Mirrored to getting-started/Cost-attribution.md (see PLAN), NOT
-    // architecture/. Without this entry a relative `./COST_ATTRIBUTION.md` link misses
-    // the `/guides/` bail-out and falls through to the `/architecture/${slug}` default,
-    // producing a 404 on the published site.
-    COST_ATTRIBUTION: '/getting-started/cost-attribution',
+/**
+ * Heading ids as GitHub and Astro compute them (the github-slugger algorithm): lowercase,
+ * drop punctuation, spaces become hyphens, repeats get -1, -2, ... The returned function
+ * remembers the ids it handed out, so use one per document.
+ */
+function createSlugger() {
+  const seen = new Map();
+  return (heading) => {
+    const base = heading
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .toLowerCase()
+      .replace(/[^\p{Alphabetic}\p{M}\p{Nd}\p{Pc} -]/gu, '')
+      .replace(/ /g, '-');
+    let slug = base;
+    while (seen.has(slug)) {
+      seen.set(base, seen.get(base) + 1);
+      slug = `${base}-${seen.get(base)}`;
+    }
+    seen.set(slug, 0);
+    return slug;
   };
+}
 
-  /** The split emits each `##` from DEVELOPER_GUIDE as its own page — map #anchors to those routes. */
-  const developerGuideAnchorRoutes = {
-    'repository-preparation': '/developer-guide/repository-preparation',
-    'model-configuration': '/developer-guide/model-configuration',
-  };
-  if (stem === 'DEVELOPER_GUIDE' && anchor) {
-    const splitRoute = developerGuideAnchorRoutes[anchor.toLowerCase()];
-    if (splitRoute) {
-      return splitRoute;
+/**
+ * Where links to each source file go: its `route`, and for every heading the page and id
+ * it has on the site. GitHub numbers repeated headings across the whole source file; the
+ * site numbers them per page and has no id for the heading that became the page title.
+ */
+function indexSources(pages) {
+  const docs = new Map(
+    handAuthored.map((target) => [`${contentDir}/${target}`, { route: routeOf(target), anchors: new Map() }]),
+  );
+  const sourceSlug = new Map();
+  for (const page of pages) {
+    if (!docs.has(page.source)) {
+      const first = pages.find((candidate) => candidate.source === page.source && !candidate.skip);
+      docs.set(page.source, { route: routeOf(first.target), anchors: new Map() });
+      sourceSlug.set(page.source, createSlugger());
+    }
+    const doc = docs.get(page.source);
+    const route = page.skip ? doc.route : routeOf(page.target);
+    const slugInSource = sourceSlug.get(page.source);
+    const slugInPage = createSlugger();
+    if (page.heading !== undefined) {
+      doc.anchors.set(slugInSource(page.heading), { route, id: '' });
+    }
+    for (const heading of headingsOf(page.body)) {
+      doc.anchors.set(slugInSource(heading.text), { route, id: slugInPage(heading.text) });
     }
   }
+  return docs;
+}
 
-  /** Map USER_GUIDE anchors to the new `using/` and `customizing/` directories. */
-  const userGuideAnchorRoutes = {
-    overview: '/using/overview',
-    authentication: '/using/authentication',
-    'repository-onboarding': '/customizing/repository-onboarding',
-    'per-repo-overrides': '/customizing/per-repo-overrides',
-    'monthly-user-and-team-budgets': '/customizing/per-repo-overrides#monthly-user-and-team-budgets',
-    workflows: '/using/workflows',
-    'using-the-rest-api': '/using/using-the-rest-api',
-    'using-the-cli': '/using/using-the-cli',
-    'webhook-integration': '/using/webhook-integration',
-    'task-lifecycle': '/using/task-lifecycle',
-    'what-the-agent-does': '/using/what-the-agent-does',
-    'tips-for-being-a-good-citizen': '/using/tips-for-being-a-good-citizen',
-  };
-  if (stem === 'USER_GUIDE' && anchor) {
-    const splitRoute = userGuideAnchorRoutes[anchor.toLowerCase()];
-    if (splitRoute) {
-      return splitRoute;
-    }
-  }
+const fragment = (id) => (id ? `#${id}` : '');
 
-  if (explicitGuideRoutes[stem]) {
-    return `${explicitGuideRoutes[stem]}${anchorSuffix}`;
-  }
-
-  if (normalizedPath.includes('/guides/') || normalizedPath.startsWith('../guides/')) {
+/**
+ * The URL for a relative link written in `page.source`, or undefined to leave it as written.
+ * A published file becomes its site route (under `docsBase`: Starlight does not prefix links
+ * in Markdown bodies), an image its public URL, any other file of the repository a GitHub URL.
+ */
+function resolveLink(target, page, docs, repoRoot) {
+  if (target.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(target)) {
     return undefined;
   }
-  return `/architecture/${slug}${anchorSuffix}`;
+  const [file, anchor = ''] = target.split('#');
+  const source =
+    file === '' ? page.source : path.posix.join(path.posix.dirname(page.source), file).replace(/\/$/, '');
+  // A directory stands for its README when that is a published page.
+  const doc = docs.get(source) ?? docs.get(`${source}/README.md`);
+  if (doc) {
+    const hit = anchor ? doc.anchors.get(anchor.toLowerCase()) : undefined;
+    if (file === '') {
+      // An anchor within the same source file: only a split guide moves it to another page.
+      if (!hit) {
+        return undefined;
+      }
+      return hit.route === routeOf(page.target)
+        ? `#${hit.id || '_top'}`
+        : `${docsBase}${hit.route}${fragment(hit.id)}`;
+    }
+    // An anchor the source does not have is passed through: the site link check reports it.
+    const { route, id } = hit ?? { route: doc.route, id: anchor };
+    return `${docsBase}${route}${fragment(id)}`;
+  }
+  if (source.startsWith('..') || !fs.existsSync(path.join(repoRoot, source))) {
+    // Dangling: left as written, so that the link checks report it.
+    return undefined;
+  }
+  if (source.startsWith(`${assets.from}/`)) {
+    return `${docsBase}${assets.route}${source.slice(assets.from.length)}`;
+  }
+  // The file exists in the repository but is not published on the site: link to GitHub.
+  const kind = fs.statSync(path.join(repoRoot, source)).isDirectory() ? 'tree' : 'blob';
+  return `${repoUrl}/${kind}/main/${source}${fragment(anchor)}`;
+}
+
+/** Rewrites Markdown links and images outside code; `resolve` returns the new target or undefined. */
+function rewriteLinks(text, resolve) {
+  const lines = text.split('\n');
+  const fenced = fencedLines(lines);
+  // First alternative: an inline code span, which is skipped. Second: [label](target "title").
+  const codeOrLink = /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))/g;
+  return lines
+    .map((line, index) =>
+      fenced[index]
+        ? line
+        : line.replace(codeOrLink, (match, code, open, target, close) => {
+            const rewritten = code ? undefined : resolve(target);
+            return rewritten ? `${open}${rewritten}${close}` : match;
+          }),
+    )
+    .join('\n');
 }
 
 function ensureFrontmatter(content, title) {
-  const normalized = content
-    .replaceAll('../imgs/', `${docsBase}/imgs/`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
-      const rewritten = rewriteDocsLinkTarget(target);
-      if (!rewritten) {
-        return match;
-      }
-      // The site is served under `base` (docsBase), so root-relative routes
-      // must carry that prefix — otherwise they resolve to the domain root
-      // and 404. Starlight prefixes its own nav links automatically, but our
-      // rewritten body links are raw markdown and need it added explicitly
-      // (same reason the image rewrites above include docsBase). Every
-      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
-      // `#…` anchors and external links return undefined and keep their
-      // original text above), so the prefix always applies.
-      // (Fixes the broken in-body design-doc links.)
-      return `[${label}](${docsBase}${rewritten})`;
-    });
-
-  const trimmed = normalized.trimStart();
+  const trimmed = content.trimStart();
   if (trimmed.startsWith('---')) {
     const closingIdx = trimmed.indexOf('\n---', 3);
     if (closingIdx !== -1) {
-      return normalized;
+      return content;
     }
   }
-  return `---\ntitle: ${title}\n---\n\n${normalized}`;
+  return `---\ntitle: ${title}\n---\n\n${content}`;
 }
 
 function writeFile(targetPath, content) {
@@ -187,7 +239,8 @@ function filePage(repoRoot, source, target) {
     return [];
   }
   const stem = path.basename(source, path.extname(source));
-  return [{ target, title: normalizeFileStem(stem).replace(/-/g, ' '), body: fs.readFileSync(sourcePath, 'utf8') }];
+  const title = normalizeFileStem(stem).replace(/-/g, ' ');
+  return [{ source, target, title, body: fs.readFileSync(sourcePath, 'utf8') }];
 }
 
 /** One page per `##` section of a guide. */
@@ -202,11 +255,16 @@ function splitPages(repoRoot, { split: source, to, introTitle, moved = {}, dropp
     const firstNewline = part.indexOf('\n');
     const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
     const body = firstNewline === -1 ? '' : part.slice(firstNewline + 1);
-    pages.push({ file: `${normalizeFileStem(heading)}.md`, title: heading, body });
+    pages.push({ file: `${normalizeFileStem(heading)}.md`, title: heading, heading, body });
   }
-  return pages
-    .filter(({ file }) => !dropped.includes(file))
-    .map(({ file, title, body }) => ({ target: `${moved[file] ?? to}/${file}`, title, body: body.trim() }));
+  // A dropped page is not written (`skip`), but links to its headings still need a destination.
+  return pages.map(({ file, body, ...page }) => ({
+    ...page,
+    source,
+    target: `${moved[file] ?? to}/${file}`,
+    body: body.trim(),
+    skip: dropped.includes(file),
+  }));
 }
 
 function collectPages(repoRoot, plan) {
@@ -244,16 +302,19 @@ function copyAssetDir(sourceDir, targetDir) {
 
 export function sync(repoRoot, plan = PLAN) {
   const contentRoot = path.join(repoRoot, contentDir);
-  for (const page of collectPages(repoRoot, plan)) {
-    writeFile(path.join(contentRoot, page.target), ensureFrontmatter(page.body, page.title));
+  const pages = collectPages(repoRoot, plan);
+  const docs = indexSources(pages);
+  for (const page of pages.filter((candidate) => !candidate.skip)) {
+    const body = rewriteLinks(page.body, (target) => resolveLink(target, page, docs, repoRoot));
+    writeFile(path.join(contentRoot, page.target), ensureFrontmatter(body, page.title));
   }
 
   // --- Static assets: copy source image dir into the site's public/ ---
-  // Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns
+  // Guides reference images as `../imgs/foo.png`; resolveLink() turns
   // those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
   // public/. Copy the source dir here so every committed image is published —
   // otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
-  copyAssetDir(path.join(repoRoot, 'docs', 'imgs'), path.join(repoRoot, 'docs', 'public', 'imgs'));
+  copyAssetDir(path.join(repoRoot, assets.from), path.join(repoRoot, assets.to));
 
   // Guardrail: ensure target tree exists when running in a clean checkout.
   fs.mkdirSync(contentRoot, { recursive: true });

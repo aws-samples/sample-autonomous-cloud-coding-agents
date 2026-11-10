@@ -96,7 +96,7 @@ The divergence is safe because it does not weaken detection: the orchestrator st
 
 Neither the mapping nor the NotFound rule is a health decision: both are mechanical restatements of substrate state, which is what keeps the "strategy reports, orchestrator interprets" split intact.
 
-Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax)):
+Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agents/decisions/adr-020-ears-requirements-syntax)):
 
 - When a task's Blueprint sets `compute_type: 'lambda-microvm'`, the orchestrator shall resolve the `LambdaMicrovmComputeStrategy` via `resolveComputeStrategy`.
 - When `startSession` is invoked, the strategy shall call `RunMicrovm` with `maximumDurationInSeconds` set to 28 800 (the service maximum, matching AgentCore's 8-hour session cap and sitting inside the orchestrator's ~8.5 h safety-net poll window).
@@ -431,6 +431,6 @@ Lambda MicroVMs launched in 5 regions (us-east-1/2, us-west-2, eu-west-1, ap-nor
 - PR [#596](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/596) — ECS Fargate backend (pattern source for conditional wiring)
 - [AWS Lambda MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html) — developer guide; [Running and using MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/microvms-launching.html) — lifecycle APIs and hooks
 - [Agent Toolkit for AWS — aws-lambda-microvms skill](https://github.com/aws/agent-toolkit-for-aws/blob/main/skills/specialized-skills/serverless-skills/aws-lambda-microvms/SKILL.md) — operational constraints (no self-suspend, idle-policy semantics, snapshot uniqueness, size limits)
-- [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax) — EARS syntax used for the normative requirements above
+- [ADR-020](/sample-autonomous-cloud-coding-agents/decisions/adr-020-ears-requirements-syntax) — EARS syntax used for the normative requirements above
 - [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — approval-gate mechanics (decisions #6, #7) the suspend/resume handshake preserves; `cancel-task.ts` / `task-api.ts` — the inline best-effort + reconciler-backstop pattern the resume path mirrors
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute), [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) — design docs to be updated by the implementing PRs
