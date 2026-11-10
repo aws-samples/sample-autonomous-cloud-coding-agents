@@ -99,10 +99,11 @@ jobs:
         run: mise run security:secrets:range
 
       # This step is part of the "Secrets, deps, and workflow scan" job, which is
-      # a required status check on main (repo ruleset) and re-runs in the merge
-      # queue using trunk's copy of this workflow — so a fork PR cannot gut this
-      # step to slip a masking regression past merge. Do not remove this step or
-      # rename the job: the required-check binding is by job name.
+      # a required status check on main (repo ruleset), bound by job NAME: do not
+      # rename the job or remove this step. Pull request and merge-queue runs
+      # both execute this file as it is in the commit under test, so a pull
+      # request can edit it. What stops a step from being removed is the admin
+      # code-owner review that .github/CODEOWNERS requires for .github/.
       - name: Silent-success masking scan (semgrep, ratcheted to new findings)
         if: ${{ !cancelled() }}
         env:
