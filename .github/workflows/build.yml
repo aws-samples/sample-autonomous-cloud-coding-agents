@@ -30,11 +30,22 @@ permissions:
   repository-projects: none
   security-events: none
   statuses: none
+# One build per pull request: a new push cancels the superseded run instead of
+# both holding a runner. Merge-queue and manual runs each get a group of their
+# own (the run id) and cancel-in-progress is false for them, so this block can
+# never cancel a queued merge group or make it wait behind another run.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     permissions:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
+    # A hung build must not hold a runner for the 360-minute default. The longest
+    # of 194 recorded jobs took 27 minutes (on one jest worker), and the merge
+    # queue gives up on an entry after 60.
+    timeout-minutes: 45
     # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
     runs-on: >-
       ${{
@@ -63,6 +74,10 @@ jobs:
       # secret/dependency/workflow scanning runs as required PR checks in
       # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
+      # cdk's test script defaults to `--maxWorkers=25%`, which is ONE worker on
+      # the 4-core runner: the whole jest suite ran serially. Three workers leave
+      # a core for the other build tasks (the ECS agent box runs four).
+      JEST_MAX_WORKERS: "3"
     steps:
       - name: Free Disk Space
         shell: bash
