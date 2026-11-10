@@ -47,6 +47,7 @@ import {
   type AttachmentUploadInstruction,
   type ChannelSource,
   type CreateTaskRequest,
+  type CreateTaskResponse,
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
   type InlineAttachment,
@@ -936,7 +937,7 @@ export async function createTaskCore(
       ...toTaskDetail(taskRecord),
       upload_instructions: uploadInstructions,
       task_expires_at: taskExpiresAt,
-    }, requestId);
+    } satisfies CreateTaskResponse, requestId);
   }
 
   return successResponse(201, toTaskDetail(taskRecord), requestId);

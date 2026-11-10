@@ -26,7 +26,7 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type TaskRecord } from './shared/types';
+import { NUDGE_MAX_MESSAGE_LENGTH, type NudgeRecord, type NudgeRequest, type NudgeResponse, type TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
@@ -223,7 +223,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       task_id: taskId,
       nudge_id: nudgeId,
       submitted_at: nowIso,
-    }, requestId);
+    } satisfies NudgeResponse, requestId);
   } catch (err) {
     logger.error('Failed to submit nudge', {
       error: err instanceof Error ? err.message : String(err),
