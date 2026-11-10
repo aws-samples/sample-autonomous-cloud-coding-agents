@@ -306,6 +306,24 @@ jobs:
           SECONDS=0
           mise run install
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
+      # The install is not frozen, so a manifest that disagrees with its lockfile
+      # makes it rewrite the lockfile. Fail here and name the file, instead of at
+      # the end of the build as an anonymous "files were changed". A lockfile that
+      # is not tracked fails too (git ls-files --error-unmatch).
+      - name: Fail on lockfile drift
+        shell: bash
+        run: |
+          drift=0
+          for lock in yarn.lock agent/uv.lock; do
+            git ls-files --error-unmatch "$lock" > /dev/null
+            changed="$(git status --porcelain -- "$lock")"
+            if [ -n "$changed" ]; then
+              echo "::error file=${lock},title=Lockfile drift::Installing dependencies rewrote ${lock}: a package.json or agent/pyproject.toml no longer matches it. Run 'mise run install' locally and commit ${lock}."
+              git --no-pager diff --stat -- "$lock"
+              drift=1
+            fi
+          done
+          exit "$drift"
       - name: build
         env:
           TMPDIR: ${{ runner.temp }}
