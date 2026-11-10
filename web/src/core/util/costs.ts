@@ -61,7 +61,7 @@ function utcDay(date: Date): string {
 }
 
 /** The instant a task's spend is attributed to. */
-export function spendAt(task: Pick<TaskSummary, 'completed_at' | 'updated_at'>): string {
+function spendAt(task: Pick<TaskSummary, 'completed_at' | 'updated_at'>): string {
   return task.completed_at ?? task.updated_at;
 }
 
@@ -98,7 +98,7 @@ export function outcomeLabel(task: Pick<TaskSummary, 'status'>): string {
   }
 }
 
-export function groupOf(task: TaskSummary, grouping: CostGrouping): string {
+function groupOf(task: TaskSummary, grouping: CostGrouping): string {
   switch (grouping) {
     case 'repo':
       return task.repo ?? 'No repository';
