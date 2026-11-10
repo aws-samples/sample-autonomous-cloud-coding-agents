@@ -19,7 +19,10 @@ depends = [":compile", ":test", ":eslint"]
 
 [tasks.test]
 description = "Run Jest tests"
-run = "yarn jest --passWithNoTests --updateSnapshot"
+# --ci: a snapshot that is missing or differs fails the run instead of being written, on a
+# developer machine as in CI. Do not add --updateSnapshot (rewrites a failing snapshot and
+# passes) or --passWithNoTests (passes when no test file is left).
+run = "yarn jest --ci"
 
 [tasks.eslint]
 description = "Run ESLint"

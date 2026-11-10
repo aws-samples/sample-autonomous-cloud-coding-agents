@@ -12,7 +12,7 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "eslint": "eslint --fix --no-error-on-unmatched-pattern src test build-tools",
-    "test": "jest --passWithNoTests --updateSnapshot",
+    "test": "jest --ci",
     "test:watch": "jest --watch",
     "build": "npm run compile && npm run test && npm run eslint",
     "security:retire": "retire --path . --severity high"
