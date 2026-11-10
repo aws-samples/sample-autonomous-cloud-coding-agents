@@ -92,5 +92,3 @@ export const ORCH_LOG = {
    *  'lost_terminal'). */
   sweepRecovered: 'orch.sweep.recovered',
 } as const;
-
-export type OrchLogEvent = (typeof ORCH_LOG)[keyof typeof ORCH_LOG];

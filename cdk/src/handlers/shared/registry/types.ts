@@ -129,12 +129,6 @@ export interface ResolvedAsset {
   readonly warnings: readonly string[];
 }
 
-/** The bundle threaded into the agent invocation payload after resolving all of a
- *  Blueprint's `registry://` refs. */
-export interface ResolvedAssetBundle {
-  readonly assets: readonly ResolvedAsset[];
-}
-
 export type ResolutionFailureReason =
   | 'NO_MATCHING_VERSION'
   | 'REMOVED'

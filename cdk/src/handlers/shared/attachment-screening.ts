@@ -29,8 +29,6 @@ const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 200;
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
 
-export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
-
 /** Bedrock Guardrail image filter max side (docs: 8000x8000). */
 const MAX_IMAGE_DIMENSION_PX = 8000;
 
