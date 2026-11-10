@@ -5,7 +5,7 @@ const docsBase = '/sample-autonomous-cloud-coding-agents';
 const repoUrl = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
 /** Generated pages are written here. All paths in this file are relative to the repository root. */
 const contentDir = 'docs/src/content/docs';
-/** Pages under `contentDir` that are written by hand, not generated. */
+/** Pages under `contentDir` that are written by hand: never generated, never pruned. */
 const handAuthored = ['index.md'];
 /** Images are copied from `from` to `to`; Astro serves them at `${docsBase}${route}/`. */
 const assets = { from: 'docs/imgs', to: 'docs/public/imgs', route: '/imgs' };
@@ -339,17 +339,44 @@ function copyAssetDir(sourceDir, targetDir) {
   }
 }
 
+/** Every file below `dir`, as POSIX paths relative to it. */
+function listFiles(dir) {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  return fs
+    .readdirSync(dir, { recursive: true })
+    .filter((file) => fs.statSync(path.join(dir, file)).isFile())
+    .map((file) => file.split(path.sep).join('/'));
+}
+
+/**
+ * Deletes the files of a generated tree that this run did not produce, so that a deleted or
+ * renamed source (or `##` heading) takes its page off the site. In CI the mutation check
+ * then fails on the stale file that is still committed.
+ */
+function prune(dir, keep) {
+  for (const file of listFiles(dir)) {
+    if (!keep.has(file)) {
+      fs.rmSync(path.join(dir, file));
+    }
+  }
+}
+
 export function sync(repoRoot, plan = PLAN) {
   const contentRoot = path.join(repoRoot, contentDir);
   // Every source is read before the first page is written: a failure leaves the mirrors as they were.
   const pages = collectPages(repoRoot, plan);
   const docs = indexSources(pages);
+  const written = new Set(handAuthored);
   for (const page of pages.filter((candidate) => !candidate.skip)) {
     const body = rewriteLinks(page.body, (target) => resolveLink(target, page, docs, repoRoot));
     // JSON quoting is valid YAML and keeps a colon in the title from breaking the frontmatter.
     const frontmatter = page.frontmatter ?? `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n`;
     writeFile(path.join(contentRoot, page.target), `${frontmatter}${body}`);
+    written.add(page.target);
   }
+  prune(contentRoot, written);
 
   // --- Static assets: copy source image dir into the site's public/ ---
   // Guides reference images as `../imgs/foo.png`; resolveLink() turns
@@ -357,6 +384,7 @@ export function sync(repoRoot, plan = PLAN) {
   // public/. Copy the source dir here so every committed image is published —
   // otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
   copyAssetDir(path.join(repoRoot, assets.from), path.join(repoRoot, assets.to));
+  prune(path.join(repoRoot, assets.to), new Set(listFiles(path.join(repoRoot, assets.from))));
 
   // Guardrail: ensure target tree exists when running in a clean checkout.
   fs.mkdirSync(contentRoot, { recursive: true });

@@ -160,6 +160,36 @@ test('two sources for one page fail instead of overwriting each other', () => {
   );
 });
 
+test('mirrors and images without a source are pruned; hand-authored pages are kept', () => {
+  const root = repo({
+    'docs/guides/GUIDE.md': '# Guide\n\n## Old name\n\nText.\n',
+    'docs/design/EXTRA.md': '# Extra\n',
+    'docs/imgs/old.png': 'png',
+    'docs/imgs/kept.png': 'png',
+    [`${CONTENT}/stray/Hand-made.md`]: '---\ntitle: Stray\n---\n',
+  });
+  sync(root, PLAN);
+  assert.ok(pages(root).includes('guide/Old-name.md') && pages(root).includes('architecture/Extra.md'));
+
+  // Rename a heading, delete a source file and an image, then sync again.
+  fs.writeFileSync(path.join(root, 'docs/guides/GUIDE.md'), '# Guide\n\n## New name\n\nText.\n');
+  fs.rmSync(path.join(root, 'docs/design/EXTRA.md'));
+  fs.rmSync(path.join(root, 'docs/imgs/old.png'));
+  sync(root, PLAN);
+
+  assert.deepEqual(pages(root), [
+    'architecture/Api.md',
+    'decisions/Adr-001-first.md',
+    'decisions/Readme.md',
+    'guide/Contributing.md',
+    'guide/New-name.md',
+    'index.md',
+    'start/Start.mdx',
+  ]);
+  assert.equal(page(root, 'index.md'), SOURCES[`${CONTENT}/index.md`]);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'docs/public/imgs')), ['kept.png']);
+});
+
 test('a missing source fails the sync and leaves the mirrors untouched', () => {
   const root = repo();
   sync(root, PLAN);

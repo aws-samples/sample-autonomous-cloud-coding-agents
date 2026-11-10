@@ -32,7 +32,8 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 | `docs/decisions/` | WRITE | ADRs |
 | `docs/imgs/` | WRITE | Static images |
 | `CONTRIBUTING.md` (repo root) | WRITE | Mirrored to Starlight |
-| `docs/src/content/docs/` | READ only | Generated — never edit by hand |
+| `docs/src/content/docs/` | READ only | Generated — never edit by hand. Sync deletes every page there that no source generates; `index.md` (home page) is the one hand-written exception |
+| `docs/public/imgs/` | READ only | Generated copy of `docs/imgs/`, pruned the same way |
 | `docs/scripts/sync-starlight.mjs` | READ | Sync logic (change only if adding new mirror rules; cover the change in `sync-starlight.test.mjs`) |
 
 Site renders `docs/design/` at `/architecture/` on the published docs site.
