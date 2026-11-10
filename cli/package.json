@@ -60,6 +60,9 @@
     ],
     "clearMocks": true,
     "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
     "coverageReporters": [
       "json",
       "lcov",
