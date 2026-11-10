@@ -32,7 +32,7 @@ const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
 export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /** Bedrock Guardrail image filter max side (docs: 8000x8000). */
-export const MAX_IMAGE_DIMENSION_PX = 8000;
+const MAX_IMAGE_DIMENSION_PX = 8000;
 
 /* eslint-disable @typescript-eslint/no-magic-numbers -- file format magic-byte signatures */
 const PNG_FILE_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

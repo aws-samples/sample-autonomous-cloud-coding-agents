@@ -22,7 +22,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
 /** Lifecycle expiry for task attachments — matches task record retention. */
-export const ATTACHMENT_TTL_DAYS = 90;
+const ATTACHMENT_TTL_DAYS = 90;
 
 /** Noncurrent version expiry — covers the longest-running tasks. */
 const NONCURRENT_VERSION_TTL_DAYS = 7;

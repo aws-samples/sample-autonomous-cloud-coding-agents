@@ -68,7 +68,7 @@ const ECS_SUBNETS = process.env.ECS_SUBNETS;
  * (`arn:aws:ecs:…:task-definition/<family>:<rev>`) or a plain `<family>:<rev>` and
  * return just `<family>`; a value with no `/` and no `:` is returned unchanged.
  */
-export function toTaskDefinitionFamily(ref: string): string {
+function toTaskDefinitionFamily(ref: string): string {
   // Take the segment after `task-definition/` when it's a full ARN, else the whole
   // value; then strip a trailing `:<digits>` revision suffix.
   const afterSlash = ref.includes('task-definition/')

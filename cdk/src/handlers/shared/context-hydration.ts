@@ -160,7 +160,7 @@ export class GuardrailScreeningError extends Error {
  * check in the hydration catch block covers all current and future attachment error
  * types, avoiding a growing allowlist.
  */
-export class AttachmentError extends Error {
+class AttachmentError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'AttachmentError';
