@@ -302,7 +302,7 @@ interface Formatter {
   emit(ev: TaskEvent): void;
 }
 
-export function makeFormatter(isJson: boolean): Formatter {
+function makeFormatter(isJson: boolean): Formatter {
   return {
     emit(ev: TaskEvent): void {
       if (isJson) {
@@ -478,7 +478,7 @@ interface SnapshotResult {
  *
  *  Emitted event ordering: events are returned in ascending event_id
  *  order (REST contract). */
-export async function fetchInitialSnapshot(
+async function fetchInitialSnapshot(
   apiClient: ApiClient,
   taskId: string,
   opts: { signal: AbortSignal },

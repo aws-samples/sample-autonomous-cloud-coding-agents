@@ -98,7 +98,7 @@ const COMPUTE_LABELS: Readonly<Record<ComputeBackend, string>> = {
 };
 
 /** One-time account changes a deploy needs, in execution order. */
-export type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
+type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
 
 /** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
 const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
@@ -369,7 +369,7 @@ function versionAtLeast(actual: string, required: string): boolean {
  * What the account needs before ABCA can deploy. A standard CDK bootstrap (no
  * ABCA policy outputs) is shared with other apps and is never modified.
  */
-export function planAccountPreparation(
+function planAccountPreparation(
   bootstrap: ExistingStack | null,
   compute: readonly ComputeBackend[],
 ): { steps: AccountPreparation[]; computeTypes: ComputeBackend[]; standardBootstrap: boolean } {

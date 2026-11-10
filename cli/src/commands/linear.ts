@@ -128,7 +128,7 @@ export function parsePastedAuthorization(raw: string): { code: string; state?: s
 }
 
 /** Agent name used when the operator does not choose one. */
-export const DEFAULT_APP_NAME = 'bgagent';
+const DEFAULT_APP_NAME = 'bgagent';
 
 /**
  * The literal token a comment must contain to summon the agent.
@@ -139,7 +139,7 @@ export const DEFAULT_APP_NAME = 'bgagent';
  * here rather than imported because the CLI does not depend on the CDK package;
  * the two must be changed together.
  */
-export const COMMENT_TRIGGER_TOKEN = '@bgagent';
+const COMMENT_TRIGGER_TOKEN = '@bgagent';
 
 /**
  * Column the `←` annotations start at, so operator-chosen values of different
@@ -211,7 +211,7 @@ export interface LinearAppTemplateOptions {
 const WEBHOOK_URL_HINT = '(run `bgagent linear webhook-info`)';
 
 /** ABCA's Linear webhook endpoint for a configured API URL. */
-export function linearWebhookUrl(apiUrl: string): string {
+function linearWebhookUrl(apiUrl: string): string {
   return `${apiUrl.replace(/\/+$/, '')}/linear/webhook`;
 }
 

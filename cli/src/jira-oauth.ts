@@ -23,8 +23,8 @@ import { CliError } from './errors';
 /**
  * Atlassian OAuth (3LO) endpoint URLs. Fixed across all tenants.
  */
-export const JIRA_AUTHORIZE_ENDPOINT = 'https://auth.atlassian.com/authorize';
-export const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
+const JIRA_AUTHORIZE_ENDPOINT = 'https://auth.atlassian.com/authorize';
+const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
 
 /**
  * Scopes for the agent install. The classic-scope set required for ABCA's
@@ -36,7 +36,7 @@ export const JIRA_TOKEN_ENDPOINT = 'https://auth.atlassian.com/oauth/token';
  *   the access token expires after 1h and the integration cannot
  *   self-renew.
  */
-export const JIRA_OAUTH_SCOPES = [
+const JIRA_OAUTH_SCOPES = [
   'read:jira-work',
   'write:jira-work',
   'read:jira-user',
@@ -131,7 +131,7 @@ export interface StoredJiraOauthToken {
  * name is `${JIRA_OAUTH_SECRET_PREFIX}<cloudId>`. Use this when scanning
  * Secrets Manager for every tenant install.
  */
-export const JIRA_OAUTH_SECRET_PREFIX = 'bgagent-jira-oauth-';
+const JIRA_OAUTH_SECRET_PREFIX = 'bgagent-jira-oauth-';
 
 /**
  * Build the secret name for a given Jira cloudId. Matches the naming
