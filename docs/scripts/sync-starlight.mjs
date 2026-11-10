@@ -237,13 +237,20 @@ function writeFile(targetPath, content) {
   }
 }
 
-/** One page for a whole source file. The title is the source's H1 (fallback: the file name). */
-function filePage(repoRoot, source, target) {
+/** A source named in PLAN that is gone must fail the sync: skipping it would unpublish a page silently. */
+function readSource(repoRoot, source) {
   const sourcePath = path.join(repoRoot, source);
   if (!fs.existsSync(sourcePath)) {
-    return [];
+    throw new Error(
+      `sync-starlight: missing source ${source}. Restore the file or update PLAN in docs/scripts/sync-starlight.mjs.`,
+    );
   }
-  const raw = fs.readFileSync(sourcePath, 'utf8');
+  return fs.readFileSync(sourcePath, 'utf8');
+}
+
+/** One page for a whole source file. The title is the source's H1 (fallback: the file name). */
+function filePage(repoRoot, source, target) {
+  const raw = readSource(repoRoot, source);
   // A source that brings its own frontmatter (MDX) keeps it verbatim.
   const closing = raw.startsWith('---') ? raw.indexOf('\n---', 3) : -1;
   const frontmatter = closing === -1 ? undefined : raw.slice(0, closing + 4);
@@ -255,11 +262,7 @@ function filePage(repoRoot, source, target) {
 
 /** One page per `##` section of a guide. */
 function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
-  const sourcePath = path.join(repoRoot, source);
-  if (!fs.existsSync(sourcePath)) {
-    return [];
-  }
-  const parts = fs.readFileSync(sourcePath, 'utf8').split(/\n##\s+/g);
+  const parts = readSource(repoRoot, source).split(/\n##\s+/g);
   const intro = takeH1(parts.shift() ?? '');
   // Every section is published. Only an introduction that is nothing but the guide's H1 is
   // not written (`skip`): it would be an empty page, and links to it go to the first section.
@@ -270,6 +273,11 @@ function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
     const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
     const body = firstNewline === -1 ? '' : part.slice(firstNewline + 1);
     pages.push({ file: `${normalizeFileStem(heading)}.md`, title: heading, heading, body });
+  }
+  if (pages.every((page) => page.skip)) {
+    throw new Error(
+      `sync-starlight: ${source} has no content to publish. Add a section or remove it from PLAN in docs/scripts/sync-starlight.mjs.`,
+    );
   }
   return pages.map(({ file, body, ...page }) => ({
     ...page,
@@ -289,6 +297,11 @@ function collectPages(repoRoot, plan) {
     }
     const dir = path.join(repoRoot, entry.dir);
     const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((file) => file.endsWith('.md')) : [];
+    if (files.length === 0) {
+      throw new Error(
+        `sync-starlight: no Markdown source in ${entry.dir}. Restore the directory or update PLAN in docs/scripts/sync-starlight.mjs.`,
+      );
+    }
     return files.flatMap((file) => filePage(repoRoot, `${entry.dir}/${file}`, `${entry.to}/${normalizeFileStem(file)}.md`));
   });
 }
@@ -314,6 +327,7 @@ function copyAssetDir(sourceDir, targetDir) {
 
 export function sync(repoRoot, plan = PLAN) {
   const contentRoot = path.join(repoRoot, contentDir);
+  // Every source is read before the first page is written: a failure leaves the mirrors as they were.
   const pages = collectPages(repoRoot, plan);
   const docs = indexSources(pages);
   for (const page of pages.filter((candidate) => !candidate.skip)) {

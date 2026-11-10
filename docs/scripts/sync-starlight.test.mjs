@@ -120,6 +120,27 @@ test('every ## section is published; an introduction that is only the H1 is not'
   assert.deepEqual(links(root, 'architecture/Api.md'), [`[guide](${BASE}/guide/overview) [title](${BASE}/guide/overview)`]);
 });
 
+test('a missing source fails the sync and leaves the mirrors untouched', () => {
+  const root = repo();
+  sync(root, PLAN);
+  const before = pages(root).map((target) => page(root, target));
+
+  fs.rmSync(path.join(root, 'CONTRIBUTING.md'));
+  fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# Changed\n');
+  assert.throws(() => sync(root, PLAN), /missing source CONTRIBUTING\.md\. .*update PLAN in docs\/scripts\/sync-starlight\.mjs/);
+  assert.deepEqual(
+    pages(root).map((target) => page(root, target)),
+    before,
+  );
+
+  assert.throws(() => sync(repo(), [{ split: 'docs/guides/GONE.md', to: 'guide' }]), /missing source docs\/guides\/GONE\.md/);
+  assert.throws(() => sync(repo(), [{ dir: 'docs/gone', to: 'gone' }]), /no Markdown source in docs\/gone/);
+  assert.throws(
+    () => sync(repo({ 'docs/guides/GUIDE.md': '# Only a title\n' }), PLAN),
+    /docs\/guides\/GUIDE\.md has no content to publish/,
+  );
+});
+
 test('the source H1 becomes the quoted title and the only H1 of the page', () => {
   const root = repo({
     'docs/decisions/ADR-001-first.md': '# ADR-001: A "quoted" title: with colons\n\nDecision text.\n\n## Context\n',
