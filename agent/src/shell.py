@@ -131,8 +131,7 @@ def redact_secrets(text: str) -> str:
         text,
         flags=re.I,
     )
-    text = re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
-    return text
+    return re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
 
 
 def _clean_env() -> dict[str, str]:

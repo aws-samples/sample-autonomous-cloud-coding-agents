@@ -269,6 +269,27 @@ class TestEnsurePrCreate:
         assert "**PASS**" in body  # build passed
         assert "**FAIL**" in body  # lint failed
 
+    def test_returns_none_when_pr_creation_fails(self, monkeypatch):
+        # No existing PR; commits present; gh pr create exits non-zero.
+        def responder(cmd):
+            if "view" in cmd:
+                return _cp(returncode=1, stderr="no pr")
+            if "log" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder(returncodes={"create-pr": 1})
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        url = post_hooks.ensure_pr(
+            _config(), _setup(), build_passed=True, lint_passed=True, strategy="create"
+        )
+        assert url is None
+        assert run_cmd.cmd_for("create-pr") is not None
+
 
 class TestReconcileAgentBranch:
     """A leading cause of lost deliverables: reconcile the platform branch when

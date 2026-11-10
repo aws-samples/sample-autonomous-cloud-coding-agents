@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Credential helper for Claude Code's Bedrock calls (#215, cost attribution).
 
 Claude Code (``CLAUDE_CODE_USE_BEDROCK=1``) makes every ``InvokeModel`` call —

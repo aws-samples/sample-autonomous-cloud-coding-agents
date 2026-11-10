@@ -115,6 +115,10 @@ select = [
     "SIM",   # flake8-simplify
     "TCH",   # flake8-type-checking
     "RUF",   # ruff-specific rules
+    "ASYNC", # flake8-async: blocking calls inside `async def`
+    "C4",    # flake8-comprehensions
+    "EXE",   # flake8-executable: shebang and executable bit agree
+    "RET",   # flake8-return
     # AI007 guard (#258): magic-value comparisons should use named constants.
     # Values shared across Python/TypeScript belong in contracts/constants.json
     # (see contracts/constants.md).

@@ -148,7 +148,7 @@ def _print_result(label: str, result: dict) -> int:
     return count
 
 
-async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None):
+async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version: str):
     loop = asyncio.get_running_loop()
 
     print(f"Python:     {sys.version}")
@@ -157,13 +157,7 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None):
     policy = asyncio.get_event_loop_policy()
     print(f"Policy:     {type(policy).__module__}.{type(policy).__name__}")
     if node_cmd:
-        node_ver = subprocess.run(
-            ["node", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        print(f"Node.js:    {node_ver.stdout.strip()}")
+        print(f"Node.js:    {node_version}")
     else:
         print("Node.js:    not found (skipping Node.js tests)")
     print(f"Expected:   {EXPECTED_COUNT} messages per test")
@@ -243,5 +237,13 @@ if __name__ == "__main__":
             sys.exit(2)
     print()
 
-    # Threaded tests
-    asyncio.run(_run_tests(py_cmd, node_cmd))
+    # Threaded tests. The version probe blocks, so it runs here, before the event loop.
+    node_version = ""
+    if node_cmd:
+        node_version = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    asyncio.run(_run_tests(py_cmd, node_cmd, node_version))
