@@ -5,8 +5,10 @@ import os
 import sys
 import tempfile
 import threading
+import traceback
 from types import SimpleNamespace
 
+import botocore.httpsession
 import pytest
 
 from models import TaskConfig
@@ -108,6 +110,63 @@ _hang_watchdog.daemon = True
 _hang_watchdog.start()
 
 
+# Session-wide AWS isolation. Applied at import so that it holds for the whole
+# session: a monkeypatch would hand the inherited values back at teardown, to the
+# threads and wider-scoped fixtures still running, and would not cover the import
+# of a test module.
+#
+# 1. Nothing for botocore to find credentials in — not the environment, not a
+#    profile, not the shared config or credentials files (nor the two legacy
+#    files botocore still reads), not the container or instance metadata
+#    endpoints. Before this, writer threads leaked by test_server.py signed
+#    CloudWatch Logs requests with whatever credentials the developer's
+#    environment resolved.
+for _var in (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CREDENTIAL_FILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_PROFILE",
+    "AWS_ROLE_ARN",
+    "AWS_ROLE_SESSION_NAME",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SECURITY_TOKEN",
+    "AWS_SESSION_TOKEN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+):
+    os.environ.pop(_var, None)
+os.environ["AWS_CONFIG_FILE"] = os.devnull
+os.environ["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+os.environ["BOTO_CONFIG"] = os.devnull
+os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
+
+# 2. No request leaves the process. Every HTTP request botocore makes — service
+#    calls and its own credential lookups alike — goes through
+#    ``URLLib3Session.send``, so replacing that one method refuses them all. Each
+#    attempt is kept and fails the session in ``pytest_sessionfinish`` below, even
+#    when the code under test swallows the error. The error is a RuntimeError
+#    because botocore retries its own connection errors, with backoff.
+_blocked_aws_requests: list[str] = []
+
+
+def _refuse_aws_request(self, request):
+    frames = [f for f in traceback.extract_stack()[:-1] if "site-packages" not in f.filename]
+    origin = f"{os.path.relpath(frames[-1].filename)}:{frames[-1].lineno}" if frames else "?"
+    attempt = (
+        f"{request.method} {request.url.partition('?')[0]} from {origin} "
+        f"(thread {threading.current_thread().name}, "
+        f"during {os.environ.get('PYTEST_CURRENT_TEST', 'no test')})"
+    )
+    _blocked_aws_requests.append(attempt)
+    raise RuntimeError(f"unit tests must not reach AWS — refused by tests/conftest.py: {attempt}")
+
+
+botocore.httpsession.URLLib3Session.send = _refuse_aws_request
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Cancel the hang watchdog on a clean session finish.
 
@@ -115,8 +174,34 @@ def pytest_sessionfinish(session, exitstatus):
     the 600s deadline (e.g. during teardown / coverage write) would be hard-exited
     by ``_reap_on_hang`` and turn green red with a thread-dump uncorrelated to any
     failed test. ``Timer.cancel()`` is a no-op if the timer already fired (a true
-    hang), so this only prevents the false-positive kill."""
+    hang), so this only prevents the false-positive kill.
+
+    Also fails a session in which a request to AWS was attempted. Every test may
+    have passed — the code under test tends to swallow the refusal — so the exit
+    status is the only place the attempt can still count."""
     _hang_watchdog.cancel()
+    if _blocked_aws_requests and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(trylast=True)  # after the coverage report, so it is the last section printed
+def pytest_terminal_summary(terminalreporter):
+    """Say why an otherwise green session failed, where its reader looks first."""
+    if not _blocked_aws_requests:
+        return
+    terminalreporter.section("AWS send guard", red=True, bold=True)
+    terminalreporter.line(
+        f"FAILED: {len(_blocked_aws_requests)} request(s) to AWS were attempted during this "
+        "session. Each was refused before it left the process, and the run fails because "
+        "unit tests must not reach AWS:"
+    )
+    for attempt in dict.fromkeys(_blocked_aws_requests):
+        terminalreporter.line(f"  {attempt}")
+    terminalreporter.line(
+        "Fix: stub the client at the line shown, in the test named (patch boto3.client or the "
+        "aws_session.tenant_client / platform_client seam), or join the thread that outlives "
+        "that test."
+    )
 
 
 class FakeRunCmd:
