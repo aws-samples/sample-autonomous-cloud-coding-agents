@@ -4,8 +4,9 @@ name: security-pr
 #
 # One step per check; the name and comment of each step say what it covers and
 # how it is scoped. The job is a required status check and runs on every pull
-# request and merge-queue entry, so only checks that stay quick belong here.
-# The slower sweeps (full registry SAST, grype, retire, bandit, the trivy image
+# request and merge-queue entry, so checks here must stay quick; the one slow
+# step, the agent image build, runs only when the image inputs change. The
+# slower sweeps (full registry SAST, grype, retire, bandit, the trivy image
 # scan and the full-history secret sweep) run weekly in security.yml and are
 # tracked by #235.
 on:
@@ -78,7 +79,8 @@ jobs:
             workflow_dispatch|*)
               # Manual dispatch: scan HEAD only (safe default, not full history).
               # baseline=HEAD reports only uncommitted findings (none in CI), so
-              # the ratchet is a no-op here — the full scan lives in security.yml.
+              # the two ratchets and the image build do nothing here — the full
+              # registry scan lives in security.yml.
               range="HEAD"
               baseline="HEAD"
               ;;
