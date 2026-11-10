@@ -1,5 +1,5 @@
 {
-  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. Floors measured 2026-06-02.",
+  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700.",
   "jest": {
     "cdk": {
       "collectCoverage": true,
@@ -30,10 +30,10 @@
       ],
       "coverageThreshold": {
         "global": {
-          "branches": 84,
-          "functions": 78,
-          "lines": 68,
-          "statements": 68
+          "branches": 85,
+          "functions": 89,
+          "lines": 83,
+          "statements": 83
         }
       }
     }
@@ -48,7 +48,7 @@
         "relative_files": true
       },
       "report": {
-        "fail_under": 72,
+        "fail_under": 80,
         "precision": 2,
         "show_missing": true,
         "skip_covered": true

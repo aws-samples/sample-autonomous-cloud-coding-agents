@@ -172,7 +172,7 @@ source = ["src"]
 relative_files = true
 
 [tool.coverage.report]
-fail_under = 72
+fail_under = 80
 precision = 2
 show_missing = true
 skip_covered = true
