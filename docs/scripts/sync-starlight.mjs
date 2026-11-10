@@ -262,18 +262,20 @@ function filePage(repoRoot, source, target) {
 
 /** One page per `##` section of a guide. */
 function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
-  const parts = readSource(repoRoot, source).split(/\n##\s+/g);
-  const intro = takeH1(parts.shift() ?? '');
+  const lines = readSource(repoRoot, source).split('\n');
+  const fenced = fencedLines(lines);
+  // A `## ` line inside a code fence is code, not the start of a section.
+  const starts = lines.flatMap((line, index) => (!fenced[index] && /^##\s+/.test(line) ? [index] : []));
+  const intro = takeH1(lines.slice(0, starts[0] ?? lines.length).join('\n'));
   // Every section is published. Only an introduction that is nothing but the guide's H1 is
   // not written (`skip`): it would be an empty page, and links to it go to the first section.
   const skip = intro.body.trim() === '';
   const pages = [{ file: 'Introduction.md', title: introTitle, heading: intro.h1, body: intro.body, skip }];
-  for (const part of parts) {
-    const firstNewline = part.indexOf('\n');
-    const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
-    const body = firstNewline === -1 ? '' : part.slice(firstNewline + 1);
+  starts.forEach((start, n) => {
+    const heading = lines[start].replace(/^##\s+/, '').trim();
+    const body = lines.slice(start + 1, starts[n + 1] ?? lines.length).join('\n');
     pages.push({ file: `${normalizeFileStem(heading)}.md`, title: heading, heading, body });
-  }
+  });
   if (pages.every((page) => page.skip)) {
     throw new Error(
       `sync-starlight: ${source} has no content to publish. Add a section or remove it from PLAN in docs/scripts/sync-starlight.mjs.`,
@@ -288,7 +290,7 @@ function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
 }
 
 function collectPages(repoRoot, plan) {
-  return plan.flatMap((entry) => {
+  const pages = plan.flatMap((entry) => {
     if (entry.split) {
       return splitPages(repoRoot, entry);
     }
@@ -304,6 +306,18 @@ function collectPages(repoRoot, plan) {
     }
     return files.flatMap((file) => filePage(repoRoot, `${entry.dir}/${file}`, `${entry.to}/${normalizeFileStem(file)}.md`));
   });
+  // Two pages with one target would overwrite each other without a trace (and routes ignore case).
+  const owner = new Map(handAuthored.map((target) => [target.toLowerCase(), 'a hand-authored page']));
+  for (const page of pages.filter((candidate) => !candidate.skip)) {
+    const key = page.target.toLowerCase();
+    if (owner.has(key)) {
+      throw new Error(
+        `sync-starlight: ${page.source} ("${page.title}") and ${owner.get(key)} both generate ${contentDir}/${page.target}. Rename one of the headings or files.`,
+      );
+    }
+    owner.set(key, `${page.source} ("${page.title}")`);
+  }
+  return pages;
 }
 
 // Recursively copy a source asset directory into the site's public/ tree so

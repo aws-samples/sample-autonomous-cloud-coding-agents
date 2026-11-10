@@ -120,6 +120,46 @@ test('every ## section is published; an introduction that is only the H1 is not'
   assert.deepEqual(links(root, 'architecture/Api.md'), [`[guide](${BASE}/guide/overview) [title](${BASE}/guide/overview)`]);
 });
 
+test('a ## line inside a code fence does not start a page', () => {
+  const section = [
+    'Before the fences.',
+    '',
+    '```markdown',
+    '## Not a section',
+    '```',
+    '',
+    '~~~~',
+    '```',
+    '## Still not a section',
+    '~~~~',
+    '',
+    'After the fences.',
+  ].join('\n');
+  const root = repo({ 'docs/guides/GUIDE.md': `# Guide\n\n## First\n\n${section}\n\n## Second\n\nText.\n` });
+  sync(root, PLAN);
+
+  assert.deepEqual(
+    pages(root).filter((target) => target.startsWith('guide/')),
+    ['guide/Contributing.md', 'guide/First.md', 'guide/Second.md'],
+  );
+  assert.equal(page(root, 'guide/First.md'), `---\ntitle: "First"\n---\n\n${section}`);
+});
+
+test('two sources for one page fail instead of overwriting each other', () => {
+  assert.throws(
+    () => sync(repo({ 'docs/guides/GUIDE.md': '# Guide\n\n## Setup\n\nOne.\n\n## Setup!\n\nTwo.\n' }), PLAN),
+    /docs\/guides\/GUIDE\.md \("Setup!"\) and docs\/guides\/GUIDE\.md \("Setup"\) both generate docs\/src\/content\/docs\/guide\/Setup\.md/,
+  );
+  assert.throws(
+    () => sync(repo({ 'docs/guides/GUIDE.md': '# Guide\n\n## Contributing\n\nText.\n' }), PLAN),
+    /CONTRIBUTING\.md \("Contributing"\) and docs\/guides\/GUIDE\.md \("Contributing"\) both generate/,
+  );
+  assert.throws(
+    () => sync(repo(), [...PLAN, { file: 'docs/design/API.md', to: 'index.md' }]),
+    /docs\/design\/API\.md \("API"\) and a hand-authored page both generate docs\/src\/content\/docs\/index\.md/,
+  );
+});
+
 test('a missing source fails the sync and leaves the mirrors untouched', () => {
   const root = repo();
   sync(root, PLAN);
