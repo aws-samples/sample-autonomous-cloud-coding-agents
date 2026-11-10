@@ -85,6 +85,7 @@ skips = [
 
 [dependency-groups]
 dev = [
+    "bandit==1.9.4",  # security:bandit task — locked, and run on the project's Python: under `uvx` the version floated and its own Python 3.10 skipped files it could not parse
     "ruff",
     "ty",
     "pytest",

@@ -56,7 +56,7 @@ run = "uv run pytest --cov=src --cov-branch --cov-fail-under=72 --cov-report=ter
 
 [tasks."security:bandit"]
 description = "Run Bandit"
-run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
+run = "uv run bandit -c pyproject.toml -r . --severity-level=high"
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
