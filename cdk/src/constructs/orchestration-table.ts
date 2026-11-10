@@ -20,6 +20,7 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
+import { ORCHESTRATION_CHILD_TASK_INDEX_NAME } from '../handlers/shared/storage-names';
 
 /**
  * Properties for OrchestrationTable construct.
@@ -87,8 +88,12 @@ export class OrchestrationTable extends Construct {
    * GSI name for resolving a child ``task_id`` back to its
    * orchestration + sub-issue row.
    * PK: child_task_id. Sparse — only released children are projected.
+   *
+   * The reconciler Lambda queries this index, so the literal lives in
+   * ``handlers/shared/storage-names.ts``: a handler importing this class would
+   * bundle all of ``aws-cdk-lib`` into the function.
    */
-  public static readonly CHILD_TASK_INDEX = 'ChildTaskIndex';
+  public static readonly CHILD_TASK_INDEX = ORCHESTRATION_CHILD_TASK_INDEX_NAME;
 
   /**
    * GSI name for resolving a child's head branch back to its

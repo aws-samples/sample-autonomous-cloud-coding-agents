@@ -85,9 +85,9 @@ import {
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { ORCHESTRATION_CHILD_TASK_INDEX_NAME } from './shared/storage-names';
 import { readTaskPrNumber } from './shared/task-pr-number';
 import { makeDocClient } from './shared/ua';
-import { OrchestrationTable } from '../constructs/orchestration-table';
 import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
@@ -317,7 +317,7 @@ export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEve
 async function resolveSubIssueId(taskId: string): Promise<string | null> {
   const res = await ddb.send(new QueryCommand({
     TableName: ORCHESTRATION_TABLE,
-    IndexName: OrchestrationTable.CHILD_TASK_INDEX,
+    IndexName: ORCHESTRATION_CHILD_TASK_INDEX_NAME,
     KeyConditionExpression: 'child_task_id = :tid',
     ExpressionAttributeValues: { ':tid': taskId },
     Limit: 1,

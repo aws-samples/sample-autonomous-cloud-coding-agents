@@ -36,6 +36,7 @@ import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import {
   APPROVAL_GATE_CAP_DEFAULT,
   APPROVAL_GATE_CAP_MAX,
@@ -56,7 +57,6 @@ import {
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
