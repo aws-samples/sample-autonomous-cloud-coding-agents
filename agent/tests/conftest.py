@@ -46,10 +46,14 @@ for _var in (
     os.environ.pop(_var, None)
 # No user or machine configuration: a test repository gets no identity, hooks
 # path or signing setup from the host, and `git config --global` / `--system`
-# fails instead of writing to the contributor's files. GIT_CONFIG_NOSYSTEM is
-# what also switches off the extra system file Apple's git reads.
-os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
-os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+# fails instead of writing to the contributor's files. The files are pinned to
+# a path BELOW the null device, where nothing can exist, rather than to the
+# device itself: git writes configuration to a new file and renames it into
+# place, so a write that root is allowed to start would replace /dev/null.
+# GIT_CONFIG_NOSYSTEM is what also switches off the extra system file Apple's
+# git reads.
+os.environ["GIT_CONFIG_GLOBAL"] = os.path.join(os.devnull, "gitconfig")
+os.environ["GIT_CONFIG_SYSTEM"] = os.path.join(os.devnull, "gitconfig")
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 # A git command aimed at a directory that is not a repository must fail, not walk
 # up and adopt one: neither the checkout this suite runs from (pytest's working
