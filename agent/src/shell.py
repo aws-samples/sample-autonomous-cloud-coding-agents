@@ -124,12 +124,14 @@ def redact_secrets(text: str) -> str:
     # GitHub and generic token-like values.
     text = re.sub(r"(ghp_|github_pat_|gho_|ghs_|ghr_)[A-Za-z0-9_]+", r"\1***", text)
     text = re.sub(r"(x-access-token:)[^\s@]+", r"\1***", text)
-    text = re.sub(r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.I)
+    text = re.sub(
+        r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.IGNORECASE
+    )
     text = re.sub(
         r"([?&](?:token|access_token|api_key|apikey|password)=)[^&\s]+",
         r"\1***",
         text,
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
     return re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
 

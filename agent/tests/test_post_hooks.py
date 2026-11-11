@@ -291,6 +291,27 @@ class TestEnsurePrCreate:
         assert run_cmd.cmd_for("create-pr") is not None
 
 
+class TestExtractAgentNotes:
+    """``_extract_agent_notes`` reads the "## Agent notes" section of the PR body."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (
+                "## Summary\nDone.\n\n## Agent notes\nRetried the build once.\n\n## Tests\nok\n",
+                "Retried the build once.",
+            ),
+            ("## Summary\nDone.\n", None),  # no such section
+        ],
+    )
+    def test_returns_the_section_text_or_none(self, monkeypatch, body, expected):
+        sub = _SubprocessRunRecorder(responder=lambda _cmd: _cp(stdout=body))
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+
+        assert post_hooks._extract_agent_notes("/repo", "bgagent/t/x", _config()) == expected
+        assert sub.calls, "the PR body is read with `gh pr view`"
+
+
 class TestReconcileAgentBranch:
     """A leading cause of lost deliverables: reconcile the platform branch when
     the agent committed on its OWN branch instead of the pre-checked-out

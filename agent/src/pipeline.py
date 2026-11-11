@@ -534,8 +534,7 @@ def _strip_needs_input_marker(result_text: str) -> str:
     """Remove the leading NEEDS_INPUT_MARKER line/token so the reviewer sees only
     the clarifying question, never our internal sentinel."""
     text = result_text.strip()
-    if text.startswith(NEEDS_INPUT_MARKER):
-        text = text[len(NEEDS_INPUT_MARKER) :]
+    text = text.removeprefix(NEEDS_INPUT_MARKER)
     return text.strip()
 
 

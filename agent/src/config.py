@@ -285,7 +285,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso)
         except ValueError:
             # Malformed timestamp: treat as expiring so the refresh path runs.
             # Log so a bad write earlier in the chain doesn't silently trigger
@@ -581,7 +581,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso)
         except ValueError:
             log(
                 "WARN",

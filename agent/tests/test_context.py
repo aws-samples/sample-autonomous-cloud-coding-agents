@@ -136,7 +136,7 @@ def _fetched_issue(monkeypatch, *, title, body, number, comments=None):
     monkeypatch.setattr(
         context,
         "requests",
-        _fake_requests(payload, raw_comments if raw_comments else None),
+        _fake_requests(payload, raw_comments or None),
     )
     return fetch_github_issue("owner/repo", str(number), "tok")
 

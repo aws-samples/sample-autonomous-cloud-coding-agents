@@ -119,6 +119,7 @@ select = [
     "ASYNC", # flake8-async: blocking calls inside `async def`
     "C4",    # flake8-comprehensions
     "EXE",   # flake8-executable: shebang and executable bit agree
+    "FURB",  # refurb: a builtin or stdlib call that already does what the code spells out
     "RET",   # flake8-return
     # AI007 guard (#258): magic-value comparisons should use named constants.
     # Values shared across Python/TypeScript belong in contracts/constants.json

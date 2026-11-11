@@ -287,7 +287,7 @@ def _transition_issue_state(issue_id: str, target_type: str, preferred_names: li
         if target:
             break
     if target is None:
-        target = sorted(of_type, key=lambda s: s.get("position", 0))[0]
+        target = min(of_type, key=lambda s: s.get("position", 0))
 
     current = issue.get("state") or {}
     if current.get("id") == target.get("id"):
