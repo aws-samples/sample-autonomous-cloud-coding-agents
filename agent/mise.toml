@@ -33,8 +33,8 @@ description = "Lint with ruff"
 run = "uv run ruff check --config pyproject.toml"
 
 [tasks."lint:fix"]
-description = "Lint and auto-fix"
-run = "uv run ruff check --config pyproject.toml --fix"
+description = "Lint and auto-fix. Fails when it changed a file (the fixes are listed): look at the change, keep it, run again."
+run = "uv run ruff check --config pyproject.toml --fix --show-fixes --exit-non-zero-on-fix"
 
 [tasks.format]
 description = "Format with ruff"
