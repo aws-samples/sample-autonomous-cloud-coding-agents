@@ -25,6 +25,7 @@ import importX from 'eslint-plugin-import-x';
 import jest from 'eslint-plugin-jest';
 import jsdoc from 'eslint-plugin-jsdoc';
 import licenseHeader from 'eslint-plugin-license-header';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -32,6 +33,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const TS_FILES = ['src/**/*.ts', 'test/**/*.ts', 'scripts/**/*.ts'];
+
+// Used by the rules for src/handlers below.
+const NO_CDK_IN_HANDLERS = 'Lambda handler code is bundled with everything it imports, and a module that imports the CDK'
+  + ' brings the whole library into the function. Inside cdk/src a handler may import only src/handlers and the two'
+  + ' import-free modules constructs/task-status and constructs/task-table-indexes. Put a value both sides need in'
+  + ' src/handlers/shared (see storage-names.ts) and import it from the construct.';
+
+// What handler code may import from inside cdk/src, relative to src. Add a module only
+// if neither it nor anything it imports imports aws-cdk-lib or constructs.
+const HANDLER_IMPORT_ALLOW_LIST = ['./handlers', './constructs/task-status.ts', './constructs/task-table-indexes.ts'];
+// The handler rules select by path, so a path that no longer exists would switch them
+// off without a word: fail the run instead.
+for (const allowed of HANDLER_IMPORT_ALLOW_LIST) {
+  if (!existsSync(join(__dirname, 'src', allowed))) {
+    throw new Error(`cdk/eslint.config.mjs: ${join('src', allowed)} does not exist; update the handler import rules.`);
+  }
+}
 
 export default [
   // Global ignores
@@ -291,6 +309,28 @@ export default [
       'jest/no-test-prefixes': 'error',
       'jest/valid-describe-callback': 'error',
       'jest/valid-expect-in-promise': 'error',
+    },
+  },
+
+  // Lambda runtime code must not reach the CDK. The bundle test
+  // (test/handlers/shared/runtime-bundle-boundary.test.ts) bundles every entrypoint and
+  // is the ground truth for any import spelling; these two rules name the line.
+  {
+    files: ['src/handlers/**/*.ts'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: ['aws-cdk-lib', 'constructs', 'cdk-nag'].map((name) => ({ name, message: NO_CDK_IN_HANDLERS })),
+        patterns: [{ group: ['aws-cdk-lib/*', '@aws-cdk/*'], message: NO_CDK_IN_HANDLERS }],
+      }],
+      'import-x/no-restricted-paths': ['error', {
+        basePath: __dirname,
+        zones: [{
+          target: './src/handlers',
+          from: './src',
+          except: HANDLER_IMPORT_ALLOW_LIST,
+          message: NO_CDK_IN_HANDLERS,
+        }],
+      }],
     },
   },
 
