@@ -1,7 +1,12 @@
 {
-  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. commands gives scripts.test of each package.json verbatim: it is the command the build runs, and a flag there wins over the settings pinned here. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700.",
+  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json: every key but the few that cannot move a floor (JEST_FREE_KEYS in the script), so a key added to the block has to be added here. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. commands gives scripts.test of each package.json verbatim: it is the command the build runs, and a flag there wins over the settings pinned here. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700.",
   "jest": {
     "cdk": {
+      "coverageProvider": "v8",
+      "testMatch": [
+        "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
+        "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
+      ],
       "collectCoverage": true,
       "collectCoverageFrom": [
         "src/**/*.ts",
@@ -18,9 +23,18 @@
           "lines": 91,
           "statements": 91
         }
-      }
+      },
+      "testPathIgnorePatterns": [
+        "/node_modules/",
+        "<rootDir>/test/integ/"
+      ]
     },
     "cli": {
+      "coverageProvider": "v8",
+      "testMatch": [
+        "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
+        "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
+      ],
       "collectCoverage": true,
       "collectCoverageFrom": [
         "src/**/*.ts"
@@ -35,7 +49,10 @@
           "lines": 83,
           "statements": 83
         }
-      }
+      },
+      "testPathIgnorePatterns": [
+        "/node_modules/"
+      ]
     }
   },
   "pytest": {

@@ -31,10 +31,8 @@
  * left behind in a comment, a contract value that is a prefix of the real one
  * and a setting that narrows what is measured are all drift.
  *
- *   cdk, cli   the jest block of package.json: collectCoverage,
- *              collectCoverageFrom, coveragePathIgnorePatterns,
- *              coverageThreshold and any further key the contract names;
- *              scripts.test, verbatim
+ *   cdk, cli   the jest block of package.json, every key except those in
+ *              JEST_FREE_KEYS; scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
  *              pyproject.toml, every key; the coverage flags of the test task
  *              in mise.toml, which win over those tables
@@ -54,8 +52,15 @@ type Json = Record<string, unknown>;
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT = 'contracts/coverage-thresholds.json';
 
-/** jest settings that switch coverage on, choose the files it counts and set the floor. */
-const JEST_KEYS = ['collectCoverage', 'collectCoverageFrom', 'coveragePathIgnorePatterns', 'coverageThreshold'];
+/**
+ * jest settings that cannot change which files a floor counts, which tests run or how a failed
+ * run exits. Every other key of a jest block must be in the contract with the same value, so a
+ * setting nobody thought of here (rootDir, projects, passWithNoTests, ...) is drift, not a way in.
+ */
+const JEST_FREE_KEYS = [
+  'cacheDirectory', 'clearMocks', 'coverageDirectory', 'coverageReporters', 'globalSetup', 'maxWorkers', 'reporters',
+  'setupFiles', 'setupFilesAfterEnv', 'transform', 'watchPathIgnorePatterns', 'workerIdleMemoryLimit',
+];
 
 /**
  * The package.json files whose test script is the command the build runs. A flag there wins over
@@ -129,8 +134,9 @@ function pinKeys(where: string, actual: Json, contractKey: string, expected: Jso
 }
 
 function checkJest(contract: Json, pkg: string): void {
-  const manifest = readJson(`${pkg}/package.json`);
-  pinKeys(`${pkg}/package.json jest`, (manifest.jest ?? {}) as Json, `jest.${pkg}`, section(contract, 'jest', pkg), JEST_KEYS);
+  const jest = (readJson(`${pkg}/package.json`).jest ?? {}) as Json;
+  const pinned = Object.keys(jest).filter(key => !JEST_FREE_KEYS.includes(key));
+  pinKeys(`${pkg}/package.json jest`, jest, `jest.${pkg}`, section(contract, 'jest', pkg), pinned);
 }
 
 function checkTestScripts(contract: Json): void {

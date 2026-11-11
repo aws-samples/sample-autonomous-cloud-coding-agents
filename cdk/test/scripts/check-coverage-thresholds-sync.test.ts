@@ -47,6 +47,7 @@ const AGENT_MISE = 'agent/mise.toml';
 const FIXTURE_FILES = [SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE];
 
 interface JestBlock {
+  [setting: string]: unknown;
   collectCoverage?: boolean;
   collectCoverageFrom?: string[];
   coveragePathIgnorePatterns: string[];
@@ -137,7 +138,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(18);
+    expect(Number(checked)).toBeGreaterThanOrEqual(24);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -174,6 +175,34 @@ describe('check-coverage-thresholds-sync', () => {
           delete json.jest.collectCoverageFrom;
         });
       }, 'cli/package.json jest collectCoverageFrom', 'cdk/package.json jest collectCoverageFrom: not set');
+    });
+
+    // Each of these lets a run of one test file, or of none, exit 0 with the floors still in the block (jest 30.4).
+    // None is a coverage setting, which is why the block is pinned whole except for a short list of harmless keys.
+    test.each<[string, unknown]>([
+      ['testFailureExitCode', 0],
+      ['passWithNoTests', true],
+      ['rootDir', 'test'],
+      ['roots', ['<rootDir>/test']],
+      ['projects', [{ displayName: 'unit' }]],
+      ['onlyChanged', true],
+    ])('a setting the contract does not list: %s', (setting, value) => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, 'cli/package.json', (json) => {
+          json.jest[setting] = value;
+        });
+      }, `cli/package.json jest ${setting}: ${JSON.stringify(value)} does not match ${CONTRACT} jest.cli.${setting}: not set`);
+    });
+
+    test('a setting that cannot move a floor changes without the contract', () => {
+      const result = runInMutatedRepo((root) => {
+        editJson<Manifest>(root, 'cdk/package.json', (json) => {
+          json.jest.maxWorkers = '50%';
+        });
+      });
+
+      expect(result.stderr).toBe('');
+      expect(result.status).toBe(0);
     });
 
     // jest takes a flag over the block, and takes it in several spellings. The script is pinned whole, so none is special.
