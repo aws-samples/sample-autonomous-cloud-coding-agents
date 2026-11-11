@@ -142,6 +142,11 @@ select = [
     "RSE",   # flake8-raise
     "T10",   # flake8-debugger: breakpoints left behind
     "YTT",   # flake8-2020: sys.version misuse
+    # Import boundaries. TID251 enforces the banned-api table below (attributed
+    # AWS clients, #319). TID252 rejects an import relative to a parent package
+    # (`from .. import x`): `src/` is the import root, so there is no parent and
+    # such an import fails when the module loads.
+    "TID",   # flake8-tidy-imports
 ]
 ignore = [
     "S603",  # subprocess call — allowed for agent CLI operations
@@ -150,8 +155,21 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
+"src/aws_session.py" = ["TID251"]  # the one module that builds boto3 clients, resources and sessions: it attaches the solution User-Agent (#319)
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004", "ARG"]  # assert; test tokens; /tmp paths; importorskip; literal assertions; fixture and stub signatures are set by pytest and by what they replace
+"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; importorskip; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
+
+# Every AWS call the agent makes must carry the solution User-Agent (#319), and
+# only the factories in src/aws_session.py attach it. These names are the ways
+# to get a client, resource or session without them.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"boto3.client".msg = "un-attributed AWS client (#319): use aws_session.tenant_client() for tenant data or aws_session.platform_client() for platform calls"
+"boto3.resource".msg = "un-attributed AWS resource (#319): use aws_session.tenant_resource()"
+"boto3.Session".msg = "sessions are built only in src/aws_session.py (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.session".msg = "sessions are built only in src/aws_session.py (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.DEFAULT_SESSION".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.setup_default_session".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"botocore.session".msg = "a botocore session builds un-attributed clients (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

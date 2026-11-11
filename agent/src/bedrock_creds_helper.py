@@ -104,9 +104,11 @@ def _frozen_to_creds(frozen: Any, expiry_iso: str | None) -> dict[str, str]:
 
 def _ambient_credentials() -> dict[str, str]:
     """Frozen ambient (compute-role) credentials — the fail-open fallback."""
-    import botocore.session
+    # TID251: only the ambient credentials are read, to hand them on; no client is
+    # built, and this fallback must not depend on aws_session importing cleanly.
+    import botocore.session  # noqa: TID251
 
-    creds = botocore.session.get_session().get_credentials()
+    creds = botocore.session.get_session().get_credentials()  # noqa: TID251
     if creds is None:
         # No resolvable credentials at all — the deepest degradation. Emit an
         # empty object; Claude Code then falls back to its own default-chain
