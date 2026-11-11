@@ -148,9 +148,9 @@ run = [
   { task = "sync:abca-commands" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
+  { task = "check:cedar-engine-pair" },
   { task = "check:coverage-thresholds-sync" },
   { task = "check:transitive-pin-sync" },
-  { task = "check:cedar-engine-pair" },
   { task = "//docs:link-check" },
 ]
 
