@@ -180,7 +180,7 @@ describe('makeJiraCommand', () => {
   });
 });
 
-describe('jira map action', () => {
+describe('jira map action status overrides', () => {
   let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
   let logSpy: jest.SpiedFunction<typeof console.log>;
 

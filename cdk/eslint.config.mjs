@@ -316,7 +316,7 @@ export default [
       'jest/no-standalone-expect': 'off',
       'jest/valid-expect': 'off',
       'jest/valid-title': 'off',
-      'jest/no-identical-title': 'off',
+      'jest/no-identical-title': 'error',
       'jest/no-disabled-tests': 'error',
       'jest/no-focused-tests': 'error',
       'jest/no-alias-methods': 'error',
