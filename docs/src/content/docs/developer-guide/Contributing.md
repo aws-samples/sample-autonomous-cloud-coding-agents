@@ -79,7 +79,7 @@ Common commands:
 | `mise //cdk:build` | CDK only: compile + lint + test + synth |
 | `mise //agent:quality` | Agent only: lint + type check + tests |
 | `mise //cli:build` | CLI only: compile + test + lint |
-| `mise //docs:build` | Docs only: sync sources, generator tests, `astro check`, Astro build (fails on a broken internal link or anchor) |
+| `mise //docs:build` | Docs only: sync sources, script tests, Markdown structure lint, `astro check`, Astro build (fails on a broken internal link or anchor) |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 

@@ -524,3 +524,5 @@ Two checks keep cross-references intact. Both run in CI on every pull request, a
 - `mise //docs:build` validates every internal link and anchor of the rendered site, anchors into other pages included, and fails with the page, line and link.
 
 External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+
+A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it.
