@@ -103,6 +103,6 @@
   "commands": {
     "cdk/package.json": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "cli/package.json": "jest --ci",
-    "web/package.json": "vitest run --config vite.config.ts --coverage"
+    "web/package.json": "vitest run --config vite.config.ts --coverage --allowOnly=false"
   }
 }

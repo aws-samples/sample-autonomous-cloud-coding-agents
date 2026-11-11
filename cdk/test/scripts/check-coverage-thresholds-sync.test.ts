@@ -315,7 +315,7 @@ describe('check-coverage-thresholds-sync', () => {
         editJson<Manifest>(root, 'web/package.json', (json) => {
           json.scripts.test = json.scripts.test.replace(' --coverage', '');
         });
-      }, 'web/package.json scripts.test: "vitest run --config vite.config.ts" does not match');
+      }, 'web/package.json scripts.test', `does not match ${CONTRACT} commands.web/package.json`);
     });
 
     test('a test script that is gone', () => {
