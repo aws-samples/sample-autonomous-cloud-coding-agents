@@ -38,7 +38,7 @@ export default defineConfig({
           tag: 'script',
           attrs: { type: 'module' },
           content:
-            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
+            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
         },
       ],
       sidebar: [
