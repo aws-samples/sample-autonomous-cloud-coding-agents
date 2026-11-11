@@ -30,8 +30,8 @@
  * tested from cdk/), the real script is spawned against a copy of the files it
  * reads. The script has mise parse TOML, so `mise` must be on PATH; it is
  * wherever this suite runs through `mise //cdk:test`. It also evaluates
- * web/vite.config.ts, whose imports the copy finds through a link to the
- * repository's node_modules.
+ * web/vite.config.ts, whose imports the copy finds through links to the
+ * repository's node_modules directories.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -83,7 +83,13 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(REPO_ROOT, rel), dest);
     }
-    fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'));
+    // The copy of web/vite.config.ts has to find its imports where the original does: in the hoisted node_modules
+    // and, when yarn keeps a package out of the hoist, in web's own.
+    for (const dir of ['node_modules', 'web/node_modules']) {
+      if (fs.existsSync(path.join(REPO_ROOT, dir))) {
+        fs.symlinkSync(path.join(REPO_ROOT, dir), path.join(root, dir));
+      }
+    }
     mutate(root);
 
     try {
