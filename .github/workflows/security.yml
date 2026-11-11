@@ -71,7 +71,8 @@ jobs:
 
       # An osv-scanner ignore stops applying on its ignoreUntil date; from that
       # day the required dependency scan (security-pr.yml) fails every pull
-      # request. Warn 21 days ahead. A date that cannot be read is reported too.
+      # request. Warn 21 days ahead. A date that cannot be read is reported too,
+      # and so is an expiry written in a form this line reader does not follow.
       # osv-expiry.md is empty when there is nothing to warn about.
       - name: Warn about osv-scanner ignores that expire within 21 days
         run: |
@@ -84,11 +85,20 @@ jobs:
           const warnings = [];
           for (const file of files.split('\n').filter(Boolean)) {
             let id = '';
-            readFileSync(file, 'utf8').split('\n').forEach((line, index) => {
+            // osv-scanner accepts CRLF line endings and any capitalisation of a
+            // key (IgnoreUntil), so both are read here.
+            readFileSync(file, 'utf8').split(/\r?\n/).forEach((line, index) => {
               if (line.startsWith('[[')) id = '';
-              id = line.match(/^\s*id\s*=\s*"([^"]+)"/)?.[1] ?? id;
-              const value = line.match(/^\s*(?:ignoreUntil|effectiveUntil)\s*=\s*(.*)$/)?.[1];
-              if (value === undefined) return;
+              id = line.match(/^\s*id\s*=\s*"([^"]+)"/i)?.[1] ?? id;
+              const value = line.match(/^\s*(?:ignoreUntil|effectiveUntil)\s*=\s*(.*)$/i)?.[1];
+              if (value === undefined) {
+                // A quoted key or an inline table is valid TOML too. Say that
+                // the line was not read instead of skipping it.
+                if (/^(?!\s*#).*(?:ignoreUntil|effectiveUntil)["']?\s*=/i.test(line)) {
+                  warnings.push(`- \`${file}:${index + 1}\` entry: expiry not readable in this form; write it as \`ignoreUntil = YYYY-MM-DD\` on a line of its own`);
+                }
+                return;
+              }
               const date = value.match(/\d{4}-\d{2}-\d{2}/)?.[0];
               const days = Math.round((Date.parse(date) - today) / 86400000);
               if (days > 21) return;
