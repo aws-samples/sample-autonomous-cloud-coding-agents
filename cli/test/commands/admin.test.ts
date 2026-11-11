@@ -96,7 +96,7 @@ describe('generateTempPassword', () => {
   const upper = /[A-Z]/;
   const lower = /[a-z]/;
   const digit = /[0-9]/;
-  const symbol = /[!@#$%^&*()\-_=+\[\]{}<>?]/;
+  const symbol = /[!@#$%^&*()\-_=+[\]{}<>?]/;
 
   test('produces a password ≥ 18 chars', () => {
     const pwd = generateTempPassword();

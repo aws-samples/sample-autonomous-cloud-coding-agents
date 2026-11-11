@@ -52,6 +52,7 @@
     "@aws-cdk/integ-runner": "2.202.1",
     "@aws-cdk/integ-tests-alpha": "2.260.0-alpha.0",
     "@cdklabs/eslint-plugin": "^2",
+    "@eslint/js": "10.0.1",
     "@stylistic/eslint-plugin": "^5",
     "@types/aws-lambda": "^8.10.162",
     "@types/jest": "^30.0.0",

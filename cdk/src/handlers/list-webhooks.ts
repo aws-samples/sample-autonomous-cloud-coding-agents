@@ -53,7 +53,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const includeRevoked = event.queryStringParameters?.include_revoked === 'true';
 
     let filterExpression: string | undefined;
-    let expressionAttributeValues: Record<string, unknown> = { ':uid': userId };
+    const expressionAttributeValues: Record<string, unknown> = { ':uid': userId };
 
     if (!includeRevoked) {
       filterExpression = '#s = :active';

@@ -65,7 +65,7 @@ export function makeSlackCommand(): Command {
 
         // Step 1: Fetch the manifest JSON from stack outputs.
         console.log('Fetching Slack App manifest from stack outputs...\n');
-        let manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
+        const manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
 
         // Deploying happens through `bgagent setup`, which shows the diff and
         // guards data loss; a bare deploy here would follow whatever the profile says.

@@ -475,7 +475,7 @@ function filenameFromUrl(url: string, index: number): string {
       } catch {
         decoded = lastSegment;
       }
-      const sanitized = decoded.replace(/[^a-zA-Z0-9._\-]/g, '_');
+      const sanitized = decoded.replace(/[^a-zA-Z0-9._-]/g, '_');
       if (isValidFilename(sanitized)) {
         return sanitized;
       }

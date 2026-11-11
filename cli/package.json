@@ -18,6 +18,7 @@
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@stylistic/eslint-plugin": "^5",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.0",

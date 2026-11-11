@@ -505,7 +505,7 @@ export async function downloadScreenAndStoreLinearAttachments(
 
   try {
     for (const upload of selected) {
-      let outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
+      const outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
 
       // uploads.linear.app auth failures are terminal here: the caller already
       // resolved a fresh workspace token (resolveLinearOauthToken refreshes
