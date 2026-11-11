@@ -32,6 +32,18 @@ const __dirname = dirname(__filename);
 
 const TS_FILES = ['src/**/*.ts', 'test/**/*.ts', 'build-tools/**/*.ts'];
 
+const NO_MD5 = {
+  selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
+  message: 'Use the md5hash() function from the core library if you want md5',
+};
+// The name exception is this package's own REST client, which is not an SDK client.
+const NO_NAKED_SDK_CLIENT = {
+  selector: 'NewExpression:matches([callee.name=/^(?!ApiClient$).*Client$/], [callee.property.name=/Client$/])',
+  message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/ua.ts: `new XxxClient()` drops the'
+    + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
+    + ' the exception in this selector.',
+};
+
 export default [
   // Global ignores
   {
@@ -156,10 +168,7 @@ export default [
       }],
       'no-console': ['error'],
       'no-trailing-spaces': ['error'],
-      'no-restricted-syntax': ['error', {
-        selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
-        message: 'Use the md5hash() function from the core library if you want md5',
-      }],
+      'no-restricted-syntax': ['error', NO_MD5],
       // Rules of the recommended sets that still have findings. Each one stays off
       // until its findings are fixed; delete the line to turn the rule on.
       '@typescript-eslint/no-explicit-any': 'off',
@@ -285,6 +294,9 @@ export default [
     files: ['src/**/*.ts'],
     rules: {
       'no-console': 'off',
+      // Every AWS SDK client in src is built by the attributed factory (#319). The whole
+      // list again: a later block replaces a rule's options.
+      'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
     },
   },
 

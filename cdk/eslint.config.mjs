@@ -34,6 +34,21 @@ const __dirname = dirname(__filename);
 
 const TS_FILES = ['src/**/*.ts', 'test/**/*.ts', 'scripts/**/*.ts'];
 
+const NO_MD5 = {
+  selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
+  message: 'Use the md5hash() function from the core library if you want md5',
+};
+// An AWS SDK client takes one config argument at most; a CDK construct such as
+// cognito.UserPoolClient takes (scope, id, props) and is not meant here. The name
+// exception is this package's own registry client, which is not an SDK client.
+const NO_NAKED_SDK_CLIENT = {
+  selector: 'NewExpression[arguments.length<2]:matches('
+    + '[callee.name=/^(?!AgentRegistryClient$).*Client$/], [callee.property.name=/Client$/])',
+  message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/handlers/shared/ua.ts: `new XxxClient()` drops the'
+    + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
+    + ' the exception in this selector.',
+};
+
 // Used by the rules for src/handlers below.
 const NO_CDK_IN_HANDLERS = 'Lambda handler code is bundled with everything it imports, and a module that imports the CDK'
   + ' brings the whole library into the function. Inside cdk/src a handler may import only src/handlers and the two'
@@ -177,10 +192,7 @@ export default [
       }],
       'no-console': ['error'],
       'no-trailing-spaces': ['error'],
-      'no-restricted-syntax': ['error', {
-        selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
-        message: 'Use the md5hash() function from the core library if you want md5',
-      }],
+      'no-restricted-syntax': ['error', NO_MD5],
       // A holder that a closure reads before its one assignment cannot become a const
       // (the Lazy ARN holders in stacks/agent.ts).
       'prefer-const': ['error', { ignoreReadBeforeAssign: true }],
@@ -311,6 +323,15 @@ export default [
       'jest/no-test-prefixes': 'error',
       'jest/valid-describe-callback': 'error',
       'jest/valid-expect-in-promise': 'error',
+    },
+  },
+
+  // Every AWS SDK client in src is built by the attributed factory (#319).
+  {
+    files: ['src/**/*.ts'],
+    rules: {
+      // The whole list again: a later block replaces a rule's options.
+      'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
     },
   },
 
