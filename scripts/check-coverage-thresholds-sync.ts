@@ -27,9 +27,10 @@
  * carries a copy; this script fails when a copy says something else.
  *
  * It compares the values a runner will read, never text: package.json through
- * ``JSON.parse`` and TOML through mise's parser (``mise config get``). A number
- * left behind in a comment, a contract value that is a prefix of the real one
- * and a setting that narrows what is measured are all drift.
+ * ``JSON.parse``, TOML through mise's parser (``mise config get``) and
+ * vite.config.ts by evaluating it. A number left behind in a comment, a
+ * contract value that is a prefix of the real one and a setting that narrows
+ * what is measured are all drift.
  *
  *   cdk, cli   the jest block of package.json, every key except those in
  *              JEST_FREE_KEYS; scripts.test, verbatim
@@ -38,6 +39,8 @@
  *              in mise.toml, which win over those tables; no coverage flag in
  *              pytest's own settings and no config file that would be read
  *              before pyproject.toml
+ *   web        the test block of vite.config.ts, every key except those in
+ *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
  *
  * Run via ``mise run check:coverage-thresholds-sync``. Exits 0 when in sync,
  * 1 on drift or when something it needs cannot be read.
@@ -46,7 +49,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 type Json = Record<string, unknown>;
@@ -64,12 +67,15 @@ const JEST_FREE_KEYS = [
   'setupFiles', 'setupFilesAfterEnv', 'transform', 'watchPathIgnorePatterns', 'workerIdleMemoryLimit',
 ];
 
+/** The same for the test block of web/vite.config.ts. */
+const VITEST_FREE_KEYS = ['css', 'environment', 'setupFiles', 'testTimeout'];
+
 /**
  * The package.json files whose test script is the command the build runs. A flag there wins over
  * the settings of the runner, so the contract pins each script verbatim: a flag in any spelling,
  * a second command or another list of test files is drift.
  */
-const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json'];
+const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json', 'web/package.json'];
 
 /**
  * Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they
@@ -141,10 +147,26 @@ function pinKeys(where: string, actual: Json, contractKey: string, expected: Jso
   }
 }
 
+/** The keys of a runner's settings that the contract has to pin: all but the free ones. */
+const notFree = (settings: Json, free: string[]): string[] => Object.keys(settings).filter(key => !free.includes(key));
+
 function checkJest(contract: Json, pkg: string): void {
   const jest = (readJson(`${pkg}/package.json`).jest ?? {}) as Json;
-  const pinned = Object.keys(jest).filter(key => !JEST_FREE_KEYS.includes(key));
-  pinKeys(`${pkg}/package.json jest`, jest, `jest.${pkg}`, section(contract, 'jest', pkg), pinned);
+  pinKeys(`${pkg}/package.json jest`, jest, `jest.${pkg}`, section(contract, 'jest', pkg), notFree(jest, JEST_FREE_KEYS));
+}
+
+async function checkWeb(contract: Json): Promise<void> {
+  // The config is code, so read what it returns for a vitest run rather than its text.
+  const { default: exported } = await import(pathToFileURL(join(root, 'web/vite.config.ts')).href) as { default: unknown };
+  const env = { command: 'serve', mode: 'test', isSsrBuild: false, isPreview: false };
+  const config = (typeof exported === 'function' ? await exported(env) : exported) as Json;
+  const { coverage, ...test } = (config.test ?? {}) as Json;
+  const { coverage: pinnedCoverage, ...pinned } = section(contract, 'vitest', 'web');
+  pinKeys('web/vite.config.ts test', test, 'vitest.web', pinned, notFree(test, VITEST_FREE_KEYS));
+  pinKeys('web/vite.config.ts test.coverage', (coverage ?? {}) as Json, 'vitest.web.coverage', (pinnedCoverage ?? {}) as Json);
+
+  // The patterns above are relative to the root. Moved, they match no file, and a floor over no file is met.
+  pin('web/vite.config.ts root', config.root, 'vitest.web (no root: the patterns are relative to web/)', undefined);
 }
 
 function checkTestScripts(contract: Json): void {
@@ -186,6 +208,7 @@ try {
   checkJest(contract, 'cdk');
   checkJest(contract, 'cli');
   checkAgent(contract);
+  await checkWeb(contract);
   checkTestScripts(contract);
 } catch (err) {
   errors.push(`the check could not finish: ${err instanceof Error ? err.message : String(err)}`);

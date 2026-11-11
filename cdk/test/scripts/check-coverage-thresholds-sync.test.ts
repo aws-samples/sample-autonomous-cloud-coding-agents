@@ -29,7 +29,9 @@
  * As in check-constants-sync.test.ts (which explains why a root script is
  * tested from cdk/), the real script is spawned against a copy of the files it
  * reads. The script has mise parse TOML, so `mise` must be on PATH; it is
- * wherever this suite runs through `mise //cdk:test`.
+ * wherever this suite runs through `mise //cdk:test`. It also evaluates
+ * web/vite.config.ts, whose imports the copy finds through a link to the
+ * repository's node_modules.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -42,9 +44,12 @@ const SCRIPT = 'scripts/check-coverage-thresholds-sync.ts';
 const CONTRACT = 'contracts/coverage-thresholds.json';
 const PYPROJECT = 'agent/pyproject.toml';
 const AGENT_MISE = 'agent/mise.toml';
+const VITE_CONFIG = 'web/vite.config.ts';
 
 /** Every file the script reads, relative to the repo root. */
-const FIXTURE_FILES = [SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE];
+const FIXTURE_FILES = [
+  SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json',
+];
 
 interface JestBlock {
   [setting: string]: unknown;
@@ -77,6 +82,7 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(REPO_ROOT, rel), dest);
     }
+    fs.symlinkSync(path.join(REPO_ROOT, 'node_modules'), path.join(root, 'node_modules'));
     mutate(root);
 
     try {
@@ -138,7 +144,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(26);
+    expect(Number(checked)).toBeGreaterThanOrEqual(34);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -204,30 +210,6 @@ describe('check-coverage-thresholds-sync', () => {
       expect(result.stderr).toBe('');
       expect(result.status).toBe(0);
     });
-
-    // jest takes a flag over the block, and takes it in several spellings. The script is pinned whole, so none is special.
-    test.each([
-      ['cdk', '--coverage=false'],
-      ['cdk', '--no-coverage'],
-      ['cdk', '--collect-coverage=false'],
-      ['cli', '--no-collectCoverage'],
-      ['cli', '--collect-coverage-from=src/errors.ts'],
-      ['cli', '|| true'],
-    ])('the %s test script with "%s" appended', (pkg, suffix) => {
-      expectDrift((root) => {
-        editJson<Manifest>(root, `${pkg}/package.json`, (json) => {
-          json.scripts.test += ` ${suffix}`;
-        });
-      }, `${pkg}/package.json scripts.test`, `${suffix}" does not match ${CONTRACT} commands.${pkg}/package.json`);
-    });
-
-    test('a test script that is gone', () => {
-      expectDrift((root) => {
-        editJson<Manifest>(root, 'cli/package.json', (json) => {
-          delete json.scripts.test;
-        });
-      }, `cli/package.json scripts.test: not set does not match ${CONTRACT} commands.cli/package.json`);
-    });
   });
 
   describe('pytest (agent)', () => {
@@ -279,6 +261,69 @@ describe('check-coverage-thresholds-sync', () => {
       expectDrift((root) => {
         fs.writeFileSync(path.join(root, 'agent', name), '');
       }, `agent/${name} exists`);
+    });
+  });
+
+  describe('vitest (web)', () => {
+    test('a floor lowered in the config', () => {
+      expectDrift((root) => {
+        edit(root, VITE_CONFIG, text => text.replace(/thresholds: \{ statements: \d+/, 'thresholds: { statements: 10'));
+      }, `${VITE_CONFIG} test.coverage thresholds`);
+    });
+
+    test('a directory added to exclude', () => {
+      expectDrift((root) => {
+        edit(root, VITE_CONFIG, text => text.replace("'src/mocks/browser.ts']", "'src/mocks/browser.ts', 'src/domains/**']"));
+      }, `${VITE_CONFIG} test.coverage exclude`);
+    });
+
+    // As for jest, the block is pinned whole but for a few harmless keys. The root is why: moved, at either level, the
+    // coverage patterns match no file, and vitest 5.1 counts a floor over no file as met.
+    test.each([
+      ["environment: 'jsdom',", "environment: 'jsdom', root: './test',", 'test root: "./test"'],
+      ["environment: 'jsdom',", "environment: 'jsdom', passWithNoTests: true,", 'test passWithNoTests: true'],
+      ["provider: 'v8',", "provider: 'v8', allowExternal: true,", 'test.coverage allowExternal: true'],
+      ['define: {', "root: './test', define: {", 'root: "./test"'],
+    ])('a setting the contract does not list: %s -> %s', (from, to, drift) => {
+      expectDrift((root) => {
+        edit(root, VITE_CONFIG, text => text.replace(from, to));
+      }, `${VITE_CONFIG} ${drift} does not match`);
+    });
+  });
+
+  describe('test scripts', () => {
+    // A runner takes a flag over its settings, and takes it in several spellings. The scripts are pinned whole, so
+    // no spelling is special.
+    test.each([
+      ['cdk', '--coverage=false'],
+      ['cdk', '--no-coverage'],
+      ['cdk', '--collect-coverage=false'],
+      ['cli', '--no-collectCoverage'],
+      ['cli', '--collect-coverage-from=src/errors.ts'],
+      ['cli', '|| true'],
+      ['web', '--coverage.thresholds.lines=0'],
+    ])('the %s test script with "%s" appended', (pkg, suffix) => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, `${pkg}/package.json`, (json) => {
+          json.scripts.test += ` ${suffix}`;
+        });
+      }, `${pkg}/package.json scripts.test`, `${suffix}" does not match ${CONTRACT} commands.${pkg}/package.json`);
+    });
+
+    test('the web test script without --coverage, which collects nothing and applies no floor', () => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, 'web/package.json', (json) => {
+          json.scripts.test = json.scripts.test.replace(' --coverage', '');
+        });
+      }, 'web/package.json scripts.test: "vitest run --config vite.config.ts" does not match');
+    });
+
+    test('a test script that is gone', () => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, 'cli/package.json', (json) => {
+          delete json.scripts.test;
+        });
+      }, `cli/package.json scripts.test: not set does not match ${CONTRACT} commands.cli/package.json`);
     });
   });
 

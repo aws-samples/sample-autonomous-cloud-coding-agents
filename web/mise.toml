@@ -22,8 +22,12 @@ description = "Type-check the console"
 run = "yarn typecheck"
 
 [tasks.test]
-description = "Run Vitest component and unit tests"
-run = "yarn vitest run"
+description = "Run Vitest component and unit tests (coverage floors enforced)"
+# The package's test script, which contracts/coverage-thresholds.json pins verbatim:
+#   --coverage               without it vitest collects nothing and applies no floor
+#   --config vite.config.ts  the one config file; a vitest.config.* next to it would otherwise be read instead
+# For one file while iterating: `yarn vitest run test/<file>` (no coverage, no floors).
+run = "yarn test"
 
 [tasks.eslint]
 description = "Run ESLint with --fix"
