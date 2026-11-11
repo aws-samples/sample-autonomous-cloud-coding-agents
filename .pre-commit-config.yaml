@@ -72,11 +72,14 @@ repos:
         stages: [pre-commit]
 
       - id: types-sync-cdk-cli
-        name: type sync drift (CDK ↔ CLI)
+        name: type sync drift (CDK ↔ CLI ↔ web)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:types-sync'
         language: system
         pass_filenames: false
-        files: ^(cdk/src/handlers/shared/types\.ts$|cli/src/types\.ts$|scripts/check-types-sync\.ts$)
+        # The script compiles the CDK types file with every module it imports (ten
+        # today, in handlers/shared and constructs), so any CDK source file may be
+        # one of its inputs; plus the two mirrors and the constants they share.
+        files: ^(cdk/src/.*\.ts$|cli/src/types\.ts$|web/src/core/api/types\.ts$|contracts/constants\.json$|scripts/check-types-sync\.ts$)
         stages: [pre-commit]
 
       - id: constants-sync
@@ -84,7 +87,9 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:constants-sync'
         language: system
         pass_filenames: false
-        files: ^(contracts/constants\.json$|agent/src/policy\.py$|cdk/src/handlers/shared/types\.ts$|cdk/src/constructs/blueprint\.ts$|scripts/check-constants-sync\.ts$)
+        # The script scans every Python file under agent/src, one CDK consumer and
+        # the agent's value-parity test.
+        files: ^(contracts/constants\.json$|agent/src/.*\.py$|agent/tests/test_constants_parity\.py$|cdk/src/handlers/shared/types\.ts$|cdk/src/constructs/(blueprint|lambda-microvm-compute)\.ts$|scripts/check-constants-sync\.ts$)
         stages: [pre-commit]
 
       - id: coverage-thresholds-sync
@@ -92,7 +97,7 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:coverage-thresholds-sync'
         language: system
         pass_filenames: false
-        files: ^(contracts/coverage-thresholds\.json$|cdk/package\.json$|cli/package\.json$|agent/(pyproject\.toml|mise\.toml)$|scripts/check-coverage-thresholds-sync\.ts$)
+        files: ^(contracts/coverage-thresholds\.json$|cdk/package\.json$|cli/package\.json$|agent/(pyproject\.toml|mise\.toml)$|web/(vite\.config\.ts|mise\.toml)$|scripts/check-coverage-thresholds-sync\.ts$)
         stages: [pre-commit]
 
       - id: monorepo-security-pre-push
