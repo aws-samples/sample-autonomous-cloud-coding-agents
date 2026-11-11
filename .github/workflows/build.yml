@@ -361,7 +361,18 @@ jobs:
               [ -n "$task" ] || continue
               echo "\`mise run ${task}\` failed. Last 60 lines of its output (coverage table rows left out):"
               echo '```text'
-              awk -v p="[${task}] " 'index($0, p) == 1 && split($0, cols, "[|]") < 5 { print substr($0, length(p) + 1) }' "$log.clean" | tail -n 60
+              # Only rows of the coverage table that jest prints are left out: six
+              # cells, with nothing but numbers, line ranges and dashes after the
+              # first, or the "% Stmts" heading. Every other line is kept however
+              # many "|" it has: compiler and type-checker errors spell union types
+              # with them, and those lines are the reason the task failed.
+              awk -v p="[${task}] " '
+                index($0, p) != 1 { next }
+                { line = substr($0, length(p) + 1); n = split(line, cell, "[|]") }
+                n == 6 && (cell[2] cell[3] cell[4] cell[5] cell[6]) ~ /^[-0-9., ]+$/ { next }
+                n == 6 && cell[2] ~ /^ *% Stmts *$/ { next }
+                { print line }
+              ' "$log.clean" | tail -n 60
               echo '```'
             done
           } >> "$GITHUB_STEP_SUMMARY"
