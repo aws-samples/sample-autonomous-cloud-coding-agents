@@ -86,7 +86,7 @@ skips = [
 [dependency-groups]
 dev = [
     "bandit==1.9.4",  # security:bandit task — locked, and run on the project's Python: under `uvx` the version floated and its own Python 3.10 skipped files it could not parse
-    "ruff",
+    "ruff==0.17.3",  # lint and format tasks — exact pin, moved by a reviewed bump: the 0.15.20 the lock held lacked rules the floating `uvx ruff` had enforced (RUF036, RUF063, RUF068, RUF071) and did not format Python blocks in Markdown
     "ty",
     "pytest",
     "pygments==2.20.0",
