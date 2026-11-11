@@ -268,6 +268,8 @@ export default [
         alphabetize: { order: 'asc', caseInsensitive: true },
       }],
       'import-x/no-duplicates': ['error'],
+      // Runtime import cycles; `import type` edges do not count.
+      'import-x/no-cycle': ['error', { ignoreExternal: true }],
       'import-x/no-self-import': 'error',
       'import-x/no-useless-path-segments': 'error',
 
