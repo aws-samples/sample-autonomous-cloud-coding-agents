@@ -68,6 +68,7 @@ jobs:
               # Scan exactly the commits this PR introduces.
               range="${PR_BASE_SHA}..${PR_HEAD_SHA}"
               baseline="${PR_BASE_SHA}"
+              head="${PR_HEAD_SHA}"
               ;;
             merge_group)
               # Scan only the queued merge commits — not full history. An empty
@@ -75,6 +76,7 @@ jobs:
               # (#334 merge-queue ejection).
               range="${MG_BASE_SHA}..${MG_HEAD_SHA}"
               baseline="${MG_BASE_SHA}"
+              head="${MG_HEAD_SHA}"
               ;;
             workflow_dispatch|*)
               # Manual dispatch: scan HEAD only (safe default, not full history).
@@ -83,8 +85,20 @@ jobs:
               # registry scan lives in security.yml.
               range="HEAD"
               baseline="HEAD"
+              head="HEAD"
               ;;
           esac
+          # Both ends of the range must be commits in this checkout. gitleaks
+          # scans nothing and still exits 0 when it cannot resolve the range, so
+          # with an empty or unknown SHA the secret scan would pass unscanned.
+          # `^{commit}` makes git look the object up: a bare 40-character name
+          # is accepted without that.
+          for commit in "${baseline}" "${head}"; do
+            if ! git rev-parse --verify --quiet "${commit}^{commit}" > /dev/null; then
+              echo "::error::Cannot resolve '${commit}' to a commit in this checkout (event ${EVENT_NAME}, range '${range}'), so nothing can be scanned. Re-run the job; if it fails again, check that the checkout step fetched the full history."
+              exit 1
+            fi
+          done
           echo "range=${range}" >> "$GITHUB_OUTPUT"
           echo "baseline=${baseline}" >> "$GITHUB_OUTPUT"
           echo "Resolved GITLEAKS_RANGE='${range}'"
