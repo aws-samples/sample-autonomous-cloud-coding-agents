@@ -8,8 +8,9 @@ You are a **technical writer for ABCA**: source guides and design docs, ADRs, an
 
 ```bash
 mise //docs:sync            # regenerate docs/src/content/docs/ (<1 s)
-mise //docs:test            # tests for the generator (scripts/sync-starlight.test.mjs)
-mise //docs:build           # sync + generator tests + astro check + Astro/Starlight build; fails on a broken internal link
+mise //docs:test            # tests for the generator and for the Markdown lint (scripts/*.test.mjs)
+mise //docs:markdown-lint   # structure of every tracked Markdown file: tables, headings, image alt text
+mise //docs:build           # sync + tests + Markdown lint + astro check + Astro/Starlight build; fails on a broken internal link
 mise //docs:check           # sync + astro check alone (MDX/components)
 mise //docs:link-check      # relative links in every tracked Markdown file of the repository
 ```
@@ -21,6 +22,7 @@ Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installe
 - **Sync + build:** `mise //docs:build` (required before PR if you touched guides, design, ADRs, or `CONTRIBUTING.md`)
 - **Sync only:** `mise //docs:sync` then `git diff docs/src/content/docs/` — commit mirror changes alongside sources
 - **Astro check:** part of `mise //docs:build`; on its own `mise //docs:check` (or `cd docs && npm run docs:check`)
+- **Structure:** `mise //docs:markdown-lint` (part of `mise //docs:build`) lints all tracked Markdown sources, repository-wide
 - **Links:** `mise //docs:link-check` checks relative links in all tracked Markdown sources, repository-wide (it reports the source file; it does not check an `#anchor` into another file). `mise //docs:build` checks links and anchors on the rendered site
 
 CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do not match what sync produces.
@@ -36,6 +38,22 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 | `invalid hash` | The page exists but has no heading with that anchor | Use the anchor of an existing heading in the target source |
 
 Never add an `exclude` option to `starlightLinksValidator()` to make a link pass.
+
+### When the Markdown lint fails
+
+`mise //docs:markdown-lint` checks the structure of every tracked Markdown file with five markdownlint rules (`docs/.markdownlint-cli2.jsonc`) and prints the file, the line and the rule. The generated mirrors are not linted: fix the source.
+
+| Rule | Meaning | Fix |
+|------|---------|-----|
+| `MD056/table-column-count` | A table row has more or fewer cells than the header; renderers drop the extra cells | Give the row the header's number of cells, and escape a pipe that belongs to a cell's text (see below) |
+| `MD045/no-alt-text` | An image has no alternative text | `![what the image shows](path)` |
+| `MD025/single-h1` | A second top-level heading; a front matter `title` counts as the first | Keep one `# H1` (none in a source with front matter) and make the others `##` |
+| `MD024/no-duplicate-heading` | Two headings with the same text under the same parent heading, so their anchors collide | Rename one, or delete the repeated section |
+| `MD001/heading-increment` | A heading level is skipped (`##` followed by `####`) | Use the next level down |
+
+Inside a table cell write a literal pipe as `\|`, also in a code span: an unescaped pipe ends the cell.
+
+Never silence a finding. `<!-- markdownlint-disable -->` comments are ignored, and a `.markdownlint*` file anywhere but `docs/.markdownlint-cli2.jsonc` fails the task.
 
 ## Primary locations
 
