@@ -144,7 +144,8 @@ export default [
       // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
       // A function above it is split, not exempted. The eslint-disable-next-line
       // directives in src mark the functions that were above it when it landed: they
-      // must not grow, and ESLint reports a directive as unused once its function fits.
+      // must not grow. When a directive stops applying, as when its function comes to
+      // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
       'complexity': ['error', { max: 40 }],
       'quotes': ['error', 'single', { avoidEscape: true }],
       'comma-spacing': ['error', { before: false, after: true }],
