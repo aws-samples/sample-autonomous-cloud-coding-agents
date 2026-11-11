@@ -106,6 +106,18 @@ depends = [
   "//web:typecheck",
 ]
 
+# The gate scripts are gates too: a typo in one (`errors.lenght > 0`) runs fine and
+# passes everything. `strict` plus the unused checks catch that class; the two
+# flags after them describe what `node --experimental-strip-types`, which runs
+# these scripts, can execute. The behaviour of each script is tested in
+# cdk/test/scripts/*.test.ts, which //cdk:test runs in the same build.
+# The compiler is named by path because the root `node_modules/.bin/tsc` link
+# belongs to whichever hoisted package claimed it, not to the `typescript` these
+# scripts import.
+[tasks."check:scripts"]
+description = "Type-check the gate scripts (scripts/*.ts) with the TypeScript they import"
+run = "node node_modules/typescript/bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters --noImplicitReturns --erasableSyntaxOnly --verbatimModuleSyntax --skipLibCheck --target es2022 --module esnext --moduleResolution bundler --types node scripts/*.ts"
+
 [tasks."check:types-sync"]
 description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8) and web/src/core/api/types.ts. Fails if a public type exists in both with different shapes, if CLI exports a name CDK doesn't, or if the web mirror declares a member its canonical type lacks or exports a name that has no canonical declaration and is not listed as console-only."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
@@ -146,6 +158,7 @@ run = "node scripts/check-cedar-engine-pair.mjs"
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
+  { task = "check:scripts" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:cedar-engine-pair" },
