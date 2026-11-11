@@ -84,9 +84,10 @@ export default defineConfig(
   {
     files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
-      // What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli.
+      // What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli. :has()
+      // looks down the whole chain, so `it.concurrent.only` is reported like `it.only`.
       'no-restricted-syntax': ['error', {
-        selector: 'MemberExpression[object.name=/^(it|test|describe|suite)$/][property.name=/^(skip|only|todo|fails|skipIf|runIf)$/]',
+        selector: 'MemberExpression[property.name=/^(skip|only|todo|fails|skipIf|runIf)$/]:has(Identifier.object[name=/^(it|test|describe|suite)$/])',
         message: 'A skipped, focused, todo or expected-to-fail test must not be committed: make the test pass or delete it.',
       }],
     },
