@@ -45,6 +45,21 @@ class TestRedactSecrets:
         result = redact_secrets("https://x-access-token:mysecret@github.com/foo/bar")
         assert "mysecret" not in result
 
+    def test_github_token_with_a_prefix_only_the_catch_all_rule_knows(self):
+        # ghu_ (user-to-server) is not among the prefixes the first rule lists.
+        assert redact_secrets("remote: ghu_abc123XYZ rejected") == "remote: *** rejected"
+
+    def test_authorization_header(self):
+        assert (
+            redact_secrets("> Authorization: Bearer abc.def-123") == "> Authorization: Bearer ***"
+        )
+        assert redact_secrets("authorization: token s3cr3t next") == "authorization: token *** next"
+
+    def test_secret_query_parameters(self):
+        url = "https://example.test/hook?access_token=abc123&ref=main&API_KEY=xyz789"
+        redacted = "https://example.test/hook?access_token=***&ref=main&API_KEY=***"
+        assert redact_secrets(url) == redacted
+
     def test_no_secrets(self):
         text = "nothing secret here"
         assert redact_secrets(text) == text
