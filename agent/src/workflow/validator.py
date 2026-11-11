@@ -171,15 +171,15 @@ def _rule_4_read_only_no_pr_create(data: dict[str, Any]) -> list[str]:
     """read_only ⇒ no ensure_pr that creates/pushes (writes the tree)."""
     if not data.get("read_only", False):
         return []
-    msgs = []
-    for s in data.get("steps", []):
+    return [
+        f"read_only workflow may not ensure_pr with strategy {s.get('strategy')!r}"
+        for s in data.get("steps", [])
         if (
             isinstance(s, dict)
             and s.get("kind") == "ensure_pr"
             and s.get("strategy") in ("create", "push_resolve")
-        ):
-            msgs.append(f"read_only workflow may not ensure_pr with strategy {s.get('strategy')!r}")
-    return msgs
+        )
+    ]
 
 
 def _rule_5_policy_floor(data: dict[str, Any]) -> list[str]:
@@ -215,11 +215,11 @@ def _rule_6_tier_ceiling(data: dict[str, Any]) -> list[str]:
         if bad:
             msgs.append(f"read-only tier may not grant mutating tools: {bad}")
     if tier in ("standard", "read-only"):
-        for field in _ELEVATED_ONLY_FIELDS:
-            if ac.get(field):
-                msgs.append(
-                    f"{tier} tier may not declare {field} (extended reach requires tier: elevated)"
-                )
+        msgs.extend(
+            f"{tier} tier may not declare {field} (extended reach requires tier: elevated)"
+            for field in _ELEVATED_ONLY_FIELDS
+            if ac.get(field)
+        )
     return msgs
 
 
@@ -246,10 +246,11 @@ def _rule_8_refs_resolve(data: dict[str, Any]) -> list[str]:
     is caught universally here rather than only when it collides with the
     primary terminal outcome (rule 11).
     """
-    msgs = []
-    for kind in _step_kinds(data):
-        if kind not in _HANDLER_KINDS:
-            msgs.append(f"step kind {kind!r} has no registered handler")
+    msgs = [
+        f"step kind {kind!r} has no registered handler"
+        for kind in _step_kinds(data)
+        if kind not in _HANDLER_KINDS
+    ]
     for step in data.get("steps", []):
         if isinstance(step, dict) and step.get("kind") == "deliver_artifact":
             target = step.get("target")
@@ -266,11 +267,11 @@ def _rule_8_refs_resolve(data: dict[str, Any]) -> list[str]:
         "subagents",
         "prompt_fragments",
     ):
-        for ref in _refs(data, field):
-            if not _ref_resolves(ref):
-                msgs.append(
-                    f"{field} ref {ref!r} does not resolve (expected builtin/* or registry://)"
-                )
+        msgs.extend(
+            f"{field} ref {ref!r} does not resolve (expected builtin/* or registry://)"
+            for ref in _refs(data, field)
+            if not _ref_resolves(ref)
+        )
     return msgs
 
 
@@ -280,18 +281,19 @@ def _rule_9_required_inputs_satisfiable(data: dict[str, Any]) -> list[str]:
     if not ri:
         return []
     sources = set(data.get("hydration", {}).get("sources", []))
-    msgs = []
 
     def _satisfiable(name: str) -> bool:
         need = _INPUT_TO_SOURCE.get(name)
         return need is None or need in sources
 
-    for name in ri.get("all_of", []) or []:
-        if not _satisfiable(name):
-            msgs.append(
-                f"required input {name!r} needs hydration source "
-                f"{_INPUT_TO_SOURCE[name]!r}, which is not declared"
-            )
+    msgs = [
+        (
+            f"required input {name!r} needs hydration source "
+            f"{_INPUT_TO_SOURCE[name]!r}, which is not declared"
+        )
+        for name in ri.get("all_of", []) or []
+        if not _satisfiable(name)
+    ]
     one_of = ri.get("one_of", []) or []
     if one_of and not any(_satisfiable(n) for n in one_of):
         msgs.append(

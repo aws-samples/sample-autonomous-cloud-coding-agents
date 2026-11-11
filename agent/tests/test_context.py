@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import context
 from context import _UNTRUSTED_BEGIN, _UNTRUSTED_END, assemble_prompt, fetch_github_issue
-from models import GitHubIssue, TaskConfig
+from models import GitHubIssue, IssueComment, TaskConfig
 
 
 def _config(issue: GitHubIssue | None = None, task_description: str = "") -> TaskConfig:
@@ -245,6 +245,22 @@ class TestAssemblePromptDoesNotDoubleSanitize:
 
 
 class TestAssemblePromptDelimiters:
+    def test_comments_render_one_block_each_in_order_inside_the_delimiters(self):
+        issue = GitHubIssue(
+            number=3,
+            title="T",
+            body="B",
+            comments=[
+                IssueComment(id=1, author="alice", body="first"),
+                IssueComment(id=2, author="bob", body="second"),
+            ],
+        )
+        prompt = assemble_prompt(_config(issue=issue))
+        assert (
+            f"B\n\n### Comments\n\n**@alice**: first\n\n**@bob**: second\n\n{_UNTRUSTED_END}"
+            in prompt
+        )
+
     def test_external_content_is_wrapped_in_delimiters(self):
         issue = GitHubIssue(number=1, title="T", body="B")
         prompt = assemble_prompt(_config(issue=issue))
