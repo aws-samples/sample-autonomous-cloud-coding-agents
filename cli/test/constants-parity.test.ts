@@ -33,6 +33,7 @@ import {
   BUDGET_WARNING_ALERT_MARKER,
   BUDGET_WARNING_PERCENT,
 } from '../src/budget-store';
+import { makeSubmitCommand } from '../src/commands/submit';
 import {
   FORGE_WEBTRIGGER_SUFFIX,
   JIRA_APP_ACTOR_MIN_SECRET_LENGTH,
@@ -87,6 +88,14 @@ describe('CLI constants parity with contracts/constants.json', () => {
   test('approval_timeout_s bounds match the contract', () => {
     expect(APPROVAL_TIMEOUT_S_MIN).toBe(contracts.approval_timeout_s.min);
     expect(APPROVAL_TIMEOUT_S_MAX).toBe(contracts.approval_timeout_s.max);
+  });
+
+  test('submit --help states the contract default for approval_timeout_s', () => {
+    // The agent applies the default; the CLI only prints it, as a literal.
+    const option = makeSubmitCommand().options.find((o) => o.long === '--approval-timeout');
+    expect(option?.description).toContain(
+      `platform default of ${contracts.approval_timeout_s.default}s`,
+    );
   });
 
   test('max_budget_usd bounds match the contract', () => {
