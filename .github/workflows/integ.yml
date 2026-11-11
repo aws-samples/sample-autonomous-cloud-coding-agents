@@ -196,13 +196,10 @@ jobs:
     # parallelism rather than preventing a name collision. The group is on this
     # job, not on the workflow: at workflow level a run waiting for the `deploy`
     # approval held the group and every later run was cancelled before `resolve`
-    # could post a status. `queue: max` makes later integ jobs wait in line (up
-    # to 100, first in first out) instead of each new one cancelling the one
-    # pending before it; drop the line to go back to "newest pending job wins".
+    # could post a status.
     concurrency:
       group: cdk-integ
       cancel-in-progress: false
-      queue: max
     timeout-minutes: 45
     permissions:
       id-token: write
