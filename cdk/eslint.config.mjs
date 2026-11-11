@@ -317,7 +317,11 @@ export default [
       // loaded, not as part of a test. afterEach is allowed: two handler suites
       // assert an invariant of every test there.
       'jest/no-standalone-expect': ['error', { additionalTestBlockFunctions: ['afterEach'] }],
-      'jest/valid-expect': 'off',
+      // expect(x) without a matcher, and an async assertion nobody awaits, check
+      // nothing. One idiom is sound and still reported: keep the assertion promise,
+      // advance fake timers, then await it. Mark it with eslint-disable-next-line
+      // and the reason; the rule's autofix would await it on the spot and hang the test.
+      'jest/valid-expect': 'error',
       'jest/valid-title': 'off',
       'jest/no-identical-title': 'error',
       'jest/no-disabled-tests': 'error',
