@@ -276,7 +276,9 @@ export default [
       // Jest rules
       'jest/expect-expect': 'off',
       'jest/no-conditional-expect': 'off',
-      'jest/no-standalone-expect': 'off',
+      // An expect() at the top level or in a describe body runs while the file is
+      // loaded, not as part of a test.
+      'jest/no-standalone-expect': 'error',
       'jest/valid-expect': 'off',
       'jest/valid-title': 'off',
       'jest/no-identical-title': 'error',
