@@ -26,6 +26,7 @@ Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`.
 |------|---------------|
 | `progress_writer.py` | `agent/tests/test_progress_writer.py` |
 | `hooks.py`, `policy.py` | `agent/tests/test_hooks.py`, `test_policy.py` |
+| `policies/*.cedar` (built-in rules) | `agent/tests/test_policy_builtin_rules.py` — a table with one call per pattern that each rule must catch and one it must leave alone; a new rule or pattern needs its rows |
 | `pipeline.py`, `runner.py` | `agent/tests/test_pipeline.py`, etc. |
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
