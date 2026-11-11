@@ -82,6 +82,8 @@ def test_a():
 
 **Silent failures** — do not `except: pass` or return empty defaults without justification; semgrep `AI004` blocks masking (use `nosemgrep` with reason if intentional).
 
+**Unused arguments** — ruff `ARG` fails the lint on a parameter the body never reads (in `src/` and `scripts/`). Delete it and update the callers. If a caller you do not control fixes the signature (an SDK callback, a retry hook), prefix the name with `_`; on a method that overrides a base-class method, add `@typing.override`.
+
 ## Boundaries
 
 - ✅ **Always:** Add tests under `agent/tests/` for behavior changes; update `agent/README.md` for new env vars; emit structured progress events for operator-visible milestones

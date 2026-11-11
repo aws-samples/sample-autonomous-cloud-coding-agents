@@ -108,6 +108,7 @@ select = [
     "E",     # pycodestyle errors
     "W",     # pycodestyle warnings
     "F",     # pyflakes
+    "ARG",   # flake8-unused-arguments
     "I",     # isort
     "B",     # flake8-bugbear
     "S",     # flake8-bandit (security)
@@ -148,7 +149,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004"]  # assert; test tokens; /tmp paths; importorskip; literal assertions
+"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004", "ARG"]  # assert; test tokens; /tmp paths; importorskip; literal assertions; fixture and stub signatures are set by pytest and by what they replace
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -39,7 +39,7 @@ def _clone_backoff_reporter(progress: Any, label: str):
 
     from hooks import _try_progress
 
-    def _on_retry(attempt: int, max_attempts: int, stderr: str) -> None:
+    def _on_retry(attempt: int, max_attempts: int, _stderr: str) -> None:
         _try_progress(
             progress,
             "write_agent_blocked",

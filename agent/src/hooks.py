@@ -364,8 +364,8 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
 
 async def pre_tool_use_hook(
     hook_input: Any,
-    tool_use_id: str | None,
-    hook_context: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
     *,
     engine: PolicyEngine,
     trajectory: _TrajectoryWriter | None = None,
@@ -1191,8 +1191,8 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
 
 async def post_tool_use_hook(
     hook_input: Any,
-    tool_use_id: str | None,
-    hook_context: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
     *,
     trajectory: _TrajectoryWriter | None = None,
     stuck_guard: StuckGuard | None = None,
@@ -1633,9 +1633,9 @@ between_turns_hooks: list[BetweenTurnsHook] = [
 
 
 async def stop_hook(
-    hook_input: Any,
-    tool_use_id: str | None,
-    hook_context: Any,
+    _hook_input: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
     *,
     task_id: str,
     progress: Any = None,

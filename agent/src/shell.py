@@ -268,7 +268,7 @@ def _exit_status(returncode: int | None) -> int:
 
 
 def _run_cmd_streaming(
-    cmd: list[str], label: str, cwd: str | None, timeout: int
+    cmd: list[str], cwd: str | None, timeout: int
 ) -> subprocess.CompletedProcess:
     """Run *cmd* streaming BOTH pipes live to the log while capturing them.
 
@@ -351,7 +351,7 @@ def run_cmd(
     """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
     if stream:
-        result = _run_cmd_streaming(cmd, label, cwd, timeout)
+        result = _run_cmd_streaming(cmd, cwd, timeout)
     else:
         result = subprocess.run(
             cmd,

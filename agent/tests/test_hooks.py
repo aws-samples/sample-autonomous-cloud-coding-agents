@@ -1835,9 +1835,9 @@ class TestDenialBetweenTurnsHook:
         )
         result = _run(
             hooks.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context={},
+                {},
+                None,
+                {},
                 task_id="01K",
                 progress=None,
                 engine=engine_with_soft_gate,

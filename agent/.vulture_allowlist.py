@@ -12,12 +12,3 @@
 #   cd agent && uvx vulture src --make-whitelist
 #
 # Keep this list MINIMAL. Prefer deleting dead code over allowlisting it.
-
-# claude-agent-sdk invokes hooks positionally as
-# (hook_input, tool_use_id, hook_context). The dispatcher in hooks.py passes
-# its own `ctx`, so the `hook_context` positional is part of the required
-# signature but unread in these three hook bodies. Cannot be removed without
-# breaking the SDK calling convention.
-hook_context  # unused variable (src/hooks.py:132)
-hook_context  # unused variable (src/hooks.py:918)
-hook_context  # unused variable (src/hooks.py:1258)
