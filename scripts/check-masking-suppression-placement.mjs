@@ -1,71 +1,141 @@
 #!/usr/bin/env node
-// Guards the silent-success-masking suppression footgun (#790).
+// Guards the semgrep suppression comments in source files (#790, #257).
 //
-// `focus-metavariable: $RET` in .semgrep/silent-success-masking.yaml anchors each
-// finding on the `return` statement, so a `nosemgrep: <rule> -- ...` token only
-// binds when it sits ON that return line or the line IMMEDIATELY above it. A
-// multi-line justification whose token drifts higher silently STOPS suppressing
-// (or, worse, looks suppressed while the finding is live). This check asserts
-// every masking suppression token is placed where semgrep will honour it, so the
-// drift that mis-bound agent/src/observability.py cannot recur unnoticed.
+// A suppression comment is the documented escape hatch of the semgrep gates, and
+// an unchecked one is an unreviewed off switch. This check holds every one of
+// them, in every tracked ts/js/py file, to two rules:
+//
+//  1. FORM. It reads `nosemgrep: <rule-id> -- <reason>`. Without a rule id the
+//     comment silences every rule on its line; without a reason nobody can review
+//     it. Any other mention of the word on a line of code counts too, because
+//     semgrep honours the bare word anywhere on a flagged line.
+//
+//  2. BINDING, for the two silent-success-masking rules. `focus-metavariable: $RET`
+//     in .semgrep/silent-success-masking.yaml anchors each finding on the returned
+//     value, so a suppression only acts when it sits ON that line or on the line
+//     IMMEDIATELY above it. One that sits anywhere else suppresses nothing: either
+//     it drifted away from its return (the finding is then live, or the comment
+//     only looks like it is doing something), or the code changed and no longer
+//     needs it. Both are reported. This is asked of semgrep itself rather than
+//     guessed from the text: the rules are run once with suppressions ignored and
+//     every suppression must sit on, or directly above, a finding of its rule.
+//
+// The binding rule covers only the two local rules because only they can be run
+// offline and reproducibly; the registry rules behind `security:sast` cannot.
 //
 // Run: node scripts/check-masking-suppression-placement.mjs  (wired into
-// `security:sast:masking` and `:masking:range`).
+// `security:sast:masking` and `:masking:range`, which put semgrep on PATH).
+// Exit 0 when every suppression passes, 1 on a violation, 2 when the check could
+// not run (it never passes on what it could not read).
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const TOKEN = /nosemgrep:[^\n]*\bsilent-success-masking\b/;
-// The rule anchors on a return; re-throwing (`raise`/`throw`) is the ok path but
-// is accepted here too so the guard never fights a legitimate placement.
-//
-// KNOWN LIMITATION (deliberate): this matches the bare word anywhere on the line,
-// including inside a comment or a string literal. So a token whose next line only
-// *mentions* `return`/`raise`/`throw` in prose — `// we return early below` — is
-// accepted even though the real anchor sits further down and the suppression does
-// not bind. That is a false negative for THIS guard, never a false positive: it
-// can wave through a mis-placed token, but it cannot flag a correct one.
-//
-// Left as-is on purpose. This check is belt-and-suspenders over `semgrep test
-// .semgrep/`, which is the actual correctness gate — the scan itself reports the
-// finding when a suppression fails to bind, so the failure mode here is "the
-// friendly early warning stayed quiet", not "a mask shipped undetected".
-// Tightening it (strip comments/strings before testing) trades that simplicity
-// for a language-aware parser in a defensive lint. Revisit if a real mis-binding
-// ever slips past.
-const ANCHOR = /\b(return|raise|throw)\b/;
+const RULES = '.semgrep/silent-success-masking.yaml';
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|py)$/;
 
-// Tracked source files only; the .semgrep/ fixtures use `ok:`/`ruleid:` markers,
-// not `nosemgrep:`, so excluding them is belt-and-suspenders.
-const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
-  .split('\0')
-  .filter((f) => f && SOURCE_EXT.test(f) && !f.startsWith('.semgrep/'));
+// This file is scanned like any other, so no line of its code may read as a
+// suppression: the word is assembled from two halves, and the patterns spell it
+// with a character class.
+const WORD = 'nose' + 'mgrep';
+const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
+const MENTION = /\bnose[m](?:grep)?\b/;
+// On a comment-only line semgrep honours the word only where it opens the
+// comment; further in it is prose. On a line of code it honours it anywhere.
+const COMMENT_ONLY = /^\s*(?:\/\/|#|\/?\*)/;
+const OPENS_COMMENT = /^[^a-zA-Z0-9]*nose[m](?:grep)?\b/;
+const WELL_FORMED = /\bnose[m]grep: [\w.-]+ -- \S/;
+const MASKING = /\bnose[m]grep: ((?:ts|py)-silent-success-masking) -- /;
 
-const violations = [];
+/** The check could not run: say why and stop, never report success. */
+function cannotRun(message) {
+  console.error(`check-masking-suppression-placement: ${message}`);
+  process.exit(2);
+}
+
+/** `file:line` of every masking finding, with suppression comments ignored. */
+function findings() {
+  let stdout;
+  try {
+    stdout = execFileSync(
+      'semgrep',
+      ['scan', '--config', RULES, '--exclude', '.semgrep/*', IGNORE_SUPPRESSIONS, '--json', '--quiet', '--metrics=off', '--disable-version-check', '.'],
+      { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  } catch (err) {
+    cannotRun(
+      err.code === 'ENOENT'
+        ? 'semgrep is not on PATH. Run this through `mise run security:sast:masking`.'
+        : `semgrep failed (exit ${err.status}): ${String(err.stderr ?? err.message).trim()}`,
+    );
+  }
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch (err) {
+    cannotRun(`semgrep did not print JSON: ${err.message}`);
+  }
+  if (!Array.isArray(report.results) || !Array.isArray(report.paths?.scanned) || report.paths.scanned.length === 0) {
+    cannotRun('semgrep scanned no file, so no suppression can be matched to a finding.');
+  }
+  // check_id carries the rules directory as a prefix (`semgrep.ts-silent-success-masking`).
+  return new Set(report.results.map((r) => `${r.path}:${r.start.line}:${r.check_id.split('.').pop()}`));
+}
+
+// Tracked source files only; the .semgrep/ fixtures trigger by design.
+let tracked;
+try {
+  tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+} catch (err) {
+  cannotRun(`git ls-files failed: ${String(err.stderr ?? err.message).trim()}`);
+}
+const files = tracked.split('\0').filter((f) => f && SOURCE_EXT.test(f) && !f.startsWith('.semgrep/'));
+if (files.length === 0) cannotRun('git lists no tracked source file here. Run from the repository root.');
+
+const found = findings();
+const malformed = [];
+const unbound = [];
+let suppressions = 0;
+let masking = 0;
 for (const file of files) {
-  const lines = readFileSync(file, 'utf8').split('\n');
-  lines.forEach((line, i) => {
-    if (!TOKEN.test(line)) return;
-    const onTokenLine = ANCHOR.test(line); // inline `return x; // nosemgrep: ...`
-    const onNextLine = i + 1 < lines.length && ANCHOR.test(lines[i + 1]);
-    if (!onTokenLine && !onNextLine) {
-      violations.push({ file, line: i + 1, text: line.trim() });
+  readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+    if (!MENTION.test(line) || (COMMENT_ONLY.test(line) && !OPENS_COMMENT.test(line))) return;
+    suppressions++;
+    if (!WELL_FORMED.test(line)) {
+      malformed.push({ file, line: i + 1, text: line.trim() });
+      return;
+    }
+    const rule = MASKING.exec(line)?.[1];
+    if (!rule) return;
+    masking++;
+    // On the finding's line (inline) or directly above it.
+    if (!found.has(`${file}:${i + 1}:${rule}`) && !found.has(`${file}:${i + 2}:${rule}`)) {
+      unbound.push({ file, line: i + 1, text: line.trim() });
     }
   });
 }
 
-if (violations.length > 0) {
+if (malformed.length > 0) {
+  console.error(`\n✖ ${malformed.length} semgrep suppression(s) not in the form \`${WORD}: <rule-id> -- <reason>\`:\n`);
+  for (const v of malformed) console.error(`  ${v.file}:${v.line}\n      ${v.text}`);
   console.error(
-    `\n✖ ${violations.length} silent-success-masking suppression(s) mis-placed — the token must sit on the flagged \`return\` line or the line directly above it, or it does not bind:\n`,
+    '\nName the rule being suppressed and say why the finding is acceptable, for example\n' +
+      `\`// ${WORD}: ts-silent-success-masking -- <why callers may treat this failure as an empty success>\`.\n` +
+      'Without a rule id the comment silences every rule on its line. If the line only mentions the word, reword it.\n',
   );
-  for (const v of violations) {
-    console.error(`  ${v.file}:${v.line}\n      ${v.text}`);
-  }
-  console.error(
-    '\nMove the `# nosemgrep:`/`// nosemgrep:` line directly above the `return`, with any prose above that. See .semgrep/silent-success-masking.yaml (PLACEMENT FOOTGUN).\n',
-  );
-  process.exit(1);
 }
+if (unbound.length > 0) {
+  console.error(`\n✖ ${unbound.length} silent-success-masking suppression(s) suppress nothing — semgrep reports no finding of that rule on the line or on the line below:\n`);
+  for (const v of unbound) console.error(`  ${v.file}:${v.line}\n      ${v.text}`);
+  console.error(
+    '\nIf the comment drifted away from its `return`, move it onto that line or directly above it, with any prose above that\n' +
+      '(see PLACEMENT FOOTGUN in .semgrep/silent-success-masking.yaml). If the rule no longer flags this code, delete the\n' +
+      'suppression and keep the explanation as an ordinary comment.\n',
+  );
+}
+if (malformed.length > 0 || unbound.length > 0) process.exit(1);
 
-console.log('✓ all silent-success-masking suppressions are correctly placed');
+console.log(
+  `✓ ${suppressions} semgrep suppressions in ${files.length} source files name a rule and a reason; ` +
+    `all ${masking} silent-success-masking suppressions bind to one of ${found.size} findings`,
+);
