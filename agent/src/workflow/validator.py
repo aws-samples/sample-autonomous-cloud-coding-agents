@@ -189,8 +189,10 @@ def _rule_5_policy_floor(data: dict[str, Any]) -> list[str]:
     modules = _refs(data, "cedar_policy_modules")
     if "builtin/soft_deny" not in modules:
         return [
-            "writeable workflow (read_only:false) must include builtin/soft_deny in "
-            "agent_config.cedar_policy_modules (policy floor)"
+            (
+                "writeable workflow (read_only:false) must include builtin/soft_deny in "
+                "agent_config.cedar_policy_modules (policy floor)"
+            )
         ]
     return []
 
@@ -328,8 +330,10 @@ def _rule_11_outcome_step_consistency(data: dict[str, Any]) -> list[str]:
 
         if not any(_produces(s) for s in deliver_steps):
             return [
-                f"terminal outcome {primary!r} requires a deliver_artifact step whose "
-                f"target produces it; none of the declared targets do"
+                (
+                    f"terminal outcome {primary!r} requires a deliver_artifact step whose "
+                    f"target produces it; none of the declared targets do"
+                )
             ]
     return []
 

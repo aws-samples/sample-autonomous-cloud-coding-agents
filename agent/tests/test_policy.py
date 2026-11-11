@@ -239,8 +239,10 @@ class TestFilePathsWithSpecialChars:
 class TestExtraPolicies:
     def test_extra_forbid_applied(self):
         extra = [
-            'forbid (principal, action == Agent::Action::"invoke_tool", '
-            'resource == Agent::Tool::"WebFetch");'
+            (
+                'forbid (principal, action == Agent::Action::"invoke_tool", '
+                'resource == Agent::Tool::"WebFetch");'
+            )
         ]
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=extra)
         result = engine.evaluate_tool_use("WebFetch", {})
