@@ -274,7 +274,8 @@ export default [
       'jsdoc/check-alignment': ['error'],
 
       // Jest rules
-      'jest/expect-expect': 'off',
+      // A test must call expect() itself.
+      'jest/expect-expect': 'error',
       'jest/no-conditional-expect': 'off',
       // An expect() at the top level or in a describe body runs while the file is
       // loaded, not as part of a test.

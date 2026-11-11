@@ -311,7 +311,18 @@ export default [
       'jsdoc/check-alignment': ['error'],
 
       // Jest rules
-      'jest/expect-expect': 'off',
+      // A test must assert: expect(), a local helper whose name starts with expect, or
+      // an assertion method of aws-cdk-lib/assertions (every void method of Template
+      // and Annotations; find* and get* return a value and do not count).
+      'jest/expect-expect': ['error', {
+        assertFunctionNames: [
+          'expect*',
+          '**.resourceCountIs', '**.resourcePropertiesCountIs', '**.hasResource', '**.hasResourceProperties',
+          '**.allResources', '**.allResourcesProperties', '**.hasParameter', '**.hasOutput', '**.hasMapping',
+          '**.hasCondition', '**.templateMatches',
+          '**.hasError', '**.hasNoError', '**.hasWarning', '**.hasNoWarning', '**.hasInfo', '**.hasNoInfo',
+        ],
+      }],
       'jest/no-conditional-expect': 'off',
       // An expect() at the top level or in a describe body runs while the file is
       // loaded, not as part of a test. afterEach is allowed: two handler suites
