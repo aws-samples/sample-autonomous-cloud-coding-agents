@@ -25,7 +25,14 @@ run = "yarn vitest run"
 
 [tasks.eslint]
 description = "Run ESLint with --fix"
-run = "yarn eslint --fix src test"
+run = "../node_modules/.bin/eslint --max-warnings 0 --fix src test"
+
+# The same command without --fix, for checks that must not rewrite files (the root
+# `lint` task). Keep the targets of the two tasks identical. --max-warnings 0 in both:
+# a warning fails the task like an error.
+[tasks."eslint:check"]
+description = "Run ESLint without --fix: reports findings and rewrites nothing"
+run = "../node_modules/.bin/eslint --max-warnings 0 src test"
 
 [tasks.bundle]
 description = "Production bundle into web/dist (mock code is compiled out)"

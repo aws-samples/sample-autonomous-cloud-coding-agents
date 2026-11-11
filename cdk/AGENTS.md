@@ -11,6 +11,7 @@ mise //cdk:compile          # TypeScript compile
 mise //cdk:test             # Jest unit tests
 mise //cdk:synth            # synth to cdk/cdk.out/
 mise //cdk:eslint           # ESLint --fix (run after merging main)
+mise //cdk:eslint:check     # ESLint without --fix: reports only; a warning fails too
 mise //cdk:deploy           # deploy stack (requires AWS creds)
 mise //cdk:diff             # diff vs deployed
 mise //cdk:destroy          # destroy stack

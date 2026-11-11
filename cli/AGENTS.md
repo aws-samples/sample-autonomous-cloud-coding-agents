@@ -11,6 +11,7 @@ mise //cli:build            # compile + test + lint
 cd cli && mise run test     # Jest only
 cd cli && mise run compile  # tsc only
 mise //cli:eslint           # ESLint --fix (run after merging main)
+mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fails too
 ```
 
 ## Testing

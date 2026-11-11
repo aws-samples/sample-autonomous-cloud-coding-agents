@@ -10,6 +10,7 @@ You maintain the **operator console** (`@abca/web`): React 19, Vite, React Route
 mise //web:build      # typecheck + test + lint + bundle
 mise //web:test       # Vitest only
 mise //web:eslint     # ESLint --fix
+mise //web:eslint:check  # ESLint without --fix: reports only; a warning fails too
 mise //web:dev:mock   # local console on http://127.0.0.1:5173 against the mock API
 ```
 
