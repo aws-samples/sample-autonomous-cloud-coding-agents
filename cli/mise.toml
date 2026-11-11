@@ -19,10 +19,12 @@ depends = [":compile", ":test", ":eslint"]
 
 [tasks.test]
 description = "Run Jest tests"
+# The package's test script (`jest --ci`), not a second jest command line: the coverage contract
+# check reads scripts.test of package.json, so that has to be the command this task runs.
 # --ci: a snapshot that is missing or differs fails the run instead of being written, on a
 # developer machine as in CI. Do not add --updateSnapshot (rewrites a failing snapshot and
-# passes) or --passWithNoTests (passes when no test file is left).
-run = "yarn jest --ci"
+# passes) or --passWithNoTests (passes when no test file is left) to the script.
+run = "yarn test"
 
 [tasks.eslint]
 description = "Run ESLint"
