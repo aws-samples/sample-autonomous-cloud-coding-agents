@@ -181,6 +181,15 @@ strict = true
 # A parametrize over an empty list is an error, not one skipped test. The lists here
 # come from globs and tables: "nothing found" means the check has stopped checking.
 empty_parameter_set_mark = "fail_at_collect"
+# A warning is an error. In a green run nobody reads the warnings summary; as an
+# error the warning fails the test that caused it, or the collection of its module.
+# An entry below "error" lets one named warning through and says why.
+filterwarnings = [
+    "error",
+    # starlette's TestClient asks for httpx2. The agent stays on httpx until it moves to
+    # mcp 2.x, which requires httpx2; drop this line with that change.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 # Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
 # an agent's Bash tool) pytest's default is a wall of featureless progress dots
 # with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
