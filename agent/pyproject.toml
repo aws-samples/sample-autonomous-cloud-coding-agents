@@ -157,7 +157,7 @@ ignore = [
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 "src/aws_session.py" = ["TID251"]  # the one module that builds boto3 clients, resources and sessions: it attaches the solution User-Agent (#319)
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; importorskip; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
+"tests/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
 
 # Every AWS call the agent makes must carry the solution User-Agent (#319), and
 # only the factories in src/aws_session.py attach it. These names are the ways
