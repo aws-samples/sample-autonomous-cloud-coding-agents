@@ -51,28 +51,26 @@ const PY_REQUIREMENT = /["']cedarpy(?![\w-])([^"']*)["']/g;
 
 const errors = [];
 
-function read(file) {
+/**
+ * Run `check` on the parsed content of one file. A file that cannot be read
+ * or parsed is reported like any other mismatch, and its checks do not run.
+ */
+function inspect(file, parse, check) {
+  let content;
+  let readable = true;
   try {
-    return readFileSync(join(repoRoot, file), 'utf8');
+    content = parse(readFileSync(join(repoRoot, file), 'utf8'));
   } catch (err) {
-    errors.push(`${file}: cannot be read (${err.code ?? err.message}).`);
-    return undefined;
+    readable = false;
+    errors.push(`${file}: cannot be read or parsed (${err.code ?? err.message}).`);
   }
+  if (readable) check(content);
 }
 
-function readJson(file) {
-  const text = read(file);
-  if (text === undefined) return undefined;
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    errors.push(`${file}: is not valid JSON (${err.message}).`);
-    return undefined;
-  }
-}
-
-const pair = readJson(PAIR_FILE);
-if (pair !== undefined) {
+/** The verified pair; stays undefined when the pair file is unusable. */
+let pair;
+inspect(PAIR_FILE, JSON.parse, (json) => {
+  pair = json;
   const names = Object.keys(pair).sort().join(', ');
   if (names !== [WASM, PY].sort().join(', ')) {
     errors.push(`${PAIR_FILE}: must name exactly "${WASM}" and "${PY}", found: ${names || 'nothing'}.`);
@@ -82,7 +80,7 @@ if (pair !== undefined) {
       errors.push(`${PAIR_FILE}: "${name}" must be one exact version such as 4.12.0, found "${pair[name]}".`);
     }
   }
-}
+});
 
 /** Hold one pinned version to the pair file, or say what to change. */
 function expectPin(file, name, pinned, howToPin) {
@@ -96,22 +94,21 @@ function expectPin(file, name, pinned, howToPin) {
 }
 
 for (const manifest of ['cdk/package.json', 'cdk/layers/cedar-wasm/package.json']) {
-  const pkg = readJson(manifest);
-  if (pkg === undefined) continue;
-  expectPin(manifest, WASM, pkg.dependencies?.[WASM], (version) => `"${WASM}": "${version}", no ^ or ~`);
+  inspect(manifest, JSON.parse, (pkg) => {
+    expectPin(manifest, WASM, pkg.dependencies?.[WASM], (version) => `"${WASM}": "${version}", no ^ or ~`);
+  });
 }
 
-const pyproject = read('agent/pyproject.toml');
-if (pyproject !== undefined) {
+inspect('agent/pyproject.toml', String, (pyproject) => {
   const requirements = [...pyproject.matchAll(PY_REQUIREMENT)].map((match) => match[1].trim());
   if (requirements.length !== 1) {
     errors.push(`agent/pyproject.toml: expected one "${PY}" requirement, found ${requirements.length}.`);
-  } else {
-    const [specifier] = requirements;
-    const pinned = specifier.startsWith('==') ? specifier.slice(2).trim() : specifier;
-    expectPin('agent/pyproject.toml', PY, pinned, (version) => `"${PY}==${version}"`);
+    return;
   }
-}
+  const [specifier] = requirements;
+  const pinned = specifier.startsWith('==') ? specifier.slice(2).trim() : specifier;
+  expectPin('agent/pyproject.toml', PY, pinned, (version) => `"${PY}==${version}"`);
+});
 
 if (errors.length > 0) {
   console.error('check-cedar-engine-pair: the Cedar engines are not pinned to the verified pair.\n');
