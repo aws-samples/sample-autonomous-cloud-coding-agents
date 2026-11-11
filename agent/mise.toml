@@ -23,22 +23,26 @@ echo "Project: $PROJECT_NAME"
 '''
 
 # QUALITY
+# The ruff tasks name their configuration (--config): ruff then applies
+# agent/pyproject.toml to every file. Left to discover configuration per directory,
+# it would let a ruff.toml or [tool.ruff] added below agent/ replace the rules,
+# the ignores and the banned-api table for that directory, with the gate still green.
 
 [tasks.lint]
 description = "Lint with ruff"
-run = "uv run ruff check"
+run = "uv run ruff check --config pyproject.toml"
 
 [tasks."lint:fix"]
 description = "Lint and auto-fix"
-run = "uv run ruff check --fix"
+run = "uv run ruff check --config pyproject.toml --fix"
 
 [tasks.format]
 description = "Format with ruff"
-run = "uv run ruff format"
+run = "uv run ruff format --config pyproject.toml"
 
 [tasks."format:check"]
 description = "Check formatting"
-run = "uv run ruff format --check"
+run = "uv run ruff format --config pyproject.toml --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
