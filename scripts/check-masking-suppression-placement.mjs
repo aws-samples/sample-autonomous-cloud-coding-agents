@@ -42,7 +42,10 @@ const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
 const MENTION = /\bnose[m](?:grep)?\b/;
 // On a comment-only line semgrep honours the word only where it opens the
 // comment; further in it is prose. On a line of code it honours it anywhere.
-const COMMENT_ONLY = /^\s*(?:\/\/|#|\/?\*)/;
+// What opens a comment depends on the language: in JS and TS a leading `#` is a
+// private field and `*name` a generator method, both code.
+const PY_COMMENT_ONLY = /^\s*#/;
+const JS_COMMENT_ONLY = /^\s*(?:\/\/|\/\*|\*(?:\s|\/|$))/;
 const OPENS_COMMENT = /^[^a-zA-Z0-9]*nose[m](?:grep)?\b/;
 const WELL_FORMED = /\bnose[m]grep: [\w.-]+ -- \S/;
 const MASKING = /\bnose[m]grep: ((?:ts|py)-silent-success-masking) -- /;
@@ -98,8 +101,9 @@ const unbound = [];
 let suppressions = 0;
 let masking = 0;
 for (const file of files) {
+  const commentOnly = file.endsWith('.py') ? PY_COMMENT_ONLY : JS_COMMENT_ONLY;
   readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
-    if (!MENTION.test(line) || (COMMENT_ONLY.test(line) && !OPENS_COMMENT.test(line))) return;
+    if (!MENTION.test(line) || (commentOnly.test(line) && !OPENS_COMMENT.test(line))) return;
     suppressions++;
     if (!WELL_FORMED.test(line)) {
       malformed.push({ file, line: i + 1, text: line.trim() });

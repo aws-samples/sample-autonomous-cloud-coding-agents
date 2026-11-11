@@ -150,14 +150,15 @@ describe('check-masking-suppression-placement', () => {
         'src/above.py': ['def f():', '    try:', '        return g()', '    except KeyError:', `        # ${WORD}: ${PY_RULE} -- absent key means not configured`, '        return None', ''].join('\n'),
         'src/other-rule.ts': `const p = join(root, name); // ${WORD}: path-join-resolve-traversal -- name is checked against an allowlist above\n`,
         // The false-positive side: the word inside the prose of a comment line is not a suppression.
-        'src/prose.ts': `// The ${WORD} comment on parseBody is justified by the test below.\nexport const x = 1;\n`,
+        'src/prose.ts': `// The ${WORD} comment on parseBody is justified by the test below.\n/**\n * See the ${WORD} note above.\n */\nexport const x = 1;\n`,
+        'src/prose.py': `# The ${WORD} comment below is justified in the design doc.\nx = 1\n`,
       },
       [['src/inline.ts', 5, TS_RULE], ['src/above.py', 6, PY_RULE]],
     );
 
     expect(result.status).toBe(0);
     // The counts are the anti-vacuity assertion: a guard that read nothing also exits 0.
-    expect(result.stdout).toContain('3 semgrep suppressions in 4 source files name a rule and a reason');
+    expect(result.stdout).toContain('3 semgrep suppressions in 5 source files name a rule and a reason');
     expect(result.stdout).toContain('all 2 silent-success-masking suppressions bind to one of 2 findings');
   });
 
@@ -190,6 +191,17 @@ describe('check-masking-suppression-placement', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('src/a.py:1');
+    });
+
+    test('rejects a bare suppression on code that only looks like a comment line', () => {
+      // In JS and TS a leading `#` opens a private field and `*name` a generator method.
+      const source = ['export class C {', `  #secret = load(); // ${WORD}`, `  *items() { yield 1; } // ${WORD}`, '}', ''].join('\n');
+      const result = run({ 'src/a.ts': source }, []);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('2 semgrep suppression(s) not in the form');
+      expect(result.stderr).toContain('src/a.ts:2');
+      expect(result.stderr).toContain('src/a.ts:3');
     });
 
     test('rejects the word in the prose of a comment that trails code', () => {
