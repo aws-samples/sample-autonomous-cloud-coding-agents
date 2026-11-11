@@ -6,6 +6,10 @@
   "ignoreBinaries": [
     "mise"
   ],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  },
   "workspaces": {
     ".": {
       "entry": ["scripts/*.{js,mjs,ts}"]
