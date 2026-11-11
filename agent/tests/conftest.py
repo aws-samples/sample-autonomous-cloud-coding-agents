@@ -171,6 +171,26 @@ def _refuse_aws_request(self, request):
 botocore.httpsession.URLLib3Session.send = _refuse_aws_request
 
 
+# No skipped test in CI. A skip is one more line in a summary nobody reads on a
+# green build, so a check that has stopped running looks exactly like one that
+# passes. CI is the one environment where every test must have what it needs;
+# on a developer's machine a skip stays a skip. ``CI`` is the variable GitHub
+# Actions sets and the one pytest itself reads to tell.
+_IN_CI = bool(os.environ.get("CI"))
+_skipped: list[str] = []
+
+
+def _record_skip(report):
+    """Remember a skipped test, or a module skipped at import (importorskip)."""
+    if report.skipped and not hasattr(report, "wasxfail"):  # an xfail is an expectation, and strict
+        where = report.longrepr  # (file, line, reason) for a skip
+        detail = f"{os.path.relpath(where[0])}:{where[1]}: {where[2]}"
+        _skipped.append(f"{report.nodeid} — {detail}")
+
+
+pytest_runtest_logreport = pytest_collectreport = _record_skip
+
+
 def pytest_sessionfinish(session, exitstatus):
     """Cancel the hang watchdog on a clean session finish.
 
@@ -182,30 +202,43 @@ def pytest_sessionfinish(session, exitstatus):
 
     Also fails a session in which a request to AWS was attempted. Every test may
     have passed — the code under test tends to swallow the refusal — so the exit
-    status is the only place the attempt can still count."""
+    status is the only place the attempt can still count. The same goes for a
+    test skipped in CI."""
     _hang_watchdog.cancel()
-    if _blocked_aws_requests and session.exitstatus == pytest.ExitCode.OK:
+    failed = _blocked_aws_requests or (_IN_CI and _skipped)
+    if failed and session.exitstatus == pytest.ExitCode.OK:
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.hookimpl(trylast=True)  # after the coverage report, so it is the last section printed
 def pytest_terminal_summary(terminalreporter):
     """Say why an otherwise green session failed, where its reader looks first."""
-    if not _blocked_aws_requests:
-        return
-    terminalreporter.section("AWS send guard", red=True, bold=True)
-    terminalreporter.line(
-        f"FAILED: {len(_blocked_aws_requests)} request(s) to AWS were attempted during this "
-        "session. Each was refused before it left the process, and the run fails because "
-        "unit tests must not reach AWS:"
-    )
-    for attempt in dict.fromkeys(_blocked_aws_requests):
-        terminalreporter.line(f"  {attempt}")
-    terminalreporter.line(
-        "Fix: stub the client at the line shown, in the test named (patch boto3.client or the "
-        "aws_session.tenant_client / platform_client seam), or join the thread that outlives "
-        "that test."
-    )
+    if _blocked_aws_requests:
+        terminalreporter.section("AWS send guard", red=True, bold=True)
+        terminalreporter.line(
+            f"FAILED: {len(_blocked_aws_requests)} request(s) to AWS were attempted during this "
+            "session. Each was refused before it left the process, and the run fails because "
+            "unit tests must not reach AWS:"
+        )
+        for attempt in dict.fromkeys(_blocked_aws_requests):
+            terminalreporter.line(f"  {attempt}")
+        terminalreporter.line(
+            "Fix: stub the client at the line shown, in the test named (patch boto3.client or "
+            "the aws_session.tenant_client / platform_client seam), or join the thread that "
+            "outlives that test."
+        )
+    if _IN_CI and _skipped:
+        terminalreporter.section("Skip guard", red=True, bold=True)
+        terminalreporter.line(
+            f"FAILED: {len(_skipped)} test(s) or module(s) were skipped, and the CI variable is "
+            "set. In CI every test must run, because a skipped check looks like a passing one:"
+        )
+        for skipped in _skipped:
+            terminalreporter.line(f"  {skipped}")
+        terminalreporter.line(
+            "Fix: give the test what it waits for in CI (the dependency, the tool, the file), "
+            "or delete it. For a known failure use xfail: an xfail that passes fails the run."
+        )
 
 
 class FakeRunCmd:
