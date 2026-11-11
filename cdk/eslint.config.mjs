@@ -32,7 +32,9 @@ import { dirname, join } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const TS_FILES = ['src/**/*.ts', 'test/**/*.ts', 'scripts/**/*.ts'];
+// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
+// without a word, so a .mts or .cts file would sit outside every rule below.
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}', 'scripts/**/*.{ts,tsx,mts,cts}'];
 
 const NO_MD5 = {
   selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
@@ -355,7 +357,7 @@ export default [
 
   // Every AWS SDK client in src is built by the attributed factory (#319).
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
       // The whole list again: a later block replaces a rule's options.
       'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
@@ -366,7 +368,7 @@ export default [
   // (test/handlers/shared/runtime-bundle-boundary.test.ts) bundles every entrypoint and
   // is the ground truth for any import spelling; these two rules name the line.
   {
-    files: ['src/handlers/**/*.ts'],
+    files: ['src/handlers/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-restricted-imports': ['error', {
         paths: ['aws-cdk-lib', 'constructs', 'cdk-nag'].map((name) => ({ name, message: NO_CDK_IN_HANDLERS })),
@@ -386,7 +388,7 @@ export default [
 
   // Override: tests legitimately use inline literals (fixtures, assertions)
   {
-    files: ['test/**/*.ts'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       // Literal fixtures and expected values are the point of a test; naming every
       // one defeats readability.
@@ -406,7 +408,7 @@ export default [
   // preflight checks), not CDK constructs. They print progress and results to
   // the terminal, so console output is their interface.
   {
-    files: ['scripts/**/*.ts'],
+    files: ['scripts/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-console': 'off',
     },

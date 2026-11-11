@@ -30,7 +30,9 @@ import { dirname, join } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const TS_FILES = ['src/**/*.ts', 'test/**/*.ts', 'build-tools/**/*.ts'];
+// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
+// without a word, so a .mts or .cts file would sit outside every rule below.
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}', 'build-tools/**/*.{ts,tsx,mts,cts}'];
 
 const NO_MD5 = {
   selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
@@ -307,7 +309,7 @@ export default [
 
   // Override: allow console.log in CLI source files (console output is the product)
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-console': 'off',
       // Every AWS SDK client in src is built by the attributed factory (#319). The whole
@@ -318,7 +320,7 @@ export default [
 
   // Override: tests and build tooling legitimately use inline literals
   {
-    files: ['test/**/*.ts', 'build-tools/**/*.ts'],
+    files: ['test/**/*.{ts,tsx,mts,cts}', 'build-tools/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
     },
@@ -326,7 +328,7 @@ export default [
 
   // Override: shebang files can't have the license header at line 1
   {
-    files: ['src/bin/**/*.ts'],
+    files: ['src/bin/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'license-header/header': 'off',
     },

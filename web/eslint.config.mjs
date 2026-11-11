@@ -38,7 +38,9 @@ export default defineConfig(
   tseslint.configs.recommended,
   reactHooks.configs.flat['recommended-latest'],
   {
-    files: ['src/**/*.{ts,tsx}', 'test/**/*.{ts,tsx}'],
+    // Every TypeScript extension here and below: the presets above also match .mts and
+    // .cts, so such a file would be linted, but by none of the rules of this package.
+    files: ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}'],
     // Type information for the type-aware rules below, from web/tsconfig.json.
     languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: __dirname } },
     plugins: { 'license-header': licenseHeader },
@@ -65,7 +67,7 @@ export default defineConfig(
     },
   },
   {
-    files: ['src/**/*.{ts,tsx}'],
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS] }],
       'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS],
@@ -73,14 +75,14 @@ export default defineConfig(
   },
   {
     // A later block replaces the options of a rule, so core repeats the lists in full.
-    files: ['src/core/**/*.{ts,tsx}'],
+    files: ['src/core/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS, NO_DOMAINS] }],
       'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS, NO_DYNAMIC_DOMAINS],
     },
   },
   {
-    files: ['test/**/*.{ts,tsx}'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       // What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli.
       'no-restricted-syntax': ['error', {
