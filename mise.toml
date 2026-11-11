@@ -8,6 +8,9 @@
 #   - agent:   cedarpy==4.12.2                 (agent/pyproject.toml)
 #   - cdk:     @cedar-policy/cedar-wasm@4.12.0  (cdk/package.json)
 #   Both build on the Cedar 4.12.0 core.
+# contracts/cedar-parity/engines/versions.json names that pair, and
+# `check:cedar-engine-pair` (in drift-prevention) fails when a manifest
+# pins anything else.
 min_version = "2026.7.11"
 
 monorepo_root = true
@@ -135,6 +138,10 @@ run = "node scripts/check-deadcode-ratchet.mjs"
 description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
 run = "node scripts/check-transitive-pin-sync.mjs"
 
+[tasks."check:cedar-engine-pair"]
+description = "Cedar engine pair: fail unless @cedar-policy/cedar-wasm (cdk, Lambda layer) and cedarpy (agent) are pinned exactly to the versions in contracts/cedar-parity/engines/versions.json."
+run = "node scripts/check-cedar-engine-pair.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
@@ -143,6 +150,7 @@ run = [
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
   { task = "check:transitive-pin-sync" },
+  { task = "check:cedar-engine-pair" },
   { task = "//docs:link-check" },
 ]
 
