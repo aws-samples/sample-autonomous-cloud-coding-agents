@@ -57,7 +57,7 @@ dependencies = [
 # `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
 # (surprise malicious/unstable version) is already covered by exact pins + reviewed
 # lock upgrades. See #532.
-# nosemgrep: uv-missing-dependency-cooldown
+# nosemgrep: uv-missing-dependency-cooldown -- deps are exact-pinned and lock-reviewed; a global cooldown makes `uv sync` unsatisfiable on fresh pins (#532)
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
