@@ -15,7 +15,7 @@
       "entry": ["scripts/*.{js,mjs,ts}"]
     },
     "cdk": {
-      "entry": ["src/main.ts!", "src/handlers/*.ts!", "src/handlers/*/index.ts!", "scripts/*.ts", "test/integ/integ.*.ts"],
+      "entry": ["src/main.ts!", "src/handlers/*.ts!", "scripts/*.ts", "test/integ/integ.*.ts"],
       "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"],
       "ignoreDependencies": ["esbuild", "ts-node", "tsx", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
     },
