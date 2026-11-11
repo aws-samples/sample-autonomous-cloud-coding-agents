@@ -150,22 +150,29 @@ description = "Scan the checked-out history for secrets with gitleaks (scheduled
 # Secrets introduced by a PR are independently caught at merge time by the
 # required range-scoped check (`security:secrets:range`, see security-pr.yml).
 #
+# `--config .gitleaks.toml` (here and in the two tasks below) names the rule
+# file instead of leaving gitleaks to look for it. When gitleaks finds no file
+# it scans with its built-in rules and exits 0: the aws-account-id rule and
+# every allowlist are gone and nothing says so. With the flag a missing or
+# unreadable file stops the scan with an error, and a GITLEAKS_CONFIG variable
+# in the environment cannot replace the rules.
+#
 # `--verbose` (here and in the two tasks below) prints rule, file and line for
 # each finding; without it gitleaks only prints a count. `--redact` keeps the
 # secret itself out of the output.
-run = 'gitleaks git . --no-banner --redact --verbose --log-opts="HEAD"'
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
 # Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
 # to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
-run = 'gitleaks git . --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
 # `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
-run = "gitleaks git . --staged --no-banner --redact --verbose"
+run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --verbose"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
