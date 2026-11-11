@@ -75,6 +75,7 @@ jobs:
       # and so is an expiry written in a form this line reader does not follow.
       # osv-expiry.md is empty when there is nothing to warn about.
       - name: Warn about osv-scanner ignores that expire within 21 days
+        id: expiry
         run: |
           set -euo pipefail
           node - > osv-expiry.md <<'EOF'
@@ -121,15 +122,18 @@ jobs:
       # One rolling issue instead of a new issue per failing run: comment on the
       # open issue that has this exact title, or create it. `!cancelled()` so a
       # failure of the step above cannot suppress the report of a failed suite.
+      # That failure is reported as well: when the expiry check did not finish,
+      # a run that looks clean says nothing about ignores that are about to expire.
       - name: Report to the rolling issue
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          EXPIRY_OUTCOME: ${{ steps.expiry.outcome }}
         run: |
           set -euo pipefail
-          if [ "${SCAN_OUTCOME}" = "success" ] && [ ! -s osv-expiry.md ]; then
+          if [ "${SCAN_OUTCOME}" = "success" ] && [ "${EXPIRY_OUTCOME}" = "success" ] && [ ! -s osv-expiry.md ]; then
             echo "Suite passed and no ignore expires within 21 days: nothing to report."
             exit 0
           fi
@@ -145,6 +149,10 @@ jobs:
             echo "| SHA | [\`${GITHUB_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |"
             echo "| Actor | @${GITHUB_ACTOR} |"
             echo "| Event | \`${GITHUB_EVENT_NAME}\` |"
+            if [ "${EXPIRY_OUTCOME}" != "success" ]; then
+              echo ""
+              echo "**The check for osv-scanner ignores close to expiry did not finish (step outcome: ${EXPIRY_OUTCOME}).** This run says nothing about ignores that are about to expire. The step \"Warn about osv-scanner ignores that expire within 21 days\" in the workflow run shows why."
+            fi
             if [ -s osv-expiry.md ]; then
               echo ""
               cat osv-expiry.md
