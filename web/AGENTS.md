@@ -8,12 +8,12 @@ You maintain the **operator console** (`@abca/web`): React 19, Vite, React Route
 
 ```bash
 mise //web:build      # typecheck + test + lint + bundle
-mise //web:test       # Vitest only
+mise //web:test       # Vitest with coverage floors; a committed `.only` fails
 mise //web:eslint     # ESLint --fix
 mise //web:dev:mock   # local console on http://127.0.0.1:5173 against the mock API
 ```
 
-Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.test.tsx`.
+Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.test.tsx` (no coverage, no floors). The floors count every file under `src/`, tested or not; they live in `vite.config.ts` and are pinned in `contracts/coverage-thresholds.json`.
 
 ## Conventions
 

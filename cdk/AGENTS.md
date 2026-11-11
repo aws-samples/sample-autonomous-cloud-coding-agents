@@ -18,9 +18,11 @@ mise //cdk:destroy          # destroy stack
 
 ## Testing
 
-- **Full suite:** `mise //cdk:test`
-- **Single file:** `cd cdk && npx jest test/handlers/shared/validation.test.ts`
-- **Pattern:** `cd cdk && npx jest --testPathPattern=orchestrate-task`
+- **Full suite:** `mise //cdk:test`. The coverage floors apply; they count every file in `src/`, tested or not.
+- **Single file:** `mise //cdk:testf -- test/handlers/shared/validation.test.ts`
+- **Pattern:** `mise //cdk:testf -- orchestrate-task`
+
+`testf` runs without coverage. A partial run with plain `npx jest` fails on the coverage floors after its tests pass. The full suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it: to add or update one on purpose, `mise //cdk:testf -- -u <file>`, then commit the snapshot.
 
 **Extend tests when you change:**
 
