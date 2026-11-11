@@ -114,7 +114,7 @@ function tomlTable(file: string, key: string): Json {
       if (eq < 1) throw new Error('not a key = value line');
       return [line.slice(0, eq), JSON.parse(line.slice(eq + ' = '.length))];
     } catch {
-      throw new Error(`${file} [${key}]: cannot read "${line}". Keep this table to plain values, one per line.`);
+      throw new Error(`${file} [${key}]: cannot read "${line}". This check reads one-line values only, and no string that holds a backslash or a double quote: mise prints those in a form it does not parse`);
     }
   }));
 }
@@ -196,8 +196,10 @@ if (errors.length > 0) {
   for (const e of errors) {
     console.error(`  - ${e}`);
   }
-  console.error(`\n${CONTRACT} is the source of truth. Put the manifest back in line with it. To change a floor or`);
-  console.error('what it measures, change the contract and the manifest together and say why in the pull request.');
+  console.error(`\n${CONTRACT} is the source of truth: put the manifest back in line with it. If coverage`);
+  console.error('fell below a floor, add tests. Raising a floor takes the same change in the contract and the manifest.');
+  console.error('Lowering one, measuring fewer files or changing a test command needs a maintainer to agree first: do not');
+  console.error('edit the contract to make this check pass.');
   process.exit(1);
 }
 
