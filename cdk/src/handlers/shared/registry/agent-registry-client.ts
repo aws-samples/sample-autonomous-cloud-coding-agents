@@ -639,7 +639,7 @@ export class AgentRegistryClient implements RegistryClient {
       );
     } catch (err) {
       if (err instanceof ResourceNotFoundException) {
-        return null; // nosemgrep: ts-silent-success-masking -- service 404 is the port's absent-record contract
+        return null; // service 404 is the port's absent-record contract
       }
       throw err;
     }

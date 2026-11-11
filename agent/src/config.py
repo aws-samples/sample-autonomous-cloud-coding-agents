@@ -174,7 +174,7 @@ def _resolve_linear_token_via_vault(
             "WARN",
             "_resolve_linear_token_via_vault: consent required (no cached grant); SM fallback",
         )
-        # nosemgrep: py-silent-success-masking -- vault needs consent; SM fallback follows
+        # vault needs consent; SM fallback follows
         return ""
     except (ClientError, BotoCoreError) as e:
         log(
