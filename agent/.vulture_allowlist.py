@@ -9,6 +9,6 @@
 # dead code in those forms still surfaces.
 #
 # Regenerate/extend (then hand-review the diff):
-#   cd agent && uvx vulture src --make-whitelist
+#   cd agent && uv run vulture src --make-whitelist
 #
 # Keep this list MINIMAL. Prefer deleting dead code over allowlisting it.

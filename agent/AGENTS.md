@@ -7,7 +7,7 @@ You maintain the **Python agent runtime** bundled into the CDK-deployed image: p
 ## Commands (run these)
 
 ```bash
-mise //agent:quality         # lint, type-check, pytest
+mise //agent:quality         # lint, format, type-check, dead code, pytest
 mise //agent:security        # agent-scoped security checks
 cd agent && uv run pytest -v # verbose single run
 cd agent && uv run pytest tests/test_progress_writer.py -v

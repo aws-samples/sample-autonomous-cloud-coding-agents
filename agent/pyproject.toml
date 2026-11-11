@@ -64,10 +64,12 @@ constraint-dependencies = [
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
 ]
 
-# Dead-code detection (#282, cairn MVG gate #6). ruff "F" catches unused
-# imports/locals; vulture catches unused module-level functions/classes/methods
-# that ruff cannot see. min_confidence 80 keeps the signal high; intentional
-# keeps (e.g. SDK-mandated hook params) live in .vulture_allowlist.py.
+# Dead-code detection (#282, cairn MVG gate #6), part of `mise run quality`.
+# At min_confidence 80 vulture reports only what it is sure of: unreachable code
+# (after return or raise, a condition that cannot hold) and imports, arguments
+# and variables that nothing reads. It rates an unused function, class or method
+# 60, so those are NOT reported at this threshold; lowering it needs a reviewed
+# allowlist first. Intentional keeps live in .vulture_allowlist.py.
 [tool.vulture]
 paths = ["src", ".vulture_allowlist.py"]
 min_confidence = 80
