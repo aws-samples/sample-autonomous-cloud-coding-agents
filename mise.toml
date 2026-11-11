@@ -104,7 +104,7 @@ depends = [
 ]
 
 [tasks."check:types-sync"]
-description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8) and web/src/core/api/types.ts. Fails if a public type exists in both with different shapes, if CLI exports a name CDK doesn't, or if the web mirror declares a member the CDK type lacks."
+description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8) and web/src/core/api/types.ts. Fails if a public type exists in both with different shapes, if CLI exports a name CDK doesn't, or if the web mirror declares a member its canonical type lacks or exports a name that has no canonical declaration and is not listed as console-only."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
 
 [tasks."check:constants-sync"]

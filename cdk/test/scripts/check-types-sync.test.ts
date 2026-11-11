@@ -26,6 +26,8 @@
  * method signatures, compare types declared in another file by name only, and
  * never read the web mirror — so the task-status union, among others, was not
  * compared at all. Each of those is pinned here by making the gate fail on it.
+ * So is each direction of the name checks: a mirror export nothing declares,
+ * and a CDK export the CLI lacks.
  *
  * HOW: same as `check-constants-sync.test.ts` — the script is spawned against a
  * throwaway repo root. Drift is APPENDED to copies of the real files as small
@@ -94,13 +96,21 @@ function escape(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Add an entry to one of the script's own allowlists (fails loudly if the list is renamed). */
-function allowlist(root: string, list: string, entry: string): void {
+/** Add an entry to one of the script's own lists (fails loudly if the list is renamed). */
+function addEntry(root: string, opening: string, entry: string): void {
   const file = path.join(root, SCRIPT_REL);
-  const opening = `const ${list} = new Set<string>([`;
   const source = fs.readFileSync(file, 'utf-8');
-  if (!source.includes(opening)) throw new Error(`${SCRIPT_REL} no longer declares ${list}`);
-  fs.writeFileSync(file, source.replace(opening, `${opening}\n  '${entry}',`));
+  if (!source.includes(opening)) throw new Error(`${SCRIPT_REL} no longer declares \`${opening}\``);
+  fs.writeFileSync(file, source.replace(opening, `${opening}\n  ${entry},`));
+}
+
+function allowlist(root: string, list: string, entry: string): void {
+  addEntry(root, `const ${list} = new Set<string>([`, `'${entry}'`);
+}
+
+/** Tell the script that a web export is declared in a CDK module other than the types file. */
+function canonElsewhere(root: string, name: string, module: string): void {
+  addEntry(root, 'const WEB_CANON_ELSEWHERE: ReadonlyMap<string, string> = new Map([', `['${name}', '${module}']`);
 }
 
 describe('check-types-sync', () => {
@@ -114,7 +124,7 @@ describe('check-types-sync', () => {
       // The counts are the anti-vacuity assertion: a script that compared
       // NOTHING would also exit 0.
       expect(result.stdout).toMatch(/[1-9]\d* CLI exports validated against [1-9]\d* CDK exports/);
-      expect(result.stdout).toMatch(/CDK ↔ web: [1-9]\d* of \d+ web exports have a CDK declaration and match it/);
+      expect(result.stdout).toMatch(/CDK ↔ web: [1-9]\d* of \d+ web exports match their canonical declaration \([1-9]\d* console-only allowlisted\)/);
     });
   });
 
@@ -130,6 +140,9 @@ describe('check-types-sync', () => {
             "export const GateStatuses = { A: 'A', B: 'B' } as const;",
             'export type GateStatus = (typeof GateStatuses)[keyof typeof GateStatuses];',
             'export interface GateNested { readonly x: string; readonly y: number }',
+            // Constants declared outside the types file, as the status lists are.
+            'export const GateList: readonly GateStatus[] = [GateStatuses.A, GateStatuses.B];',
+            'export const GateListSame: readonly GateStatus[] = [GateStatuses.A, GateStatuses.B];',
           ].join('\n'),
         );
         append(root, CDK_TYPES, [
@@ -148,6 +161,7 @@ describe('check-types-sync', () => {
           'export interface GateWeb { readonly a: string; readonly b?: number; readonly c: string }',
           'export interface GateSubset { readonly a: string; readonly b: number }',
           'export interface GateUnresolved { readonly a: GateMissing }',
+          'export interface GateCdkOnly { readonly a: string }',
         ].join('\n'));
         append(root, CLI_TYPES, [
           "export type GateStatus = 'A';",
@@ -167,12 +181,26 @@ describe('check-types-sync', () => {
           "export enum GateCliEnum { A = 'a' }",
           'export function gateCliFn(): number { return 1; }',
           'export class GateCliClass {}',
+          'export interface GateCliShape { readonly a: string }',
         ].join('\n'));
         append(root, WEB_TYPES, [
           "export type GateStatus = 'A';",
           'export interface GateWeb { readonly a: number; readonly b: number; readonly d: string }',
           'export interface GateSubset { readonly a: string }',
+          "export const GateList: readonly string[] = ['A'];",
+          "export const GateListSame = ['A', 'B'] as const;",
+          'export interface GateCliShape { readonly a: number }',
+          'export interface GateWebOnly { readonly a: string }',
+          'export interface GateConsole { readonly a: string }',
         ].join('\n'));
+        canonElsewhere(root, 'GateList', 'cdk/src/handlers/shared/gate-fixture.ts');
+        canonElsewhere(root, 'GateListSame', 'cdk/src/handlers/shared/gate-fixture.ts');
+        canonElsewhere(root, 'GateGone', 'cdk/src/handlers/shared/gate-fixture.ts');
+        canonElsewhere(root, 'GateWeb', 'cdk/src/handlers/shared/gate-fixture.ts');
+        allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateCliShape');
+        allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateConsole');
+        allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateStaleWeb');
+        allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateWeb');
         allowlist(root, 'CDK_ONLY_ALLOWLIST', 'GateStale');
         allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateBoth');
         allowlist(root, 'WEB_REQUIRED_WHERE_CDK_OPTIONAL', 'GateWeb.gone');
@@ -218,6 +246,34 @@ describe('check-types-sync', () => {
       }
     });
 
+    test('rejects a CDK export the CLI neither mirrors nor is excused from', () => {
+      expect(result.stderr).toContain('CDK exports "GateCdkOnly" but CLI does not');
+    });
+
+    test('rejects a web export that nothing declares, and accepts a listed console-only one', () => {
+      // A type renamed in the CDK and the CLI leaves the forgotten web copy here.
+      expect(result.stderr).toContain(`web exports "GateWebOnly" but neither ${CDK_TYPES} nor ${CLI_TYPES} declares it`);
+      expect(result.stderr).not.toContain('"GateConsole"');
+    });
+
+    test('compares a web constant with the CDK module that declares it, by value', () => {
+      expect(result.stderr).toMatch(new RegExp(`"GateList" differs between cdk/src/handlers/shared/gate-fixture\\.ts:\\d+ \\(CDK\\) and ${escape(WEB_TYPES)}:\\d+ \\(web\\)`));
+      expect(result.stderr).toContain('GateList: ["A","B"] in CDK, ["A"] in web');
+      // The false-positive side: member accesses on one side, literals `as const` on the other.
+      expect(result.stderr).not.toContain('GateListSame');
+    });
+
+    test('compares a web export the CDK types lack with the CLI declaration', () => {
+      expect(result.stderr).toContain('GateCliShape.a: string in CLI, number in web');
+    });
+
+    test('rejects a stale or contradicted entry of the web lists', () => {
+      expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateStaleWeb", which ${WEB_TYPES} does not export`);
+      expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateWeb", but it has a canonical declaration`);
+      expect(result.stderr).toContain(`WEB_CANON_ELSEWHERE in ${SCRIPT_REL} names "GateGone", which ${WEB_TYPES} does not export`);
+      expect(result.stderr).toContain(`WEB_CANON_ELSEWHERE in ${SCRIPT_REL} sends "GateWeb" to cdk/src/handlers/shared/gate-fixture.ts, but ${CDK_TYPES} exports it`);
+    });
+
     test('rejects an allowlist entry that is stale or names a pair', () => {
       expect(result.stderr).toContain(`CDK_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateStale", which ${CDK_TYPES} does not export`);
       expect(result.stderr).toContain(`CLI_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateBoth", but ${CDK_TYPES} exports it too`);
@@ -254,6 +310,24 @@ describe('check-types-sync', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(`${WEB_TYPES} is missing or exports nothing`);
+    });
+
+    test('when the web mirror has nothing left to compare', () => {
+      const result = runInMutatedRepo((root) => {
+        fs.writeFileSync(path.join(root, WEB_TYPES), 'export interface DecisionResponse { readonly task_id: string }\n');
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`${WEB_TYPES} shares no export name with ${CDK_TYPES}, so the web mirror check compared nothing`);
+    });
+
+    test('when a module named as canonical does not export the name', () => {
+      const result = runInMutatedRepo((root) => {
+        canonElsewhere(root, 'TaskEvent', 'cdk/src/constructs/task-status.ts');
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('says cdk/src/constructs/task-status.ts declares "TaskEvent", but that module does not export it');
     });
   });
 });

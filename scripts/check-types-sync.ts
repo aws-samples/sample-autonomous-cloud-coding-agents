@@ -36,10 +36,15 @@
  * is the source of truth, so a CLI type missing on CDK indicates
  * drift in the wrong direction).
  *
- * Web: the console mirrors only what it reads, so an export it shares
- * with the CDK may leave members out, but every member it declares must
- * exist on the CDK with the same type and optionality. Console-only
- * shapes have no CDK declaration and are not compared.
+ * Web: the console mirrors only what it reads, so an export may leave
+ * members out, but every member it declares must exist on the canonical
+ * declaration with the same type and optionality. The canonical
+ * declaration of a web export is, in this order: the CDK types file; the
+ * CDK module listed for it in ``WEB_CANON_ELSEWHERE`` (the status lists,
+ * the coding workflow id); the CLI mirror, which is the only place that
+ * declares the envelopes and events the server builds inline. A web
+ * export with none of these must be listed in ``WEB_ONLY_ALLOWLIST``;
+ * those are the only web exports this check does not compare.
  *
  * Shapes are compared as the TypeScript compiler resolves them, not as
  * they are spelled: a re-export is followed to its declaration, ``extends``
@@ -92,6 +97,7 @@ const WEB_TYPES = 'web/src/core/api/types.ts';
 const CONSTANTS_JSON_FILE = path.join(REPO_ROOT, 'contracts/constants.json');
 const CLI: Sides = { canon: 'CDK', mirror: 'CLI', subset: false };
 const WEB: Sides = { canon: 'CDK', mirror: 'web', subset: true };
+const WEB_VS_CLI: Sides = { canon: 'CLI', mirror: 'web', subset: true };
 
 /**
  * ``contracts/constants.json`` is the single source of truth for the
@@ -226,10 +232,46 @@ const WEB_REQUIRED_WHERE_CDK_OPTIONAL = new Set<string>([
 /** Entries of the list above that a comparison relied on; the rest are stale. */
 const usedOptionalityEntries = new Set<string>();
 
-// One program over the three files, so every type is resolved by the compiler:
+/**
+ * Web exports whose canonical declaration is in a CDK module other than
+ * the types file, each with that module. They are compared like the rest.
+ */
+const WEB_CANON_ELSEWHERE: ReadonlyMap<string, string> = new Map([
+  ['TERMINAL_STATUSES', 'cdk/src/constructs/task-status.ts'],
+  ['PRE_ACTIVE_STATUSES', 'cdk/src/constructs/task-status.ts'],
+  ['ACTIVE_STATUSES', 'cdk/src/constructs/task-status.ts'],
+  ['CODING_WORKFLOW_ID', 'cdk/src/handlers/shared/workflows.ts'],
+]);
+
+/**
+ * Web exports with no canonical declaration to compare against. Every
+ * other web export is compared, so adding a name here is a deliberate
+ * signal that nothing checks it.
+ */
+const WEB_ONLY_ALLOWLIST = new Set<string>([
+  // The operator console stack's own API (Linear issues); its handlers
+  // build these responses inline and the CLI never reads them:
+  'LinearAgentState',
+  'LinearIssueSummary',
+  'LinearProjectIssues',
+  'ListLinearIssuesResponse',
+  'StartLinearIssueResponse',
+  // One shape for the approve and the deny response, which the CDK and the
+  // CLI declare as two types (ApprovalResponse, DenyResponse):
+  'DecisionResponse',
+  // Limits regrouped into one object each. Their values mirror
+  // MIN_MAX_TURNS / MAX_MAX_TURNS / DEFAULT_MAX_TURNS in
+  // cdk/src/handlers/shared/validation.ts and `max_budget_usd` in
+  // contracts/constants.json, but under other names, so this check cannot
+  // pair them:
+  'TURN_LIMIT',
+  'BUDGET_LIMIT_USD',
+]);
+
+// One program over the compared files, so every type is resolved by the compiler:
 // across re-exports, `extends` clauses and imports from sibling modules.
 const program = ts.createProgram(
-  [CDK_TYPES, CLI_TYPES, WEB_TYPES].map((file) => path.join(REPO_ROOT, file)),
+  [CDK_TYPES, CLI_TYPES, WEB_TYPES, ...new Set(WEB_CANON_ELSEWHERE.values())].map((file) => path.join(REPO_ROOT, file)),
   {
     noEmit: true,
     strict: true,
@@ -476,19 +518,51 @@ function resolveConstantsReference(
     value = (value as Record<string, unknown>)[seg];
   }
   if (value == null || typeof value === 'object') return undefined;
-  return String(value);
+  return JSON.stringify(value);
+}
+
+/**
+ * The value of an initializer made of literals — ``[Status.A, 'B']``,
+ * ``{ min: 1 } as const`` — so that two spellings of one value compare
+ * equal. ``undefined`` for anything computed.
+ */
+function literalValue(expr: ts.Expression): unknown {
+  if (ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr) || ts.isParenthesizedExpression(expr)) {
+    return literalValue(expr.expression);
+  }
+  if (ts.isArrayLiteralExpression(expr)) {
+    const items = expr.elements.map(literalValue);
+    return items.includes(undefined) ? undefined : items;
+  }
+  if (ts.isObjectLiteralExpression(expr)) {
+    const entries: Array<[string, unknown]> = [];
+    for (const property of expr.properties) {
+      if (!ts.isPropertyAssignment(property) || !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) return undefined;
+      const value = literalValue(property.initializer);
+      if (value === undefined) return undefined;
+      entries.push([property.name.text, value]);
+    }
+    return Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b)));
+  }
+  const type = checker.getTypeAtLocation(expr);
+  if (type.isLiteral() && typeof type.value !== 'object') return type.value;
+  if (type.flags & ts.TypeFlags.BooleanLiteral) return checker.typeToString(type) === 'true';
+  return undefined;
 }
 
 function summarizeLiteralConst(decl: ts.VariableDeclaration): string {
-  // Capture the textual initializer so a value drift (e.g.
+  // Capture the initializer so a value drift (e.g.
   // APPROVAL_TIMEOUT_S_MIN = 30 vs 60) gets flagged. A reference into
   // contracts/constants.json (e.g. ``sharedConstants.approval_timeout_s.min``)
   // is first resolved to its JSON value so it compares equal to the
-  // mirrored literal on the other side. Whitespace normalized to keep
-  // formatting churn out of the diff.
+  // mirrored literal on the other side; an initializer made of literals is
+  // compared by value; anything else by its text, whitespace normalized to
+  // keep formatting churn out of the diff.
   if (!decl.initializer) return '';
   const resolved = resolveConstantsReference(decl.initializer, collectConstantsAliases(decl.getSourceFile()));
-  return resolved ?? decl.initializer.getText().replace(/\s+/g, ' ').trim();
+  if (resolved !== undefined) return resolved;
+  const value = literalValue(decl.initializer);
+  return value === undefined ? decl.initializer.getText().replace(/\s+/g, ' ').trim() : JSON.stringify(value);
 }
 
 function summarize(symbol: ts.Symbol): ExportSummary {
@@ -615,16 +689,56 @@ function main(): number {
     }
   }
 
-  // Walk web; a name it shares with CDK must be a subset of the CDK shape.
-  let webShared = 0;
+  // Walk web; every export is held to its canonical declaration (see the
+  // header for the order) or must be listed as console-only.
+  const elsewhere = new Map(
+    [...new Set(WEB_CANON_ELSEWHERE.values())].map((file) => [file, collectExports(file, errors)] as const),
+  );
+  let webCompared = 0;
   for (const [name, webExport] of web) {
-    const cdkExport = cdk.get(name);
-    if (!cdkExport) continue; // console-only shape: no canonical declaration
-    webShared++;
-    errors.push(...compareExport(name, cdkExport, webExport, WEB));
+    const module = WEB_CANON_ELSEWHERE.get(name);
+    let canon = cdk.get(name);
+    let sides = WEB;
+    if (!canon && module) {
+      canon = elsewhere.get(module)?.get(name);
+      if (!canon) {
+        errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts says ${module} declares "${name}", but that module does not export it. Point the entry at the module that does.`);
+        continue;
+      }
+    } else if (!canon && cli.has(name)) {
+      canon = cli.get(name);
+      sides = WEB_VS_CLI;
+    }
+    if (!canon) {
+      if (!WEB_ONLY_ALLOWLIST.has(name)) {
+        errors.push(
+          `web exports "${name}" but neither ${CDK_TYPES} nor ${CLI_TYPES} declares it, so nothing checks its shape. ` +
+            `If the type was renamed there, rename it in ${WEB_TYPES} too; if it is declared in another CDK module, ` +
+            `add it to WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts; if the console alone uses it, add "${name}" ` +
+            `to WEB_ONLY_ALLOWLIST there with a comment explaining why.`,
+        );
+      }
+      continue;
+    }
+    webCompared++;
+    errors.push(...compareExport(name, canon, webExport, sides));
   }
-  if (webShared === 0) {
+  if (webCompared === 0) {
     errors.push(`${WEB_TYPES} shares no export name with ${CDK_TYPES}, so the web mirror check compared nothing.`);
+  }
+  for (const name of WEB_ONLY_ALLOWLIST) {
+    if (!web.has(name)) {
+      errors.push(`WEB_ONLY_ALLOWLIST in scripts/check-types-sync.ts names "${name}", which ${WEB_TYPES} does not export. Remove the stale entry.`);
+    } else if (cdk.has(name) || cli.has(name) || WEB_CANON_ELSEWHERE.has(name)) {
+      errors.push(`WEB_ONLY_ALLOWLIST in scripts/check-types-sync.ts names "${name}", but it has a canonical declaration. Remove the entry so the two declarations are compared.`);
+    }
+  }
+  for (const [name, module] of WEB_CANON_ELSEWHERE) {
+    if (!web.has(name)) {
+      errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts names "${name}", which ${WEB_TYPES} does not export. Remove the stale entry.`);
+    } else if (cdk.has(name)) {
+      errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts sends "${name}" to ${module}, but ${CDK_TYPES} exports it. Remove the entry.`);
+    }
   }
   for (const entry of WEB_REQUIRED_WHERE_CDK_OPTIONAL) {
     if (!usedOptionalityEntries.has(entry)) {
@@ -645,7 +759,8 @@ function main(): number {
   console.log(
     `CDK ↔ CLI type sync OK: ${cli.size} CLI exports validated against ${cdk.size} CDK exports ` +
       `(${CDK_ONLY_ALLOWLIST.size} server-only allowlisted). ` +
-      `CDK ↔ web: ${webShared} of ${web.size} web exports have a CDK declaration and match it.`,
+      `CDK ↔ web: ${webCompared} of ${web.size} web exports match their canonical declaration ` +
+      `(${WEB_ONLY_ALLOWLIST.size} console-only allowlisted).`,
   );
   return 0;
 }
