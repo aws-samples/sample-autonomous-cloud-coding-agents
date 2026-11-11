@@ -37,4 +37,14 @@ export default defineConfig(
       '@typescript-eslint/restrict-plus-operands': 'error',
     },
   },
+  {
+    files: ['test/**/*.{ts,tsx}'],
+    rules: {
+      // What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli.
+      'no-restricted-syntax': ['error', {
+        selector: 'MemberExpression[object.name=/^(it|test|describe|suite)$/][property.name=/^(skip|only|todo|fails|skipIf|runIf)$/]',
+        message: 'A skipped, focused, todo or expected-to-fail test must not be committed: make the test pass or delete it.',
+      }],
+    },
+  },
 );
