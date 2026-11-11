@@ -3,10 +3,34 @@ import { defineConfig } from 'eslint/config';
 import licenseHeader from 'eslint-plugin-license-header';
 import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Import boundaries of web/AGENTS.md. They match directory names inside import paths,
+// so a renamed directory would switch a rule off without a word: fail the run instead.
+for (const dir of ['src/core', 'src/domains', 'src/mocks']) {
+  if (!existsSync(join(__dirname, dir))) {
+    throw new Error(`web/eslint.config.mjs: ${dir} does not exist; update the import boundary rules.`);
+  }
+}
+const MOCKS_MESSAGE = 'src/mocks may be loaded only through import() inside `if (__MOCK__) { ... }`, as main.tsx does,'
+  + ' and by tests: mock sign-in must never reach a production bundle.';
+const DOMAINS_MESSAGE = 'src/core must not import from src/domains: move what both need into core.';
+const NO_CLOUDSCAPE_BARREL = {
+  name: '@cloudscape-design/components',
+  message: 'Import each Cloudscape component from its own module: @cloudscape-design/components/<name>.',
+};
+const NO_MOCKS = { regex: '(^|/)mocks(/|$)', message: MOCKS_MESSAGE };
+const NO_DOMAINS = { regex: '(^|/)domains(/|$)', message: DOMAINS_MESSAGE };
+// no-restricted-imports does not look at import(), so the same two paths again.
+const NO_DYNAMIC_MOCKS = {
+  selector: "ImportExpression[source.value=/(^|\\/)mocks(\\/|$)/]:not(IfStatement[test.name='__MOCK__'] > .consequent ImportExpression)",
+  message: MOCKS_MESSAGE,
+};
+const NO_DYNAMIC_DOMAINS = { selector: 'ImportExpression[source.value=/(^|\\/)domains(\\/|$)/]', message: DOMAINS_MESSAGE };
 
 export default defineConfig(
   { ignores: ['dist/', 'coverage/', 'node_modules/', '**/*.js'] },
@@ -35,6 +59,21 @@ export default defineConfig(
       '@typescript-eslint/no-implied-eval': 'error',
       '@typescript-eslint/no-unsafe-unary-minus': 'error',
       '@typescript-eslint/restrict-plus-operands': 'error',
+    },
+  },
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS] }],
+      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS],
+    },
+  },
+  {
+    // A later block replaces the options of a rule, so core repeats the lists in full.
+    files: ['src/core/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS, NO_DOMAINS] }],
+      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS, NO_DYNAMIC_DOMAINS],
     },
   },
   {
