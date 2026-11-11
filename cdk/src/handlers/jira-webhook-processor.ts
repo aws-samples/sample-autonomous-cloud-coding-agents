@@ -219,6 +219,7 @@ interface ProcessorEvent {
  *   agent uses to address the originating issue via the Jira REST v3 API
  *   (`jira_reactions.py`; see ADR-015 for why outbound is REST, not MCP).
  */
+// eslint-disable-next-line complexity -- predates the ceiling (116 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Jira webhook processor invoked without raw_body');

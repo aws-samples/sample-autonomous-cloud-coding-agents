@@ -133,6 +133,7 @@ function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; one
  * @param requestId - unique request ID for tracing.
  * @returns the API Gateway proxy result.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (140 when it landed); must not grow
 export async function createTaskCore(
   body: CreateTaskRequest,
   context: TaskCreationContext,

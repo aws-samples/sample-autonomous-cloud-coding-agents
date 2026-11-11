@@ -45,6 +45,9 @@ export default defineConfig(
     rules: {
       'license-header/header': ['error', join(__dirname, 'header.js')],
       'eqeqeq': ['error', 'always'],
+      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
+      // A function above it is split, not exempted with a disable directive.
+      'complexity': ['error', { max: 40 }],
       'no-console': ['error', { allow: ['warn', 'error'] }],
       // The preset only warns for these three.
       'react-hooks/exhaustive-deps': 'error',

@@ -537,6 +537,7 @@ export type AttachmentValidationResult =
  * MIME types, and filename safety. Returns a discriminated union of
  * validated attachments on success.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (44 when it landed); must not grow
 export function validateAttachments(
   attachments: unknown[] | undefined,
 ): AttachmentValidationResult {

@@ -230,6 +230,7 @@ interface TerminalTaskEvent {
  * null for records we don't act on (inserts, non-terminal MODIFYs,
  * non-orchestration tasks, malformed images).
  */
+// eslint-disable-next-line complexity -- predates the ceiling (71 when it landed); must not grow
 export function parseTerminalTaskRecord(record: DynamoDBRecord): TerminalTaskEvent | null {
   if (record.eventName !== 'MODIFY' && record.eventName !== 'INSERT') return null;
   const img = record.dynamodb?.NewImage;
@@ -1151,6 +1152,7 @@ async function maybeRecoverFailedNode(
  * caller wins and posts; redeliveries lose the conditional write and skip.
  * Best-effort throughout — a Linear or DDB hiccup never blocks the cascade.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (54 when it landed); must not grow
 async function replyToIterationComment(
   evt: TerminalTaskEvent,
   changedSubIssueId: string,

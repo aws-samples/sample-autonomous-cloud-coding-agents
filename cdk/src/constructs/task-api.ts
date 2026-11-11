@@ -304,6 +304,7 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
+  // eslint-disable-next-line complexity -- predates the ceiling (53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 

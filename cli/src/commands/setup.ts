@@ -636,6 +636,7 @@ async function confirmDataLoss(deps: SetupDeps, opts: SetupOptions, stackName: s
 }
 
 /** Interactive or scripted `bgagent setup` (ADR-024). */
+// eslint-disable-next-line complexity -- predates the ceiling (132 when it landed); must not grow
 export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<void> {
   const ui = new Ui(deps);
   const { style } = ui;

@@ -165,6 +165,11 @@ export default [
       'dot-notation': ['error'],
       'no-bitwise': ['error'],
       'no-throw-literal': ['error'],
+      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
+      // A function above it is split, not exempted. The eslint-disable-next-line
+      // directives in src mark the functions that were above it when it landed: they
+      // must not grow, and ESLint reports a directive as unused once its function fits.
+      'complexity': ['error', { max: 40 }],
       'quotes': ['error', 'single', { avoidEscape: true }],
       'comma-spacing': ['error', { before: false, after: true }],
       'no-multi-spaces': ['error', { ignoreEOLComments: false }],

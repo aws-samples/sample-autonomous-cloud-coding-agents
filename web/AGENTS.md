@@ -24,6 +24,7 @@ Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.tes
 - **Wire types:** `src/core/api/types.ts` mirrors `cli/src/types.ts`. Change both when the API changes.
 - **Tests:** `test/` mirrors `src/`. Page tests render real routes through `test/helpers/render.tsx` against the MSW server in `test/helpers/server.ts`, which uses the same handlers as mock mode. Add a fixture in `src/mocks/fixtures.ts` for each new state the UI must handle.
 - **License header:** every `src/` and `test/` file starts with the MIT-0 header (`header.js`); ESLint enforces it.
+- **Complexity:** ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40, the ceiling shared with cdk and cli. Split the component or move logic into a hook or helper; do not add an `eslint-disable`.
 
 ## Boundaries
 
