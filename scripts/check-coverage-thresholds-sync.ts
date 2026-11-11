@@ -34,7 +34,7 @@
  *   cdk, cli   the jest block of package.json: collectCoverage,
  *              collectCoverageFrom, coveragePathIgnorePatterns,
  *              coverageThreshold and any further key the contract names;
- *              scripts.test may not override the block with a flag
+ *              scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
  *              pyproject.toml, every key; the coverage flags of the test task
  *              in mise.toml, which win over those tables
@@ -56,6 +56,13 @@ const CONTRACT = 'contracts/coverage-thresholds.json';
 
 /** jest settings that switch coverage on, choose the files it counts and set the floor. */
 const JEST_KEYS = ['collectCoverage', 'collectCoverageFrom', 'coveragePathIgnorePatterns', 'coverageThreshold'];
+
+/**
+ * The package.json files whose test script is the command the build runs. A flag there wins over
+ * the settings of the runner, so the contract pins each script verbatim: a flag in any spelling,
+ * a second command or another list of test files is drift.
+ */
+const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json'];
 
 const errors: string[] = [];
 let checked = 0;
@@ -124,12 +131,12 @@ function pinKeys(where: string, actual: Json, contractKey: string, expected: Jso
 function checkJest(contract: Json, pkg: string): void {
   const manifest = readJson(`${pkg}/package.json`);
   pinKeys(`${pkg}/package.json jest`, (manifest.jest ?? {}) as Json, `jest.${pkg}`, section(contract, 'jest', pkg), JEST_KEYS);
+}
 
-  // A flag on the command line wins over the jest block.
-  const overrides = args((manifest.scripts as Json | undefined)?.test).filter(arg => /^--(coverage|collectCoverage|config)|^-c$/.test(arg));
-  checked += 1;
-  if (overrides.length > 0) {
-    errors.push(`${pkg}/package.json scripts.test passes ${overrides.join(' ')}: coverage settings belong in the jest block, which ${CONTRACT} pins`);
+function checkTestScripts(contract: Json): void {
+  const pinned = section(contract, 'commands');
+  for (const file of new Set([...TEST_SCRIPTS, ...Object.keys(pinned)])) {
+    pin(`${file} scripts.test`, (readJson(file).scripts as Json | undefined)?.test, `commands.${file}`, pinned[file]);
   }
 }
 
@@ -154,6 +161,7 @@ try {
   checkJest(contract, 'cdk');
   checkJest(contract, 'cli');
   checkAgent(contract);
+  checkTestScripts(contract);
 } catch (err) {
   errors.push(`the check could not finish: ${err instanceof Error ? err.message : String(err)}`);
 }

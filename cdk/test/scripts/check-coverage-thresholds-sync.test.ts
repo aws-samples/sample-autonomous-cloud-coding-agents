@@ -176,12 +176,28 @@ describe('check-coverage-thresholds-sync', () => {
       }, 'cli/package.json jest collectCoverageFrom', 'cdk/package.json jest collectCoverageFrom: not set');
     });
 
-    test('a flag in the test script that overrides the jest block', () => {
+    // jest takes a flag over the block, and takes it in several spellings. The script is pinned whole, so none is special.
+    test.each([
+      ['cdk', '--coverage=false'],
+      ['cdk', '--no-coverage'],
+      ['cdk', '--collect-coverage=false'],
+      ['cli', '--no-collectCoverage'],
+      ['cli', '--collect-coverage-from=src/errors.ts'],
+      ['cli', '|| true'],
+    ])('the %s test script with "%s" appended', (pkg, suffix) => {
       expectDrift((root) => {
-        editJson<Manifest>(root, 'cdk/package.json', (json) => {
-          json.scripts.test += ' --coverage=false';
+        editJson<Manifest>(root, `${pkg}/package.json`, (json) => {
+          json.scripts.test += ` ${suffix}`;
         });
-      }, 'cdk/package.json scripts.test passes --coverage=false');
+      }, `${pkg}/package.json scripts.test`, `${suffix}" does not match ${CONTRACT} commands.${pkg}/package.json`);
+    });
+
+    test('a test script that is gone', () => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, 'cli/package.json', (json) => {
+          delete json.scripts.test;
+        });
+      }, `cli/package.json scripts.test: not set does not match ${CONTRACT} commands.cli/package.json`);
     });
   });
 

@@ -1,5 +1,5 @@
 {
-  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700.",
+  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml. commands gives scripts.test of each package.json verbatim: it is the command the build runs, and a flag there wins over the settings pinned here. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700.",
   "jest": {
     "cdk": {
       "collectCoverage": true,
@@ -54,5 +54,9 @@
         "skip_covered": true
       }
     }
+  },
+  "commands": {
+    "cdk/package.json": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
+    "cli/package.json": "jest --ci"
   }
 }
