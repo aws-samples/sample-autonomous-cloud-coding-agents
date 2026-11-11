@@ -35,14 +35,16 @@
  *              JEST_FREE_KEYS; scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
  *              pyproject.toml, every key; the coverage flags of the test task
- *              in mise.toml, which win over those tables
+ *              in mise.toml, which win over those tables; no coverage flag in
+ *              pytest's own settings and no config file that would be read
+ *              before pyproject.toml
  *
  * Run via ``mise run check:coverage-thresholds-sync``. Exits 0 when in sync,
  * 1 on drift or when something it needs cannot be read.
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -68,6 +70,12 @@ const JEST_FREE_KEYS = [
  * a second command or another list of test files is drift.
  */
 const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json'];
+
+/**
+ * Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they
+ * sit next to it. With one of them present the tables pinned here are no longer the ones in force.
+ */
+const AGENT_SHADOW_CONFIGS = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
 
 const errors: string[] = [];
 let checked = 0;
@@ -160,6 +168,17 @@ function checkAgent(contract: Json): void {
     `--cov-fail-under=${report.fail_under}`,
   ];
   pin('agent/mise.toml tasks.test.run coverage flags', flags.sort(), 'pytest.agent (run.source, run.branch, report.fail_under)', expected.sort());
+
+  // pytest puts its addopts setting in front of that command line, so --no-cov or a second --cov there changes what runs.
+  checked += 1;
+  for (const flag of toml('agent/pyproject.toml', 'tool.pytest.ini_options').match(/--(no-)?cov[^\s"',\]]*/g) ?? []) {
+    errors.push(`agent/pyproject.toml [tool.pytest.ini_options] passes ${flag}: coverage flags belong in the test task of agent/mise.toml, where ${CONTRACT} pins them. Remove it`);
+  }
+
+  checked += 1;
+  for (const name of AGENT_SHADOW_CONFIGS.filter(file => existsSync(join(root, 'agent', file)))) {
+    errors.push(`agent/${name} exists: pytest or coverage.py reads it before agent/pyproject.toml, so the settings ${CONTRACT} pins would not be the ones in force. Delete it and keep its settings in agent/pyproject.toml`);
+  }
 }
 
 try {

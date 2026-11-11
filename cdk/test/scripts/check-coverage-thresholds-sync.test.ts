@@ -138,7 +138,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(24);
+    expect(Number(checked)).toBeGreaterThanOrEqual(26);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -258,6 +258,27 @@ describe('check-coverage-thresholds-sync', () => {
       expectDrift((root) => {
         edit(root, AGENT_MISE, text => text.replace('run = "uv run pytest ', 'run = "uv run pytest --no-cov '));
       }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--no-cov"');
+    });
+
+    // pytest adds addopts to the command line of the test task: --no-cov there switches the floor off, a second --cov
+    // adds files to the measurement.
+    test.each([
+      ['addopts = "-ra --no-cov"', '--no-cov'],
+      ['addopts = ["-ra", "--cov=tests"]', '--cov=tests'],
+    ])('a coverage flag in the pytest settings: %s', (addopts, flag) => {
+      expectDrift((root) => {
+        edit(root, PYPROJECT, text => text.replace('addopts = "-ra"', addopts));
+      }, `${PYPROJECT} [tool.pytest.ini_options] passes ${flag}:`);
+    });
+
+    // Each of these is read before pyproject.toml (pytest 9.1 findpaths.py, coverage 7.15 config.py): with an omit list
+    // or a --no-cov in it, the floor measures less, or nothing, while pyproject.toml still matches the contract.
+    test.each([
+      'pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini',
+    ])('a config file that would be read before pyproject.toml: %s', (name) => {
+      expectDrift((root) => {
+        fs.writeFileSync(path.join(root, 'agent', name), '');
+      }, `agent/${name} exists`);
     });
   });
 
