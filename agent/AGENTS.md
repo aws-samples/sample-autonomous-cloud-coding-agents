@@ -31,6 +31,8 @@ Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`.
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
 
+pytest runs in strict mode (`strict = true` in `pyproject.toml`). These fail the run instead of warning: a marker that is not registered under `markers`, a key `[tool.pytest.ini_options]` does not know, an `xfail` test that passes, two parameter sets with the same id, and a `parametrize` over an empty list.
+
 Unit tests cannot reach AWS. `tests/conftest.py` removes every credential source for the whole session and refuses any request botocore tries to send; a refused request fails the run even when every test passes (see the `AWS send guard` section at the end of the output). Stub the client (`boto3.client`, or the `aws_session` seam the code calls) and join any thread the test starts.
 
 ## Primary locations
