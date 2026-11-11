@@ -45,10 +45,11 @@ const CONTRACT = 'contracts/coverage-thresholds.json';
 const PYPROJECT = 'agent/pyproject.toml';
 const AGENT_MISE = 'agent/mise.toml';
 const VITE_CONFIG = 'web/vite.config.ts';
+const FORGE = 'integrations/jira-forge-app/package.json';
 
 /** Every file the script reads, relative to the repo root. */
 const FIXTURE_FILES = [
-  SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json',
+  SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json', FORGE,
 ];
 
 interface JestBlock {
@@ -144,7 +145,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(34);
+    expect(Number(checked)).toBeGreaterThanOrEqual(35);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -316,6 +317,19 @@ describe('check-coverage-thresholds-sync', () => {
           json.scripts.test = json.scripts.test.replace(' --coverage', '');
         });
       }, 'web/package.json scripts.test', `does not match ${CONTRACT} commands.web/package.json`);
+    });
+
+    // node:test has no config file: the floors of the Forge app and its one test file are arguments of the script.
+    test.each([
+      ['a floor lowered', /--test-coverage-lines=\d+/, '--test-coverage-lines=1'],
+      ['its test file left to discovery, which passes when there is none', / test\/proxy\.test\.js$/, ''],
+      ['--test-only, which runs nothing but tests marked only', /^node --test /, 'node --test --test-only '],
+    ])('the Forge test script with %s', (_case, from, to) => {
+      expectDrift((root) => {
+        editJson<Manifest>(root, FORGE, (json) => {
+          json.scripts.test = json.scripts.test.replace(from, to);
+        });
+      }, `${FORGE} scripts.test`, `does not match ${CONTRACT} commands.${FORGE}`);
     });
 
     test('a test script that is gone', () => {

@@ -81,3 +81,10 @@ flags, and troubleshooting.
 ```bash
 npm test
 ```
+
+The script names its test file and sets coverage floors for `src/` (lines 85 %,
+branches 76 %, functions 81 %). Left to find tests on its own, `node --test`
+exits 0 when it finds none; with the file named and the floors set, a missing
+or emptied test file fails. A new test file does not run until it is added to
+the `test` script in `package.json`. That script is pinned in
+`contracts/coverage-thresholds.json`: change both.

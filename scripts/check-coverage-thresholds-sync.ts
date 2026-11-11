@@ -41,6 +41,8 @@
  *              before pyproject.toml
  *   web        the test block of vite.config.ts, every key except those in
  *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
+ *   jira-forge-app  scripts.test, verbatim: node:test has no config file, so
+ *              the floors and the test file are arguments of the script
  *
  * Run via ``mise run check:coverage-thresholds-sync``. Exits 0 when in sync,
  * 1 on drift or when something it needs cannot be read.
@@ -75,7 +77,7 @@ const VITEST_FREE_KEYS = ['css', 'environment', 'setupFiles', 'testTimeout'];
  * the settings of the runner, so the contract pins each script verbatim: a flag in any spelling,
  * a second command or another list of test files is drift.
  */
-const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json', 'web/package.json'];
+const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json', 'web/package.json', 'integrations/jira-forge-app/package.json'];
 
 /**
  * Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they
