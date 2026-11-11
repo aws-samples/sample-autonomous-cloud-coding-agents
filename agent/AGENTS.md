@@ -89,6 +89,8 @@ def test_a():
 
 **Unused arguments** — ruff `ARG` fails the lint on a parameter the body never reads (in `src/` and `scripts/`). Delete it and update the callers. If a caller you do not control fixes the signature (an SDK callback, a retry hook), prefix the name with `_`; on a method that overrides a base-class method, add `@typing.override`.
 
+**Complexity** — ruff `C901` fails the lint on a function with a cyclomatic complexity above 15 (`max-complexity` in `pyproject.toml`). Split the function: pull a branch out into a helper, return early, or replace an `if` chain with a table. Ten functions that were above the ceiling when it was set carry `# noqa: C901` with the value they had then: do not add branches to them, do not add the comment to new code, and do not raise the ceiling. `uv run ruff check --ignore-noqa --select C901` prints the current values.
+
 ## Boundaries
 
 - ✅ **Always:** Add tests under `agent/tests/` for behavior changes; update `agent/README.md` for new env vars; emit structured progress events for operator-visible milestones

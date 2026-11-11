@@ -185,7 +185,7 @@ def _assert_clone_root(repo_dir: str) -> None:
         )
 
 
-def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
+def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: C901 -- 28 when the ceiling of 15 was set; must not grow
     """Clone repo, create branch, configure git auth, run mise install.
 
     Returns a RepoSetup with repo_dir, branch, notes, build_before,

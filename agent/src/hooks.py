@@ -510,7 +510,7 @@ async def pre_tool_use_hook(
     )
 
 
-async def _handle_require_approval(
+async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 was set; must not grow
     *,
     decision: Any,
     tool_name: str,

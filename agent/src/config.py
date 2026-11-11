@@ -185,7 +185,7 @@ def _resolve_linear_token_via_vault(
         return ""
 
 
-def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 34 when the ceiling of 15 was set; must not grow
     """Resolve the Linear OAuth access token from Secrets Manager.
 
     Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
@@ -496,7 +496,7 @@ def clear_jira_task_credentials() -> None:
         os.environ.pop(name, None)
 
 
-def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 21 when the ceiling of 15 was set; must not grow
     """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task

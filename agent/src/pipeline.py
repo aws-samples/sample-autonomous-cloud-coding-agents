@@ -801,7 +801,7 @@ def _write_memory(
     return episode_ok or learnings_ok
 
 
-def run_task(
+def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
     repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",

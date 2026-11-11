@@ -144,6 +144,8 @@ select = [
     "RSE",   # flake8-raise
     "T10",   # flake8-debugger: breakpoints left behind
     "YTT",   # flake8-2020: sys.version misuse
+    # One fixed ceiling on cyclomatic complexity, set under [tool.ruff.lint.mccabe].
+    "C90",   # mccabe
     # Import boundaries. TID251 enforces the banned-api table below (attributed
     # AWS clients, #319). TID252 rejects an import relative to a parent package
     # (`from .. import x`): `src/` is the import root, so there is no parent and
@@ -154,6 +156,13 @@ ignore = [
     "S603",  # subprocess call — allowed for agent CLI operations
     "S607",  # partial executable path — agent relies on PATH for git, gh, mise
 ]
+
+# A function with more than 15 independent paths fails the lint. The ten functions
+# that were above it when the ceiling was set carry `# noqa: C901` with the value
+# they had: that value must not grow, and the comment goes when the function is
+# split. Do not raise the number to make a new function fit.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
