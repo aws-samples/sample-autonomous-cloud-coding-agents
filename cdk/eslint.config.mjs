@@ -325,6 +325,9 @@ export default [
       'jest/no-duplicate-hooks': 'error',
       'jest/no-export': 'error',
       'jest/no-interpolation-in-snapshots': 'error',
+      // Jest has no `fail()`: the call is a ReferenceError, which the catch block of
+      // a try/fail/catch test swallows, so the test passes when nothing throws.
+      'jest/no-jasmine-globals': 'error',
       'jest/no-mocks-import': 'error',
       'jest/no-test-prefixes': 'error',
       'jest/valid-describe-callback': 'error',

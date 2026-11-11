@@ -132,14 +132,14 @@ describe('parseRules', () => {
 
   test('CedarPolicyParseError carries upstream errors', () => {
     const bad = '@tier("soft") @rule_id("unclosed_policy" ;';
+    let thrown: unknown;
     try {
       parseRules(bad);
-      fail('expected parse error');
     } catch (err) {
-      expect(err).toBeInstanceOf(CedarPolicyParseError);
-      const e = err as CedarPolicyParseError;
-      expect(e.errors).toBeDefined();
+      thrown = err;
     }
+    expect(thrown).toBeInstanceOf(CedarPolicyParseError);
+    expect((thrown as CedarPolicyParseError).errors).toBeDefined();
   });
 });
 
