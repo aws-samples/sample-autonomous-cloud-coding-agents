@@ -761,7 +761,7 @@ class PolicyEngine:
     / ``blueprint_disable`` / ``initial_approvals`` / ``approval_gate_cap``.
     """
 
-    def __init__(
+    def __init__(  # noqa: C901 -- 18 when the ceiling of 15 was set; must not grow
         self,
         task_type: str,
         repo: str,

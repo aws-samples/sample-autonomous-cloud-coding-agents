@@ -98,9 +98,9 @@ def test_runs_all_steps_in_order_and_succeeds():
             {"kind": "ensure_pr", "strategy": "create"},
         ]
     )
-    handlers: dict[str, StepHandler] = {
-        k: track for k in ("clone_repo", "hydrate_context", "run_agent", "ensure_pr")
-    }
+    handlers: dict[str, StepHandler] = dict.fromkeys(
+        ("clone_repo", "hydrate_context", "run_agent", "ensure_pr"), track
+    )
     result = run_workflow(wf, _ctx(wf), handlers=handlers)
     assert seen == ["clone_repo", "hydrate_context", "run_agent", "ensure_pr"]
     assert result.succeeded

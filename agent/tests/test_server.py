@@ -37,6 +37,13 @@ def reset_server_state():
     refuses to be read; it stays clearable, which is all this fixture asks of it.
     Joining the pipeline thread also retires its heartbeat, which the pipeline stops
     on its way out.
+
+    The CloudWatch writer threads (`debug-cw-write`, `warn-cw-write`) are joined for
+    the same reason, after the pipeline threads that can still start one. Each
+    builds a real CloudWatch Logs client; left running, it makes its call during
+    some later test and bumps the shared failure counter there. A thread that is
+    still alive after the join fails the test that started it instead of leaking
+    quietly into the next one.
     """
     server._background_pipeline_failed = False
     with server._threads_lock:
@@ -45,9 +52,18 @@ def reset_server_state():
     for thread in threading.enumerate():
         if thread.name.startswith("pipeline-") and thread.is_alive():
             thread.join(timeout=10)
+    for thread in threading.enumerate():
+        if thread.name.endswith("-cw-write"):
+            thread.join(timeout=10)
     server._background_pipeline_failed = False
     with server._threads_lock:
         server._active_threads.clear()
+    leaked = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith("pipeline-") or thread.name.endswith("-cw-write")
+    ]
+    assert not leaked, f"threads outlived the test that started them (10 s join): {leaked}"
 
 
 @pytest.fixture

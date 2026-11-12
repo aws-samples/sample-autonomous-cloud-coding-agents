@@ -534,8 +534,7 @@ def _strip_needs_input_marker(result_text: str) -> str:
     """Remove the leading NEEDS_INPUT_MARKER line/token so the reviewer sees only
     the clarifying question, never our internal sentinel."""
     text = result_text.strip()
-    if text.startswith(NEEDS_INPUT_MARKER):
-        text = text[len(NEEDS_INPUT_MARKER) :]
+    text = text.removeprefix(NEEDS_INPUT_MARKER)
     return text.strip()
 
 
@@ -802,7 +801,7 @@ def _write_memory(
     return episode_ok or learnings_ok
 
 
-def run_task(
+def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
     repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",

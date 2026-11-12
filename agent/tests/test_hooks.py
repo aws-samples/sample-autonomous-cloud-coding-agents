@@ -1,13 +1,21 @@
 """Unit tests for hooks.py — Cedar policy SDK hook callbacks."""
 
 import asyncio
+import hashlib
+import json as _json
+from collections import deque
+from datetime import UTC
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+# Hard import (not importorskip): without cedarpy the engine denies every call.
+# These tests must then fail, not drop out of the run.
+import cedarpy  # noqa: F401
 import pytest
 
-cedarpy = pytest.importorskip("cedarpy")
-
+import hooks
 from hooks import (
+    _denial_between_turns_hook,
     _is_self_reclone,
     _reset_blocker_reason_for_tests,
     _stuck_guard_between_turns_hook,
@@ -750,16 +758,6 @@ class TestBuildHookMatchers:
 #   - Denial injection queued + ``_denial_between_turns_hook`` drain / cancel
 #     short-circuit.
 #   - ``permissionDecisionReason`` is ANSI-stripped and ≤500 chars on DENY.
-
-
-import hashlib
-import json as _json
-from collections import deque
-from datetime import UTC
-from typing import Any
-
-import hooks
-from hooks import _denial_between_turns_hook
 
 
 def _sha256_of(tool_input: dict) -> str:
@@ -1835,9 +1833,9 @@ class TestDenialBetweenTurnsHook:
         )
         result = _run(
             hooks.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context={},
+                {},
+                None,
+                {},
                 task_id="01K",
                 progress=None,
                 engine=engine_with_soft_gate,

@@ -233,7 +233,7 @@ def write_running(task_id: str) -> None:
         log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
-def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
+def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:  # noqa: C901 -- 24 when the ceiling of 15 was set; must not grow
     """Transition a task to a terminal state (COMPLETED or FAILED).
 
     Updates ``status_created_at`` alongside ``status`` — see

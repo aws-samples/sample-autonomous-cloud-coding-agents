@@ -2,7 +2,7 @@ min_version = "2026.7.11"
 
 [tools]
 python = "3.13"
-uv = "latest"
+uv = "0.13.7"
 "aqua:aquasecurity/trivy" = "v0.70.0"
 
 [env]
@@ -10,7 +10,7 @@ _.python.venv = { path = ".venv", create = true }
 PROJECT_NAME = "{{ config_root | basename }}"
 
 [tasks]
-install = "uv sync --all-groups"
+install = "uv sync --locked --all-groups"
 
 [tasks.upgrade]
 description = "Refresh uv.lock within the pins declared in pyproject.toml (exact pins, incl. cedarpy, are not rewritten)"
@@ -23,29 +23,33 @@ echo "Project: $PROJECT_NAME"
 '''
 
 # QUALITY
+# The ruff tasks name their configuration (--config): ruff then applies
+# agent/pyproject.toml to every file. Left to discover configuration per directory,
+# it would let a ruff.toml or [tool.ruff] added below agent/ replace the rules,
+# the ignores and the banned-api table for that directory, with the gate still green.
 
 [tasks.lint]
 description = "Lint with ruff"
-run = "uvx ruff check"
+run = "uv run ruff check --config pyproject.toml"
 
 [tasks."lint:fix"]
-description = "Lint and auto-fix"
-run = "uvx ruff check --fix"
+description = "Lint and auto-fix. Fails when it changed a file (the fixes are listed): look at the change, keep it, run again."
+run = "uv run ruff check --config pyproject.toml --fix --show-fixes --exit-non-zero-on-fix"
 
 [tasks.format]
 description = "Format with ruff"
-run = "uvx ruff format"
+run = "uv run ruff format --config pyproject.toml"
 
 [tasks."format:check"]
 description = "Check formatting"
-run = "uvx ruff format --check"
+run = "uv run ruff format --config pyproject.toml --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
 run = "uv run ty check"
 
 [tasks."lint:deadcode"]
-description = "Dead-code detection with vulture (#282, cairn MVG gate #6): unused functions/classes/methods ruff F cannot see. Config + allowlist in pyproject.toml / .vulture_allowlist.py."
+description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports, arguments and variables it is sure are unused. Unused functions, classes and methods are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
 run = "uv run vulture"
 
 [tasks.test]
@@ -56,7 +60,7 @@ run = "uv run pytest --cov=src --cov-branch --cov-fail-under=72 --cov-report=ter
 
 [tasks."security:bandit"]
 description = "Run Bandit"
-run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
+run = "uv run bandit -c pyproject.toml -r . --severity-level=high"
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
@@ -75,6 +79,7 @@ run = [
     { task = "lint:fix" },
     { task = "format" },
     { task = "typecheck" },
+    { task = "lint:deadcode" },
     { task = "test" },
 ]
 

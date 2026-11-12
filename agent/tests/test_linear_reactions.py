@@ -584,6 +584,27 @@ class TestTransitionIssueState:
             linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
         assert set_calls == []  # backward move (completed → started) skipped
 
+    def test_without_a_preferred_name_the_lowest_position_state_wins(self):
+        """No state of the type carries a preferred name: take the first one in
+        the team's own workflow order (lowest position; list order breaks a tie)."""
+        states = [
+            {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
+            {"id": "s-qa", "name": "QA", "type": "started", "position": 7},
+            {"id": "s-doing", "name": "Doing", "type": "started", "position": 3},
+            {"id": "s-pairing", "name": "Pairing", "type": "started", "position": 3},
+        ]
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return {"issue": {"state": states[0], "team": {"states": {"nodes": states}}}}
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert [call["stateId"] for call in set_calls] == ["s-doing"]
+
     def test_no_op_when_already_in_target_state(self):
         set_calls = []
 
