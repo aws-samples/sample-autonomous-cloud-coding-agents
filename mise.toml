@@ -149,23 +149,55 @@ description = "Scan the checked-out history for secrets with gitleaks (scheduled
 #
 # Secrets introduced by a PR are independently caught at merge time by the
 # required range-scoped check (`security:secrets:range`, see security-pr.yml).
-run = 'gitleaks git . --no-banner --redact --log-opts="HEAD"'
+#
+# `--config .gitleaks.toml` (here and in the two tasks below) names the rule
+# file instead of leaving gitleaks to look for it. When gitleaks finds no file
+# it scans with its built-in rules and exits 0: the aws-account-id rule and
+# every allowlist are gone and nothing says so. With the flag a missing or
+# unreadable file stops the scan with an error, and a GITLEAKS_CONFIG variable
+# in the environment cannot replace the rules.
+#
+# `--verbose` (here and in the two tasks below) prints rule, file and line for
+# each finding; without it gitleaks only prints a count. `--redact` keeps the
+# secret itself out of the output.
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
 # Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
 # to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
-run = 'gitleaks git . --no-banner --redact --log-opts="${GITLEAKS_RANGE:-}"'
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
 # `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
-run = "gitleaks git . --staged --no-banner --redact"
+run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --verbose"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+
+[tasks."security:sast:range"]
+description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
+# The rule packs of security:sast (keep the two --config lists identical), but
+# --baseline-commit reports only findings a branch ADDS relative to the
+# baseline. A rule the registry adds or changes therefore cannot fail code a
+# pull request did not touch (#532, #540); the full scan stays in security.yml.
+# Defaults the baseline to origin/main so the task is safe to run anywhere; the
+# per-PR CI job sets SEMGREP_SAST_BASELINE to the PR base SHA.
+#
+# The packs are downloaded from semgrep.dev on every run, so the task must fail
+# when they do not arrive. Semgrep exits non-zero by itself when the registry is
+# unreachable or a pack cannot be loaded; there is no --quiet here because it
+# hides that error. A registry that answers with EMPTY packs leaves semgrep at
+# exit 0 with nothing checked, so the last command fails unless the SARIF
+# report lists at least one loaded rule.
+run = [
+  "mkdir -p test-reports && rm -f test-reports/semgrep-sast-range.sarif",
+  "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --baseline-commit \"${SEMGREP_SAST_BASELINE:-origin/main}\" --sarif-output=test-reports/semgrep-sast-range.sarif --error .",
+  '''node -e 'const sarif = JSON.parse(require("fs").readFileSync("test-reports/semgrep-sast-range.sarif", "utf8")); if (!sarif.runs[0].tool.driver.rules.length) { console.error("security:sast:range: semgrep loaded 0 rules, so nothing was checked (did semgrep.dev answer with empty rule packs?). Rerun the task; do not treat this run as a pass."); process.exit(1); }' ''',
+]
 
 [tasks."security:sast:masking"]
 description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
@@ -185,8 +217,8 @@ description = "Masking scan ratcheted to newly-introduced findings only (per-PR 
 # ADDS relative to the baseline, so the pre-existing findings on main (tracked
 # in #756) don't block PRs that don't touch them — while any NEW masking
 # regression fails here at PR time. Mirrors security:secrets:range. The full
-# blocking scan (security:sast:masking) still runs in security.yml and the
-# pre-push hook.
+# blocking scan (security:sast:masking) runs next to it in the required per-PR
+# job, in security.yml and in the pre-push hook.
 # `semgrep test .semgrep/` runs first (as in the full task) so a PR that WEAKENS
 # the rule or breaks a fixture fails at PR time too — otherwise a rule-weakening
 # change would only be caught weekly / at pre-push (which is currently bypassable
@@ -222,6 +254,11 @@ run = "zizmor --offline .github"
 
 [tasks.security]
 description = "Run security scans"
+# Every leg is a task reference, so `mise run --continue-on-error security` (the
+# weekly workflow) runs all of them and still exits non-zero when any fails. A
+# nested `mise //agent:security` shell call did not get the flag: a bandit
+# failure skipped the image scan. Without the flag the first failure still
+# stops the run, as before.
 run = [
     { task = "security:secrets" },
     { task = "security:deps" },
@@ -230,8 +267,7 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
-    "MISE_EXPERIMENTAL=1 mise //agent:security",
-    "echo All good!"
+    { task = "//agent:security" },
 ]
 
 ##################
