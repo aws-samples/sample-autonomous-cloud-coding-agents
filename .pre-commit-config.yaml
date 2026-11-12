@@ -87,6 +87,14 @@ repos:
         files: \.(md|mdx)$|(^|/)\.markdownlint
         stages: [pre-commit]
 
+      - id: docs-script-tests
+        name: docs script tests (generator, markdown lint, lint configuration)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:test'
+        language: system
+        pass_filenames: false
+        files: ^docs/(scripts/|\.markdownlint)
+        stages: [pre-commit]
+
       - id: types-sync-cdk-cli
         name: type sync drift (CDK ↔ CLI ↔ web)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:types-sync'
