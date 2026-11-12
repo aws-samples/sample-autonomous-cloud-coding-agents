@@ -15,7 +15,7 @@ mise //docs:check           # sync + astro check alone (MDX/components)
 mise //docs:link-check      # relative links in every Markdown file of the repository, tracked or new
 ```
 
-With prek hooks installed, the pre-commit hook `docs-sync` runs sync when a `.md` file under `docs/guides/` or `docs/design/`, or `CONTRIBUTING.md`, is staged. It does not run for an ADR or for `QUICK_START.mdx`: after editing one of those, run `mise //docs:sync` yourself. Two more hooks run at commit time: `docs-markdown-lint` runs `mise //docs:markdown-lint` when a Markdown file or a `.markdownlint*` file is staged, and `docs-script-tests` runs `mise //docs:test` when a file under `docs/scripts/` or `docs/.markdownlint*` is staged.
+With prek hooks installed, the pre-commit hook `docs-sync` runs sync when a `.md` file under `docs/guides/` or `docs/design/`, or `CONTRIBUTING.md`, is staged. It does not run for an ADR or for `QUICK_START.mdx`: after editing one of those, run `mise //docs:sync` yourself. Two more hooks run at commit time: `docs-markdown-lint` runs `mise //docs:markdown-lint` when a Markdown file is staged, and `docs-script-tests` runs `mise //docs:test` when a file under `docs/scripts/` is staged.
 
 ## Testing
 
@@ -41,7 +41,7 @@ Never add an `exclude` option to `starlightLinksValidator()` to make a link pass
 
 ### When the Markdown lint fails
 
-`mise //docs:markdown-lint` checks the structure of every tracked Markdown file with five markdownlint rules (`docs/.markdownlint-cli2.jsonc`) and prints the file, the line and the rule. The generated mirrors are not linted: fix the source.
+`mise //docs:markdown-lint` checks the structure of every tracked Markdown file with five markdownlint rules (set in `docs/scripts/markdown-lint.mjs`) and prints the file, the line and the rule. The generated mirrors are not linted: fix the source.
 
 | Rule | Meaning | Fix |
 |------|---------|-----|
@@ -53,7 +53,7 @@ Never add an `exclude` option to `starlightLinksValidator()` to make a link pass
 
 Inside a table cell write a literal pipe as `\|`, also in a code span: an unescaped pipe ends the cell.
 
-Never silence a finding. `<!-- markdownlint-disable -->` comments are ignored, a `.markdownlint*` file anywhere but `docs/.markdownlint-cli2.jsonc` fails the task, and `mise //docs:test` holds that file to its exact content: adding `ignores`, `overrides` or a rule option to it fails the build.
+Never silence a finding. `<!-- markdownlint-disable -->` comments are ignored, and the lint reads no configuration file, so a `.markdownlint*` file changes nothing. `mise //docs:test` fails when one of the five rules in `docs/scripts/markdown-lint.mjs` is switched off, or the `noInlineConfig` option that makes it ignore those comments.
 
 ## Primary locations
 
