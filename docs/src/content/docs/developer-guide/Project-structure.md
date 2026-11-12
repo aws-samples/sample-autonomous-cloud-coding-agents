@@ -56,7 +56,7 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
-| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint step has fixed a file it fails once and lists the fixes: run the task again |
+| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint or the format step has changed a file, the task fails once and says so (the lint step lists its fixes): run the task again |
 
 Build and test: `mise //agent:quality`. The unit tests run with the AWS credential sources removed and refuse every request that botocore tries to send; a refused request fails the run and is listed in the `AWS send guard` section at the end of the output (details in [agent/AGENTS.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/AGENTS.md)). The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
 
