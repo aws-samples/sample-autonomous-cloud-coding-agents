@@ -53,7 +53,7 @@ description = "Type check with ty"
 run = "uv run ty check"
 
 [tasks."lint:deadcode"]
-description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports, arguments and variables it is sure are unused. Unused functions, classes and methods are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
+description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports and function arguments it is sure are unused. Unused functions, classes, methods and variables are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
 run = "uv run vulture"
 
 [tasks.test]

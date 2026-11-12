@@ -66,10 +66,11 @@ constraint-dependencies = [
 
 # Dead-code detection (#282, cairn MVG gate #6), part of `mise run quality`.
 # At min_confidence 80 vulture reports only what it is sure of: unreachable code
-# (after return or raise, a condition that cannot hold) and imports, arguments
-# and variables that nothing reads. It rates an unused function, class or method
-# 60, so those are NOT reported at this threshold; lowering it needs a reviewed
-# allowlist first. Intentional keeps live in .vulture_allowlist.py.
+# (after return or raise, a condition that cannot hold) and imports and function
+# arguments that nothing reads (it calls such an argument an "unused variable").
+# It rates an unused function, class, method or variable 60, so those are NOT
+# reported at this threshold; lowering it needs a reviewed allowlist first.
+# Intentional keeps live in .vulture_allowlist.py.
 [tool.vulture]
 paths = ["src", ".vulture_allowlist.py"]
 min_confidence = 80
@@ -94,7 +95,7 @@ dev = [
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
     "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
-    "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
+    "vulture==2.16",  # dead code (#282): unreachable code and unused imports and arguments, at min_confidence 80 (see [tool.vulture])
 ]
 
 [tool.ruff]
