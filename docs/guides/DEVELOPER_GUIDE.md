@@ -21,10 +21,10 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Area | Paths | Notes |
 |------|--------|--------|
 | API & Lambdas | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Extend `cdk/test/` for the same feature. |
-| API types | `cdk/src/handlers/shared/types.ts` and **`cli/src/types.ts`** | Update both when request/response shapes change. |
+| API types | `cdk/src/handlers/shared/types.ts`, **`cli/src/types.ts`** and `web/src/core/api/types.ts` | Update the CLI mirror when request/response shapes change, and the web mirror where the console mirrors the type. `mise run check:types-sync` fails on drift. |
 | CLI | `cli/src/`, `cli/test/` |  - |
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
-| Docs (source) | `docs/guides/`, `docs/design/` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
+| Docs (source) | `docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
 For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
@@ -475,7 +475,7 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 | Change webhook authentication | `cdk/src/handlers/webhook-authorizer.ts`, `cdk/src/handlers/webhook-create-task.ts` |
 | Add or update tests | `cdk/test/` mirrors `cdk/src/` - each handler and construct has a colocated test file |
 
-Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync.
+Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync, and `web/src/core/api/types.ts` where the console mirrors the type.
 
 Build and test: `mise //cdk:build` (compile + lint + type-check + test + synth).
 
@@ -503,13 +503,13 @@ The `bgagent` command-line tool. Authenticates via Cognito, calls the REST API, 
 | Add a new CLI command | `cli/src/commands/` (one file per command), `cli/src/bin/bgagent.ts` (program setup) |
 | Change how the CLI calls the API | `cli/src/api-client.ts` |
 | Modify authentication or token handling | `cli/src/auth.ts` |
-| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`) |
+| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`; the console's subset mirror is `web/src/core/api/types.ts`) |
 
 Build and test: `mise //cli:build`.
 
 ### `docs/` - Documentation site (Astro/Starlight)
 
-Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
+Source docs live in `docs/guides/`, `docs/design/` and `docs/decisions/`; the root `CONTRIBUTING.md` is mirrored as well. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
 
 | I want to... | Look at |
 |---|---|

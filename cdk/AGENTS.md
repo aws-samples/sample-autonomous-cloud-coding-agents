@@ -44,7 +44,7 @@ Construct tests: synthesize each distinct stack config once in `beforeAll`, asse
 | `cdk/src/handlers/` | WRITE | Lambda handlers |
 | `cdk/src/stacks/` | WRITE | Stack definitions |
 | `cdk/src/constructs/` | WRITE | Reusable constructs |
-| `cdk/src/handlers/shared/types.ts` | WRITE | API types (mirror to `cli/src/types.ts`) |
+| `cdk/src/handlers/shared/types.ts` | WRITE | API types (mirror to `cli/src/types.ts`, and to `web/src/core/api/types.ts` where the console mirrors the type) |
 | `cdk/test/` | WRITE | Unit / snapshot tests |
 | `cli/src/types.ts` | WRITE (sync) | Must match shared types |
 
@@ -90,7 +90,7 @@ beforeAll(() => {
 
 ## Boundaries
 
-- ✅ **Always:** Update `cli/src/types.ts` when changing `shared/types.ts`; add/extend tests in `cdk/test/`; use mise tasks not raw `cdk` CLI
+- ✅ **Always:** Update `cli/src/types.ts` when changing `shared/types.ts`, and `web/src/core/api/types.ts` where the console mirrors the type; add/extend tests in `cdk/test/`; use mise tasks not raw `cdk` CLI
 - ⚠️ **Ask first:** New stacks or constructs, IAM policy changes, DynamoDB schema changes, enabling Lambda bundling in unit tests
 - 🚫 **Never:** Bump `@cedar-policy/cedar-wasm` without bumping `cedarpy` and refreshing `contracts/cedar-parity/` fixtures; re-enable global Lambda bundling in tests; use constructor `context` for `aws:cdk:bundling-stacks` (use `postCliContext` instead — see #366)
 

@@ -15,7 +15,7 @@ The orchestrator sits between the API layer and the agent runtime. Changes to ta
 
 | Concern | Location | Notes |
 |---------|----------|-------|
-| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts` |
+| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts`; the console mirrors a subset in `web/src/core/api/types.ts` |
 | HTTP handlers and orchestration | `cdk/src/handlers/` | Tests under `cdk/test/handlers/` |
 | Agent runtime | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `prompts/`) | See `agent/README.md` for env vars and local run |
 

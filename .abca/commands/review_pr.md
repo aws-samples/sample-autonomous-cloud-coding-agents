@@ -66,7 +66,8 @@ Omitting an in-scope agent, or reviewing by hand "because it's simple," is a pro
 Then apply principal-architect judgment over the diff:
 
 - **Correctness & contracts** — Logic, edge cases, race conditions. If shared API shapes in
-  `cdk/src/handlers/shared/types.ts` changed, confirm `cli/src/types.ts` was kept in sync.
+  `cdk/src/handlers/shared/types.ts` changed, confirm `cli/src/types.ts` was kept in sync, and
+  `web/src/core/api/types.ts` where the console mirrors the type.
   If a Cedar engine pin moved, confirm *both* `cedarpy` and `@cedar-policy/cedar-wasm` moved
   together and parity fixtures were refreshed.
 - **Security & least privilege** — IAM scoping, Cedar HITL gates, secrets handling, path-
@@ -134,10 +135,11 @@ Documentation drift is a blocking concern on this repo. Check:
 - **Did the change require docs and did the PR include them?** New/changed behavior, contracts,
   env vars, or commands must be reflected in `docs/guides/` or `docs/design/`, and ADRs added
   to `docs/decisions/` for architectural decisions.
-- **Generated mirror is in sync** — Edits to `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`
-  require regenerating the Starlight mirror under `docs/src/content/docs/` via
-  `mise //docs:sync` (or `cd docs && node scripts/sync-starlight.mjs`). A PR that edits sources
-  but ships a stale mirror will fail CI's "Fail build on mutation" step — flag it.
+- **Generated mirror is in sync** — Edits to `docs/guides/`, `docs/design/`, `docs/decisions/`,
+  or `CONTRIBUTING.md` require regenerating the Starlight mirror under
+  `docs/src/content/docs/` via `mise //docs:sync` (or
+  `cd docs && node scripts/sync-starlight.mjs`). A PR that edits sources but ships a stale
+  mirror will fail CI's "Fail build on mutation" step — flag it.
 - **Never edit `docs/src/content/docs/` by hand** — it is generated.
 - **AGENTS.md / README / package docs** — Updated if the developer flow, routing, or commands
   changed.

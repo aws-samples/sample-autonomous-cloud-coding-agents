@@ -14,10 +14,11 @@ the squash-merge history stay accurate.
 2. **Stay off `main`** — All work flows through a feature branch named
    `(feat|fix|chore|docs)/<issue-number>-short-description`. If you are on `main`, stop and
    create a branch/worktree first.
-3. **Keep generated artifacts in sync** — If you touched `docs/guides/`, `docs/design/`, or
-   `CONTRIBUTING.md`, regenerate and stage the Starlight mirror (`mise //docs:sync`). If you
-   changed `cdk/src/handlers/shared/types.ts`, ensure `cli/src/types.ts` is updated in the same
-   commit.
+3. **Keep generated artifacts in sync** — If you touched `docs/guides/`, `docs/design/`,
+   `docs/decisions/`, or `CONTRIBUTING.md`, regenerate and stage the Starlight mirror
+   (`mise //docs:sync`). If you changed `cdk/src/handlers/shared/types.ts`, ensure
+   `cli/src/types.ts` is updated in the same commit, and `web/src/core/api/types.ts` where the
+   console mirrors the type.
 4. **Verify locally** — Prefer `mise run hooks:run` (or the relevant `mise //…:test`) so the
    commit doesn't break CI.
 
