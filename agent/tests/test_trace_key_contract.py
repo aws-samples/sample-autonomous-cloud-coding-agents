@@ -11,9 +11,10 @@ asserted by three independent codepaths that MUST agree:
 2. CDK handler ``expectedKeyPrefix`` in
    ``cdk/src/handlers/get-trace-url.ts`` — refuses to presign keys
    outside the caller's user prefix.
-3. CDK construct ``TRACE_OBJECT_KEY_PREFIX`` in
-   ``cdk/src/constructs/trace-artifacts-bucket.ts`` — exports the
-   canonical prefix that the handler imports.
+3. Shared constant ``TRACE_OBJECT_KEY_PREFIX`` in
+   ``cdk/src/handlers/shared/storage-names.ts`` — exports the
+   canonical prefix that the handler imports. The bucket construct
+   repeats the literal under a compile-time equality check.
 
 This test is a drift detector: if anyone renames ``traces/`` to
 ``trajectories/`` on one side, it fails immediately. The agent side is
@@ -35,13 +36,13 @@ from telemetry import upload_trace_to_s3
 # Repository root relative to this test file:
 #   agent/tests/test_trace_key_contract.py -> parents[2]
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONSTRUCT_TS = REPO_ROOT / "cdk" / "src" / "constructs" / "trace-artifacts-bucket.ts"
+CONSTRUCT_TS = REPO_ROOT / "cdk" / "src" / "handlers" / "shared" / "storage-names.ts"
 HANDLER_TS = REPO_ROOT / "cdk" / "src" / "handlers" / "get-trace-url.ts"
 
 
 def _read_trace_object_key_prefix_from_construct() -> str:
     """Parse ``export const TRACE_OBJECT_KEY_PREFIX = 'traces/';`` from
-    the CDK construct file without importing TypeScript."""
+    the shared storage-names module without importing TypeScript."""
     text = CONSTRUCT_TS.read_text(encoding="utf-8")
     match = re.search(
         r"""export\s+const\s+TRACE_OBJECT_KEY_PREFIX\s*=\s*['"]([^'"]+)['"]""",
@@ -88,7 +89,7 @@ class TestTraceKeyLayoutContract:
         # test_construct_prefix_is_traces_slash stops catching renames.
         assert "TRACE_OBJECT_KEY_PREFIX" in expr, (
             f"expectedKeyPrefix expression {expr!r} must reference "
-            "TRACE_OBJECT_KEY_PREFIX so the construct is the single source of truth."
+            "TRACE_OBJECT_KEY_PREFIX so storage-names.ts is the single source of truth."
         )
         # Must interpolate the user id and end with a trailing slash.
         assert "${userId}" in expr, expr
