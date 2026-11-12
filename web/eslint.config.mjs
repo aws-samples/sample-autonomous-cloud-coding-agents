@@ -33,7 +33,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Import boundaries of web/AGENTS.md. They match directory names inside import paths,
 // so a renamed directory would switch a rule off without a word: fail the run instead.
-for (const dir of ['src/core', 'src/domains', 'src/mocks']) {
+for (const dir of ['src/core', 'src/domains', 'src/mocks', 'test']) {
   if (!existsSync(join(__dirname, dir))) {
     throw new Error(`web/eslint.config.mjs: ${dir} does not exist; update the import boundary rules.`);
   }
@@ -53,6 +53,20 @@ const NO_DYNAMIC_MOCKS = {
   message: MOCKS_MESSAGE,
 };
 const NO_DYNAMIC_DOMAINS = { selector: 'ImportExpression[source.value=/(^|\\/)domains(\\/|$)/]', message: DOMAINS_MESSAGE };
+// The test helpers load the mock data, so src must not import them either.
+const TEST_MESSAGE = 'src must not import from test/: the helpers there load the mock data, which must never reach a production bundle.';
+const NO_TEST = { regex: '(^|/)test(/|$)', message: TEST_MESSAGE };
+const NO_DYNAMIC_TEST = { selector: 'ImportExpression[source.value=/(^|\\/)test(\\/|$)/]', message: TEST_MESSAGE };
+// The rules above read a path that is written out. vite bundles every file that a
+// template literal in import() or a pattern in import.meta.glob() can reach.
+const NO_COMPUTED_IMPORT = {
+  selector: "ImportExpression[source.type!='Literal']",
+  message: 'Give import() a string literal: lint checks that path against the import boundaries, and vite bundles every file a computed one can reach.',
+};
+const NO_GLOB_IMPORT = {
+  selector: "MemberExpression[object.type='MetaProperty'][property.name='glob']",
+  message: 'Do not use import.meta.glob in src: a pattern can pull src/mocks into the production bundle. Import each module by name.',
+};
 
 export default defineConfig(
   { ignores: ['dist/', 'coverage/', 'node_modules/', '**/*.js'] },
@@ -91,16 +105,16 @@ export default defineConfig(
   {
     files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
-      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS] }],
-      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS],
+      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS, NO_TEST] }],
+      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS, NO_DYNAMIC_TEST, NO_COMPUTED_IMPORT, NO_GLOB_IMPORT],
     },
   },
   {
     // A later block replaces the options of a rule, so core repeats the lists in full.
     files: ['src/core/**/*.{ts,tsx,mts,cts}'],
     rules: {
-      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS, NO_DOMAINS] }],
-      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS, NO_DYNAMIC_DOMAINS],
+      'no-restricted-imports': ['error', { paths: [NO_CLOUDSCAPE_BARREL], patterns: [NO_MOCKS, NO_TEST, NO_DOMAINS] }],
+      'no-restricted-syntax': ['error', NO_DYNAMIC_MOCKS, NO_DYNAMIC_TEST, NO_COMPUTED_IMPORT, NO_GLOB_IMPORT, NO_DYNAMIC_DOMAINS],
     },
   },
   {
