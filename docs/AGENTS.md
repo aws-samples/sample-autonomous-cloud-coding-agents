@@ -53,7 +53,7 @@ Never add an `exclude` option to `starlightLinksValidator()` to make a link pass
 
 Inside a table cell write a literal pipe as `\|`, also in a code span: an unescaped pipe ends the cell.
 
-Never silence a finding. `<!-- markdownlint-disable -->` comments are ignored, and a `.markdownlint*` file anywhere but `docs/.markdownlint-cli2.jsonc` fails the task.
+Never silence a finding. `<!-- markdownlint-disable -->` comments are ignored, a `.markdownlint*` file anywhere but `docs/.markdownlint-cli2.jsonc` fails the task, and `mise //docs:test` holds that file to its exact content: adding `ignores`, `overrides` or a rule option to it fails the build.
 
 ## Primary locations
 

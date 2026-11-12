@@ -1,9 +1,10 @@
 /**
  * Tests for `markdown-lint.mjs`, the structural Markdown lint.
  *
- * Every test builds a throwaway git repository in a temp dir and runs the real `lint()`
- * against it, with the real configuration and the installed markdownlint-cli2. Nothing
- * reads or changes this repository's files.
+ * All tests but one build a throwaway git repository in a temp dir and run the real
+ * `lint()` against it, with the real configuration and the installed markdownlint-cli2.
+ * The other one reads that configuration. Nothing else of this repository is read, and
+ * nothing is changed.
  */
 
 import assert from 'node:assert/strict';
@@ -12,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
+import jsonc from 'markdownlint-cli2/parsers/jsonc';
 import { lint } from './markdown-lint.mjs';
 
 const CLEAN = '# Doc\n\n## Part\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![diagram](d.png)\n';
@@ -103,4 +105,18 @@ test('a file list that is almost empty fails instead of passing', async () => {
   const { status, output } = await run({ 'README.md': CLEAN });
   assert.equal(status, 1);
   assert.match(output, /expected ≥10 Markdown files but found 1/);
+});
+
+test('docs/.markdownlint-cli2.jsonc holds the five rules and nothing else: no ignores, no overrides', () => {
+  // The tests above show that the rules fire, not that they fire for every file. `ignores`
+  // drops files by path and `overrides` switches rules off by path: with either the lint
+  // still passes and still counts every file. So the whole content is held, as the tool
+  // parses it. To change a rule, change it here too. To get a file through, fix the file.
+  const config = path.join(import.meta.dirname, '..', '.markdownlint-cli2.jsonc');
+  assert.deepEqual(jsonc(fs.readFileSync(config, 'utf8')), {
+    config: { default: false, MD001: true, MD024: { siblings_only: true }, MD025: true, MD045: true, MD056: true },
+    noInlineConfig: true,
+    noBanner: true,
+    noProgress: true,
+  });
 });
