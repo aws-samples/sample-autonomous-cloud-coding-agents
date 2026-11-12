@@ -106,7 +106,9 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
  * `const READY_HOOK_TIMEOUT_SECONDS = 300;` — which is exactly how the budget
  * invariant got asserted against a hardcoded copy in the first place. So the one
  * TypeScript consumer whose value is half of a cross-language invariant is checked
- * the same way the Python ones are.
+ * the same way the Python ones are: every declaration must read the contract, and
+ * the name has to be declared in a consumer, so that renaming or inlining the
+ * constant cannot quietly take it out of this check.
  */
 const OWNED_TS_NAMES: ReadonlyMap<string, string> = new Map([
   ['READY_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.ready_hook_timeout_seconds'],
@@ -185,13 +187,15 @@ function findDriftInPython(filePath: string, seen: Set<string>): Drift[] {
   return drifts;
 }
 
-function findDriftInTypeScript(filePath: string): Drift[] {
+/** The TypeScript counterpart of `findDriftInPython`: `seen` collects every owned name the file declares. */
+function findDriftInTypeScript(filePath: string, seen: Set<string>): Drift[] {
   const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
   const drifts: Drift[] = [];
   lines.forEach((line, index) => {
     const declaration = TS_DECLARATION.exec(line);
     const contractPath = declaration ? OWNED_TS_NAMES.get(declaration[1]) : undefined;
     if (!declaration || contractPath === undefined) return;
+    seen.add(declaration[1]);
     // The value may sit on the line after the `=`.
     const value = (declaration[2].trim() || (lines[index + 1] ?? '')).trim();
     if (TS_CONTRACT_READ.exec(value)?.[1] === contractPath) return;
@@ -402,19 +406,21 @@ function main(): number {
 
   const pythonFiles = sourceFiles(AGENT_SRC, '.py');
   const assigned = new Set<string>();
+  const declared = new Set<string>();
   const drifts = [
     ...pythonFiles.flatMap((file) => findDriftInPython(file, assigned)),
-    ...TS_CONSUMERS.flatMap(findDriftInTypeScript),
+    ...TS_CONSUMERS.flatMap((file) => findDriftInTypeScript(file, declared)),
   ];
   // A name nothing assigns is a renamed or deleted constant: the check would
   // otherwise go on reporting OK for a constant it no longer sees.
   const unassigned = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !assigned.has(name));
+  const undeclared = [...OWNED_TS_NAMES.keys()].filter((name) => !declared.has(name));
   // This script checks how a constant is written; the parity test checks the
   // value it holds. A name only one of the two knows is half-checked.
   const parityTest = fs.readFileSync(path.join(REPO_ROOT, PARITY_TEST), 'utf-8');
   const untested = [...OWNED_PYTHON_NAMES.keys()].filter((name) => !parityTest.includes(`"${name}"`));
 
-  if (drifts.length > 0 || unassigned.length > 0 || untested.length > 0) {
+  if (drifts.length > 0 || unassigned.length > 0 || undeclared.length > 0 || untested.length > 0) {
     console.error('Cross-language constants drift detected:\n');
     for (const d of drifts) {
       console.error(
@@ -429,13 +435,21 @@ function main(): number {
           `    If the constant was renamed or removed, update OWNED_PYTHON_NAMES in scripts/check-constants-sync.ts.`,
       );
     }
+    for (const name of undeclared) {
+      console.error(
+        `  - "${name}" is owned by contracts/constants.json but declared in none of its TypeScript consumers ` +
+          `(${TS_CONSUMERS.map((file) => path.relative(REPO_ROOT, file)).join(', ')}).\n` +
+          `    Declare it there as a read of its contract value (const ${name} = <constants.json import>.${OWNED_TS_NAMES.get(name)}).\n` +
+          `    If the constant was renamed or removed on purpose, update OWNED_TS_NAMES in scripts/check-constants-sync.ts.`,
+      );
+    }
     for (const name of untested) {
       console.error(
         `  - "${name}" is owned by contracts/constants.json but ${PARITY_TEST} does not compare its value.\n` +
           `    Add a row for it to _OWNED in that file.`,
       );
     }
-    console.error(`\n${drifts.length + unassigned.length + untested.length} drift issue(s) found.`);
+    console.error(`\n${drifts.length + unassigned.length + undeclared.length + untested.length} drift issue(s) found.`);
     return 1;
   }
 

@@ -415,6 +415,21 @@ describe('check-constants-sync', () => {
       expect(result.stderr).toContain('"FLOOR_TIMEOUT_S" is owned by contracts/constants.json but assigned nowhere under agent/src');
     });
 
+    test('fails when an owned TypeScript constant is no longer declared in its consumer', () => {
+      // The same hole on the TypeScript side: renamed, or deleted with the number
+      // written where it was used, the constant would simply stop being checked.
+      const consumer = 'cdk/src/constructs/lambda-microvm-compute.ts';
+      const result = runInMutatedRepo((root) => {
+        const source = read(root, consumer);
+        expect(source).toContain('\nconst READY_HOOK_TIMEOUT_SECONDS = ');
+        write(root, consumer, source.replace('\nconst READY_HOOK_TIMEOUT_SECONDS = ', '\nconst READY_TIMEOUT_SECONDS = '));
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`"READY_HOOK_TIMEOUT_SECONDS" is owned by contracts/constants.json but declared in none of its TypeScript consumers (${consumer})`);
+      expect(result.stderr).toContain('update OWNED_TS_NAMES in scripts/check-constants-sync.ts');
+    });
+
     test('fails when the value-parity test does not cover an owned constant', () => {
       // The script checks how a constant is written, the pytest what it holds:
       // a name only one of the two lists knows is half-checked.
