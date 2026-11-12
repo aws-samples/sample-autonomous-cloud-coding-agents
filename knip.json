@@ -21,11 +21,10 @@
       "ignoreDependencies": ["tsx", "@aws-cdk/integ-runner"]
     },
     "cli": {
-      "entry": ["src/bin/bgagent.ts!", "src/index.ts!"],
       "project": ["src/**/*.ts!", "test/**/*.ts"]
     },
     "docs": {
-      "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro", "scripts/*.mjs"],
+      "entry": ["src/components/**/*.astro", "scripts/*.mjs"],
       "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
       "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui", "jest"]
     },
