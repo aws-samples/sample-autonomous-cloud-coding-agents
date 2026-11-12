@@ -15,7 +15,7 @@ mise //docs:check           # sync + astro check alone (MDX/components)
 mise //docs:link-check      # relative links in every Markdown file of the repository, tracked or new
 ```
 
-Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installed.
+Pre-commit hook `docs-sync` runs sync automatically when prek hooks are installed. Two more hooks run at commit time: `docs-markdown-lint` runs `mise //docs:markdown-lint` when a Markdown file or a `.markdownlint*` file is staged, and `docs-script-tests` runs `mise //docs:test` when a file under `docs/scripts/` or `docs/.markdownlint*` is staged.
 
 ## Testing
 

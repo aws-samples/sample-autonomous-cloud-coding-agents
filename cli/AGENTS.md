@@ -20,7 +20,7 @@ mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fail
 - **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply; they count every file in `src/`, tested or not.
 - **Single file:** `cd cli && npx jest --coverage=false test/commands/status.test.ts`
 - **Pattern:** `cd cli && npx jest --coverage=false --testPathPatterns=auth`
-- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build runs it. A fixture has to match the type from `src/types.ts` it is declared with.
+- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build and `mise run lint` run it. A fixture has to match the type from `src/types.ts` it is declared with.
 
 Without `--coverage=false` a partial run fails on the coverage floors after its tests pass.
 

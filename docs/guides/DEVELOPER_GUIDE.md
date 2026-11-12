@@ -274,7 +274,7 @@ export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
-**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk and cli test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
+**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk, cli and agent test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
 
 ### Development workflow
 
@@ -527,4 +527,4 @@ Two checks keep cross-references intact. Both run in CI on every pull request, a
 
 External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
 
-A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it.
+A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it. With the git hooks installed, the same lint also runs at commit time when a Markdown file is staged, so a broken table fails the commit and not only the build.
