@@ -93,6 +93,8 @@ The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR 
 
 PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
 
+The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype` and `zizmor` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically: bump them by pull request, to a release that is at least 7 days old, and keep `uv` the same in both files. After pulling a change to a pin, run `mise install`.
+
 ### Git hooks
 
 `mise run install` automatically installs [prek](https://github.com/j178/prek) git hooks. These run on every commit and push:
