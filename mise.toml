@@ -92,6 +92,8 @@ run = [
 # on purpose: no `--fix` and no formatter rewrite, so a pass means the tree is
 # clean as committed and a failure names the file, line and rule. Use
 # `mise run quality` for the auto-fixing variant.
+# The two `typecheck` tasks are the only type check that test files get (jest
+# transpiles them without checking), so a type error there has to fail here too.
 [tasks.lint]
 description = "Non-mutating lint and type checks of every package"
 depends = [
@@ -100,8 +102,10 @@ depends = [
   "//agent:typecheck",
   "//cdk:eslint:check",
   "//cdk:compile",
+  "//cdk:typecheck",
   "//cli:eslint:check",
   "//cli:compile",
+  "//cli:typecheck",
   "//web:eslint:check",
   "//web:typecheck",
 ]
