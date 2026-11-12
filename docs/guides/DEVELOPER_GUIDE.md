@@ -520,7 +520,7 @@ After editing source docs, run `mise //docs:sync` or `mise //docs:build` to rege
 
 Two checks keep cross-references intact. Both run in CI on every pull request, as part of the required build:
 
-- `mise //docs:link-check` checks the relative links of every tracked Markdown file in the repository: the sources in `docs/guides/`, `docs/design/` and `docs/decisions/`, and also package READMEs, `AGENTS.md` files, plugin skills and command files. It confirms that the target file exists and that an anchor within the same file exists; it does not check an anchor that points into another file.
+- `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (a file that git ignores is not read): the sources in `docs/guides/`, `docs/design/` and `docs/decisions/`, and also package READMEs, `AGENTS.md` files, plugin skills and command files. It confirms that the target file exists and that an anchor within the same file exists; it does not check an anchor that points into another file.
 - `mise //docs:build` validates every internal link and anchor of the rendered site, anchors into other pages included, and fails with the page, line and link.
 
 External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
