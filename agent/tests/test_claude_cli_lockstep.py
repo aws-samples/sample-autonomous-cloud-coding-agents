@@ -7,6 +7,10 @@ drives the CLI over a control protocol, so both must be the same version (#215).
 The two pins live in different ecosystems and a dependency update moves one of
 them alone. This test is what holds them together: before it, the lockstep was a
 comment beside each pin.
+
+It reads the Dockerfile as text. It sees every command that names the package,
+with a version or without, but not what the command does with it, and not a CLI
+that reaches the image some other way.
 """
 
 import re
@@ -18,24 +22,28 @@ from pathlib import Path
 from claude_agent_sdk._cli_version import __cli_version__ as bundled_cli_version
 
 _DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile"
-_NPM_PIN = re.compile(r"@anthropic-ai/claude-code@([\w.+-]+)")
+# The package as a command argument, with its version when that is a literal one.
+# Inside a path ("$(npm root -g)/@anthropic-ai/claude-code") it is not an argument.
+_CLI_PACKAGE = re.compile(r"(?<![\w/])@anthropic-ai/claude-code(?![\w/-])(?:@([\w.+-]+))?")
 
 
 def test_dockerfile_installs_the_cli_version_the_sdk_bundles() -> None:
-    pins = [
-        (number, pin.group(1))
+    named = [
+        (number, mention.group(1))
         for number, line in enumerate(_DOCKERFILE.read_text(encoding="utf-8").splitlines(), 1)
         if not line.lstrip().startswith("#")
-        for pin in _NPM_PIN.finditer(line)
+        for mention in _CLI_PACKAGE.finditer(line)
     ]
-    assert len(pins) == 1, (
-        "agent/Dockerfile must install the Claude Code CLI exactly once and at a literal "
-        "version (`npm install -g @anthropic-ai/claude-code@<version>`), so that the version "
-        f"can be compared with the CLI that claude-agent-sdk bundles ({bundled_cli_version}). "
-        f"Found outside comments, as (line, version): {pins}. If the image now gets the CLI "
-        "another way, change this test to read the version from there."
+    assert len(named) == 1 and named[0][1], (
+        "agent/Dockerfile must name the Claude Code CLI package as a command argument exactly "
+        "once, and at a literal version (`npm install -g @anthropic-ai/claude-code@<version>`), "
+        "so that the version can be compared with the CLI that claude-agent-sdk bundles "
+        f"({bundled_cli_version}). Found outside comments, as (line, version): {named}. None "
+        "stands for a command that names the package without a literal version: it installs "
+        "or updates to whatever npm serves that day. If the image now gets the CLI another "
+        "way, change this test to read the version from there."
     )
-    line, installed = pins[0]
+    line, installed = named[0]
     assert installed == bundled_cli_version, (
         f"agent/Dockerfile:{line} installs @anthropic-ai/claude-code@{installed}, but "
         f"claude-agent-sdk {version('claude-agent-sdk')} (pinned in agent/pyproject.toml) "
