@@ -282,7 +282,7 @@ export default [
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
-        devDependencies: ['**/test/**', '**/build-tools/**', '**/scripts/**'],
+        devDependencies: ['**/test/**', '**/scripts/**'],
         optionalDependencies: false,
         peerDependencies: true,
       }],

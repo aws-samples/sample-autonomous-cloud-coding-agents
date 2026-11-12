@@ -8,7 +8,7 @@ description = "Install from monorepo root (Yarn workspaces)"
 run = "cd .. && yarn install --check-files"
 
 [tasks.sync]
-description = "Sync docs content from guides/design/CONTRIBUTING"
+description = "Generate the Starlight mirrors from docs/guides, docs/design, docs/decisions and CONTRIBUTING.md"
 run = "node scripts/sync-starlight.mjs"
 
 [tasks.test]

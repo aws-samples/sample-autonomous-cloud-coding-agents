@@ -44,10 +44,10 @@ config_roots = ["cdk", "agent", "cli", "docs", "web"]
 ###### CORE ######
 ##################
 
-# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`).
-# `//cdk:install`, `//cli:install`, and `//docs:install` are thin wrappers around the same command.
+# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`, `web`).
+# `//cdk:install`, `//cli:install`, `//docs:install` and `//web:install` are thin wrappers around the same command.
 [tasks.install]
-description = "Yarn workspaces (cdk, cli, docs) + agent Python (uv) + prek git hooks when inside a Git repo"
+description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
@@ -63,7 +63,7 @@ run = [
 # are exact pins that must only ever move together, by hand, with refreshed
 # contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
 [tasks.upgrade]
-description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
+description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs, web) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
 run = [
   # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
   # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
@@ -78,7 +78,7 @@ run = [
 ##################
 
 [tasks.quality]
-description = "Monorepo quality checks (agent quality, then cdk, cli, docs)"
+description = "Monorepo quality checks: agent quality, then ESLint with --fix for cdk, cli and web, then the docs check"
 depends = ["//agent:quality"]
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
@@ -95,7 +95,7 @@ run = [
 # The two `typecheck` tasks are the only type check that test files get (jest
 # transpiles them without checking), so a type error there has to fail here too.
 [tasks.lint]
-description = "Non-mutating lint and type checks of every package"
+description = "Non-mutating lint and type checks of agent, cdk, cli and web (no docs check)"
 depends = [
   "//agent:lint",
   "//agent:format:check",
@@ -191,7 +191,7 @@ run = [
 ]
 
 [tasks."check:fast"]
-description = "Fast tier: every check that needs no test run (the `lint` and `drift-prevention` tasks)"
+description = "Fast tier without a test run: the `lint` and `drift-prevention` tasks"
 depends = [":lint", ":drift-prevention"]
 
 ##################
@@ -361,7 +361,7 @@ description = "Pre-push security scans"
 run = "mise run security"
 
 [tasks."hooks:pre-push:tests"]
-description = "Pre-push tests in cdk/cli/agent"
+description = "Pre-push tests in cdk, cli, web and agent"
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:test",
   "MISE_EXPERIMENTAL=1 mise //cli:test",
@@ -370,7 +370,7 @@ run = [
 ]
 
 [tasks."hooks:pre-push"]
-description = "Pre-push gate: security scans then tests in cdk/cli/agent"
+description = "Pre-push gate: security scans, then tests in cdk, cli, web and agent"
 run = [
   "mise run hooks:pre-push:security",
   "mise run hooks:pre-push:tests",
