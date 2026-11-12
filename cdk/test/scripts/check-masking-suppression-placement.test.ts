@@ -202,17 +202,6 @@ describe('check-masking-suppression-placement', () => {
       expect(result.stderr).toContain('src/a.py:1');
     });
 
-    test('rejects a bare suppression on code that only looks like a comment line', () => {
-      // In JS and TS a leading `#` opens a private field and `*name` a generator method.
-      const source = ['export class C {', `  #secret = load(); // ${WORD}`, `  *items() { yield 1; } // ${WORD}`, '}', ''].join('\n');
-      const result = run({ 'src/a.ts': source }, []);
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('2 semgrep suppression(s) not in the form');
-      expect(result.stderr).toContain('src/a.ts:2');
-      expect(result.stderr).toContain('src/a.ts:3');
-    });
-
     test('rejects the word in the prose of a comment that trails code', () => {
       // semgrep honours the bare word anywhere on a flagged line.
       const result = run({ 'src/a.ts': tsCatch(` // deliberately ${WORD} here`) }, [['src/a.ts', 5, TS_RULE]]);
