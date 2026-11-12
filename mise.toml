@@ -158,10 +158,33 @@ run = "node scripts/check-transitive-pin-sync.mjs"
 description = "Cedar engine pair: fail unless @cedar-policy/cedar-wasm (cdk, Lambda layer) and cedarpy (agent) are pinned exactly to the versions in contracts/cedar-parity/engines/versions.json."
 run = "node scripts/check-cedar-engine-pair.mjs"
 
+# The five generic hooks of .pre-commit-config.yaml over every tracked file. A commit
+# made without the hooks could otherwise bring an unparseable YAML or JSON file or
+# leftover conflict markers through the build.
+# One prek call per hook: given several ids, prek only warns about an id that matches
+# no hook and exits 0; given one, it fails. SKIP is unset because prek honours it and
+# reports a skipped hook as success.
+# The first two hooks fix what they find and fail when they did: keep the change and
+# run again.
+# `mise run install` already fetches the hook repository and builds its environment
+# (`prek install --prepare-hooks`), so this needs no network afterwards. Without that
+# step the first run fetches from github.com and PyPI, and fails if it cannot.
+[tasks."check:hygiene"]
+description = "File hygiene over all tracked files (the five generic prek hooks): trailing whitespace, final newline, merge-conflict markers, YAML syntax, JSON syntax"
+run = '''
+unset SKIP PREK_SKIP
+rc=0
+for hook in trailing-whitespace end-of-file-fixer check-merge-conflict check-yaml check-json; do
+  prek run --all-files "$hook" || rc=1
+done
+exit "$rc"
+'''
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
+  { task = "check:hygiene" },
   { task = "check:scripts" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },

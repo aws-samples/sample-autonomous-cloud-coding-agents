@@ -15,6 +15,9 @@ repos:
       - id: end-of-file-fixer
         exclude: (cdk/cdk\.out/|node_modules/|^docs/src/content/docs/.*\.md$|(^|/)LICENSE$|(^|/)\.gitattributes$|(^|/)\.npmignore$|(^|/)\.gitignore$|^cli/header\.js$|^docs/astro\.config\.mjs$|^docs/tsconfig\.json$|^docs/src/content\.config\.ts$)
       - id: check-merge-conflict
+        # Without this the hook only looks while a merge is in progress: it would
+        # check nothing in `mise run check:hygiene`, which runs it over all files.
+        args: [--assume-in-merge]
       - id: check-yaml
         exclude: ^(cdk/cdk\.out/|cdk\.out/|node_modules/|agent/\.venv/)
       - id: check-json
