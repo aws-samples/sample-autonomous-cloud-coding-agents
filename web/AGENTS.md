@@ -23,6 +23,7 @@ Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.tes
 - **Cloudscape:** import components directly (`@cloudscape-design/components/<name>`; ESLint rejects the package root); no pass-through wrappers. Use `RouterLink`/`ExternalLink` from `core/components/RouterLink.tsx` for links.
 - **Wire types:** `src/core/api/types.ts` mirrors `cli/src/types.ts`. Change both when the API changes.
 - **Tests:** `test/` mirrors `src/`. Page tests render real routes through `test/helpers/render.tsx` against the MSW server in `test/helpers/server.ts`, which uses the same handlers as mock mode. Add a fixture in `src/mocks/fixtures.ts` for each new state the UI must handle.
+- **Coverage:** ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`: vitest would leave that code out of the coverage report. Test the code, or leave it counted as uncovered and say why in a plain comment.
 - **License header:** every `src/` and `test/` file starts with the MIT-0 header (`header.js`); ESLint enforces it.
 - **Complexity:** ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40, the ceiling shared with cdk and cli. Split the component or move logic into a hook or helper; do not add an `eslint-disable`.
 
