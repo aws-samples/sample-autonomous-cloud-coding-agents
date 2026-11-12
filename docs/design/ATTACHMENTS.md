@@ -580,7 +580,7 @@ If the user explicitly provided attachments, proceeding without them produces in
 
 ```typescript
 // Error class hierarchy:
-export class AttachmentError extends Error { }
+class AttachmentError extends Error { }
 export class AttachmentResolutionError extends AttachmentError { }
 export class AttachmentBudgetExceededError extends AttachmentError { }
 
