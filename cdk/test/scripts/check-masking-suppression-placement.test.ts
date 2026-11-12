@@ -88,9 +88,10 @@ function run(files: Record<string, string>, findings: readonly Finding[], option
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'args.json'), '[]');
     if (options.semgrep !== 'missing') {
+      // Started by the node that runs this suite, not by whichever `node` PATH holds.
       fs.writeFileSync(
         path.join(bin, 'semgrep'),
-        `#!/usr/bin/env node
+        `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
 fs.writeFileSync(path.join(__dirname, 'args.json'), JSON.stringify(process.argv.slice(2)));
@@ -108,10 +109,13 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
     // repository, and both `git init` here and `git ls-files` in the script
     // would act on it instead of on the temp root.
     const inherited = Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'));
-    // The real semgrep must not answer for the fake one, least of all when the case is "missing".
-    const realPath = (process.env.PATH ?? '')
-      .split(path.delimiter)
-      .filter((dir) => !fs.existsSync(path.join(dir, 'semgrep')));
+    // The fake semgrep is first on PATH, so the real one never answers for it. Only
+    // the "missing" case has to take the real one away, and it does so by dropping
+    // every directory that holds it — with whatever else lives there, so no other case does.
+    const inheritedPath = (process.env.PATH ?? '').split(path.delimiter);
+    const realPath = options.semgrep === 'missing'
+      ? inheritedPath.filter((dir) => !fs.existsSync(path.join(dir, 'semgrep')))
+      : inheritedPath;
     const env = { ...Object.fromEntries(inherited), PATH: [bin, ...realPath].join(path.delimiter) };
     if (!options.noGit) {
       execFileSync('git', ['init', '--quiet'], { cwd: root, env, stdio: 'ignore' });
