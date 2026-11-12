@@ -149,8 +149,9 @@ const fragment = (id) => (id ? `#${id}` : '');
  * The URL for a relative link written in `page.source`, or undefined to leave it as written.
  * A published file becomes its site route (under `docsBase`: Starlight does not prefix links
  * in Markdown bodies), an image its public URL, any other file of the repository a GitHub URL.
- * `shown` marks the target of an image: the page displays that file instead of linking to
- * it, and the site serves no file of the repository but the images of `assets.from`.
+ * `shown` marks the target of an image or of an HTML `src`: the page displays that file
+ * instead of linking to it, and the site serves no file of the repository but the images of
+ * `assets.from`.
  */
 function resolveLink(target, page, docs, repoRoot, shown) {
   if (target.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(target)) {
@@ -198,21 +199,32 @@ function resolveLink(target, page, docs, repoRoot, shown) {
 }
 
 /**
- * Rewrites Markdown links and images outside code. `resolve` gets the target and whether it
- * is the target of an image, and returns the new target or undefined.
+ * Rewrites the targets of links and images outside code: Markdown `[label](target "title")`,
+ * and the `src` and `href` attributes of inline HTML, which is how a source sets the width
+ * of an image. `resolve` gets the target and whether the page shows it (an image, a `src`)
+ * instead of linking to it, and returns the new target or undefined.
  */
 function rewriteLinks(text, resolve) {
   const lines = text.split('\n');
   const fenced = fencedLines(lines);
   // First alternative: an inline code span, which is skipped. Second: [label](target "title").
-  const codeOrLink = /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))/g;
+  // Third: src="target" or href="target", in either kind of quotes.
+  const codeOrLink =
+    /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))|(\b(?:src|href)\s*=\s*(["']))([^"'\s]+)(\6)/gi;
   return lines
     .map((line, index) =>
       fenced[index]
         ? line
-        : line.replace(codeOrLink, (match, code, open, target, close) => {
-            const rewritten = code ? undefined : resolve(target, open.startsWith('!'));
-            return rewritten ? `${open}${rewritten}${close}` : match;
+        : line.replace(codeOrLink, (match, code, open, target, close, attribute, quote, value) => {
+            if (code) {
+              return match;
+            }
+            if (open) {
+              const rewritten = resolve(target, open.startsWith('!'));
+              return rewritten ? `${open}${rewritten}${close}` : match;
+            }
+            const rewritten = resolve(value, /^src/i.test(attribute));
+            return rewritten ? `${attribute}${rewritten}${quote}` : match;
           }),
     )
     .join('\n');

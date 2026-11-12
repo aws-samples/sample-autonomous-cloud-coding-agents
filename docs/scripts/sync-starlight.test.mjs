@@ -55,11 +55,11 @@ function repo(files = {}) {
 
 const page = (root, target) => fs.readFileSync(path.join(root, CONTENT, target), 'utf8');
 
-/** The lines of a generated page that start with a link or an image. */
+/** The lines of a generated page that start with a link or an image, in Markdown or HTML. */
 const links = (root, target) =>
   page(root, target)
     .split('\n')
-    .filter((line) => /^!?\[/.test(line));
+    .filter((line) => /^(!?\[|<a |<img )/.test(line));
 
 function pages(root) {
   return fs
@@ -296,6 +296,7 @@ test('links to files that are not published point at GitHub; images are served f
       '',
       '[agents](../../AGENTS.md) [setup](../../agent/README.md#setup) [fixtures](../../contracts/parity/)',
       '![architecture](../imgs/nested/arch.png)',
+      '<img src="../imgs/nested/arch.png" width="200"> <a href=\'../../AGENTS.md\'>agents</a>',
       '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
       '',
     ].join('\n'),
@@ -305,6 +306,7 @@ test('links to files that are not published point at GitHub; images are served f
   assert.deepEqual(links(root, 'architecture/Api.md'), [
     `[agents](${GITHUB}/blob/main/AGENTS.md) [setup](${GITHUB}/blob/main/agent/README.md#setup) [fixtures](${GITHUB}/tree/main/contracts/parity)`,
     `![architecture](${BASE}/imgs/nested/arch.png)`,
+    `<img src="${BASE}/imgs/nested/arch.png" width="200"> <a href='${GITHUB}/blob/main/AGENTS.md'>agents</a>`,
     // Left as written: the link checks report a target that does not exist.
     '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
   ]);
@@ -330,6 +332,10 @@ test('an image that is not a file in docs/imgs fails the sync and leaves the mir
 
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n![gone](../imgs/gone.png)\n');
   assert.throws(() => sync(root, PLAN), /docs\/design\/API\.md shows the image \.\.\/imgs\/gone\.png, which is not a file in docs\/imgs\//);
+
+  // An HTML image is an image too, in whatever case its tag is written.
+  fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n<IMG SRC="../diagrams/flow.svg" WIDTH="200">\n');
+  assert.throws(() => sync(root, PLAN), /docs\/design\/API\.md shows the image \.\.\/diagrams\/flow\.svg, which is not a file in docs\/imgs\//);
 
   // A link to the same file is not an image: it goes to GitHub.
   fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n[flow](../diagrams/flow.svg)\n');
@@ -400,9 +406,11 @@ test('links inside code are left alone', () => {
       '# API',
       '',
       '[rewritten](./OTHER.md) but not `[code](./OTHER.md)` or ``[more `code`](./OTHER.md)``',
+      '<a href="./OTHER.md">rewritten</a> but not `<a href="./OTHER.md">`',
       '',
       '```markdown',
       '[fenced](./OTHER.md)',
+      '<a href="./OTHER.md">fenced</a>',
       '```',
       '',
       '~~~~',
@@ -419,7 +427,9 @@ test('links inside code are left alone', () => {
 
   assert.deepEqual(links(root, 'architecture/Api.md'), [
     `[rewritten](${BASE}/architecture/other) but not \`[code](./OTHER.md)\` or \`\`[more \`code\`](./OTHER.md)\`\``,
+    `<a href="${BASE}/architecture/other">rewritten</a> but not \`<a href="./OTHER.md">\``,
     '[fenced](./OTHER.md)',
+    '<a href="./OTHER.md">fenced</a>',
     '[still fenced](./OTHER.md)',
     `[after the fences](${BASE}/architecture/other)`,
   ]);
