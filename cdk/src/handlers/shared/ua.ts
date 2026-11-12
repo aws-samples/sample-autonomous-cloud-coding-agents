@@ -56,7 +56,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
  * in the CloudFormation stack description in `cdk/src/main.ts`. Per-surface
  * literal by design.
  */
-const SOLUTION_ID = 'uksb-wt64nei4u6';
+export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /**
  * Env var carrying the stable per-component label (`api`, `webhook`,
