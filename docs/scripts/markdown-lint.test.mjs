@@ -1,10 +1,9 @@
 /**
  * Tests for `markdown-lint.mjs`, the structural Markdown lint.
  *
- * All tests but one build a throwaway git repository in a temp dir and run the real
- * `lint()` against it, with the real configuration and the installed markdownlint-cli2.
- * The other one reads that configuration. Nothing else of this repository is read, and
- * nothing is changed.
+ * Every test builds a throwaway git repository in a temp dir and runs the real `lint()`
+ * against it, with the real rules and the installed markdownlint. Nothing else of this
+ * repository is read, and nothing is changed.
  */
 
 import assert from 'node:assert/strict';
@@ -13,7 +12,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
-import jsonc from 'markdownlint-cli2/parsers/jsonc';
 import { lint } from './markdown-lint.mjs';
 
 const CLEAN = '# Doc\n\n## Part\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![diagram](d.png)\n';
@@ -90,33 +88,17 @@ test('a markdownlint-disable comment does not switch a rule off', async () => {
   assert.match(output, /^docs\/guides\/quiet\.md:5:1 error MD045\//m);
 });
 
-test('a second markdownlint configuration fails the lint, tracked or not', async () => {
-  const broken = { ...SOURCES, 'docs/guides/alt.md': '# T\n\n![](d.png)\n' };
-  const nested = await run({ ...broken, 'docs/guides/.markdownlint.json': '{ "MD045": false }\n' });
-  assert.equal(nested.status, 1);
-  assert.match(nested.output, /configuration found outside docs\/\.markdownlint-cli2\.jsonc:\n {2}docs\/guides\/\.markdownlint\.json\n/);
-
-  const untracked = await run(broken, { '.markdownlint-cli2.yaml': 'ignores: ["**"]\n' });
-  assert.equal(untracked.status, 1);
-  assert.match(untracked.output, /configuration found outside docs\/\.markdownlint-cli2\.jsonc:\n {2}\.markdownlint-cli2\.yaml\n/);
+test('a markdownlint configuration file in the tree changes nothing, tracked or not', async () => {
+  const { status, output } = await run(
+    { ...SOURCES, 'docs/guides/alt.md': '# T\n\n![](d.png)\n', 'docs/guides/.markdownlint.json': '{ "MD045": false }\n' },
+    { '.markdownlint-cli2.yaml': 'ignores: ["**"]\n' },
+  );
+  assert.equal(status, 1);
+  assert.match(output, /^docs\/guides\/alt\.md:3:1 error MD045\//m);
 });
 
 test('a file list that is almost empty fails instead of passing', async () => {
   const { status, output } = await run({ 'README.md': CLEAN });
   assert.equal(status, 1);
   assert.match(output, /expected ≥10 Markdown files but found 1/);
-});
-
-test('docs/.markdownlint-cli2.jsonc holds the five rules and nothing else: no ignores, no overrides', () => {
-  // The tests above show that the rules fire, not that they fire for every file. `ignores`
-  // drops files by path and `overrides` switches rules off by path: with either the lint
-  // still passes and still counts every file. So the whole content is held, as the tool
-  // parses it. To change a rule, change it here too. To get a file through, fix the file.
-  const config = path.join(import.meta.dirname, '..', '.markdownlint-cli2.jsonc');
-  assert.deepEqual(jsonc(fs.readFileSync(config, 'utf8')), {
-    config: { default: false, MD001: true, MD024: { siblings_only: true }, MD025: true, MD045: true, MD056: true },
-    noInlineConfig: true,
-    noBanner: true,
-    noProgress: true,
-  });
 });

@@ -16,7 +16,7 @@
     "jest": "^30.4.2",
     "jest-junit": "^17",
     "markdown-link-check": "^3.13.6",
-    "markdownlint-cli2": "0.24.0",
+    "markdownlint": "0.42.0",
     "retire": "^6.1.0",
     "starlight-links-validator": "0.25.3"
   },

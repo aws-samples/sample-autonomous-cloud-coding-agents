@@ -87,15 +87,15 @@ repos:
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:markdown-lint'
         language: system
         pass_filenames: false
-        files: \.(md|mdx)$|(^|/)\.markdownlint
+        files: \.(md|mdx)$
         stages: [pre-commit]
 
       - id: docs-script-tests
-        name: docs script tests (generator, markdown lint, lint configuration)
+        name: docs script tests (generator, markdown lint)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:test'
         language: system
         pass_filenames: false
-        files: ^docs/(scripts/|\.markdownlint)
+        files: ^docs/scripts/
         stages: [pre-commit]
 
       - id: types-sync-cdk-cli

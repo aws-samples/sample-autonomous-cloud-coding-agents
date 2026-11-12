@@ -41,9 +41,8 @@ run = "bash scripts/link-check.sh"
 
 [tasks.markdown-lint]
 # Scope: every Markdown file in the repository that git tracks, with the five structural
-# rules of .markdownlint-cli2.jsonc. A dependency of :build, so the required build runs it.
+# rules set in scripts/markdown-lint.mjs. A dependency of :build, so the required build
+# runs it.
 # Not linted: the generated mirrors in src/content/docs (their sources are).
-# Runs the package.json script: the dead-code check reads package.json scripts, not this
-# file, and must see markdownlint-cli2 in use.
 description = "Lint the structure of all Markdown sources: tables, headings, image alt text"
 run = "yarn -s markdown-lint"
