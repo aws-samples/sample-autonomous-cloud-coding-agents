@@ -71,6 +71,14 @@ repos:
         exclude: ^docs/node_modules/
         stages: [pre-commit]
 
+      - id: docs-markdown-lint
+        name: markdown structure lint (all tracked Markdown)
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:markdown-lint'
+        language: system
+        pass_filenames: false
+        files: \.(md|mdx)$|(^|/)\.markdownlint
+        stages: [pre-commit]
+
       - id: types-sync-cdk-cli
         name: type sync drift (CDK ↔ CLI ↔ web)
         entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:types-sync'
