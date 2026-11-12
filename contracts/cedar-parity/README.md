@@ -12,8 +12,9 @@ before deploy.
 ## Engine pair
 
 [`engines/versions.json`](./engines/versions.json) names the one pair of engine
-versions these fixtures were verified against. `mise run check:cedar-engine-pair`
-(`scripts/check-cedar-engine-pair.mjs`, part of `drift-prevention` in the build)
+versions these fixtures were verified against. The test file
+[`cdk/test/constructs/cedar-wasm-layer.test.ts`](../../cdk/test/constructs/cedar-wasm-layer.test.ts)
+(part of `mise //cdk:test`, so of the build)
 fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and
 `agent/pyproject.toml` each pin exactly that version. To move to another Cedar
 release, bump both engines and that file in one change and keep every fixture
