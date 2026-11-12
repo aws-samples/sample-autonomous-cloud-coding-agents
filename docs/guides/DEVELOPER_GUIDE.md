@@ -4,12 +4,13 @@ This project is built in TypeScript with [Yarn workspaces](https://classic.yarnp
 
 ![ABCA architecture](../imgs/abca-arch.png)
 
-The repository is organized around four main pieces:
+The repository is organized around these main pieces:
 
 - **Agent runtime code** in Python under `agent/`  - runtime entrypoint, task execution loop, memory writes, observability hooks, and local container tooling.
 - **Infrastructure as code** in AWS CDK under `cdk/src/`  - stacks, constructs, and handlers that define and deploy the platform on AWS.
 - **Documentation site** under `docs/`  - source guides/design docs plus the generated Astro/Starlight documentation site.
 - **CLI package** under `cli/`  - the `bgagent` command-line client used to authenticate, submit tasks, and inspect task status/events.
+- **Operator console** under `web/`  - a single-page React app for the people running a deployment: what agents are working on, what is stuck, and what is waiting for a human. It talks only to the REST API.
 - **Claude Code plugin** under `docs/abca-plugin/`  - a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) with guided skills and agents for setup, deployment, task submission, and troubleshooting. See the [plugin README](../abca-plugin/README.md) for details.
 
 > **Tip:** If you use Claude Code, run `claude --plugin-dir docs/abca-plugin` from the repo root. The plugin's `/setup` skill walks you through the entire setup process interactively.
@@ -26,7 +27,7 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
 | Docs (source) | `docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
-For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
 
 ## Repository preparation
 
@@ -437,19 +438,20 @@ Use the same AWS Region as your deployment. If `--region` is omitted, the CLI us
 
 ## Project structure
 
-The repository is a monorepo with four packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
+The repository is a monorepo with five packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
 
 ```
 sample-autonomous-cloud-coding-agents/
 ├── cdk/          # Infrastructure and API (TypeScript, AWS CDK)
 ├── agent/        # Agent runtime (Python, Docker)
 ├── cli/          # CLI client (TypeScript, commander)
+├── web/          # Operator console (TypeScript, React)
 ├── docs/         # Documentation site (Astro/Starlight)
 ├── mise.toml     # Monorepo task runner config
 └── package.json  # Yarn workspace root
 ```
 
-A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **docs** package is independent and only affects the documentation site.
+A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **web** console uses the same REST API and is deployed only with the opt-in console stack. The **docs** package is independent and only affects the documentation site.
 
 ```mermaid
 flowchart LR
@@ -458,7 +460,7 @@ flowchart LR
     Agent -->|opens PR| GH[GitHub]
 ```
 
-Below is a task-oriented guide for each package: "I want to change X - where do I look?"
+Below is a task-oriented guide for each package: "I want to change X - where do I look?" For the operator console, see [web/README.md](../../web/README.md).
 
 ### `cdk/` - Infrastructure and API (TypeScript)
 

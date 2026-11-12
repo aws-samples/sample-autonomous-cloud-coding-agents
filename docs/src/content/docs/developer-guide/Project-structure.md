@@ -2,19 +2,20 @@
 title: "Project structure"
 ---
 
-The repository is a monorepo with four packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
+The repository is a monorepo with five packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
 
 ```
 sample-autonomous-cloud-coding-agents/
 ├── cdk/          # Infrastructure and API (TypeScript, AWS CDK)
 ├── agent/        # Agent runtime (Python, Docker)
 ├── cli/          # CLI client (TypeScript, commander)
+├── web/          # Operator console (TypeScript, React)
 ├── docs/         # Documentation site (Astro/Starlight)
 ├── mise.toml     # Monorepo task runner config
 └── package.json  # Yarn workspace root
 ```
 
-A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **docs** package is independent and only affects the documentation site.
+A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **web** console uses the same REST API and is deployed only with the opt-in console stack. The **docs** package is independent and only affects the documentation site.
 
 ```mermaid
 flowchart LR
@@ -23,7 +24,7 @@ flowchart LR
     Agent -->|opens PR| GH[GitHub]
 ```
 
-Below is a task-oriented guide for each package: "I want to change X - where do I look?"
+Below is a task-oriented guide for each package: "I want to change X - where do I look?" For the operator console, see [web/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/web/README.md).
 
 ### `cdk/` - Infrastructure and API (TypeScript)
 

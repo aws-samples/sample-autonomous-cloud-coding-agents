@@ -25,7 +25,7 @@ Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:
 
 `security:sast:masking` also checks the suppression comments themselves, in every tracked TypeScript, JavaScript and Python file. A line that contains the word `nosemgrep` at all — in any letter case, in a comment or in code, for any rule — must be exactly one suppression of the form `nosemgrep: <rule-id> -- <reason>`; a comment that merely mentions suppressions has to use another word. A suppression of a masking rule must also sit on a finding of that rule, or on the line directly above it: one that suppresses nothing fails the task, so delete it when the code no longer needs it.
 
-Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
+Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
 Run `mise tasks --all` with `MISE_EXPERIMENTAL=1` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
 
@@ -39,7 +39,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 **After merging `main` into your branch:**
 
-1. `mise //cdk:eslint` and `mise //cli:eslint` (both use `--fix`)
+1. `mise //cdk:eslint`, `mise //cli:eslint` and `mise //web:eslint` (all use `--fix`)
 2. Commit any auto-fixes (CI "Fail build on mutation" rejects uncommitted lint output)
 3. `mise run build`
 
@@ -84,7 +84,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 - **Node** 22 (mise) · **TypeScript** 6.x · **Python** ≥3.13 (agent, uv)
 - **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
-- **Test / lint** — Jest 30, ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`), Ruff (agent)
+- **Test / lint** — Jest 30 (cdk, cli), Vitest (web), ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`, `web/eslint.config.mjs`), Ruff (agent)
 - **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together, with `contracts/cedar-parity/engines/versions.json`, which names the pair (`mise run check:cedar-engine-pair` fails on any other pin)
 - **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
 

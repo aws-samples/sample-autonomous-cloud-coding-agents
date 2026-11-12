@@ -18,7 +18,7 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
 
-Use **[AGENTS.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/AGENTS.md)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+Use **[AGENTS.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/AGENTS.md)** to understand where to make changes (CDK vs CLI vs web console vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
