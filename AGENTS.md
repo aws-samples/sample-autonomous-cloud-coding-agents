@@ -22,6 +22,8 @@ mise run hooks:run        # pre-commit + pre-push locally
 
 Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment on the flagged `return` line (or the line immediately above) — the rule anchors on the `return`, so a token placed higher does not bind.
 
+`security:sast:masking` also checks the suppression comments themselves, in every tracked TypeScript, JavaScript and Python file. A line that contains the word `nosemgrep` at all — in any letter case, in a comment or in code, for any rule — must be exactly one suppression of the form `nosemgrep: <rule-id> -- <reason>`; a comment that merely mentions suppressions has to use another word. A suppression of a masking rule must also sit on a finding of that rule, or on the line directly above it: one that suppresses nothing fails the task, so delete it when the code no longer needs it.
+
 Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
 Run `mise tasks --all` with `MISE_EXPERIMENTAL=1` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
