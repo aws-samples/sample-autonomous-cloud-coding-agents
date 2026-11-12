@@ -147,6 +147,14 @@ describe('check-cedar-engine-pair', () => {
     expect(result.stderr).toMatch(/Pin it exactly \("cedarpy==\d+\.\d+\.\d+"\)/);
   });
 
+  test('fails when the agent declares the engine twice', () => {
+    // Which of two requirements wins is the installer's business; neither is "the" pin.
+    const result = runInMutatedRepo((root) => setPyRequirement(root, '"cedarpy>=4", "cedarpy<5"'));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`${PYPROJECT}: expected one "cedarpy" requirement, found 2`);
+  });
+
   test('fails when the pair file itself names a range', () => {
     const result = runInMutatedRepo((root) => {
       patchJson(root, PAIR, (pair) => { pair.cedarpy = '>=4.12'; });

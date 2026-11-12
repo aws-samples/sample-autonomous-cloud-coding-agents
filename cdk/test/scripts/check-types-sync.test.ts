@@ -202,6 +202,7 @@ describe('check-types-sync', () => {
           'export interface GateCliShape { readonly a: number }',
           'export interface GateWebOnly { readonly a: string }',
           'export interface GateConsole { readonly a: string }',
+          "export const GateListListed = ['A', 'B'] as const;",
         ].join('\n'));
         canonElsewhere(root, 'GateList', 'cdk/src/handlers/shared/gate-fixture.ts');
         canonElsewhere(root, 'GateListSame', 'cdk/src/handlers/shared/gate-fixture.ts');
@@ -216,6 +217,10 @@ describe('check-types-sync', () => {
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateConsole');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateStaleWeb');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateWeb');
+        // Listed as console-only although the CLI declares it, or the canonical-module list names it.
+        allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateCliShape');
+        canonElsewhere(root, 'GateListListed', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateListSame');
+        allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateListListed');
         allowlist(root, 'CDK_ONLY_ALLOWLIST', 'GateStale');
         allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateBoth');
         allowlist(root, 'WEB_REQUIRED_WHERE_CDK_OPTIONAL', 'GateWeb.gone');
@@ -294,7 +299,10 @@ describe('check-types-sync', () => {
 
     test('rejects a stale or contradicted entry of the web lists', () => {
       expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateStaleWeb", which ${WEB_TYPES} does not export`);
-      expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateWeb", but it has a canonical declaration`);
+      // A canonical declaration is one in the CDK types, in the CLI mirror or in a listed CDK module.
+      for (const name of ['GateWeb', 'GateCliShape', 'GateListListed']) {
+        expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "${name}", but it has a canonical declaration`);
+      }
     });
 
     test('rejects a stale, contradicted or dangling entry of the canonical-module list', () => {

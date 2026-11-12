@@ -355,6 +355,39 @@ describe('check-constants-sync', () => {
       expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
     });
 
+    test('catches an owned name among tuple targets even when the value is a contract read', () => {
+      // Unpacking: the name ends up holding one element of the value, not the value.
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nretries, FLOOR_TIMEOUT_S = _ATS["min"]\n`);
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
+    });
+
+    test('catches an augmented assignment to an owned name', () => {
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nFLOOR_TIMEOUT_S += 1\n`);
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
+    });
+
+    test('catches a TypeScript literal on the line after the `=`', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'cdk/src/constructs/lambda-microvm-compute.ts',
+          `${read(root, 'cdk/src/constructs/lambda-microvm-compute.ts')}\n`
+          + 'const READY_HOOK_TIMEOUT_SECONDS =\n  300;\n',
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/cdk\/src\/constructs\/lambda-microvm-compute\.ts:\d+: "READY_HOOK_TIMEOUT_SECONDS" is not a plain read/);
+    });
+
     test('catches a conversion in the TypeScript consumer', () => {
       const result = runInMutatedRepo((root) => {
         write(
