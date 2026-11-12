@@ -26,7 +26,7 @@
     },
     "docs": {
       "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro", "scripts/*.mjs"],
-      "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs"],
+      "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
       "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui", "jest"]
     },
     "integrations/jira-forge-app": {
