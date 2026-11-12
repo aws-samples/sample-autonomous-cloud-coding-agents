@@ -311,6 +311,32 @@ test('links to files that are not published point at GitHub; images are served f
   assert.equal(fs.readFileSync(path.join(root, 'docs/public/imgs/nested/arch.png'), 'utf8'), 'png');
 });
 
+test('an image that is not a file in docs/imgs fails the sync and leaves the mirrors untouched', () => {
+  const root = repo({ 'docs/diagrams/flow.svg': '<svg/>' });
+  sync(root, PLAN);
+  const before = pages(root).map((target) => page(root, target));
+
+  // The guide is written before the design document that shows the image.
+  fs.writeFileSync(path.join(root, 'docs/guides/GUIDE.md'), '# Guide\n\nChanged.\n\n## First\n\nChanged.\n');
+  fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n![flow](../diagrams/flow.svg)\n');
+  assert.throws(
+    () => sync(root, PLAN),
+    /docs\/design\/API\.md shows the image \.\.\/diagrams\/flow\.svg, which is not a file in docs\/imgs\/.* Correct the path, or move the image there\./,
+  );
+  assert.deepEqual(
+    pages(root).map((target) => page(root, target)),
+    before,
+  );
+
+  fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n![gone](../imgs/gone.png)\n');
+  assert.throws(() => sync(root, PLAN), /docs\/design\/API\.md shows the image \.\.\/imgs\/gone\.png, which is not a file in docs\/imgs\//);
+
+  // A link to the same file is not an image: it goes to GitHub.
+  fs.writeFileSync(path.join(root, 'docs/design/API.md'), '# API\n\n[flow](../diagrams/flow.svg)\n');
+  sync(root, PLAN);
+  assert.deepEqual(links(root, 'architecture/Api.md'), [`[flow](${GITHUB}/blob/main/docs/diagrams/flow.svg)`]);
+});
+
 test('anchors into a split guide land on the page that holds the heading (#765)', () => {
   const root = repo({
     'docs/guides/GUIDE.md': [

@@ -149,14 +149,25 @@ const fragment = (id) => (id ? `#${id}` : '');
  * The URL for a relative link written in `page.source`, or undefined to leave it as written.
  * A published file becomes its site route (under `docsBase`: Starlight does not prefix links
  * in Markdown bodies), an image its public URL, any other file of the repository a GitHub URL.
+ * `shown` marks the target of an image: the page displays that file instead of linking to
+ * it, and the site serves no file of the repository but the images of `assets.from`.
  */
-function resolveLink(target, page, docs, repoRoot) {
+function resolveLink(target, page, docs, repoRoot, shown) {
   if (target.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(target)) {
     return undefined;
   }
   const [file, anchor = ''] = target.split('#');
   const source =
     file === '' ? page.source : path.posix.join(path.posix.dirname(page.source), file).replace(/\/$/, '');
+  const servable =
+    source.startsWith(`${assets.from}/`) &&
+    fs.statSync(path.join(repoRoot, source), { throwIfNoEntry: false })?.isFile();
+  if (shown && !servable) {
+    // A GitHub URL in its place would be an HTML page: a broken image that no check reports.
+    throw new Error(
+      `sync-starlight: ${page.source} shows the image ${target}, which is not a file in ${assets.from}/, the only directory the site serves images from. Correct the path, or move the image there.`,
+    );
+  }
   // A directory stands for its README when that is a published page.
   const doc = docs.get(source) ?? docs.get(`${source}/README.md`);
   if (doc) {
@@ -186,7 +197,10 @@ function resolveLink(target, page, docs, repoRoot) {
   return `${repoUrl}/${kind}/main/${source}${fragment(anchor)}`;
 }
 
-/** Rewrites Markdown links and images outside code; `resolve` returns the new target or undefined. */
+/**
+ * Rewrites Markdown links and images outside code. `resolve` gets the target and whether it
+ * is the target of an image, and returns the new target or undefined.
+ */
 function rewriteLinks(text, resolve) {
   const lines = text.split('\n');
   const fenced = fencedLines(lines);
@@ -197,7 +211,7 @@ function rewriteLinks(text, resolve) {
       fenced[index]
         ? line
         : line.replace(codeOrLink, (match, code, open, target, close) => {
-            const rewritten = code ? undefined : resolve(target);
+            const rewritten = code ? undefined : resolve(target, open.startsWith('!'));
             return rewritten ? `${open}${rewritten}${close}` : match;
           }),
     )
@@ -371,13 +385,20 @@ export function sync(repoRoot, plan = PLAN) {
   // Every source is read before the first page is written: a failure leaves the mirrors as they were.
   const pages = collectPages(repoRoot, plan);
   const docs = indexSources(pages);
+  // Likewise every page is complete before the first one is written: an image that cannot be
+  // published fails the sync here.
+  const files = pages
+    .filter((candidate) => !candidate.skip)
+    .map((page) => {
+      const body = rewriteLinks(page.body, (target, shown) => resolveLink(target, page, docs, repoRoot, shown));
+      // JSON quoting is valid YAML and keeps a colon in the title from breaking the frontmatter.
+      const frontmatter = page.frontmatter ?? `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n`;
+      return { target: page.target, content: `${frontmatter}${body}` };
+    });
   const written = new Set(handAuthored);
-  for (const page of pages.filter((candidate) => !candidate.skip)) {
-    const body = rewriteLinks(page.body, (target) => resolveLink(target, page, docs, repoRoot));
-    // JSON quoting is valid YAML and keeps a colon in the title from breaking the frontmatter.
-    const frontmatter = page.frontmatter ?? `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n`;
-    writeFile(path.join(contentRoot, page.target), `${frontmatter}${body}`);
-    written.add(page.target);
+  for (const { target, content } of files) {
+    writeFile(path.join(contentRoot, target), content);
+    written.add(target);
   }
   prune(repoRoot, contentDir, written);
 
