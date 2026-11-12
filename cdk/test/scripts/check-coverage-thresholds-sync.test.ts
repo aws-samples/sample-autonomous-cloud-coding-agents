@@ -50,6 +50,7 @@ const FORGE = 'integrations/jira-forge-app/package.json';
 /** Every file the script reads, relative to the repo root. */
 const FIXTURE_FILES = [
   SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json', FORGE,
+  'mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'web/mise.toml',
 ];
 
 interface JestBlock {
@@ -151,7 +152,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(35);
+    expect(Number(checked)).toBeGreaterThanOrEqual(40);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -352,6 +353,44 @@ describe('check-coverage-thresholds-sync', () => {
           delete json.scripts.test;
         });
       }, `cli/package.json scripts.test: not set does not match ${CONTRACT} commands.cli/package.json`);
+    });
+  });
+
+  describe('mise tasks', () => {
+    // The build reaches each test script, and the agent's pytest, through a mise task. What follows the script's name
+    // on the task line reaches the runner as a flag in the script would, so each task is pinned too.
+    test('a suffix on the command line of each of the five test tasks', () => {
+      expectDrift((root) => {
+        edit(root, 'cdk/mise.toml', text => text.replace('"yarn test"]', '"yarn test --coverage=false"]'));
+        edit(root, 'cli/mise.toml', text => text.replace('run = "yarn test"', 'run = "yarn test --no-coverage"'));
+        edit(root, 'web/mise.toml', text => text.replace('run = "yarn test"', 'run = "yarn test --coverage.enabled=false"'));
+        edit(root, AGENT_MISE, text => text.replace('coverage/coverage.json"', 'coverage/coverage.json || true"'));
+        edit(root, 'mise.toml', text => text.replace('integrations/jira-forge-app"', 'integrations/jira-forge-app || true"'));
+      },
+      `cdk/mise.toml [tasks.test] run: ["mkdir -p $TMPDIR","yarn test --coverage=false"] does not match ${CONTRACT} tasks.//cdk:test.run`,
+      `cli/mise.toml [tasks.test] run: "yarn test --no-coverage" does not match ${CONTRACT} tasks.//cli:test.run: "yarn test"`,
+      `web/mise.toml [tasks.test] run: "yarn test --coverage.enabled=false" does not match ${CONTRACT} tasks.//web:test.run: "yarn test"`,
+      `|| true" does not match ${CONTRACT} tasks.//agent:test.run`,
+      'mise.toml [tasks.test:jira-forge-app] run: "npm test --prefix integrations/jira-forge-app || true" does not match');
+    });
+
+    // Other keys of a task decide whether and how its line runs, so a task is pinned whole: a key the contract does
+    // not list is drift. Its description and its dependencies cannot change what runs, and are free.
+    test('a task key the contract does not list, next to one that is free', () => {
+      const result = runInMutatedRepo((root) => {
+        edit(root, 'cli/mise.toml', text => text.replace('run = "yarn test"', 'run = "yarn test"\nshell = "bash -c"'));
+        edit(root, 'cdk/mise.toml', text => text.replace('description = "Jest tests"', 'description = "Jest tests, with coverage"'));
+      });
+
+      expect(result.stderr).toContain(`cli/mise.toml [tasks.test] shell: "bash -c" does not match ${CONTRACT} tasks.//cli:test.shell: not set`);
+      expect(result.stderr).not.toContain('cdk/mise.toml');
+      expect(result.status).toBe(1);
+    });
+
+    test('a table of variables on a task, which the check cannot compare and so does not accept', () => {
+      expectDrift((root) => {
+        edit(root, 'web/mise.toml', text => text.replace('run = "yarn test"', 'run = "yarn test"\nenv = { CI = "true" }'));
+      }, 'web/mise.toml [tasks.test]: cannot read "[env]"');
     });
   });
 

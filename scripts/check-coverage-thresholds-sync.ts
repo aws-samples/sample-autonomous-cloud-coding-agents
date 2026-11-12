@@ -43,6 +43,8 @@
  *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
  *   jira-forge-app  scripts.test, verbatim: node:test has no config file, so
  *              the floors and the test file are arguments of the script
+ *   mise       the task that runs each of those scripts and the agent's
+ *              pytest, every key except those in TASK_FREE_KEYS
  *
  * Run via ``mise run check:coverage-thresholds-sync``. Exits 0 when in sync,
  * 1 on drift or when something it needs cannot be read.
@@ -78,6 +80,17 @@ const VITEST_FREE_KEYS = ['css', 'environment', 'setupFiles', 'testTimeout'];
  * a second command or another list of test files is drift.
  */
 const TEST_SCRIPTS = ['cdk/package.json', 'cli/package.json', 'web/package.json', 'integrations/jira-forge-app/package.json'];
+
+/**
+ * The mise tasks the root build runs those scripts and the agent's pytest through, as mise names
+ * them: ``//<directory>:<task>``. What comes after the script's name on a task line reaches the
+ * runner as a flag would, and other keys of a task decide whether and how its line runs, so the
+ * contract pins each task whole but for TASK_FREE_KEYS.
+ */
+const TEST_TASKS = ['//cdk:test', '//cli:test', '//web:test', '//agent:test', '//:test:jira-forge-app'];
+
+/** Task keys that cannot change what a task runs. */
+const TASK_FREE_KEYS = ['depends', 'description'];
 
 /**
  * Files that pytest 9 and coverage.py 7 read before pyproject.toml, or in place of it, when they
@@ -178,6 +191,19 @@ function checkTestScripts(contract: Json): void {
   }
 }
 
+function checkTestTasks(contract: Json): void {
+  const pinned = section(contract, 'tasks');
+  for (const path of new Set([...TEST_TASKS, ...Object.keys(pinned)])) {
+    const [, directory, name] = /^\/\/([^:]*):(.+)$/.exec(path) ?? [];
+    if (name === undefined) {
+      throw new Error(`${CONTRACT} tasks.${path}: a mise task is named //<directory>:<task>`);
+    }
+    const file = join(directory, 'mise.toml');
+    const task = tomlTable(file, `tasks.${name}`);
+    pinKeys(`${file} [tasks.${name}]`, task, `tasks.${path}`, (pinned[path] ?? {}) as Json, notFree(task, TASK_FREE_KEYS));
+  }
+}
+
 function checkAgent(contract: Json): void {
   const run = section(contract, 'pytest', 'agent', 'run');
   const report = section(contract, 'pytest', 'agent', 'report');
@@ -211,6 +237,7 @@ try {
   checkAgent(contract);
   await checkWeb(contract);
   checkTestScripts(contract);
+  checkTestTasks(contract);
 } catch (err) {
   errors.push(`the check could not finish: ${err instanceof Error ? err.message : String(err)}`);
 }
