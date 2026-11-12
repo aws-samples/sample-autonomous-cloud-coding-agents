@@ -3,7 +3,7 @@
 Every rule is pinned to the tool calls it must catch and to one similar,
 legitimate call it must leave alone. Removing a rule, moving it to the softer
 tier, dropping or narrowing one of its patterns, limiting it to some task types
-or turning it into a catch-all fails here.
+or to tasks that are not read-only, or turning it into a catch-all fails here.
 
 The calls go through ``PolicyEngine.evaluate_tool_use``, the only place the
 shipped rules are evaluated. ``cdk/src/handlers/shared/builtin-policies.ts``
@@ -173,13 +173,19 @@ def test_table_covers_exactly_the_shipped_rules() -> None:
         pytest.param(
             rule_id,
             tier,
-            call,
+            call._replace(read_only=read_only),
             task_type,
-            id=f"{rule_id}: {call.tool} {call.target} as {task_type}",
+            id=f"{rule_id}: {call.tool} {call.target} as {task_type}"
+            + (", read-only" if read_only else ""),
         )
         for rule_id, (tier, caught, _) in BUILTIN_RULES.items()
         for call in caught
         for task_type in _TASK_TYPES
+        # A command rule holds in a read-only task as well: the review workflow
+        # is read-only and runs Bash. A file rule shows only in a task that may
+        # write: in a read-only one the two read_only rules deny Write and Edit
+        # before a file rule is reached.
+        for read_only in ((False, True) if call.tool == "Bash" else (call.read_only,))
     ],
 )
 def test_rule_catches_the_call_it_exists_for(
@@ -190,8 +196,8 @@ def test_rule_catches_the_call_it_exists_for(
         f"agent/policies/{tier}_deny.cedar: rule {rule_id!r} must catch {call} in a "
         f"{task_type!r} task with outcome {_OUTCOME[tier].value!r}, but the engine returned "
         f"{decision!r}. The rule was removed, moved to another tier, limited to some task types "
-        "or narrowed so that its pattern no longer matches this call, or policy.py no longer "
-        f"evaluates this tool against it. {_ON_PURPOSE}"
+        "or to tasks that are not read-only, or narrowed so that its pattern no longer matches "
+        f"this call, or policy.py no longer evaluates this tool against it. {_ON_PURPOSE}"
     )
     assert decision.outcome == _OUTCOME[tier], hint
     assert rule_id in _rules_behind(decision), hint
