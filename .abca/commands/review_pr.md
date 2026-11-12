@@ -86,7 +86,9 @@ Then apply principal-architect judgment over the diff:
   4. `docs/design/DEPLOYMENT_ROLES.md` golden baseline updated (required by
      `cdk/test/bootstrap/golden-baseline.test.ts`).
   5. `cdk/test/bootstrap/synth-coverage.test.ts` passes — run
-     `mise //cdk:test -- test/bootstrap/synth-coverage` or the full bootstrap suite.
+     `mise //cdk:testf -- test/bootstrap/synth-coverage` or the full bootstrap suite
+     (`testf` runs without coverage; a partial run of `mise //cdk:test` fails on the
+     coverage floors after its tests pass).
      **Flag as blocking** if constructs changed but bootstrap policies, the action map, or
      version/artifacts were not updated. Missing ARN patterns (action present but resource
      too narrow) are a common gap — check secret/queue/bucket naming against the patterns
