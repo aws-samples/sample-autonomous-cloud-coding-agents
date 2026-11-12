@@ -55,6 +55,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | User-facing / design prose | `docs/guides/`, `docs/design/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | ADRs | `docs/decisions/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | Deployment profiles / regional capabilities | `cdk/src/deployment/`, `contracts/deployment-capabilities.json` | **`cli/src/deployment-capabilities.ts`**, `cli/src/deployment-profile.ts`, `docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles` | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| Solution User-Agent (#319) | `agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts` (keep the three identical) | `contracts/ua-vectors.json` — the solution id and the sanitizer vectors that all three test suites load | [agent/AGENTS.md](./agent/AGENTS.md), [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
 | Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | — | — |
 
 ## Boundaries
