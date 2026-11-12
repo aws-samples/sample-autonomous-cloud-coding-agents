@@ -42,7 +42,7 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 
 Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync.
 
-Build and test: `mise //cdk:build` (compile + lint + test + synth).
+Build and test: `mise //cdk:build` (compile + lint + type-check + test + synth).
 
 ### `agent/` - Agent runtime (Python)
 
