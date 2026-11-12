@@ -125,24 +125,8 @@ _hang_watchdog.start()
 #    endpoints. Before this, writer threads leaked by test_server.py signed
 #    CloudWatch Logs requests with whatever credentials the developer's
 #    environment resolved.
-for _var in (
-    "AWS_ACCESS_KEY_ID",
-    "AWS_BEARER_TOKEN_BEDROCK",
-    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
-    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
-    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-    "AWS_CREDENTIAL_FILE",
-    "AWS_DEFAULT_PROFILE",
-    "AWS_PROFILE",
-    "AWS_ROLE_ARN",
-    "AWS_ROLE_SESSION_NAME",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SECURITY_TOKEN",
-    "AWS_SESSION_TOKEN",
-    "AWS_WEB_IDENTITY_TOKEN_FILE",
-):
-    os.environ.pop(_var, None)
+for _var in [name for name in os.environ if name.startswith("AWS_")]:
+    del os.environ[_var]
 os.environ["AWS_CONFIG_FILE"] = os.devnull
 os.environ["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
 os.environ["BOTO_CONFIG"] = os.devnull
