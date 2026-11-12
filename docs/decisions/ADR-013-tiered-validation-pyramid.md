@@ -120,7 +120,7 @@ Progressive build-out:
 **Tier 3 — Remote CI (5–20 min, authoritative, gates merge)**
 
 - Full test matrix (multiple Node versions if applicable)
-- Security scans (Semgrep SAST, OSV deps, Grype container, Retire.js, zizmor)
+- Security scans. The required job `Secrets, deps, and workflow scan` (`.github/workflows/security-pr.yml`) runs on every pull request and merge-queue entry: gitleaks over the commits of the change, the silent-success-masking rules over the whole repository, the Semgrep registry packs for the findings the change adds, OSV deps and zizmor, and it builds the agent image when `agent/Dockerfile`, `agent/pyproject.toml`, `agent/uv.lock` or `.dockerignore` changed. The weekly suite (`.github/workflows/security.yml`) runs every scanner even when an earlier one fails, adds the full Semgrep SAST, Grype, Retire.js, Bandit and the Trivy image scan, and reports to one rolling issue
 - CDK diff against deployed stack
 - Multi-account deployment verification
 - E2E tests against real AWS services
