@@ -46,11 +46,12 @@ const PYPROJECT = 'agent/pyproject.toml';
 const AGENT_MISE = 'agent/mise.toml';
 const VITE_CONFIG = 'web/vite.config.ts';
 const FORGE = 'integrations/jira-forge-app/package.json';
+const FORGE_SOURCE = 'integrations/jira-forge-app/src/proxy.js';
 
 /** Every file the script reads, relative to the repo root. */
 const FIXTURE_FILES = [
   SCRIPT, CONTRACT, 'cdk/package.json', 'cli/package.json', PYPROJECT, AGENT_MISE, VITE_CONFIG, 'web/package.json', FORGE,
-  'mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'web/mise.toml',
+  'mise.toml', 'cdk/mise.toml', 'cli/mise.toml', 'web/mise.toml', FORGE_SOURCE,
 ];
 
 interface JestBlock {
@@ -158,7 +159,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(41);
+    expect(Number(checked)).toBeGreaterThanOrEqual(42);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -350,6 +351,14 @@ describe('check-coverage-thresholds-sync', () => {
           json.scripts.test = json.scripts.test.replace(from, to);
         });
       }, `${FORGE} scripts.test`, `does not match ${CONTRACT} commands.${FORGE}`);
+    });
+
+    // Node leaves out of its coverage the code that a node:coverage comment marks, and nothing lints the Forge app:
+    // the floors of its script would then measure whatever is left.
+    test('a comment in the Forge app that takes code out of the measurement', () => {
+      expectDrift((root) => {
+        edit(root, FORGE_SOURCE, text => `/* node:coverage disable */\n${text}`);
+      }, `${FORGE_SOURCE} holds a node:coverage comment`);
     });
 
     test('a test script that is gone', () => {

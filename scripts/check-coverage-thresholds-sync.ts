@@ -42,7 +42,8 @@
  *   web        the test block of vite.config.ts, every key except those in
  *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
  *   jira-forge-app  scripts.test, verbatim: node:test has no config file, so
- *              the floors and the test file are arguments of the script
+ *              the floors and the test file are arguments of the script; no
+ *              node:coverage comment in src/, which nothing lints
  *   mise       the task that runs each of those scripts and the agent's
  *              pytest, every key except those in TASK_FREE_KEYS
  *   rc files   none committed that mise, yarn or npm would read on top of
@@ -53,7 +54,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -119,6 +120,9 @@ const LAUNCHER_CONFIGS = [
   { reader: 'yarn', directories: ['.', 'cdk', 'cli', 'web'], names: ['.yarnrc', '.yarnrc.yml', '.npmrc'] },
   { reader: 'npm', directories: ['integrations/jira-forge-app'], names: ['.npmrc'] },
 ];
+
+/** The files that the Forge test script holds to its floors (--test-coverage-include). */
+const FORGE_SOURCES = 'integrations/jira-forge-app/src';
 
 const errors: string[] = [];
 let checked = 0;
@@ -253,6 +257,20 @@ function checkLauncherConfigs(): void {
   }
 }
 
+/**
+ * Node leaves out of its coverage the code that a ``node:coverage`` comment marks, so one comment takes a
+ * module out of the floors, and nothing lints the Forge app that could refuse it.
+ */
+function checkForgeIgnoreComments(): void {
+  checked += 1;
+  for (const name of readdirSync(join(root, FORGE_SOURCES), { recursive: true, encoding: 'utf8' })) {
+    const file = join(FORGE_SOURCES, name);
+    if (statSync(join(root, file)).isFile() && readFileSync(join(root, file), 'utf8').includes('node:coverage')) {
+      errors.push(`${file} holds a node:coverage comment: node leaves the code it marks out of the coverage that the Forge test script holds to its floors. Remove the comment and cover the code with a test`);
+    }
+  }
+}
+
 function checkAgent(contract: Json): void {
   const run = section(contract, 'pytest', 'agent', 'run');
   const report = section(contract, 'pytest', 'agent', 'report');
@@ -288,6 +306,7 @@ try {
   checkTestScripts(contract);
   checkTestTasks(contract);
   checkLauncherConfigs();
+  checkForgeIgnoreComments();
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
   // Not drift, so not the advice below: evaluating web/vite.config.ts takes the packages it imports.

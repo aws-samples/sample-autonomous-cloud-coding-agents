@@ -92,4 +92,6 @@ it is added to the `test` script in `package.json`. That script is pinned in
 Node measures only the modules that a run loads, and the script loads
 `src/proxy.js` alone (`--import=./src/proxy.js`). `src/index.js`, which hands
 the proxy to Forge, is not measured. A module added to `src/` is not measured
-either until the script loads it with an `--import` of its own.
+either until the script loads it with an `--import` of its own. A
+`node:coverage` comment would take code out of the measurement as well, so
+`mise run check:coverage-thresholds-sync` fails on one in `src/`.
