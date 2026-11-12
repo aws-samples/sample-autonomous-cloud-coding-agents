@@ -16,6 +16,8 @@ from pathlib import Path
 AGENT_DIR = Path(__file__).resolve().parent.parent
 
 _SKIPPING_TESTS = """
+from pathlib import Path
+
 import pytest
 
 
@@ -32,8 +34,10 @@ def test_inside():
     pytest.skip("skipped from inside the test")
 
 
-def test_inside_a_deleted_directory(tmp_path, monkeypatch):
-    gone = tmp_path / "gone"
+def test_inside_a_deleted_directory(monkeypatch):
+    # Beside this file, not under tmp_path: with that fixture this run would take a
+    # number in pytest's series of temp directories, of which it keeps only three.
+    gone = Path(__file__).with_name("gone")
     gone.mkdir()
     monkeypatch.chdir(gone)
     gone.rmdir()
