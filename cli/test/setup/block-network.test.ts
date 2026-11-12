@@ -43,14 +43,14 @@ describe('network guard', () => {
       emitter.on('error', () => undefined);
     };
 
-    afterEach(() => expect(lookup).not.toHaveBeenCalled());
-
     test('net.connect with options', () => {
       expect(() => quiet(net.connect({ host: UNRESOLVED, port: 443, lookup }))).toThrow(refused(UNRESOLVED));
+      expect(lookup).not.toHaveBeenCalled();
     });
 
     test('an http request', () => {
       expect(() => quiet(http.get({ host: UNRESOLVED, lookup }))).toThrow(refused(UNRESOLVED));
+      expect(lookup).not.toHaveBeenCalled();
     });
 
     test('socket.connect with a port and a host', () => {
