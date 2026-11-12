@@ -102,6 +102,7 @@ def test_a():
 ## Common mistakes
 
 - **Cedar parity** — `cedarpy==4.12.2` (agent) and `@cedar-policy/cedar-wasm` 4.12.0 (cdk) must move together. See [cdk/AGENTS.md](../cdk/AGENTS.md) and `docs/design/CEDAR_HITL_GATES.md` §15.6.
+- **Claude Code CLI lockstep (#215)** — `claude-agent-sdk` (`pyproject.toml`) bundles a Claude Code CLI, and `Dockerfile` installs the same CLI from npm; the two must be the same version. Move both pins in one commit: `tests/test_claude_cli_lockstep.py` fails when they differ and names the version to use.
 - **Forgotten consumer** — Progress event schema changes need `cli/src/commands/watch.ts` and `test_progress_writer.py` updates.
 - **Image bundle** — CDK deploys this tree; root `mise run build` always runs agent quality.
 - **Un-attributed AWS SDK client (#319)** — build clients via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed); a naked `boto3.client(...)` silently drops solution attribution. ruff `TID251` fails the lint on `boto3.client`, `boto3.resource` and any boto3 or botocore session in `src/` and `scripts/` outside `src/aws_session.py` (the list is `banned-api` in `pyproject.toml`).
