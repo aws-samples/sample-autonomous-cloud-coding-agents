@@ -41,8 +41,8 @@ description = "Lint and auto-fix. Fails when it changed a file (the fixes are li
 run = "uv run ruff check --config pyproject.toml --no-cache --fix --show-fixes --exit-non-zero-on-fix"
 
 [tasks.format]
-description = "Format with ruff"
-run = "uv run ruff format --config pyproject.toml --no-cache"
+description = "Format with ruff. Fails when it rewrote a file: look at the change, keep it, run again."
+run = "uv run ruff format --config pyproject.toml --no-cache --exit-non-zero-on-format"
 
 [tasks."format:check"]
 description = "Check formatting"
