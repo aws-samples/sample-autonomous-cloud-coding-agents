@@ -46,14 +46,13 @@ run = "yarn jest --coverage=false --runInBand"
 # without a file extension in a test, which jest runs as a require, 4 that follow from
 # those, and 1 for `import.meta` in a script that node runs as an ES module.
 #
-# After `compile`, like the tests, so that the build starts it beside them. It uses
-# nothing that compile emits. The reason is the queue: more tasks are ready when the
-# root build starts than mise runs at once (8), and a task that is ready then can be
-# given a slot ahead of `compile`, which heads the path that decides the build time
-# (compile, then the tests).
+# `wait_for`, not `depends`: it uses nothing that compile emits, so this only orders
+# the start. In a build it begins after `compile` and cannot take a slot ahead of the
+# task that heads the path deciding the build time (compile, then the tests). Run on
+# its own, it does not compile first.
 [tasks.typecheck]
 description = "Type-check src, test and scripts (tsc --noEmit); jest does not check types"
-depends = [":compile"]
+wait_for = [":compile"]
 run = "yarn typecheck"
 
 [tasks.synth]

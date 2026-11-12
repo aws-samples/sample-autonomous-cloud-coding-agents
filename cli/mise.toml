@@ -17,11 +17,11 @@ run = "yarn compile"
 # isolatedModules, which transpiles each file and checks no types, and `compile` covers
 # src/. Without this task a type error in a test passes the whole build.
 # tsconfig.dev.json is src and test under the same compiler options as tsconfig.json.
-# After `compile` only so that it is not one more task ready when the root build starts:
-# see the note on the same task in cdk/mise.toml.
+# `wait_for` only orders the start, after `compile` in a build: see the note on the same
+# task in cdk/mise.toml.
 [tasks.typecheck]
 description = "Type-check src and test (tsc --noEmit); jest does not check types"
-depends = [":compile"]
+wait_for = [":compile"]
 run = "yarn typecheck"
 
 [tasks.build]
