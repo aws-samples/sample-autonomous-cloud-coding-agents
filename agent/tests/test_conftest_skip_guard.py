@@ -8,6 +8,7 @@ status and what the run says.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -29,6 +30,14 @@ def test_marker():
 
 def test_inside():
     pytest.skip("skipped from inside the test")
+
+
+def test_inside_a_deleted_directory(tmp_path, monkeypatch):
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    pytest.skip("skipped where the working directory is gone")
 
 
 @pytest.mark.xfail(reason="an expected failure is not a skip")
@@ -79,13 +88,15 @@ def test_a_skip_fails_the_run_in_ci_and_is_named(tmp_path):
     proc = _run_pytest(tmp_path, ci="true")
     out = proc.stdout
 
-    assert "1 passed, 3 skipped, 1 xfailed" in out, out + proc.stderr
+    assert "1 passed, 4 skipped, 1 xfailed" in out, out + proc.stderr
     assert proc.returncode == 1, "every test passed or was skipped, yet the run must fail in CI"
     assert "Skip guard" in out
     # Each skip is listed with where it is and why, so that it can be acted on.
-    assert "test_skipping.py::test_marker — " in out
-    assert "Skipped: skipped by a marker" in out
+    where_and_why = r"test_skipping\.py:\d+: Skipped: skipped by a marker"
+    assert re.search(rf"test_skipping\.py::test_marker — .*{where_and_why}", out), out
     assert "test_skipping.py::test_inside — " in out
+    # Listing a skip must not need the working directory: the test may have deleted it.
+    assert "test_skipping.py::test_inside_a_deleted_directory — " in out
     assert "test_skipped_module.py — " in out
     assert "could not import 'a_module_that_is_not_installed'" in out
     # An expected failure is an expectation, not a skip (and a stale one already fails).
@@ -95,6 +106,6 @@ def test_a_skip_fails_the_run_in_ci_and_is_named(tmp_path):
 def test_outside_ci_a_skip_stays_a_skip(tmp_path):
     proc = _run_pytest(tmp_path, ci=None)
 
-    assert "1 passed, 3 skipped, 1 xfailed" in proc.stdout, proc.stdout + proc.stderr
+    assert "1 passed, 4 skipped, 1 xfailed" in proc.stdout, proc.stdout + proc.stderr
     assert proc.returncode == 0
     assert "Skip guard" not in proc.stdout

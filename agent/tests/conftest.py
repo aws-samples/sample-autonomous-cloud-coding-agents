@@ -187,7 +187,10 @@ def _record_skip(report):
     """Remember a skipped test, or a module skipped at import (importorskip)."""
     if report.skipped and not hasattr(report, "wasxfail"):  # an xfail is an expectation, and strict
         where = report.longrepr  # (file, line, reason) for a skip
-        detail = f"{os.path.relpath(where[0])}:{where[1]}: {where[2]}"
+        # The file as pytest has it, not made relative: that asks for the working
+        # directory, and where a test has deleted it this hook would raise and end
+        # the session there, in CI or not.
+        detail = f"{where[0]}:{where[1]}: {where[2]}"
         _skipped.append(f"{report.nodeid} — {detail}")
 
 
