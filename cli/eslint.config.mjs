@@ -32,7 +32,7 @@ const __dirname = dirname(__filename);
 
 // Every TypeScript extension. ESLint skips a file that no `files` pattern matches
 // without a word, so a .mts or .cts file would sit outside every rule below.
-const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}', 'build-tools/**/*.{ts,tsx,mts,cts}'];
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}'];
 
 const NO_MD5 = {
   selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
@@ -64,7 +64,7 @@ export default [
   { files: TS_FILES, rules: js.configs.recommended.rules },
   ...tseslint.configs['flat/recommended'].map((config) => ({ ...config, files: TS_FILES })),
 
-  // TypeScript source, test, and build-tools files
+  // TypeScript source and test files
   {
     files: TS_FILES,
     languageOptions: {
@@ -255,7 +255,7 @@ export default [
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
-        devDependencies: ['**/test/**', '**/build-tools/**'],
+        devDependencies: ['**/test/**'],
         optionalDependencies: false,
         peerDependencies: true,
       }],
@@ -322,9 +322,9 @@ export default [
     },
   },
 
-  // Override: tests and build tooling legitimately use inline literals
+  // Override: tests legitimately use inline literals
   {
-    files: ['test/**/*.{ts,tsx,mts,cts}', 'build-tools/**/*.{ts,tsx,mts,cts}'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
     },
