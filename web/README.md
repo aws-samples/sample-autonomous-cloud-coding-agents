@@ -112,4 +112,5 @@ test/         mirrors src/; helpers/ holds the MSW server and render helper
 ```
 
 Dependencies flow `domains/ -> core/ -> app/config`. API wire types in
-`src/core/api/types.ts` mirror `cli/src/types.ts`; keep them identical.
+`src/core/api/types.ts` mirror `cli/src/types.ts` as a subset: a type may leave members
+out, and `mise run check:types-sync` fails when a declared member differs.
