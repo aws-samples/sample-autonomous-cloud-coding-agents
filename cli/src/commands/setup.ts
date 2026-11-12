@@ -1000,7 +1000,7 @@ export function cliInvocation(script: string | undefined, cwd: string): string {
   return `node ${relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : script}`;
 }
 
-/* istanbul ignore next -- thin AWS/terminal adapters; runSetup is tested through SetupDeps */
+// Not unit-tested: thin AWS/terminal adapters; runSetup is tested through SetupDeps.
 function defaultDeps(): SetupDeps {
   const describeError = (stackName: string, region: string, err: unknown) => new CliError(
     `Could not read stack '${stackName}' in ${region}: ${err instanceof Error ? err.message : String(err)}`,

@@ -82,6 +82,10 @@ export default defineConfig(
     plugins: { 'license-header': licenseHeader },
     rules: {
       'license-header/header': ['error', join(__dirname, 'header.js')],
+      // A coverage-ignore comment takes code out of what the coverage floors measure:
+      // test the code, or leave it counted as uncovered. These are the spellings that
+      // jest (v8-to-istanbul) and vitest honour.
+      'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'eqeqeq': ['error', 'always'],
       // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
       // A function above it is split, not exempted with a disable directive.

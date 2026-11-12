@@ -199,6 +199,10 @@ export default [
         ignoreRegExpLiterals: true,
       }],
       'no-console': ['error'],
+      // A coverage-ignore comment takes code out of what the coverage floors measure:
+      // test the code, or leave it counted as uncovered. These are the spellings that
+      // jest (v8-to-istanbul) and vitest honour.
+      'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-trailing-spaces': ['error'],
       'no-restricted-syntax': ['error', NO_MD5],
       // A holder that a closure reads before its one assignment cannot become a const
