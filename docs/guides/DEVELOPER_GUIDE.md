@@ -488,7 +488,7 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
-| Run agent quality checks | `mise //agent:quality` (lint, type check, tests) |
+| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint step has fixed a file it fails once and lists the fixes: run the task again |
 
 Build and test: `mise //agent:quality`. The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
 

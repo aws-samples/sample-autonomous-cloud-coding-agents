@@ -75,7 +75,7 @@ Common commands:
 | `mise run install` | Install all dependencies (Yarn workspaces + Python) |
 | `mise run build` | Full build: agent quality, CDK compile/lint/test/synth, CLI build, docs build |
 | `mise //cdk:build` | CDK only: compile + lint + type-check + test + synth |
-| `mise //agent:quality` | Agent only: lint + type check + tests |
+| `mise //agent:quality` | Agent only: lint + format + type check + dead code + tests |
 | `mise //cli:build` | CLI only: compile + type-check + test + lint |
 | `mise //docs:build` | Docs only: sync sources, script tests, Markdown structure lint, `astro check`, Astro build (fails on a broken internal link or anchor) |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
