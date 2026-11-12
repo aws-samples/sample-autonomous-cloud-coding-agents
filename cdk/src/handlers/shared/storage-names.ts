@@ -38,8 +38,6 @@ export const ATTACHMENT_OBJECT_KEY_PREFIX = 'attachments/';
  * S3 key prefix for all trace artifacts. Layout:
  * ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1). The per-user segment is
  * what ``get-trace-url`` authorizes a presigned read against.
- * ``constructs/trace-artifacts-bucket.ts`` repeats this literal under a compile-time
- * equality check.
  */
 export const TRACE_OBJECT_KEY_PREFIX = 'traces/';
 

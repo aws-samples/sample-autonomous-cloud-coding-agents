@@ -20,26 +20,12 @@
 import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import { TRACE_OBJECT_KEY_PREFIX as RUNTIME_TRACE_OBJECT_KEY_PREFIX } from '../handlers/shared/storage-names';
 
 /** Lifecycle expiry for trace artifacts (design §10.1). */
 export const TRACE_ARTIFACT_TTL_DAYS = 7;
 
-/**
- * Object-key prefix used for all trace artifacts. Key layout:
- * ``traces/<user_id>/<task_id>.jsonl.gz`` (design §10.1). The per-user
- * prefix is load-bearing — the ``get-trace-url`` handler relies on the
- * caller's Cognito ``sub`` matching the TaskRecord's ``user_id`` to
- * authorize a presigned read, so the agent MUST write under its own
- * user prefix and never another user's.
- *
- * Lambda handlers import this value from ``handlers/shared/storage-names.ts``
- * instead: importing this module would bundle all of ``aws-cdk-lib`` into the
- * function. The literal is repeated here rather than re-exported because
- * ``agent/tests/test_trace_key_contract.py`` parses this file for it;
- * ``satisfies`` makes the compiler reject any drift between the two.
- */
-export const TRACE_OBJECT_KEY_PREFIX = 'traces/' satisfies typeof RUNTIME_TRACE_OBJECT_KEY_PREFIX;
+/** Re-exported from the import-free module that Lambda handlers read it from. */
+export { TRACE_OBJECT_KEY_PREFIX } from '../handlers/shared/storage-names';
 
 /**
  * This bucket holds a SECOND, disjoint key space the agent writes to:

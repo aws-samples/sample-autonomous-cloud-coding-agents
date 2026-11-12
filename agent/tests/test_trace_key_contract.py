@@ -13,8 +13,7 @@ asserted by three independent codepaths that MUST agree:
    outside the caller's user prefix.
 3. Shared constant ``TRACE_OBJECT_KEY_PREFIX`` in
    ``cdk/src/handlers/shared/storage-names.ts`` — exports the
-   canonical prefix that the handler imports. The bucket construct
-   repeats the literal under a compile-time equality check.
+   canonical prefix that the handler imports.
 
 This test is a drift detector: if anyone renames ``traces/`` to
 ``trajectories/`` on one side, it fails immediately. The agent side is
