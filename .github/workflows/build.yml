@@ -306,10 +306,12 @@ jobs:
           SECONDS=0
           mise run install
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
-      # The install is not frozen, so a manifest that disagrees with its lockfile
-      # makes it rewrite the lockfile. Fail here and name the file, instead of at
-      # the end of the build as an anonymous "files were changed". A lockfile that
-      # is not tracked fails too (git ls-files --error-unmatch).
+      # The yarn install is not frozen: a package.json that disagrees with
+      # yarn.lock makes it rewrite the lockfile. Fail here and name the file,
+      # instead of at the end of the build as an anonymous "files were changed".
+      # The agent install (`uv sync --locked`) fails by itself on such a mismatch
+      # and never rewrites agent/uv.lock; the step still requires that file to be
+      # tracked (git ls-files --error-unmatch, as for yarn.lock) and unchanged.
       - name: Fail on lockfile drift
         shell: bash
         run: |
@@ -318,7 +320,7 @@ jobs:
             git ls-files --error-unmatch "$lock" > /dev/null
             changed="$(git status --porcelain -- "$lock")"
             if [ -n "$changed" ]; then
-              echo "::error file=${lock},title=Lockfile drift::Installing dependencies rewrote ${lock}: a package.json or agent/pyproject.toml no longer matches it. Run 'mise run install' locally and commit ${lock}."
+              echo "::error file=${lock},title=Lockfile drift::${lock} is not as committed after installing dependencies. Regenerate it locally and commit it: 'mise run install' for yarn.lock (a package.json no longer matches it), 'cd agent && uv lock' for agent/uv.lock."
               git --no-pager diff --stat -- "$lock"
               drift=1
             fi
