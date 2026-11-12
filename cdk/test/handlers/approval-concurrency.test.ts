@@ -43,7 +43,7 @@ process.env.APPROVE_RATE_LIMIT_PER_MINUTE = '60';
 process.env.DENY_RATE_LIMIT_PER_MINUTE = '60';
 
 class MockTransactionCanceledException extends Error {
-  name = 'TransactionCanceledException';
+  override name = 'TransactionCanceledException';
   CancellationReasons: Array<{ Code: string }>;
 
   constructor(reasons: Array<{ Code: string }>) {

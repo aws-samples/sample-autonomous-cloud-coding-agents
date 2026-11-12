@@ -179,7 +179,7 @@ export class RegistryRecordMalformedError extends Error {
   constructor(
     readonly reason: MalformedReason,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryRecordMalformedError';
@@ -198,7 +198,7 @@ export class RegistryPublishIncompleteError extends Error {
   constructor(
     readonly recordId: string,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryPublishIncompleteError';
