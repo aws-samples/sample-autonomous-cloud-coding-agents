@@ -298,7 +298,32 @@ describe('check-masking-suppression-placement', () => {
       const result = run({ 'src/a.ts': tsCatch(` // ${WORD}: ${PY_RULE} -- missing record is the null contract`) }, [['src/a.ts', 5, TS_RULE]]);
 
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain('src/a.ts:5');
+      expect(result.stderr).toContain(`src/a.ts:5 (${PY_RULE})`);
+    });
+
+    describe('counts a suppression as a masking one however its rule id is written', () => {
+      // Comments the pinned semgrep accepts as naming the masking rule (measured
+      // against it), other than the documented one. Data on purpose, as above.
+      const comments = [
+        ` // ${WORD}: semgrep.${TS_RULE} -- missing record is the null contract`,
+        ` // ${WORD}: other-rule -- missing record is the null contract, ${TS_RULE}`,
+      ];
+
+      test.each(comments.map((_, i) => i))('rejects comment %i on code the rule does not flag', (i) => {
+        const result = run({ 'src/a.ts': tsCatch(comments[i]) }, []);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('1 silent-success-masking suppression(s) suppress nothing');
+        expect(result.stderr).toContain(`src/a.ts:5 (${TS_RULE})`);
+      });
+
+      test('and holds each of them to a finding of that rule', () => {
+        const files = Object.fromEntries(comments.map((comment, i) => [`src/c${i}.ts`, tsCatch(comment)]));
+        const result = run(files, comments.map((_, i): Finding => [`src/c${i}.ts`, 5, TS_RULE]));
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain(`all ${comments.length} silent-success-masking suppressions bind to one of ${comments.length} findings`);
+      });
     });
   });
 

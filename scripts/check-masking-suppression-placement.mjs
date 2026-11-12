@@ -22,6 +22,9 @@
 //     needs it. Both are reported. This is asked of semgrep itself rather than
 //     guessed from the text: the rules are run once with suppressions ignored and
 //     every suppression must sit on, or directly above, a finding of its rule.
+//     A suppression counts as one for a masking rule when that rule's id stands
+//     anywhere on its line: semgrep reads an id in more places and spellings
+//     than the documented one, and all of them contain the id.
 //
 // The binding rule covers only the two local rules because only they can be run
 // offline and reproducibly; the registry rules behind `security:sast` cannot.
@@ -47,7 +50,8 @@ const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
 const MENTION = /(?<![a-z0-9])nose[m]\w*/giu;
 // The documented form, read from where a mention starts.
 const WELL_FORMED = /^nose[m]grep: [\w.-]+ -- \S/;
-const MASKING = /\bnose[m]grep: ((?:ts|py)-silent-success-masking) -- /;
+// A masking rule id, wherever it stands on a suppression line.
+const MASKING_RULE = /(?:ts|py)-silent-success-masking/g;
 
 /** The check could not run: say why and stop, never report success. */
 function cannotRun(message) {
@@ -108,12 +112,14 @@ for (const file of files) {
       malformed.push({ file, line: i + 1, text: line.trim(), read: mentions.map((mention) => `"${mention[0]}"`).join(', ') });
       return;
     }
-    const rule = MASKING.exec(line)?.[1];
-    if (!rule) return;
+    const rules = new Set(line.match(MASKING_RULE));
+    if (rules.size === 0) return;
     masking++;
-    // On the finding's line (inline) or directly above it.
-    if (!found.has(`${file}:${i + 1}:${rule}`) && !found.has(`${file}:${i + 2}:${rule}`)) {
-      unbound.push({ file, line: i + 1, text: line.trim() });
+    for (const rule of rules) {
+      // On the finding's line (inline) or directly above it.
+      if (!found.has(`${file}:${i + 1}:${rule}`) && !found.has(`${file}:${i + 2}:${rule}`)) {
+        unbound.push({ file, line: i + 1, text: line.trim(), rule });
+      }
     }
   });
 }
@@ -131,11 +137,12 @@ if (malformed.length > 0) {
 }
 if (unbound.length > 0) {
   console.error(`\n✖ ${unbound.length} silent-success-masking suppression(s) suppress nothing — semgrep reports no finding of that rule on the line or on the line below:\n`);
-  for (const v of unbound) console.error(`  ${v.file}:${v.line}\n      ${v.text}`);
+  for (const v of unbound) console.error(`  ${v.file}:${v.line} (${v.rule})\n      ${v.text}`);
   console.error(
     '\nIf the comment drifted away from its `return`, move it onto that line or directly above it, with any prose above that\n' +
       '(see PLACEMENT FOOTGUN in .semgrep/silent-success-masking.yaml). If the rule no longer flags this code, delete the\n' +
-      'suppression and keep the explanation as an ordinary comment.\n',
+      'suppression and keep the explanation as an ordinary comment. The rule in brackets is the one without a finding: its\n' +
+      'id counts wherever it stands on the line, so do not name a masking rule in the reason of another suppression.\n',
   );
 }
 if (malformed.length > 0 || unbound.length > 0) process.exit(1);
