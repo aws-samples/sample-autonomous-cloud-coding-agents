@@ -52,7 +52,7 @@ Rules:
 
 - Push to a fork and open a PR against `main`.
 - The PR title and description become the squash commit message, so keep them accurate throughout the review.
-- The CI workflow runs `mise run install` then `mise run build` (compile + lint + test + synth + security scans for all packages).
+- The CI `build` workflow runs `mise run install` then `mise run build` (lint, type checks and tests of every package, the CDK synth, the docs build and the drift checks). The security scans run in a second required workflow, as the job `Secrets, deps, and workflow scan`.
 - Iterate on review feedback by pushing new commits to the same branch. Maintainers squash-merge when approved.
 - For structured reviews (human or agent), use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md) — including the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for smell dimensions automation cannot catch. To review a queue of PRs in one pass, use the [`review_prs` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_prs.md), which derives a filtered work-list and runs `review_pr` across each.
 
@@ -66,14 +66,14 @@ Rules:
 
 ## Tooling
 
-This repository uses [mise](https://mise.jdx.dev/) for tool versions and monorepo tasks. The root `mise.toml` defines config roots for `cdk`, `agent`, `cli`, and `docs`.
+This repository uses [mise](https://mise.jdx.dev/) for tool versions and monorepo tasks. The root `mise.toml` defines config roots for `cdk`, `agent`, `cli`, `docs`, and `web`.
 
 Common commands:
 
 | Command | What it does |
 |---|---|
 | `mise run install` | Install all dependencies (Yarn workspaces + Python) |
-| `mise run build` | Full build: agent quality, CDK compile/lint/test/synth, CLI build, docs build |
+| `mise run build` | Full build: agent quality, the cdk, cli, web and docs builds, the Jira Forge app tests and the drift checks (`mise run drift-prevention`) |
 | `mise //cdk:build` | CDK only: compile + lint + type-check + test + synth |
 | `mise //agent:quality` | Agent only: lint + format + type check + dead code + tests |
 | `mise //cli:build` | CLI only: compile + type-check + test + lint |
