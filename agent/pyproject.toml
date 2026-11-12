@@ -181,6 +181,11 @@ max-complexity = 15
 "boto3.DEFAULT_SESSION".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 "boto3.setup_default_session".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 "botocore.session".msg = "a botocore session builds un-attributed clients (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+# The two process entrypoints: uvicorn loads server.py, batch mode runs
+# entrypoint.py. No module in src/ or scripts/ may import either. Tests import
+# both to test them, under the tests/** exemption above.
+"server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
+"entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
