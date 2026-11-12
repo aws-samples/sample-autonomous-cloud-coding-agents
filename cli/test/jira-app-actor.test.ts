@@ -144,13 +144,7 @@ describe('Jira app actor setup helpers', () => {
   });
 
   test('rejects non-JSON and invalid site responses', async () => {
-    const nonJsonFetch = jest.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new Error('invalid JSON');
-      },
-    } as Response);
+    const nonJsonFetch = jest.fn().mockResolvedValue(new Response('<html>not JSON</html>', { status: 200 }));
     await expect(probeJiraAppActor({
       proxyUrl: 'https://install.webtrigger.atlassian.app/public/trigger',
       sharedSecret: 's'.repeat(64),

@@ -792,7 +792,7 @@ describe('jira invite-user action', () => {
   });
 
   test('fails before writing when the admin is not logged in', async () => {
-    loadCredentialsSpy.mockReturnValue(undefined as ReturnType<typeof config.loadCredentials>);
+    loadCredentialsSpy.mockReturnValue(null);
 
     await expect(runInvite(['cloud-123', 'maya@example.test'])).rejects.toThrow(/Not authenticated/);
 
@@ -1285,7 +1285,7 @@ describe('jira setup action', () => {
         ],
       }],
     });
-    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue(undefined as ReturnType<typeof config.loadCredentials>);
+    const credsSpy = jest.spyOn(config, 'loadCredentials').mockReturnValue(null);
     try {
       const program = makeJiraCommand();
       await expect(program.parseAsync(['node', 'bgagent', 'setup'])).rejects.toThrow(/Not authenticated/);

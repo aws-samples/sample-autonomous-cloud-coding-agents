@@ -26,7 +26,9 @@ describe('format', () => {
     status: 'COMPLETED',
     repo: 'owner/repo',
     issue_number: 42,
+    issue_title: null,
     resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+    resolved_assets: null,
     pr_number: null,
     task_description: 'Fix the bug',
     branch_name: 'bgagent/abc123/fix-the-bug',
@@ -44,6 +46,8 @@ describe('format', () => {
     duration_s: 3540,
     cost_usd: 0.1234,
     build_passed: true,
+    lint_passed: null,
+    otel_trace_id: null,
     max_turns: 100,
     max_budget_usd: null,
     turns_attempted: null,
@@ -332,7 +336,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 1,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -340,6 +346,9 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('TASK ID');
@@ -358,7 +367,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'work',
         branch_name: 'bgagent/abc/fix',
@@ -366,6 +377,9 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       };
       const now = Date.parse('2026-08-07T00:05:30.000Z');
 
@@ -410,7 +424,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'Fix the login bug',
         branch_name: 'bgagent/abc/fix',
@@ -418,6 +434,9 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('Fix the login bug');
@@ -430,7 +449,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: 'owner/repo',
         issue_number: 42,
+        issue_title: null,
         resolved_workflow: { id: 'coding/new-task-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: null,
         branch_name: 'bgagent/abc/fix',
@@ -438,6 +459,9 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('#42');
@@ -449,7 +473,9 @@ describe('format', () => {
         status: 'RUNNING',
         repo: null,
         issue_number: null,
+        issue_title: null,
         resolved_workflow: { id: 'default/agent-v1', version: '1.0.0' },
+        resolved_assets: null,
         pr_number: null,
         task_description: 'Summarise these papers',
         branch_name: 'bgagent/abc/task',
@@ -457,6 +483,9 @@ describe('format', () => {
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
         agent_heartbeat_at: null,
+        cost_usd: null,
+        completed_at: null,
+        channel_source: 'api',
       }];
       const output = formatTaskList(tasks);
       expect(output).toContain('—');
@@ -512,7 +541,6 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-        agent_heartbeat_at: null,
         revoked_at: null,
       }];
       const output = formatWebhookList(webhooks);
@@ -553,7 +581,6 @@ describe('format', () => {
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
-        agent_heartbeat_at: null,
         revoked_at: null,
       };
       const output = formatWebhookDetail(webhook);

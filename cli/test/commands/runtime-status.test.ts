@@ -212,8 +212,10 @@ describe('buildRuntimeStatusReport', () => {
       { deployment: LEGACY_DEPLOYMENT },
     );
 
-    expect(report.agentcore_runtimes[0].probe_status).toBe('error');
-    expect(report.agentcore_runtimes[0].error).toContain('AccessDenied');
+    expect(report.agentcore_runtimes[0]).toMatchObject({
+      probe_status: 'error',
+      error: expect.stringContaining('AccessDenied'),
+    });
   });
 
   test('filters by repo and skips non-active blueprints for probes', async () => {
@@ -254,7 +256,7 @@ describe('buildRuntimeStatusReport', () => {
       { deployment: LEGACY_DEPLOYMENT },
     );
 
-    expect(report.agentcore_runtimes[0].last_updated_at).toBe('2026-01-01T00:00:00.000Z');
+    expect(report.agentcore_runtimes[0]).toMatchObject({ probe_status: 'ok', last_updated_at: '2026-01-01T00:00:00.000Z' });
   });
 
   test('handles control plane failure_reason on successful probe', async () => {
@@ -278,7 +280,7 @@ describe('buildRuntimeStatusReport', () => {
       { deployment: LEGACY_DEPLOYMENT },
     );
 
-    expect(report.agentcore_runtimes[0].failure_reason).toBe('image pull failed');
+    expect(report.agentcore_runtimes[0]).toMatchObject({ probe_status: 'ok', failure_reason: 'image pull failed' });
   });
 
   test('skips agentcore probe when no runtime ARN is resolved', async () => {
