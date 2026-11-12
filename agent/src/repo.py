@@ -692,7 +692,7 @@ def _install_commit_hook(repo_dir: str) -> None:
         shutil.copy2(hook_src, hook_dst)
         current = os.stat(hook_dst).st_mode
         exec_bits = stat.S_IXUSR | stat.S_IXGRP
-        os.chmod(hook_dst, current | exec_bits)  # nosemgrep
+        os.chmod(hook_dst, current | exec_bits)
         log("SETUP", "Installed prepare-commit-msg hook")
     except Exception as e:
         log("WARN", f"Commit hook install failed: {type(e).__name__}: {e}")

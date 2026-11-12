@@ -64,7 +64,7 @@ async function getSecret(webhookId: string): Promise<string | null> {
     const errorName = (err as Error)?.name;
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Webhook secret not found in Secrets Manager', { webhook_id: webhookId });
-      return null; // nosemgrep: ts-silent-success-masking -- missing per-webhook secret is an expected config state; other SM errors rethrow below
+      return null; // missing per-webhook secret is an expected config state; other SM errors rethrow below
     }
     logger.error('Failed to fetch webhook secret from Secrets Manager', {
       webhook_id: webhookId,

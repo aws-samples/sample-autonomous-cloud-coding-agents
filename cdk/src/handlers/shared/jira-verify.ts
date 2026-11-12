@@ -87,7 +87,7 @@ export async function getJiraSecret(secretId: string, forceRefresh = false): Pro
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Jira secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null; // nosemgrep: ts-silent-success-masking -- missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
+      return null; // missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Jira secret from Secrets Manager', {
       secret_id: secretId,

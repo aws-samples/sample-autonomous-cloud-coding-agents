@@ -1,6 +1,8 @@
 """Unit + wire-capture tests for ua.py (#319, simplified app-id design)."""
 
 import contextlib
+import json
+from pathlib import Path
 
 import boto3
 import pytest
@@ -9,21 +11,28 @@ from botocore.config import Config
 
 import ua
 
+# Shared with cdk/test/handlers/shared/ua.test.ts and cli/test/ua.test.ts: the three
+# UA modules must agree on the solution id and on what the sanitiser lets through.
+_VECTORS = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts" / "ua-vectors.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+class TestSolutionId:
+    def test_matches_contract(self):
+        assert _VECTORS["solution_id"] == ua.SOLUTION_ID
+
 
 class TestSanitize:
-    @pytest.mark.parametrize(
-        "raw,expected",
-        [
-            ("agent", "agent"),
-            ("a/b", "a-b"),  # '/' is not a UA token char
-            ("a#b", "a-b"),  # '#' is the scheme separator — must be stripped
-            ("héllo", "h-llo"),  # non-ASCII -> '-'
-            ("a b", "a-b"),  # space -> '-'
-            ("ok-_.~!", "ok-_.~!"),  # legal token chars pass through
-        ],
-    )
-    def test_sanitize_vectors(self, raw, expected):
-        assert ua.sanitize_ua_value(raw) == expected
+    def test_contract_has_vectors(self):
+        # pytest skips an empty parametrize list instead of failing it.
+        assert _VECTORS["sanitize"]
+
+    @pytest.mark.parametrize("vector", _VECTORS["sanitize"], ids=lambda vector: vector["note"])
+    def test_sanitize_vectors(self, vector):
+        assert ua.sanitize_ua_value(vector["input"]) == vector["expected"]
 
 
 class TestStaticUserAgentExtra:

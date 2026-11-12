@@ -997,7 +997,7 @@ async function getOauthSecretForResolve(
   } catch (err) {
     // A deleted secret IS a definite absence; anything else is not a verdict.
     if ((err as { name?: string } | undefined)?.name === 'ResourceNotFoundException') {
-      return null; // nosemgrep: ts-silent-success-masking -- ResourceNotFound IS the empty success this function reports: the secret does not exist, so there is definitively no stored grant. Every other error rethrows on the next line, which is the whole point of the function.
+      return null; // ResourceNotFound IS the empty success this function reports: the secret does not exist, so there is definitively no stored grant. Every other error rethrows on the next line, which is the whole point of the function.
     }
     throw err;
   }

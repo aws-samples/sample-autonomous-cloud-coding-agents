@@ -33,5 +33,6 @@ run = "yarn vite build"
 
 [tasks.build]
 description = "Type-check, test, lint and bundle the console"
-depends = [":typecheck", ":test", ":eslint"]
-run = "yarn vite build"
+# `:bundle` is a dependency, not a second `yarn vite build` here: //cdk:synth
+# depends on the same task and packages web/dist, so one build must write it.
+depends = [":typecheck", ":test", ":eslint", ":bundle"]

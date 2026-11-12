@@ -9,6 +9,19 @@ before deploy.
 **Design reference:** [`docs/design/CEDAR_HITL_GATES.md`](../../docs/design/CEDAR_HITL_GATES.md)
 §15.6 (cross-engine parity contract), decision #23, finding #1.
 
+## Engine pair
+
+[`engines/versions.json`](./engines/versions.json) names the one pair of engine
+versions these fixtures were verified against. `mise run check:cedar-engine-pair`
+(`scripts/check-cedar-engine-pair.mjs`, part of `drift-prevention` in the build)
+fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and
+`agent/pyproject.toml` each pin exactly that version. To move to another Cedar
+release, bump both engines and that file in one change and keep every fixture
+here green on both runners.
+
+The file sits in a subdirectory because both runners load every `*.json` file
+directly in this directory as a fixture.
+
 ## Why this lives in `contracts/`
 
 Neither `agent/` nor `cdk/` owns the parity contract — it's an agreement

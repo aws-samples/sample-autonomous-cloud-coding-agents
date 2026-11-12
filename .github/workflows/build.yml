@@ -30,11 +30,22 @@ permissions:
   repository-projects: none
   security-events: none
   statuses: none
+# One build per pull request: a new push cancels the superseded run instead of
+# both holding a runner. Merge-queue and manual runs each get a group of their
+# own (the run id) and cancel-in-progress is false for them, so this block can
+# never cancel a queued merge group or make it wait behind another run.
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
     permissions:
       actions: write # upload-artifact when self-mutation is detected
       contents: read
+    # A hung build must not hold a runner for the 360-minute default. The longest
+    # of 194 recorded jobs took 27 minutes (on one jest worker), and the merge
+    # queue gives up on an entry after 60.
+    timeout-minutes: 45
     # Runner priority: vars.DEFAULT_RUNNER_LABEL > PR label 'self-hosted' > PR label 'ubuntu-latest-4-cores' > 'ubuntu-latest'
     runs-on: >-
       ${{
@@ -63,6 +74,10 @@ jobs:
       # secret/dependency/workflow scanning runs as required PR checks in
       # security-pr.yml (issue #327); the full image/SAST suite runs in security.yml.
       MISE_DISABLE_TOOLS: "aqua:aquasecurity/trivy,grype,semgrep"
+      # cdk's test script defaults to `--maxWorkers=25%`, which is ONE worker on
+      # the 4-core runner: the whole jest suite ran serially. Three workers leave
+      # a core for the other build tasks (the ECS agent box runs four).
+      JEST_MAX_WORKERS: "3"
     steps:
       - name: Free Disk Space
         shell: bash
@@ -241,6 +256,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -290,20 +306,94 @@ jobs:
           SECONDS=0
           mise run install
           echo "::notice::Install completed in ${SECONDS}s (node_modules=${CACHE_NODE:-miss}, venv=${CACHE_VENV:-miss}, jest=${CACHE_JEST:-miss})"
+      # The install is not frozen, so a manifest that disagrees with its lockfile
+      # makes it rewrite the lockfile. Fail here and name the file, instead of at
+      # the end of the build as an anonymous "files were changed". A lockfile that
+      # is not tracked fails too (git ls-files --error-unmatch).
+      - name: Fail on lockfile drift
+        shell: bash
+        run: |
+          drift=0
+          for lock in yarn.lock agent/uv.lock; do
+            git ls-files --error-unmatch "$lock" > /dev/null
+            changed="$(git status --porcelain -- "$lock")"
+            if [ -n "$changed" ]; then
+              echo "::error file=${lock},title=Lockfile drift::Installing dependencies rewrote ${lock}: a package.json or agent/pyproject.toml no longer matches it. Run 'mise run install' locally and commit ${lock}."
+              git --no-pager diff --stat -- "$lock"
+              drift=1
+            fi
+          done
+          exit "$drift"
       - name: build
+        id: build
+        shell: bash
         env:
           TMPDIR: ${{ runner.temp }}
         run: |
+          # The output is copied for "Summarize build failure". pipefail is what
+          # keeps the pipe to tee from turning a failed build green: do not drop it.
+          set -o pipefail
           echo "::notice::Runner: $(nproc) cores, $(free -h | awk '/Mem:/{print $2}') RAM"
           SECONDS=0
-          mise run build
+          mise run build 2>&1 | tee "$RUNNER_TEMP/build.log"
           echo "::notice::Build completed in ${SECONDS}s ($(nproc) cores, mise parallel DAG)"
+      # A failed build must say which mise task failed and why, without anyone
+      # reading a thousand interleaved log lines (#256, CA-06): the task name and
+      # the last lines of its own output go to the job summary and an annotation.
+      - name: Summarize build failure
+        if: failure() && steps.build.outcome == 'failure'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          esc="$(printf '\033')"
+          sed -E "s/${esc}\[[0-9;]*m//g" "$log" > "$log.clean"
+          # mise prints "[//pkg:task] ERROR task failed" for every task that failed.
+          failed="$(sed -n -E 's/^\[([^]]+)\] ERROR task failed$/\1/p' "$log.clean" | sort -u)"
+          {
+            echo "## Build failed"
+            if [ -z "$failed" ]; then
+              echo "mise named no failed task. Last 60 lines of the build output:"
+              echo '```text'
+              tail -n 60 "$log.clean"
+              echo '```'
+            fi
+            printf '%s\n' "$failed" | while IFS= read -r task; do
+              [ -n "$task" ] || continue
+              echo "\`mise run ${task}\` failed. Last 60 lines of its output (coverage table rows left out):"
+              echo '```text'
+              # Only rows of the coverage table that jest prints are left out: six
+              # cells, with nothing but numbers, line ranges and dashes after the
+              # first, or the "% Stmts" heading. Every other line is kept however
+              # many "|" it has: compiler and type-checker errors spell union types
+              # with them, and those lines are the reason the task failed.
+              awk -v p="[${task}] " '
+                index($0, p) != 1 { next }
+                { line = substr($0, length(p) + 1); n = split(line, cell, "[|]") }
+                n == 6 && (cell[2] cell[3] cell[4] cell[5] cell[6]) ~ /^[-0-9., ]+$/ { next }
+                n == 6 && cell[2] ~ /^ *% Stmts *$/ { next }
+                { print line }
+              ' "$log.clean" | tail -n 60
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Build failed::Failed mise task(s): $(printf '%s' "${failed:-none named by mise}" | tr '\n' ' '). The job summary shows the last lines of their output."
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-reports-${{ matrix.compute_type }}
+          path: "*/test-reports"
+          if-no-files-found: ignore
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: cdk/coverage/lcov.info,cli/coverage/lcov.info,agent/coverage/lcov.info
+          # Information only, never a gate: the coverage floors are enforced by the
+          # test tasks themselves. Without disable_search the uploader also sends
+          # every file that looks like coverage, e.g. contracts/coverage-thresholds.json.
+          disable_search: true
           fail_ci_if_error: false
       - name: Upload CDK artifact (${{ matrix.compute_type }})
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

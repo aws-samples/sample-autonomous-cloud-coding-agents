@@ -8,6 +8,9 @@
 #   - agent:   cedarpy==4.12.2                 (agent/pyproject.toml)
 #   - cdk:     @cedar-policy/cedar-wasm@4.12.0  (cdk/package.json)
 #   Both build on the Cedar 4.12.0 core.
+# contracts/cedar-parity/engines/versions.json names that pair, and
+# `check:cedar-engine-pair` (in drift-prevention) fails when a manifest
+# pins anything else.
 min_version = "2026.7.11"
 
 monorepo_root = true
@@ -17,18 +20,22 @@ experimental = true
 
 [tools]
 node = "22"
-prek = "latest"
-gitleaks = "latest"
+# Gate tools are pinned to exact versions so that a required check changes only
+# with a commit (#722, #540). Nothing bumps these automatically (Dependabot has
+# no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
+# in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml.
+prek = "0.5.9"
+gitleaks = "8.30.1"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
 # present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
 # that breaks under the mise 2026.6.x default `minimum_release_age`
 # (jdx/mise#10279; see #320).
-uv = "latest"
-semgrep = "latest"
-osv-scanner = "latest"
-"grype" = "latest"
-"aqua:zizmorcore/zizmor" = "latest"
+uv = "0.13.7"
+semgrep = "1.183.0"
+osv-scanner = "2.7.0"
+"grype" = "0.121.1"
+"aqua:zizmorcore/zizmor" = "1.32.0"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
@@ -80,12 +87,43 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
 
+# What an ABCA agent runs by default to verify lint before and after its change
+# (`mise run lint`, DEFAULT_LINT_COMMAND in agent/src/post_hooks.py). Check-only
+# on purpose: no `--fix` and no formatter rewrite, so a pass means the tree is
+# clean as committed and a failure names the file, line and rule. Use
+# `mise run quality` for the auto-fixing variant.
+[tasks.lint]
+description = "Non-mutating lint and type checks of every package"
+depends = [
+  "//agent:lint",
+  "//agent:format:check",
+  "//agent:typecheck",
+  "//cdk:eslint:check",
+  "//cdk:compile",
+  "//cli:eslint:check",
+  "//cli:compile",
+  "//web:eslint:check",
+  "//web:typecheck",
+]
+
+# The gate scripts are gates too: a typo in one (`errors.lenght > 0`) runs fine and
+# passes everything. `strict` plus the unused checks catch that class; the two
+# flags after them describe what `node --experimental-strip-types`, which runs
+# these scripts, can execute. The behaviour of each script is tested in
+# cdk/test/scripts/*.test.ts, which //cdk:test runs in the same build.
+# The compiler is named by path because the root `node_modules/.bin/tsc` link
+# belongs to whichever hoisted package claimed it, not to the `typescript` these
+# scripts import.
+[tasks."check:scripts"]
+description = "Type-check the gate scripts (scripts/*.ts) with the TypeScript they import"
+run = "node node_modules/typescript/bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters --noImplicitReturns --erasableSyntaxOnly --verbatimModuleSyntax --skipLibCheck --target es2022 --module esnext --moduleResolution bundler --types node scripts/*.ts"
+
 [tasks."check:types-sync"]
-description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
+description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8) and web/src/core/api/types.ts. Fails if a public type exists in both with different shapes, if CLI exports a name CDK doesn't, or if the web mirror declares a member its canonical type lacks or exports a name that has no canonical declaration and is not listed as console-only."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
 
 [tasks."check:constants-sync"]
-description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if agent/src/policy.py declares a literal for a name owned by the JSON contract."
+description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if any file under agent/src assigns a name owned by the JSON contract anything but a plain read of its contract key."
 run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 
 [tasks."check:coverage-thresholds-sync"]
@@ -112,12 +150,18 @@ run = "node scripts/check-deadcode-ratchet.mjs"
 description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
 run = "node scripts/check-transitive-pin-sync.mjs"
 
+[tasks."check:cedar-engine-pair"]
+description = "Cedar engine pair: fail unless @cedar-policy/cedar-wasm (cdk, Lambda layer) and cedarpy (agent) are pinned exactly to the versions in contracts/cedar-parity/engines/versions.json."
+run = "node scripts/check-cedar-engine-pair.mjs"
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
+  { task = "check:scripts" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
+  { task = "check:cedar-engine-pair" },
   { task = "check:coverage-thresholds-sync" },
   { task = "check:transitive-pin-sync" },
   { task = "//docs:link-check" },
