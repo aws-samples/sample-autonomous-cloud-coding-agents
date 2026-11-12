@@ -285,6 +285,31 @@ test('links to mirrored files become site routes (#920)', () => {
   ]);
 });
 
+test('a link label may wrap over lines, and starts at the nearest bracket', () => {
+  const root = repo({
+    'docs/design/API.md': [
+      '# API',
+      '',
+      'See [the first',
+      'decision](../decisions/ADR-001-first.md) and [the others](../decisions/README.md',
+      '"Decisions") for more.',
+      '',
+      'A bare ![ or [ in a sentence does not open a label: [decisions](../decisions/README.md).',
+      '',
+    ].join('\n'),
+  });
+  sync(root, PLAN);
+
+  assert.deepEqual(page(root, 'architecture/Api.md').split('\n').slice(4), [
+    'See [the first',
+    `decision](${BASE}/decisions/adr-001-first) and [the others](${BASE}/decisions/readme`,
+    '"Decisions") for more.',
+    '',
+    `A bare ![ or [ in a sentence does not open a label: [decisions](${BASE}/decisions/readme).`,
+    '',
+  ]);
+});
+
 test('links to files that are not published point at GitHub; images are served from /imgs', () => {
   const root = repo({
     'AGENTS.md': '# Agents\n',

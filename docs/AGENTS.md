@@ -33,7 +33,7 @@ CI **"Fail build on mutation"** rejects PRs where committed Starlight mirrors do
 
 | Reason | Meaning | Fix |
 |--------|---------|-----|
-| `relative link` | Sync left the link as written because its target does not exist in the repository | Correct the path, or restore the file |
+| `relative link` | Sync left the link as written: its target does not exist in the repository, or the link is written in a form sync does not rewrite — a path in angle brackets (`[label](<path>)`), a title in single quotes or parentheses, a reference definition (`[label]: path`), a link around an image (`[![alt](image)](path)`), a label that contains brackets | Correct the path, or restore the file. For the other forms write the link inline as `[label](path)` or `[label](path "title")` (the label may wrap over lines); link an image with `<a href="path"><img src="../imgs/name.png" alt="..."></a>` |
 | `invalid link` | No page is published at that route | Link to the source file with a relative path instead of a hand-written site URL |
 | `invalid hash` | The page exists but has no heading with that anchor | Use the anchor of an existing heading in the target source |
 

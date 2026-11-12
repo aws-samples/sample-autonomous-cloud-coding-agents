@@ -210,24 +210,33 @@ function rewriteLinks(text, resolve) {
   // First alternative: an inline code span, which is skipped. Second: [label](target "title").
   // Third: src="target" or href="target", in either kind of quotes.
   const codeOrLink =
-    /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))|(\b(?:src|href)\s*=\s*(["']))([^"'\s]+)(\6)/gi;
-  return lines
-    .map((line, index) =>
-      fenced[index]
-        ? line
-        : line.replace(codeOrLink, (match, code, open, target, close, attribute, quote, value) => {
-            if (code) {
-              return match;
-            }
-            if (open) {
-              const rewritten = resolve(target, open.startsWith('!'));
-              return rewritten ? `${open}${rewritten}${close}` : match;
-            }
-            const rewritten = resolve(value, /^src/i.test(attribute));
-            return rewritten ? `${attribute}${rewritten}${quote}` : match;
-          }),
-    )
-    .join('\n');
+    /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^[\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))|(\b(?:src|href)\s*=\s*(["']))([^"'\s]+)(\6)/gi;
+  const rewrite = (run) =>
+    run.replace(codeOrLink, (match, code, open, target, close, attribute, quote, value) => {
+      if (code) {
+        return match;
+      }
+      if (open) {
+        const rewritten = resolve(target, open.startsWith('!'));
+        return rewritten ? `${open}${rewritten}${close}` : match;
+      }
+      const rewritten = resolve(value, /^src/i.test(attribute));
+      return rewritten ? `${attribute}${rewritten}${quote}` : match;
+    });
+  // The lines between two code fences are searched as one text, not line by line: a label
+  // may wrap over lines. It cannot contain a bracket, so it starts at the nearest `[`.
+  const runs = [];
+  let start = 0;
+  while (start < lines.length) {
+    let end = start + 1;
+    while (end < lines.length && fenced[end] === fenced[start]) {
+      end += 1;
+    }
+    const run = lines.slice(start, end).join('\n');
+    runs.push(fenced[start] ? run : rewrite(run));
+    start = end;
+  }
+  return runs.join('\n');
 }
 
 /**
