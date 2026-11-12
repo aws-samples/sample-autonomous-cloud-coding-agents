@@ -8,6 +8,7 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test scripts",
     "synth": "npx cdk synth",

@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.dev.json",
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler"
+  }
+}

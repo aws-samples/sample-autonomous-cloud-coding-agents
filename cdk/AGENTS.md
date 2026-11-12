@@ -8,6 +8,7 @@ You are an **ABCA platform engineer** for the `@abca/cdk` package: Lambda handle
 
 ```bash
 mise //cdk:compile          # TypeScript compile
+mise //cdk:typecheck        # type-check src, test and scripts (jest does not check types)
 mise //cdk:test             # Jest unit tests
 mise //cdk:synth            # synth to cdk/cdk.out/
 mise //cdk:eslint           # ESLint --fix (run after merging main)
@@ -21,6 +22,7 @@ mise //cdk:destroy          # destroy stack
 - **Full suite:** `mise //cdk:test`. The coverage floors apply; they count every file in `src/`, tested or not.
 - **Single file:** `mise //cdk:testf -- test/handlers/shared/validation.test.ts`
 - **Pattern:** `mise //cdk:testf -- orchestrate-task`
+- **Types:** `mise //cdk:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/` and `scripts/`; the build runs it. A fixture has to match the production type it is declared with.
 
 `testf` runs without coverage. A partial run with plain `npx jest` fails on the coverage floors after its tests pass. The full suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it: to add or update one on purpose, `mise //cdk:testf -- -u <file>`, then commit the snapshot.
 
