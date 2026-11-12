@@ -293,7 +293,7 @@ describe('get-task-replay handler', () => {
 describe('assembleBundle', () => {
   test('coerces a string cost_usd and treats NaN as null', () => {
     const base = { task_id: 't', user_id: 'u' } as unknown as TaskRecord;
-    expect(assembleBundle({ ...base, cost_usd: '1.5' } as TaskRecord, []).cost_usd).toBe(1.5);
+    expect(assembleBundle({ ...base, cost_usd: '1.5' } as unknown as TaskRecord, []).cost_usd).toBe(1.5);
     expect(assembleBundle({ ...base, cost_usd: 'oops' } as unknown as TaskRecord, []).cost_usd).toBeNull();
     expect(assembleBundle(base, []).cost_usd).toBeNull();
   });

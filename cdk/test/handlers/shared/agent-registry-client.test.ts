@@ -664,7 +664,7 @@ describe('AgentRegistryClient', () => {
   test('publish (native MCP) preserves a caller-supplied discovery._meta alongside ABCA keys', async () => {
     const fake = new FakeClient();
     const client = makeClient(fake);
-    const runtime = { transport: 'http', url: 'https://x' };
+    const runtime = { transport: 'http', url: 'https://x' } as const;
     const record = await client.publish({
       kind: 'mcp_server',
       namespace: 'acme',
