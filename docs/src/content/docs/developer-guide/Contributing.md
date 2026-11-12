@@ -26,7 +26,7 @@ Guidelines:
 
 - One logical change per pull request. Related changes (e.g. a feature + its tests) are fine together; unrelated changes should be separate PRs.
 - Every change requires a unit test. Tests live alongside the code they cover (`cdk/test/` mirrors `cdk/src/`, `agent/tests/`, `cli/test/`).
-- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python).
+- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs every package's lint and type checks the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web: test the code, or leave it counted as uncovered.
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match.
 - If you change docs sources (`docs/guides/`, `docs/design/`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
