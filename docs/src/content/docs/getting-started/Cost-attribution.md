@@ -1,8 +1,6 @@
 ---
-title: Cost attribution
+title: "Cost attribution (operator guide)"
 ---
-
-# Cost attribution (operator guide)
 
 How to attribute **Amazon Bedrock model-inference spend** to individual users and repositories in a multi-user ABCA deployment. This is the operator-facing companion to the platform design in [BEDROCK_COST_ATTRIBUTION.md](/sample-autonomous-cloud-coding-agents/architecture/bedrock-cost-attribution) and the cost model in [COST_MODEL.md](/sample-autonomous-cloud-coding-agents/architecture/cost-model#cost-attribution).
 

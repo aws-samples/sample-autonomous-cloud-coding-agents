@@ -1,8 +1,8 @@
 ---
-title: Installation
+title: "Installation"
 ---
 
-Follow the [Quick Start](./QUICK_START.mdx) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
 This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
 
@@ -114,17 +114,17 @@ By default, progress events and task state writes are silently skipped during lo
 
 ```bash
 # 1. Start DynamoDB Local and create tables
-cd agent && mise run local:up
+mise //agent:local:up
 
 # 2. Run the agent with --local-events
 ./agent/run.sh --local-events "owner/repo" 42
 
-# 4. In another terminal — query progress events
-mise run local:events          # table format
-mise run local:events:json     # JSON format
+# 3. In another terminal — query progress events
+mise //agent:local:events          # table format
+mise //agent:local:events:json     # JSON format
 
-# 5. When done — tear down DynamoDB Local
-mise run local:down
+# 4. When done — tear down DynamoDB Local
+mise //agent:local:down
 ```
 
 The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
@@ -148,11 +148,11 @@ For the full list, see `agent/README.md`. For how the model default is layered, 
 | `ERROR: GITHUB_TOKEN is not set` | Export `GITHUB_TOKEN` with the required scopes. |
 | `WARNING: No AWS credentials detected` | Configure one of the three credential methods above. |
 | `WARNING: Image exceeds AgentCore 2 GB limit!` | Reduce dependencies or use multi-stage Docker build. |
-| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required | Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region |
+| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required. Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region. |
 
 ### Deployment
 
-Follow the [Quick Start](./QUICK_START.mdx) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) steps 3-6 for first-time deployment. For subsequent deploys after code changes:
 
 ```bash
 mise run build

@@ -1,0 +1,23 @@
+{
+  // Structure only: each rule below catches content that is lost or broken when the file
+  // is rendered. Style rules (line length, list markers, fence languages, ...) stay off.
+  // scripts/markdown-lint.test.mjs holds this file to exactly these keys and values: any
+  // other key, such as "ignores" or "overrides", could exempt files from the rules.
+  "config": {
+    "default": false,
+    // A heading goes at most one level deeper than the heading before it.
+    "MD001": true,
+    // No two headings with the same text under one parent heading: their anchors collide.
+    "MD024": { "siblings_only": true },
+    // One top-level heading per file. A front matter `title` counts as that heading.
+    "MD025": true,
+    // Every image has alternative text.
+    "MD045": true,
+    // Every table row has as many cells as the header: renderers drop the extra ones.
+    "MD056": true
+  },
+  // A `<!-- markdownlint-disable -->` comment in a file must not switch a rule off.
+  "noInlineConfig": true,
+  "noBanner": true,
+  "noProgress": true
+}

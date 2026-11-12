@@ -1,8 +1,6 @@
 ---
-title: Attachments
+title: "Task Attachments (Multimodal)"
 ---
-
-# Task Attachments (Multimodal)
 
 End-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context — screenshots of bugs, design mockups, CSV data, log files, code snippets — that the agent can reference during execution. Every channel (CLI, webhook, Slack, Linear) feeds the same schema; every attachment passes through security screening before reaching the agent.
 
@@ -936,12 +934,12 @@ New `--attachment` flag (repeatable):
 
 ```bash
 # Local files (auto-detects inline vs presigned based on size)
-bgagent submit --repo org/app --description "Fix this bug" \
+bgagent submit --repo org/app --task "Fix this bug" \
   --attachment screenshot.png \
   --attachment error.log
 
 # URL reference
-bgagent submit --repo org/app --description "Implement this design" \
+bgagent submit --repo org/app --task "Implement this design" \
   --attachment https://figma.com/file/abc123/export.png
 ```
 

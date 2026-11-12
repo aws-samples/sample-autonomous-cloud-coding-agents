@@ -1,8 +1,6 @@
 ---
-title: Contributing
+title: "Contributing Guidelines"
 ---
-
-# Contributing Guidelines
 
 Thank you for your interest in contributing. Whether it's a bug report, new feature, or documentation improvement, we value contributions from the community.
 
@@ -18,9 +16,9 @@ Describe what you intend to contribute. This avoids duplicate work and gives mai
 
 ### 2. Set up your environment
 
-Follow the [Quick Start](./docs/guides/QUICK_START.mdx) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
+Follow the [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) to clone, install, and build the project. See the [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction) for local testing and the development workflow.
 
-Use **[AGENTS.md](/sample-autonomous-cloud-coding-agents/architecture/agents)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+Use **[AGENTS.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/AGENTS.md)** to understand where to make changes (CDK vs CLI vs agent vs docs), which tests to extend, and common pitfalls (generated docs, mirrored API types, `mise` tasks). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
 
 ### 3. Implement your change
 
@@ -32,7 +30,7 @@ Guidelines:
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match.
 - If you change docs sources (`docs/guides/`, `docs/design/`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
-- For cross-cutting or hard-to-reverse decisions, add an ADR to `docs/decisions/` (see [ADR README](/sample-autonomous-cloud-coding-agents/architecture/readme)).
+- For cross-cutting or hard-to-reverse decisions, add an ADR to `docs/decisions/` (see [ADR README](/sample-autonomous-cloud-coding-agents/decisions/readme)).
 
 ### 4. Commit
 
@@ -81,7 +79,7 @@ Common commands:
 | `mise //cdk:build` | CDK only: compile + lint + test + synth |
 | `mise //agent:quality` | Agent only: lint + type check + tests |
 | `mise //cli:build` | CLI only: compile + test + lint |
-| `mise //docs:build` | Docs only: sync sources + Astro build |
+| `mise //docs:build` | Docs only: sync sources, script tests, Markdown structure lint, `astro check`, Astro build (fails on a broken internal link or anchor) |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 

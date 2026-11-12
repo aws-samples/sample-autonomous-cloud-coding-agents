@@ -1,8 +1,6 @@
 ---
-title: Ecs rightsized planning
+title: "Right-sized ECS task def for read-only planning"
 ---
-
-# Right-sized ECS task def for read-only planning
 
 > **Status:** IMPLEMENTED. Built as designed below: a second 8 GB / 2 vCPU planning
 > Fargate task def in `EcsAgentCluster`, selected by `workflowIsReadOnly` in the ECS compute

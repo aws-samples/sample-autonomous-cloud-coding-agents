@@ -1,8 +1,6 @@
 ---
-title: Memory
+title: "Memory"
 ---
-
-# Memory
 
 Agents are stateless by default: each task starts from scratch with no knowledge of what happened before. The memory system fixes this by giving agents access to repository knowledge, past task episodes, and review feedback across sessions. A well-configured `CLAUDE.md` in the repository is often more impactful than any external memory, but external memory fills gaps the repo cannot: execution history, reviewer preferences, operational quirks, and cross-task patterns.
 

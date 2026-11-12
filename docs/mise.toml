@@ -11,10 +11,17 @@ run = "cd .. && yarn install --check-files"
 description = "Sync docs content from guides/design/CONTRIBUTING"
 run = "node scripts/sync-starlight.mjs"
 
+[tasks.test]
+# The files are named, not globbed: a glob that matches nothing would pass.
+description = "Tests for the mirror generator and for the Markdown structure lint (scripts/*.test.mjs)"
+run = "node --test scripts/sync-starlight.test.mjs scripts/markdown-lint.test.mjs"
+
 [tasks.build]
-description = "Starlight docs site build"
-depends = [":sync"]
-run = "./node_modules/.bin/astro build"
+# astro check (type errors in .astro components and config) runs first, in this task, so
+# that the required build gets it without building the site a second time.
+description = "Starlight docs site build: Markdown structure lint, astro check, then astro build (which validates internal links)"
+depends = [":sync", ":test", ":markdown-lint"]
+run = ["./node_modules/.bin/astro check", "./node_modules/.bin/astro build"]
 
 [tasks.dev]
 description = "Starlight dev server"
@@ -26,7 +33,17 @@ depends = [":sync"]
 run = "./node_modules/.bin/astro sync && ./node_modules/.bin/astro check"
 
 [tasks.link-check]
-# Scope: docs/guides/, docs/design/, docs/decisions/, and root *.md files.
-# Not scanned: docs/README.md, agent/, cli/, contracts/, docs/abca-plugin/.
-description = "Check for broken links in Markdown sources"
+# Scope: every Markdown file in the repository that git tracks, and every new one that is
+# not ignored.
+# Not scanned: the generated mirrors in src/content/docs (astro build validates those).
+description = "Check for broken relative links in all Markdown sources"
 run = "bash scripts/link-check.sh"
+
+[tasks.markdown-lint]
+# Scope: every Markdown file in the repository that git tracks, with the five structural
+# rules of .markdownlint-cli2.jsonc. A dependency of :build, so the required build runs it.
+# Not linted: the generated mirrors in src/content/docs (their sources are).
+# Runs the package.json script: the dead-code check reads package.json scripts, not this
+# file, and must see markdownlint-cli2 in use.
+description = "Lint the structure of all Markdown sources: tables, headings, image alt text"
+run = "yarn -s markdown-lint"

@@ -556,7 +556,7 @@ The `AWAITING_APPROVAL` state holds the user's concurrency slot (paused but aliv
 
 - Every transition is a conditional DDB write: `#status = :fromStatus`.
 - Illegal transitions are rejected at the storage layer (not enforced in code).
-- The valid-transition table lives in `cdk/src/handlers/shared/task-status.ts`.
+- The valid-transition table lives in `cdk/src/constructs/task-status.ts`.
 
 ---
 

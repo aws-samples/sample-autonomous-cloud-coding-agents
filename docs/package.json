@@ -9,13 +9,16 @@
     "build": "npm run docs:build",
     "preview": "astro preview",
     "security:retire": "retire --path . --severity high",
-    "link-check": "bash scripts/link-check.sh"
+    "link-check": "bash scripts/link-check.sh",
+    "markdown-lint": "node scripts/markdown-lint.mjs"
   },
   "devDependencies": {
     "jest": "^30.4.2",
     "jest-junit": "^17",
     "markdown-link-check": "^3.13.6",
-    "retire": "^6.1.0"
+    "markdownlint-cli2": "0.24.0",
+    "retire": "^6.1.0",
+    "starlight-links-validator": "0.25.3"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",

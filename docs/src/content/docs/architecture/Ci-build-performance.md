@@ -1,8 +1,6 @@
 ---
-title: Ci build performance
+title: "CI build performance"
 ---
-
-# CI build performance
 
 The `build` workflow (`.github/workflows/build.yml`) is the gating CI check on every pull request and in the merge queue. This document records how its cost is distributed, the levers for reducing it, and the sequence in which we are applying them. It exists so that each optimization is a measurable, independently-reviewable experiment rather than ad-hoc tuning.
 

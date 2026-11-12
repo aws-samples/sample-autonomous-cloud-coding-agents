@@ -1,18 +1,16 @@
 ---
-title: Adr 024 deployment profiles
+title: "ADR-024: Deployment profiles and regional capability validation"
 ---
-
-# ADR-024: Deployment profiles and regional capability validation
 
 **Status:** proposed
 **Date:** 2026-10-25
 **Issue:** [#836](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/836)
 
-Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/architecture/readme#lifecycle), this decision remains proposed until its implementing PR merges.
+Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/decisions/readme#lifecycle), this decision remains proposed until its implementing PR merges.
 
 ## Context
 
-The application stack deploys Slack, Linear, Jira, deploy-preview screenshots and the Agent Registry whether or not an operator uses them. Each adds Lambdas, tables, secrets, IAM grants, API routes and alarms, so unused integrations cost money, slow deploys, widen the security-review surface and consume the root stack's 490-resource budget ([ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)). Some depend on Region-limited services: AWS Agent Registry is available in nine Regions, and AgentCore Memory, which every deployment uses, in sixteen. An unsupported Region fails late, inside CloudFormation, with an opaque service error.
+The application stack deploys Slack, Linear, Jira, deploy-preview screenshots and the Agent Registry whether or not an operator uses them. Each adds Lambdas, tables, secrets, IAM grants, API routes and alarms, so unused integrations cost money, slow deploys, widen the security-review surface and consume the root stack's 490-resource budget ([ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries)). Some depend on Region-limited services: AWS Agent Registry is available in nine Regions, and AgentCore Memory, which every deployment uses, in sixteen. An unsupported Region fails late, inside CloudFormation, with an opaque service error.
 
 Issue #836 also suggests moving substantial optional modules into nested stacks. Slack, Linear, Jira and screenshots each attach methods to the shared Task API `RestApi`. ADR-023 §1 and the #852 proof of concept record that extracting such integrations loses deployment dependencies, CORS, attribution and tags even when synthesis passes, and moving their tables and secrets would replace them.
 
@@ -54,6 +52,6 @@ Issue #836 also suggests moving substantial optional modules into nested stacks.
 ## References
 
 - [#836](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/836), [#735](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/735), [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
-- [ADR-023: Optional network stack and deployment budgets](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)
+- [ADR-023: Optional network stack and deployment budgets](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries)
 - [Supported AgentCore Regions](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)
 - [CDK best practices](https://docs.aws.amazon.com/cdk/v2/guide/best-practices.html)

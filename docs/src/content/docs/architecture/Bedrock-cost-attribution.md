@@ -1,8 +1,6 @@
 ---
-title: Bedrock cost attribution
+title: "Bedrock cost attribution"
 ---
-
-# Bedrock cost attribution
 
 Design for [#215](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/215). Adds AWS-native, per-user/per-repo attribution of **Bedrock model-inference spend** on top of the in-app `cost_usd` meter and the #211 per-session tenant-data isolation.
 

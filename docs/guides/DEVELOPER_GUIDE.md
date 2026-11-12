@@ -360,17 +360,17 @@ By default, progress events and task state writes are silently skipped during lo
 
 ```bash
 # 1. Start DynamoDB Local and create tables
-cd agent && mise run local:up
+mise //agent:local:up
 
 # 2. Run the agent with --local-events
 ./agent/run.sh --local-events "owner/repo" 42
 
-# 4. In another terminal — query progress events
-mise run local:events          # table format
-mise run local:events:json     # JSON format
+# 3. In another terminal — query progress events
+mise //agent:local:events          # table format
+mise //agent:local:events:json     # JSON format
 
-# 5. When done — tear down DynamoDB Local
-mise run local:down
+# 4. When done — tear down DynamoDB Local
+mise //agent:local:down
 ```
 
 The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
@@ -394,7 +394,7 @@ For the full list, see `agent/README.md`. For how the model default is layered, 
 | `ERROR: GITHUB_TOKEN is not set` | Export `GITHUB_TOKEN` with the required scopes. |
 | `WARNING: No AWS credentials detected` | Configure one of the three credential methods above. |
 | `WARNING: Image exceeds AgentCore 2 GB limit!` | Reduce dependencies or use multi-stage Docker build. |
-| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required | Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region |
+| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required. Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region. |
 
 ### Deployment
 
@@ -518,4 +518,11 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
 
-To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal (relative) links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step. External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+Two checks keep cross-references intact. Both run in CI on every pull request, as part of the required build:
+
+- `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (a file that git ignores is not read): the sources in `docs/guides/`, `docs/design/` and `docs/decisions/`, and also package READMEs, `AGENTS.md` files, plugin skills and command files. It confirms that the target file exists and that an anchor within the same file exists; it does not check an anchor that points into another file.
+- `mise //docs:build` validates every internal link and anchor of the rendered site, anchors into other pages included, and fails with the page, line and link.
+
+External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+
+A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it.

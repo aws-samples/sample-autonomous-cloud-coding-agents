@@ -120,7 +120,7 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 
    Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#iacrole-abca-compute-lambdamicrovms).
 
-3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent doctor` probes it live.
+3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent platform doctor` probes it live.
 
 Operational notes specific to this backend:
 

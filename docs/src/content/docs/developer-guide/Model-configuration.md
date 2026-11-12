@@ -1,5 +1,5 @@
 ---
-title: Model configuration
+title: "Model configuration"
 ---
 
 **This is the canonical reference for which model the agent uses and where to change it.** The model ID is configured across five independent layers in three languages, so read this section before changing a default — a mismatch between the layers fails every task on the stack at turn 0, not just an edge case.
