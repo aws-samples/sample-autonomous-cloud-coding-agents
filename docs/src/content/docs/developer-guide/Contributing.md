@@ -85,6 +85,8 @@ Common commands:
 
 Set `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`.
 
+Keep settings for one machine out of the repository: mise reads an untracked `mise.local.toml` next to a `mise.toml`. Committing that file, or a `.mise.toml`, `.miserc.toml`, `.yarnrc`, `.yarnrc.yml` or `.npmrc`, in the repository root or a package directory fails `mise run check:coverage-thresholds-sync`, because such a file can change how a pinned test command runs without changing its text (the exact names and directories are `LAUNCHER_CONFIGS` in `scripts/check-coverage-thresholds-sync.ts`).
+
 ### Dependency upgrades
 
 The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, which keeps the Cedar engine parity pair (`cedarpy` / `@cedar-policy/cedar-wasm`) untouched; those move only together, by hand, with refreshed parity fixtures.
