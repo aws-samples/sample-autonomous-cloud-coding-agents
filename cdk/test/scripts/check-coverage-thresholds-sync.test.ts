@@ -249,15 +249,23 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${AGENT_MISE} tasks.test.run coverage flags`, '"--no-cov"');
     });
 
-    // pytest adds addopts to the command line of the test task: --no-cov there switches the floor off, a second --cov
-    // adds files to the measurement.
+    // pytest adds addopts to the command line of the test task, so a flag there changes the run as one on the task
+    // line would. The value is pinned whole: no flag is special, and neither is the way the value is written.
     test.each([
-      ['addopts = "-ra --no-cov"', '--no-cov'],
-      ['addopts = ["-ra", "--cov=tests"]', '--cov=tests'],
-    ])('a coverage flag in the pytest settings: %s', (addopts, flag) => {
+      ['one more flag', 'addopts = "-ra --collect-only"'],
+      ['a list', 'addopts = ["-ra", "--no-cov"]'],
+    ])('the pytest addopts as %s', (_case, addopts) => {
       expectDrift((root) => {
         edit(root, PYPROJECT, text => text.replace('addopts = "-ra"', addopts));
-      }, `${PYPROJECT} [tool.pytest.ini_options] passes ${flag}:`);
+      }, `${PYPROJECT} [tool.pytest.ini_options] addopts: `, `does not match ${CONTRACT} pytest.agent.addopts: "-ra"`);
+    });
+
+    // pytest 9 reads [tool.pytest] itself when [tool.pytest.ini_options] is empty: the pinned table would be one
+    // that is no longer in force.
+    test('the pytest settings moved to the table that pytest 9 reads natively', () => {
+      expectDrift((root) => {
+        edit(root, PYPROJECT, text => `${text.replace('[tool.pytest.ini_options]', '[tool.pytest]')}\n[tool.pytest.ini_options]\n`);
+      }, `cannot read tool.pytest.ini_options.addopts from ${PYPROJECT}`);
     });
 
     // Each of these is read before pyproject.toml (pytest 9.1 findpaths.py, coverage 7.15 config.py): with an omit list

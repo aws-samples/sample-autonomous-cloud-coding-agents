@@ -36,9 +36,9 @@
  *              JEST_FREE_KEYS; scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
  *              pyproject.toml, every key; the coverage flags of the test task
- *              in mise.toml, which win over those tables; no coverage flag in
- *              pytest's own settings and no config file that would be read
- *              before pyproject.toml
+ *              in mise.toml, which win over those tables; pytest's addopts,
+ *              verbatim; no config file that would be read before
+ *              pyproject.toml
  *   web        the test block of vite.config.ts, every key except those in
  *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
  *   jira-forge-app  scripts.test, verbatim: node:test has no config file, so
@@ -193,11 +193,10 @@ function checkAgent(contract: Json): void {
   ];
   pin('agent/mise.toml tasks.test.run coverage flags', flags.sort(), 'pytest.agent (run.source, run.branch, report.fail_under)', expected.sort());
 
-  // pytest puts its addopts setting in front of that command line, so --no-cov or a second --cov there changes what runs.
-  checked += 1;
-  for (const flag of toml('agent/pyproject.toml', 'tool.pytest.ini_options').match(/--(no-)?cov[^\s"',\]]*/g) ?? []) {
-    errors.push(`agent/pyproject.toml [tool.pytest.ini_options] passes ${flag}: coverage flags belong in the test task of agent/mise.toml, where ${CONTRACT} pins them. Remove it`);
-  }
+  // pytest puts its addopts setting in front of that command line, where a flag can switch coverage off or keep the
+  // tests from running. It is pinned whole: no list of such flags is ever complete. pytest 9 refuses a pyproject.toml
+  // that also fills [tool.pytest] itself, so this table is the one in force.
+  pin('agent/pyproject.toml [tool.pytest.ini_options] addopts', toml('agent/pyproject.toml', 'tool.pytest.ini_options.addopts'), 'pytest.agent.addopts', section(contract, 'pytest', 'agent').addopts);
 
   checked += 1;
   for (const name of AGENT_SHADOW_CONFIGS.filter(file => existsSync(join(root, 'agent', file)))) {
