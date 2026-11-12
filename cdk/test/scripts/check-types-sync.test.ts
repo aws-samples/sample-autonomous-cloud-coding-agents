@@ -27,7 +27,10 @@
  * never read the web mirror — so the task-status union, among others, was not
  * compared at all. Each of those is pinned here by making the gate fail on it.
  * So is each direction of the name checks: a mirror export nothing declares,
- * and a CDK export the CLI lacks.
+ * and a CDK export the CLI lacks. The CLI's copies of the status list and of
+ * the coding workflow id were excused as client-only although the CDK declares
+ * both in other modules; a mirror export declared elsewhere, under its own
+ * name or another, is pinned too.
  *
  * HOW: same as `check-constants-sync.test.ts` — the script is spawned against a
  * throwaway repo root. Drift is APPENDED to copies of the real files as small
@@ -108,9 +111,10 @@ function allowlist(root: string, list: string, entry: string): void {
   addEntry(root, `const ${list} = new Set<string>([`, `'${entry}'`);
 }
 
-/** Tell the script that a web export is declared in a CDK module other than the types file. */
-function canonElsewhere(root: string, name: string, module: string): void {
-  addEntry(root, 'const WEB_CANON_ELSEWHERE: ReadonlyMap<string, string> = new Map([', `['${name}', '${module}']`);
+/** Tell the script that a mirror export is declared in a CDK module other than the types file (as `canonName`, when it differs). */
+function canonElsewhere(root: string, name: string, module: string, canonName?: string): void {
+  const declaration = canonName === undefined ? `'${module}'` : `'${module}', '${canonName}'`;
+  addEntry(root, 'const CANON_ELSEWHERE: ReadonlyMap<string, readonly [module: string, name?: string]> = new Map([', `['${name}', [${declaration}]]`);
 }
 
 describe('check-types-sync', () => {
@@ -182,6 +186,12 @@ describe('check-types-sync', () => {
           'export function gateCliFn(): number { return 1; }',
           'export class GateCliClass {}',
           'export interface GateCliShape { readonly a: string }',
+          // Copies of what the CDK declares outside its types file, as the status list is.
+          "export const GateList = ['B', 'A'] as const;",
+          "export const GATE_RENAMED_LIST = ['A'] as const;",
+          "export const GATE_RENAMED_LIST_SAME = ['A', 'B'] as const;",
+          "export const GateExcused = ['A'] as const;",
+          'export const GateMoved = 1;',
         ].join('\n'));
         append(root, WEB_TYPES, [
           "export type GateStatus = 'A';",
@@ -197,6 +207,11 @@ describe('check-types-sync', () => {
         canonElsewhere(root, 'GateListSame', 'cdk/src/handlers/shared/gate-fixture.ts');
         canonElsewhere(root, 'GateGone', 'cdk/src/handlers/shared/gate-fixture.ts');
         canonElsewhere(root, 'GateWeb', 'cdk/src/handlers/shared/gate-fixture.ts');
+        canonElsewhere(root, 'GATE_RENAMED_LIST', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateList');
+        canonElsewhere(root, 'GATE_RENAMED_LIST_SAME', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateListSame');
+        canonElsewhere(root, 'GateExcused', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateList');
+        canonElsewhere(root, 'GateMoved', 'cdk/src/handlers/shared/gate-fixture.ts');
+        allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateExcused');
         allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateCliShape');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateConsole');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateStaleWeb');
@@ -263,6 +278,16 @@ describe('check-types-sync', () => {
       expect(result.stderr).not.toContain('GateListSame');
     });
 
+    test('compares a CLI constant with the CDK module that declares it, under the same name or another', () => {
+      const between = `differs between cdk/src/handlers/shared/gate-fixture\\.ts:\\d+ \\(CDK\\) and ${escape(CLI_TYPES)}:\\d+ \\(CLI\\)`;
+      expect(result.stderr).toMatch(new RegExp(`"GateList" ${between}`));
+      expect(result.stderr).toContain('GateList: ["A","B"] in CDK, ["B","A"] in CLI');
+      expect(result.stderr).toMatch(new RegExp(`"GATE_RENAMED_LIST" ${between}`));
+      expect(result.stderr).toContain('GATE_RENAMED_LIST: ["A","B"] in CDK, ["A"] in CLI');
+      // The false-positive side: an equal copy under another name.
+      expect(result.stderr).not.toContain('GATE_RENAMED_LIST_SAME');
+    });
+
     test('compares a web export the CDK types lack with the CLI declaration', () => {
       expect(result.stderr).toContain('GateCliShape.a: string in CLI, number in web');
     });
@@ -270,8 +295,16 @@ describe('check-types-sync', () => {
     test('rejects a stale or contradicted entry of the web lists', () => {
       expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateStaleWeb", which ${WEB_TYPES} does not export`);
       expect(result.stderr).toContain(`WEB_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateWeb", but it has a canonical declaration`);
-      expect(result.stderr).toContain(`WEB_CANON_ELSEWHERE in ${SCRIPT_REL} names "GateGone", which ${WEB_TYPES} does not export`);
-      expect(result.stderr).toContain(`WEB_CANON_ELSEWHERE in ${SCRIPT_REL} sends "GateWeb" to cdk/src/handlers/shared/gate-fixture.ts, but ${CDK_TYPES} exports it`);
+    });
+
+    test('rejects a stale, contradicted or dangling entry of the canonical-module list', () => {
+      expect(result.stderr).toContain(`CANON_ELSEWHERE in ${SCRIPT_REL} names "GateGone", which neither ${CLI_TYPES} nor ${WEB_TYPES} exports`);
+      expect(result.stderr).toContain(`CANON_ELSEWHERE in ${SCRIPT_REL} sends "GateWeb" to cdk/src/handlers/shared/gate-fixture.ts, but ${CDK_TYPES} exports it`);
+      // Excused as CLI-only and given a canonical declaration at once: the excuse would win silently.
+      expect(result.stderr).toContain(`CLI_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateExcused", but CANON_ELSEWHERE there gives it a canonical declaration`);
+      // The module named for a CLI export lacks it: one message, about the entry.
+      expect(result.stderr).toContain('says cdk/src/handlers/shared/gate-fixture.ts declares "GateMoved", but that module does not export it');
+      expect(result.stderr).not.toContain('CLI exports "GateMoved" but CDK does not');
     });
 
     test('rejects an allowlist entry that is stale or names a pair', () => {

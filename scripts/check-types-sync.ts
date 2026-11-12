@@ -34,13 +34,15 @@
  * must match. CDK-only types are allowed (handler-internal shapes
  * the CLI doesn't need); CLI-only types are rejected (the CDK
  * is the source of truth, so a CLI type missing on CDK indicates
- * drift in the wrong direction).
+ * drift in the wrong direction). A CLI export that the CDK declares in
+ * another module, possibly under another name, is listed in
+ * ``CANON_ELSEWHERE`` and compared with that declaration.
  *
  * Web: the console mirrors only what it reads, so an export may leave
  * members out, but every member it declares must exist on the canonical
  * declaration with the same type and optionality. The canonical
  * declaration of a web export is, in this order: the CDK types file; the
- * CDK module listed for it in ``WEB_CANON_ELSEWHERE`` (the status lists,
+ * CDK module listed for it in ``CANON_ELSEWHERE`` (the status lists,
  * the coding workflow id); the CLI mirror, which is the only place that
  * declares the envelopes and events the server builds inline. A web
  * export with none of these must be listed in ``WEB_ONLY_ALLOWLIST``;
@@ -206,15 +208,6 @@ const CLI_ONLY_ALLOWLIST = new Set<string>([
   // CLI on-disk config / credential cache:
   'CliConfig',
   'Credentials',
-  // Terminal-status helper for CLI exit codes:
-  'TERMINAL_STATUSES',
-  // Client-side display/default helper: the workflow id the CLI treats
-  // as "the default coding workflow" (suppressed in detail output,
-  // applied by `submit` when no --workflow is given). Distinct from
-  // CDK's DEFAULT_WORKFLOW_ID ('default/agent-v1'), which is the
-  // server-side fallback for repo-less tasks — the two are different
-  // contracts, hence the different name.
-  'DEFAULT_CODING_WORKFLOW_ID',
 ]);
 
 /**
@@ -233,15 +226,22 @@ const WEB_REQUIRED_WHERE_CDK_OPTIONAL = new Set<string>([
 const usedOptionalityEntries = new Set<string>();
 
 /**
- * Web exports whose canonical declaration is in a CDK module other than
- * the types file, each with that module. They are compared like the rest.
+ * Mirror exports (CLI or web) whose canonical declaration is in a CDK
+ * module other than the types file: that module and, where the mirror
+ * uses another name, the name there. They are compared like the rest.
  */
-const WEB_CANON_ELSEWHERE: ReadonlyMap<string, string> = new Map([
-  ['TERMINAL_STATUSES', 'cdk/src/constructs/task-status.ts'],
-  ['PRE_ACTIVE_STATUSES', 'cdk/src/constructs/task-status.ts'],
-  ['ACTIVE_STATUSES', 'cdk/src/constructs/task-status.ts'],
-  ['CODING_WORKFLOW_ID', 'cdk/src/handlers/shared/workflows.ts'],
+const CANON_ELSEWHERE: ReadonlyMap<string, readonly [module: string, name?: string]> = new Map([
+  ['TERMINAL_STATUSES', ['cdk/src/constructs/task-status.ts']],
+  ['PRE_ACTIVE_STATUSES', ['cdk/src/constructs/task-status.ts']],
+  ['ACTIVE_STATUSES', ['cdk/src/constructs/task-status.ts']],
+  ['CODING_WORKFLOW_ID', ['cdk/src/handlers/shared/workflows.ts']],
+  // The CLI's name for that id: what `submit` sends when no --workflow is
+  // given. Not DEFAULT_WORKFLOW_ID of the same module ('default/agent-v1'),
+  // which is the server's fallback for repo-less tasks, a different contract.
+  ['DEFAULT_CODING_WORKFLOW_ID', ['cdk/src/handlers/shared/workflows.ts', 'CODING_WORKFLOW_ID']],
 ]);
+/** The CDK modules named above, each once. */
+const CANON_MODULES = [...new Set([...CANON_ELSEWHERE.values()].map(([module]) => module))];
 
 /**
  * Web exports with no canonical declaration to compare against. Every
@@ -271,7 +271,7 @@ const WEB_ONLY_ALLOWLIST = new Set<string>([
 // One program over the compared files, so every type is resolved by the compiler:
 // across re-exports, `extends` clauses and imports from sibling modules.
 const program = ts.createProgram(
-  [CDK_TYPES, CLI_TYPES, WEB_TYPES, ...new Set(WEB_CANON_ELSEWHERE.values())].map((file) => path.join(REPO_ROOT, file)),
+  [CDK_TYPES, CLI_TYPES, WEB_TYPES, ...CANON_MODULES].map((file) => path.join(REPO_ROOT, file)),
   {
     noEmit: true,
     strict: true,
@@ -646,11 +646,19 @@ function main(): number {
   const cdk = collectExports(CDK_TYPES, errors);
   const cli = collectExports(CLI_TYPES, errors);
   const web = collectExports(WEB_TYPES, errors);
+  const elsewhere = new Map(CANON_MODULES.map((file) => [file, collectExports(file, errors)] as const));
+  /** The declaration CANON_ELSEWHERE names for a mirror export, when it names one and the module has it. */
+  const canonElsewhere = (name: string): ExportSummary | undefined => {
+    const [module, canonName = name] = CANON_ELSEWHERE.get(name) ?? [];
+    return module === undefined ? undefined : elsewhere.get(module)?.get(canonName);
+  };
 
   // Walk CLI; every name must exist in CDK (or be allowlisted CLI-only).
   for (const [name, cliExport] of cli) {
     if (CLI_ONLY_ALLOWLIST.has(name)) continue;
-    const cdkExport = cdk.get(name);
+    const cdkExport = cdk.get(name) ?? canonElsewhere(name);
+    // An entry of CANON_ELSEWHERE that leads nowhere is reported with the entries, below.
+    if (!cdkExport && CANON_ELSEWHERE.has(name)) continue;
     if (!cdkExport) {
       errors.push(
         `CLI exports "${name}" but CDK does not — CDK is the source of truth, ` +
@@ -685,27 +693,21 @@ function main(): number {
         errors.push(`${listName} in scripts/check-types-sync.ts names "${name}", which ${ownFile} does not export. Remove the stale entry.`);
       } else if (other.has(name)) {
         errors.push(`${listName} in scripts/check-types-sync.ts names "${name}", but ${otherFile} exports it too. Remove the entry so the two declarations are compared.`);
+      } else if (CANON_ELSEWHERE.has(name)) {
+        errors.push(`${listName} in scripts/check-types-sync.ts names "${name}", but CANON_ELSEWHERE there gives it a canonical declaration. Remove the entry so the two declarations are compared.`);
       }
     }
   }
 
   // Walk web; every export is held to its canonical declaration (see the
   // header for the order) or must be listed as console-only.
-  const elsewhere = new Map(
-    [...new Set(WEB_CANON_ELSEWHERE.values())].map((file) => [file, collectExports(file, errors)] as const),
-  );
   let webCompared = 0;
   for (const [name, webExport] of web) {
-    const module = WEB_CANON_ELSEWHERE.get(name);
-    let canon = cdk.get(name);
+    let canon = cdk.get(name) ?? canonElsewhere(name);
     let sides = WEB;
-    if (!canon && module) {
-      canon = elsewhere.get(module)?.get(name);
-      if (!canon) {
-        errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts says ${module} declares "${name}", but that module does not export it. Point the entry at the module that does.`);
-        continue;
-      }
-    } else if (!canon && cli.has(name)) {
+    // An entry of CANON_ELSEWHERE that leads nowhere is reported with the entries, below.
+    if (!canon && CANON_ELSEWHERE.has(name)) continue;
+    if (!canon && cli.has(name)) {
       canon = cli.get(name);
       sides = WEB_VS_CLI;
     }
@@ -714,7 +716,7 @@ function main(): number {
         errors.push(
           `web exports "${name}" but neither ${CDK_TYPES} nor ${CLI_TYPES} declares it, so nothing checks its shape. ` +
             `If the type was renamed there, rename it in ${WEB_TYPES} too; if it is declared in another CDK module, ` +
-            `add it to WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts; if the console alone uses it, add "${name}" ` +
+            `add it to CANON_ELSEWHERE in scripts/check-types-sync.ts; if the console alone uses it, add "${name}" ` +
             `to WEB_ONLY_ALLOWLIST there with a comment explaining why.`,
         );
       }
@@ -729,15 +731,18 @@ function main(): number {
   for (const name of WEB_ONLY_ALLOWLIST) {
     if (!web.has(name)) {
       errors.push(`WEB_ONLY_ALLOWLIST in scripts/check-types-sync.ts names "${name}", which ${WEB_TYPES} does not export. Remove the stale entry.`);
-    } else if (cdk.has(name) || cli.has(name) || WEB_CANON_ELSEWHERE.has(name)) {
+    } else if (cdk.has(name) || cli.has(name) || CANON_ELSEWHERE.has(name)) {
       errors.push(`WEB_ONLY_ALLOWLIST in scripts/check-types-sync.ts names "${name}", but it has a canonical declaration. Remove the entry so the two declarations are compared.`);
     }
   }
-  for (const [name, module] of WEB_CANON_ELSEWHERE) {
-    if (!web.has(name)) {
-      errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts names "${name}", which ${WEB_TYPES} does not export. Remove the stale entry.`);
+  for (const [name, [module, canonName = name]] of CANON_ELSEWHERE) {
+    if (!elsewhere.get(module)?.has(canonName)) {
+      errors.push(`CANON_ELSEWHERE in scripts/check-types-sync.ts says ${module} declares "${canonName}", but that module does not export it. Point the entry at the module that does.`);
+    }
+    if (!cli.has(name) && !web.has(name)) {
+      errors.push(`CANON_ELSEWHERE in scripts/check-types-sync.ts names "${name}", which neither ${CLI_TYPES} nor ${WEB_TYPES} exports. Remove the stale entry.`);
     } else if (cdk.has(name)) {
-      errors.push(`WEB_CANON_ELSEWHERE in scripts/check-types-sync.ts sends "${name}" to ${module}, but ${CDK_TYPES} exports it. Remove the entry.`);
+      errors.push(`CANON_ELSEWHERE in scripts/check-types-sync.ts sends "${name}" to ${module}, but ${CDK_TYPES} exports it. Remove the entry.`);
     }
   }
   for (const entry of WEB_REQUIRED_WHERE_CDK_OPTIONAL) {
