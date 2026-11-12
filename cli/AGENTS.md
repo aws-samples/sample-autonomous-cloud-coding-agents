@@ -7,7 +7,8 @@ You maintain the **`bgagent` CLI** (`@backgroundagent/cli`): Commander commands,
 ## Commands (run these)
 
 ```bash
-mise //cli:build            # compile + test + lint
+mise //cli:build            # compile + type-check + test + lint
+mise //cli:typecheck        # type-check src and test (jest does not check types)
 cd cli && mise run test     # Jest only
 cd cli && mise run compile  # tsc only
 mise //cli:eslint           # ESLint --fix (run after merging main)
@@ -16,11 +17,20 @@ mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fail
 
 ## Testing
 
-- **Full suite:** `cd cli && mise run test` or `mise //cli:build`
-- **Single file:** `cd cli && npx jest test/commands/status.test.ts`
-- **Pattern:** `cd cli && npx jest --testPathPattern=auth`
+- **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply; they count every file in `src/`, tested or not.
+- **Single file:** `cd cli && npx jest --coverage=false test/commands/status.test.ts`
+- **Pattern:** `cd cli && npx jest --coverage=false --testPathPatterns=auth`
+- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build runs it. A fixture has to match the type from `src/types.ts` it is declared with.
+
+Without `--coverage=false` a partial run fails on the coverage floors after its tests pass.
 
 Mock `ApiClient` in command tests; reset `process.exitCode` in `beforeEach`/`afterEach` (commands set exit codes — see `status.test.ts`).
+
+The suite is sealed off from the machine it runs on (`test/setup/`):
+
+- **No home, no AWS identity** — `HOME` is an empty scratch directory and every `AWS_*` and `BGAGENT_*` variable is removed before the first test, so no test sees `~/.bgagent`, `~/.aws` or `~/.cdk.json`. A test that needs a config creates a directory and points `BGAGENT_CONFIG_DIR` at it (see `test/config.test.ts`).
+- **No network** — a connection to anything but loopback throws `cli tests must not open network connections…`. Mock the client or `fetch` call that sends the request; do not add hosts to the list.
+- **Snapshots** — the suite runs with `--ci`, which fails on a missing or changed snapshot instead of writing it. To add or update one on purpose: `npx jest --coverage=false -u <file>`, then commit the snapshot.
 
 ## Primary locations
 

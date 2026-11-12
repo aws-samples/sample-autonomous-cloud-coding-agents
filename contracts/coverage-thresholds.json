@@ -1,27 +1,130 @@
 {
-  "$comment": "Measured coverage floors (2026-06-02). Ratchet up when coverage improves; do not lower without maintainer approval. Synced into cdk/cli package.json (jest) and agent/pyproject.toml (pytest-cov); enforced by scripts/check-coverage-thresholds-sync.ts.",
+  "$comment": "Coverage floors and the settings that decide what each floor measures. This file is the source of truth; each manifest below carries a copy that its test runner reads, and scripts/check-coverage-thresholds-sync.ts fails when a copy differs. jest.<package> mirrors the jest block of <package>/package.json: every key but the few that cannot move a floor (JEST_FREE_KEYS in the script), so a key added to the block has to be added here. pytest.agent.run and .report mirror [tool.coverage.run] and [tool.coverage.report] in agent/pyproject.toml, whole, and give the coverage flags of the test task in agent/mise.toml; pytest.agent.addopts is addopts of [tool.pytest.ini_options] there, verbatim, because pytest puts it in front of that task's command line. vitest.web mirrors the test block of web/vite.config.ts in the same way (VITEST_FREE_KEYS). commands gives scripts.test of each package.json verbatim: it is the command the build runs, and a flag there wins over the settings pinned here. tasks gives the mise task that runs each of those scripts and the agent's pytest, named as mise names it (//<directory>:<task>, in <directory>/mise.toml): every key but description and depends (TASK_FREE_KEYS), because what follows the script's name on a task line reaches the runner too. node:test has no config file, so the floors of integrations/jira-forge-app are the --test-coverage flags of its script; they measure src/proxy.js, the one module that script loads (--import), and another module counts only once the script loads it in the same way. Raise a floor when coverage improves; do not lower a floor or narrow a scope without maintainer approval. cdk floors measured 2026-06-02; cli and agent floors set 2026-11-10 from CI build 42716472700; web floors set 2026-11-11 two points under a local macOS run (90.81 / 82.6 / 91.11 / 93.36), because CI does not measure web coverage yet; jira-forge-app floors set the same day two points under 87.50 / 78.87 / 83.33 (lines, branches, functions), measured locally with Node 22.22.3.",
   "jest": {
     "cdk": {
-      "global": {
-        "branches": 82,
-        "functions": 94,
-        "lines": 91,
-        "statements": 91
-      }
+      "coverageProvider": "v8",
+      "testMatch": [
+        "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
+        "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
+      ],
+      "collectCoverage": true,
+      "collectCoverageFrom": [
+        "src/**/*.ts",
+        "scripts/generate-bootstrap-template.ts"
+      ],
+      "coveragePathIgnorePatterns": [
+        "/node_modules/",
+        "<rootDir>/test/integ/"
+      ],
+      "coverageThreshold": {
+        "global": {
+          "branches": 82,
+          "functions": 94,
+          "lines": 91,
+          "statements": 91
+        }
+      },
+      "testPathIgnorePatterns": [
+        "/node_modules/",
+        "<rootDir>/test/integ/"
+      ]
     },
     "cli": {
-      "global": {
-        "branches": 84,
-        "functions": 78,
-        "lines": 68,
-        "statements": 68
-      }
+      "coverageProvider": "v8",
+      "testMatch": [
+        "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
+        "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)"
+      ],
+      "collectCoverage": true,
+      "collectCoverageFrom": [
+        "src/**/*.ts"
+      ],
+      "coveragePathIgnorePatterns": [
+        "/node_modules/"
+      ],
+      "coverageThreshold": {
+        "global": {
+          "branches": 85,
+          "functions": 89,
+          "lines": 83,
+          "statements": 83
+        }
+      },
+      "testPathIgnorePatterns": [
+        "/node_modules/"
+      ]
     }
   },
   "pytest": {
     "agent": {
-      "fail_under": 72,
-      "branch": true
+      "addopts": "-ra",
+      "run": {
+        "branch": true,
+        "source": [
+          "src"
+        ],
+        "relative_files": true
+      },
+      "report": {
+        "fail_under": 80,
+        "precision": 2,
+        "show_missing": true,
+        "skip_covered": true
+      }
+    }
+  },
+  "vitest": {
+    "web": {
+      "include": [
+        "test/**/*.test.{ts,tsx}"
+      ],
+      "coverage": {
+        "provider": "v8",
+        "include": [
+          "src/**"
+        ],
+        "exclude": [
+          "src/main.tsx",
+          "src/env.d.ts",
+          "src/mocks/browser.ts"
+        ],
+        "reporter": [
+          "text",
+          "html"
+        ],
+        "thresholds": {
+          "statements": 88,
+          "branches": 80,
+          "functions": 89,
+          "lines": 91
+        }
+      }
+    }
+  },
+  "commands": {
+    "cdk/package.json": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
+    "cli/package.json": "jest --ci",
+    "web/package.json": "vitest run --config vite.config.ts --coverage --allowOnly=false",
+    "integrations/jira-forge-app/package.json": "node --test --experimental-test-coverage --test-coverage-include='src/**' --import=./src/proxy.js --test-coverage-lines=85 --test-coverage-branches=76 --test-coverage-functions=81 test/proxy.test.js"
+  },
+  "tasks": {
+    "//cdk:test": {
+      "run": [
+        "mkdir -p $TMPDIR",
+        "yarn test"
+      ]
+    },
+    "//cli:test": {
+      "run": "yarn test"
+    },
+    "//web:test": {
+      "run": "yarn test"
+    },
+    "//agent:test": {
+      "run": "uv run pytest --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
+    },
+    "//:test:jira-forge-app": {
+      "run": "npm test --prefix integrations/jira-forge-app"
     }
   }
 }

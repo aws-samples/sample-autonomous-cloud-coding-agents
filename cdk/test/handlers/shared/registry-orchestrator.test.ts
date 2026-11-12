@@ -38,7 +38,7 @@ jest.mock('../../../src/handlers/shared/registry/factory', () => {
   return { ...actual, makeRegistryClient: () => ({ resolve: mockResolve }) };
 });
 
-const log = { info: jest.fn(), warn: jest.fn(), error: jest.fn() } as never;
+const log = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), child: jest.fn() };
 
 const asset = (over: Partial<ResolvedAsset> = {}): ResolvedAsset => ({
   kind: 'mcp_server',

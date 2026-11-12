@@ -43,6 +43,25 @@ run = ["mkdir -p $TMPDIR", "yarn test"]
 description = "Focused jest run (no coverage, single worker)"
 run = "yarn jest --coverage=false --runInBand"
 
+# The only type check that test/ and scripts/ get: jest runs the tests through ts-jest
+# with isolatedModules, which transpiles each file and checks no types, and `compile`
+# covers src/. Without this task a type error there passes the whole build.
+#
+# tsconfig.typecheck.json is tsconfig.dev.json (src, test, scripts) with bundler-style
+# module resolution. Under the NodeNext settings of tsconfig.dev.json itself, tsc reported
+# 26 errors that were no defects when this task was added: 21 for an `await import()`
+# without a file extension in a test, which jest runs as a require, 4 that follow from
+# those, and 1 for `import.meta` in a script that node runs as an ES module.
+#
+# `wait_for`, not `depends`: it uses nothing that compile emits, so this only orders
+# the start. In a build it begins after `compile` and cannot take a slot ahead of the
+# task that heads the path deciding the build time (compile, then the tests). Run on
+# its own, it does not compile first.
+[tasks.typecheck]
+description = "Type-check src, test and scripts (tsc --noEmit); jest does not check types"
+wait_for = [":compile"]
+run = "yarn typecheck"
+
 [tasks.synth]
 description = "cdk synth"
 # The app includes the operator console stack, which packages web/dist.
@@ -194,5 +213,5 @@ description = "No-op bundle step for cdk/cdk.json (NodejsFunction bundles at syn
 run = "node -e \"process.exit(0)\""
 
 [tasks.build]
-description = "compile, test, eslint, synth (quiet) — DAG: compile first, then test+synth+eslint in parallel"
-depends = [":test", ":eslint", ":synth:quiet"]
+description = "compile, test, eslint, typecheck, synth (quiet) — DAG: compile first, then test+typecheck+synth; eslint beside them"
+depends = [":test", ":eslint", ":typecheck", ":synth:quiet"]

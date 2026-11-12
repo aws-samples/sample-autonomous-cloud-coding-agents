@@ -10,7 +10,7 @@
     "dev:mock": "vite --mode mock",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run --config vite.config.ts --coverage --allowOnly=false",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",

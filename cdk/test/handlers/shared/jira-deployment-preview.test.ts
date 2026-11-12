@@ -36,13 +36,19 @@ jest.mock('../../../src/handlers/shared/jira-preview', () => ({
 const post = jest.mocked(postIssueCommentAdf);
 const edit = jest.mocked(updateIssueCommentAdf);
 const iteration = jest.mocked(updateJiraIterationComment);
-const original = {
+const original: TaskRecord = {
   task_id: 'original',
+  user_id: 'user-1',
+  status: 'COMPLETED',
   repo: 'owner/repo',
+  branch_name: 'bgagent/original/eng-42',
   channel_source: 'jira',
   head_sha: 'initial',
   channel_metadata: { jira_cloud_id: 'cloud', jira_issue_key: 'ENG-42' },
-} as TaskRecord;
+  status_created_at: 'COMPLETED#2026-01-01T00:00:00Z',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
 const shot = 'https://cdn.example.com/shot.png';
 const preview = 'https://preview.example.com';
 let records: Record<string, TaskRecord>;

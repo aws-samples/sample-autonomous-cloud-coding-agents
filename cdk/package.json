@@ -8,7 +8,8 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
-    "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "eslint": "eslint --fix src test scripts",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q",
@@ -91,6 +92,10 @@
     "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "scripts/generate-bootstrap-template.ts"
+    ],
     "coverageReporters": [
       "json",
       "lcov",

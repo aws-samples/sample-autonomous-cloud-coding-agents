@@ -107,6 +107,9 @@ export default defineConfig(({ command, mode }) => {
         include: ['src/**'],
         exclude: ['src/main.tsx', 'src/env.d.ts', 'src/mocks/browser.ts'],
         reporter: ['text', 'html'],
+        // Floors for `mise //web:test`. The settings that decide what they measure (this block and `include` above)
+        // are copies of vitest.web in contracts/coverage-thresholds.json: the drift check fails when they differ.
+        thresholds: { statements: 88, branches: 80, functions: 89, lines: 91 },
       },
     },
   };
