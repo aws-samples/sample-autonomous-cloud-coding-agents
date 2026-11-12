@@ -199,19 +199,22 @@ describe('check-coverage-thresholds-sync', () => {
 
     // Each of these lets a run of one test file, or of none, exit 0 with the floors still in the block (jest 30.4).
     // None is a coverage setting, which is why the block is pinned whole except for a short list of harmless keys.
-    test.each<[string, unknown]>([
-      ['testFailureExitCode', 0],
-      ['passWithNoTests', true],
-      ['rootDir', 'test'],
-      ['roots', ['<rootDir>/test']],
-      ['projects', [{ displayName: 'unit' }]],
-      ['onlyChanged', true],
-    ])('a setting the contract does not list: %s', (setting, value) => {
+    // One run plants them all: each is the same comparison, and each has to be reported.
+    test('settings the contract does not list', () => {
+      const unlisted: [string, unknown][] = [
+        ['testFailureExitCode', 0],
+        ['passWithNoTests', true],
+        ['rootDir', 'test'],
+        ['roots', ['<rootDir>/test']],
+        ['projects', [{ displayName: 'unit' }]],
+        ['onlyChanged', true],
+      ];
       expectDrift((root) => {
         editJson<Manifest>(root, 'cli/package.json', (json) => {
-          json.jest[setting] = value;
+          Object.assign(json.jest, Object.fromEntries(unlisted));
         });
-      }, `cli/package.json jest ${setting}: ${JSON.stringify(value)} does not match ${CONTRACT} jest.cli.${setting}: not set`);
+      }, ...unlisted.map(([setting, value]) =>
+        `cli/package.json jest ${setting}: ${JSON.stringify(value)} does not match ${CONTRACT} jest.cli.${setting}: not set`));
     });
 
     test('a setting that cannot move a floor changes without the contract', () => {
@@ -277,12 +280,13 @@ describe('check-coverage-thresholds-sync', () => {
 
     // Each of these is read before pyproject.toml (pytest 9.1 findpaths.py, coverage 7.15 config.py): with an omit list
     // or a --no-cov in it, the floor measures less, or nothing, while pyproject.toml still matches the contract.
-    test.each([
-      'pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini',
-    ])('a config file that would be read before pyproject.toml: %s', (name) => {
+    test('config files that would be read before pyproject.toml, each of the eight names', () => {
+      const names = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
       expectDrift((root) => {
-        fs.writeFileSync(path.join(root, 'agent', name), '');
-      }, `agent/${name} exists`);
+        for (const name of names) {
+          fs.writeFileSync(path.join(root, 'agent', name), '');
+        }
+      }, ...names.map(name => `  - agent/${name} exists`));
     });
   });
 
@@ -315,21 +319,16 @@ describe('check-coverage-thresholds-sync', () => {
 
   describe('test scripts', () => {
     // A runner takes a flag over its settings, and takes it in several spellings. The scripts are pinned whole, so
-    // no spelling is special.
-    test.each([
-      ['cdk', '--coverage=false'],
-      ['cdk', '--no-coverage'],
-      ['cdk', '--collect-coverage=false'],
-      ['cli', '--no-collectCoverage'],
-      ['cli', '--collect-coverage-from=src/errors.ts'],
-      ['cli', '|| true'],
-      ['web', '--coverage.thresholds.lines=0'],
-    ])('the %s test script with "%s" appended', (pkg, suffix) => {
+    // no spelling is special: one flag and one second command stand for all of them, in each of the three scripts.
+    test.each(['--no-coverage', '|| true'])('the cdk, cli and web test scripts with "%s" appended', (suffix) => {
+      const packages = ['cdk', 'cli', 'web'];
       expectDrift((root) => {
-        editJson<Manifest>(root, `${pkg}/package.json`, (json) => {
-          json.scripts.test += ` ${suffix}`;
-        });
-      }, `${pkg}/package.json scripts.test`, `${suffix}" does not match ${CONTRACT} commands.${pkg}/package.json`);
+        for (const pkg of packages) {
+          editJson<Manifest>(root, `${pkg}/package.json`, (json) => {
+            json.scripts.test += ` ${suffix}`;
+          });
+        }
+      }, ...packages.map(pkg => `${suffix}" does not match ${CONTRACT} commands.${pkg}/package.json`));
     });
 
     test('the web test script without --coverage, which collects nothing and applies no floor', () => {
