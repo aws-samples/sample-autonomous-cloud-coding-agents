@@ -156,7 +156,11 @@ jobs:
       # Nothing else builds the agent image before merge (deploy and integ build
       # it afterwards), so a broken Dockerfile or lockfile used to pass every
       # check (#235). Build it here when a file that defines the image differs
-      # between the base commit and this checkout. The decision is made inside
+      # between the base commit and this checkout: the Dockerfile, .dockerignore
+      # and the four files the Dockerfile copies by name. Of the directories it
+      # copies whole (agent/src, agent/policies, agent/workflows, contracts) only
+      # a path that is gone counts, deleted or renamed: an edit or a new file
+      # there cannot break the build. The decision is made inside
       # the step, never with a workflow `paths` filter: a required check that
       # does not run stays pending and blocks the merge. The command mirrors
       # `security:image` in agent/mise.toml (linux/amd64 on this runner); the
@@ -167,12 +171,15 @@ jobs:
           IMAGE_BASELINE: ${{ steps.range.outputs.baseline }}
         run: |
           set -euo pipefail
-          changed="$(git diff --name-only "${IMAGE_BASELINE}" HEAD -- agent/Dockerfile agent/pyproject.toml agent/uv.lock .dockerignore)"
-          if [ -z "${changed}" ]; then
+          changed="$(git diff --name-only "${IMAGE_BASELINE}" HEAD -- agent/Dockerfile agent/pyproject.toml agent/uv.lock .dockerignore agent/prepare-commit-msg.sh agent/managed-settings.json)"
+          # --no-renames: a rename then shows as its old path deleted.
+          removed="$(git diff --name-only --no-renames --diff-filter=D "${IMAGE_BASELINE}" HEAD -- agent/src agent/policies agent/workflows contracts)"
+          if [ -z "${changed}${removed}" ]; then
             echo "No agent image input changed since ${IMAGE_BASELINE}: skipping the image build."
             exit 0
           fi
           echo "Agent image inputs changed since ${IMAGE_BASELINE}:"
           echo "${changed}"
+          echo "${removed}"
           ARCH="$(uname -m)"; PLATFORM="linux/arm64"; if [ "$ARCH" = "x86_64" ]; then PLATFORM="linux/amd64"; fi
           docker build --build-arg TARGETPLATFORM="$PLATFORM" --build-arg CACHE_BUST="$(date +%s)" -f agent/Dockerfile -t bgagent-local:latest .
