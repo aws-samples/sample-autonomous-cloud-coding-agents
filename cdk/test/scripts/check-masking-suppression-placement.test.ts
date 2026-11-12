@@ -241,6 +241,9 @@ describe('check-masking-suppression-placement', () => {
         [`// _${WORD}`, 'return null;'],
         [`// The ${WORD} comment on this return is explained elsewhere.`, 'return null;'],
         [`/* ${SHORT}:${TS_RULE} */ return null; // ${WORD}: other-rule -- the reason given for another rule`],
+        // The two below hold a well-formed text that is not what semgrep acts on.
+        [`return null; // ${SHORT} x${WORD}: other-rule -- the reason given for another rule`],
+        [`return null; //${WORD}: other-rule -- the reason given for another rule ${SHORT}`],
       ];
       const pyBodies: ReadonlyArray<readonly string[]> = [
         [`return None  # ${UPPER}`],
@@ -303,6 +306,18 @@ describe('check-masking-suppression-placement', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(`src/a.ts:5 (${PY_RULE})`);
+    });
+
+    test('rejects a suppression that also names a masking rule it has no finding for', () => {
+      // Every masking rule on the line is held to a finding, not only the first.
+      const result = run(
+        { 'src/a.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- the agent does the same under ${PY_RULE}`) },
+        [['src/a.ts', 5, TS_RULE]],
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`src/a.ts:5 (${PY_RULE})`);
+      expect(result.stderr).not.toContain(`src/a.ts:5 (${TS_RULE})`);
     });
 
     describe('counts a suppression as a masking one however its rule id is written', () => {

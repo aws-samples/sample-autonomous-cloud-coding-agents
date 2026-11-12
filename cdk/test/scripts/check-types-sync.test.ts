@@ -203,6 +203,7 @@ describe('check-types-sync', () => {
           'export interface GateWebOnly { readonly a: string }',
           'export interface GateConsole { readonly a: string }',
           "export const GateListListed = ['A', 'B'] as const;",
+          'export const GateMovedWeb = 1;',
         ].join('\n'));
         canonElsewhere(root, 'GateList', 'cdk/src/handlers/shared/gate-fixture.ts');
         canonElsewhere(root, 'GateListSame', 'cdk/src/handlers/shared/gate-fixture.ts');
@@ -212,6 +213,7 @@ describe('check-types-sync', () => {
         canonElsewhere(root, 'GATE_RENAMED_LIST_SAME', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateListSame');
         canonElsewhere(root, 'GateExcused', 'cdk/src/handlers/shared/gate-fixture.ts', 'GateList');
         canonElsewhere(root, 'GateMoved', 'cdk/src/handlers/shared/gate-fixture.ts');
+        canonElsewhere(root, 'GateMovedWeb', 'cdk/src/handlers/shared/gate-fixture.ts');
         allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateExcused');
         allowlist(root, 'CLI_ONLY_ALLOWLIST', 'GateCliShape');
         allowlist(root, 'WEB_ONLY_ALLOWLIST', 'GateConsole');
@@ -310,9 +312,11 @@ describe('check-types-sync', () => {
       expect(result.stderr).toContain(`CANON_ELSEWHERE in ${SCRIPT_REL} sends "GateWeb" to cdk/src/handlers/shared/gate-fixture.ts, but ${CDK_TYPES} exports it`);
       // Excused as CLI-only and given a canonical declaration at once: the excuse would win silently.
       expect(result.stderr).toContain(`CLI_ONLY_ALLOWLIST in ${SCRIPT_REL} names "GateExcused", but CANON_ELSEWHERE there gives it a canonical declaration`);
-      // The module named for a CLI export lacks it: one message, about the entry.
+      // The module named for a mirror export lacks it: one message, about the entry.
       expect(result.stderr).toContain('says cdk/src/handlers/shared/gate-fixture.ts declares "GateMoved", but that module does not export it');
       expect(result.stderr).not.toContain('CLI exports "GateMoved" but CDK does not');
+      expect(result.stderr).toContain('says cdk/src/handlers/shared/gate-fixture.ts declares "GateMovedWeb", but that module does not export it');
+      expect(result.stderr).not.toContain('web exports "GateMovedWeb" but neither');
     });
 
     test('rejects an allowlist entry that is stale or names a pair', () => {
