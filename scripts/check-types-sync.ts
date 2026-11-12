@@ -244,15 +244,21 @@ const CANON_ELSEWHERE: ReadonlyMap<string, readonly [module: string, name?: stri
 const CANON_MODULES = [...new Set([...CANON_ELSEWHERE.values()].map(([module]) => module))];
 
 /**
- * Web exports with no canonical declaration to compare against. Every
- * other web export is compared, so adding a name here is a deliberate
- * signal that nothing checks it.
+ * Web exports this check does not compare: nothing declares them under
+ * that name. Every other web export is compared, so adding a name here
+ * is a deliberate signal that nothing checks it.
  */
 const WEB_ONLY_ALLOWLIST = new Set<string>([
-  // The operator console stack's own API (Linear issues); its handlers
-  // build these responses inline and the CLI never reads them:
+  // The operator console stack's own API (Linear issues), which the CLI
+  // never reads. The first two have a CDK declaration under another name,
+  // in cdk/src/handlers/console-linear.ts: AgentState and
+  // ConsoleLinearIssueWithAgent. They are not paired with it, and they
+  // already differ: the task `status` is `string | null` there and
+  // `TaskStatusType | null` here. Once that is settled, two CANON_ELSEWHERE
+  // entries compare them.
   'LinearAgentState',
   'LinearIssueSummary',
+  // The handler builds these three responses inline:
   'LinearProjectIssues',
   'ListLinearIssuesResponse',
   'StartLinearIssueResponse',
