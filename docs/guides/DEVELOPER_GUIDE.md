@@ -274,6 +274,8 @@ export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
+**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk and cli test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
+
 ### Development workflow
 
 Use this order to iterate quickly and catch issues early:
@@ -475,7 +477,7 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 
 Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync.
 
-Build and test: `mise //cdk:build` (compile + lint + test + synth).
+Build and test: `mise //cdk:build` (compile + lint + type-check + test + synth).
 
 ### `agent/` - Agent runtime (Python)
 
@@ -488,9 +490,9 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
-| Run agent quality checks | `mise //agent:quality` (lint, type check, tests) |
+| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint step has fixed a file it fails once and lists the fixes: run the task again |
 
-Build and test: `mise //agent:quality`. The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
+Build and test: `mise //agent:quality`. The unit tests run with the AWS credential sources removed and refuse every request that botocore tries to send; a refused request fails the run and is listed in the `AWS send guard` section at the end of the output (details in [agent/AGENTS.md](../../agent/AGENTS.md)). The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
 
 ### `cli/` - CLI client (TypeScript)
 

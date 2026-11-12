@@ -122,7 +122,7 @@ Progressive build-out:
 **Tier 3 — Remote CI (5–20 min, authoritative, gates merge)**
 
 - Full test matrix (multiple Node versions if applicable)
-- Security scans (Semgrep SAST, OSV deps, Grype container, Retire.js, zizmor)
+- Security scans. The required job `Secrets, deps, and workflow scan` (`.github/workflows/security-pr.yml`) runs on every pull request and merge-queue entry: gitleaks over the commits of the change, the silent-success-masking rules over the whole repository, the Semgrep registry packs for the findings the change adds, OSV deps and zizmor, and it builds the agent image when `agent/Dockerfile`, `agent/pyproject.toml`, `agent/uv.lock` or `.dockerignore` changed. The weekly suite (`.github/workflows/security.yml`) runs every scanner even when an earlier one fails, adds the full Semgrep SAST, Grype, Retire.js, Bandit and the Trivy image scan, and reports to one rolling issue
 - CDK diff against deployed stack
 - Multi-account deployment verification
 - E2E tests against real AWS services
@@ -131,7 +131,7 @@ Progressive build-out:
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
-> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts a required `integ-smoke` status that blocks merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts an `integ-smoke` status that is not required: the ruleset for `main` requires only `build (agentcore)` and `Secrets, deps, and workflow scan`, so the status informs reviewers and does not block merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
 
 #### Residual risk acceptance — fork PR integ execution
 

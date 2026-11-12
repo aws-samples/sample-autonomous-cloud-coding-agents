@@ -66,6 +66,7 @@ tasks. A fleet-wide operator view needs admin-scoped endpoints (next increments)
 MISE_EXPERIMENTAL=1 mise //web:build      # typecheck + test + lint + bundle (part of `mise run build`)
 MISE_EXPERIMENTAL=1 mise //web:test       # Vitest + Testing Library against the same MSW handlers
 MISE_EXPERIMENTAL=1 mise //web:eslint     # ESLint --fix
+MISE_EXPERIMENTAL=1 mise //web:eslint:check  # ESLint without --fix: reports only; a warning fails too
 MISE_EXPERIMENTAL=1 mise //web:dev:mock   # local mock mode
 MISE_EXPERIMENTAL=1 mise //web:dev:live   # local dev server against your deployment
 ```

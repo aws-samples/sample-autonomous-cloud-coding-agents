@@ -2273,6 +2273,7 @@ The agent runtime uses Python [`cedarpy@4.12.2`](https://pypi.org/project/cedarp
 - `agent/pyproject.toml`: `cedarpy==4.12.2`
 - `cdk/package.json`: `"@cedar-policy/cedar-wasm": "4.12.0"`
 - `mise.toml` documents the pinned versions in a comment for operator visibility
+- `contracts/cedar-parity/engines/versions.json` names the pair the fixtures were verified against. `mise run check:cedar-engine-pair` (part of `mise run drift-prevention`, so of the build) fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and `agent/pyproject.toml` each pin exactly that version, so an engine bump is always an edit to that file as well
 
 **Lambda layer packaging** (finding #5). The cedar-wasm package is 4.1 MB unzipped. Shipping it in the deployment bundle of each of the 4 policy Lambdas would consume ~16 MB of unzipped bundle size — manageable on its own but leaves little room for AWS SDK + other deps as the codebase grows, and threatens the Lambda 250 MB unzipped limit under realistic growth. Solution: package cedar-wasm as a **Lambda layer** (`cedar-wasm-layer.ts`, task #10 in §15.2), attached to each policy Lambda. This reduces each Lambda's deployment bundle to just the handler code + thin wrapper around the layer import. Policy Lambdas are configured with ≥ 512 MB memory to accommodate WASM module instantiation under concurrent invocation (measured under 100-concurrent bursts in §15.3 Lambda memory tests).
 
@@ -2318,6 +2319,8 @@ flowchart LR
 ```
 
 When policy authors upgrade either engine, the parity fixture must be re-generated (a small helper script dumps decisions from both engines; the human confirms the change is intentional).
+
+**What the parity fixtures do not cover.** Each fixture carries its own policy text, so the parity tests compare the two engines and do not exercise the rules shipped in `agent/policies/`. Those are pinned by `agent/tests/test_policy_builtin_rules.py`: for each built-in rule its tier, the calls it must catch (each evaluated for every task type) and one similar call it must leave alone. Removing a rule, moving it to the softer tier, limiting it to some task types or narrowing one of its patterns fails that test.
 
 **Scenario (finding #1, illustrative):** This example uses hypothetical versions (e.g. cedarpy `4.10.1` → `4.11.0`) to show the *class* of bug the parity contract catches; it does not describe the real shipped pins (`cedarpy==4.12.2` ↔ `cedar-wasm==4.12.0`, documented above). The point is that closeness of version strings — even within the same minor line — is no guarantee of behavioral parity, which is exactly why the golden fixtures, not the version numbers, are the source of truth. A platform engineer runs `mise run deps:update` which bumps cedarpy from 4.10.1 to 4.11.0. They notice cedar-wasm is still 4.10.0 but assume it's fine because both say "4.x". Between these versions, cedarpy added support for a new `context has` operator that cedar-wasm doesn't yet have. A new blueprint soft-deny rule uses `context has "approved_context"`. On deploy:
 - Agent-side `PolicyEngine.__init__` parses the rule successfully; engine loads normally.

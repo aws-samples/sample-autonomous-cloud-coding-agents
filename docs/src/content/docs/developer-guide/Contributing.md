@@ -26,7 +26,7 @@ Guidelines:
 
 - One logical change per pull request. Related changes (e.g. a feature + its tests) are fine together; unrelated changes should be separate PRs.
 - Every change requires a unit test. Tests live alongside the code they cover (`cdk/test/` mirrors `cdk/src/`, `agent/tests/`, `cli/test/`).
-- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python).
+- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs every package's lint and type checks the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web: test the code, or leave it counted as uncovered.
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match.
 - If you change docs sources (`docs/guides/`, `docs/design/`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
@@ -76,20 +76,24 @@ Common commands:
 |---|---|
 | `mise run install` | Install all dependencies (Yarn workspaces + Python) |
 | `mise run build` | Full build: agent quality, CDK compile/lint/test/synth, CLI build, docs build |
-| `mise //cdk:build` | CDK only: compile + lint + test + synth |
-| `mise //agent:quality` | Agent only: lint + type check + tests |
-| `mise //cli:build` | CLI only: compile + test + lint |
+| `mise //cdk:build` | CDK only: compile + lint + type-check + test + synth |
+| `mise //agent:quality` | Agent only: lint + format + type check + dead code + tests |
+| `mise //cli:build` | CLI only: compile + type-check + test + lint |
 | `mise //docs:build` | Docs only: sync sources, script tests, Markdown structure lint, `astro check`, Astro build (fails on a broken internal link or anchor) |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 
 Set `export MISE_EXPERIMENTAL=1` for namespaced tasks like `mise //cdk:build`.
 
+Keep settings for one machine out of the repository: mise reads an untracked `mise.local.toml` next to a `mise.toml`. Committing that file, or a `.mise.toml`, `.miserc.toml`, `.yarnrc`, `.yarnrc.yml` or `.npmrc`, in the repository root or a package directory fails `mise run check:coverage-thresholds-sync`, because such a file can change how a pinned test command runs without changing its text (the exact names and directories are `LAUNCHER_CONFIGS` in `scripts/check-coverage-thresholds-sync.ts`).
+
 ### Dependency upgrades
 
 The `upgrade-main` GitHub workflow runs `mise run upgrade` daily and opens a PR labeled `auto-approve` when lockfiles change. Upgrades stay within the ranges declared in each manifest — exact pins are never rewritten, which keeps the Cedar engine parity pair (`cedarpy` / `@cedar-policy/cedar-wasm`) untouched; those move only together, by hand, with refreshed parity fixtures.
 
 PRs labeled `auto-approve` are approved automatically by the `auto-approve` workflow; only apply the label to automated PRs whose changes are gated by the full build (e.g. the dependency-upgrade PRs).
+
+The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `uv`, `semgrep`, `osv-scanner`, `grype` and `zizmor` are pinned to exact versions in the root `mise.toml` (`uv` and `trivy` in `agent/mise.toml`), and every workflow that installs mise pins the mise version (`version:` under `jdx/mise-action`). Nothing bumps these pins automatically: bump them by pull request, to a release that is at least 7 days old, and keep `uv` the same in both files. After pulling a change to a pin, run `mise install`.
 
 ### Git hooks
 
