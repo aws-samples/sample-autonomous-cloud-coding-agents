@@ -63,7 +63,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 ## Boundaries
 
-- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, `web/`, or `docs/`)
+- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, `docs/decisions/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, `web/`, or `docs/`)
 - ⚠️ **Ask first:** New CDK stacks or constructs, agent contract changes, new dependencies, major refactors, CI workflow edits
 - 🚫 **Never:** Edit on `main`; edit `docs/src/content/docs/` by hand; commit secrets; implement without an `approved` issue (conversational "go ahead" is not approval); run raw `jest`/`tsc`/`cdk` when a mise task exists
 
@@ -77,6 +77,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **Transitive npm pin applied in only one place** — `integrations/jira-forge-app` is a standalone npm project *outside* the yarn workspaces, so a root `package.json` `resolutions` bump does **not** reach it. Mirror the pin into `integrations/jira-forge-app/package.json` `overrides` and re-lock (`npm install --package-lock-only`). `mise run drift-prevention` (`check:transitive-pin-sync`) fails locally if they drift. See [#712](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/712).
 - **Unused export, file or dependency** — `mise run check:deadcode` (knip over the TypeScript and JavaScript workspaces; part of `mise run drift-prevention`, so of the build) fails on any finding: zero tolerance, no baseline. Remove the unused code or dependency, drop `export` from a symbol that only its own file uses, or declare in `knip.json` a use that knip cannot see. Decide per symbol; do not bulk-apply `knip --fix`.
 - **Optional feature read from context, or catalog edited in one place** — new optional modules belong in `DeploymentFeatures` (`cdk/src/deployment/features.ts`) and are gated in `AgentStack` from that selection, not with a fresh `tryGetContext`. Regional data lives in `contracts/deployment-capabilities.json`; mirror it into `cli/src/deployment-capabilities.ts` (parity test) and update `lastVerified`. See [ADR-024](./docs/decisions/ADR-024-deployment-profiles.md).
+- **Broken link or misplaced image in Markdown** — `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (READMEs, `AGENTS.md` files and plugin skills included), and `mise //docs:build` fails on a broken link or anchor of the rendered site. An image shown in a mirrored doc must be a file in `docs/imgs/`, or `mise //docs:sync` fails. See [docs/AGENTS.md](./docs/AGENTS.md).
 - **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack
