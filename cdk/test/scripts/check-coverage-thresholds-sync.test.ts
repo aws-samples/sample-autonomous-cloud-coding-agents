@@ -353,8 +353,8 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${FORGE} scripts.test`, `does not match ${CONTRACT} commands.${FORGE}`);
     });
 
-    // Node leaves out of its coverage the code that a node:coverage comment marks, and nothing lints the Forge app:
-    // the floors of its script would then measure whatever is left.
+    // Node leaves out of its coverage the code that one of its coverage comments marks (the edit below spells one), and
+    // nothing lints the Forge app: the floors of its script would then measure whatever is left.
     test('a comment in the Forge app that takes code out of the measurement', () => {
       expectDrift((root) => {
         edit(root, FORGE_SOURCE, text => `/* node:coverage disable */\n${text}`);
