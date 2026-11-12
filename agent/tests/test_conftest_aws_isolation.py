@@ -6,12 +6,12 @@ Neither half can be shown by an ordinary test:
   scrub, so deleting it would change nothing. The first test hands a fresh
   interpreter every credential source botocore knows and asks botocore what it
   finds once ``tests.conftest`` is imported;
-* the send guard — it only acts when a request is attempted, so the second test
-  attempts one and checks what the guard does with it.
+* the send guard — it only acts when a request is attempted, so the other tests
+  each attempt one and check what the guard does with it.
 
-Every credential here is an obvious fake, and the one request this module
-attempts on purpose is aimed at a closed local port, so it cannot reach AWS even
-if the guard under test is broken.
+Every credential here is an obvious fake, and the requests this module attempts
+on purpose are aimed at a closed local port, so they cannot reach AWS even if the
+guard under test is broken.
 """
 
 import json
@@ -104,16 +104,20 @@ def test_no_credential_source_survives_importing_conftest(tmp_path):
     assert seen["found"] is None, f"botocore resolved credentials through: {seen['found']}" + fix
 
 
-def test_a_request_to_aws_is_refused_recorded_and_fails_the_session(monkeypatch):
-    # This test attempts a request on purpose: keep it out of the real session's record.
-    monkeypatch.setattr(conftest, "_blocked_aws_requests", [])
-    client = boto3.client(
+def _client_aimed_at_a_closed_port():
+    return boto3.client(
         "sts",
         region_name="us-east-1",
         endpoint_url=CLOSED_PORT,
         aws_access_key_id=FAKE_KEY,
         aws_secret_access_key="fake",
     )
+
+
+def test_a_request_to_aws_is_refused_recorded_and_fails_the_session(monkeypatch):
+    # This test attempts a request on purpose: keep it out of the real session's record.
+    monkeypatch.setattr(conftest, "_blocked_aws_requests", [])
+    client = _client_aimed_at_a_closed_port()
 
     with pytest.raises(RuntimeError, match="unit tests must not reach AWS"):
         client.get_caller_identity()
@@ -135,3 +139,25 @@ def test_a_request_to_aws_is_refused_recorded_and_fails_the_session(monkeypatch)
         SimpleNamespace(section=lambda title, **_markup: report.append(title), line=report.append)
     )
     assert f"  {attempt}" in report
+
+
+def test_a_request_from_a_deleted_working_directory_is_recorded_too(tmp_path, monkeypatch):
+    # A test may delete the directory it works in. The guard must not need that
+    # directory to describe an attempt: one it fails to describe is one it does not
+    # record, and a session whose code under test swallowed the error would pass.
+    recorded: list[str] = []
+    monkeypatch.setattr(conftest, "_blocked_aws_requests", recorded)
+    client = _client_aimed_at_a_closed_port()
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+
+    try:
+        with pytest.raises(RuntimeError, match="unit tests must not reach AWS"):
+            client.get_caller_identity()
+    finally:
+        monkeypatch.chdir(tmp_path)  # an existing directory again, before anything is reported
+
+    assert len(recorded) == 1, recorded
+    assert f"{Path(__file__).name}:" in recorded[0], "the report must name the line that sent"

@@ -158,7 +158,9 @@ _blocked_aws_requests: list[str] = []
 
 def _refuse_aws_request(self, request):
     frames = [f for f in traceback.extract_stack()[:-1] if "site-packages" not in f.filename]
-    origin = f"{os.path.relpath(frames[-1].filename)}:{frames[-1].lineno}" if frames else "?"
+    # The path as the frame has it, not made relative: that asks for the working
+    # directory, and where a test has deleted it the attempt would go unrecorded.
+    origin = f"{frames[-1].filename}:{frames[-1].lineno}" if frames else "?"
     attempt = (
         f"{request.method} {request.url.partition('?')[0]} from {origin} "
         f"(thread {threading.current_thread().name}, "
