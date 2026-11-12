@@ -47,7 +47,7 @@ Never add an `exclude` option to `starlightLinksValidator()` to make a link pass
 |------|---------|-----|
 | `MD056/table-column-count` | A table row has more or fewer cells than the header; renderers drop the extra cells | Give the row the header's number of cells, and escape a pipe that belongs to a cell's text (see below) |
 | `MD045/no-alt-text` | An image has no alternative text | `![what the image shows](path)` |
-| `MD025/single-h1` | A second top-level heading; a front matter `title` counts as the first | Keep one `# H1` (none in a source with front matter) and make the others `##` |
+| `MD025/single-h1` | A second top-level heading; a front matter `title` counts as the first. Reported only in a file that has such a `title` or opens with its `# H1` (blank lines and HTML comments may come first). A file that opens with anything else is not checked: the root `README.md` opens with an HTML block, and a `# H1` added to it passes | Keep one `# H1` (none in a source with front matter) and make the others `##` |
 | `MD024/no-duplicate-heading` | Two headings with the same text under the same parent heading, so their anchors collide | Rename one, or delete the repeated section |
 | `MD001/heading-increment` | A heading level is skipped (`##` followed by `####`) | Use the next level down |
 
