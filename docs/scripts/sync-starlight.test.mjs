@@ -85,6 +85,8 @@ test('splits a guide into one page per ## section', () => {
       'Moved text.',
       '',
     ].join('\n'),
+    // Only the Markdown files of a mirrored directory become pages.
+    'docs/design/notes.txt': 'Not a page.\n',
   });
   sync(root, PLAN);
 
@@ -120,7 +122,7 @@ test('every ## section is published; an introduction that is only the H1 is not'
   assert.deepEqual(links(root, 'architecture/Api.md'), [`[guide](${BASE}/guide/overview) [title](${BASE}/guide/overview)`]);
 });
 
-test('a ## line inside a code fence does not start a page', () => {
+test('a heading line inside a code fence is code: it starts no page and is no title', () => {
   const section = [
     'Before the fences.',
     '',
@@ -135,7 +137,12 @@ test('a ## line inside a code fence does not start a page', () => {
     '',
     'After the fences.',
   ].join('\n');
-  const root = repo({ 'docs/guides/GUIDE.md': `# Guide\n\n## First\n\n${section}\n\n## Second\n\nText.\n` });
+  // Like the quick start: the title is in the front matter, the shell comments are in code blocks.
+  const start = '---\ntitle: Start\n---\n\n```bash\n# a comment, not a title\n```\n\nStart text.\n';
+  const root = repo({
+    'docs/guides/GUIDE.md': `# Guide\n\n## First\n\n${section}\n\n## Second\n\nText.\n`,
+    'docs/guides/START.mdx': start,
+  });
   sync(root, PLAN);
 
   assert.deepEqual(
@@ -143,6 +150,7 @@ test('a ## line inside a code fence does not start a page', () => {
     ['guide/Contributing.md', 'guide/First.md', 'guide/Second.md'],
   );
   assert.equal(page(root, 'guide/First.md'), `---\ntitle: "First"\n---\n\n${section}`);
+  assert.equal(page(root, 'start/Start.mdx'), start);
 });
 
 test('two sources for one page fail instead of overwriting each other', () => {
@@ -231,7 +239,7 @@ test('a missing source fails the sync and leaves the mirrors untouched', () => {
 test('the source H1 becomes the quoted title and the only H1 of the page', () => {
   const root = repo({
     'docs/decisions/ADR-001-first.md': '# ADR-001: A "quoted" title: with colons\n\nDecision text.\n\n## Context\n',
-    'docs/design/API.md': 'No heading at all.\n',
+    'docs/design/API.md': 'No top-level heading.\n\n## A section\n',
     'docs/guides/START.mdx':
       "---\ntitle: Start\n---\n\nimport { Tabs } from '@astrojs/starlight/components';\n\n# Start\n\nStart text.\n",
   });
@@ -241,8 +249,8 @@ test('the source H1 becomes the quoted title and the only H1 of the page', () =>
     page(root, 'decisions/Adr-001-first.md'),
     '---\ntitle: "ADR-001: A \\"quoted\\" title: with colons"\n---\n\nDecision text.\n\n## Context\n',
   );
-  // No H1 in the source: the file name is the fallback.
-  assert.equal(page(root, 'architecture/Api.md'), '---\ntitle: "Api"\n---\n\nNo heading at all.\n');
+  // No H1 in the source: the file name is the fallback, and a `##` stays where it is.
+  assert.equal(page(root, 'architecture/Api.md'), '---\ntitle: "Api"\n---\n\nNo top-level heading.\n\n## A section\n');
   // A source with its own frontmatter keeps it; its H1 would be a second one.
   assert.equal(
     page(root, 'start/Start.mdx'),
@@ -322,6 +330,7 @@ test('links to files that are not published point at GitHub; images are served f
       '[agents](../../AGENTS.md) [setup](../../agent/README.md#setup) [fixtures](../../contracts/parity/)',
       '![architecture](../imgs/nested/arch.png)',
       '<img src="../imgs/nested/arch.png" width="200"> <a href=\'../../AGENTS.md\'>agents</a>',
+      '![external](https://example.com/logo.png) <img src="/elsewhere/logo.png">',
       '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
       '',
     ].join('\n'),
@@ -332,6 +341,8 @@ test('links to files that are not published point at GitHub; images are served f
     `[agents](${GITHUB}/blob/main/AGENTS.md) [setup](${GITHUB}/blob/main/agent/README.md#setup) [fixtures](${GITHUB}/tree/main/contracts/parity)`,
     `![architecture](${BASE}/imgs/nested/arch.png)`,
     `<img src="${BASE}/imgs/nested/arch.png" width="200"> <a href='${GITHUB}/blob/main/AGENTS.md'>agents</a>`,
+    // Left as written: a URL or an absolute path is not a file of the repository.
+    '![external](https://example.com/logo.png) <img src="/elsewhere/logo.png">',
     // Left as written: the link checks report a target that does not exist.
     '[dangling](./GONE.md) [outside](../../../elsewhere.md)',
   ]);
@@ -402,7 +413,7 @@ test('anchors into a split guide land on the page that holds the heading (#765)'
       '[guide](../guides/GUIDE.md) [h2](../guides/GUIDE.md#second) [h3](../guides/GUIDE.md#deep-heading)',
       '[first examples](../guides/GUIDE.md#examples) [second examples](../guides/GUIDE.md#examples-1)',
       '[punctuation](../guides/GUIDE.md#github-pat--minimal-permissions-v2) [moved](../guides/GUIDE.md#moved-section)',
-      '[unknown](../guides/GUIDE.md#no-such-heading)',
+      '[unknown](../guides/GUIDE.md#no-such-heading) [upper case](../guides/GUIDE.md#Deep-Heading)',
       '',
     ].join('\n'),
   });
@@ -414,7 +425,7 @@ test('anchors into a split guide land on the page that holds the heading (#765)'
     `[first examples](${BASE}/guide/first#examples) [second examples](${BASE}/guide/second#examples)`,
     `[punctuation](${BASE}/guide/second#github-pat--minimal-permissions-v2) [moved](${BASE}/elsewhere/moved-section)`,
     // An anchor the guide does not have is passed through, so that the site link check reports it.
-    `[unknown](${BASE}/guide/introduction#no-such-heading)`,
+    `[unknown](${BASE}/guide/introduction#no-such-heading) [upper case](${BASE}/guide/second#deep-heading)`,
   ]);
   assert.deepEqual(links(root, 'guide/Introduction.md'), [
     `[second](${BASE}/guide/second) [deep](${BASE}/guide/second#deep-heading) [the title](#_top)`,
