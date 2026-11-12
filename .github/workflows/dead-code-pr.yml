@@ -1,9 +1,11 @@
 name: dead-code-pr
-# Advisory dead-code detection gate (issue #282, cairn MVG gate #6).
-# Steps use continue-on-error so findings surface as annotations without
-# blocking the merge queue. Flips to required/blocking once the knip
-# baseline (knip-baseline.json) is driven to zero. The eslint no-unused-vars
-# half of the gate is already blocking via the `build` check.
+# Advisory Python dead-code scan (issue #282, cairn MVG gate #6).
+# The TypeScript half is not here any more: knip blocks inside the required
+# `build` check (`mise run check:deadcode`, part of drift-prevention), like
+# the eslint no-unused-vars half. What remains is vulture. Its step uses
+# continue-on-error, so findings surface as annotations without blocking the
+# merge queue. Delete this workflow once `//agent:quality` runs
+# `lint:deadcode`: the required build then covers vulture as well.
 on:
   pull_request: {}
   merge_group: {}
@@ -44,15 +46,6 @@ jobs:
 
       - name: Install dependencies
         run: mise run install
-
-      - name: TS dead-code ratchet (knip, advisory)
-        continue-on-error: true
-        run: |
-          if mise run check:deadcode-ratchet; then
-            echo "::notice title=knip ratchet::Dead-code count is at or below baseline."
-          else
-            echo "::warning title=knip ratchet::Dead-code count increased above the baseline (knip-baseline.json). Run 'yarn knip' locally and remove the new dead code, or suppress a false positive in knip.json."
-          fi
 
       - name: Python dead-code scan (vulture, advisory)
         continue-on-error: true

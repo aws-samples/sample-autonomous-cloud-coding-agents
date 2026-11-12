@@ -350,6 +350,7 @@ describe('AgentRegistryClient', () => {
       });
       // A timeout after create also strands a record, so it surfaces as
       // RegistryPublishIncompleteError with the underlying reason on `cause`.
+      // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
       const assertion = expect(p).rejects.toBeInstanceOf(RegistryPublishIncompleteError);
       const causeAssertion = p.catch((e: unknown) => {
         expect(String((e as RegistryPublishIncompleteError).cause)).toMatch(/did not leave CREATING/);

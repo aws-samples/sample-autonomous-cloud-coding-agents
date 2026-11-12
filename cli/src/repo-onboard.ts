@@ -52,6 +52,7 @@ export interface OnboardRepoDependencies {
 }
 
 /** Register or re-activate a repository in RepoTable (operator path). */
+// eslint-disable-next-line complexity -- predates the ceiling (45 when it landed); must not grow
 export async function onboardRepo(
   region: string,
   tableName: string,

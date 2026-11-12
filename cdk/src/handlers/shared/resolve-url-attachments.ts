@@ -40,9 +40,9 @@ import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningCo
 import { AttachmentResolutionError } from './context-hydration';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type AttachmentRecord } from './types';
 import { isAllowedMimeType, validateMagicBytes } from './validation';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 // ---------------------------------------------------------------------------
 // Constants

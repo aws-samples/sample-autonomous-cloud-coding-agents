@@ -16,6 +16,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+import js from '@eslint/js';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
 import stylistic from '@stylistic/eslint-plugin';
@@ -24,11 +25,48 @@ import importX from 'eslint-plugin-import-x';
 import jest from 'eslint-plugin-jest';
 import jsdoc from 'eslint-plugin-jsdoc';
 import licenseHeader from 'eslint-plugin-license-header';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
+// without a word, so a .mts or .cts file would sit outside every rule below.
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}', 'scripts/**/*.{ts,tsx,mts,cts}'];
+
+const NO_MD5 = {
+  selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
+  message: 'Use the md5hash() function from the core library if you want md5',
+};
+// An AWS SDK client takes one config argument at most; a CDK construct such as
+// cognito.UserPoolClient takes (scope, id, props) and is not meant here. The name
+// exception is this package's own registry client, which is not an SDK client.
+const NO_NAKED_SDK_CLIENT = {
+  selector: 'NewExpression[arguments.length<2]:matches('
+    + '[callee.name=/^(?!AgentRegistryClient$).*Client$/], [callee.property.name=/Client$/])',
+  message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/handlers/shared/ua.ts: `new XxxClient()` drops the'
+    + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
+    + ' the exception in this selector.',
+};
+
+// Used by the rules for src/handlers below.
+const NO_CDK_IN_HANDLERS = 'Lambda handler code is bundled with everything it imports, and a module that imports the CDK'
+  + ' brings the whole library into the function. Inside cdk/src a handler may import only src/handlers and the two'
+  + ' import-free modules constructs/task-status and constructs/task-table-indexes. Put a value both sides need in'
+  + ' src/handlers/shared (see storage-names.ts) and import it from the construct.';
+
+// What handler code may import from inside cdk/src, relative to src. Add a module only
+// if neither it nor anything it imports imports aws-cdk-lib or constructs.
+const HANDLER_IMPORT_ALLOW_LIST = ['./handlers', './constructs/task-status.ts', './constructs/task-table-indexes.ts'];
+// The handler rules select by path, so a path that no longer exists would switch them
+// off without a word: fail the run instead.
+for (const allowed of HANDLER_IMPORT_ALLOW_LIST) {
+  if (!existsSync(join(__dirname, 'src', allowed))) {
+    throw new Error(`cdk/eslint.config.mjs: ${join('src', allowed)} does not exist; update the handler import rules.`);
+  }
+}
 
 export default [
   // Global ignores
@@ -44,9 +82,14 @@ export default [
     ],
   },
 
+  // Correctness baselines: eslint:recommended and the typescript-eslint recommended
+  // set. They come before the package block so that block wins where both set a rule.
+  { files: TS_FILES, rules: js.configs.recommended.rules },
+  ...tseslint.configs['flat/recommended'].map((config) => ({ ...config, files: TS_FILES })),
+
   // TypeScript source, test, and scripts files
   {
-    files: ['src/**/*.ts', 'test/**/*.ts', 'scripts/**/*.ts'],
+    files: TS_FILES,
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -118,11 +161,18 @@ export default [
 
       // Core ESLint rules
       'curly': ['error', 'multi-line', 'consistent'],
+      'eqeqeq': ['error', 'always', { null: 'ignore' }],
       'no-shadow': ['off'],
       'no-return-await': 'off',
       'dot-notation': ['error'],
       'no-bitwise': ['error'],
       'no-throw-literal': ['error'],
+      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
+      // A function above it is split, not exempted. The eslint-disable-next-line
+      // directives in src mark the functions that were above it when it landed: they
+      // must not grow. When a directive stops applying, as when its function comes to
+      // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
+      'complexity': ['error', { max: 40 }],
       'quotes': ['error', 'single', { avoidEscape: true }],
       'comma-spacing': ['error', { before: false, after: true }],
       'no-multi-spaces': ['error', { ignoreEOLComments: false }],
@@ -149,11 +199,22 @@ export default [
         ignoreRegExpLiterals: true,
       }],
       'no-console': ['error'],
+      // A coverage-ignore comment takes code out of what the coverage floors measure:
+      // test the code, or leave it counted as uncovered. These are the spellings that
+      // jest (v8-to-istanbul) and vitest honour.
+      'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-trailing-spaces': ['error'],
-      'no-restricted-syntax': ['error', {
-        selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
-        message: 'Use the md5hash() function from the core library if you want md5',
-      }],
+      'no-restricted-syntax': ['error', NO_MD5],
+      // A holder that a closure reads before its one assignment cannot become a const
+      // (the Lazy ARN holders in stacks/agent.ts).
+      'prefer-const': ['error', { ignoreReadBeforeAssign: true }],
+      // Rules of the recommended sets that still have findings. Each one stays off
+      // until its findings are fixed; delete the line to turn the rule on.
+      '@typescript-eslint/no-explicit-any': 'off',
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
+      // Off for good: its one finding is the sanitizer that strips control characters.
+      'no-control-regex': 'off',
 
       // TypeScript rules
       // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
@@ -209,6 +270,15 @@ export default [
         ],
       }],
       '@typescript-eslint/unbound-method': 'error',
+      // Promise and operator misuse that compiles (type-aware rules).
+      '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/prefer-promise-reject-errors': 'error',
+      '@typescript-eslint/no-array-delete': 'error',
+      '@typescript-eslint/no-for-in-array': 'error',
+      '@typescript-eslint/no-implied-eval': 'error',
+      '@typescript-eslint/no-unsafe-unary-minus': 'error',
+      '@typescript-eslint/restrict-plus-operands': 'error',
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
@@ -222,6 +292,10 @@ export default [
         alphabetize: { order: 'asc', caseInsensitive: true },
       }],
       'import-x/no-duplicates': ['error'],
+      // Runtime import cycles; `import type` edges do not count.
+      'import-x/no-cycle': ['error', { ignoreExternal: true }],
+      'import-x/no-self-import': 'error',
+      'import-x/no-useless-path-segments': 'error',
 
       // CDK Labs rules
       // NOTE: The following 4 rules use context.getFilename() which was removed in ESLint 10.
@@ -243,21 +317,82 @@ export default [
       'jsdoc/check-alignment': ['error'],
 
       // Jest rules
-      'jest/expect-expect': 'off',
+      // A test must assert: expect(), a local helper whose name starts with expect, or
+      // an assertion method of aws-cdk-lib/assertions (every void method of Template
+      // and Annotations; find* and get* return a value and do not count).
+      'jest/expect-expect': ['error', {
+        assertFunctionNames: [
+          'expect*',
+          '**.resourceCountIs', '**.resourcePropertiesCountIs', '**.hasResource', '**.hasResourceProperties',
+          '**.allResources', '**.allResourcesProperties', '**.hasParameter', '**.hasOutput', '**.hasMapping',
+          '**.hasCondition', '**.templateMatches',
+          '**.hasError', '**.hasNoError', '**.hasWarning', '**.hasNoWarning', '**.hasInfo', '**.hasNoInfo',
+        ],
+      }],
       'jest/no-conditional-expect': 'off',
-      'jest/no-done-callback': 'off',
-      'jest/no-standalone-expect': 'off',
-      'jest/valid-expect': 'off',
+      // An expect() at the top level or in a describe body runs while the file is
+      // loaded, not as part of a test. afterEach is allowed: two handler suites
+      // assert an invariant of every test there.
+      'jest/no-standalone-expect': ['error', { additionalTestBlockFunctions: ['afterEach'] }],
+      // expect(x) without a matcher, and an async assertion nobody awaits, check
+      // nothing. One idiom is sound and still reported: keep the assertion promise,
+      // advance fake timers, then await it. Mark it with eslint-disable-next-line
+      // and the reason; the rule's autofix would await it on the spot and hang the test.
+      'jest/valid-expect': 'error',
       'jest/valid-title': 'off',
-      'jest/no-identical-title': 'off',
+      'jest/no-identical-title': 'error',
       'jest/no-disabled-tests': 'error',
       'jest/no-focused-tests': 'error',
+      'jest/no-alias-methods': 'error',
+      'jest/no-deprecated-functions': 'error',
+      'jest/no-done-callback': 'error',
+      'jest/no-duplicate-hooks': 'error',
+      'jest/no-export': 'error',
+      'jest/no-interpolation-in-snapshots': 'error',
+      // Jest has no `fail()`: the call is a ReferenceError, which the catch block of
+      // a try/fail/catch test swallows, so the test passes when nothing throws.
+      'jest/no-jasmine-globals': 'error',
+      'jest/no-mocks-import': 'error',
+      'jest/no-test-prefixes': 'error',
+      'jest/valid-describe-callback': 'error',
+      'jest/valid-expect-in-promise': 'error',
+    },
+  },
+
+  // Every AWS SDK client in src is built by the attributed factory (#319).
+  {
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
+    rules: {
+      // The whole list again: a later block replaces a rule's options.
+      'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
+    },
+  },
+
+  // Lambda runtime code must not reach the CDK. The bundle test
+  // (test/handlers/shared/runtime-bundle-boundary.test.ts) bundles every entrypoint and
+  // is the ground truth for any import spelling; these two rules name the line.
+  {
+    files: ['src/handlers/**/*.{ts,tsx,mts,cts}'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: ['aws-cdk-lib', 'constructs', 'cdk-nag'].map((name) => ({ name, message: NO_CDK_IN_HANDLERS })),
+        patterns: [{ group: ['aws-cdk-lib/*', '@aws-cdk/*'], message: NO_CDK_IN_HANDLERS }],
+      }],
+      'import-x/no-restricted-paths': ['error', {
+        basePath: __dirname,
+        zones: [{
+          target: './src/handlers',
+          from: './src',
+          except: HANDLER_IMPORT_ALLOW_LIST,
+          message: NO_CDK_IN_HANDLERS,
+        }],
+      }],
     },
   },
 
   // Override: tests legitimately use inline literals (fixtures, assertions)
   {
-    files: ['test/**/*.ts'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       // Literal fixtures and expected values are the point of a test; naming every
       // one defeats readability.
@@ -277,7 +412,7 @@ export default [
   // preflight checks), not CDK constructs. They print progress and results to
   // the terminal, so console output is their interface.
   {
-    files: ['scripts/**/*.ts'],
+    files: ['scripts/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-console': 'off',
     },

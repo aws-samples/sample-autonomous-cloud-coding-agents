@@ -183,7 +183,7 @@ async function main(): Promise<void> {
   process.exitCode = failed ? 1 : 0;
 }
 
-/* istanbul ignore next -- exercised through the command-line smoke checks */
+// Not reachable under jest: exercised through the command-line smoke checks.
 if (require.main === module) {
   void main().catch(error => {
     process.stderr.write(`${errorMessage(error)}\n`);

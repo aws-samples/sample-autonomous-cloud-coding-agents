@@ -138,13 +138,13 @@ run = "npm test --prefix integrations/jira-forge-app"
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
-[tasks.deadcode]
-description = "Dead-code detection across TS workspaces via knip (#282, cairn MVG gate #6). Lists unused files/exports/deps; run `yarn knip --fix` locally to auto-remove."
-run = "yarn knip"
-
-[tasks."check:deadcode-ratchet"]
-description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
-run = "node scripts/check-deadcode-ratchet.mjs"
+[tasks."check:deadcode"]
+description = "Dead-code gate (#282): knip must report nothing in the TS/JS workspaces — no unused file, dependency, export or exported type, no unlisted or unresolved import. Zero tolerance, no baseline."
+run = '''
+yarn -s knip --no-progress && exit 0
+echo 'check:deadcode: knip must report nothing (zero tolerance, no baseline). For each finding above: remove the unused file, dependency or code; drop `export` if the symbol is used only in its own file; declare a use that knip cannot see in knip.json. Decide per symbol and do not bulk-apply `knip --fix`.' >&2
+exit 1
+'''
 
 [tasks."check:transitive-pin-sync"]
 description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
@@ -164,6 +164,7 @@ run = [
   { task = "check:cedar-engine-pair" },
   { task = "check:coverage-thresholds-sync" },
   { task = "check:transitive-pin-sync" },
+  { task = "check:deadcode" },
   { task = "//docs:link-check" },
 ]
 

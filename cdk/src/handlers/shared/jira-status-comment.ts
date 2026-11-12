@@ -45,13 +45,6 @@ export function renderJiraFinishedPointer(
   return [[{ text: '❌ Finished — details posted below.', strong: true }]];
 }
 
-/** Plain-text/markdown form for the channel adapter. */
-export function renderJiraFinishedPointerText(kind: JiraFinishedPointerKind): string {
-  return renderJiraFinishedPointer(kind)
-    .map((paragraph) => paragraph.map((run) => run.text).join(''))
-    .join('\n');
-}
-
 function formatDuration(seconds: number): string {
   const rounded = Math.max(0, Math.round(seconds));
   const minutes = Math.floor(rounded / 60);

@@ -98,7 +98,7 @@ const COMPUTE_LABELS: Readonly<Record<ComputeBackend, string>> = {
 };
 
 /** One-time account changes a deploy needs, in execution order. */
-export type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
+type AccountPreparation = 'bootstrap' | 'rebootstrap' | 'computeTypes';
 
 /** Resource types whose deletion, replacement or orphaning loses data, installations or ownership. */
 const STATE_BEARING_TYPES: ReadonlyMap<string, string> = new Map([
@@ -369,7 +369,7 @@ function versionAtLeast(actual: string, required: string): boolean {
  * What the account needs before ABCA can deploy. A standard CDK bootstrap (no
  * ABCA policy outputs) is shared with other apps and is never modified.
  */
-export function planAccountPreparation(
+function planAccountPreparation(
   bootstrap: ExistingStack | null,
   compute: readonly ComputeBackend[],
 ): { steps: AccountPreparation[]; computeTypes: ComputeBackend[]; standardBootstrap: boolean } {
@@ -636,6 +636,7 @@ async function confirmDataLoss(deps: SetupDeps, opts: SetupOptions, stackName: s
 }
 
 /** Interactive or scripted `bgagent setup` (ADR-024). */
+// eslint-disable-next-line complexity -- predates the ceiling (132 when it landed); must not grow
 export async function runSetup(opts: SetupOptions, deps: SetupDeps): Promise<void> {
   const ui = new Ui(deps);
   const { style } = ui;
@@ -999,7 +1000,7 @@ export function cliInvocation(script: string | undefined, cwd: string): string {
   return `node ${relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : script}`;
 }
 
-/* istanbul ignore next -- thin AWS/terminal adapters; runSetup is tested through SetupDeps */
+// Not unit-tested: thin AWS/terminal adapters; runSetup is tested through SetupDeps.
 function defaultDeps(): SetupDeps {
   const describeError = (stackName: string, region: string, err: unknown) => new CliError(
     `Could not read stack '${stackName}' in ${region}: ${err instanceof Error ? err.message : String(err)}`,

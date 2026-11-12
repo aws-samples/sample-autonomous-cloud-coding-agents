@@ -22,7 +22,7 @@
 // matching, so ranking is always done here in code (this is substrate-agnostic
 // ABCA logic — it does not import the AWS SDK).
 
-import { type ParsedConstraint, parseConstraint } from './ref';
+import type { ParsedConstraint } from './ref';
 
 export interface SemVer {
   readonly major: number;
@@ -157,13 +157,4 @@ export function selectHighest(
     if (best === null || compareVersions(v, best) > 0) best = v;
   }
   return best ? best.raw : null;
-}
-
-/** Convenience: parse a constraint string then select. Null on bad constraint. */
-export function selectHighestForConstraint(
-  candidates: readonly string[],
-  constraintRaw: string,
-): string | null {
-  const c = parseConstraint(constraintRaw);
-  return c ? selectHighest(candidates, c) : null;
 }

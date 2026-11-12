@@ -27,9 +27,6 @@ import { makeClient, makeDocClient } from './ua';
 const sm = makeClient(SecretsManagerClient);
 const ddb = makeDocClient();
 
-/** Prefix for Jira-related secrets in Secrets Manager. */
-export const JIRA_SECRET_PREFIX = 'bgagent/jira/';
-
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;

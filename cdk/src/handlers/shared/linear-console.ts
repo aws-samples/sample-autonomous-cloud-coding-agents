@@ -35,7 +35,7 @@ const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 const REQUEST_TIMEOUT_MS = 8_000;
 /** Long enough for Linear's webhook to arrive, short enough not to outlive the click. */
 export const START_CLAIM_TTL_SECONDS = 600;
-export const MAX_ISSUES_PER_PROJECT = 50;
+const MAX_ISSUES_PER_PROJECT = 50;
 
 export class LinearApiError extends Error {
   constructor(message: string, readonly status?: number) {

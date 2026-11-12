@@ -56,7 +56,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
  * in the CloudFormation stack description in `cdk/src/main.ts`. Per-surface
  * literal by design.
  */
-export const SOLUTION_ID = 'uksb-wt64nei4u6';
+const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /**
  * Env var carrying the stable per-component label (`api`, `webhook`,
@@ -64,7 +64,7 @@ export const SOLUTION_ID = 'uksb-wt64nei4u6';
  * are bundled into multiple Lambdas, so identity must come from the
  * environment, not from code.
  */
-export const COMPONENT_ENV = 'ABCA_COMPONENT';
+const COMPONENT_ENV = 'ABCA_COMPONENT';
 
 /** Default component label when ABCA_COMPONENT is absent (REST API surface). */
 const DEFAULT_COMPONENT = 'api';

@@ -463,7 +463,7 @@ export async function checkJiraAppIdentity(
       status: 'warn',
       detail: `${incomplete.length} of ${active.length} active Jira tenant(s) will write as the OAuth `
         + `setup user or have incomplete Forge metadata: ${tenantIds}. Run \`bgagent jira app-setup `
-        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>\` for each tenant.',
+        + '<cloud-id> --proxy-url <forge-v2-url> --stack-name <stack>` for each tenant.',
     };
   } catch (err) {
     return {

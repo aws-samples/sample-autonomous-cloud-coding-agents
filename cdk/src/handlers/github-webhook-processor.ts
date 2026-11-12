@@ -120,6 +120,7 @@ const PR_LOOKUP_RETRY_DELAYS_MS = [
  * the receiver already 200'd, so retries by GitHub will dedup at the
  * receiver layer.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (59 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   // One wall-clock deadline shared across PR lookup + screenshot capture
   // + S3 PUT + comment POST. Without this, findPullRequestForShaWithRetry

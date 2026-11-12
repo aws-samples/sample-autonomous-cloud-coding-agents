@@ -1,34 +1,40 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignore": [
-    ".semgrep/**",
-    "scripts/**"
+    ".semgrep/**"
   ],
   "ignoreBinaries": [
     "mise"
   ],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  },
   "workspaces": {
+    ".": {
+      "entry": ["scripts/*.{js,mjs,ts}"]
+    },
     "cdk": {
-      "entry": ["src/main.ts!", "src/handlers/*.ts!"],
-      "project": ["src/**/*.ts!"],
-      "ignoreDependencies": ["esbuild", "ts-node", "tsx", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
+      "entry": ["src/main.ts!", "src/handlers/*.ts!", "scripts/*.ts", "test/integ/integ.*.ts"],
+      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"],
+      "ignoreDependencies": ["tsx", "@aws-cdk/integ-runner"]
     },
     "cli": {
       "entry": ["src/bin/bgagent.ts!", "src/index.ts!"],
-      "project": ["src/**/*.ts!"]
+      "project": ["src/**/*.ts!", "test/**/*.ts"]
     },
     "docs": {
-      "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro"],
-      "project": ["src/**/*.{astro,ts,tsx}"],
-      "ignoreDependencies": ["@astrojs/check", "markdown-link-check", "remark-gfm", "@pagefind/default-ui", "jest"]
+      "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro", "scripts/*.mjs"],
+      "project": ["src/**/*.{astro,ts,tsx}", "scripts/**/*.mjs"],
+      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui", "jest"]
     },
     "integrations/jira-forge-app": {
       "entry": ["src/index.js!", "test/**/*.test.js"],
       "project": ["src/**/*.js!", "test/**/*.js"]
     },
     "web": {
-      "entry": ["test/**/*.test.{ts,tsx}"],
-      "project": ["src/**/*.{ts,tsx}!", "test/**/*.{ts,tsx}"]
+      "entry": ["test/**/*.test.{ts,tsx}", "scripts/*.mjs"],
+      "project": ["src/**/*.{ts,tsx}!", "test/**/*.{ts,tsx}", "scripts/**/*.mjs"]
     }
   }
 }

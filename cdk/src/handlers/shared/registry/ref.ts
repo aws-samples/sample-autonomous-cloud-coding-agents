@@ -36,7 +36,6 @@ export const REGISTRY_KINDS = [
   'cedar_policy_module',
   'skill',
 ] as const;
-export type RegistryKind = (typeof REGISTRY_KINDS)[number];
 
 /** Reserved kinds accepted by the grammar but rejected at publish (no loader yet). */
 export const RESERVED_KINDS = ['plugin', 'subagent', 'prompt_fragment', 'capability'] as const;

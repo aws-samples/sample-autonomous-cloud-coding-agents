@@ -198,6 +198,7 @@ function classifySlackError(slackErrorCode: string): 'terminal' | 'retryable' {
  * its standard ``fanout.dispatcher.rejected`` channel without failing
  * the batch.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (46 when it landed); must not grow
 export async function dispatchSlackEvent(
   event: SlackDispatchEvent,
   ddb: DynamoDBDocumentClient,

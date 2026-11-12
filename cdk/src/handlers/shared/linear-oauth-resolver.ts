@@ -829,7 +829,7 @@ export async function getRegistryRowStrict(
   return parseRegistryRow(result.Item, linearWorkspaceId);
 }
 
-export async function getRegistryRow(
+async function getRegistryRow(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,

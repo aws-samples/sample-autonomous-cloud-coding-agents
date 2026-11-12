@@ -36,6 +36,7 @@ import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { lookupRepo } from './repo-config';
 import { ErrorCode, errorResponse, successResponse } from './response';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import {
   APPROVAL_GATE_CAP_DEFAULT,
   APPROVAL_GATE_CAP_MAX,
@@ -46,6 +47,7 @@ import {
   type AttachmentUploadInstruction,
   type ChannelSource,
   type CreateTaskRequest,
+  type CreateTaskResponse,
   createAttachmentRecord,
   INITIAL_APPROVALS_MAX_ENTRIES,
   type InlineAttachment,
@@ -56,7 +58,6 @@ import {
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 import { TaskStatus } from '../../constructs/task-status';
 
 /**
@@ -132,6 +133,7 @@ function describeRequiredInputs(requiredInputs: { allOf?: readonly string[]; one
  * @param requestId - unique request ID for tracing.
  * @returns the API Gateway proxy result.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (140 when it landed); must not grow
 export async function createTaskCore(
   body: CreateTaskRequest,
   context: TaskCreationContext,
@@ -936,7 +938,7 @@ export async function createTaskCore(
       ...toTaskDetail(taskRecord),
       upload_instructions: uploadInstructions,
       task_expires_at: taskExpiresAt,
-    }, requestId);
+    } satisfies CreateTaskResponse, requestId);
   }
 
   return successResponse(201, toTaskDetail(taskRecord), requestId);

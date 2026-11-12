@@ -11,6 +11,7 @@ mise //cli:build            # compile + test + lint
 cd cli && mise run test     # Jest only
 cd cli && mise run compile  # tsc only
 mise //cli:eslint           # ESLint --fix (run after merging main)
+mise //cli:eslint:check     # ESLint without --fix: reports only; a warning fails too
 ```
 
 ## Testing
@@ -81,6 +82,9 @@ test('renders snapshot from combined payload', async () => {
 
 ## Common mistakes
 
+- **Coverage-ignore comment** — ESLint (`no-warning-comments`) rejects a comment that contains `istanbul ignore`, `c8 ignore`, `v8 ignore` or `node:coverage`, in `src/` and `test/`: such a comment takes code out of what the coverage floors measure. Test the code, or leave it counted as uncovered and say why in a plain comment.
 - **API type drift** — Update both `cli/src/types.ts` and `cdk/src/handlers/shared/types.ts` in the same PR. See [cdk/AGENTS.md](../cdk/AGENTS.md).
+- **Function above the complexity ceiling** — ESLint (`complexity`) fails any function whose cyclomatic complexity is above 40 and names it, or gives the line of an anonymous one: every `if`, loop, `case`, `catch`, `&&`, `||`, `??`, `?:`, `?.` and default value adds one. Split the function; do not add an `eslint-disable`. The `eslint-disable-next-line complexity` lines in `src/` mark the functions that predate the ceiling: they must not grow (`cd cli && ../node_modules/.bin/eslint --no-inline-config <file>` prints the current value). Once such a function fits, its directive no longer applies: `mise //cli:eslint` (`--fix`) deletes it and `mise //cli:eslint:check` reports it as unused. Commit the deletion.
+- **Test that cannot fail** — ESLint (`eslint-plugin-jest`) rejects the shapes that pass without checking anything. `fail()` does not exist in Jest: assert the rejection (`await expect(promise).rejects.toThrow(...)`), or keep the error from a `.catch()` and assert on it. Every test needs its own `expect()` call, with a matcher, and an async assertion must be awaited; the fake-timer idiom that keeps `expect(p).rejects…` and awaits it after advancing the timers takes `// eslint-disable-next-line jest/valid-expect -- <reason>`, because the autofix would `await` it on the spot and hang the test. No `expect` outside a test, and no title twice in one `describe`.
 - **Exit code leaks** — Command tests must reset `process.exitCode` or Jest exits non-zero despite green assertions.
-- **Un-attributed AWS SDK client (#319)** — build clients via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` from `src/ua.ts`; a naked `new XxxClient({})` silently drops solution attribution.
+- **Un-attributed AWS SDK client (#319)** — build clients via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` from `src/ua.ts`; a naked `new XxxClient({})` silently drops solution attribution. ESLint rejects `new XxxClient(...)` in `src/` (`no-restricted-syntax`); it matches the name at the `new` site, so it does not see an alias or a service class without the `Client` suffix.
