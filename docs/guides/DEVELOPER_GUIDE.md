@@ -274,7 +274,7 @@ export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
-**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk and cli test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
+**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk, cli and agent test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
 
 ### Development workflow
 
