@@ -49,9 +49,9 @@
  * only packages actually present in both trees must agree. A pin for a package
  * jira-forge-app doesn't depend on is a no-op there and is not flagged.
  *
- * No third-party deps by design: every other script in scripts/ uses only
- * `node:` builtins, and scripts/** is knip-ignored, so pulling in `semver`
- * would be an undeclared/transitive import that could vanish on a re-lock. The
+ * No third-party deps by design: root scripts are knip entries (knip.json), so
+ * pulling in `semver` without declaring it fails `check:deadcode`, and a
+ * transitive copy could vanish on a re-lock. The
  * repo's transitive pins are all `^`/`>=`-style minimum FLOORS, so a
  * "resolved >= floor" numeric compare on the leading `major.minor.patch` is the
  * exact check we need — no range engine required.
