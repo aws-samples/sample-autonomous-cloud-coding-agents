@@ -2271,6 +2271,7 @@ The agent runtime uses Python [`cedarpy@4.12.2`](https://pypi.org/project/cedarp
 - `agent/pyproject.toml`: `cedarpy==4.12.2`
 - `cdk/package.json`: `"@cedar-policy/cedar-wasm": "4.12.0"`
 - `mise.toml` documents the pinned versions in a comment for operator visibility
+- `contracts/cedar-parity/engines/versions.json` names the pair the fixtures were verified against. `mise run check:cedar-engine-pair` (part of `mise run drift-prevention`, so of the build) fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and `agent/pyproject.toml` each pin exactly that version, so an engine bump is always an edit to that file as well
 
 **Lambda layer packaging** (finding #5). The cedar-wasm package is 4.1 MB unzipped. Shipping it in the deployment bundle of each of the 4 policy Lambdas would consume ~16 MB of unzipped bundle size — manageable on its own but leaves little room for AWS SDK + other deps as the codebase grows, and threatens the Lambda 250 MB unzipped limit under realistic growth. Solution: package cedar-wasm as a **Lambda layer** (`cedar-wasm-layer.ts`, task #10 in §15.2), attached to each policy Lambda. This reduces each Lambda's deployment bundle to just the handler code + thin wrapper around the layer import. Policy Lambdas are configured with ≥ 512 MB memory to accommodate WASM module instantiation under concurrent invocation (measured under 100-concurrent bursts in §15.3 Lambda memory tests).
 
