@@ -155,7 +155,7 @@ Residual risk after these mitigations (a malicious fork PR that passes maintaine
 
 ### Agent interaction model
 
-Agents interact with validation tiers through skills (depends on ADR-012 for the skill model):
+Agents interact with validation tiers through skills (depends on ADR-012 for the skill model). The `validate-locally` skill and the two `mise` tasks it runs in the flow below are proposed here and do not exist yet:
 
 ```
 Agent completes implementation
@@ -211,7 +211,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - (-) Tier 2 infrastructure requires maintenance (LocalStack config, container images, fixtures)
 - (-) Local machine requirements increase (Docker, disk space for containers)
 - (-) Tier 2 may diverge from real AWS behavior — LocalStack is not 100% faithful
-- (-) Pre-push gate adds 30–90s to every push (mitigation: `mise run check:fast` for safe paths)
+- (-) Pre-push gate adds 30–90s to every push (mitigation: the proposed `mise run check:fast` for safe paths)
 - (!) LocalStack fidelity gaps must be documented — when Tier 2 passes but Tier 3 fails, document the divergence and add it to Tier 2's scope
 - (!) Tier 2 "optional until stable" phase must have a defined graduation criteria, or it stays optional forever
 
