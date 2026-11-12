@@ -128,6 +128,7 @@ Progressive build-out:
 - E2E tests against real AWS services
 - Performance/cost regression checks
 - Documentation mutation check (fail if Starlight mirrors are stale)
+- The Tier 0 file checks (whitespace, end of file, conflict markers, YAML/JSON syntax) over all tracked files (`mise run check:hygiene`, part of `mise run build`): a commit made without the hooks skips Tier 0
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
