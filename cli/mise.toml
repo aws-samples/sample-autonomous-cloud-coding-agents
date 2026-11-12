@@ -13,9 +13,17 @@ description = "Compile TypeScript"
 # `yarn tsc` runs the root node_modules/.bin/tsc, which Yarn can link to another package's copy.
 run = "yarn compile"
 
+# The only type check that test/ gets: jest runs the tests through ts-jest with
+# isolatedModules, which transpiles each file and checks no types, and `compile` covers
+# src/. Without this task a type error in a test passes the whole build.
+# tsconfig.dev.json is src and test under the same compiler options as tsconfig.json.
+[tasks.typecheck]
+description = "Type-check src and test (tsc --noEmit); jest does not check types"
+run = "yarn typecheck"
+
 [tasks.build]
-description = "Compile, test, and lint CLI"
-depends = [":compile", ":test", ":eslint"]
+description = "Compile, type-check, test, and lint CLI"
+depends = [":compile", ":typecheck", ":test", ":eslint"]
 
 [tasks.test]
 description = "Run Jest tests"

@@ -7,7 +7,8 @@ You maintain the **`bgagent` CLI** (`@backgroundagent/cli`): Commander commands,
 ## Commands (run these)
 
 ```bash
-mise //cli:build            # compile + test + lint
+mise //cli:build            # compile + type-check + test + lint
+mise //cli:typecheck        # type-check src and test (jest does not check types)
 cd cli && mise run test     # Jest only
 cd cli && mise run compile  # tsc only
 mise //cli:eslint           # ESLint --fix (run after merging main)
@@ -18,6 +19,7 @@ mise //cli:eslint           # ESLint --fix (run after merging main)
 - **Full suite:** `cd cli && mise run test` or `mise //cli:build`. The coverage floors apply; they count every file in `src/`, tested or not.
 - **Single file:** `cd cli && npx jest --coverage=false test/commands/status.test.ts`
 - **Pattern:** `cd cli && npx jest --coverage=false --testPathPatterns=auth`
+- **Types:** `mise //cli:typecheck`. Jest only transpiles the tests (ts-jest), so this task is what type-checks `test/`; the build runs it. A fixture has to match the type from `src/types.ts` it is declared with.
 
 Without `--coverage=false` a partial run fails on the coverage floors after its tests pass.
 
