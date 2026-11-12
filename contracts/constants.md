@@ -206,8 +206,15 @@ minimum length in `proxy.js`.
 Do not assign an owned constant anything but a plain read of its contract
 key (`NAME = <contract section>["key"]`, optionally inside one conversion):
 `scripts/check-constants-sync.ts` scans every file under `agent/src` and
-fails on a literal, arithmetic on the contract value, another key, or a
-second declaration in another file.
+fails on a literal, arithmetic on the contract value or another key, in
+whichever file the assignment stands.
+
+Declare an owned constant once, in the module that owns it, and import it
+elsewhere. The script reads the source text and cannot tell which mapping
+a subscript reads, so a second declaration passes when it is a plain
+subscript read ending in the constant's key, whatever it reads from. The
+value a constant holds is compared with the contract by
+`agent/tests/test_constants_parity.py`, for the owning module only.
 
 ## Lint enforcement (AI007, #258)
 
