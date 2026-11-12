@@ -184,11 +184,19 @@ _skipped: list[str] = []
 
 
 def _record_skip(report):
-    """Remember a skipped test, or a module skipped at import (importorskip)."""
+    """Remember a skipped test, a module skipped at import (importorskip) and an
+    xfail that pytest is told not to run."""
     if report.skipped and not hasattr(report, "wasxfail"):  # an xfail is an expectation, and strict
         where = report.longrepr  # (file, line, reason) for a skip
-        detail = f"{os.path.relpath(where[0])}:{where[1]}: {where[2]}"
+        # The file as pytest has it, not made relative: that asks for the working
+        # directory, and where a test has deleted it this hook would raise and end
+        # the session there, in CI or not.
+        detail = f"{where[0]}:{where[1]}: {where[2]}"
         _skipped.append(f"{report.nodeid} — {detail}")
+    elif report.skipped and report.wasxfail.startswith("[NOTRUN]"):
+        # The exception: an xfail marked run=False. pytest never runs that test, so
+        # it can never pass and fail the run the way a stale expectation does.
+        _skipped.append(f"{report.nodeid} — {report.wasxfail}")
 
 
 pytest_runtest_logreport = pytest_collectreport = _record_skip
@@ -240,7 +248,8 @@ def pytest_terminal_summary(terminalreporter):
             terminalreporter.line(f"  {skipped}")
         terminalreporter.line(
             "Fix: give the test what it waits for in CI (the dependency, the tool, the file), "
-            "or delete it. For a known failure use xfail: an xfail that passes fails the run."
+            "or delete it. For a known failure use xfail without run=False (listed as [NOTRUN]): "
+            "the test then runs, and an xfail that passes fails the run."
         )
 
 
