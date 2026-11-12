@@ -15,6 +15,8 @@ cd agent && uv run pytest tests/test_progress_writer.py -v
 
 Root `mise run build` includes `//agent:quality` in parallel with `//cdk:build`.
 
+The lint step of `//agent:quality` (`lint:fix`) applies ruff's automatic fixes and then fails, listing each one (`Fixed 2 errors: …`). When its summary line says `0 remaining`, the files are already corrected: look at the change, keep it, and run the task again.
+
 ## Testing
 
 - **Full quality gate:** `mise //agent:quality`
