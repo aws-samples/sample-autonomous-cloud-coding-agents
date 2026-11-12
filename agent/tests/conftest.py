@@ -127,6 +127,7 @@ _hang_watchdog.start()
 #    environment resolved.
 for _var in (
     "AWS_ACCESS_KEY_ID",
+    "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
     "AWS_CONTAINER_CREDENTIALS_FULL_URI",

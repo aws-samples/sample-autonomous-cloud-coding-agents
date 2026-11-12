@@ -65,6 +65,7 @@ def test_no_credential_source_survives_importing_conftest(tmp_path):
         "AWS_SECRET_ACCESS_KEY": "fake",
         "AWS_SESSION_TOKEN": "fake",
         "AWS_SECURITY_TOKEN": "fake",
+        "AWS_BEARER_TOKEN_BEDROCK": "fake",
         "AWS_PROFILE": "default",
         "AWS_DEFAULT_PROFILE": "default",
         "AWS_CONFIG_FILE": str(shared),
