@@ -125,6 +125,10 @@ jobs:
       # failure of the step above cannot suppress the report of a failed suite.
       # That failure is reported as well: when the expiry check did not finish,
       # a run that looks clean says nothing about ignores that are about to expire.
+      # Only an issue that this workflow opened is reused: the lookup asks for
+      # `author:app/github-actions`, the account that GITHUB_TOKEN writes as. An
+      # issue with the same title from anyone else is ignored and a new one is
+      # created. Change the qualifier if this step ever writes with another token.
       - name: Report to the rolling issue
         if: ${{ !cancelled() }}
         env:
@@ -176,7 +180,7 @@ jobs:
             echo "Close this issue after \`mise run security\` succeeds on \`${GITHUB_REF_NAME}\` and no ignore is within 21 days of expiry."
           } > "${body_file}"
 
-          number="$(gh issue list --state open --search "in:title \"${title}\"" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          number="$(gh issue list --state open --search "in:title \"${title}\" author:app/github-actions" --json number,title --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
           if [ -n "${number}" ]; then
             gh issue comment "${number}" --body-file "${body_file}"
           else
