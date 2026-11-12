@@ -455,6 +455,20 @@ describe('check-coverage-thresholds-sync', () => {
       expect(result.status).toBe(1);
     });
 
+    // The check evaluates web/vite.config.ts. Without the packages that file imports there is nothing to put back
+    // in line, so the message names the cause and leaves the advice about drift out.
+    test('when dependencies are not installed, and says so', () => {
+      const result = runInMutatedRepo((root) => {
+        for (const link of ['node_modules', 'web/node_modules']) {
+          fs.rmSync(path.join(root, link), { force: true });
+        }
+      });
+
+      expect(result.stderr).toContain('dependencies have to be installed: run `mise run install`');
+      expect(result.stderr).not.toContain('Coverage contract drift detected');
+      expect(result.status).toBe(1);
+    });
+
     test('when git cannot say what the checkout tracks', () => {
       expectDrift((root) => {
         fs.writeFileSync(path.join(root, '.git'), '');

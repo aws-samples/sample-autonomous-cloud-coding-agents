@@ -289,7 +289,14 @@ try {
   checkTestTasks(contract);
   checkLauncherConfigs();
 } catch (err) {
-  errors.push(`the check could not finish: ${err instanceof Error ? err.message : String(err)}`);
+  const message = err instanceof Error ? err.message : String(err);
+  // Not drift, so not the advice below: evaluating web/vite.config.ts takes the packages it imports.
+  if ((err as { code?: string }).code === 'ERR_MODULE_NOT_FOUND' && message.startsWith('Cannot find package')) {
+    console.error(`Cannot check ${CONTRACT}: ${message}.`);
+    console.error('The check evaluates web/vite.config.ts, so dependencies have to be installed: run `mise run install`.');
+    process.exit(1);
+  }
+  errors.push(`the check could not finish: ${message}`);
 }
 
 if (errors.length > 0) {
