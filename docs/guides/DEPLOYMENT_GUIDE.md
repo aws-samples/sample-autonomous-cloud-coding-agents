@@ -401,7 +401,7 @@ The repository includes a two-stage CI/CD pipeline:
 
 ### Stage 1: Build (`build.yml`)
 
-Triggers on every PR and push to main. Runs `mise run build` (compile, test, lint, synth) and uploads the synthesized `cdk.out/` as a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+Triggers on every pull request and merge-queue entry, and on manual dispatch. Runs `mise run build` (what it covers is listed under [Pull request](../../CONTRIBUTING.md#5-pull-request) in CONTRIBUTING.md) and uploads the synthesized `cdk.out/` together with a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
 
 ### Stage 2: Deploy (`deploy.yml`)
 
