@@ -8,6 +8,10 @@ stand-ins for the contributor's user and system git config — imports
 ``tests.conftest`` the way pytest does, and then runs the unguarded git commands
 a careless fixture would run.
 
+The interpreter is handed every variable the conftest block removes, not only the
+ones those git commands react to, and reports which are still set after the
+import: a name dropped from that block fails here by name.
+
 Every hostile value points into ``tmp_path``. No real repository or config file
 is named anywhere, so a broken scrub fails this test without leaking into one.
 """
@@ -19,6 +23,27 @@ import sys
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent.parent
+
+# What tests/conftest.py removes: git's own list of the variables that tie a
+# command to one repository (`git rev-parse --local-env-vars`). A second copy on
+# purpose — read from conftest, a name dropped there would be dropped here too.
+_REPOSITORY_VARIABLES = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+)
 
 _PROBE = """
 import json, os, subprocess, sys
@@ -35,6 +60,18 @@ def git(*args, cwd=sandbox):
 git("init", "-q")
 git("init", "-q", cwd=enclosing)
 print(json.dumps({
+    # Names and scopes only, never values: under a broken pin they are the contributor's.
+    # `env` is asked, not this process: what git is handed is what a child inherits.
+    "still_set": sorted(
+        line.split(b"=")[0].decode()
+        for line in subprocess.check_output(["env"]).splitlines()
+        if line.startswith(b"GIT_")
+    ),
+    "config_scopes": sorted({
+        line.split()[0]
+        for line in git("config", "--list", "--show-scope").stdout.splitlines()
+        if line.strip()
+    }),
     "identity_read": git("config", "--get", "user.email").stdout.strip(),
     "user_config_write": git("config", "--global", "user.name", "probe").returncode,
     # Read-only on purpose: these two start OUTSIDE any repository of their own.
@@ -73,6 +110,10 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
 
     hostile: dict[str, str] = {
         **os.environ,
+        # Every variable conftest removes arrives set (to a placeholder inside tmp_path),
+        # so that the probe can name the ones the import left behind. The entries below
+        # replace the placeholder where the probe's git commands act on the value.
+        **dict.fromkeys(_REPOSITORY_VARIABLES, str(hook_git_dir)),
         "PYTHONPATH": str(AGENT_DIR / "src"),
         "TMPDIR": str(enclosing / "tmp"),
         "GIT_DIR": str(hook_git_dir),
@@ -81,7 +122,9 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
         "GIT_WORK_TREE": str(tmp_path),
         "GIT_CONFIG_GLOBAL": str(user_config),
         "GIT_CONFIG_SYSTEM": str(system_config),
-        # What `git -c user.email=... commit` passes on to the hooks it runs.
+        # What `git -c user.email=... commit` passes on to the hooks it runs …
+        "GIT_CONFIG_PARAMETERS": "'user.email'='contributor@command-line.example'",
+        # … and what a shell exports to configure git without a file.
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "user.email",
         "GIT_CONFIG_VALUE_0": "contributor@command-line.example",
@@ -103,11 +146,27 @@ def test_a_hook_environment_cannot_point_git_at_another_repository(tmp_path):
     seen = json.loads(proc.stdout.splitlines()[-1])
 
     fix = " — tests/conftest.py must isolate git at import; see the #855 block there."
+    leftover = sorted(set(_REPOSITORY_VARIABLES) & set(seen["still_set"]))
+    assert not leftover, (
+        f"{', '.join(leftover)} still set after the import: the removal loop must name "
+        "every variable that ties git to one repository" + fix
+    )
+    assert "GIT_CONFIG_NOSYSTEM" in seen["still_set"], (
+        "GIT_CONFIG_NOSYSTEM is not set after the import: Apple's git then reads the "
+        "system-wide file it ships with, whatever GIT_CONFIG_SYSTEM names" + fix
+    )
     assert not hook_git_dir.exists() and (sandbox / ".git").is_dir(), (
         "`git init` in a sandbox acted on the repository an inherited GIT_DIR names" + fix
     )
     assert seen["identity_read"] == "", (
         f"git took an identity from outside the test repository ({seen['identity_read']})" + fix
+    )
+    assert seen["config_scopes"] == ["local"], (
+        "`git config --list --show-scope` in a new test repository reported the scopes "
+        f"{seen['config_scopes']}, expected only local. `command` is an inherited "
+        "GIT_CONFIG_COUNT or GIT_CONFIG_PARAMETERS; `global`, `system` and `unknown` are the "
+        "host's files, which the GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM and GIT_CONFIG_NOSYSTEM "
+        "pins switch off; no scope at all means the command failed (it needs git 2.26)" + fix
     )
     assert seen["user_config_write"] != 0 and "probe" not in user_config.read_text(), (
         "`git config --global` wrote to the contributor's user configuration" + fix
