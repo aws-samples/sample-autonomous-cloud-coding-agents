@@ -96,7 +96,7 @@ Status: **Implemented** (prek hooks). A commit runs the hooks that match what is
 
 Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, `mise //web:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
-Remaining refinement: consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
+`mise run check:fast` runs the `lint` and `drift-prevention` tasks (lint, type checks, drift and file-hygiene checks; no test run; measured at about 30 s on a laptop). It is run on demand: the push gate does not use it. Remaining refinement: consider `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
@@ -214,7 +214,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - (-) Tier 2 infrastructure requires maintenance (LocalStack config, container images, fixtures)
 - (-) Local machine requirements increase (Docker, disk space for containers)
 - (-) Tier 2 may diverge from real AWS behavior — LocalStack is not 100% faithful
-- (-) Pre-push gate adds 30–90s to every push (mitigation: the proposed `mise run check:fast` for safe paths)
+- (-) Pre-push gate adds 30–90s to every push (proposed mitigation: `mise run check:fast` alone for safe paths)
 - (!) LocalStack fidelity gaps must be documented — when Tier 2 passes but Tier 3 fails, document the divergence and add it to Tier 2's scope
 - (!) Tier 2 "optional until stable" phase must have a defined graduation criteria, or it stays optional forever
 

@@ -26,7 +26,7 @@ Guidelines:
 
 - One logical change per pull request. Related changes (e.g. a feature + its tests) are fine together; unrelated changes should be separate PRs.
 - Every change requires a unit test. Tests live alongside the code they cover (`cdk/test/` mirrors `cdk/src/`, `agent/tests/`, `cli/test/`).
-- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs every package's lint and type checks the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web: test the code, or leave it counted as uncovered.
+- Follow the code style around you. Linters run automatically on every PR (ESLint for TypeScript, Ruff for Python); an ESLint warning fails the build like an error. `mise //cdk:eslint:check`, `mise //cli:eslint:check` and `mise //web:eslint:check` report findings without rewriting files (the tasks without `:check` apply `--fix`), and `mise run lint` runs the lint and type checks of agent, cdk, cli and web the same way. ESLint also rejects coverage-ignore comments (`istanbul ignore`, `c8 ignore`, `v8 ignore`, `node:coverage`) in cdk, cli and web: test the code, or leave it counted as uncovered.
 - If you change API types in `cdk/src/handlers/shared/types.ts`, update `cli/src/types.ts` to match, and `web/src/core/api/types.ts` where the console mirrors the type. `mise run check:types-sync` fails the build on drift.
 - If you change docs sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md`), run `mise //docs:sync` so generated content stays in sync.
 - For significant features, add a design document to `docs/design/`.
@@ -54,7 +54,7 @@ Rules:
 
 - Push to a fork and open a PR against `main`.
 - The PR title and description become the squash commit message, so keep them accurate throughout the review.
-- The CI `build` workflow runs `mise run install` then `mise run build` (lint, type checks and tests of every package, the CDK synth, the docs build and the drift checks). The security scans run in a second required workflow, as the job `Secrets, deps, and workflow scan`.
+- The CI `build` workflow runs `mise run install` then `mise run build` (lint, type checks and tests of every package, the CDK synth, the docs build, and the drift and file-hygiene checks). The security scans run in a second required workflow, as the job `Secrets, deps, and workflow scan`.
 - Iterate on review feedback by pushing new commits to the same branch. Maintainers squash-merge when approved.
 - For structured reviews (human or agent), use the [`review_pr` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_pr.md) — including the **human review heuristics** (Proportionality, Coherence, Clarity, Appropriateness) for smell dimensions automation cannot catch. To review a queue of PRs in one pass, use the [`review_prs` command](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/.abca/commands/review_prs.md), which derives a filtered work-list and runs `review_pr` across each.
 
@@ -75,11 +75,12 @@ Common commands:
 | Command | What it does |
 |---|---|
 | `mise run install` | Install all dependencies (Yarn workspaces + Python) |
-| `mise run build` | Full build: agent quality, the cdk, cli, web and docs builds, the Jira Forge app tests and the drift checks (`mise run drift-prevention`) |
+| `mise run build` | Full build: agent quality, the cdk, cli, web and docs builds, the Jira Forge app tests, and the drift and file-hygiene checks (`mise run drift-prevention`) |
 | `mise //cdk:build` | CDK only: compile + lint + type-check + test + synth |
 | `mise //agent:quality` | Agent only: lint + format + type check + dead code + tests |
 | `mise //cli:build` | CLI only: compile + type-check + test + lint |
 | `mise //docs:build` | Docs only: sync sources, script tests, Markdown structure lint, `astro check`, Astro build (fails on a broken internal link or anchor) |
+| `mise run check:fast` | Fast check without a test run: `mise run lint` and `mise run drift-prevention` |
 | `mise run hooks:run` | Run pre-commit and pre-push checks locally |
 | `mise run upgrade` | Upgrade dependencies within declared ranges (Yarn workspaces + agent `uv.lock`) |
 
