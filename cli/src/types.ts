@@ -406,25 +406,6 @@ export interface TaskEvent {
   readonly trace_id?: string;
 }
 
-/**
- * Query parameters accepted by GET /v1/tasks/{task_id}/events.
- *
- * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
- * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
- * cursor used by the CLI to catch up on the next polling iteration. The server
- * side is ``cdk/src/handlers/get-task-events.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  readonly after?: string;
-  /**
-   * When ``"1"``, requests events in descending ``event_id`` order
-   * (newest first). Mutually exclusive with ``after`` on the server.
-   */
-  readonly desc?: string;
-}
-
 /** Wire format — parsed from untrusted JSON. Validate before use. */
 export interface Attachment {
   readonly type: AttachmentType;

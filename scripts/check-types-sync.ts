@@ -126,12 +126,6 @@ const SHARED_CONSTANTS: Record<string, unknown> = JSON.parse(
 const CDK_ONLY_ALLOWLIST = new Set<string>([
   // Server-only persistence shapes (not part of the public API):
   'TaskRecord',
-  'ApprovalRecord',
-  'PendingApprovalRecord',
-  'ApprovedApprovalRecord',
-  'DeniedApprovalRecord',
-  'TimedOutApprovalRecord',
-  'StrandedApprovalRecord',
   'NudgeRecord',
   'EventRecord',
   'WebhookRecord',
@@ -146,9 +140,6 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   // Server-side helper / internal contracts:
   'TaskNotificationsConfig',
   'ChannelConfig',
-  // Internal extension shape used by create-task-core.ts to thread
-  // Cedar HITL fields without widening the public CreateTaskRequest:
-  'CreateTaskApprovalExtensions',
   // Server-side bound constants — sourced from contracts/constants.json
   // (S9). Cross-language drift is enforced by scripts/check-constants-sync.ts.
   'APPROVAL_GATE_CAP_MIN',
@@ -156,7 +147,6 @@ const CDK_ONLY_ALLOWLIST = new Set<string>([
   'APPROVAL_GATE_CAP_DEFAULT',
   // Attachment validation / persistence (server-only; CLI uses
   // Attachment / AttachmentSummary / AttachmentUploadInstruction):
-  'AttachmentDelivery',
   'InlineAttachment',
   'PresignedAttachment',
   'UrlAttachment',
