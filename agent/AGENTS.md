@@ -33,7 +33,7 @@ The lint step of `//agent:quality` (`lint:fix`) applies ruff's automatic fixes a
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
 
-pytest runs in strict mode (`strict = true` in `pyproject.toml`). These fail the run instead of warning: a marker that is not registered under `markers`, a key `[tool.pytest.ini_options]` does not know, an `xfail` test that passes, two parameter sets with the same id, and a `parametrize` over an empty list. When the `CI` variable is set, a skipped test or module fails the run as well (`Skip guard` section at the end of the output): give the test what it needs in CI or delete it.
+pytest runs in strict mode (`strict = true` in `pyproject.toml`). These fail the run instead of warning: a marker that is not registered under `markers`, a key `[tool.pytest.ini_options]` does not know, an `xfail` test that passes, two parameter sets with the same id, and a `parametrize` over an empty list. When the `CI` variable is set, a skipped test or module fails the run as well (`Skip guard` section at the end of the output): give the test what it needs in CI or delete it. An `xfail` marked `run=False` counts as skipped there, because it never runs: leave `run=False` out, so that the test runs and fails the run once it passes.
 
 Warnings are errors (`filterwarnings = ["error", …]`): a deprecation, a coroutine that is never awaited or a file left open fails the test that caused it. Fix the cause. Only for a warning from a dependency that cannot be fixed here, add an `ignore:` line for that one message below `"error"` in `pyproject.toml`, with the reason and when it can go.
 

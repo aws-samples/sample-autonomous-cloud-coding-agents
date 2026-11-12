@@ -43,6 +43,11 @@ def test_inside_a_deleted_directory(tmp_path, monkeypatch):
 @pytest.mark.xfail(reason="an expected failure is not a skip")
 def test_expected_failure():
     raise AssertionError("fails, as expected")
+
+
+@pytest.mark.xfail(run=False, reason="an expected failure that never runs is a skip")
+def test_expected_failure_never_run():
+    raise AssertionError("never runs")
 """
 
 _SKIPPED_MODULE = """
@@ -88,7 +93,7 @@ def test_a_skip_fails_the_run_in_ci_and_is_named(tmp_path):
     proc = _run_pytest(tmp_path, ci="true")
     out = proc.stdout
 
-    assert "1 passed, 4 skipped, 1 xfailed" in out, out + proc.stderr
+    assert "1 passed, 4 skipped, 2 xfailed" in out, out + proc.stderr
     assert proc.returncode == 1, "every test passed or was skipped, yet the run must fail in CI"
     assert "Skip guard" in out
     # Each skip is listed with where it is and why, so that it can be acted on.
@@ -99,13 +104,15 @@ def test_a_skip_fails_the_run_in_ci_and_is_named(tmp_path):
     assert "test_skipping.py::test_inside_a_deleted_directory — " in out
     assert "test_skipped_module.py — " in out
     assert "could not import 'a_module_that_is_not_installed'" in out
-    # An expected failure is an expectation, not a skip (and a stale one already fails).
+    # An expected failure is an expectation, not a skip (and a stale one already fails) ...
     assert "test_expected_failure — " not in out
+    # ... unless pytest is told not to run it: that test can never be found stale.
+    assert "test_skipping.py::test_expected_failure_never_run — [NOTRUN] " in out
 
 
 def test_outside_ci_a_skip_stays_a_skip(tmp_path):
     proc = _run_pytest(tmp_path, ci=None)
 
-    assert "1 passed, 4 skipped, 1 xfailed" in proc.stdout, proc.stdout + proc.stderr
+    assert "1 passed, 4 skipped, 2 xfailed" in proc.stdout, proc.stdout + proc.stderr
     assert proc.returncode == 0
     assert "Skip guard" not in proc.stdout
