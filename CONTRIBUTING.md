@@ -97,7 +97,7 @@ The tools that the gates run are not part of that upgrade. `prek`, `gitleaks`, `
 
 `mise run install` automatically installs [prek](https://github.com/j178/prek) git hooks. These run on every commit and push:
 
-- **pre-commit** - Whitespace/EOF checks, gitleaks on staged changes, linters (ESLint, Ruff, astro check) for touched files.
+- **pre-commit** - Whitespace/EOF checks, gitleaks on staged changes, and the checks that belong to the files you staged: ESLint for cdk, cli and web, the agent quality task for Python, the docs sync and `astro check`, the Markdown structure lint, the docs script tests, and the drift checks for API types and shared constants. The coverage contract check runs on every commit.
 - **pre-push** - Security scans (`mise run hooks:pre-push:security`) and tests across all packages (`mise run hooks:pre-push:tests`).
 
 If `prek install` fails with "refusing to install hooks with `core.hooksPath` set", another tool owns your hooks. Either unset it (`git config --unset-all core.hooksPath`) or integrate these checks into your hook manager.
