@@ -28,7 +28,7 @@ The lint step of `//agent:quality` (`lint:fix`) applies ruff's automatic fixes a
 |------|---------------|
 | `progress_writer.py` | `agent/tests/test_progress_writer.py` |
 | `hooks.py`, `policy.py` | `agent/tests/test_hooks.py`, `test_policy.py` |
-| `policies/*.cedar` (built-in rules) | `agent/tests/test_policy_builtin_rules.py` — a table with one call per pattern that each rule must catch and one it must leave alone; a new rule or pattern needs its rows |
+| `policies/*.cedar` (built-in rules) | `agent/tests/test_policy_builtin_rules.py` — a table of the calls each rule must catch (per pattern the bare call and the call inside a longer command or path, file rules through `Write` and `Edit`, each evaluated for every task type) and one call it must leave alone; a new rule or pattern needs its rows |
 | `pipeline.py`, `runner.py` | `agent/tests/test_pipeline.py`, etc. |
 
 Use `@pytest.fixture(autouse=True)` to reset shared module state between tests when handlers use circuit breakers or caches.
