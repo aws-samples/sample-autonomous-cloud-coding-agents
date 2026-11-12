@@ -2,8 +2,11 @@
 
 Every rule is pinned to the tool calls it must catch and to one similar,
 legitimate call it must leave alone. Removing a rule, moving it to the softer
-tier, dropping or narrowing one of its patterns, limiting it to some task types
-or to tasks that are not read-only, or turning it into a catch-all fails here.
+tier, dropping one of its patterns, limiting it to some task types or to tasks
+that are not read-only, or turning it into a catch-all fails here. Narrowing a
+pattern fails here when a call listed for the rule no longer matches it. The
+calls are chosen with that in mind (see ``BUILTIN_RULES``), but they are
+examples: a pattern that still matches every one of them passes.
 
 The calls go through ``PolicyEngine.evaluate_tool_use``, the only place the
 shipped rules are evaluated. ``cdk/src/handlers/shared/builtin-policies.ts``
@@ -38,9 +41,11 @@ class Call(NamedTuple):
 
 # rule id -> (tier, calls it must catch, a similar call it must leave alone)
 #
-# Calls it must catch: for each ``like`` pattern the bare call and, where that
-# leaves a ``*`` of the pattern matching nothing, the same call inside a longer
-# command or path, so that a pattern which lost a ``*`` is noticed as well. The
+# Calls it must catch: at least two for each ``like`` pattern, and every ``*``
+# of the pattern stands for different text in them. Where an ordinary call can
+# leave the ``*`` empty, one call does and another does not: the bare call and
+# the call inside a longer command or path. A pattern that lost a ``*``, or
+# was narrowed to the text of one call, then no longer matches another. The
 # file rules are reached through Write and through Edit.
 BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
     "read_only_forbid_write": (
@@ -60,17 +65,17 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
     ),
     "write_git_internals": (
         "hard",
-        [Call("Write", ".git/config"), Call("Edit", ".git/config")],
+        [Call("Write", ".git/config"), Call("Edit", ".git/hooks/pre-commit")],
         Call("Write", ".gitignore"),
     ),
     "write_git_internals_nested": (
         "hard",
-        [Call("Write", "vendor/lib/.git/config"), Call("Edit", "vendor/lib/.git/config")],
+        [Call("Write", "vendor/lib/.git/config"), Call("Edit", "packages/app/.git/HEAD")],
         Call("Write", "vendor/lib/.gitignore"),
     ),
     "drop_table": (
         "hard",
-        [Call("Bash", 'psql -c "DROP TABLE users"')],
+        [Call("Bash", 'psql -c "DROP TABLE users"'), Call("Bash", "mysql -e 'DROP TABLE orders'")],
         Call("Bash", 'psql -c "SELECT count(*) FROM users"'),
     ),
     "force_push_any": (
@@ -79,8 +84,8 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "git push --force origin feature/login"),
             Call("Bash", "git push -f origin feature/login"),
             Call("Bash", "git push -f"),
-            Call("Bash", "cd repo && git push --force origin feature/login"),
-            Call("Bash", "cd repo && git push -f origin feature/login"),
+            Call("Bash", "cd repo && git push --force"),
+            Call("Bash", "cd repo && git push -f upstream fix/typo"),
             Call("Bash", "cd repo && git push -f"),
         ],
         Call("Bash", "git push origin feature/login"),
@@ -110,18 +115,18 @@ BUILTIN_RULES: dict[str, tuple[str, list[Call], Call]] = {
             Call("Bash", "cd repo && git push origin main && git status"),
             Call("Bash", "cd repo && git push origin master && git status"),
             Call("Bash", "cd repo && git push origin prod && git status"),
-            Call("Bash", "cd repo && git push origin release/1.2 && git status"),
+            Call("Bash", "cd repo && git push origin release/2026.11 && git status"),
         ],
         Call("Bash", "git push origin feature/login"),
     ),
     "write_env_files": (
         "soft",
-        [Call("Write", "config/.env"), Call("Edit", "config/.env")],
+        [Call("Write", "config/.env"), Call("Edit", ".env")],
         Call("Write", "src/env.py"),
     ),
     "write_credentials": (
         "soft",
-        [Call("Write", ".aws/credentials"), Call("Edit", "config/credentials.json")],
+        [Call("Write", ".aws/credentials"), Call("Edit", "credentials.json")],
         Call("Write", "src/auth/login.py"),
     ),
 }
@@ -161,9 +166,9 @@ def test_table_covers_exactly_the_shipped_rules() -> None:
     pinned = {rule_id: tier for rule_id, (tier, caught, _) in BUILTIN_RULES.items() if caught}
     assert pinned == shipped, (
         f"agent/policies/ ships the rules {shipped} but BUILTIN_RULES pins {pinned}. Every "
-        "built-in rule needs an entry: its tier, the calls it must catch (for each pattern the "
-        "bare call and the call inside a longer command or path) and a similar call it must "
-        f"leave alone. {_ON_PURPOSE}"
+        "built-in rule needs an entry: its tier, the calls it must catch (at least two for each "
+        "pattern, with different text for each `*`: see the comment above BUILTIN_RULES) and a "
+        f"similar call it must leave alone. {_ON_PURPOSE}"
     )
 
 
