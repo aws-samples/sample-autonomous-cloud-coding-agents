@@ -47,7 +47,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | Change | Primary location | Also update | Package guide |
 |--------|------------------|-------------|---------------|
 | REST API, Lambdas, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | `cdk/test/` | [cdk/AGENTS.md](./cdk/AGENTS.md) |
-| Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`**, `web/src/core/api/types.ts` — `mise run check:types-sync` fails when either mirror drifts | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md) |
 | `bgagent` CLI | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API changes | [cli/AGENTS.md](./cli/AGENTS.md) |
 | Operator web console | `web/src/`, `web/test/` | `web/src/core/api/types.ts` if API changes | [web/AGENTS.md](./web/AGENTS.md) |
 | Agent runtime | `agent/src/` | `agent/tests/`, `agent/README.md` | [agent/AGENTS.md](./agent/AGENTS.md) |
