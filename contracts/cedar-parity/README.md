@@ -41,6 +41,10 @@ same pattern for cross-language SHA-256 parity.
 If a fixture's `expected` no longer matches either engine, CI fails before
 the change ships.
 
+These fixtures carry their own policy text: they compare the two engines and
+do not exercise the rules shipped in `agent/policies/`. Those rules are pinned
+by [`agent/tests/test_policy_builtin_rules.py`](../../agent/tests/test_policy_builtin_rules.py).
+
 ## Fixture shape
 
 Each `<name>.json` file is a single object:
