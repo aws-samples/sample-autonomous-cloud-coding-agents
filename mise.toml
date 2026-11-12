@@ -195,6 +195,10 @@ run = [
   { task = "//docs:link-check" },
 ]
 
+[tasks."check:fast"]
+description = "Fast tier: every check that needs no test run (the `lint` and `drift-prevention` tasks)"
+depends = [":lint", ":drift-prevention"]
+
 ##################
 #### SECURITY ####
 ##################
