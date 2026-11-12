@@ -334,7 +334,6 @@ class TestReconcileAgentBranch:
         "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_PREFIX",
-        "GIT_CEILING_DIRECTORIES",
     )
 
     @pytest.fixture(autouse=True)
@@ -379,7 +378,6 @@ class TestReconcileAgentBranch:
                 "GIT_OBJECT_DIRECTORY",
                 "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                 "GIT_PREFIX",
-                "GIT_CEILING_DIRECTORIES",
             }
         }
         env.update(
