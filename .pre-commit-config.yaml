@@ -123,9 +123,9 @@ repos:
         pass_filenames: false
         # Every commit, not a `files` pattern: the script reads the contract, five
         # mise.toml files, four package.json files, the vitest config, the agent
-        # settings and the Forge sources, and refuses rc files by name wherever they
-        # are tracked. A pattern over that list was stale twice; the check takes
-        # about a second.
+        # settings and the Forge sources, and refuses rc files by name next to those
+        # manifests. A pattern over that list went stale each time the script grew;
+        # the check takes about a second.
         always_run: true
         stages: [pre-commit]
 
