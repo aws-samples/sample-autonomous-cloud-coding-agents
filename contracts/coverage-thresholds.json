@@ -121,7 +121,7 @@
       "run": "yarn test"
     },
     "//agent:test": {
-      "run": "uv run pytest --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json --junit-xml=test-reports/junit.xml"
+      "run": "uv run pytest --junit-xml=test-reports/junit.xml --cov=src --cov-branch --cov-fail-under=80 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
     },
     "//:test:jira-forge-app": {
       "run": "npm test --prefix integrations/jira-forge-app"
