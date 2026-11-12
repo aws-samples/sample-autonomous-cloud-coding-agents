@@ -69,6 +69,12 @@ interface Contract {
   pytest?: { agent: { report: { fail_under: number } } };
 }
 
+/**
+ * The environment without what a Git hook exports. Under a hook those variables name the developer's repository, and
+ * the script and the fixture commands would ask about it instead of the copy.
+ */
+const ENV = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+
 interface RunResult {
   readonly status: number;
   readonly stdout: string;
@@ -97,7 +103,7 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       const stdout = execFileSync(
         process.execPath,
         ['--experimental-strip-types', path.join(root, SCRIPT)],
-        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], env: ENV },
       );
       return { status: 0, stdout, stderr: '' };
     } catch (err) {
@@ -152,7 +158,7 @@ describe('check-coverage-thresholds-sync', () => {
     }
     // The count is the anti-vacuity assertion: a script that compared nothing would also exit 0.
     const [, checked] = /\((\d+) values checked\)/.exec(result.stdout) ?? [];
-    expect(Number(checked)).toBeGreaterThanOrEqual(40);
+    expect(Number(checked)).toBeGreaterThanOrEqual(41);
   });
 
   describe('jest (cdk, cli)', () => {
@@ -394,6 +400,49 @@ describe('check-coverage-thresholds-sync', () => {
     });
   });
 
+  describe('config files that a launcher reads on top of a pinned manifest', () => {
+    // What mise 2026.10 reads next to a mise.toml, in each directory that holds a pinned task, and the rc files that
+    // yarn 1.22 and npm read next to a pinned script. Any of them can change how a pinned command runs while the
+    // text the contract pins stays the same.
+    const MISE = [
+      '.mise.toml', 'mise.local.toml', '.mise.local.toml', '.miserc.toml', '.miserc.local.toml', 'mise', '.mise',
+      '.config/mise.toml', '.config/mise.local.toml', '.config/miserc.toml', '.config/mise',
+    ];
+    const LAUNCHER_CONFIGS = [
+      ...['.', 'cdk', 'cli', 'web', 'agent'].flatMap(dir => MISE.map(name => path.join(dir, name))),
+      ...['.', 'cdk', 'cli', 'web'].flatMap(dir => ['.yarnrc', '.yarnrc.yml', '.npmrc'].map(name => path.join(dir, name))),
+      'integrations/jira-forge-app/.npmrc',
+    ];
+
+    test('every one of them, in a tree that is not a git checkout', () => {
+      expectDrift((root) => {
+        for (const file of LAUNCHER_CONFIGS) {
+          const isDirectory = file.endsWith('mise');
+          fs.mkdirSync(path.join(root, isDirectory ? file : path.dirname(file)), { recursive: true });
+          if (!isDirectory) {
+            fs.writeFileSync(path.join(root, file), '');
+          }
+        }
+      }, ...LAUNCHER_CONFIGS.map(file => `  - ${file} is in the repository`));
+    });
+
+    // In a checkout only what git tracks counts: a config file kept for one machine is not drift until it is
+    // committed, and CI never sees it.
+    test('in a git checkout, the one that is tracked and not the one that is not', () => {
+      const result = runInMutatedRepo((root) => {
+        const git = (...args: string[]) => execFileSync('git', args, { cwd: root, env: ENV, stdio: 'pipe' });
+        fs.writeFileSync(path.join(root, 'cli/.mise.toml'), '');
+        fs.writeFileSync(path.join(root, 'mise.local.toml'), '');
+        git('init', '--quiet');
+        git('add', 'cli/.mise.toml');
+      });
+
+      expect(result.stderr).toContain('  - cli/.mise.toml is in the repository: mise reads it');
+      expect(result.stderr).not.toContain('mise.local.toml');
+      expect(result.status).toBe(1);
+    });
+  });
+
   describe('fails closed', () => {
     test('when the contract has no section for a package', () => {
       const result = runInMutatedRepo((root) => {
@@ -404,6 +453,12 @@ describe('check-coverage-thresholds-sync', () => {
 
       expect(result.stderr).toContain(`${CONTRACT} has no pytest.agent.run section`);
       expect(result.status).toBe(1);
+    });
+
+    test('when git cannot say what the checkout tracks', () => {
+      expectDrift((root) => {
+        fs.writeFileSync(path.join(root, '.git'), '');
+      }, 'the check could not finish: cannot ask git which config files are committed');
     });
 
     test('when a manifest cannot be parsed', () => {

@@ -45,6 +45,8 @@
  *              the floors and the test file are arguments of the script
  *   mise       the task that runs each of those scripts and the agent's
  *              pytest, every key except those in TASK_FREE_KEYS
+ *   rc files   none committed that mise, yarn or npm would read on top of
+ *              those manifests (LAUNCHER_CONFIGS)
  *
  * Run via ``mise run check:coverage-thresholds-sync``. Exits 0 when in sync,
  * 1 on drift or when something it needs cannot be read.
@@ -98,6 +100,26 @@ const TASK_FREE_KEYS = ['depends', 'description'];
  */
 const AGENT_SHADOW_CONFIGS = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
 
+/**
+ * Config files that the launcher of a pinned command reads on top of the manifest the contract pins,
+ * by the directories it looks in. mise 2026.10 merges each of these names into the mise.toml next
+ * to it, or reads it in its place; yarn 1.22 and npm take settings for the way a script is run from
+ * an rc file. With one of them a pinned task or script runs differently and its text stays the same.
+ * Not listed: mise.<env>.toml, which mise reads only when MISE_ENV names that environment.
+ */
+const LAUNCHER_CONFIGS = [
+  {
+    reader: 'mise',
+    directories: ['.', 'cdk', 'cli', 'web', 'agent'],
+    names: [
+      '.mise.toml', 'mise.local.toml', '.mise.local.toml', '.miserc.toml', '.miserc.local.toml', 'mise', '.mise',
+      '.config/mise.toml', '.config/mise.local.toml', '.config/miserc.toml', '.config/mise',
+    ],
+  },
+  { reader: 'yarn', directories: ['.', 'cdk', 'cli', 'web'], names: ['.yarnrc', '.yarnrc.yml', '.npmrc'] },
+  { reader: 'npm', directories: ['integrations/jira-forge-app'], names: ['.npmrc'] },
+];
+
 const errors: string[] = [];
 let checked = 0;
 
@@ -138,6 +160,24 @@ function tomlTable(file: string, key: string): Json {
       throw new Error(`${file} [${key}]: cannot read "${line}". This check reads one-line values only, and no string that holds a backslash or a double quote: mise prints those in a form it does not parse`);
     }
   }));
+}
+
+/**
+ * Of ``paths``, the files git tracks. A config file kept for one machine is not drift until it is
+ * committed, and a CI checkout holds nothing else. A tree without ``.git`` (a source archive)
+ * cannot tell the two apart: there, the paths that exist.
+ */
+function tracked(paths: string[]): string[] {
+  if (!existsSync(join(root, '.git'))) {
+    return paths.filter(path => existsSync(join(root, path)));
+  }
+  try {
+    return execFileSync('git', ['ls-files', '--', ...paths], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+      .split('\n').filter(Boolean);
+  } catch (err) {
+    const reason = String((err as { stderr?: string }).stderr || (err as Error).message).trim().split('\n')[0];
+    throw new Error(`cannot ask git which config files are committed: ${reason}`);
+  }
 }
 
 /** The arguments of a shell command line, quotes removed. */
@@ -204,6 +244,15 @@ function checkTestTasks(contract: Json): void {
   }
 }
 
+function checkLauncherConfigs(): void {
+  checked += 1;
+  for (const { reader, directories, names } of LAUNCHER_CONFIGS) {
+    for (const file of tracked(directories.flatMap(directory => names.map(name => join(directory, name))))) {
+      errors.push(`${file} is in the repository: ${reader} reads it on top of the manifest that ${CONTRACT} pins, so a pinned test command may not run as written. Remove it (\`git rm\`). Settings for one machine belong in a file that is not committed`);
+    }
+  }
+}
+
 function checkAgent(contract: Json): void {
   const run = section(contract, 'pytest', 'agent', 'run');
   const report = section(contract, 'pytest', 'agent', 'report');
@@ -238,6 +287,7 @@ try {
   await checkWeb(contract);
   checkTestScripts(contract);
   checkTestTasks(contract);
+  checkLauncherConfigs();
 } catch (err) {
   errors.push(`the check could not finish: ${err instanceof Error ? err.message : String(err)}`);
 }
