@@ -5,10 +5,13 @@
 // an unchecked one is an unreviewed off switch. This check holds every one of
 // them, in every tracked ts/js/py file, to two rules:
 //
-//  1. FORM. It reads `nosemgrep: <rule-id> -- <reason>`. Without a rule id the
-//     comment silences every rule on its line; without a reason nobody can review
-//     it. Any other mention of the word on a line of code counts too, because
-//     semgrep honours the bare word anywhere on a flagged line.
+//  1. FORM. The suppression word is followed by `: <rule-id> -- <reason>` (the
+//     failure message prints an example). Without a rule id the comment silences
+//     every rule on its line; without a reason nobody can review it. The word is
+//     found the way semgrep finds it, which is far looser than this form spells
+//     it and makes no difference between code and comment. So a line that holds
+//     the word at all must be one well-formed suppression and nothing else: a
+//     comment that only talks about suppressions has to use other words.
 //
 //  2. BINDING, for the two silent-success-masking rules. `focus-metavariable: $RET`
 //     in .semgrep/silent-success-masking.yaml anchors each finding on the returned
@@ -34,20 +37,16 @@ import { readFileSync } from 'node:fs';
 const RULES = '.semgrep/silent-success-masking.yaml';
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs|py)$/;
 
-// This file is scanned like any other, so no line of its code may read as a
-// suppression: the word is assembled from two halves, and the patterns spell it
-// with a character class.
+// This file is scanned like any other, so no line of it may hold the word: it is
+// assembled from two halves, and the patterns spell it with a character class.
 const WORD = 'nose' + 'mgrep';
 const IGNORE_SUPPRESSIONS = '--disable-nose' + 'm';
-const MENTION = /\bnose[m](?:grep)?\b/;
-// On a comment-only line semgrep honours the word only where it opens the
-// comment; further in it is prose. On a line of code it honours it anywhere.
-// What opens a comment depends on the language: in JS and TS a leading `#` is a
-// private field and `*name` a generator method, both code.
-const PY_COMMENT_ONLY = /^\s*#/;
-const JS_COMMENT_ONLY = /^\s*(?:\/\/|\/\*|\*(?:\s|\/|$))/;
-const OPENS_COMMENT = /^[^a-zA-Z0-9]*nose[m](?:grep)?\b/;
-const WELL_FORMED = /\bnose[m]grep: [\w.-]+ -- \S/;
+// The word as semgrep finds it. Both of its patterns (one for the flagged line,
+// one for the line above) match only where this one does, so nothing it honours
+// is missed; `u` makes `i` fold letters the way semgrep's matcher does.
+const MENTION = /(?<![a-z0-9])nose[m]\w*/giu;
+// The documented form, read from where a mention starts.
+const WELL_FORMED = /^nose[m]grep: [\w.-]+ -- \S/;
 const MASKING = /\bnose[m]grep: ((?:ts|py)-silent-success-masking) -- /;
 
 /** The check could not run: say why and stop, never report success. */
@@ -101,12 +100,12 @@ const unbound = [];
 let suppressions = 0;
 let masking = 0;
 for (const file of files) {
-  const commentOnly = file.endsWith('.py') ? PY_COMMENT_ONLY : JS_COMMENT_ONLY;
   readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
-    if (!MENTION.test(line) || (commentOnly.test(line) && !OPENS_COMMENT.test(line))) return;
+    const mentions = [...line.matchAll(MENTION)];
+    if (mentions.length === 0) return;
     suppressions++;
-    if (!WELL_FORMED.test(line)) {
-      malformed.push({ file, line: i + 1, text: line.trim() });
+    if (mentions.length > 1 || !WELL_FORMED.test(line.slice(mentions[0].index))) {
+      malformed.push({ file, line: i + 1, text: line.trim(), read: mentions.map((mention) => `"${mention[0]}"`).join(', ') });
       return;
     }
     const rule = MASKING.exec(line)?.[1];
@@ -121,11 +120,13 @@ for (const file of files) {
 
 if (malformed.length > 0) {
   console.error(`\n✖ ${malformed.length} semgrep suppression(s) not in the form \`${WORD}: <rule-id> -- <reason>\`:\n`);
-  for (const v of malformed) console.error(`  ${v.file}:${v.line}\n      ${v.text}`);
+  for (const v of malformed) console.error(`  ${v.file}:${v.line} (semgrep reads ${v.read})\n      ${v.text}`);
   console.error(
     '\nName the rule being suppressed and say why the finding is acceptable, for example\n' +
       `\`// ${WORD}: ts-silent-success-masking -- <why callers may treat this failure as an empty success>\`.\n` +
-      'Without a rule id the comment silences every rule on its line. If the line only mentions the word, reword it.\n',
+      'Without a rule id the comment silences every rule on its line. Semgrep finds the word far more loosely than this\n' +
+      'form spells it, in code as well as in comments, so a line may hold it only as one such suppression. If the line is\n' +
+      'not meant to suppress anything, reword the comment or rename the identifier that semgrep reads as the word.\n',
   );
 }
 if (unbound.length > 0) {

@@ -24,7 +24,8 @@
  * WHY THESE EXIST: the guard used to check one thing, that a masking suppression
  * sits near the word `return`. A suppression with no reason, a bare one that
  * names no rule, one above a line that merely mentions `return`, and one that no
- * longer suppresses anything all passed it.
+ * longer suppresses anything all passed it. So did a bare one written in any
+ * way but the conventional one, which semgrep honours all the same.
  *
  * HOW: same as `preflight-log-delivery.test.ts` — the script is spawned in a
  * throwaway repo root with a fake `semgrep` on PATH that replays the findings a
@@ -135,9 +136,14 @@ process.stdout.write(${JSON.stringify(JSON.stringify(report))});
   }
 }
 
+/** A catch block holding `lines` (the first of them is line 5 of the file). */
+function tsCatchWith(lines: readonly string[]): string {
+  return ['export function f(): string | null {', '  try {', '    return g();', '  } catch {', ...lines.map((line) => `    ${line}`), '  }', '}', ''].join('\n');
+}
+
 /** A catch block whose return carries `comment` (the finding is on line 5). */
 function tsCatch(comment: string): string {
-  return ['export function f(): string | null {', '  try {', '    return g();', '  } catch {', `    return null;${comment}`, '  }', '}', ''].join('\n');
+  return tsCatchWith([`return null;${comment}`]);
 }
 
 describe('check-masking-suppression-placement', () => {
@@ -149,16 +155,15 @@ describe('check-masking-suppression-placement', () => {
         'src/inline.ts': tsCatch(` // ${WORD}: ${TS_RULE} -- a missing record is this lookup's null contract`),
         'src/above.py': ['def f():', '    try:', '        return g()', '    except KeyError:', `        # ${WORD}: ${PY_RULE} -- absent key means not configured`, '        return None', ''].join('\n'),
         'src/other-rule.ts': `const p = join(root, name); // ${WORD}: path-join-resolve-traversal -- name is checked against an allowlist above\n`,
-        // The false-positive side: the word inside the prose of a comment line is not a suppression.
-        'src/prose.ts': `// The ${WORD} comment on parseBody is justified by the test below.\n/**\n * See the ${WORD} note above.\n */\nexport const x = 1;\n`,
-        'src/prose.py': `# The ${WORD} comment below is justified in the design doc.\nx = 1\n`,
+        // The false-positive side: the same letters inside a longer word are not the word.
+        'src/other-word.ts': 'export function diagnoseMemory(): number {\n  return 1;\n}\n',
       },
       [['src/inline.ts', 5, TS_RULE], ['src/above.py', 6, PY_RULE]],
     );
 
     expect(result.status).toBe(0);
     // The counts are the anti-vacuity assertion: a guard that read nothing also exits 0.
-    expect(result.stdout).toContain('3 semgrep suppressions in 5 source files name a rule and a reason');
+    expect(result.stdout).toContain('3 semgrep suppressions in 4 source files name a rule and a reason');
     expect(result.stdout).toContain('all 2 silent-success-masking suppressions bind to one of 2 findings');
   });
 
@@ -210,6 +215,55 @@ describe('check-masking-suppression-placement', () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('src/a.ts:5');
+    });
+
+    describe('finds the word the way semgrep does', () => {
+      // Each entry is the body of a catch block that the pinned semgrep treats as
+      // suppressed (measured against it, not guessed), written some other way than
+      // the convention. The word sits on line 5 of its file in every one. The
+      // entries are data on purpose: what they have in common is in the guard.
+      const UPPER = WORD.toUpperCase();
+      const SHORT = 'NOSE' + 'M';
+      const tsBodies: ReadonlyArray<readonly string[]> = [
+        [`return null; // ${UPPER}`],
+        [`return null; // ${'NoSe' + 'mgrep'}`],
+        [`return null; // ${SHORT}`],
+        [`return null; // ${WORD}_all`],
+        [`return null; // ${'nose' + 'mantic'} change`],
+        [`return null; // no\u017Fe${'mgrep'}`],
+        [`/* optional */ return null; // ${WORD}`],
+        [`const ${'no' + 'Semicolons'} = 1; return null;`],
+        [`// ${UPPER}`, 'return null;'],
+        [`// _${WORD}`, 'return null;'],
+        [`// The ${WORD} comment on this return is explained elsewhere.`, 'return null;'],
+        [`/* ${SHORT}:${TS_RULE} */ return null; // ${WORD}: other-rule -- the reason given for another rule`],
+      ];
+      const pyBodies: ReadonlyArray<readonly string[]> = [
+        [`return None  # ${UPPER}`],
+        [`# ${SHORT}`, 'return None'],
+        [`# The ${WORD} comment on this return is explained elsewhere.`, 'return None'],
+      ];
+      const pyExcept = (lines: readonly string[]): string =>
+        ['def f():', '    try:', '        return g()', '    except KeyError:', ...lines.map((line) => `        ${line}`), ''].join('\n');
+      const files = {
+        ...Object.fromEntries(tsBodies.map((lines, i) => [`src/v${i}.ts`, tsCatchWith(lines)])),
+        ...Object.fromEntries(pyBodies.map((lines, i) => [`src/p${i}.py`, pyExcept(lines)])),
+      };
+      // All of them share one run; each case then asserts its own line.
+      let result: RunResult;
+      beforeAll(() => {
+        result = run(files, []);
+      });
+
+      test('exits 1 and reports every one of them', () => {
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`${tsBodies.length + pyBodies.length} semgrep suppression(s) not in the form`);
+        expect(result.stderr).toContain('reword the comment or rename the identifier');
+      });
+
+      test.each(Object.keys(files))('rejects the suppression in %s', (file) => {
+        expect(result.stderr).toContain(`${file}:5 (semgrep reads `);
+      });
     });
   });
 

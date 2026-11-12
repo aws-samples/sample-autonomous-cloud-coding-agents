@@ -111,7 +111,7 @@ describe('registry-publish handler', () => {
 
   test('400 VALIDATION_ERROR on malformed JSON body', async () => {
     // parseBody returns null on a JSON.parse failure and the handler maps that
-    // to a 400 — the fail-closed path the nosemgrep suppression on parseBody claims.
+    // to a 400 — the fail-closed path the semgrep suppression on parseBody claims.
     const res = await publishHandler(makeEvent({
       requestContext: { ...makeEvent().requestContext, authorizer: withGroups(['RegistryPublisher']) },
       body: '{not json',
