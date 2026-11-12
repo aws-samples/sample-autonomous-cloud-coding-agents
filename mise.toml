@@ -127,7 +127,7 @@ description = "Drift check: cross-language constants in contracts/constants.json
 run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 
 [tasks."check:coverage-thresholds-sync"]
-description = "Drift check: contracts/coverage-thresholds.json ↔ cdk/cli jest coverageThreshold and agent pytest fail_under"
+description = "Drift check: contracts/coverage-thresholds.json ↔ coverage settings, test scripts and mise test tasks of cdk, cli, web, agent and the Jira Forge app"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
 [tasks."test:jira-forge-app"]
