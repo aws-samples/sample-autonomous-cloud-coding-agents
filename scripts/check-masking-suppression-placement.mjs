@@ -3,7 +3,8 @@
 //
 // A suppression comment is the documented escape hatch of the semgrep gates, and
 // an unchecked one is an unreviewed off switch. This check holds every one of
-// them, in every tracked ts/js/py file, to two rules:
+// them, in every tracked ts/js/py file and in any other tracked file semgrep
+// reads for the masking rules, to two rules:
 //
 //  1. FORM. The suppression word is followed by `: <rule-id> -- <reason>` (the
 //     failure message prints an example). Without a rule id the comment silences
@@ -59,8 +60,8 @@ function cannotRun(message) {
   process.exit(2);
 }
 
-/** `file:line` of every masking finding, with suppression comments ignored. */
-function findings() {
+/** What semgrep makes of the masking rules with suppression comments ignored: every finding, and the files it read. */
+function scan() {
   let stdout;
   try {
     stdout = execFileSync(
@@ -84,21 +85,27 @@ function findings() {
   if (!Array.isArray(report.results) || !Array.isArray(report.paths?.scanned) || report.paths.scanned.length === 0) {
     cannotRun('semgrep scanned no file, so no suppression can be matched to a finding.');
   }
-  // check_id carries the rules directory as a prefix (`semgrep.ts-silent-success-masking`).
-  return new Set(report.results.map((r) => `${r.path}:${r.start.line}:${r.check_id.split('.').pop()}`));
+  return {
+    // check_id carries the rules directory as a prefix (`semgrep.ts-silent-success-masking`).
+    found: new Set(report.results.map((r) => `${r.path}:${r.start.line}:${r.check_id.split('.').pop()}`)),
+    scanned: new Set(report.paths.scanned),
+  };
 }
 
-// Tracked source files only; the .semgrep/ fixtures trigger by design.
+// Tracked files only; the .semgrep/ fixtures trigger by design.
 let tracked;
 try {
   tracked = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 } catch (err) {
   cannotRun(`git ls-files failed: ${String(err.stderr ?? err.message).trim()}`);
 }
-const files = tracked.split('\0').filter((f) => f && SOURCE_EXT.test(f) && !f.startsWith('.semgrep/'));
-if (files.length === 0) cannotRun('git lists no tracked source file here. Run from the repository root.');
+const candidates = tracked.split('\0').filter((f) => f && !f.startsWith('.semgrep/'));
+if (!candidates.some((f) => SOURCE_EXT.test(f))) cannotRun('git lists no tracked source file here. Run from the repository root.');
 
-const found = findings();
+const { found, scanned } = scan();
+// Source files by name, where suppressions of any rule live, and whatever else
+// semgrep read for the masking rules: it picks its files by more than the name.
+const files = candidates.filter((f) => SOURCE_EXT.test(f) || scanned.has(f));
 const malformed = [];
 const unbound = [];
 let suppressions = 0;

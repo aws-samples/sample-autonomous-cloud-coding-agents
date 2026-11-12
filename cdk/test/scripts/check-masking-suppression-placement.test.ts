@@ -221,6 +221,15 @@ describe('check-masking-suppression-placement', () => {
       expect(result.stderr).toContain('src/a.ts:5');
     });
 
+    test('reads a file semgrep scanned although its name is not a source file name', () => {
+      // semgrep picks its files by more than the name; the fake reports every file of the case as scanned.
+      const tool = `#!/usr/bin/env node\n${tsCatch(` // ${WORD}`)}`;
+      const result = run({ 'src/a.ts': 'export const x = 1;\n', 'bin/tool': tool }, [['bin/tool', 6, TS_RULE]]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('bin/tool:6 (semgrep reads ');
+    });
+
     describe('finds the word the way semgrep does', () => {
       // Each entry is the body of a catch block that the pinned semgrep treats as
       // suppressed (measured against it, not guessed), written some other way than
