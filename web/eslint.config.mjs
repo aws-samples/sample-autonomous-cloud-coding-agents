@@ -7,6 +7,28 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+// What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli, for each way
+// vitest has to skip a test, focus on it, leave it as a todo or expect it to fail.
+const TEST_FN = '/^(it|test|describe|suite)$/';
+const TEST_MODIFIER = '/^(skip|only|todo|fails|skipIf|runIf)$/';
+const NO_DISABLED_TESTS = [
+  // `it.skip`, `describe.only`, `it.skipIf(...)`, `it['skip']`. :has() looks down the
+  // whole chain, so `it.concurrent.only` and `it.skip.each` count too. As a call also
+  // under any other name: `ctx.skip()` of the test context, a renamed test function.
+  `MemberExpression:matches([property.name=${TEST_MODIFIER}], [property.value=${TEST_MODIFIER}])`
+    + `:matches(:has(Identifier.object[name=${TEST_FN}]), CallExpression > .callee)`,
+  // `skip()` taken from the test context: it('name', ({ skip }) => { skip(); ... }).
+  "CallExpression[callee.name='skip']",
+  // The same modifiers as options: it('name', { skip: true }, fn), also behind a chain.
+  `CallExpression:matches([callee.name=${TEST_FN}], :has(> .callee:has(Identifier.object[name=${TEST_FN}])))`
+    + ` > ObjectExpression.arguments > Property:matches([key.name=${TEST_MODIFIER}], [key.value=${TEST_MODIFIER}])`,
+  // A test or suite without a function is a todo: it('name'), it('name', { timeout: 5 }).
+  `CallExpression[callee.name=${TEST_FN}]:matches([arguments.length=1], :has(> ObjectExpression.arguments:last-child))`,
+].map((selector) => ({
+  selector,
+  message: 'A skipped, focused, todo or expected-to-fail test must not be committed: make the test pass or delete it.',
+}));
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Import boundaries of web/AGENTS.md. They match directory names inside import paths,
@@ -84,12 +106,7 @@ export default defineConfig(
   {
     files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
-      // What jest/no-disabled-tests and jest/no-focused-tests do in cdk and cli. :has()
-      // looks down the whole chain, so `it.concurrent.only` is reported like `it.only`.
-      'no-restricted-syntax': ['error', {
-        selector: 'MemberExpression[property.name=/^(skip|only|todo|fails|skipIf|runIf)$/]:has(Identifier.object[name=/^(it|test|describe|suite)$/])',
-        message: 'A skipped, focused, todo or expected-to-fail test must not be committed: make the test pass or delete it.',
-      }],
+      'no-restricted-syntax': ['error', ...NO_DISABLED_TESTS],
     },
   },
 );
