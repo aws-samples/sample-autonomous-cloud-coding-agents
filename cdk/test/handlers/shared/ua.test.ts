@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { DynamoDBClient, ListTablesCommand } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
@@ -24,11 +26,9 @@ import { abcaUserAgent, makeClient, makeDocClient, sanitizeUaValue, SOLUTION_ID 
 
 // Shared with cli/test/ua.test.ts and agent/tests/test_ua.py: the three UA
 // modules must agree on the solution id and on what the sanitiser lets through.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const uaVectors = require('../../../../contracts/ua-vectors.json') as {
-  solution_id: string;
-  sanitize: { input: string; expected: string; note: string }[];
-};
+const uaVectors = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'contracts', 'ua-vectors.json'), 'utf-8'),
+) as { solution_id: string; sanitize: { input: string; expected: string; note: string }[] };
 
 // `abcaUserAgent` / `componentLabel` read process.env at call time, so a plain
 // import suffices — no module reload needed. The wire-capture cases likewise
