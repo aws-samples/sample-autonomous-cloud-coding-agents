@@ -7,7 +7,7 @@
 
 The current validation architecture has two operational tiers:
 
-- **Pre-commit hooks** (< 5s) — formatting, secrets scan, file-level linting
+- **Pre-commit hooks** — formatting, secrets scan, and the lint and drift checks of the staged files
 - **Remote CI** (5–20 min) — full build, test, synth, security scans, deploy verification
 
 The gap between these tiers is significant. When an agent (or human) makes a change that passes pre-commit but fails in CI, the feedback loop is:
@@ -30,7 +30,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 
 | Tier | Time | What it catches | Gap |
 |------|------|-----------------|-----|
-| Pre-commit (Tier 0) | < 5s | Formatting, secrets, trailing whitespace | None — works well |
+| Pre-commit (Tier 0) | No fixed budget: by what is staged (measured times under Tier 0 below) | Formatting, secrets, lint and drift checks of the staged files | None — works well |
 | mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
 | Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
 | **Local integration (Tier 2)** | — | **Does not exist** | Integration-level validation without remote round-trip |
@@ -63,7 +63,7 @@ In a repo where agents run autonomously (ABCA's own design goal), validation spe
                ─┴─────────────────┴─
               ┌─────────────────────┐
               │       Tier 0        │  Pre-commit (gate)
-              │       < 5s          │  Format, lint, secrets
+              │  by what is staged  │  Format, lint, secrets
               └─────────────────────┘
 ```
 
@@ -71,16 +71,18 @@ Each tier is **necessary but not sufficient** — passing a lower tier is requir
 
 ### Tier definitions
 
-**Tier 0 — Pre-commit (< 5s, gates every commit)**
+**Tier 0 — Pre-commit (gates every commit)**
 
 - Trailing whitespace, end-of-file fix
 - Merge conflict markers
 - Secrets scan (gitleaks)
-- ESLint (file-level, staged files only)
-- Docs sync check (no stale mirrors)
+- ESLint for cdk, cli and web, each when one of its source files is staged
+- Agent quality task, when a Python file under `agent/` is staged
+- Docs sync and `astro check`, the Markdown structure lint when a Markdown file is staged, and the docs script tests when the docs scripts are staged
+- Drift checks for API types and shared constants when one of their inputs is staged, and the coverage contract check on every commit
 - YAML/JSON syntax validation
 
-Status: **Implemented** (prek hooks)
+Status: **Implemented** (prek hooks). A commit runs the hooks that match what is staged, so there is no single duration. Measured when the newer hooks were added: the coverage contract check takes about 1 s on every commit, the Markdown structure lint about 3 s on a commit with Markdown, and web ESLint 6 to 13 s on a commit with web sources.
 
 **Tier 1 — Local build (30–90s, gates push)**
 
@@ -92,7 +94,7 @@ Status: **Implemented** (prek hooks)
 - Type sync drift (CDK ↔ CLI types in sync)
 - Constants drift (cross-language contract check)
 
-Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
+Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, `mise //web:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
 Remaining refinement: consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
