@@ -14,6 +14,8 @@ mise //web:eslint:check  # ESLint without --fix: reports only; a warning fails t
 mise //web:dev:mock   # local console on http://127.0.0.1:5173 against the mock API
 ```
 
+The `web-eslint` pre-commit hook runs `mise //web:eslint` when a TypeScript or JavaScript file under `web/` is staged.
+
 Single test file: `cd web && yarn vitest run test/domains/tasks/TaskListPage.test.tsx` (no coverage, no floors). The floors count every file under `src/`, tested or not; they live in `vite.config.ts` and are pinned in `contracts/coverage-thresholds.json`.
 
 ## Conventions
