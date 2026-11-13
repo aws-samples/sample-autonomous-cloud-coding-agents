@@ -24,7 +24,7 @@
   "resolutions": {
     "@astrojs/markdown-remark": "7.2.0",
     "@astrojs/mdx": "6.0.3",
-    "basic-ftp": "^6.2.1",
+    "basic-ftp": "^6.2.6",
     "brace-expansion": "^5.0.12",
     "devalue": "^5.9.3",
     "fast-uri": "^3.1.9",
