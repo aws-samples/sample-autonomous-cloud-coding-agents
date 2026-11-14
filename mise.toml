@@ -94,12 +94,15 @@ run = [
 # `mise run quality` for the auto-fixing variant.
 # The two `typecheck` tasks are the only type check that test files get (jest
 # transpiles them without checking), so a type error there has to fail here too.
+# `//agent:lint:deadcode` is here because the build fails on it (through
+# `//agent:quality`): without it a pass here could still fail the build.
 [tasks.lint]
-description = "Non-mutating lint and type checks of agent, cdk, cli and web (no docs check)"
+description = "Non-mutating lint and type checks of agent, cdk, cli and web, and the agent's dead-code check (no docs check)"
 depends = [
   "//agent:lint",
   "//agent:format:check",
   "//agent:typecheck",
+  "//agent:lint:deadcode",
   "//cdk:eslint:check",
   "//cdk:compile",
   "//cdk:typecheck",

@@ -31,10 +31,15 @@ echo "Project: $PROJECT_NAME"
 # `ruff format` by hand does discover such a file, and the cache then hands the
 # results it stored for the files beside it to the tasks: they stayed green until
 # the cache was removed. Uncached, the whole tree takes a fraction of a second.
+#
+# The four tasks that only check (lint, format:check, typecheck, lint:deadcode)
+# run `uv run --locked`. A plain `uv run` re-locks when pyproject.toml is ahead of
+# uv.lock: the check would rewrite the lockfile and still pass. With --locked it
+# fails instead and says that the lockfile needs to be updated.
 
 [tasks.lint]
 description = "Lint with ruff"
-run = "uv run ruff check --config pyproject.toml --no-cache"
+run = "uv run --locked ruff check --config pyproject.toml --no-cache"
 
 [tasks."lint:fix"]
 description = "Lint and auto-fix. Fails when it changed a file (the fixes are listed): look at the change, keep it, run again."
@@ -46,15 +51,15 @@ run = "uv run ruff format --config pyproject.toml --no-cache --exit-non-zero-on-
 
 [tasks."format:check"]
 description = "Check formatting"
-run = "uv run ruff format --config pyproject.toml --no-cache --check"
+run = "uv run --locked ruff format --config pyproject.toml --no-cache --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
-run = "uv run ty check"
+run = "uv run --locked ty check"
 
 [tasks."lint:deadcode"]
 description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports and function arguments it is sure are unused. Unused functions, classes, methods and variables are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
-run = "uv run vulture"
+run = "uv run --locked vulture"
 
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
