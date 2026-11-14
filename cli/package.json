@@ -7,7 +7,7 @@
     "lib"
   ],
   "engines": {
-    "node": ">= 22.23.4 <= 24.x"
+    "node": ">= 20.x <= 24.x"
   },
   "scripts": {
     "compile": "tsc --build tsconfig.json",
