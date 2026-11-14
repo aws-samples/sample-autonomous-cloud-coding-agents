@@ -53,6 +53,18 @@ function repo(files = {}) {
   return root;
 }
 
+/**
+ * A directory that belongs to no throwaway repository, with a file that no sync may touch. The
+ * file is in `imgs/` so that it is below the link whether a test links a tree or `docs/public`.
+ */
+function outside() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-starlight-outside-'));
+  roots.push(dir);
+  fs.mkdirSync(path.join(dir, 'imgs'));
+  fs.writeFileSync(path.join(dir, 'imgs/theirs.png'), 'theirs');
+  return dir;
+}
+
 const page = (root, target) => fs.readFileSync(path.join(root, CONTENT, target), 'utf8');
 
 /** The lines of a generated page that start with a link or an image, in Markdown or HTML. */
@@ -213,6 +225,45 @@ test('mirrors and images without a source are pruned; hand-authored pages are ke
       `removed ${CONTENT}/guide/Old-name.md`,
     ],
   );
+});
+
+test('a link inside a generated tree is removed and never entered', (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  const root = repo({ 'docs/imgs/kept.png': 'png' });
+  sync(root, PLAN);
+  const elsewhere = outside();
+  for (const tree of [CONTENT, 'docs/public/imgs']) {
+    fs.symlinkSync(elsewhere, path.join(root, tree, 'linked'), 'dir');
+  }
+  sync(root, PLAN);
+
+  assert.equal(fs.readFileSync(path.join(elsewhere, 'imgs/theirs.png'), 'utf8'), 'theirs');
+  assert.deepEqual(
+    warn.mock.calls.map((call) => call.arguments[0].split(': ')[1]),
+    [`removed ${CONTENT}/linked`, 'removed docs/public/imgs/linked'],
+  );
+  assert.ok(!fs.readdirSync(path.join(root, CONTENT)).includes('linked'));
+  assert.deepEqual(fs.readdirSync(path.join(root, 'docs/public/imgs')), ['kept.png']);
+});
+
+test('a generated tree that is reached through a link fails the sync and is not pruned', () => {
+  const refused = (link, tree) => {
+    const root = repo({ 'docs/imgs/kept.png': 'png' });
+    const elsewhere = outside();
+    fs.rmSync(path.join(root, link), { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(path.join(root, link)), { recursive: true });
+    fs.symlinkSync(elsewhere, path.join(root, link), 'dir');
+
+    assert.throws(
+      () => sync(root, PLAN),
+      new RegExp(`${tree} is reached through a link .* Replace the link, which is ${tree} or a directory above it`),
+    );
+    assert.equal(fs.readFileSync(path.join(elsewhere, 'imgs/theirs.png'), 'utf8'), 'theirs');
+  };
+  refused(CONTENT, CONTENT);
+  refused('docs/public/imgs', 'docs/public/imgs');
+  // The link may also be a directory above the tree.
+  refused('docs/public', 'docs/public/imgs');
 });
 
 test('a missing source fails the sync and leaves the mirrors untouched', () => {

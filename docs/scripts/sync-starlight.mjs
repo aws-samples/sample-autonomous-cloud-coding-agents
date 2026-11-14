@@ -374,24 +374,38 @@ function copyAssetDir(sourceDir, targetDir) {
   }
 }
 
-/** Every file below `dir`, as POSIX paths relative to it. */
+/**
+ * Every file below `dir`, as POSIX paths relative to it. Only real directories are entered:
+ * a link is listed under its own name, whatever it points at.
+ */
 function listFiles(dir) {
   if (!fs.existsSync(dir)) {
     return [];
   }
   return fs
-    .readdirSync(dir, { recursive: true })
-    .filter((file) => fs.statSync(path.join(dir, file)).isFile())
-    .map((file) => file.split(path.sep).join('/'));
+    .readdirSync(dir, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? listFiles(path.join(dir, entry.name)).map((file) => `${entry.name}/${file}`) : [entry.name],
+    );
 }
 
 /**
  * Deletes the files of a generated tree that this run did not produce, so that a deleted or
  * renamed source (or `##` heading) takes its page off the site. In CI the mutation check
  * then fails on the stale file that is still committed.
+ * It deletes inside the repository only: a link in the tree is a file like any other and is
+ * never entered, and a tree that is reached through a link (the tree itself, or a directory
+ * above it) fails the sync.
  */
 function prune(repoRoot, tree, keep) {
-  for (const file of listFiles(path.join(repoRoot, tree))) {
+  const dir = path.join(repoRoot, tree);
+  const real = fs.existsSync(dir) ? fs.realpathSync(dir) : undefined;
+  if (real && real !== path.join(fs.realpathSync(repoRoot), tree)) {
+    throw new Error(
+      `sync-starlight: ${tree} is reached through a link (it resolves to ${real}), so it was not pruned: the files there may not belong to this repository. Replace the link, which is ${tree} or a directory above it, with a real directory.`,
+    );
+  }
+  for (const file of listFiles(dir)) {
     if (!keep.has(file)) {
       fs.rmSync(path.join(repoRoot, tree, file));
       console.warn(
