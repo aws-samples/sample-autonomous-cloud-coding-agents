@@ -15,10 +15,11 @@ filelist=$(mktemp)
 trap 'rm -f "$filelist"' EXIT
 
 # A tracked file that was deleted but not staged is still listed by git: skip it here, the
-# links that point at it are reported from the files that contain them.
+# links that point at it are reported from the files that contain them. Every path gets "./"
+# in front, so that the checker takes it for a file whatever character its name starts with.
 git ls-files -z --cached --others --exclude-standard -- '*.md' '*.mdx' ':!docs/src/content/docs' |
   while IFS= read -r -d '' file; do
-    if [ -e "$file" ]; then printf '%s\0' "$file"; fi
+    if [ -e "$file" ]; then printf './%s\0' "$file"; fi
   done > "$filelist"
 
 count=$(tr '\0' '\n' < "$filelist" | grep -c . || true)
