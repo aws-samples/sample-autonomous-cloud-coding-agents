@@ -59,6 +59,15 @@ def test_no_credential_source_survives_importing_conftest(tmp_path):
     legacy.write_text(f"AWSAccessKeyId={FAKE_KEY}\nAWSSecretKey=fake\n")
     token = tmp_path / "token"
     token.write_text("not-a-token")
+    # The files botocore reads when no variable names another one. A CI runner has
+    # no ~/.aws and no ~/.boto, so without a home directory that holds them nothing
+    # would show that conftest.py pins the file variables instead of only removing
+    # them.
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text(f"[default]\n{keys}")
+    (home / ".aws" / "config").write_text(f"[default]\n{keys}")
+    (home / ".boto").write_text(f"[Credentials]\n{keys}")
 
     sources = {
         "AWS_ACCESS_KEY_ID": FAKE_KEY,
@@ -84,6 +93,7 @@ def test_no_credential_source_survives_importing_conftest(tmp_path):
     hostile: dict[str, str] = {
         **os.environ,
         **sources,
+        "HOME": str(home),
         "PYTHONPATH": str(AGENT_DIR / "src"),
         "AWS_EC2_METADATA_SERVICE_ENDPOINT": CLOSED_PORT,
     }
