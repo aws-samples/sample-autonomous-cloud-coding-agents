@@ -198,7 +198,7 @@ run = [
 ]
 
 [tasks."check:fast"]
-description = "Fast tier without a test run: the `lint` and `drift-prevention` tasks"
+description = "Fast tier without a test run: the `lint` and `drift-prevention` tasks. Not check-only: drift-prevention fixes trailing whitespace and missing final newlines (and then fails) and regenerates the command stubs"
 depends = [":lint", ":drift-prevention"]
 
 ##################

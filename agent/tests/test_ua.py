@@ -27,7 +27,8 @@ class TestSolutionId:
 
 class TestSanitize:
     def test_contract_has_vectors(self):
-        # pytest skips an empty parametrize list instead of failing it.
+        # An empty vector list is a collection error already (empty_parameter_set_mark
+        # in pyproject.toml); this assert keeps the requirement if that setting goes.
         assert _VECTORS["sanitize"]
 
     @pytest.mark.parametrize("vector", _VECTORS["sanitize"], ids=lambda vector: vector["note"])

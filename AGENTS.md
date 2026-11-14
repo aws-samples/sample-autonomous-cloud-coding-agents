@@ -16,7 +16,7 @@ Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architectur
 mise run install          # yarn workspaces + agent Python (uv)
 mise run build            # agent quality + cdk, cli, web and docs builds + Forge tests + drift and file-hygiene checks (parallel)
 mise run lint             # lint + type checks of agent, cdk, cli and web, plus the agent's dead-code check; rewrites nothing (what ABCA agents run by default)
-mise run check:fast       # lint + drift-prevention (drift and file-hygiene checks), no test run
+mise run check:fast       # lint + drift-prevention (drift and file-hygiene checks), no test run; not check-only: it fixes trailing whitespace and final newlines and regenerates the command stubs
 mise run security         # secrets, deps, sast, grype, retire, gh-actions, agent
 mise run hooks:install    # prek git hooks (also runs at end of install)
 mise run hooks:run        # pre-commit + pre-push locally

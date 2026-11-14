@@ -167,7 +167,11 @@ max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
-"src/aws_session.py" = ["TID251"]  # the one module that builds boto3 clients, resources and sessions: it attaches the solution User-Agent (#319)
+# aws_session.py is the one module that builds boto3 clients, resources and sessions:
+# it attaches the solution User-Agent (#319). TID251 is one rule for the whole
+# banned-api table below, so this file-wide exemption also switches off the ban
+# on importing `server` and `entrypoint` in that file.
+"src/aws_session.py" = ["TID251"]
 "src/prompts/*.py" = ["E501"]  # long prompt strings
 "tests/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
 
@@ -184,7 +188,8 @@ max-complexity = 15
 "botocore.session".msg = "a botocore session builds un-attributed clients (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
 # The two process entrypoints: uvicorn loads server.py, batch mode runs
 # entrypoint.py. No module in src/ or scripts/ may import either. Tests import
-# both to test them, under the tests/** exemption above.
+# both to test them, under the tests/** exemption above. src/aws_session.py is
+# not checked for this either: its TID251 exemption is file-wide.
 "server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
 "entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
 

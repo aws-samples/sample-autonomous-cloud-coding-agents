@@ -15,8 +15,7 @@ from shell import log, log_error_cw
 class ApprovalRow(TypedDict):
     """Schema for the approval row written by ``transact_write_approval_request``.
 
-    Mirrors the DDB column layout and the TypeScript ``ApprovalRecord``
-    discriminated union in ``cdk/src/handlers/shared/types.ts``. Used as
+    Mirrors the column layout of ``TaskApprovalsTable``. Used as
     the typed contract between the PreToolUse hook (which builds the row)
     and the transactional writer (which serializes it to DDB attributes).
     Earlier the function accepted a bare ``dict`` so missing or misspelled
