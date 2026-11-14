@@ -67,7 +67,7 @@ export function currentBudgetPeriod(date: Date = new Date()): string {
   return `${year}-${month}`;
 }
 
-export function budgetScopeKey(scope: BudgetScope): string {
+function budgetScopeKey(scope: BudgetScope): string {
   return `${scope.type === 'user' ? BUDGET_USER_PREFIX : BUDGET_TEAM_PREFIX}${scope.id}`;
 }
 

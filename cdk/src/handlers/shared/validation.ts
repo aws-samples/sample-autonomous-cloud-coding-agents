@@ -33,9 +33,9 @@ import { TaskStatus } from '../../constructs/task-status';
 /** Default maximum agent turns per task. */
 export const DEFAULT_MAX_TURNS = 100;
 /** Minimum allowed value for max_turns. */
-export const MIN_MAX_TURNS = 1;
+const MIN_MAX_TURNS = 1;
 /** Maximum allowed value for max_turns. */
-export const MAX_MAX_TURNS = 500;
+const MAX_MAX_TURNS = 500;
 /** Maximum allowed length for task_description. */
 export const MAX_TASK_DESCRIPTION_LENGTH = 10_000;
 
@@ -271,11 +271,11 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 /** Maximum attachments per task. */
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
-export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
 /** Maximum total decoded inline size per request (MiB). */
 const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
 /** Maximum total attachment size per task (MiB). */
 const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
@@ -402,7 +402,7 @@ export function validateMagicBytes(data: Buffer, contentType: string): boolean {
  * validation would have accepted (returning `null` instead of the correct type),
  * turning a detection miss into a spurious rejection.
  */
-export function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
+function detectMimeTypeFromMagicBytes(data: Buffer): string | null {
   for (const sig of MAGIC_BYTES) {
     if (data.length >= sig.bytes.length) {
       const offset = sig.offset ?? 0;
@@ -475,7 +475,7 @@ function filenameFromUrl(url: string, index: number): string {
       } catch {
         decoded = lastSegment;
       }
-      const sanitized = decoded.replace(/[^a-zA-Z0-9._\-]/g, '_');
+      const sanitized = decoded.replace(/[^a-zA-Z0-9._-]/g, '_');
       if (isValidFilename(sanitized)) {
         return sanitized;
       }
@@ -537,6 +537,7 @@ export type AttachmentValidationResult =
  * MIME types, and filename safety. Returns a discriminated union of
  * validated attachments on success.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (44 when it landed); must not grow
 export function validateAttachments(
   attachments: unknown[] | undefined,
 ): AttachmentValidationResult {

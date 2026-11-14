@@ -22,7 +22,7 @@ import sys
 import time
 
 
-async def smoke_test():
+async def smoke_test():  # noqa: C901 -- 17 when the ceiling of 15 was set; must not grow
     # Ensure required env vars
     os.environ.setdefault("CLAUDE_CODE_USE_BEDROCK", "1")
     region = os.environ.get("AWS_REGION", "")

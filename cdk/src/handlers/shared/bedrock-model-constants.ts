@@ -60,7 +60,7 @@
  * that list means the granted model and the delivered model id cannot drift — a
  * mismatch would AccessDenied every Haiku call at run time while synth stayed green.
  */
-export const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-5-5';
+const DEFAULT_HAIKU_MODEL_ID = 'anthropic.claude-haiku-5-5';
 
 /**
  * Single source of truth for the Bedrock **foundation-model IDs** the agent runtime

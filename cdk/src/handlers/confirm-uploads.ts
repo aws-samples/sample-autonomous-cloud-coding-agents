@@ -26,13 +26,13 @@ import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, S3Client } f
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
 import { TaskStatus } from '../constructs/task-status';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './shared/attachment-screening';
 import { extractUserId } from './shared/gateway';
 import { estimateImageTokensFromBuffer } from './shared/image-tokens';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './shared/storage-names';
 import { type AttachmentRecord, createAttachmentRecord, type TaskRecord, toTaskDetail } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { computeTtlEpoch, MAX_TOTAL_ATTACHMENT_SIZE_BYTES } from './shared/validation';

@@ -2,9 +2,10 @@
 
 from unittest.mock import patch
 
+# Hard import (not importorskip): without cedarpy the engine denies every call.
+# These tests must then fail, not drop out of the run.
+import cedarpy  # noqa: F401
 import pytest
-
-cedarpy = pytest.importorskip("cedarpy")
 
 import policy
 from policy import PolicyDecision, PolicyEngine, _validate_constants
@@ -239,8 +240,10 @@ class TestFilePathsWithSpecialChars:
 class TestExtraPolicies:
     def test_extra_forbid_applied(self):
         extra = [
-            'forbid (principal, action == Agent::Action::"invoke_tool", '
-            'resource == Agent::Tool::"WebFetch");'
+            (
+                'forbid (principal, action == Agent::Action::"invoke_tool", '
+                'resource == Agent::Tool::"WebFetch");'
+            )
         ]
         engine = PolicyEngine(task_type="new_task", repo="owner/repo", extra_policies=extra)
         result = engine.evaluate_tool_use("WebFetch", {})

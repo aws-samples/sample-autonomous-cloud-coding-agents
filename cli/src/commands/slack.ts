@@ -65,7 +65,7 @@ export function makeSlackCommand(): Command {
 
         // Step 1: Fetch the manifest JSON from stack outputs.
         console.log('Fetching Slack App manifest from stack outputs...\n');
-        let manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
+        const manifestJson = await getStackOutput(region, opts.stackName, 'SlackAppManifestJson');
 
         // Deploying happens through `bgagent setup`, which shows the diff and
         // guards data loss; a bare deploy here would follow whatever the profile says.
@@ -347,7 +347,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }

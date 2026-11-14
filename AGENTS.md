@@ -14,15 +14,19 @@ Deeper design: [Developer guide](./docs/guides/DEVELOPER_GUIDE.md), [Architectur
 
 ```bash
 mise run install          # yarn workspaces + agent Python (uv)
-mise run build            # agent quality + cdk + cli + docs (parallel)
+mise run build            # agent quality + cdk, cli, web and docs builds + Forge tests + drift and file-hygiene checks (parallel)
+mise run lint             # lint + type checks of agent, cdk, cli and web, rewrites nothing (what ABCA agents run by default)
+mise run check:fast       # lint + drift-prevention (drift and file-hygiene checks), no test run
 mise run security         # secrets, deps, sast, grype, retire, gh-actions, agent
 mise run hooks:install    # prek git hooks (also runs at end of install)
 mise run hooks:run        # pre-commit + pre-push locally
 ```
 
-Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment on the flagged `return` line (or the line immediately above) — the rule anchors on the `return`, so a token placed higher does not bind.
+Security subtasks: `mise run security:secrets`, `security:sast`, `security:sast:range` (the same rule packs, reporting only the findings a branch adds: the per-PR check), `security:sast:masking`, `security:deps`, `security:retire`, `security:gh-actions`. The secret scans print the rule, file and line of each finding. A 12-digit number that reads as an AWS account id fails them, in tests and workflows too, unless it is an AWS-published placeholder (`123456789012`, `111122223333`, `444455556666`, `000000000000`) or, when it is not an account id, its line carries `gitleaks:allow -- <reason>`. Use that marker only on a line that holds no identifier, key or token: it exempts the whole line from every rule of the secret scan, not only the number. For `security:sast:masking` allowlist intentional fallbacks with an inline `nosemgrep: <rule-id> -- <reason>` comment on the flagged `return` line (or the line immediately above) — the rule anchors on the `return`, so a token placed higher does not bind.
 
-Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
+`security:sast:masking` also checks the suppression comments themselves, in every tracked TypeScript, JavaScript and Python file. A line that contains the word `nosemgrep` at all — in any letter case, in a comment or in code, for any rule — must be exactly one suppression of the form `nosemgrep: <rule-id> -- <reason>`; a comment that merely mentions suppressions has to use another word. A suppression of a masking rule must also sit on a finding of that rule, or on the line directly above it: one that suppresses nothing fails the task, so delete it when the code no longer needs it.
+
+Package commands: [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md), [agent/AGENTS.md](./agent/AGENTS.md), [docs/AGENTS.md](./docs/AGENTS.md).
 
 Run `mise tasks --all` with `MISE_EXPERIMENTAL=1` for the full list. Prefer mise tasks over raw `jest`, `tsc`, or `cdk` for full suites; package guides show targeted `npx jest` / `uv run pytest` for single files.
 
@@ -36,7 +40,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 
 **After merging `main` into your branch:**
 
-1. `mise //cdk:eslint` and `mise //cli:eslint` (both use `--fix`)
+1. `mise //cdk:eslint`, `mise //cli:eslint` and `mise //web:eslint` (all use `--fix`)
 2. Commit any auto-fixes (CI "Fail build on mutation" rejects uncommitted lint output)
 3. `mise run build`
 
@@ -47,7 +51,7 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | Change | Primary location | Also update | Package guide |
 |--------|------------------|-------------|---------------|
 | REST API, Lambdas, orchestration | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | `cdk/test/` | [cdk/AGENTS.md](./cdk/AGENTS.md) |
-| Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`** | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| Shared API types | `cdk/src/handlers/shared/types.ts` | **`cli/src/types.ts`**, `web/src/core/api/types.ts` — `mise run check:types-sync` fails when either mirror drifts | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md), [web/AGENTS.md](./web/AGENTS.md) |
 | `bgagent` CLI | `cli/src/`, `cli/test/` | `cli/src/types.ts` if API changes | [cli/AGENTS.md](./cli/AGENTS.md) |
 | Operator web console | `web/src/`, `web/test/` | `web/src/core/api/types.ts` if API changes | [web/AGENTS.md](./web/AGENTS.md) |
 | Agent runtime | `agent/src/` | `agent/tests/`, `agent/README.md` | [agent/AGENTS.md](./agent/AGENTS.md) |
@@ -55,11 +59,12 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 | User-facing / design prose | `docs/guides/`, `docs/design/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | ADRs | `docs/decisions/` | `mise //docs:sync` | [docs/AGENTS.md](./docs/AGENTS.md) |
 | Deployment profiles / regional capabilities | `cdk/src/deployment/`, `contracts/deployment-capabilities.json` | **`cli/src/deployment-capabilities.ts`**, `cli/src/deployment-profile.ts`, `docs/guides/DEPLOYMENT_GUIDE.md#deployment-profiles` | [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
-| Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | — | — |
+| Solution User-Agent (#319) | `agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts` (keep the three identical) | `contracts/ua-vectors.json` — the solution id and the sanitizer vectors that all three test suites load | [agent/AGENTS.md](./agent/AGENTS.md), [cdk/AGENTS.md](./cdk/AGENTS.md), [cli/AGENTS.md](./cli/AGENTS.md) |
+| Monorepo CI / tasks | `mise.toml`, `scripts/`, `.github/workflows/` | `cdk/test/scripts/` — the jest suites of the gate scripts; `mise run check:scripts` type-checks the `.ts` ones | — |
 
 ## Boundaries
 
-- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, `web/`, or `docs/`)
+- ✅ **Always:** Use an approved GitHub issue before implementing ([ADR-003](./docs/decisions/ADR-003-contribution-governance.md)); branch from `main` via worktree; run `mise run build` before opening a PR; regenerate Starlight mirrors when editing `docs/guides/`, `docs/design/`, `docs/decisions/`, or `CONTRIBUTING.md`; add dependencies to the owning package `package.json` (`cdk/`, `cli/`, `web/`, or `docs/`)
 - ⚠️ **Ask first:** New CDK stacks or constructs, agent contract changes, new dependencies, major refactors, CI workflow edits
 - 🚫 **Never:** Edit on `main`; edit `docs/src/content/docs/` by hand; commit secrets; implement without an `approved` issue (conversational "go ahead" is not approval); run raw `jest`/`tsc`/`cdk` when a mise task exists
 
@@ -68,18 +73,22 @@ Branch names: `(feat|fix|chore|docs)/<issue-number>-short-description` (e.g. `do
 - **No approved issue** — Create issue → `approved` label → self-assign → comment "Starting implementation". See [ADR-003](./docs/decisions/ADR-003-contribution-governance.md).
 - **Branch without issue number** — Unauthorized work.
 - **`MISE_EXPERIMENTAL=1`** — Required for `mise //cdk:build` and other namespaced tasks ([CONTRIBUTING.md](./CONTRIBUTING.md)).
+- **Trailing whitespace, missing final newline, conflict markers, unparseable YAML or JSON** — the build checks these as well as the commit hook: `mise run check:hygiene` (part of `mise run drift-prevention`) runs the hooks `trailing-whitespace`, `end-of-file-fixer`, `check-merge-conflict`, `check-yaml` and `check-json` over all tracked files, with the exclusions of `.pre-commit-config.yaml`. The output names the failed hook and the file. The first two correct the file and fail that run: keep the change and run again. The other three change nothing: they print the line of the marker, or the parser's message.
 - **`prek install` fails** — Another hook manager owns `core.hooksPath`; see [CONTRIBUTING.md](./CONTRIBUTING.md).
-- **Dropping solution UA on a new AWS client (#319)** — every outbound AWS call carries `md/uksb-wt64nei4u6#{component}` (the `app/` segment is SDK-native via `AWS_SDK_UA_APP_ID`, set by `SolutionUaAspect`). Construct clients through the attributed factory: `cdk/src/` and `cli/src/` via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` (`cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`); `agent/src/` via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed). A naked `new XxxClient({})` / `boto3.client(...)` silently loses solution attribution. Keep the three `ua` modules (`agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`) identical in id/wire-format/sanitization.
+- **Dropping solution UA on a new AWS client (#319)** — every outbound AWS call carries `md/uksb-wt64nei4u6#{component}` (the `app/` segment is SDK-native via `AWS_SDK_UA_APP_ID`, set by `SolutionUaAspect`). Construct clients through the attributed factory: `cdk/src/` and `cli/src/` via `makeClient(Ctor, cfg)` / `makeDocClient(cfg)` (`cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`); `agent/src/` via `aws_session.tenant_client`/`tenant_resource` (tenant-scoped) or `aws_session.platform_client` (unscoped, still attributed). A naked `new XxxClient({})` / `boto3.client(...)` silently loses solution attribution. In the agent, lint enforces it: ruff `TID251` fails on `boto3.client`, `boto3.resource` and any boto3 or botocore session outside `agent/src/aws_session.py` (tests are exempt). Keep the three `ua` modules (`agent/src/ua.py`, `cdk/src/handlers/shared/ua.ts`, `cli/src/ua.ts`) identical in id/wire-format/sanitization.
 - **Transitive npm pin applied in only one place** — `integrations/jira-forge-app` is a standalone npm project *outside* the yarn workspaces, so a root `package.json` `resolutions` bump does **not** reach it. Mirror the pin into `integrations/jira-forge-app/package.json` `overrides` and re-lock (`npm install --package-lock-only`). `mise run drift-prevention` (`check:transitive-pin-sync`) fails locally if they drift. See [#712](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/712).
+- **Unused export, file or dependency** — `mise run check:deadcode` (knip over the TypeScript and JavaScript workspaces; part of `mise run drift-prevention`, so of the build) fails on any finding: zero tolerance, no baseline. Remove the unused code or dependency, drop `export` from a symbol that only its own file uses, or declare in `knip.json` a use that knip cannot see. Decide per symbol; do not bulk-apply `knip --fix`.
 - **Optional feature read from context, or catalog edited in one place** — new optional modules belong in `DeploymentFeatures` (`cdk/src/deployment/features.ts`) and are gated in `AgentStack` from that selection, not with a fresh `tryGetContext`. Regional data lives in `contracts/deployment-capabilities.json`; mirror it into `cli/src/deployment-capabilities.ts` (parity test) and update `lastVerified`. See [ADR-024](./docs/decisions/ADR-024-deployment-profiles.md).
+- **Broken link or misplaced image in Markdown** — `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (READMEs, `AGENTS.md` files and plugin skills included), and `mise //docs:build` fails on a broken link or anchor of the rendered site. An image shown in a mirrored doc must be a file in `docs/imgs/`, or `mise //docs:sync` fails. See [docs/AGENTS.md](./docs/AGENTS.md).
 - **Package-specific pitfalls** — API type drift, CDK test bundling, Cedar parity, generated docs: see package `AGENTS.md` files.
 
 ## Tech stack
 
 - **Node** 22 (mise) · **TypeScript** 6.x · **Python** ≥3.13 (agent, uv)
+- **TypeScript compiler checks** (cdk, cli, web; `src/` and `test/`) — `strict`, plus `noImplicitOverride` (a member that overrides one of its base class needs the `override` modifier) and `noFallthroughCasesInSwitch`; unreachable code and unused labels are errors
 - **AWS CDK** `aws-cdk-lib` 2.x · `@aws-cdk/aws-bedrock-alpha`, `@aws-cdk/aws-bedrock-agentcore-alpha`, `cdk-nag`
-- **Test / lint** — Jest 30, ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`), Ruff (agent)
-- **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together
+- **Test / lint** — Jest 30 (cdk, cli), Vitest (web), ESLint flat config (`cdk/eslint.config.mjs`, `cli/eslint.config.mjs`, `web/eslint.config.mjs`), Ruff (agent)
+- **Cedar** — `@cedar-policy/cedar-wasm` 4.12.0 (cdk) + `cedarpy==4.12.2` (agent); must bump together, with `contracts/cedar-parity/engines/versions.json`, which names the pair (`cdk/test/constructs/cedar-wasm-layer.test.ts` fails on any other pin)
 - **Tooling** — mise, Yarn workspaces, prek hooks, Starlight docs sync
 
 ## Repository structure

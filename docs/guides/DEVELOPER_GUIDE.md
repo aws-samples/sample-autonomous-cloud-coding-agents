@@ -4,12 +4,13 @@ This project is built in TypeScript with [Yarn workspaces](https://classic.yarnp
 
 ![ABCA architecture](../imgs/abca-arch.png)
 
-The repository is organized around four main pieces:
+The repository is organized around these main pieces:
 
 - **Agent runtime code** in Python under `agent/`  - runtime entrypoint, task execution loop, memory writes, observability hooks, and local container tooling.
 - **Infrastructure as code** in AWS CDK under `cdk/src/`  - stacks, constructs, and handlers that define and deploy the platform on AWS.
 - **Documentation site** under `docs/`  - source guides/design docs plus the generated Astro/Starlight documentation site.
 - **CLI package** under `cli/`  - the `bgagent` command-line client used to authenticate, submit tasks, and inspect task status/events.
+- **Operator console** under `web/`  - a single-page React app for the people running a deployment: what agents are working on, what is stuck, and what is waiting for a human. It talks only to the REST API.
 - **Claude Code plugin** under `docs/abca-plugin/`  - a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) with guided skills and agents for setup, deployment, task submission, and troubleshooting. See the [plugin README](../abca-plugin/README.md) for details.
 
 > **Tip:** If you use Claude Code, run `claude --plugin-dir docs/abca-plugin` from the repo root. The plugin's `/setup` skill walks you through the entire setup process interactively.
@@ -21,12 +22,12 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Area | Paths | Notes |
 |------|--------|--------|
 | API & Lambdas | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Extend `cdk/test/` for the same feature. |
-| API types | `cdk/src/handlers/shared/types.ts` and **`cli/src/types.ts`** | Update both when request/response shapes change. |
+| API types | `cdk/src/handlers/shared/types.ts`, **`cli/src/types.ts`** and `web/src/core/api/types.ts` | Update the CLI mirror when request/response shapes change, and the web mirror where the console mirrors the type. `mise run check:types-sync` fails on drift. |
 | CLI | `cli/src/`, `cli/test/` |  - |
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
-| Docs (source) | `docs/guides/`, `docs/design/` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
+| Docs (source) | `docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
-For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
 
 ## Repository preparation
 
@@ -274,6 +275,8 @@ export MISE_EXPERIMENTAL=1
 mise run install
 ```
 
+**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk, cli and agent test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
+
 ### Development workflow
 
 Use this order to iterate quickly and catch issues early:
@@ -360,17 +363,17 @@ By default, progress events and task state writes are silently skipped during lo
 
 ```bash
 # 1. Start DynamoDB Local and create tables
-cd agent && mise run local:up
+mise //agent:local:up
 
 # 2. Run the agent with --local-events
 ./agent/run.sh --local-events "owner/repo" 42
 
-# 4. In another terminal — query progress events
-mise run local:events          # table format
-mise run local:events:json     # JSON format
+# 3. In another terminal — query progress events
+mise //agent:local:events          # table format
+mise //agent:local:events:json     # JSON format
 
-# 5. When done — tear down DynamoDB Local
-mise run local:down
+# 4. When done — tear down DynamoDB Local
+mise //agent:local:down
 ```
 
 The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
@@ -394,7 +397,7 @@ For the full list, see `agent/README.md`. For how the model default is layered, 
 | `ERROR: GITHUB_TOKEN is not set` | Export `GITHUB_TOKEN` with the required scopes. |
 | `WARNING: No AWS credentials detected` | Configure one of the three credential methods above. |
 | `WARNING: Image exceeds AgentCore 2 GB limit!` | Reduce dependencies or use multi-stage Docker build. |
-| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required | Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region |
+| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required. Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region. |
 
 ### Deployment
 
@@ -435,19 +438,20 @@ Use the same AWS Region as your deployment. If `--region` is omitted, the CLI us
 
 ## Project structure
 
-The repository is a monorepo with four packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
+The repository is a monorepo with five packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
 
 ```
 sample-autonomous-cloud-coding-agents/
 ├── cdk/          # Infrastructure and API (TypeScript, AWS CDK)
 ├── agent/        # Agent runtime (Python, Docker)
 ├── cli/          # CLI client (TypeScript, commander)
+├── web/          # Operator console (TypeScript, React)
 ├── docs/         # Documentation site (Astro/Starlight)
 ├── mise.toml     # Monorepo task runner config
 └── package.json  # Yarn workspace root
 ```
 
-A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **docs** package is independent and only affects the documentation site.
+A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **web** console uses the same REST API and is deployed only with the opt-in console stack. The **docs** package is independent and only affects the documentation site.
 
 ```mermaid
 flowchart LR
@@ -456,7 +460,7 @@ flowchart LR
     Agent -->|opens PR| GH[GitHub]
 ```
 
-Below is a task-oriented guide for each package: "I want to change X - where do I look?"
+Below is a task-oriented guide for each package: "I want to change X - where do I look?" For the operator console, see [web/README.md](../../web/README.md).
 
 ### `cdk/` - Infrastructure and API (TypeScript)
 
@@ -473,9 +477,9 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 | Change webhook authentication | `cdk/src/handlers/webhook-authorizer.ts`, `cdk/src/handlers/webhook-create-task.ts` |
 | Add or update tests | `cdk/test/` mirrors `cdk/src/` - each handler and construct has a colocated test file |
 
-Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync.
+Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync, and `web/src/core/api/types.ts` where the console mirrors the type.
 
-Build and test: `mise //cdk:build` (compile + lint + test + synth).
+Build and test: `mise //cdk:build` (compile + lint + type-check + test + synth).
 
 ### `agent/` - Agent runtime (Python)
 
@@ -488,9 +492,9 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
-| Run agent quality checks | `mise //agent:quality` (lint, type check, tests) |
+| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint or the format step has changed a file, the task fails once and says so (the lint step lists its fixes): run the task again |
 
-Build and test: `mise //agent:quality`. The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
+Build and test: `mise //agent:quality`. The unit tests run with the AWS credential sources removed and refuse every request that botocore tries to send; a refused request fails the run and is listed in the `AWS send guard` section at the end of the output (details in [agent/AGENTS.md](../../agent/AGENTS.md)). The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
 
 ### `cli/` - CLI client (TypeScript)
 
@@ -501,13 +505,13 @@ The `bgagent` command-line tool. Authenticates via Cognito, calls the REST API, 
 | Add a new CLI command | `cli/src/commands/` (one file per command), `cli/src/bin/bgagent.ts` (program setup) |
 | Change how the CLI calls the API | `cli/src/api-client.ts` |
 | Modify authentication or token handling | `cli/src/auth.ts` |
-| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`) |
+| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`; the console's subset mirror is `web/src/core/api/types.ts`) |
 
 Build and test: `mise //cli:build`.
 
 ### `docs/` - Documentation site (Astro/Starlight)
 
-Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
+Source docs live in `docs/guides/`, `docs/design/` and `docs/decisions/`; the root `CONTRIBUTING.md` is mirrored as well. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
 
 | I want to... | Look at |
 |---|---|
@@ -518,4 +522,11 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
 
-To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal (relative) links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step. External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+Two checks keep cross-references intact. Both run in CI on every pull request, as part of the required build:
+
+- `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (a file that git ignores is not read): the sources in `docs/guides/`, `docs/design/` and `docs/decisions/`, and also package READMEs, `AGENTS.md` files, plugin skills and command files. It confirms that the target file exists and that an anchor within the same file exists; it does not check an anchor that points into another file.
+- `mise //docs:build` validates every internal link and anchor of the rendered site, anchors into other pages included, and fails with the page, line and link.
+
+External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+
+A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it. With the git hooks installed, the same lint also runs at commit time when a Markdown file is staged, so a broken table fails the commit and not only the build.

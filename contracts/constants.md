@@ -27,6 +27,7 @@ the contract. This is the neutral location both runtimes read.
 | `cdk/src/constructs/lambda-microvm-compute.ts` | `microvm_hook_budgets` | synth-time `import` |
 | `cdk/src/constructs/blueprint.ts` | re-exports from `types.ts` | synth-time |
 | `cli/test/constants-parity.test.ts` | package-safe literal parity | test-time |
+| `agent/tests/test_constants_parity.py` | value each agent constant holds after import | test-time |
 
 The agent reads at runtime via `Path(__file__) / "../../contracts/..."`
 in dev / `/app/contracts/...` in the deployed image (the Dockerfile
@@ -194,12 +195,26 @@ minimum length in `proxy.js`.
 
 1. Add the key + nested object to `constants.json`.
 2. Wire each consumer (Python, TS) to read the same key.
-3. Update `scripts/check-types-sync.ts` (or successor drift check) to
-   assert the new key is consumed where expected.
+3. Register the consumer with the drift checks. For a constant the agent
+   holds: add its name and contract key to `OWNED_PYTHON_NAMES` in
+   `scripts/check-constants-sync.ts` and a row to `_OWNED` in
+   `agent/tests/test_constants_parity.py` (the script fails until the test
+   names it). For a literal the CLI mirrors: add it to
+   `cli/test/constants-parity.test.ts`.
 4. Bump this README's schema section.
 
-Do not introduce new top-level literal declarations of the same
-constant in code; the drift check exists to catch that.
+Do not assign an owned constant anything but a plain read of its contract
+key (`NAME = <contract section>["key"]`, optionally inside one conversion):
+`scripts/check-constants-sync.ts` scans every file under `agent/src` and
+fails on a literal, arithmetic on the contract value or another key, in
+whichever file the assignment stands.
+
+Declare an owned constant once, in the module that owns it, and import it
+elsewhere. The script reads the source text and cannot tell which mapping
+a subscript reads, so a second declaration passes when it is a plain
+subscript read ending in the constant's key, whatever it reads from. The
+value a constant holds is compared with the contract by
+`agent/tests/test_constants_parity.py`, for the owning module only.
 
 ## Lint enforcement (AI007, #258)
 

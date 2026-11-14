@@ -1,15 +1,13 @@
 ---
-title: Adr 023 cloudformation stack boundaries
+title: "ADR-023: Optional network stack and deployment budgets"
 ---
-
-# ADR-023: Optional network stack and deployment budgets
 
 **Status:** proposed
 **Date:** 2026-09-21
 **Last-updated:** 2026-10-05
 **Issue:** [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852)
 
-Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/architecture/readme#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
+Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/decisions/readme#lifecycle), this decision remains proposed while its implementing PR is in review and becomes accepted when that PR merges. This record does not approve or waive the existing-stack migration criteria in #852.
 
 ## Context
 
@@ -57,7 +55,7 @@ The [teardown guidance](/sample-autonomous-cloud-coding-agents/getting-started/d
 
 ## References
 
-- [Developer guide: synthesis budgets](/sample-autonomous-cloud-coding-agents/developer-guide/introduction#stack-decomposition-and-synthesis-budgets)
+- [Developer guide: synthesis budgets](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation#stack-decomposition-and-synthesis-budgets)
 - [Deployment guide: network topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology)
 - [Compute selection](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend)
 - [CDK best practices](https://docs.aws.amazon.com/cdk/v2/guide/best-practices.html)

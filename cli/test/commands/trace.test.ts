@@ -242,6 +242,7 @@ describe('trace download command', () => {
       // is never observed as unhandled (which Jest would treat as a
       // test failure even if the final assertion also matches).
       const done = cmd.parseAsync(['node', 'test', 'download', 'task-1']);
+      // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
       const assertion = expect(done).rejects.toThrow(/timed out after 2 minutes/);
 
       // Fast-forward past the 2-minute timeout. The in-action timer

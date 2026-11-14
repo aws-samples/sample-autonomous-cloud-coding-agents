@@ -1,8 +1,6 @@
 ---
-title: Adr 013 tiered validation pyramid
+title: "ADR-013: Tiered validation pyramid for agentic-first development"
 ---
-
-# ADR-013: Tiered validation pyramid for agentic-first development
 
 **Status:** proposed
 **Date:** 2026-05-19
@@ -11,7 +9,7 @@ title: Adr 013 tiered validation pyramid
 
 The current validation architecture has two operational tiers:
 
-- **Pre-commit hooks** (< 5s) — formatting, secrets scan, file-level linting
+- **Pre-commit hooks** — formatting, secrets scan, and the lint and drift checks of the staged files
 - **Remote CI** (5–20 min) — full build, test, synth, security scans, deploy verification
 
 The gap between these tiers is significant. When an agent (or human) makes a change that passes pre-commit but fails in CI, the feedback loop is:
@@ -34,7 +32,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 
 | Tier | Time | What it catches | Gap |
 |------|------|-----------------|-----|
-| Pre-commit (Tier 0) | < 5s | Formatting, secrets, trailing whitespace | None — works well |
+| Pre-commit (Tier 0) | No fixed budget: by what is staged (measured times under Tier 0 below) | Formatting, secrets, lint and drift checks of the staged files | None — works well |
 | mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
 | Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
 | **Local integration (Tier 2)** | — | **Does not exist** | Integration-level validation without remote round-trip |
@@ -67,7 +65,7 @@ In a repo where agents run autonomously (ABCA's own design goal), validation spe
                ─┴─────────────────┴─
               ┌─────────────────────┐
               │       Tier 0        │  Pre-commit (gate)
-              │       < 5s          │  Format, lint, secrets
+              │  by what is staged  │  Format, lint, secrets
               └─────────────────────┘
 ```
 
@@ -75,16 +73,18 @@ Each tier is **necessary but not sufficient** — passing a lower tier is requir
 
 ### Tier definitions
 
-**Tier 0 — Pre-commit (< 5s, gates every commit)**
+**Tier 0 — Pre-commit (gates every commit)**
 
 - Trailing whitespace, end-of-file fix
 - Merge conflict markers
 - Secrets scan (gitleaks)
-- ESLint (file-level, staged files only)
-- Docs sync check (no stale mirrors)
+- ESLint for cdk, cli and web, each when one of its source files is staged
+- Agent quality task, when a Python file under `agent/` is staged
+- Docs sync and `astro check`, the Markdown structure lint when a Markdown file is staged, and the docs script tests when the docs scripts are staged
+- Drift checks for API types and shared constants when one of their inputs is staged, and the coverage contract check on every commit
 - YAML/JSON syntax validation
 
-Status: **Implemented** (prek hooks)
+Status: **Implemented** (prek hooks). A commit runs the hooks that match what is staged, so there is no single duration. Measured when the newer hooks were added: the coverage contract check takes about 1 s on every commit, the Markdown structure lint about 3 s on a commit with Markdown, and web ESLint 6 to 13 s on a commit with web sources.
 
 **Tier 1 — Local build (30–90s, gates push)**
 
@@ -96,9 +96,9 @@ Status: **Implemented** (prek hooks)
 - Type sync drift (CDK ↔ CLI types in sync)
 - Constants drift (cross-language contract check)
 
-Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
+Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, `mise //web:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
-Remaining refinement: consider splitting into `mise run check:fast` (compile + lint, 30s) and `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
+`mise run check:fast` runs the `lint` and `drift-prevention` tasks (lint, type checks, drift and file-hygiene checks; no test run; measured at about 30 s on a laptop). It is run on demand: the push gate does not use it. Remaining refinement: consider `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
@@ -124,16 +124,17 @@ Progressive build-out:
 **Tier 3 — Remote CI (5–20 min, authoritative, gates merge)**
 
 - Full test matrix (multiple Node versions if applicable)
-- Security scans (Semgrep SAST, OSV deps, Grype container, Retire.js, zizmor)
+- Security scans. The required job `Secrets, deps, and workflow scan` (`.github/workflows/security-pr.yml`) runs on every pull request and merge-queue entry: gitleaks over the commits of the change, the silent-success-masking rules over the whole repository, the Semgrep registry packs for the findings the change adds, OSV deps and zizmor, and it builds the agent image when `agent/Dockerfile`, `.dockerignore` or a file the Dockerfile copies by name (`agent/pyproject.toml`, `agent/uv.lock`, `agent/prepare-commit-msg.sh`, `agent/managed-settings.json`) changed, or when a file under a directory it copies whole (`agent/src`, `agent/policies`, `agent/workflows`, `contracts`) was deleted or renamed. The weekly suite (`.github/workflows/security.yml`) runs every scanner even when an earlier one fails, adds the full Semgrep SAST, Grype, Retire.js, Bandit and the Trivy image scan, and reports to one rolling issue
 - CDK diff against deployed stack
 - Multi-account deployment verification
 - E2E tests against real AWS services
 - Performance/cost regression checks
 - Documentation mutation check (fail if Starlight mirrors are stale)
+- The Tier 0 file checks (whitespace, end of file, conflict markers, YAML/JSON syntax) over all tracked files (`mise run check:hygiene`, part of `mise run build`): a commit made without the hooks skips Tier 0
 
 Status: **Implemented** (GitHub Actions). This remains the authoritative gate for merge.
 
-> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts a required `integ-smoke` status that blocks merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
+> **Deployed runtime E2E — Phase 0 landed (issue #236).** `@aws-cdk/integ-tests-alpha` + `integ-runner` provide deploy-then-verify coverage: `mise //cdk:integ` deploys a trimmed Task API stack to a real account, asserts the create-and-persist happy path (task persists at `SUBMITTED`), then tears it down. In CI (`.github/workflows/integ.yml`) it is triggered per-PR via `workflow_run` only when the diff touches `cdk/**` or `agent/**` (docs/cli-only PRs get an immediate green skip), runs behind the reused `deploy` environment's admin-approval gate so it never assumes the deploy role unattended, and posts an `integ-smoke` status that is not required: the ruleset for `main` requires only `build (agentcore)` and `Secrets, deps, and workflow scan`, so the status informs reviewers and does not block merge. Because it is path-filtered and admin-gated it does not slow non-infra PRs. `workflow_dispatch` is retained for manual runs against `main`. Phase 1 (full lifecycle / real agent runs) and Phase 2 (channels) are follow-ups.
 
 #### Residual risk acceptance — fork PR integ execution
 
@@ -159,7 +160,7 @@ Residual risk after these mitigations (a malicious fork PR that passes maintaine
 
 ### Agent interaction model
 
-Agents interact with validation tiers through skills (depends on ADR-012 for the skill model):
+Agents interact with validation tiers through skills (depends on ADR-012 for the skill model). The `validate-locally` skill and the two `mise` tasks it runs in the flow below are proposed here and do not exist yet:
 
 ```
 Agent completes implementation
@@ -215,7 +216,7 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - (-) Tier 2 infrastructure requires maintenance (LocalStack config, container images, fixtures)
 - (-) Local machine requirements increase (Docker, disk space for containers)
 - (-) Tier 2 may diverge from real AWS behavior — LocalStack is not 100% faithful
-- (-) Pre-push gate adds 30–90s to every push (mitigation: `mise run check:fast` for safe paths)
+- (-) Pre-push gate adds 30–90s to every push (proposed mitigation: `mise run check:fast` alone for safe paths)
 - (!) LocalStack fidelity gaps must be documented — when Tier 2 passes but Tier 3 fails, document the divergence and add it to Tier 2's scope
 - (!) Tier 2 "optional until stable" phase must have a defined graduation criteria, or it stays optional forever
 

@@ -34,9 +34,9 @@ import { CliError } from './errors';
  * in Linear's app — keep this constant in sync with the LINEAR_SETUP_GUIDE
  * playbook entry.
  */
-export const CALLBACK_HOST = 'localhost';
+const CALLBACK_HOST = 'localhost';
 export const CALLBACK_PORT = 8080;
-export const CALLBACK_PATH = '/oauth/callback';
+const CALLBACK_PATH = '/oauth/callback';
 export const CALLBACK_URL = `http://${CALLBACK_HOST}:${CALLBACK_PORT}${CALLBACK_PATH}`;
 
 const SUCCESS_HTML = `<!doctype html>

@@ -152,12 +152,10 @@ describe('start-session step composition', () => {
 
     const strategy = resolveComputeStrategy(blueprintConfig);
 
-    try {
-      await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
-      fail('Expected startSession to throw');
-    } catch (err) {
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, userId, true);
-    }
+    await expect(
+      strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig }),
+    ).rejects.toThrow('InvokeAgent failed');
+    await failTask(taskId, TaskStatus.HYDRATING, 'Session start failed: Error: InvokeAgent failed', userId, true);
 
     // failTask should have been called — transitions to FAILED + emits event + decrements concurrency
     // transitionTask (1) + emitTaskEvent (1) + decrementConcurrency (1) = 3 DDB calls
@@ -175,15 +173,11 @@ describe('start-session step composition', () => {
     const strategy = resolveComputeStrategy(blueprintConfig);
     const handle = await strategy.startSession({ taskId, userId: 'cognito-test', payload, blueprintConfig });
 
-    try {
-      await transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
-        session_id: handle.sessionId,
-        started_at: new Date().toISOString(),
-      });
-      fail('Expected transitionTask to throw');
-    } catch (err) {
-      await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(err)}`, userId, true);
-    }
+    await expect(transitionTask(taskId, TaskStatus.HYDRATING, TaskStatus.RUNNING, {
+      session_id: handle.sessionId,
+      started_at: new Date().toISOString(),
+    })).rejects.toThrow('Conditional check failed');
+    await failTask(taskId, TaskStatus.HYDRATING, `Session start failed: ${String(condErr)}`, userId, true);
 
     // AgentCore was invoked
     expect(mockAgentCoreSend).toHaveBeenCalledTimes(1);

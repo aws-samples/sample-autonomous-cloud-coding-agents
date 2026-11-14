@@ -242,7 +242,7 @@ export interface OrchestrationReleaseContext {
  * Truncation is visible rather than silent: a reader of the child prompt sees
  * that the text was cut, instead of quietly working from half a spec.
  */
-export const PARENT_CONTEXT_MAX_CHARS = 4000;
+const PARENT_CONTEXT_MAX_CHARS = 4000;
 
 /** Cap one parent-context field, marking the cut so it is never mistaken for the whole. */
 function clampParentContext(text: string): string {

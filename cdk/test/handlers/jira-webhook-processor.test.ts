@@ -309,7 +309,7 @@ describe('jira-webhook-processor handler', () => {
       expect(userGet?.input.ConsistentRead).toBe(true);
     });
 
-    test('an orchestrated child iteration preserves routing and marks the restack source', async () => {
+    test('an orchestrated child iteration preserves routing, marks the restack source and is acknowledged once', async () => {
       resolveTaskByJiraIssueMock.mockResolvedValueOnce({
         ...priorTask,
         channel_metadata: {

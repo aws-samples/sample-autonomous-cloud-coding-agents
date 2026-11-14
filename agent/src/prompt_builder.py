@@ -48,12 +48,10 @@ def build_system_prompt(
         mc_parts: list[str] = []
         if mc.repo_knowledge:
             mc_parts.append("**Repository knowledge:**")
-            for item in mc.repo_knowledge:
-                mc_parts.append(f"- {sanitize_memory_content(item)}")
+            mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.repo_knowledge)
         if mc.past_episodes:
             mc_parts.append("\n**Past task episodes:**")
-            for item in mc.past_episodes:
-                mc_parts.append(f"- {sanitize_memory_content(item)}")
+            mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.past_episodes)
         if mc_parts:
             memory_context_text = "\n".join(mc_parts)
     system_prompt = system_prompt.replace("{memory_context}", memory_context_text)
@@ -136,12 +134,10 @@ def _render_memory_context(hydrated_context: HydratedContext | None) -> str:
     mc_parts: list[str] = []
     if mc.repo_knowledge:
         mc_parts.append("**Prior knowledge:**")
-        for item in mc.repo_knowledge:
-            mc_parts.append(f"- {sanitize_memory_content(item)}")
+        mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.repo_knowledge)
     if mc.past_episodes:
         mc_parts.append("\n**Past task episodes:**")
-        for item in mc.past_episodes:
-            mc_parts.append(f"- {sanitize_memory_content(item)}")
+        mc_parts.extend(f"- {sanitize_memory_content(item)}" for item in mc.past_episodes)
     return "\n".join(mc_parts) if mc_parts else "(No previous knowledge available.)"
 
 

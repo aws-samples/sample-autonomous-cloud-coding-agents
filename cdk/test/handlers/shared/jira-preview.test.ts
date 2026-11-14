@@ -210,7 +210,7 @@ test('continuous concurrent changes do not turn successful PUTs into retryable f
   f.send.mockImplementation(async () => ({
     Item: {
       task_id: 'task', status: 'RUNNING', jira_iteration_status: status(`Working ${version++}`, false),
-    },
+    } as TaskRecord,
   }));
   await expect(f.update()).resolves.toEqual({ ok: true });
   expect(put).toHaveBeenCalledTimes(4);

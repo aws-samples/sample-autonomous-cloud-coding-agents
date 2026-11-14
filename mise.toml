@@ -8,6 +8,9 @@
 #   - agent:   cedarpy==4.12.2                 (agent/pyproject.toml)
 #   - cdk:     @cedar-policy/cedar-wasm@4.12.0  (cdk/package.json)
 #   Both build on the Cedar 4.12.0 core.
+# contracts/cedar-parity/engines/versions.json names that pair, and
+# cdk/test/constructs/cedar-wasm-layer.test.ts fails when a manifest pins
+# anything else.
 min_version = "2026.7.11"
 
 monorepo_root = true
@@ -17,18 +20,22 @@ experimental = true
 
 [tools]
 node = "22"
-prek = "latest"
-gitleaks = "latest"
+# Gate tools are pinned to exact versions so that a required check changes only
+# with a commit (#722, #540). Nothing bumps these automatically (Dependabot has
+# no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
+# in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml.
+prek = "0.5.9"
+gitleaks = "8.30.1"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
 # present, avoiding the classic-pipx "Failed to upgrade shared libraries" path
 # that breaks under the mise 2026.6.x default `minimum_release_age`
 # (jdx/mise#10279; see #320).
-uv = "latest"
-semgrep = "latest"
-osv-scanner = "latest"
-"grype" = "latest"
-"aqua:zizmorcore/zizmor" = "latest"
+uv = "0.13.7"
+semgrep = "1.183.0"
+osv-scanner = "2.7.0"
+"grype" = "0.121.1"
+"aqua:zizmorcore/zizmor" = "1.32.0"
 
 [monorepo]
 config_roots = ["cdk", "agent", "cli", "docs", "web"]
@@ -37,10 +44,10 @@ config_roots = ["cdk", "agent", "cli", "docs", "web"]
 ###### CORE ######
 ##################
 
-# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`).
-# `//cdk:install`, `//cli:install`, and `//docs:install` are thin wrappers around the same command.
+# One `yarn install` at the repo root installs every Yarn workspace (`cdk`, `cli`, `docs`, `web`).
+# `//cdk:install`, `//cli:install`, `//docs:install` and `//web:install` are thin wrappers around the same command.
 [tasks.install]
-description = "Yarn workspaces (cdk, cli, docs) + agent Python (uv) + prek git hooks when inside a Git repo"
+description = "Yarn workspaces (cdk, cli, docs, web) + agent Python (uv) + prek git hooks when inside a Git repo"
 run = [
   "yarn install --check-files",
   "cd agent && mise run install",
@@ -56,7 +63,7 @@ run = [
 # are exact pins that must only ever move together, by hand, with refreshed
 # contracts/cedar-parity/ fixtures (CEDAR_HITL_GATES.md §15.6, decision #23).
 [tasks.upgrade]
-description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
+description = "Upgrade dependencies within declared ranges: yarn workspaces (cdk, cli, docs, web) + agent uv lockfile. Exact pins (incl. Cedar parity) are not rewritten."
 run = [
   # Regenerate the lockfile rather than `yarn upgrade`: Yarn 1 has a known bug
   # where `yarn upgrade` copies `resolutions` entries into `dependencies` in
@@ -71,7 +78,7 @@ run = [
 ##################
 
 [tasks.quality]
-description = "Monorepo quality checks (agent quality, then cdk, cli, docs)"
+description = "Monorepo quality checks: agent quality, then ESLint with --fix for cdk, cli and web, then the docs check"
 depends = ["//agent:quality"]
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:eslint",
@@ -80,16 +87,51 @@ run = [
   "MISE_EXPERIMENTAL=1 mise //docs:check",
 ]
 
+# What an ABCA agent runs by default to verify lint before and after its change
+# (`mise run lint`, DEFAULT_LINT_COMMAND in agent/src/post_hooks.py). Check-only
+# on purpose: no `--fix` and no formatter rewrite, so a pass means the tree is
+# clean as committed and a failure names the file, line and rule. Use
+# `mise run quality` for the auto-fixing variant.
+# The two `typecheck` tasks are the only type check that test files get (jest
+# transpiles them without checking), so a type error there has to fail here too.
+[tasks.lint]
+description = "Non-mutating lint and type checks of agent, cdk, cli and web (no docs check)"
+depends = [
+  "//agent:lint",
+  "//agent:format:check",
+  "//agent:typecheck",
+  "//cdk:eslint:check",
+  "//cdk:compile",
+  "//cdk:typecheck",
+  "//cli:eslint:check",
+  "//cli:compile",
+  "//cli:typecheck",
+  "//web:eslint:check",
+  "//web:typecheck",
+]
+
+# The gate scripts are gates too: a typo in one (`errors.lenght > 0`) runs fine and
+# passes everything. `strict` plus the unused checks catch that class; the two
+# flags after them describe what `node --experimental-strip-types`, which runs
+# these scripts, can execute. The behaviour of each script is tested in
+# cdk/test/scripts/*.test.ts, which //cdk:test runs in the same build.
+# The compiler is named by path because the root `node_modules/.bin/tsc` link
+# belongs to whichever hoisted package claimed it, not to the `typescript` these
+# scripts import.
+[tasks."check:scripts"]
+description = "Type-check the gate scripts (scripts/*.ts) with the TypeScript they import"
+run = "node node_modules/typescript/bin/tsc --noEmit --strict --noUnusedLocals --noUnusedParameters --noImplicitReturns --erasableSyntaxOnly --verbatimModuleSyntax --skipLibCheck --target es2022 --module esnext --moduleResolution bundler --types node scripts/*.ts"
+
 [tasks."check:types-sync"]
-description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8). Fails if a public type exists in both with different shapes, or if CLI exports a name CDK doesn't."
+description = "Drift check: CDK shared/types.ts ↔ cli/src/types.ts (S8) and web/src/core/api/types.ts. Fails if a public type exists in both with different shapes, if CLI exports a name CDK doesn't, or if the web mirror declares a member its canonical type lacks or exports a name that has no canonical declaration and is not listed as console-only."
 run = "node --experimental-strip-types scripts/check-types-sync.ts"
 
 [tasks."check:constants-sync"]
-description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if agent/src/policy.py declares a literal for a name owned by the JSON contract."
+description = "Drift check: cross-language constants in contracts/constants.json (S9). Fails if any file under agent/src assigns a name owned by the JSON contract anything but a plain read of its contract key."
 run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 
 [tasks."check:coverage-thresholds-sync"]
-description = "Drift check: contracts/coverage-thresholds.json ↔ cdk/cli jest coverageThreshold and agent pytest fail_under"
+description = "Drift check: contracts/coverage-thresholds.json ↔ coverage settings, test scripts and mise test tasks of cdk, cli, web, agent and the Jira Forge app"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
 [tasks."test:jira-forge-app"]
@@ -100,28 +142,57 @@ run = "npm test --prefix integrations/jira-forge-app"
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
-[tasks.deadcode]
-description = "Dead-code detection across TS workspaces via knip (#282, cairn MVG gate #6). Lists unused files/exports/deps; run `yarn knip --fix` locally to auto-remove."
-run = "yarn knip"
-
-[tasks."check:deadcode-ratchet"]
-description = "Dead-code ratchet (#282): fail only if knip's issue count rises above knip-baseline.json. Advisory in CI for now; flips to blocking once the baseline is driven to zero."
-run = "node scripts/check-deadcode-ratchet.mjs"
+[tasks."check:deadcode"]
+description = "Dead-code gate (#282): knip must report nothing in the TS/JS workspaces — no unused file, dependency, export or exported type, no unlisted or unresolved import. Zero tolerance, no baseline."
+run = '''
+yarn -s knip --no-progress && exit 0
+echo 'check:deadcode: knip must report nothing (zero tolerance, no baseline). For each finding above: remove the unused file, dependency or code; drop `export` if the symbol is used only in its own file; declare a use that knip cannot see in knip.json. Decide per symbol and do not bulk-apply `knip --fix`.' >&2
+exit 1
+'''
 
 [tasks."check:transitive-pin-sync"]
 description = "Transitive-pin sync guard (#712): fail if a package pinned in root `resolutions` resolves below that floor in integrations/jira-forge-app's npm lockfile — the standalone project root `resolutions` can't reach."
 run = "node scripts/check-transitive-pin-sync.mjs"
 
+# The five generic hooks of .pre-commit-config.yaml over every tracked file. A commit
+# made without the hooks could otherwise bring an unparseable YAML or JSON file or
+# leftover conflict markers through the build.
+# One prek call per hook: given several ids, prek only warns about an id that matches
+# no hook and exits 0; given one, it fails. SKIP is unset because prek honours it and
+# reports a skipped hook as success.
+# The first two hooks fix what they find and fail when they did: keep the change and
+# run again.
+# `mise run install` already fetches the hook repository and builds its environment
+# (`prek install --prepare-hooks`), so this needs no network afterwards. Without that
+# step the first run fetches from github.com and PyPI, and fails if it cannot.
+[tasks."check:hygiene"]
+description = "File hygiene over all tracked files (the five generic prek hooks): trailing whitespace, final newline, merge-conflict markers, YAML syntax, JSON syntax"
+run = '''
+unset SKIP PREK_SKIP
+rc=0
+for hook in trailing-whitespace end-of-file-fixer check-merge-conflict check-yaml check-json; do
+  prek run --all-files "$hook" || rc=1
+done
+exit "$rc"
+'''
+
 [tasks."drift-prevention"]
 description = "Run checks to prevent drift in contracts between packages and documentation links"
 run = [
   { task = "sync:abca-commands" },
+  { task = "check:hygiene" },
+  { task = "check:scripts" },
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
   { task = "check:transitive-pin-sync" },
+  { task = "check:deadcode" },
   { task = "//docs:link-check" },
 ]
+
+[tasks."check:fast"]
+description = "Fast tier without a test run: the `lint` and `drift-prevention` tasks"
+depends = [":lint", ":drift-prevention"]
 
 ##################
 #### SECURITY ####
@@ -149,23 +220,55 @@ description = "Scan the checked-out history for secrets with gitleaks (scheduled
 #
 # Secrets introduced by a PR are independently caught at merge time by the
 # required range-scoped check (`security:secrets:range`, see security-pr.yml).
-run = 'gitleaks git . --no-banner --redact --log-opts="HEAD"'
+#
+# `--config .gitleaks.toml` (here and in the two tasks below) names the rule
+# file instead of leaving gitleaks to look for it. When gitleaks finds no file
+# it scans with its built-in rules and exits 0: the aws-account-id rule and
+# every allowlist are gone and nothing says so. With the flag a missing or
+# unreadable file stops the scan with an error, and a GITLEAKS_CONFIG variable
+# in the environment cannot replace the rules.
+#
+# `--verbose` (here and in the two tasks below) prints rule, file and line for
+# each finding; without it gitleaks only prints a count. `--redact` keeps the
+# secret itself out of the output.
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="HEAD"'
 
 [tasks."security:secrets:range"]
 description = "gitleaks over a commit range only (per-PR gate). Set GITLEAKS_RANGE, e.g. origin/main..HEAD"
 # Range-scoped scan: only the commits a branch/PR introduces, not full history.
 # Defaults to the full history when GITLEAKS_RANGE is unset so the task is safe
 # to run anywhere. The per-PR CI job sets GITLEAKS_RANGE=origin/$BASE..HEAD.
-run = 'gitleaks git . --no-banner --redact --log-opts="${GITLEAKS_RANGE:-}"'
+run = 'gitleaks git . --config .gitleaks.toml --no-banner --redact --verbose --log-opts="${GITLEAKS_RANGE:-}"'
 
 [tasks."security:secrets:staged"]
 description = "gitleaks on staged changes (pre-commit hook)"
 # `gitleaks git --staged` replaces the deprecated `gitleaks protect --staged`.
-run = "gitleaks git . --staged --no-banner --redact"
+run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --verbose"
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
 run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+
+[tasks."security:sast:range"]
+description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
+# The rule packs of security:sast (keep the two --config lists identical), but
+# --baseline-commit reports only findings a branch ADDS relative to the
+# baseline. A rule the registry adds or changes therefore cannot fail code a
+# pull request did not touch (#532, #540); the full scan stays in security.yml.
+# Defaults the baseline to origin/main so the task is safe to run anywhere; the
+# per-PR CI job sets SEMGREP_SAST_BASELINE to the PR base SHA.
+#
+# The packs are downloaded from semgrep.dev on every run, so the task must fail
+# when they do not arrive. Semgrep exits non-zero by itself when the registry is
+# unreachable or a pack cannot be loaded; there is no --quiet here because it
+# hides that error. A registry that answers with EMPTY packs leaves semgrep at
+# exit 0 with nothing checked, so the last command fails unless the SARIF
+# report lists at least one loaded rule.
+run = [
+  "mkdir -p test-reports && rm -f test-reports/semgrep-sast-range.sarif",
+  "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --baseline-commit \"${SEMGREP_SAST_BASELINE:-origin/main}\" --sarif-output=test-reports/semgrep-sast-range.sarif --error .",
+  '''node -e 'const sarif = JSON.parse(require("fs").readFileSync("test-reports/semgrep-sast-range.sarif", "utf8")); if (!sarif.runs[0].tool.driver.rules.length) { console.error("security:sast:range: semgrep loaded 0 rules, so nothing was checked (did semgrep.dev answer with empty rule packs?). Rerun the task; do not treat this run as a pass."); process.exit(1); }' ''',
+]
 
 [tasks."security:sast:masking"]
 description = "Custom semgrep rules: silent-success masking (AI004, #257). Blocking — intentional degraded-mode fallbacks use inline justified nosemgrep on the return line."
@@ -185,8 +288,8 @@ description = "Masking scan ratcheted to newly-introduced findings only (per-PR 
 # ADDS relative to the baseline, so the pre-existing findings on main (tracked
 # in #756) don't block PRs that don't touch them — while any NEW masking
 # regression fails here at PR time. Mirrors security:secrets:range. The full
-# blocking scan (security:sast:masking) still runs in security.yml and the
-# pre-push hook.
+# blocking scan (security:sast:masking) runs next to it in the required per-PR
+# job, in security.yml and in the pre-push hook.
 # `semgrep test .semgrep/` runs first (as in the full task) so a PR that WEAKENS
 # the rule or breaks a fixture fails at PR time too — otherwise a rule-weakening
 # change would only be caught weekly / at pre-push (which is currently bypassable
@@ -222,6 +325,11 @@ run = "zizmor --offline .github"
 
 [tasks.security]
 description = "Run security scans"
+# Every leg is a task reference, so `mise run --continue-on-error security` (the
+# weekly workflow) runs all of them and still exits non-zero when any fails. A
+# nested `mise //agent:security` shell call did not get the flag: a bandit
+# failure skipped the image scan. Without the flag the first failure still
+# stops the run, as before.
 run = [
     { task = "security:secrets" },
     { task = "security:deps" },
@@ -230,8 +338,7 @@ run = [
     { task = "security:grype" },
     { task = "security:retire" },
     { task = "security:gh-actions" },
-    "MISE_EXPERIMENTAL=1 mise //agent:security",
-    "echo All good!"
+    { task = "//agent:security" },
 ]
 
 ##################
@@ -254,7 +361,7 @@ description = "Pre-push security scans"
 run = "mise run security"
 
 [tasks."hooks:pre-push:tests"]
-description = "Pre-push tests in cdk/cli/agent"
+description = "Pre-push tests in cdk, cli, web and agent"
 run = [
   "MISE_EXPERIMENTAL=1 mise //cdk:test",
   "MISE_EXPERIMENTAL=1 mise //cli:test",
@@ -263,7 +370,7 @@ run = [
 ]
 
 [tasks."hooks:pre-push"]
-description = "Pre-push gate: security scans then tests in cdk/cli/agent"
+description = "Pre-push gate: security scans, then tests in cdk, cli, web and agent"
 run = [
   "mise run hooks:pre-push:security",
   "mise run hooks:pre-push:tests",

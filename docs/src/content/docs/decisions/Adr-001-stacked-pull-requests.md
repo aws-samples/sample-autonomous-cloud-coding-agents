@@ -1,8 +1,6 @@
 ---
-title: Adr 001 stacked pull requests
+title: "ADR-001: Stacked pull requests for multi-PR features"
 ---
-
-# ADR-001: Stacked pull requests for multi-PR features
 
 **Status:** accepted
 **Date:** 2026-05-19

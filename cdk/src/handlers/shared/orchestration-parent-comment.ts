@@ -123,7 +123,7 @@ const TITLE_NOISE = new Set([
  */
 export const INTEGRATION_KEYWORD = 'integration';
 /** Accepted synonym of {@link INTEGRATION_KEYWORD}. */
-export const INTEGRATION_KEYWORD_ALT = 'combined';
+const INTEGRATION_KEYWORD_ALT = 'combined';
 
 export function parseParentNodeReference(
   instruction: string,

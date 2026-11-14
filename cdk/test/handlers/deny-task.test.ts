@@ -22,7 +22,7 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 const mockSend = jest.fn();
 
 class MockTransactionCanceledException extends Error {
-  name = 'TransactionCanceledException';
+  override name = 'TransactionCanceledException';
   CancellationReasons?: { Code?: string }[];
   constructor(reasons: { Code?: string }[]) {
     super('TransactionCanceledException');

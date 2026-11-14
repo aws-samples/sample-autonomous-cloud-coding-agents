@@ -38,7 +38,7 @@
 /** Deepest markdown heading level (`######`) ADF heading nodes are clamped to. */
 const MAX_MARKDOWN_HEADING_LEVEL = 6;
 
-export interface AdfNode {
+interface AdfNode {
   readonly type?: string;
   readonly text?: string;
   readonly attrs?: {

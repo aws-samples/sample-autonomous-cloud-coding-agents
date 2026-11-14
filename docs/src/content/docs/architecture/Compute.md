@@ -1,8 +1,6 @@
 ---
-title: Compute
+title: "Compute"
 ---
-
-# Compute
 
 Every task runs in an isolated cloud compute environment. Nothing runs on the user's machine. The agent clones the repo, writes code, runs tests, and opens a PR inside a compute session that is created for the task and destroyed when it ends.
 
@@ -25,7 +23,7 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 | **Cost model** | vCPU-hrs + GB-hrs | vCPU + mem/sec | Baseline-priced (8 GiB / 4 vCPU) with 4× vertical burst (32 GiB / 16 vCPU peak); suspended time is storage-only | EC2 + EBS | EKS control + EC2 | Underlying compute | Request + duration | EC2 metal + your ops |
 | **Fit** | **Default choice** | Repos > 2 GB image | Suspend/resume economics; approval-wait-heavy workloads; default-sized repos. Heavy sustained-memory builds stay on ECS | GPU, heavy toolchains | Max flexibility | Queued batch jobs | **Poor** (15 min cap) | Best potential, highest cost |
 
-> **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
+> **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend).
 
 Repositories without a `compute_type` override inherit the first entry in the deployed list. An explicit Blueprint or RepoTable override must name a deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the `ComputeStrategy` interface.
 
@@ -121,7 +119,7 @@ See [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orches
 
 Lambda MicroVMs are an opt-in third backend. Include `lambda-microvm` in `compute_types`; repositories inherit the first listed backend or choose a deployed backend through an override. Legacy `compute_type=lambda-microvm` deploys AgentCore and MicroVM, with AgentCore as the default. Image configuration has three states: a managed base-image ARN and version creates the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither provisions only the roles, buckets, and connectors needed for the bootstrap deploy. `cdk/scripts/package-microvm-artifact.sh` packages the agent as zip + Dockerfile, uploads it to the artifact bucket, and can create the external image. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
 
-Because a snapshot freezes its build-time environment, deployment-specific, non-secret identifiers travel in the `/run` hook's `platform_config` block instead. The strategy sends the canonical inline envelope or, when that envelope exceeds the verified 4,096-byte `runHookPayload` limit, an S3-pointer envelope with the configuration also merged into the uploaded payload. The agent accepts only allowlisted keys and installs them before pipeline initialization; [ADR-021 §3](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend#3-packaging-same-agent-image-source-new-build-path) defines the exact wire shapes and validation rules.
+Because a snapshot freezes its build-time environment, deployment-specific, non-secret identifiers travel in the `/run` hook's `platform_config` block instead. The strategy sends the canonical inline envelope or, when that envelope exceeds the verified 4,096-byte `runHookPayload` limit, an S3-pointer envelope with the configuration also merged into the uploaded payload. The agent accepts only allowlisted keys and installs them before pipeline initialization; [ADR-021 §3](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend#3-packaging-same-agent-image-source-new-build-path) defines the exact wire shapes and validation rules.
 
 Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. The P2 image declares and serves `/ready` and `/validate` at build time and `/run` and `/terminate` at runtime. `/suspend` and `/resume` remain disabled until their P3 implementation.
 

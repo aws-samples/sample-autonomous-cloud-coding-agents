@@ -406,25 +406,6 @@ export interface TaskEvent {
   readonly trace_id?: string;
 }
 
-/**
- * Query parameters accepted by GET /v1/tasks/{task_id}/events.
- *
- * ``after`` and ``next_token`` are mutually exclusive — if both are sent the
- * server prefers ``after`` (and logs a warning). ``after`` is a ULID event_id
- * cursor used by the CLI to catch up on the next polling iteration. Keep in
- * sync with ``cdk/src/handlers/shared/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  readonly after?: string;
-  /**
-   * When ``"1"``, requests events in descending ``event_id`` order
-   * (newest first). Mutually exclusive with ``after`` on the server.
-   */
-  readonly desc?: string;
-}
-
 /** Wire format — parsed from untrusted JSON. Validate before use. */
 export interface Attachment {
   readonly type: AttachmentType;
@@ -751,14 +732,6 @@ export type ApprovalScope =
   | `write_path:${string}`
   | `rule:${string}`;
 
-/** Approval row terminal / pending status. */
-export type ApprovalStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'TIMED_OUT'
-  | 'STRANDED';
-
 /** POST /v1/tasks/{task_id}/approve request body. */
 export interface ApprovalRequest {
   readonly request_id: string;
@@ -851,9 +824,6 @@ export const APPROVAL_TIMEOUT_S_MIN = 30;
 
 /** Upper bound on approval_timeout_s submission (before maxLifetime clip). */
 export const APPROVAL_TIMEOUT_S_MAX = 3600;
-
-/** Default approval_timeout_s when the submit payload omits it. */
-export const APPROVAL_TIMEOUT_S_DEFAULT = 300;
 
 /** Minimum allowed max_budget_usd (1 cent).
  *  Sourced from ``contracts/constants.json`` via cdk types.ts (#258). */

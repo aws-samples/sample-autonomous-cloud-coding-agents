@@ -39,13 +39,19 @@
  * the fix is to mirror the pin into jira-forge-app `overrides` and re-lock
  * (`npm install --package-lock-only`).
  *
+ * A `resolutions` key is a package name or a path pattern that ends in one
+ * (`parent/pkg`, `parent/@scope/pkg`, usually behind a leading glob). Yarn
+ * applies a pattern only under that parent, but the floor is there because of
+ * an advisory against the package itself, so here it applies to every copy in
+ * the jira-forge-app tree, whatever depends on it.
+ *
  * It intentionally does NOT require every root pin to appear in jira-forge-app —
  * only packages actually present in both trees must agree. A pin for a package
  * jira-forge-app doesn't depend on is a no-op there and is not flagged.
  *
- * No third-party deps by design: every other script in scripts/ uses only
- * `node:` builtins, and scripts/** is knip-ignored, so pulling in `semver`
- * would be an undeclared/transitive import that could vanish on a re-lock. The
+ * No third-party deps by design: root scripts are knip entries (knip.json), so
+ * pulling in `semver` without declaring it fails `check:deadcode`, and a
+ * transitive copy could vanish on a re-lock. The
  * repo's transitive pins are all `^`/`>=`-style minimum FLOORS, so a
  * "resolved >= floor" numeric compare on the leading `major.minor.patch` is the
  * exact check we need — no range engine required.
@@ -97,6 +103,14 @@ function meetsFloor(version, range) {
   return true; // exactly equal
 }
 
+/** The package a `resolutions` key pins: the name its path pattern ends in. */
+function pinnedPackage(key) {
+  const segments = key.split('/');
+  const name = segments.pop();
+  const scope = segments.pop();
+  return scope?.startsWith('@') ? `${scope}/${name}` : name;
+}
+
 const rootPkg = readJson(rootPkgPath);
 const resolutions = rootPkg.resolutions ?? {};
 if (typeof resolutions !== 'object' || Array.isArray(resolutions)) {
@@ -125,31 +139,36 @@ for (const [installPath, meta] of Object.entries(forgeLock.packages)) {
   forgeVersions.get(name).add(meta.version);
 }
 
-const drifts = [];
-const checked = [];
-for (const [name, range] of Object.entries(resolutions)) {
+// Keyed by what was compared, so several patterns that pin one package to one
+// floor (`**/jest-config/glob`, `**/jest-runtime/glob`) count and report once.
+const drifts = new Map();
+const checked = new Set();
+for (const [key, range] of Object.entries(resolutions)) {
+  const name = pinnedPackage(key);
   const present = forgeVersions.get(name);
   if (!present) continue; // not a jira-forge-app dependency — pin is a no-op there
   for (const version of present) {
     const ok = meetsFloor(version, range);
     if (ok === null) {
       console.error(
-        `check-transitive-pin-sync: cannot compare ${name}@${version} against pin "${range}" ` +
+        `check-transitive-pin-sync: cannot compare ${name}@${version} against pin "${key}": "${range}" ` +
           `(unparseable version or range).`,
       );
       process.exit(2);
     }
-    checked.push(`${name}@${version} (root pin ${range})`);
-    if (!ok) drifts.push({ name, range, version });
+    const compared = `${name}@${version} (root pin ${range})`;
+    checked.add(compared);
+    if (!ok && !drifts.has(compared)) drifts.set(compared, { key, name, range, version });
   }
 }
 
-if (drifts.length > 0) {
+if (drifts.size > 0) {
   console.error('check-transitive-pin-sync: transitive pins have DRIFTED between');
   console.error('root `resolutions` and integrations/jira-forge-app `overrides`.\n');
-  for (const { name, range, version } of drifts) {
+  for (const { key, name, range, version } of drifts.values()) {
     console.error(
-      `  ✖ ${name}: root pins "${range}" but jira-forge-app resolves ${version}`,
+      `  ✖ ${name}: root pins "${range}"${key === name ? '' : ` (resolutions key "${key}")`} ` +
+        `but jira-forge-app resolves ${version}`,
     );
     console.error(
       `      fix: add "${name}": "${range}" to integrations/jira-forge-app/package.json "overrides",`,
@@ -159,13 +178,13 @@ if (drifts.length > 0) {
     );
   }
   console.error(
-    `Drifted: ${drifts.length}. This is the failure mode #712 guards against — ` +
+    `Drifted: ${drifts.size}. This is the failure mode #712 guards against — ` +
       `a root resolutions bump that never reached the standalone npm project.`,
   );
   process.exit(1);
 }
 
 console.log(
-  `check-transitive-pin-sync: OK — ${checked.length} shared pin(s) in sync ` +
+  `check-transitive-pin-sync: OK — ${checked.size} shared pin(s) in sync ` +
     `between root resolutions and jira-forge-app.`,
 );

@@ -85,7 +85,10 @@ def _sigv4_auth(region: str) -> httpx.Auth:
     import httpx
     from botocore.auth import SigV4Auth
     from botocore.awsrequest import AWSRequest
-    from botocore.session import get_session as get_botocore_session
+
+    # TID251: only the compute role's credentials are read, to sign the request;
+    # no client is built, so there is nothing to attribute.
+    from botocore.session import get_session as get_botocore_session  # noqa: TID251
 
     credentials = get_botocore_session().get_credentials()
     if credentials is None:

@@ -64,7 +64,7 @@ export const SOLUTION_ID = 'uksb-wt64nei4u6';
  * are bundled into multiple Lambdas, so identity must come from the
  * environment, not from code.
  */
-export const COMPONENT_ENV = 'ABCA_COMPONENT';
+const COMPONENT_ENV = 'ABCA_COMPONENT';
 
 /** Default component label when ABCA_COMPONENT is absent (REST API surface). */
 const DEFAULT_COMPONENT = 'api';

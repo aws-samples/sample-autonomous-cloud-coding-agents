@@ -9,6 +9,20 @@ before deploy.
 **Design reference:** [`docs/design/CEDAR_HITL_GATES.md`](../../docs/design/CEDAR_HITL_GATES.md)
 §15.6 (cross-engine parity contract), decision #23, finding #1.
 
+## Engine pair
+
+[`engines/versions.json`](./engines/versions.json) names the one pair of engine
+versions these fixtures were verified against. The test file
+[`cdk/test/constructs/cedar-wasm-layer.test.ts`](../../cdk/test/constructs/cedar-wasm-layer.test.ts)
+(part of `mise //cdk:test`, so of the build)
+fails unless `cdk/package.json`, `cdk/layers/cedar-wasm/package.json` and
+`agent/pyproject.toml` each pin exactly that version. To move to another Cedar
+release, bump both engines and that file in one change and keep every fixture
+here green on both runners.
+
+The file sits in a subdirectory because both runners load every `*.json` file
+directly in this directory as a fixture.
+
 ## Why this lives in `contracts/`
 
 Neither `agent/` nor `cdk/` owns the parity contract — it's an agreement
@@ -27,6 +41,10 @@ same pattern for cross-language SHA-256 parity.
 
 If a fixture's `expected` no longer matches either engine, CI fails before
 the change ships.
+
+These fixtures carry their own policy text: they compare the two engines and
+do not exercise the rules shipped in `agent/policies/`. Those rules are pinned
+by [`agent/tests/test_policy_builtin_rules.py`](../../agent/tests/test_policy_builtin_rules.py).
 
 ## Fixture shape
 

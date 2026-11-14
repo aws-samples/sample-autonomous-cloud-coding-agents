@@ -23,7 +23,7 @@ import { ApiError, CliError } from './errors';
 import type { CreateTaskRequest, CreateTaskResponse, SuccessResponse } from './types';
 import { makeClient } from './ua';
 
-export const WEBHOOK_SECRET_PREFIX = 'bgagent/webhook/';
+const WEBHOOK_SECRET_PREFIX = 'bgagent/webhook/';
 
 export interface WebhookTestPayload extends CreateTaskRequest {
   readonly task_description: string;

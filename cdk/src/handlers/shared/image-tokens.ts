@@ -33,7 +33,7 @@ const PIXELS_PER_TOKEN_DIVISOR = 750;
  * Estimate the token cost of an image given its pixel dimensions.
  * Applies Anthropic's resize-and-tile algorithm with a safety margin.
  */
-export function estimateImageTokens(width: number, height: number): number {
+function estimateImageTokens(width: number, height: number): number {
   let w = width;
   let h = height;
 

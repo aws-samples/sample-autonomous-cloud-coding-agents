@@ -1,5 +1,7 @@
 {
   "compilerOptions": {
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
     "alwaysStrict": true,
     "declaration": true,
     "esModuleInterop": true,
@@ -11,8 +13,9 @@
     ],
     "module": "NodeNext",
     "noEmitOnError": false,
-    "noFallthroughCasesInSwitch": false,
+    "noFallthroughCasesInSwitch": true,
     "noImplicitAny": true,
+    "noImplicitOverride": true,
     "noImplicitReturns": true,
     "noImplicitThis": true,
     "noUnusedLocals": false,
@@ -20,7 +23,7 @@
     "skipLibCheck": true,
     "strict": true,
     "strictNullChecks": true,
-    "strictPropertyInitialization": false,
+    "strictPropertyInitialization": true,
     "stripInternal": true,
     "target": "ES2022",
     "moduleResolution": "nodenext",
@@ -33,9 +36,9 @@
     ]
   },
   "include": [
-    "src/**/*.ts",
-    "test/**/*.ts",
-    "scripts/**/*.ts"
+    "src",
+    "test",
+    "scripts"
   ],
   "exclude": [
     "node_modules",

@@ -253,7 +253,7 @@ export async function main(): Promise<void> {
 
 // Only auto-run when executed as the app entrypoint, so importing this module
 // from a test drives `buildApp` without triggering a real synth.
-/* istanbul ignore next -- entrypoint guard: not reachable under jest import */
+// Not reachable under jest, which only imports the module.
 if (require.main === module) {
   // Surface any synth-time failure (e.g. a malformed `agentcore:availabilityZones`
   // override) as a non-zero exit. `void` satisfies no-floating-promises; throwing

@@ -56,7 +56,7 @@ const awaitOauthCallbackMock = jest.fn(
     ),
 );
 jest.mock('../../src/oauth-callback-server', () => ({
-  awaitOauthCallback: (...args: unknown[]) => awaitOauthCallbackMock(...args),
+  awaitOauthCallback: (...args: Parameters<typeof awaitOauthCallbackMock>) => awaitOauthCallbackMock(...args),
   CALLBACK_URL: 'http://localhost:8080/oauth/callback',
 }));
 

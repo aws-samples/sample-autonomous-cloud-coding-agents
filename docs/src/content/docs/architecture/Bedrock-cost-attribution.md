@@ -1,8 +1,6 @@
 ---
-title: Bedrock cost attribution
+title: "Bedrock cost attribution"
 ---
-
-# Bedrock cost attribution
 
 Design for [#215](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/215). Adds AWS-native, per-user/per-repo attribution of **Bedrock model-inference spend** on top of the in-app `cost_usd` meter and the #211 per-session tenant-data isolation.
 
@@ -90,7 +88,7 @@ Set via the process env (not project settings) so the untrusted repo can't alter
 
 ## Version alignment
 
-The agent runs Claude Code two ways that must agree on the control protocol: the `claude-agent-sdk` Python wheel **bundles** a CLI, and the Dockerfile also installs the CLI via npm. Both are pinned in lockstep — `claude-agent-sdk==0.2.168` (bundles CLI 2.1.301) and npm `@anthropic-ai/claude-code@2.1.301`. 2.1.301 also satisfies the ≥2.1.176 `awsCredentialExport`-with-`Expiration` requirement and the ≥2.1.280 floor the Claude 5.5 default models need.
+The agent runs Claude Code two ways that must agree on the control protocol: the `claude-agent-sdk` Python wheel **bundles** a CLI, and the Dockerfile also installs the CLI via npm. Both are pinned in lockstep — `claude-agent-sdk==0.2.168` (bundles CLI 2.1.301) and npm `@anthropic-ai/claude-code@2.1.301`. `agent/tests/test_claude_cli_lockstep.py` fails the build when the CLI version that the SDK bundles and the one on the Dockerfile's `npm install -g` line differ. 2.1.301 also satisfies the ≥2.1.176 `awsCredentialExport`-with-`Expiration` requirement and the ≥2.1.280 floor the Claude 5.5 default models need.
 
 ## Track 3 — operator documentation
 

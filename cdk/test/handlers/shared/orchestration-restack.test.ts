@@ -30,8 +30,8 @@ function row(
   return {
     orchestration_id: 'orch_1',
     sub_issue_id: sub,
-    parent_linear_issue_id: 'PARENT',
-    linear_workspace_id: 'WS',
+    parent_issue_ref: 'PARENT',
+    credentials_ref: 'WS',
     repo: 'o/r',
     depends_on: deps,
     child_status: (opts.status ?? (started ? 'released' : 'blocked')) as never,

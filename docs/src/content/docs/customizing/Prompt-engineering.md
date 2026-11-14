@@ -1,8 +1,6 @@
 ---
-title: Prompt guide
+title: "Prompt guide"
 ---
-
-# Prompt guide
 
 Writing effective task descriptions for ABCA.
 

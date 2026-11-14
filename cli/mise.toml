@@ -9,16 +9,41 @@ run = "cd .. && yarn install --check-files"
 
 [tasks.compile]
 description = "Compile TypeScript"
-run = "yarn tsc --build tsconfig.json"
+# The package script, not `yarn tsc`: a script runs this package's own TypeScript, while
+# `yarn tsc` runs the root node_modules/.bin/tsc, which Yarn can link to another package's copy.
+run = "yarn compile"
+
+# The only type check that test/ gets: jest runs the tests through ts-jest with
+# isolatedModules, which transpiles each file and checks no types, and `compile` covers
+# src/. Without this task a type error in a test passes the whole build.
+# tsconfig.dev.json is src and test under the same compiler options as tsconfig.json.
+# `wait_for` only orders the start, after `compile` in a build: see the note on the same
+# task in cdk/mise.toml.
+[tasks.typecheck]
+description = "Type-check src and test (tsc --noEmit); jest does not check types"
+wait_for = [":compile"]
+run = "yarn typecheck"
 
 [tasks.build]
-description = "Compile, test, and lint CLI"
-depends = [":compile", ":test", ":eslint"]
+description = "Compile, type-check, test, and lint CLI"
+depends = [":compile", ":typecheck", ":test", ":eslint"]
 
 [tasks.test]
 description = "Run Jest tests"
-run = "yarn jest --passWithNoTests --updateSnapshot"
+# The package's test script (`jest --ci`), not a second jest command line: the coverage contract
+# check reads scripts.test of package.json, so that has to be the command this task runs.
+# --ci: a snapshot that is missing or differs fails the run instead of being written, on a
+# developer machine as in CI. Do not add --updateSnapshot (rewrites a failing snapshot and
+# passes) or --passWithNoTests (passes when no test file is left) to the script.
+run = "yarn test"
 
 [tasks.eslint]
 description = "Run ESLint"
-run = "../node_modules/.bin/eslint --fix --no-error-on-unmatched-pattern src test build-tools"
+run = "../node_modules/.bin/eslint --max-warnings 0 --fix src test"
+
+# The same command without --fix, for checks that must not rewrite files (the root
+# `lint` task). Keep the targets of the two tasks identical. --max-warnings 0 in both:
+# a warning fails the task like an error.
+[tasks."eslint:check"]
+description = "Run ESLint without --fix: reports findings and rewrites nothing"
+run = "../node_modules/.bin/eslint --max-warnings 0 src test"

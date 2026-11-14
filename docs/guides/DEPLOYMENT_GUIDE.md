@@ -120,7 +120,7 @@ mise //cdk:deploy -- --context compute_types=agentcore,lambda-microvm
 
    Bundle 1.6.0 adds the `MicrovmPassRoles` statement, without which the CDK-managed MicroVM image deploy fails with an `iam:PassRole` **AccessDenied on the build role** -- an IAM error that reads like a code bug. Rationale and the live evidence for the missing `iam:PassedToService` condition: [DEPLOYMENT_ROLES.md](../design/DEPLOYMENT_ROLES.md#iacrole-abca-compute-lambdamicrovms).
 
-3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent doctor` probes it live.
+3. Regional availability is limited (5 Regions at launch). Synth fails fast with the supported list if the stack's Region is not among them; `bgagent platform doctor` probes it live.
 
 Operational notes specific to this backend:
 
@@ -401,7 +401,7 @@ The repository includes a two-stage CI/CD pipeline:
 
 ### Stage 1: Build (`build.yml`)
 
-Triggers on every PR and push to main. Runs `mise run build` (compile, test, lint, synth) and uploads the synthesized `cdk.out/` as a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
+Triggers on every pull request and merge-queue entry, and on manual dispatch. Runs `mise run build` (what it covers is listed under [Pull request](../../CONTRIBUTING.md#5-pull-request) in CONTRIBUTING.md) and uploads the synthesized `cdk.out/` together with a `deploy-intent` artifact. The intent file declares whether a deploy should happen and for which compute types.
 
 ### Stage 2: Deploy (`deploy.yml`)
 

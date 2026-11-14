@@ -1,5 +1,5 @@
 ---
-title: Using the REST API
+title: "Using the REST API"
 ---
 
 The Task API exposes 5 endpoints under the base URL from the `ApiUrl` stack output. All endpoints require Cognito JWT authentication (`Authorization: Bearer <token>`).

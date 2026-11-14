@@ -1,10 +1,50 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const docsRoot = path.resolve(import.meta.dirname, '..');
-const repoRoot = path.resolve(docsRoot, '..');
-const targetRoot = path.join(docsRoot, 'src', 'content', 'docs');
 const docsBase = '/sample-autonomous-cloud-coding-agents';
+const repoUrl = 'https://github.com/aws-samples/sample-autonomous-cloud-coding-agents';
+/** Generated pages are written here. All paths in this file are relative to the repository root. */
+const contentDir = 'docs/src/content/docs';
+/** Pages under `contentDir` that are written by hand: never generated, never pruned. */
+const handAuthored = ['index.md'];
+/** Images are copied from `from` to `to`; Astro serves them at `${docsBase}${route}/`. */
+const assets = { from: 'docs/imgs', to: 'docs/public/imgs', route: '/imgs' };
+
+/**
+ * The mirror plan: which source becomes which page under `contentDir`. Link rewriting reads
+ * the same table, so a rewritten link can only point at a page that is generated.
+ *   split  one page per `##` section; the text before the first `##` becomes Introduction.md
+ *   file   one source file, one page
+ *   dir    every *.md of a directory, under a normalized file name
+ */
+const PLAN = [
+  { split: 'docs/guides/DEVELOPER_GUIDE.md', to: 'developer-guide', introTitle: 'Developer guide introduction' },
+  {
+    split: 'docs/guides/USER_GUIDE.md',
+    to: 'using',
+    introTitle: 'Using the platform',
+    // These sections belong under the Customizing sidebar group.
+    moved: { 'Repository-onboarding.md': 'customizing', 'Per-repo-overrides.md': 'customizing' },
+  },
+  // MDX for Starlight Tabs.
+  { file: 'docs/guides/QUICK_START.mdx', to: 'getting-started/Quick-start.mdx' },
+  { file: 'docs/guides/DEPLOYMENT_GUIDE.md', to: 'getting-started/Deployment-guide.md' },
+  // Operator FinOps setup.
+  { file: 'docs/guides/COST_ATTRIBUTION.md', to: 'getting-started/Cost-attribution.md' },
+  { file: 'docs/guides/PROMPT_GUIDE.md', to: 'customizing/Prompt-engineering.md' },
+  { file: 'docs/guides/SLACK_SETUP_GUIDE.md', to: 'using/Slack-setup-guide.md' },
+  { file: 'docs/guides/LINEAR_SETUP_GUIDE.md', to: 'using/Linear-setup-guide.md' },
+  { file: 'docs/guides/JIRA_SETUP_GUIDE.md', to: 'using/Jira-setup-guide.md' },
+  { file: 'docs/guides/DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md', to: 'using/Deploy-preview-screenshots-guide.md' },
+  // Authoring reference for blueprint authors.
+  { file: 'docs/guides/CEDAR_POLICY_GUIDE.md', to: 'customizing/Cedar-policies.md' },
+  { file: 'CONTRIBUTING.md', to: 'developer-guide/Contributing.md' },
+  // Source lives at docs/design/ but renders at /architecture/ on the site. The source
+  // directory keeps the name "design" because that is what CLAUDE.md and AGENTS.md reference
+  // for contributors; the rename happens only at the site level.
+  { dir: 'docs/design', to: 'architecture' },
+  { dir: 'docs/decisions', to: 'decisions' },
+];
 
 function normalizeFileStem(input) {
   const cleaned = input
@@ -18,115 +58,203 @@ function normalizeFileStem(input) {
   return `${cleaned.charAt(0).toUpperCase()}${cleaned.slice(1)}`;
 }
 
-function rewriteDocsLinkTarget(target) {
-  if (!target || target.startsWith('#') || target.startsWith('/')) {
-    return undefined;
-  }
-  if (/^[a-z]+:/i.test(target)) {
-    return undefined;
-  }
-
-  const [pathPart, anchor] = target.split('#');
-  if (!pathPart.toLowerCase().endsWith('.md')) {
-    return undefined;
-  }
-
-  const normalizedPath = pathPart.replaceAll('\\', '/');
-  const stem = path.basename(normalizedPath, '.md');
-  const slug = normalizeFileStem(stem).toLowerCase();
-  const anchorSuffix = anchor ? `#${anchor}` : '';
-
-  const explicitGuideRoutes = {
-    PROMPT_GUIDE: '/customizing/prompt-engineering',
-    QUICK_START: '/getting-started/quick-start',
-    DEVELOPER_GUIDE: '/developer-guide/introduction',
-    USER_GUIDE: '/using/overview',
-    CONTRIBUTING: '/developer-guide/contributing',
-    SLACK_SETUP_GUIDE: '/using/slack-setup-guide',
-    LINEAR_SETUP_GUIDE: '/using/linear-setup-guide',
-    JIRA_SETUP_GUIDE: '/using/jira-setup-guide',
-    DEPLOY_PREVIEW_SCREENSHOTS_GUIDE: '/using/deploy-preview-screenshots-guide',
-    CEDAR_POLICY_GUIDE: '/customizing/cedar-policies',
-    DEPLOYMENT_GUIDE: '/getting-started/deployment-guide',
-    // Mirrored to getting-started/Cost-attribution.md (see the copy list below), NOT
-    // architecture/. Without this entry a relative `./COST_ATTRIBUTION.md` link misses
-    // the `/guides/` bail-out and falls through to the `/architecture/${slug}` default,
-    // producing a 404 on the published site.
-    COST_ATTRIBUTION: '/getting-started/cost-attribution',
-  };
-
-  /** `splitGuide` emits each `##` from DEVELOPER_GUIDE as its own page — map #anchors to those routes. */
-  const developerGuideAnchorRoutes = {
-    'repository-preparation': '/developer-guide/repository-preparation',
-    'model-configuration': '/developer-guide/model-configuration',
-  };
-  if (stem === 'DEVELOPER_GUIDE' && anchor) {
-    const splitRoute = developerGuideAnchorRoutes[anchor.toLowerCase()];
-    if (splitRoute) {
-      return splitRoute;
-    }
-  }
-
-  /** Map USER_GUIDE anchors to the new `using/` and `customizing/` directories. */
-  const userGuideAnchorRoutes = {
-    overview: '/using/overview',
-    authentication: '/using/authentication',
-    'repository-onboarding': '/customizing/repository-onboarding',
-    'per-repo-overrides': '/customizing/per-repo-overrides',
-    'monthly-user-and-team-budgets': '/customizing/per-repo-overrides#monthly-user-and-team-budgets',
-    workflows: '/using/workflows',
-    'using-the-rest-api': '/using/using-the-rest-api',
-    'using-the-cli': '/using/using-the-cli',
-    'webhook-integration': '/using/webhook-integration',
-    'task-lifecycle': '/using/task-lifecycle',
-    'what-the-agent-does': '/using/what-the-agent-does',
-    'tips-for-being-a-good-citizen': '/using/tips-for-being-a-good-citizen',
-  };
-  if (stem === 'USER_GUIDE' && anchor) {
-    const splitRoute = userGuideAnchorRoutes[anchor.toLowerCase()];
-    if (splitRoute) {
-      return splitRoute;
-    }
-  }
-
-  if (explicitGuideRoutes[stem]) {
-    return `${explicitGuideRoutes[stem]}${anchorSuffix}`;
-  }
-
-  if (normalizedPath.includes('/guides/') || normalizedPath.startsWith('../guides/')) {
-    return undefined;
-  }
-  return `/architecture/${slug}${anchorSuffix}`;
+/** The route Starlight serves a page at: `using/Slack-setup-guide.md` -> `/using/slack-setup-guide`. */
+function routeOf(target) {
+  const slug = target.replace(/\.mdx?$/i, '').toLowerCase();
+  return slug === 'index' ? '/' : `/${slug}`;
 }
 
-function ensureFrontmatter(content, title) {
-  const normalized = content
-    .replaceAll('../imgs/', `${docsBase}/imgs/`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, target) => {
-      const rewritten = rewriteDocsLinkTarget(target);
-      if (!rewritten) {
-        return match;
-      }
-      // The site is served under `base` (docsBase), so root-relative routes
-      // must carry that prefix — otherwise they resolve to the domain root
-      // and 404. Starlight prefixes its own nav links automatically, but our
-      // rewritten body links are raw markdown and need it added explicitly
-      // (same reason the image rewrites above include docsBase). Every
-      // non-undefined return from rewriteDocsLinkTarget is a `/…` route (bare
-      // `#…` anchors and external links return undefined and keep their
-      // original text above), so the prefix always applies.
-      // (Fixes the broken in-body design-doc links.)
-      return `[${label}](${docsBase}${rewritten})`;
-    });
+/** Marks the lines that belong to a fenced code block (the fence lines included). */
+function fencedLines(lines) {
+  let open;
+  return lines.map((line) => {
+    const fence = line.match(/^\s*(`{3,}(?=[^`]*$)|~{3,})/)?.[1];
+    if (!open) {
+      open = fence;
+      return Boolean(fence);
+    }
+    if (fence && fence[0] === open[0] && fence.length >= open.length && line.trim() === fence) {
+      open = undefined;
+    }
+    return true;
+  });
+}
 
-  const trimmed = normalized.trimStart();
-  if (trimmed.startsWith('---')) {
-    const closingIdx = trimmed.indexOf('\n---', 3);
-    if (closingIdx !== -1) {
-      return normalized;
+/** ATX headings outside code fences, in document order. */
+function headingsOf(text) {
+  const lines = text.split('\n');
+  const fenced = fencedLines(lines);
+  return lines.flatMap((line, index) => {
+    const match = fenced[index] ? null : line.match(/^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/);
+    return match ? [{ index, depth: match[1].length, text: match[2] }] : [];
+  });
+}
+
+/**
+ * Heading ids as GitHub and Astro compute them (the github-slugger algorithm): lowercase,
+ * drop punctuation, spaces become hyphens, repeats get -1, -2, ... The returned function
+ * remembers the ids it handed out, so use one per document.
+ */
+function createSlugger() {
+  const seen = new Map();
+  return (heading) => {
+    const base = heading
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .toLowerCase()
+      .replace(/[^\p{Alphabetic}\p{M}\p{Nd}\p{Pc} -]/gu, '')
+      .replace(/ /g, '-');
+    let slug = base;
+    while (seen.has(slug)) {
+      seen.set(base, seen.get(base) + 1);
+      slug = `${base}-${seen.get(base)}`;
+    }
+    seen.set(slug, 0);
+    return slug;
+  };
+}
+
+/**
+ * Where links to each source file go: its `route`, and for every heading the page and id
+ * it has on the site. GitHub numbers repeated headings across the whole source file; the
+ * site numbers them per page and has no id for the heading that became the page title.
+ */
+function indexSources(pages) {
+  const docs = new Map(
+    handAuthored.map((target) => [`${contentDir}/${target}`, { route: routeOf(target), anchors: new Map() }]),
+  );
+  const sourceSlug = new Map();
+  for (const page of pages) {
+    if (!docs.has(page.source)) {
+      const first = pages.find((candidate) => candidate.source === page.source && !candidate.skip);
+      docs.set(page.source, { route: routeOf(first.target), anchors: new Map() });
+      sourceSlug.set(page.source, createSlugger());
+    }
+    const doc = docs.get(page.source);
+    const route = page.skip ? doc.route : routeOf(page.target);
+    const slugInSource = sourceSlug.get(page.source);
+    const slugInPage = createSlugger();
+    if (page.heading !== undefined) {
+      doc.anchors.set(slugInSource(page.heading), { route, id: '' });
+    }
+    for (const heading of headingsOf(page.body)) {
+      doc.anchors.set(slugInSource(heading.text), { route, id: slugInPage(heading.text) });
     }
   }
-  return `---\ntitle: ${title}\n---\n\n${normalized}`;
+  return docs;
+}
+
+const fragment = (id) => (id ? `#${id}` : '');
+
+/**
+ * The URL for a relative link written in `page.source`, or undefined to leave it as written.
+ * A published file becomes its site route (under `docsBase`: Starlight does not prefix links
+ * in Markdown bodies), an image its public URL, any other file of the repository a GitHub URL.
+ * `shown` marks the target of an image or of an HTML `src`: the page displays that file
+ * instead of linking to it, and the site serves no file of the repository but the images of
+ * `assets.from`.
+ */
+function resolveLink(target, page, docs, repoRoot, shown) {
+  if (target.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(target)) {
+    return undefined;
+  }
+  const [file, anchor = ''] = target.split('#');
+  const source =
+    file === '' ? page.source : path.posix.join(path.posix.dirname(page.source), file).replace(/\/$/, '');
+  const servable =
+    source.startsWith(`${assets.from}/`) &&
+    fs.statSync(path.join(repoRoot, source), { throwIfNoEntry: false })?.isFile();
+  if (shown && !servable) {
+    // A GitHub URL in its place would be an HTML page: a broken image that no check reports.
+    throw new Error(
+      `sync-starlight: ${page.source} shows the image ${target}, which is not a file in ${assets.from}/, the only directory the site serves images from. Correct the path, or move the image there.`,
+    );
+  }
+  // A directory stands for its README when that is a published page.
+  const doc = docs.get(source) ?? docs.get(`${source}/README.md`);
+  if (doc) {
+    const hit = anchor ? doc.anchors.get(anchor.toLowerCase()) : undefined;
+    if (file === '') {
+      // An anchor within the same source file: only a split guide moves it to another page.
+      if (!hit) {
+        return undefined;
+      }
+      return hit.route === routeOf(page.target)
+        ? `#${hit.id || '_top'}`
+        : `${docsBase}${hit.route}${fragment(hit.id)}`;
+    }
+    // An anchor the source does not have is passed through: the site link check reports it.
+    const { route, id } = hit ?? { route: doc.route, id: anchor };
+    return `${docsBase}${route}${fragment(id)}`;
+  }
+  if (source.startsWith('..') || !fs.existsSync(path.join(repoRoot, source))) {
+    // Dangling: left as written, so that the link checks report it.
+    return undefined;
+  }
+  if (source.startsWith(`${assets.from}/`)) {
+    return `${docsBase}${assets.route}${source.slice(assets.from.length)}`;
+  }
+  // The file exists in the repository but is not published on the site: link to GitHub.
+  const kind = fs.statSync(path.join(repoRoot, source)).isDirectory() ? 'tree' : 'blob';
+  return `${repoUrl}/${kind}/main/${source}${fragment(anchor)}`;
+}
+
+/**
+ * Rewrites the targets of links and images outside code: Markdown `[label](target "title")`,
+ * and the `src` and `href` attributes of inline HTML, which is how a source sets the width
+ * of an image. `resolve` gets the target and whether the page shows it (an image, a `src`)
+ * instead of linking to it, and returns the new target or undefined.
+ */
+function rewriteLinks(text, resolve) {
+  const lines = text.split('\n');
+  const fenced = fencedLines(lines);
+  // First alternative: an inline code span, which is skipped. Second: [label](target "title").
+  // Third: src="target" or href="target", in either kind of quotes.
+  const codeOrLink =
+    /(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)|(!?\[[^[\]]*\]\()([^)\s]+)((?:\s+"[^"]*")?\))|(\b(?:src|href)\s*=\s*(["']))([^"'\s]+)(\6)/gi;
+  const rewrite = (run) =>
+    run.replace(codeOrLink, (match, code, open, target, close, attribute, quote, value) => {
+      if (code) {
+        return match;
+      }
+      if (open) {
+        const rewritten = resolve(target, open.startsWith('!'));
+        return rewritten ? `${open}${rewritten}${close}` : match;
+      }
+      const rewritten = resolve(value, /^src/i.test(attribute));
+      return rewritten ? `${attribute}${rewritten}${quote}` : match;
+    });
+  // The lines between two code fences are searched as one text, not line by line: a label
+  // may wrap over lines. It cannot contain a bracket, so it starts at the nearest `[`.
+  const runs = [];
+  let start = 0;
+  while (start < lines.length) {
+    let end = start + 1;
+    while (end < lines.length && fenced[end] === fenced[start]) {
+      end += 1;
+    }
+    const run = lines.slice(start, end).join('\n');
+    runs.push(fenced[start] ? run : rewrite(run));
+    start = end;
+  }
+  return runs.join('\n');
+}
+
+/**
+ * Starlight renders the frontmatter title as the page's only <h1>, so the source's own
+ * `# Heading` moves into the title instead of being repeated in the body.
+ */
+function takeH1(text) {
+  const h1 = headingsOf(text).find((heading) => heading.depth === 1);
+  if (!h1) {
+    return { body: text };
+  }
+  const lines = text.split('\n');
+  lines.splice(h1.index, 1);
+  // The blank line after the heading goes with it, unless it separates two blocks of text.
+  if (lines[h1.index] === '' && (h1.index === 0 || lines[h1.index - 1] === '')) {
+    lines.splice(h1.index, 1);
+  }
+  return { h1: h1.text, body: lines.join('\n') };
 }
 
 function writeFile(targetPath, content) {
@@ -144,34 +272,87 @@ function writeFile(targetPath, content) {
   }
 }
 
-function mirrorMarkdownFile(sourcePath, targetRelativePath) {
+/** A source named in PLAN that is gone must fail the sync: skipping it would unpublish a page silently. */
+function readSource(repoRoot, source) {
+  const sourcePath = path.join(repoRoot, source);
   if (!fs.existsSync(sourcePath)) {
-    return;
+    throw new Error(
+      `sync-starlight: missing source ${source}. Restore the file or update PLAN in docs/scripts/sync-starlight.mjs.`,
+    );
   }
-  const raw = fs.readFileSync(sourcePath, 'utf8');
-  const ext = path.extname(sourcePath);
-  const stem = path.basename(sourcePath, ext);
-  const fallbackTitle = normalizeFileStem(stem).replace(/-/g, ' ');
-  const out = ensureFrontmatter(raw, fallbackTitle);
-  writeFile(path.join(docsRoot, targetRelativePath), out);
+  return fs.readFileSync(sourcePath, 'utf8');
 }
 
-function mirrorDirectory(sourceDir, targetDirRelative) {
-  if (!fs.existsSync(sourceDir)) {
-    return;
+/** One page for a whole source file. The title is the source's H1 (fallback: the file name). */
+function filePage(repoRoot, source, target) {
+  const raw = readSource(repoRoot, source);
+  // A source that brings its own frontmatter (MDX) keeps it verbatim.
+  const closing = raw.startsWith('---') ? raw.indexOf('\n---', 3) : -1;
+  const frontmatter = closing === -1 ? undefined : raw.slice(0, closing + 4);
+  const { h1, body } = takeH1(frontmatter ? raw.slice(frontmatter.length) : raw);
+  const stem = path.basename(source, path.extname(source));
+  const title = h1 ?? normalizeFileStem(stem).replace(/-/g, ' ');
+  return [{ source, target, title, heading: h1, frontmatter, body }];
+}
+
+/** One page per `##` section of a guide. */
+function splitPages(repoRoot, { split: source, to, introTitle, moved = {} }) {
+  const lines = readSource(repoRoot, source).split('\n');
+  const fenced = fencedLines(lines);
+  // A `## ` line inside a code fence is code, not the start of a section.
+  const starts = lines.flatMap((line, index) => (!fenced[index] && /^##\s+/.test(line) ? [index] : []));
+  const intro = takeH1(lines.slice(0, starts[0] ?? lines.length).join('\n'));
+  // Every section is published. Only an introduction that is nothing but the guide's H1 is
+  // not written (`skip`): it would be an empty page, and links to it go to the first section.
+  const skip = intro.body.trim() === '';
+  const pages = [{ file: 'Introduction.md', title: introTitle, heading: intro.h1, body: intro.body, skip }];
+  starts.forEach((start, n) => {
+    const heading = lines[start].replace(/^##\s+/, '').trim();
+    const body = lines.slice(start + 1, starts[n + 1] ?? lines.length).join('\n');
+    pages.push({ file: `${normalizeFileStem(heading)}.md`, title: heading, heading, body });
+  });
+  if (pages.every((page) => page.skip)) {
+    throw new Error(
+      `sync-starlight: ${source} has no content to publish. Add a section or remove it from PLAN in docs/scripts/sync-starlight.mjs.`,
+    );
   }
-  const entries = fs.readdirSync(sourceDir);
-  for (const file of entries) {
-    if (!file.endsWith('.md')) {
-      continue;
+  return pages.map(({ file, body, ...page }) => ({
+    ...page,
+    source,
+    target: `${moved[file] ?? to}/${file}`,
+    body: body.trim(),
+  }));
+}
+
+function collectPages(repoRoot, plan) {
+  const pages = plan.flatMap((entry) => {
+    if (entry.split) {
+      return splitPages(repoRoot, entry);
     }
-    const sourcePath = path.join(sourceDir, file);
-    const raw = fs.readFileSync(sourcePath, 'utf8');
-    const fallbackTitle = normalizeFileStem(file).replace(/-/g, ' ');
-    const out = ensureFrontmatter(raw, fallbackTitle);
-    const normalizedName = `${normalizeFileStem(file)}.md`;
-    writeFile(path.join(docsRoot, targetDirRelative, normalizedName), out);
+    if (entry.file) {
+      return filePage(repoRoot, entry.file, entry.to);
+    }
+    const dir = path.join(repoRoot, entry.dir);
+    const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((file) => file.endsWith('.md')) : [];
+    if (files.length === 0) {
+      throw new Error(
+        `sync-starlight: no Markdown source in ${entry.dir}. Restore the directory or update PLAN in docs/scripts/sync-starlight.mjs.`,
+      );
+    }
+    return files.flatMap((file) => filePage(repoRoot, `${entry.dir}/${file}`, `${entry.to}/${normalizeFileStem(file)}.md`));
+  });
+  // Two pages with one target would overwrite each other without a trace (and routes ignore case).
+  const owner = new Map(handAuthored.map((target) => [target.toLowerCase(), 'a hand-authored page']));
+  for (const page of pages.filter((candidate) => !candidate.skip)) {
+    const key = page.target.toLowerCase();
+    if (owner.has(key)) {
+      throw new Error(
+        `sync-starlight: ${page.source} ("${page.title}") and ${owner.get(key)} both generate ${contentDir}/${page.target}. Rename one of the headings or files.`,
+      );
+    }
+    owner.set(key, `${page.source} ("${page.title}")`);
   }
+  return pages;
 }
 
 // Recursively copy a source asset directory into the site's public/ tree so
@@ -193,135 +374,81 @@ function copyAssetDir(sourceDir, targetDir) {
   }
 }
 
-function splitGuide(sourcePath, targetDirRelative, introTitle) {
-  if (!fs.existsSync(sourcePath)) {
-    return;
+/**
+ * Every file below `dir`, as POSIX paths relative to it. Only real directories are entered:
+ * a link is listed under its own name, whatever it points at.
+ */
+function listFiles(dir) {
+  if (!fs.existsSync(dir)) {
+    return [];
   }
-  const raw = fs.readFileSync(sourcePath, 'utf8');
-  const parts = raw.split(/\n##\s+/g);
-  const intro = parts.shift() ?? '';
-  const introOut = ensureFrontmatter(intro.trim(), introTitle);
-  writeFile(path.join(docsRoot, targetDirRelative, 'Introduction.md'), introOut);
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .flatMap((entry) =>
+      entry.isDirectory() ? listFiles(path.join(dir, entry.name)).map((file) => `${entry.name}/${file}`) : [entry.name],
+    );
+}
 
-  for (const part of parts) {
-    const firstNewline = part.indexOf('\n');
-    const heading = (firstNewline === -1 ? part : part.slice(0, firstNewline)).trim();
-    const body = firstNewline === -1 ? '' : part.slice(firstNewline + 1).trim();
-    const filename = `${normalizeFileStem(heading)}.md`;
-    const out = ensureFrontmatter(body, heading);
-    writeFile(path.join(docsRoot, targetDirRelative, filename), out);
+/**
+ * Deletes the files of a generated tree that this run did not produce, so that a deleted or
+ * renamed source (or `##` heading) takes its page off the site. In CI the mutation check
+ * then fails on the stale file that is still committed.
+ * It deletes inside the repository only: a link in the tree is a file like any other and is
+ * never entered, and a tree that is reached through a link (the tree itself, or a directory
+ * above it) fails the sync.
+ */
+function prune(repoRoot, tree, keep) {
+  const dir = path.join(repoRoot, tree);
+  const real = fs.existsSync(dir) ? fs.realpathSync(dir) : undefined;
+  if (real && real !== path.join(fs.realpathSync(repoRoot), tree)) {
+    throw new Error(
+      `sync-starlight: ${tree} is reached through a link (it resolves to ${real}), so it was not pruned: the files there may not belong to this repository. Replace the link, which is ${tree} or a directory above it, with a real directory.`,
+    );
+  }
+  for (const file of listFiles(dir)) {
+    if (!keep.has(file)) {
+      fs.rmSync(path.join(repoRoot, tree, file));
+      console.warn(
+        `sync-starlight: removed ${tree}/${file}: nothing generates it (its source was deleted or renamed, or the file was made by hand). Commit the removal, restore the source, or write the content in a source file.`,
+      );
+    }
   }
 }
 
-// --- Developer Guide: split by ## into developer-guide/ ---
-splitGuide(
-  path.join(docsRoot, 'guides', 'DEVELOPER_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'developer-guide'),
-  'Developer guide introduction',
-);
-
-// --- User Guide: split by ## into using/ ---
-splitGuide(
-  path.join(docsRoot, 'guides', 'USER_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using'),
-  'Using the platform',
-);
-
-// Move customization pages from using/ to customizing/ (they belong under the Customizing sidebar section)
-const customizingPages = ['Repository-onboarding.md', 'Per-repo-overrides.md'];
-for (const page of customizingPages) {
-  const src = path.join(docsRoot, 'src', 'content', 'docs', 'using', page);
-  const dest = path.join(docsRoot, 'src', 'content', 'docs', 'customizing', page);
-  if (fs.existsSync(src)) {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.renameSync(src, dest);
+export function sync(repoRoot, plan = PLAN) {
+  const contentRoot = path.join(repoRoot, contentDir);
+  // Every source is read before the first page is written: a failure leaves the mirrors as they were.
+  const pages = collectPages(repoRoot, plan);
+  const docs = indexSources(pages);
+  // Likewise every page is complete before the first one is written: an image that cannot be
+  // published fails the sync here.
+  const files = pages
+    .filter((candidate) => !candidate.skip)
+    .map((page) => {
+      const body = rewriteLinks(page.body, (target, shown) => resolveLink(target, page, docs, repoRoot, shown));
+      // JSON quoting is valid YAML and keeps a colon in the title from breaking the frontmatter.
+      const frontmatter = page.frontmatter ?? `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n`;
+      return { target: page.target, content: `${frontmatter}${body}` };
+    });
+  const written = new Set(handAuthored);
+  for (const { target, content } of files) {
+    writeFile(path.join(contentRoot, target), content);
+    written.add(target);
   }
+  prune(repoRoot, contentDir, written);
+
+  // --- Static assets: copy source image dir into the site's public/ ---
+  // Guides reference images as `../imgs/foo.png`; resolveLink() turns
+  // those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
+  // public/. Copy the source dir here so every committed image is published —
+  // otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
+  copyAssetDir(path.join(repoRoot, assets.from), path.join(repoRoot, assets.to));
+  prune(repoRoot, assets.to, new Set(listFiles(path.join(repoRoot, assets.from))));
+
+  // Guardrail: ensure target tree exists when running in a clean checkout.
+  fs.mkdirSync(contentRoot, { recursive: true });
 }
 
-// Remove orphaned stubs generated by splitGuide that have no useful content
-const orphanedPages = ['Introduction.md', 'Prerequisites.md', 'Task-types.md'];
-for (const page of orphanedPages) {
-  const filePath = path.join(docsRoot, 'src', 'content', 'docs', 'using', page);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === import.meta.filename) {
+  sync(path.resolve(import.meta.dirname, '..', '..'));
 }
-
-// --- Quick Start: mirror to getting-started/ (MDX for Starlight Tabs) ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'QUICK_START.mdx'),
-  path.join('src', 'content', 'docs', 'getting-started', 'Quick-start.mdx'),
-);
-
-// --- Deployment Guide: mirror to getting-started/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'DEPLOYMENT_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'getting-started', 'Deployment-guide.md'),
-);
-
-// --- Cost Attribution Guide: mirror to getting-started/ (operator FinOps setup) ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'COST_ATTRIBUTION.md'),
-  path.join('src', 'content', 'docs', 'getting-started', 'Cost-attribution.md'),
-);
-
-// --- Prompt Guide: mirror to customizing/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'PROMPT_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'customizing', 'Prompt-engineering.md'),
-);
-
-// --- Slack Setup Guide: mirror to using/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'SLACK_SETUP_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using', 'Slack-setup-guide.md'),
-);
-
-// --- Linear Setup Guide: mirror to using/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'LINEAR_SETUP_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using', 'Linear-setup-guide.md'),
-);
-
-// --- Jira Setup Guide: mirror to using/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'JIRA_SETUP_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using', 'Jira-setup-guide.md'),
-);
-
-// --- Deploy preview screenshots guide: mirror to using/ ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'DEPLOY_PREVIEW_SCREENSHOTS_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'using', 'Deploy-preview-screenshots-guide.md'),
-);
-
-// --- Cedar Policy Guide: mirror to customizing/ (authoring reference for blueprint authors) ---
-mirrorMarkdownFile(
-  path.join(docsRoot, 'guides', 'CEDAR_POLICY_GUIDE.md'),
-  path.join('src', 'content', 'docs', 'customizing', 'Cedar-policies.md'),
-);
-
-// --- Contributing: mirror to developer-guide/ ---
-mirrorMarkdownFile(
-  path.join(repoRoot, 'CONTRIBUTING.md'),
-  path.join('src', 'content', 'docs', 'developer-guide', 'Contributing.md'),
-);
-
-// --- Design docs: mirror to architecture/ ---
-// Source lives at docs/design/ but renders at /architecture/ on the site.
-// We keep the source directory named "design" because that's what CLAUDE.md and
-// AGENTS.md reference for contributors. The rename happens only at the site level.
-mirrorDirectory(path.join(docsRoot, 'design'), path.join('src', 'content', 'docs', 'architecture'));
-
-// --- Decision records (ADRs): mirror to decisions/ ---
-mirrorDirectory(path.join(docsRoot, 'decisions'), path.join('src', 'content', 'docs', 'decisions'));
-
-// --- Static assets: copy source image dir into the site's public/ ---
-// Guides reference images as `../imgs/foo.png`; ensureFrontmatter() turns
-// those into absolute `/<base>/imgs/foo.png` URLs, which Astro serves from
-// public/. Copy the source dir here so every committed image is published —
-// otherwise a new image lands in docs/imgs/ but 404s on the site (#90).
-copyAssetDir(path.join(docsRoot, 'imgs'), path.join(docsRoot, 'public', 'imgs'));
-
-// Guardrail: ensure target tree exists when running in a clean checkout.
-fs.mkdirSync(targetRoot, { recursive: true });

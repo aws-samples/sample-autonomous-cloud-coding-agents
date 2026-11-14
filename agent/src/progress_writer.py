@@ -454,7 +454,7 @@ class _ProgressWriter:
 
     # -- core write ------------------------------------------------------------
 
-    def _put_event(self, event_type: str, metadata: dict) -> None:
+    def _put_event(self, event_type: str, metadata: dict) -> None:  # noqa: C901 -- 16 when the ceiling of 15 was set; must not grow
         """Write a single progress event item to DynamoDB.
 
         Error handling splits three ways:

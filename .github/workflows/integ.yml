@@ -19,8 +19,11 @@ run-name: >-
 # -> we resolve whether the PR touches cdk/** or agent/** -> an admin approves
 # the `deploy` environment gate (reused — same gate and role as deploy.yml) ->
 # deploy/assert/destroy runs against the shared account -> a commit status
-# `integ-smoke` is posted back to the PR head so it shows up as a (required)
-# check that blocks merge.
+# `integ-smoke` is posted back to the PR head.
+#
+# `integ-smoke` is NOT a required status check: the ruleset for `main` requires
+# only `build (agentcore)` and `Secrets, deps, and workflow scan`. The status
+# informs reviewers; it does not block merge.
 #
 # Local dev path is unchanged: run `mise //cdk:integ` with your own AWS creds.
 #
@@ -38,21 +41,12 @@ on:
     types: [completed]
   workflow_dispatch: {}
 
-# Only one integ run at a time against the shared account. Stack names are now
-# run-unique (`int-<sha>`, see the integ job) so this is no longer a correctness
-# requirement — it bounds shared-account cost/parallelism rather than preventing
-# a name collision.
-concurrency:
-  group: cdk-integ
-  cancel-in-progress: false
-
 permissions: {}
 
 jobs:
   # Decides whether this PR needs the integ run (touches cdk/** or agent/**) and
-  # posts the gating `integ-smoke` status. Always runs on a successful build so
-  # docs/cli-only PRs get an immediate green (skipped) status and never deadlock
-  # the required check.
+  # posts the `integ-smoke` status. Always runs on a successful build so
+  # docs/cli-only PRs get an immediate green (skipped) status instead of none.
   resolve:
     # Manual dispatch is restricted to main (defence in depth — the `deploy`
     # environment approval is the primary gate). PR runs come via workflow_run.
@@ -104,8 +98,8 @@ jobs:
 
           # Track whether we've posted a terminal integ-smoke status. If the job
           # dies (failed API call, runner crash) before reaching one, the EXIT
-          # trap posts `error` so the required check resolves instead of hanging
-          # pending forever and silently blocking merge.
+          # trap posts `error` so the status resolves instead of staying pending
+          # forever.
           STATUS_POSTED=""
 
           post_status() {
@@ -188,14 +182,24 @@ jobs:
 
   # The admin-gated deploy -> assert -> destroy. The `deploy` environment's
   # required reviewers (coding-agents-admin / coding-agents-maintainers) are the
-  # approval gate; while it waits, the integ-smoke status stays pending and merge
-  # stays blocked. Reuses deploy.yml's environment/role — no separate integ role.
+  # approval gate; while it waits, the integ-smoke status stays pending (merge is
+  # not blocked: the status is not required). Reuses deploy.yml's
+  # environment/role — no separate integ role.
   integ:
     needs: resolve
     if: needs.resolve.outputs.applicable == 'true'
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
     environment: deploy
+    # Only one integ deploy at a time against the shared account. Stack names are
+    # run-unique (`int-<sha>`, see below), so this bounds shared-account cost and
+    # parallelism rather than preventing a name collision. The group is on this
+    # job, not on the workflow: at workflow level a run waiting for the `deploy`
+    # approval held the group and every later run was cancelled before `resolve`
+    # could post a status.
+    concurrency:
+      group: cdk-integ
+      cancel-in-progress: false
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -225,6 +229,7 @@ jobs:
       - name: Install mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
 
       - name: Setup Node.js

@@ -1,8 +1,6 @@
 ---
-title: Registry
+title: "Agent asset registry"
 ---
-
-# Agent asset registry
 
 A **registry asset** is a versioned, immutable-per-version runtime artifact that a task can load — an MCP server, a Cedar policy module, or a skill. Today those artifacts are vendored into the container image (`agent/src/channel_mcp.py`), inlined on the Blueprint construct (Cedar policies), or committed to a repo (`.mcp.json`). None of them are versioned, none carry an audit trail, and adding one means a **core-code change plus a CDK deploy**. The registry replaces that with a catalog: publishers push typed, versioned records via an API; blueprints pin them by `registry://kind/namespace/name@constraint`; the orchestrator resolves the pins at task start; and the agent receives a resolved bundle.
 

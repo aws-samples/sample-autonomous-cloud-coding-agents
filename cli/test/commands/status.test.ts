@@ -177,6 +177,7 @@ describe('status command', () => {
 
       const cmd = makeStatusCommand();
       const parsed = cmd.parseAsync(['node', 'test', 'abc', '--wait', '--max-wait', '1']);
+      // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
       const assertion = expect(parsed).rejects.toThrow(/Timed out waiting/);
       // Drain poll sleeps until the ceiling trips.
       for (let i = 0; i < 3; i += 1) {

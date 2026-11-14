@@ -133,7 +133,7 @@ function withRegistry(opts: { activeCount: number; row?: Record<string, unknown>
 
 beforeEach(() => {
   jest.clearAllMocks();
-  invalidateLinearSecretCache();
+  invalidateLinearSecretCache(STACK_WIDE_ARN);
   _resetCachesForTesting();
   _resetActiveWorkspaceCountCache();
   smSend.mockImplementation((cmd: { _type: string; input: { SecretId?: string } }) => {

@@ -1,5 +1,5 @@
 ---
-title: Repository onboarding
+title: "Repository onboarding"
 ---
 
 Before submitting tasks against a repository, the repository must be **onboarded** to the platform. Onboarding is managed by the platform administrator through CDK  - each repository is registered as a `Blueprint` construct in the CDK stack, which writes a configuration record to the `RepoTable` DynamoDB table.

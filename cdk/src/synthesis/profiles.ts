@@ -28,8 +28,8 @@ import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-cons
 /** Enough additional model grants to exercise the SessionRole's lazy policy split. */
 const EXTRA_MODEL_COUNT = 8;
 
-export type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
-export type Image = 'none' | 'managed' | 'external';
+type Compute = 'agentcore' | 'ecs' | 'lambda-microvm';
+type Image = 'none' | 'managed' | 'external';
 export type Context = Readonly<Record<string, string | boolean | readonly string[]>>;
 
 /** Structural profiles describe provisioned resources, not live backend readiness. */

@@ -49,9 +49,9 @@ import { estimateImageTokensFromBuffer } from './image-tokens';
 import { extractDescriptionMarkdown } from './jira-adf';
 import { resolveJiraOauthToken } from './jira-oauth-resolver';
 import { logger } from './logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
 import { isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK } from './validation';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 /**
  * Safe Jira attachment id: digits/letters/`-`/`_` only. Jira attachment ids are

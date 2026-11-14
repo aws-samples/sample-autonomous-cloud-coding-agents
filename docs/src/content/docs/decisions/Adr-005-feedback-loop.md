@@ -1,8 +1,6 @@
 ---
-title: Adr 005 feedback loop
+title: "ADR-005: Feedback loop — PR reviews propagate to issues and ADRs"
 ---
-
-# ADR-005: Feedback loop — PR reviews propagate to issues and ADRs
 
 **Status:** proposed
 **Date:** 2026-05-19

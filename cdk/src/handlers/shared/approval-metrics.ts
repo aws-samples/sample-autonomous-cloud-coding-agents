@@ -77,7 +77,7 @@ export const APPROVAL_METRIC_MILESTONES = new Set<string>([
  * reason value can't silently inflate metric cardinality — an
  * observable ``unknown`` bucket forces the operator to notice.
  */
-export const CLIP_REASON_VALUES = new Set<string>([
+const CLIP_REASON_VALUES = new Set<string>([
   'rule_annotation',
   'maxLifetime_ceiling',
   'runtime_jwt_ceiling',

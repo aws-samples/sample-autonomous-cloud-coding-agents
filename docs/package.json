@@ -9,22 +9,25 @@
     "build": "npm run docs:build",
     "preview": "astro preview",
     "security:retire": "retire --path . --severity high",
-    "link-check": "bash scripts/link-check.sh"
+    "link-check": "bash scripts/link-check.sh",
+    "markdown-lint": "node scripts/markdown-lint.mjs"
   },
   "devDependencies": {
     "jest": "^30.4.2",
     "jest-junit": "^17",
     "markdown-link-check": "^3.13.6",
-    "retire": "^6.1.0"
+    "markdownlint": "0.42.0",
+    "retire": "^6.1.0",
+    "starlight-links-validator": "0.25.3"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
     "@astrojs/starlight": "^0.41.2",
-    "astro": "7.3.3",
+    "astro": "7.4.7",
     "remark-gfm": "^4.0.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "unist-util-visit": "^5.1.0"
   },
-  "main": "lib/index.js",
   "engines": {
     "node": ">= 20.x <= 24.x"
   },

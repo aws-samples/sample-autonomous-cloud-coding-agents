@@ -57,17 +57,20 @@ dependencies = [
 # `uv sync` unsatisfiable and re-breaks on every pin bump. The rule's threat model
 # (surprise malicious/unstable version) is already covered by exact pins + reviewed
 # lock upgrades. See #532.
-# nosemgrep: uv-missing-dependency-cooldown
+# nosemgrep: uv-missing-dependency-cooldown -- deps are exact-pinned and lock-reviewed; a global cooldown makes `uv sync` unsatisfiable on fresh pins (#532)
 [tool.uv]
 constraint-dependencies = [
     "pyjwt>=2.13.0",  # PYSEC-2026-175/177/178/179 — transitive via mcp; remove when mcp bumps floor (#267)
     "pydantic-settings>=2.14.2",  # GHSA-4xgf-cpjx-pc3j — transitive via mcp; remove when mcp bumps floor
 ]
 
-# Dead-code detection (#282, cairn MVG gate #6). ruff "F" catches unused
-# imports/locals; vulture catches unused module-level functions/classes/methods
-# that ruff cannot see. min_confidence 80 keeps the signal high; intentional
-# keeps (e.g. SDK-mandated hook params) live in .vulture_allowlist.py.
+# Dead-code detection (#282, cairn MVG gate #6), part of `mise run quality`.
+# At min_confidence 80 vulture reports only what it is sure of: unreachable code
+# (after return or raise, a condition that cannot hold) and imports and function
+# arguments that nothing reads (it calls such an argument an "unused variable").
+# It rates an unused function, class, method or variable 60, so those are NOT
+# reported at this threshold; lowering it needs a reviewed allowlist first.
+# Intentional keeps live in .vulture_allowlist.py.
 [tool.vulture]
 paths = ["src", ".vulture_allowlist.py"]
 min_confidence = 80
@@ -85,13 +88,14 @@ skips = [
 
 [dependency-groups]
 dev = [
-    "ruff",
+    "bandit==1.9.4",  # security:bandit task — exact pin: the scan runs this version, on the project's Python
+    "ruff==0.17.3",  # lint and format tasks — exact pin: the rules and the formatting change only with a reviewed bump
     "ty",
     "pytest",
     "pygments==2.20.0",
     "pytest-cov==7.1.0",
     "pytest-timeout==2.4.0",  # per-test wall-clock cap: a single hung test (network/subprocess/Bedrock without its own timeout) must fail LOUDLY with a traceback, not silently burn the whole build-verify budget (ABCA-684/686: one hang stalled the baseline build past its 3600s ceiling)
-    "vulture==2.16",  # dead-code detection (#282): unused functions/classes ruff F can't see
+    "vulture==2.16",  # dead code (#282): unreachable code and unused imports and arguments, at min_confidence 80 (see [tool.vulture])
 ]
 
 [tool.ruff]
@@ -107,6 +111,7 @@ select = [
     "E",     # pycodestyle errors
     "W",     # pycodestyle warnings
     "F",     # pyflakes
+    "ARG",   # flake8-unused-arguments
     "I",     # isort
     "B",     # flake8-bugbear
     "S",     # flake8-bandit (security)
@@ -114,24 +119,94 @@ select = [
     "SIM",   # flake8-simplify
     "TCH",   # flake8-type-checking
     "RUF",   # ruff-specific rules
+    "ASYNC", # flake8-async: blocking calls inside `async def`
+    "C4",    # flake8-comprehensions
+    "EXE",   # flake8-executable: shebang and executable bit agree
+    "FURB",  # refurb: a builtin or stdlib call that already does what the code spells out
+    "PERF",  # perflint: loops that rebuild what a comprehension or one call does
+    "RET",   # flake8-return
     # AI007 guard (#258): magic-value comparisons should use named constants.
     # Values shared across Python/TypeScript belong in contracts/constants.json
     # (see contracts/constants.md).
     "PLR2004",  # pylint magic-value-comparison
+    # Families this tree had no findings in when they were switched on
+    # (ruff 0.15.20). They are on so that it stays that way.
+    "A",     # flake8-builtins: a name that shadows a builtin
+    "DTZ",   # flake8-datetimez: naive datetimes
+    "FAST",  # FastAPI: route parameters and dependencies
+    "FLY",   # flynt: str.join over literals
+    "G",     # flake8-logging-format: strings formatted before the logging call
+    "INT",   # flake8-gettext
+    "ISC",   # flake8-implicit-str-concat
+    "LOG",   # flake8-logging: logger misuse
+    "PGH",   # pygrep-hooks: blanket `noqa` and `type: ignore`
+    "PIE",   # flake8-pie: statements and fields that do nothing
+    "PLE",   # pylint errors
+    "RSE",   # flake8-raise
+    "T10",   # flake8-debugger: breakpoints left behind
+    "YTT",   # flake8-2020: sys.version misuse
+    # One fixed ceiling on cyclomatic complexity, set under [tool.ruff.lint.mccabe].
+    "C90",   # mccabe
+    # Import boundaries. TID251 enforces the banned-api table below (attributed
+    # AWS clients, #319). TID252 rejects an import relative to a parent package
+    # (`from .. import x`): `src/` is the import root, so there is no parent and
+    # such an import fails when the module loads.
+    "TID",   # flake8-tidy-imports
 ]
 ignore = [
     "S603",  # subprocess call — allowed for agent CLI operations
     "S607",  # partial executable path — agent relies on PATH for git, gh, mise
 ]
 
+# A function with more than 15 independent paths fails the lint. The ten functions
+# that were above it when the ceiling was set carry `# noqa: C901` with the value
+# they had: that value must not grow, and the comment goes when the function is
+# split. Do not raise the number to make a new function fit.
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
 [tool.ruff.lint.per-file-ignores]
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
+"src/aws_session.py" = ["TID251"]  # the one module that builds boto3 clients, resources and sessions: it attaches the solution User-Agent (#319)
 "src/prompts/*.py" = ["E501"]  # long prompt strings
-"tests/**" = ["S101", "S106", "S108", "E402", "PLR2004"]  # assert; test tokens; /tmp paths; importorskip; literal assertions
+"tests/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # assert; test tokens; /tmp paths; literal assertions; fixture and stub signatures are set by pytest and by what they replace; a client built in a test sends nothing (conftest.py refuses every request)
+
+# Every AWS call the agent makes must carry the solution User-Agent (#319), and
+# only the factories in src/aws_session.py attach it. These names are the ways
+# to get a client, resource or session without them.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"boto3.client".msg = "un-attributed AWS client (#319): use aws_session.tenant_client() for tenant data or aws_session.platform_client() for platform calls"
+"boto3.resource".msg = "un-attributed AWS resource (#319): use aws_session.tenant_resource()"
+"boto3.Session".msg = "sessions are built only in src/aws_session.py (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.session".msg = "sessions are built only in src/aws_session.py (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.DEFAULT_SESSION".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"boto3.setup_default_session".msg = "the default session is un-attributed (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+"botocore.session".msg = "a botocore session builds un-attributed clients (#319): use aws_session.tenant_client(), tenant_resource() or platform_client()"
+# The two process entrypoints: uvicorn loads server.py, batch mode runs
+# entrypoint.py. No module in src/ or scripts/ may import either. Tests import
+# both to test them, under the tests/** exemption above.
+"server".msg = "server.py is a process entrypoint (uvicorn loads it): move what you need into a module both can import"
+"entrypoint".msg = "entrypoint.py is the batch entrypoint and a re-export shim kept for tests, and importing it reloads config: import the name from the module that defines it"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Strict mode (pytest 9): a key this table does not know, a marker nobody registered,
+# an xfail that passes and two parameter sets with the same id are errors, not
+# warnings. Without it a typo in `timeout` below silently removes the hang protection.
+strict = true
+# A parametrize over an empty list is an error, not one skipped test. The lists here
+# come from globs and tables: "nothing found" means the check has stopped checking.
+empty_parameter_set_mark = "fail_at_collect"
+# A warning is an error. In a green run nobody reads the warnings summary; as an
+# error the warning fails the test that caused it, or the collection of its module.
+# An entry below "error" lets one named warning through and says why.
+filterwarnings = [
+    "error",
+    # starlette's TestClient asks for httpx2. The agent stays on httpx until it moves to
+    # mcp 2.x, which requires httpx2; drop this line with that change.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 # Non-TTY output ergonomics. In a captured/piped context (the ECS build gate, CI,
 # an agent's Bash tool) pytest's default is a wall of featureless progress dots
 # with the "N passed" summary easy to lose in a tail — live-caught on ABCA-691,
@@ -172,7 +247,7 @@ source = ["src"]
 relative_files = true
 
 [tool.coverage.report]
-fail_under = 72
+fail_under = 80
 precision = 2
 show_missing = true
 skip_covered = true

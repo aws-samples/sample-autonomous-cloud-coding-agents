@@ -8,8 +8,8 @@
   "scripts": {
     "compile": "tsc --build tsconfig.json",
     "watch": "tsc --build -w tsconfig.json",
-    "test": "jest --maxWorkers=${JEST_MAX_WORKERS:-25%}",
-    "eslint": "eslint --fix src test scripts",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "test": "jest --ci --maxWorkers=${JEST_MAX_WORKERS:-25%}",
     "synth": "npx cdk synth",
     "synth:quiet": "npx cdk synth -q",
     "census": "node -r ts-node/register/transpile-only src/synthesis/cli.ts"
@@ -52,6 +52,7 @@
     "@aws-cdk/integ-runner": "2.202.1",
     "@aws-cdk/integ-tests-alpha": "2.260.0-alpha.0",
     "@cdklabs/eslint-plugin": "^2",
+    "@eslint/js": "10.0.1",
     "@stylistic/eslint-plugin": "^5",
     "@types/aws-lambda": "^8.10.162",
     "@types/jest": "^30.0.0",
@@ -90,6 +91,10 @@
     "workerIdleMemoryLimit": "1536MB",
     "clearMocks": true,
     "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "scripts/generate-bootstrap-template.ts"
+    ],
     "coverageReporters": [
       "json",
       "lcov",

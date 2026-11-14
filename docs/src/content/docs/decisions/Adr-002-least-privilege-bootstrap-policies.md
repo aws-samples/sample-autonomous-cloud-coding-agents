@@ -1,8 +1,6 @@
 ---
-title: Adr 002 least privilege bootstrap policies
+title: "ADR-002: Least-privilege CDK bootstrap policies as code"
 ---
-
-# ADR-002: Least-privilege CDK bootstrap policies as code
 
 **Status:** accepted
 **Date:** 2026-05-19
@@ -68,7 +66,7 @@ The implementation is decomposed into 8 sub-issues, each independently reviewabl
 
 ## References
 
-- [ADR-001](/sample-autonomous-cloud-coding-agents/architecture/adr-001-stacked-pull-requests) — delivery methodology (stacked PRs)
+- [ADR-001](/sample-autonomous-cloud-coding-agents/decisions/adr-001-stacked-pull-requests) — delivery methodology (stacked PRs)
 - RFC #120 — parent issue with full design and sub-issue breakdown
 - `docs/design/DEPLOYMENT_ROLES.md` — current documentation (will become generated)
 - PR #46 — original policy derivation and validation methodology
