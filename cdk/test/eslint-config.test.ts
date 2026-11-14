@@ -46,8 +46,11 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/handlers/a.ts', "import '../constructs/task-status';", []],
   ['src/handlers/a.ts', "import './shared/types';", []],
   ['src/constructs/a.ts', "import 'aws-cdk-lib';", []],
-  // A comment that takes code out of the coverage report.
+  // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
+  ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
+  ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
+  ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
 ];
 
 /**

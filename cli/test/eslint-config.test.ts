@@ -36,8 +36,11 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // md5 from node:crypto.
   ['src/a.ts', "export const digest = createHash('md5');", ['no-restricted-syntax']],
   ['test/a.test.ts', "export const digest = crypto.createHash('md5');", ['no-restricted-syntax']],
-  // A comment that takes code out of the coverage report.
+  // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
+  ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
+  ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
+  ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
 ];
 
 /**

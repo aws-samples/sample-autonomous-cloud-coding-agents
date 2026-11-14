@@ -56,8 +56,11 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   // A Cloudscape component comes from its own module.
   ['src/app/a.tsx', "import '@cloudscape-design/components';", ['no-restricted-imports']],
   ['src/app/a.tsx', "import '@cloudscape-design/components/button';", []],
-  // A comment that takes code out of the coverage report.
+  // A comment that takes code out of the coverage report, in each spelling the rule lists.
   ['src/core/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
+  ['src/core/a.ts', '/* istanbul ignore next */', ['no-warning-comments']],
+  ['src/core/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
+  ['src/core/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
 ];
 const RULES = new Set(CASES.flatMap(([, , rules]) => rules));
 
