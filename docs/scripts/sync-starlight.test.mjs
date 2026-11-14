@@ -254,9 +254,12 @@ test('a generated tree that is reached through a link fails the sync and is not 
     fs.mkdirSync(path.dirname(path.join(root, link)), { recursive: true });
     fs.symlinkSync(elsewhere, path.join(root, link), 'dir');
 
+    // The message names the tree at both ends; between them is the path the link resolves to.
     assert.throws(
       () => sync(root, PLAN),
-      new RegExp(`${tree} is reached through a link .* Replace the link, which is ${tree} or a directory above it`),
+      ({ message }) =>
+        message.startsWith(`sync-starlight: ${tree} is reached through a link (it resolves to `) &&
+        message.endsWith(` Replace the link, which is ${tree} or a directory above it, with a real directory.`),
     );
     assert.equal(fs.readFileSync(path.join(elsewhere, 'imgs/theirs.png'), 'utf8'), 'theirs');
   };
