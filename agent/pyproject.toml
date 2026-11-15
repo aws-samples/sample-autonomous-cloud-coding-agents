@@ -166,6 +166,7 @@ ignore = [
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
+"tests_emulator/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; test tokens; /tmp paths; literal assertions; fixtures taken for their effect; their own boto3 session
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 # aws_session.py is the one module that builds boto3 clients, resources and sessions:
 # it attaches the solution User-Agent (#319). TID251 is one rule for the whole

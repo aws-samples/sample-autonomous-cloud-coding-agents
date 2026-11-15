@@ -206,6 +206,44 @@ description = "Fast tier without a test run: the `lint` and `drift-prevention` t
 depends = [":lint", ":drift-prevention"]
 
 ##################
+#### EMULATOR ####
+##################
+
+# Emulator-backed integration tests (ADR-013 Tier 2a): ABCA's real handler, CLI and agent code
+# against a local AWS Emulator (https://github.com/aws/aws-emulator). Needs Docker and no AWS
+# account. Nothing here is reachable from `mise run build`. The emulator version is pinned once,
+# in scripts/aws-emulator/Dockerfile. See docs/research/aws-emulator-local-tests.md.
+
+[tasks."emulator:up"]
+description = "Start a fresh AWS Emulator on 127.0.0.1 (builds the pinned, signature-verified image on first use)"
+run = "scripts/aws-emulator/emulator.sh up"
+
+[tasks."emulator:down"]
+description = "Stop the AWS Emulator (emulated state is in memory and is discarded)"
+run = "scripts/aws-emulator/emulator.sh down"
+
+# Arguments after `--` are the command, for one file while iterating. Run from the repository
+# root (these are root tasks); the parentheses keep the shell there:
+#   mise run emulator:run -- yarn --cwd cdk jest --config jest.emulator.config.js task-api
+#   (cd agent && ../scripts/aws-emulator/emulator.sh run uv run pytest --no-cov tests_emulator/test_secrets.py)
+# For programs that use an AWS SDK. Not for AWS CLI v1, which ignores the endpoint for some services.
+[tasks."emulator:run"]
+description = "Run a command against the running emulator with the AWS environment replaced by the emulator's (pass it after --)"
+run = "scripts/aws-emulator/emulator.sh run"
+
+# On failure the list stops and the emulator stays up for inspection (`docker logs`); the next
+# `emulator:up` replaces it, and it is started with an idle timeout of one hour.
+[tasks."test:integration"]
+description = "Tier 2a: emulator-backed integration tests (cdk, cli, agent) against a fresh AWS Emulator"
+run = [
+  { task = "emulator:up" },
+  "scripts/aws-emulator/emulator.sh run yarn --cwd cdk jest --config jest.emulator.config.js",
+  "scripts/aws-emulator/emulator.sh run yarn --cwd cli jest --config jest.emulator.config.js",
+  "cd agent && ../scripts/aws-emulator/emulator.sh run uv run pytest --no-cov tests_emulator",
+  { task = "emulator:down" },
+]
+
+##################
 #### SECURITY ####
 ##################
 
