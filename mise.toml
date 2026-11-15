@@ -149,10 +149,14 @@ run = "npm test --prefix integrations/jira-forge-app"
 description = "Generate commands stubs from .abca/commands for multiple AI assistants"
 run = "node scripts/sync-abca-commands.mjs"
 
+# knip is called by path, like eslint in the package tasks, not as `yarn knip`:
+# yarn applies the engines range of the root package.json to every root script,
+# so under an older Node (a login shell that finds the system Node first) it
+# refused to start knip, which needs no more than Node 22.12.
 [tasks."check:deadcode"]
 description = "Dead-code gate (#282): knip must report nothing in the TS/JS workspaces — no unused file, dependency, export or exported type, no unlisted or unresolved import. Zero tolerance, no baseline."
 run = '''
-yarn -s knip --no-progress && exit 0
+node_modules/.bin/knip --no-progress && exit 0
 echo 'check:deadcode: knip must report nothing (zero tolerance, no baseline). For each finding above: remove the unused file, dependency or code; drop `export` if the symbol is used only in its own file; declare a use that knip cannot see in knip.json. Decide per symbol and do not bulk-apply `knip --fix`.' >&2
 exit 1
 '''
