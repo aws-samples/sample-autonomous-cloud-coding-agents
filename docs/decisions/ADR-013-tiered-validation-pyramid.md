@@ -96,7 +96,7 @@ Status: **Implemented** (prek hooks). A commit runs the hooks that match what is
 
 Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `default_install_hook_types: [pre-commit, pre-push]`, and the `monorepo-tests-pre-push` and `monorepo-security-pre-push` hooks (both `stages: [pre-push]`) run `mise run hooks:pre-push:tests` (→ `mise //cdk:test`, `mise //cli:test`, `mise //web:test`, and the agent test suite) and `mise run hooks:pre-push:security` (→ `mise run security`) on every push. Note the shipped gate runs tests + security rather than the full `mise run build` superset (which additionally covers CDK synth, docs sync, and type/constants drift); those remain available on demand and are enforced authoritatively in Tier 3.
 
-`mise run check:fast` runs the `lint` and `drift-prevention` tasks (lint, type checks, drift and file-hygiene checks; no test run; measured at about 30 s on a laptop). It is run on demand: the push gate does not use it. Remaining refinement: consider `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
+`mise run check:fast` runs the `lint` and `drift-prevention` tasks (lint, type checks, the agent's dead-code check, drift and file-hygiene checks; no test run; measured at about 30 s on a laptop). It is run on demand: the push gate does not use it. Remaining refinement: consider `mise run check:full` (compile + test + synth, 90s), and folding synth/docs-sync/drift checks into the push gate for full Tier 1 coverage.
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
