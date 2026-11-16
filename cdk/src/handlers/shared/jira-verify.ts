@@ -27,9 +27,6 @@ import { makeClient, makeDocClient } from './ua';
 const sm = makeClient(SecretsManagerClient);
 const ddb = makeDocClient();
 
-/** Prefix for Jira-related secrets in Secrets Manager. */
-export const JIRA_SECRET_PREFIX = 'bgagent/jira/';
-
 const secretCache = new Map<string, { secret: string; expiresAt: number }>();
 const CACHE_TTL_MINUTES = 5;
 const CACHE_TTL_MS = CACHE_TTL_MINUTES * 60 * 1000;
@@ -87,7 +84,7 @@ export async function getJiraSecret(secretId: string, forceRefresh = false): Pro
     if (errorName === 'ResourceNotFoundException') {
       logger.error('Jira secret not found in Secrets Manager', { secret_id: secretId });
       secretCache.delete(secretId);
-      return null; // nosemgrep: ts-silent-success-masking -- missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
+      return null; // missing Jira signing secret means "cannot verify"; ResourceNotFound is expected before setup
     }
     logger.error('Failed to fetch Jira secret from Secrets Manager', {
       secret_id: secretId,

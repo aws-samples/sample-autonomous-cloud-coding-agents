@@ -687,6 +687,7 @@ type BuilderResolvedToken = {
   vaultUserId?: string;
 };
 
+// eslint-disable-next-line complexity -- predates the ceiling (120 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   if (!event.raw_body) {
     logger.error('Linear webhook processor invoked without raw_body');

@@ -11,13 +11,14 @@
   },
   "scripts": {
     "compile": "tsc --build tsconfig.json",
-    "eslint": "eslint --fix --no-error-on-unmatched-pattern src test build-tools",
-    "test": "jest --passWithNoTests --updateSnapshot",
+    "typecheck": "tsc --noEmit -p tsconfig.dev.json",
+    "test": "jest --ci",
     "test:watch": "jest --watch",
-    "build": "npm run compile && npm run test && npm run eslint",
+    "build": "npm run compile && npm run typecheck && npm run test",
     "security:retire": "retire --path . --severity high"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@stylistic/eslint-plugin": "^5",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.0",
@@ -60,6 +61,9 @@
     ],
     "clearMocks": true,
     "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
     "coverageReporters": [
       "json",
       "lcov",
@@ -70,10 +74,10 @@
     "coverageDirectory": "coverage",
     "coverageThreshold": {
       "global": {
-        "branches": 84,
-        "functions": 78,
-        "lines": 68,
-        "statements": 68
+        "branches": 85,
+        "functions": 89,
+        "lines": 83,
+        "statements": 83
       }
     },
     "coveragePathIgnorePatterns": [
@@ -84,6 +88,10 @@
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"
+    ],
+    "globalSetup": "<rootDir>/test/setup/isolate-environment.ts",
+    "setupFiles": [
+      "<rootDir>/test/setup/block-network.ts"
     ],
     "reporters": [
       "default",

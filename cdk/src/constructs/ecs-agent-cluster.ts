@@ -499,8 +499,8 @@ export class EcsAgentCluster extends Construct {
       // comfortably safe on the 120 GB box even alongside the other packages +
       // agent. Kept as an explicit env (not core-relative) so a future bigger box
       // can't silently over-spawn. The test script reads JEST_MAX_WORKERS (default
-      // 25%), so this only pins the shared ECS box — CI (2–4 cores) and dev
-      // machines keep 25%, unaffected.
+      // 25%), so this only pins the shared ECS box: CI sets its own count in
+      // .github/workflows/build.yml and developer machines keep the 25% default.
       JEST_MAX_WORKERS: '4',
       // Serialize the mise task graph so the build steps' peak memory doesn't sum
       // and OOM the task. `mise run build` fans out its `depends` (the per-package

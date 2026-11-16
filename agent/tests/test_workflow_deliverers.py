@@ -148,16 +148,22 @@ class TestDeliver:
         "answer",
         [
             # PR #523 review: a cited CI URL matched the old "/workflows" marker.
-            "Our CI is defined in `.github/workflows/ci.yml`. See "
-            "https://github.com/o/r/actions/workflows/ci.yml for the runs.",
+            (
+                "Our CI is defined in `.github/workflows/ci.yml`. See "
+                "https://github.com/o/r/actions/workflows/ci.yml for the runs."
+            ),
             # "running in the background" as genuine topic prose.
             "Log compaction runs in the background, so writes are never blocked.",
             # "watch progress" / "check back" as legitimate instructions in an answer.
-            "To watch progress of a deployment, run `bgagent watch <id>`; check back "
-            "in the console once it reports COMPLETED.",
+            (
+                "To watch progress of a deployment, run `bgagent watch <id>`; check back "
+                "in the console once it reports COMPLETED."
+            ),
             # A fenced code block quoting a deferral-looking string must not trip it.
-            "Here is the guard's marker list:\n```\nresults will follow\n```\nThat is "
-            "the full answer.",
+            (
+                "Here is the guard's marker list:\n```\nresults will follow\n```\nThat is "
+                "the full answer."
+            ),
         ],
     )
     def test_genuine_answer_with_colliding_tokens_not_rejected(self, monkeypatch, answer):

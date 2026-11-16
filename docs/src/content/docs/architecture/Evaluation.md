@@ -1,8 +1,6 @@
 ---
-title: Evaluation
+title: "Evaluation"
 ---
-
-# Evaluation
 
 The evaluation pipeline measures agent performance and feeds learnings back into prompts, memory, and configuration. In MVP, evaluation is manual (inspect PRs and logs). Automated evaluation is built incrementally across iterations.
 

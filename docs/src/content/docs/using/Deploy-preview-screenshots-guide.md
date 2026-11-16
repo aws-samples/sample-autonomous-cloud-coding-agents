@@ -1,8 +1,6 @@
 ---
-title: Deploy preview screenshots guide
+title: "Deploy preview screenshots setup guide"
 ---
-
-# Deploy preview screenshots setup guide
 
 Wire your repo into ABCA so that every preview deploy gets screenshotted and posted as a comment on the open GitHub PR. For Jira-origin tasks, the originating issue receives screenshot and live-preview links. Linked Linear issues also receive preview feedback when configured.
 

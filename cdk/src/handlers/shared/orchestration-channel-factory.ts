@@ -83,7 +83,7 @@ export type ChannelFactory = (registryTableName: string) => Channel;
  * that could have seeded them — so defaulting keeps their feedback working
  * rather than silencing it. Not a statement that Linear is privileged.
  */
-export const LEGACY_DEFAULT_CHANNEL_SOURCE = 'linear';
+const LEGACY_DEFAULT_CHANNEL_SOURCE = 'linear';
 
 /**
  * Registered adapters, keyed by the ``channel_source`` value that selects them.

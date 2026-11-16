@@ -195,8 +195,8 @@ describe('resolveLinearOauthToken', () => {
         ...clients,
         resolveViaVault: async () => ({ kind: 'token', accessToken: 'lin_oauth_vault' }),
       });
-      expect(result.accessToken).toBe('lin_oauth_vault');
-      expect(result.vaultUserId).toBe('linear-ws-acme');
+      expect(result?.accessToken).toBe('lin_oauth_vault');
+      expect(result?.vaultUserId).toBe('linear-ws-acme');
     });
 
     test('passes the RECORDED vault_user_id through, not a derived one', async () => {
