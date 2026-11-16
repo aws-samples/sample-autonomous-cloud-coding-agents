@@ -1,14 +1,12 @@
 ---
-title: Slack setup guide
+title: "Slack integration setup guide"
 ---
-
-# Slack integration setup guide
 
 This guide walks through setting up the ABCA Slack integration. Once configured, your team can submit tasks by mentioning `@Shoof` in any channel and receive real-time notifications as tasks progress.
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)) with the `slack` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) (`bgagent setup --features slack,…`)
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Slack workspace where you are authorized to install apps (if your workspace requires admin approval for app installs, request it through your Slack administrator)
 - AWS CLI configured with credentials for your ABCA account
@@ -171,4 +169,4 @@ The integration supports multiple Slack workspaces. Each workspace admin opens t
 
 To uninstall from a workspace: **Slack → Settings → Manage Apps → Shoof → Remove App**. The bot token is automatically scheduled for deletion.
 
-To remove the Slack integration from your ABCA deployment entirely, delete the Slack App and redeploy without it.
+To remove the Slack integration from your ABCA deployment entirely, delete the Slack App, then run `bgagent setup` and disable Slack. This deletes the installation, user and channel mapping tables (see [What disabling a feature removes](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#what-disabling-a-feature-removes)).

@@ -467,7 +467,7 @@ beforeEach(() => {
   mockLogs.length = 0;
   mockParentOf.clear();
   for (const fn of Object.values(mockFeedback)) fn.mockClear();
-  invalidateLinearSecretCache();
+  invalidateLinearSecretCache(STACK_WIDE_ARN);
   _resetCachesForTesting();
   _resetActiveWorkspaceCountCache();
   mockSecrets.set(STACK_WIDE_ARN, STACK_WIDE_SECRET);

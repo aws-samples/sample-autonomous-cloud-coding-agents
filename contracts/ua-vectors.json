@@ -1,0 +1,71 @@
+{
+  "_comment": "Cross-language vectors for the solution User-Agent modules: agent/src/ua.py, cdk/src/handlers/shared/ua.ts and cli/src/ua.ts. All three test suites (agent/tests/test_ua.py, cdk/test/handlers/shared/ua.test.ts, cli/test/ua.test.ts) load this file, so the solution id and the sanitiser cannot change in one module alone. A value is sanitised by replacing every character outside the RFC 7230 token alphabet with '-'.",
+  "solution_id": "uksb-wt64nei4u6",
+  "sanitize": [
+    {
+      "input": "agent",
+      "expected": "agent",
+      "note": "the agent component label"
+    },
+    {
+      "input": "api",
+      "expected": "api",
+      "note": "the default Lambda component label"
+    },
+    {
+      "input": "cli",
+      "expected": "cli",
+      "note": "the CLI component label"
+    },
+    {
+      "input": "AZaz09",
+      "expected": "AZaz09",
+      "note": "letters and digits"
+    },
+    {
+      "input": "ok-_.~!",
+      "expected": "ok-_.~!",
+      "note": "common token punctuation"
+    },
+    {
+      "input": "!$%&'*+-.^_`|~",
+      "expected": "!$%&'*+-.^_`|~",
+      "note": "every special character of the token alphabet"
+    },
+    {
+      "input": "a/b",
+      "expected": "a-b",
+      "note": "slash is not a token character"
+    },
+    {
+      "input": "a#b",
+      "expected": "a-b",
+      "note": "hash is the segment separator and must not survive"
+    },
+    {
+      "input": "a b",
+      "expected": "a-b",
+      "note": "space"
+    },
+    {
+      "input": "\"(),/:;<=>?@[\\]{}# ",
+      "expected": "-------------------",
+      "note": "every other printable ASCII character"
+    },
+    {
+      "input": "a\tb\nc",
+      "expected": "a-b-c",
+      "note": "control characters"
+    },
+    {
+      "input": "h\u00e9llo",
+      "expected": "h-llo",
+      "note": "a non-ASCII letter"
+    },
+    {
+      "input": "",
+      "expected": "",
+      "note": "the empty string"
+    }
+  ]
+}

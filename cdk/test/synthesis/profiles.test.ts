@@ -20,6 +20,7 @@
 import { readdirSync } from 'node:fs';
 import { App, AssetStaging, Stack } from 'aws-cdk-lib';
 import { AGENTCORE_AZS_CONTEXT_KEY, AGENTCORE_SUPPORTED_AZ_IDS } from '../../src/constructs/agentcore-azs';
+import { FEATURE_CONTEXT_KEYS } from '../../src/deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../../src/handlers/shared/bedrock-model-constants';
 import { FIXTURE, STRUCTURAL_CONTEXT, synthesisEnvironment, synthesisProfiles } from '../../src/synthesis/profiles';
 
@@ -31,7 +32,7 @@ describe('structural synthesis profiles', () => {
     const topologyMatrix = matrix.filter(profile => profile.context.networkTopology === topology);
     expect(matrix).toHaveLength(80);
     expect(topologyMatrix).toHaveLength(40);
-    expect(profiles).toHaveLength(122);
+    expect(profiles).toHaveLength(142);
     expect(new Set(profiles.map(p => p.name)).size).toBe(profiles.length);
     for (const compute of ['agentcore', 'ecs', 'lambda-microvm']) {
       for (const gateway of [false, true]) {
@@ -134,6 +135,20 @@ describe('structural synthesis profiles', () => {
     }
   });
 
+  test('covers minimal, single-feature, paired and all-feature deployment profiles in both topologies', () => {
+    const featureProfiles = profiles.filter(profile => profile.name.startsWith('features-'));
+    expect(featureProfiles).toHaveLength(20);
+    for (const profile of featureProfiles) {
+      for (const key of Object.values(FEATURE_CONTEXT_KEYS)) expect(typeof profile.context[key]).toBe('boolean');
+      expect(profile.expectedError).toBeUndefined();
+    }
+    const minimal = featureProfiles.filter(profile => profile.name.startsWith('features-minimal-'));
+    expect(minimal.map(profile => profile.context.networkTopology).sort()).toEqual(['inline', 'split']);
+    for (const profile of minimal) {
+      expect(Object.values(FEATURE_CONTEXT_KEYS).every(key => profile.context[key] === false)).toBe(true);
+    }
+  });
+
   test('distinguishes configured images from provisioning-only MicroVM profiles', () => {
     const microvm = matrix.filter(p => p.context.compute_types === 'lambda-microvm' && !p.expectedError);
     expect(microvm.filter(p => p.microvmImageConfigured)).toHaveLength(32);
@@ -168,7 +183,7 @@ describe('structural synthesis profiles', () => {
     const app = new App({ autoSynth: false, postCliContext: STRUCTURAL_CONTEXT });
     const stack = new Stack(app, 'AssetFixture');
     const asset = new AssetStaging(stack, 'Source', { sourcePath: __dirname });
-    expect(asset.stagedPath).toBe(__dirname);
+    expect(asset.absoluteStagedPath).toBe(__dirname);
     expect(readdirSync(app.synth().directory).filter(name => name.startsWith('asset.'))).toEqual([]);
   });
 

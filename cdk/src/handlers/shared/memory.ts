@@ -36,7 +36,7 @@ import type { TaskStatusType } from '../../constructs/task-status';
  * Provenance tag indicating who wrote a memory record.
  * Must stay in sync with Python-side MEMORY_SOURCE_TYPES in agent/src/memory.py.
  */
-export type MemorySourceType =
+type MemorySourceType =
   | 'agent_episode'
   | 'agent_learning'
   | 'orchestrator_fallback';

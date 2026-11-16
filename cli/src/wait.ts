@@ -39,7 +39,7 @@ const DEFAULT_MAX_WAIT_MS = 24 * 60 * 60 * 1_000;
  *  Distinct from 1 (= the task itself reached a non-COMPLETED terminal
  *  status, via ``exitCodeForStatus``) so scripts wrapping ``--wait`` can
  *  tell "task failed" from "task may still be running; the CLI gave up". */
-export const EXIT_CODE_WAIT_ABORTED = 2;
+const EXIT_CODE_WAIT_ABORTED = 2;
 
 /**
  * Poll a task until it reaches a terminal status.

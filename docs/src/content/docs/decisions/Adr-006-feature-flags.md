@@ -1,8 +1,6 @@
 ---
-title: Adr 006 feature flags
+title: "ADR-006: Feature flags for concurrent development"
 ---
-
-# ADR-006: Feature flags for concurrent development
 
 **Status:** proposed
 **Date:** 2026-05-19

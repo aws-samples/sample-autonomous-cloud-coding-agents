@@ -122,8 +122,7 @@ def assemble_prompt(config: TaskConfig) -> str:
         parts.append(issue.body or "(no description)")
         if issue.comments:
             parts.append("\n### Comments\n")
-            for c in issue.comments:
-                parts.append(f"**@{c.author}**: {c.body}\n")
+            parts.extend(f"**@{c.author}**: {c.body}\n" for c in issue.comments)
         parts.append(_UNTRUSTED_END)
 
     if config.task_description:

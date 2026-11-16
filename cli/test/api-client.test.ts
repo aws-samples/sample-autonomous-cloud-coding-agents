@@ -452,13 +452,9 @@ describe('ApiClient', () => {
         json: async () => { throw new SyntaxError('Unexpected token <'); },
       });
 
-      try {
-        await client.getTask('abc');
-        fail('expected an error');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        expect((err as ApiError).statusCode).toBe(403);
-      }
+      const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).statusCode).toBe(403);
     });
   });
 
@@ -636,13 +632,9 @@ describe('ApiClient', () => {
 
       await expect(client.getTask('abc')).rejects.toThrow('non-JSON response');
       // ApiError (not CliError) so isTransientError can see the 502.
-      try {
-        await client.getTask('abc');
-        fail('expected throw');
-      } catch (err) {
-        expect(err).toBeInstanceOf(ApiError);
-        expect((err as ApiError).statusCode).toBe(502);
-      }
+      const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).statusCode).toBe(502);
     });
   });
 
