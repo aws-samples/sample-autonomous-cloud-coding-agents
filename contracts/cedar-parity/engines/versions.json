@@ -1,0 +1,4 @@
+{
+  "@cedar-policy/cedar-wasm": "4.12.0",
+  "cedarpy": "4.12.2"
+}

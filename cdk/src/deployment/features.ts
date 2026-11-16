@@ -30,7 +30,7 @@ export type DeploymentFeature = typeof DEPLOYMENT_FEATURES[number];
 export type DeploymentFeatures = Readonly<Record<DeploymentFeature, boolean>>;
 
 export const DEPLOYMENT_PROFILE_FILE = 'abca.deployment.json';
-export const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
+const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
 /** Path to an alternative profile, or `none` to ignore the repository profile. */
 export const DEPLOYMENT_PROFILE_CONTEXT = 'deploymentProfile';
 
@@ -124,7 +124,7 @@ export function parseDeploymentProfile(raw: unknown, source: string): Deployment
 }
 
 /** Stack the shared `abca.deployment.json` belongs to; mirrors `DEFAULT_STACK_NAME` in the CLI. */
-export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
+const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**

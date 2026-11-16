@@ -102,7 +102,7 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
   updateIssueComment: (...args: unknown[]) => jiraUpdateIssueCommentMock(...args),
   postIssueCommentAdf: (...args: unknown[]) => jiraPostIssueCommentAdfMock(...args),
   updateIssueCommentAdf: (...args: unknown[]) => jiraUpdateIssueCommentAdfMock(...args),
-  buildAdfDocument: (...args: unknown[]) => jiraBuildAdfDocumentMock(...args),
+  buildAdfDocument: (...args: Parameters<typeof jiraBuildAdfDocumentMock>) => jiraBuildAdfDocumentMock(...args),
   transitionIssueState: (...args: unknown[]) => jiraTransitionIssueStateMock(...args),
 }));
 

@@ -516,7 +516,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- missing stack is the lookup helper's null contract
+      return null; // missing stack is the lookup helper's null contract
     }
     throw err;
   }

@@ -726,4 +726,3 @@ Outputs
 
 
 ✨  Number of stacks with differences: 1
-

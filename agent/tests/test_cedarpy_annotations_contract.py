@@ -17,10 +17,9 @@ fixtures; this module validates only the agent-side API shape.
 
 import json
 
-import pytest
-
-cedarpy = pytest.importorskip("cedarpy")
-
+# Hard import (not importorskip): this module pins what the engine relies on in
+# cedarpy. Without cedarpy it must fail the run, not drop out of it.
+import cedarpy
 
 _ANNOTATED_POLICY = (
     '@tier("soft") '

@@ -128,7 +128,7 @@ export function parsePastedAuthorization(raw: string): { code: string; state?: s
 }
 
 /** Agent name used when the operator does not choose one. */
-export const DEFAULT_APP_NAME = 'bgagent';
+const DEFAULT_APP_NAME = 'bgagent';
 
 /**
  * The literal token a comment must contain to summon the agent.
@@ -139,7 +139,7 @@ export const DEFAULT_APP_NAME = 'bgagent';
  * here rather than imported because the CLI does not depend on the CDK package;
  * the two must be changed together.
  */
-export const COMMENT_TRIGGER_TOKEN = '@bgagent';
+const COMMENT_TRIGGER_TOKEN = '@bgagent';
 
 /**
  * Column the `←` annotations start at, so operator-chosen values of different
@@ -211,7 +211,7 @@ export interface LinearAppTemplateOptions {
 const WEBHOOK_URL_HINT = '(run `bgagent linear webhook-info`)';
 
 /** ABCA's Linear webhook endpoint for a configured API URL. */
-export function linearWebhookUrl(apiUrl: string): string {
+function linearWebhookUrl(apiUrl: string): string {
   return `${apiUrl.replace(/\/+$/, '')}/linear/webhook`;
 }
 
@@ -1008,6 +1008,7 @@ export function makeLinearCommand(): Command {
         'Finish a hosted consent: the authorization code shown on the consent page. Uses the PKCE '
         + 'verifier saved by the first run, so it must be the same machine and the same workspace.',
       )
+      // eslint-disable-next-line complexity -- predates the ceiling (115 when it landed); must not grow
       .action(async (slug: string, opts) => {
         if (!SLUG_RE.test(slug)) {
           throw new CliError(
@@ -2853,6 +2854,7 @@ export function makeLinearCommand(): Command {
       .option('--stack-name <name>', 'CloudFormation stack name', 'backgroundagent-dev')
       .option('--slug <slug>', 'Linear workspace slug (urlKey). If omitted, queries every active workspace in the registry.')
       .option('--output <format>', 'Output format (text or json)', 'text')
+      // eslint-disable-next-line complexity -- predates the ceiling (41 when it landed); must not grow
       .action(async (opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
@@ -3432,7 +3434,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
     }
     throw err;
   }

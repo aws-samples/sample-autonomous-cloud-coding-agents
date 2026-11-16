@@ -2,7 +2,7 @@
 
 This document outlines the overall architecture of the platform. Each component has its own deep-dive document in this folder.
 
-![](../imgs/abca-arch.png)
+![ABCA architecture](../imgs/abca-arch.png)
 
 ## Design principles
 

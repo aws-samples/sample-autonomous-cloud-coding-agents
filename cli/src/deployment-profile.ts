@@ -30,7 +30,7 @@ export type DeploymentFeature = typeof DEPLOYMENT_FEATURES[number];
 export type DeploymentFeatures = Readonly<Record<DeploymentFeature, boolean>>;
 
 export const DEPLOYMENT_PROFILE_FILE = 'abca.deployment.json';
-export const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
+const DEPLOYMENT_PROFILE_SCHEMA_VERSION = 1;
 /** Stack output listing deployed features; absent on stacks that predate profiles. */
 export const DEPLOYMENT_FEATURES_OUTPUT = 'DeploymentFeatures';
 
@@ -131,13 +131,13 @@ export function parseComputeList(value: string): ComputeBackend[] {
 }
 
 /** The profile inside an operator-chosen checkout; the file name is a literal. */
-export function profilePath(repoRoot: string, fileName: string = DEPLOYMENT_PROFILE_FILE): string {
+function profilePath(repoRoot: string, fileName: string = DEPLOYMENT_PROFILE_FILE): string {
   // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- repoRoot is the operator's own checkout (cwd or --repo-root) and the file name is a literal or built from a validated stack name; no privilege boundary is crossed
   return path.join(repoRoot, fileName);
 }
 
 /** Stack that owns the shared `abca.deployment.json`; mirrors `DEFAULT_PROFILE_STACK_NAME` in CDK. */
-export const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
+const DEFAULT_PROFILE_STACK_NAME = 'backgroundagent-dev';
 const STACK_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9-]{0,127}$/;
 
 /**

@@ -68,7 +68,7 @@ const COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Tool Gateway', ['ToolGateway']],
 ];
 const COMPONENT_BY_ID = new Map(COMPONENTS.flatMap(([name, ids]) => ids.map(id => [id, name] as const)));
-export const COMPONENT_ORDER: readonly string[] = [...COMPONENTS.map(([name]) => name), 'Repository onboarding', 'Platform helpers'];
+const COMPONENT_ORDER: readonly string[] = [...COMPONENTS.map(([name]) => name), 'Repository onboarding', 'Platform helpers'];
 
 /** Map a construct path (with or without the stack prefix) to an operator-facing component. */
 export function componentForPath(constructPath: string, stackNames: readonly string[]): string {

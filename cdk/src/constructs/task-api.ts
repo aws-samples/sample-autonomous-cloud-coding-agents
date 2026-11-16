@@ -63,7 +63,7 @@ const SCREENING_HANDLER_MEMORY_MB = 512;
 const HEAVY_ATTACHMENT_HANDLER_MEMORY_MB = 1024;
 
 /** Webhook routes that bypass the body-size rule; each is HMAC-verified in its Lambda. */
-export const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
+const LARGE_BODY_WEBHOOK_PATHS = ['/v1/linear/webhook', '/v1/jira/webhook', '/v1/github/webhook'] as const;
 export type LargeBodyWebhookPath = typeof LARGE_BODY_WEBHOOK_PATHS[number];
 
 const uriPathMatch = (positionalConstraint: 'STARTS_WITH' | 'EXACTLY', searchString: string) => ({
@@ -304,6 +304,7 @@ export class TaskApi extends Construct {
    */
   public readonly appClientId: string;
 
+  // eslint-disable-next-line complexity -- predates the ceiling (53 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskApiProps) {
     super(scope, id);
 

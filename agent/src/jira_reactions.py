@@ -328,7 +328,7 @@ def _post_comment(cloud_id: str, issue_key: str, text: str) -> bool:
             )
         except requests.RequestException as e:
             log("WARN", f"jira_reactions: request failed ({type(e).__name__}): {e}")
-            # nosemgrep: py-silent-success-masking -- Jira comments are best-effort on network blips
+            # Jira comments are best-effort on network blips
             return False
 
     if resp.status_code in (401, 403):
@@ -583,7 +583,7 @@ def _post_transition(cloud_id: str, issue_key: str, token: str, transition_id: s
             )
         except requests.RequestException as e:
             log("WARN", f"jira_reactions: transition POST failed ({type(e).__name__}): {e}")
-            # nosemgrep: py-silent-success-masking -- advisory Jira transition write
+            # advisory Jira transition write
             return False
 
     if resp.status_code in (HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN):

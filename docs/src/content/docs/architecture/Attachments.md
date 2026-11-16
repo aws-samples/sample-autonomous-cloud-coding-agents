@@ -1,8 +1,6 @@
 ---
-title: Attachments
+title: "Task Attachments (Multimodal)"
 ---
-
-# Task Attachments (Multimodal)
 
 End-to-end support for attaching files, images, and URLs to agent tasks. Attachments let users provide non-text context — screenshots of bugs, design mockups, CSV data, log files, code snippets — that the agent can reference during execution. Every channel (CLI, webhook, Slack, Linear) feeds the same schema; every attachment passes through security screening before reaching the agent.
 
@@ -61,10 +59,10 @@ interface Attachment {
 **Validated format (post-validation):** After `validateAttachments()` succeeds, the result is a discriminated union that makes illegal states unrepresentable:
 
 ```typescript
-/** Delivery mechanism — discriminant for the three upload paths.
- *  `type` alone cannot distinguish inline from presigned (both are 'image' | 'file'),
- *  so `delivery` provides the exhaustive three-way branch. */
-type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
+// Delivery mechanism — `delivery` is the discriminant for the three upload paths:
+// 'inline' | 'presigned' | 'url_fetch'. `type` alone cannot distinguish inline from presigned
+// (both are 'image' | 'file'), so `delivery` provides the exhaustive three-way branch. Each
+// interface below carries its own literal; the union has no named alias.
 
 interface BaseAttachment {
   readonly filename: string;        // Required after validation (generated if absent)
@@ -584,7 +582,7 @@ If the user explicitly provided attachments, proceeding without them produces in
 
 ```typescript
 // Error class hierarchy:
-export class AttachmentError extends Error { }
+class AttachmentError extends Error { }
 export class AttachmentResolutionError extends AttachmentError { }
 export class AttachmentBudgetExceededError extends AttachmentError { }
 
@@ -936,12 +934,12 @@ New `--attachment` flag (repeatable):
 
 ```bash
 # Local files (auto-detects inline vs presigned based on size)
-bgagent submit --repo org/app --description "Fix this bug" \
+bgagent submit --repo org/app --task "Fix this bug" \
   --attachment screenshot.png \
   --attachment error.log
 
 # URL reference
-bgagent submit --repo org/app --description "Implement this design" \
+bgagent submit --repo org/app --task "Implement this design" \
   --attachment https://figma.com/file/abc123/export.png
 ```
 
@@ -1584,7 +1582,7 @@ The implementation is ordered to deliver value incrementally while maintaining s
 
 1. Verify `@aws-sdk/client-bedrock-runtime` supports image content blocks in `ApplyGuardrail` (specifically `GuardrailImageBlock` with `format: 'png' | 'jpeg'`); upgrade if needed
 2. Create `AttachmentsBucket` construct (with versioning enabled, props interface)
-3. Extract `AttachmentType` shared type in `types.ts`; add `AttachmentDelivery` type
+3. Extract `AttachmentType` shared type in `types.ts` (the delivery mechanism needs no type of its own: each validated attachment interface carries its `delivery` literal)
 4. Add `ValidatedAttachment` discriminated union types (with `delivery` discriminant)
 5. Add `AttachmentRecord` with discriminated `ScreeningResult` union (non-empty `categories` tuple, `s3_version_id` field)
 6. Add `createAttachmentRecord` factory function (enforces cross-field invariants from day one)

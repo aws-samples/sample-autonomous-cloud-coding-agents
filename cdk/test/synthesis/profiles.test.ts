@@ -183,7 +183,7 @@ describe('structural synthesis profiles', () => {
     const app = new App({ autoSynth: false, postCliContext: STRUCTURAL_CONTEXT });
     const stack = new Stack(app, 'AssetFixture');
     const asset = new AssetStaging(stack, 'Source', { sourcePath: __dirname });
-    expect(asset.stagedPath).toBe(__dirname);
+    expect(asset.absoluteStagedPath).toBe(__dirname);
     expect(readdirSync(app.synth().directory).filter(name => name.startsWith('asset.'))).toEqual([]);
   });
 

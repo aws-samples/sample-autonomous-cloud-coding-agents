@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test --experimental-test-coverage --test-coverage-include='src/**' --import=./src/proxy.js --test-coverage-lines=85 --test-coverage-branches=76 --test-coverage-functions=81 test/proxy.test.js"
   },
   "dependencies": {
     "@forge/api": "8.0.2"

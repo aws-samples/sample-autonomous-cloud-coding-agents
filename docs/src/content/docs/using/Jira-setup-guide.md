@@ -1,8 +1,6 @@
 ---
-title: Jira setup guide
+title: "Jira integration setup guide"
 ---
-
-# Jira integration setup guide
 
 Set up the ABCA Jira Cloud integration so that adding a label to a Jira issue triggers an autonomous task. After ABCA opens a pull request, reviewers can comment `@bgagent <instruction>` on the same Jira issue to request another iteration. A dedicated Forge app named `bgagent` writes progress comments and workflow transitions, while the human who triggered the task remains its platform owner.
 
@@ -107,7 +105,7 @@ Comments are advisory and best-effort: network/auth failures are logged and swal
 > (`mcp.atlassian.com`) requires an interactive, browser-based OAuth 2.1 flow
 > and cannot connect from a headless agent. Forge provides the supported app
 > actor through `api.asApp().requestJira(...)`. See
-> [ADR-015](/sample-autonomous-cloud-coding-agents/architecture/adr-015-jira-integration).
+> [ADR-015](/sample-autonomous-cloud-coding-agents/decisions/adr-015-jira-integration).
 
 Inbound admission (webhook → task) is Jira-specific and has no DynamoDB Streams consumer of its own. Ordinary **terminal** status comments are delivered by the shared fan-out plane's DynamoDB Streams consumer (`dispatchToJira`). For comment-triggered iterations, fan-out matures standalone status comments while the orchestration reconciler matures child-iteration comments before restacking dependents.
 
@@ -362,18 +360,6 @@ When the comment author has linked their Jira and ABCA accounts, the iteration i
 The acknowledgement is immediate after task admission and its Jira comment ID is stored on the iteration task. Eligible long-running iterations edit that comment with elapsed time; they do not add heartbeat comments. When the iteration finishes, fan-out owns the terminal edit for a standalone iteration and the orchestration reconciler owns it for a child iteration so dependent restacking remains ordered. Both replace the same comment with the outcome, cost, turns, duration, task ID, and PR link when available.
 
 Comment redelivery is idempotent: the webhook receiver deduplicates by Jira comment ID, task creation uses a deterministic idempotency key as a second guard, and terminal writers claim the stored status comment before editing it. A heartbeat checks the terminal claim immediately before its cosmetic edit, preventing an overlapping sweep from replacing a completed outcome with a running message.
-
-## Authored subtask orchestration
-
-Applying the trigger label to a parent that already has Jira subtasks runs those subtasks as one orchestration instead of creating a separate coding task for the parent. Each subtask becomes an ordinary ABCA task. Standard Jira `blocks` / `is blocked by` links between those subtasks determine release order: roots start immediately, and blocked work starts only after all predecessors succeed.
-
-All executable subtasks must belong to active Jira project mappings that resolve to the same repository as the parent. Cross-project subtasks are supported when their mappings name that same repository; cross-repository graphs, unmapped projects, cycles, and blocker links to issues outside the parent's executable subtask set are rejected before any orchestration rows are written. Jira API or authentication failures are reported on the parent and never silently degrade to a single parent task.
-
-The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
-
-To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
-
-Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
 ## Authored subtask orchestration
 
