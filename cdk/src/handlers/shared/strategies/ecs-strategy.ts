@@ -68,7 +68,7 @@ const ECS_SUBNETS = process.env.ECS_SUBNETS;
  * (`arn:aws:ecs:…:task-definition/<family>:<rev>`) or a plain `<family>:<rev>` and
  * return just `<family>`; a value with no `/` and no `:` is returned unchanged.
  */
-export function toTaskDefinitionFamily(ref: string): string {
+function toTaskDefinitionFamily(ref: string): string {
   // Take the segment after `task-definition/` when it's a full ARN, else the whole
   // value; then strip a trailing `:<digits>` revision suffix.
   const afterSlash = ref.includes('task-definition/')
@@ -93,7 +93,7 @@ const INLINE_PAYLOAD_WARN_BYTES = 6144;
  * task-id prefix; deleted by the orchestrator at finalize (see
  * ``deleteEcsPayload``), with the bucket's 1-day lifecycle rule as a backstop.
  */
-export function ecsPayloadKey(taskId: string): string {
+function ecsPayloadKey(taskId: string): string {
   return `${taskId}/payload.json`;
 }
 
