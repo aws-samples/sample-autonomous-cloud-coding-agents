@@ -263,7 +263,7 @@ Returns full details of a task. Users can only access their own tasks.
 
 | Field | Type | Description |
 |---|---|---|
-| `category` | String | One of: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `unknown` |
+| `category` | String | One of: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `blocked`, `unknown` |
 | `title` | String | Human-readable error title |
 | `description` | String | Detailed explanation of what went wrong |
 | `remedy` | String | Suggested action to resolve the error |
@@ -273,13 +273,13 @@ Example for a failed task:
 
 ```json
 {
-  "error_message": "User concurrency limit reached",
+  "error_message": "Pre-flight check failed: REPO_NOT_FOUND_OR_NO_ACCESS — GitHub API returned HTTP 404 for acme/widgets",
   "error_classification": {
-    "category": "concurrency",
-    "title": "Concurrency limit reached",
-    "description": "The maximum number of concurrent tasks for this user has been reached.",
-    "remedy": "Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.",
-    "retryable": true
+    "category": "auth",
+    "title": "Repository not found or inaccessible",
+    "description": "The GitHub token cannot access the target repository. It may not exist or the token lacks visibility.",
+    "remedy": "Check that the repository name is correct and the configured PAT has access to it.",
+    "retryable": false
   }
 }
 ```

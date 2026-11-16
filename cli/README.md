@@ -423,14 +423,14 @@ bgagent admin reset-password <email> \
 For failed tasks, the error display is structured when a classification is available:
 
 ```
-Error:       [CONCURRENCY] Concurrency limit reached
-             The maximum number of concurrent tasks for this user has been reached.
-  Remedy:    Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.
-  Retryable: yes
-  Detail:    User concurrency limit reached
+Error:       [AUTH] Repository not found or inaccessible
+             The GitHub token cannot access the target repository. It may not exist or the token lacks visibility.
+  Remedy:    Check that the repository name is correct and the configured PAT has access to it.
+  Retryable: no
+  Detail:    Pre-flight check failed: REPO_NOT_FOUND_OR_NO_ACCESS — GitHub API returned HTTP 404 for acme/widgets
 ```
 
-The classifier covers 9 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, and `unknown`. When no classification is available, the raw error message is shown.
+The classifier covers 10 error categories: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `blocked`, and `unknown`. When no classification is available, the raw error message is shown.
 
 **JSON mode** (`--output json`) prints the raw API response as pretty-printed JSON, suitable for piping to `jq` or other tools.
 
