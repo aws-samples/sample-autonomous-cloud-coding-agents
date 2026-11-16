@@ -1,8 +1,6 @@
 ---
-title: Surface agnostic orchestration
+title: "Surface-agnostic sub-issue orchestration"
 ---
-
-# Surface-agnostic sub-issue orchestration
 
 **Status:** the Channel interface, its Linear + Jira + Slack adapters, the engine rewiring
 onto it, and the channel-neutral row shape are all implemented. Adapters are selected from a

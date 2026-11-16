@@ -40,6 +40,7 @@ import {
 import { LinearIdentityVault } from './linear-identity-vault';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;
@@ -134,6 +135,14 @@ export interface EcsAgentClusterProps {
    * grant, no env, and the agent stays on the Secrets-Manager path.
    */
   readonly linearIdentityVault?: LinearIdentityVault;
+
+  /**
+   * Secrets Manager name patterns of the channel OAuth bundles the agent may
+   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
+   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
+   */
+  readonly channelOauthSecretPatterns?: readonly string[];
 }
 
 /** HTTPS port — the only egress allowed from the agent task ENIs. */
@@ -496,8 +505,8 @@ export class EcsAgentCluster extends Construct {
       // comfortably safe on the 120 GB box even alongside the other packages +
       // agent. Kept as an explicit env (not core-relative) so a future bigger box
       // can't silently over-spawn. The test script reads JEST_MAX_WORKERS (default
-      // 25%), so this only pins the shared ECS box — CI (2–4 cores) and dev
-      // machines keep 25%, unaffected.
+      // 25%), so this only pins the shared ECS box: CI sets its own count in
+      // .github/workflows/build.yml and developer machines keep the 25% default.
       JEST_MAX_WORKERS: '4',
       // Serialize the mise task graph so the build steps' peak memory doesn't sum
       // and OOM the task. `mise run build` fans out its `depends` (the per-package
@@ -626,23 +635,18 @@ export class EcsAgentCluster extends Construct {
     // but the channel effect (no 👀→✅, no MCP) is invisible to the user.
     // GetSecretValue only — the container reads the token; the orchestrator owns
     // refresh/PutSecretValue.
-    taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        Stack.of(this).formatArn({
+    const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
+    if (channelOauthSecretPatterns.length > 0) {
+      taskRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: channelOauthSecretPatterns.map(resourceName => Stack.of(this).formatArn({
           service: 'secretsmanager',
           resource: 'secret',
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-        Stack.of(this).formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+          resourceName,
+        })),
+      }));
+    }
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-region inference-profile ARNs (parity with the AgentCore runtime

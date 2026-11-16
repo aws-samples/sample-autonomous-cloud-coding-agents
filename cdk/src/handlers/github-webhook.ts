@@ -64,6 +64,7 @@ const DEDUP_TTL_SECONDS = 60 * 60;
  * supplies those in its successful preview check's details_url and head_sha.
  * Both feed the same capture, persistence, and channel delivery pipeline.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (49 when it landed); must not grow
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
     if (!event.body) {

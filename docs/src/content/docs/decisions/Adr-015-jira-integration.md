@@ -1,8 +1,6 @@
 ---
-title: Adr 015 jira integration
+title: "ADR-015: Jira Cloud integration via label trigger, OAuth 3LO, and REST outbound"
 ---
-
-# ADR-015: Jira Cloud integration via label trigger, OAuth 3LO, and REST outbound
 
 **Status:** accepted
 **Date:** 2026-06-08

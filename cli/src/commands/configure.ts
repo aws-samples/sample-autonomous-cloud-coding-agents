@@ -66,6 +66,7 @@ export function makeConfigureCommand(): Command {
         providedFields = await fetchConfigureBundleFromStack(region, stackName);
         providedFields = {
           ...providedFields,
+          stack_name: stackName,
           ...(opts.region !== undefined ? { region: opts.region } : {}),
           ...(opts.apiUrl !== undefined ? { api_url: opts.apiUrl } : {}),
           ...(opts.registryApiUrl !== undefined ? { registry_api_url: opts.registryApiUrl } : {}),
@@ -82,8 +83,12 @@ export function makeConfigureCommand(): Command {
         };
       }
 
+      const { stack_name: previousStack, ...previous } = existing ?? ({} as Partial<CliConfig>);
       const merged: Partial<CliConfig> = {
-        ...(existing ?? {}),
+        ...previous,
+        // A hand-entered API URL may belong to any stack; only keep the name while the API is unchanged.
+        ...(previousStack && (providedFields.api_url === undefined || providedFields.api_url === existing?.api_url)
+          ? { stack_name: previousStack } : {}),
         ...providedFields,
       };
 

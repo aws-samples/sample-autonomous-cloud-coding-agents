@@ -22,7 +22,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { Construct } from 'constructs';
 import { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
 
-export { JIRA_ISSUE_INDEX_NAME, LINEAR_ISSUE_INDEX_NAME } from './task-table-indexes';
+export { JIRA_ISSUE_INDEX_NAME } from './task-table-indexes';
 
 /**
  * Properties for TaskTable construct.

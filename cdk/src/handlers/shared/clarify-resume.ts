@@ -37,7 +37,7 @@
  */
 
 /** The workflow a clarify-HOLD can only originate from (a brand-new task run). */
-export const NEW_TASK_WORKFLOW_ID = 'coding/new-task-v1';
+const NEW_TASK_WORKFLOW_ID = 'coding/new-task-v1';
 
 /**
  * The subset of a persisted TaskRecord needed to recognise a clarify-HOLD and

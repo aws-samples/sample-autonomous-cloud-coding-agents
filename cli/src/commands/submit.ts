@@ -98,6 +98,7 @@ export function makeSubmitCommand(): Command {
     )
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
+    // eslint-disable-next-line complexity -- predates the ceiling (70 when it landed); must not grow
     .action(async (opts) => {
       if (opts.pr !== undefined && isNaN(opts.pr)) {
         throw new CliError('--pr must be a valid number.');
