@@ -40,8 +40,9 @@ import { Construct } from 'constructs';
 // costs nothing and cannot drift.
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
-import { resolveBedrockModelIds } from './bedrock-models';
+import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import sharedConstants from '../../../contracts/constants.json';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
 
 /**
@@ -640,6 +641,14 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
    * @default {} — no baked configuration
    */
   readonly imageEnvironmentVariables?: Record<string, string>;
+
+  /**
+   * Secrets Manager name patterns of the channel OAuth bundles the agent may
+   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
+   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
+   */
+  readonly channelOauthSecretPatterns?: readonly string[];
 }
 
 /**
@@ -1169,35 +1178,31 @@ export class LambdaMicrovmCompute extends Construct {
     //
     // `GetSecretValue` ONLY — the agent reads; the orchestrator owns refresh /
     // PutSecretValue.
-    this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        stack.formatArn({
+    const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
+    if (channelOauthSecretPatterns.length > 0) {
+      this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: channelOauthSecretPatterns.map(resourceName => stack.formatArn({
           service: 'secretsmanager',
           resource: 'secret',
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-        stack.formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+          resourceName,
+        })),
+      }));
+    }
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-Region inference-profile ARNs (parity with the AgentCore runtime and
     // the ECS task role), NEVER `Resource: '*'`. The model set comes from the
-    // shared, context-overridable list (`constructs/bedrock-models.ts`) so no
-    // backend can drift from the others.
+    // shared, context-overridable list (`constructs/bedrock-models.ts`). Resolve
+    // the same geography as the agent's model IDs so grants and calls cannot drift.
     //
     // Required on the COMPUTE role even though the SessionRole carries a
     // session-tagged Bedrock grant for cost attribution (#215): that attribution
     // is designed to FAIL OPEN — Claude Code's credential helper falls back to
     // ambient compute-role credentials when the assume-role fails — so without
     // this grant the fallback path AccessDenies and the task dies at turn 0.
+    const bedrockGeoRegion = resolveBedrockGeoRegion(this.node);
     const bedrockResources: string[] = [];
     for (const modelId of resolveBedrockModelIds(this.node)) {
       bedrockResources.push(
@@ -1212,7 +1217,7 @@ export class LambdaMicrovmCompute extends Construct {
         stack.formatArn({
           service: 'bedrock',
           resource: 'inference-profile',
-          resourceName: `us.${modelId}`,
+          resourceName: inferenceProfileId(bedrockGeoRegion, modelId),
           arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
         }),
       );

@@ -1464,6 +1464,9 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
         context: {
           compute_types: 'lambda-microvm',
           microvm_region_override: true,
+          // eu-central-1 has no AWS Agent Registry; the deployment-profile
+          // check would otherwise reject the legacy default first (ADR-024).
+          enableAgentRegistry: false,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
         },
@@ -1474,7 +1477,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_types: 'lambda-microvm' } });
+      const app = new App({ context: { compute_types: 'lambda-microvm', enableAgentRegistry: false } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);

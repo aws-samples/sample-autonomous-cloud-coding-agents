@@ -118,6 +118,7 @@ describe('waitForTask', () => {
     // The message reports the ACTUAL failure count (6 = 5 retried + the
     // trip), not the retry budget — "after 5" while aborting on the 6th
     // read as an off-by-one against server logs.
+    // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/after 6 consecutive transient failures/);
     await flushPolls(12);
     await assertion;
@@ -140,6 +141,7 @@ describe('waitForTask', () => {
 
     // Tiny ceiling so the second poll observes elapsed >= maxWaitMs.
     const promise = waitForTask(client, 'task-1', { maxWaitMs: 1 });
+    // eslint-disable-next-line jest/valid-expect -- handler attached before the timers advance, awaited below
     const assertion = expect(promise).rejects.toThrow(/Timed out waiting/);
     await flushPolls(3);
     await assertion;

@@ -1,5 +1,5 @@
 ---
-title: Approval gates (Cedar HITL)
+title: "Approval gates (Cedar HITL)"
 ---
 
 The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.

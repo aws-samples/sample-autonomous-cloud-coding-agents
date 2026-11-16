@@ -769,9 +769,8 @@ def ensure_pr(
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
         return pr_url
-    else:
-        log("POST", "Failed to create PR")
-        return None
+    log("POST", "Failed to create PR")
+    return None
 
 
 def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
@@ -811,7 +810,7 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str 
         )
         if match:
             notes = match.group(1).strip()
-            return notes if notes else None
+            return notes or None
         return None
     except Exception as e:
         log("WARN", f"Failed to extract agent notes from PR body: {type(e).__name__}: {e}")

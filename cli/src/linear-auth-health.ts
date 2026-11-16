@@ -158,7 +158,7 @@ export type LinearRefreshVerifier = (workspace: {
 export type LinearProbe = (accessToken: string) => Promise<ProbeResult>;
 
 /** Default probe: a minimal authenticated GraphQL query. */
-export const probeLinearAccessToken: LinearProbe = async (accessToken) => {
+const probeLinearAccessToken: LinearProbe = async (accessToken) => {
   try {
     const response = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
       method: 'POST',

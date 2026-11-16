@@ -138,7 +138,7 @@ export async function adminCreateUser(
 }
 
 /** Set a permanent password (skips FORCE_CHANGE_PASSWORD on first login). */
-export async function adminSetPermanentPassword(
+async function adminSetPermanentPassword(
   client: CognitoIdentityProviderClient,
   userPoolId: string,
   emailOrUsername: string,

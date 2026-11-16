@@ -30,7 +30,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, override
 
 from shell import log
 
@@ -246,9 +246,11 @@ class _NullCheckpoint(WorkflowCheckpoint):
         self._path = Path(os.devnull)
         self._task_id = ""
 
+    @override
     def load(self) -> dict[str, StepOutcome]:
         return {}
 
+    @override
     def save(self, key: str, outcome: StepOutcome) -> None:
         return None
 

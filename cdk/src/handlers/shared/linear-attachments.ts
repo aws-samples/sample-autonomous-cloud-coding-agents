@@ -59,9 +59,9 @@ import { PutObjectCommand, DeleteObjectsCommand, type S3Client } from '@aws-sdk/
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type PassedAttachmentRecord } from './types';
 import { EXTENSION_TO_MIME, isAllowedMimeType, isValidFilename, validateMagicBytes, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, MAX_ATTACHMENTS_PER_TASK, SUPPORTED_ATTACHMENT_EXTENSIONS_LABEL } from './validation';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
 
 /** Per-request timeout for a single attachment download. */
 const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
@@ -505,7 +505,7 @@ export async function downloadScreenAndStoreLinearAttachments(
 
   try {
     for (const upload of selected) {
-      let outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
+      const outcome = await fetchUploadBytes(ctx.accessToken, upload.url);
 
       // uploads.linear.app auth failures are terminal here: the caller already
       // resolved a fresh workspace token (resolveLinearOauthToken refreshes

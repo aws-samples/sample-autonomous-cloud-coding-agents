@@ -28,7 +28,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install, build, and upload site
-        uses: withastro/action@e84f40bd8d2caa9e768ec82ad30dd81f0b280853 # v6.1.2
+        uses: withastro/action@a8b97df764791eb61fbf3338ef713b0e61ae05c5 # v6.1.4
         with:
           path: docs
           node-version: "22"
