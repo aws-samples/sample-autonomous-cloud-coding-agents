@@ -171,14 +171,17 @@ describe('concurrency seats against the AWS Emulator', () => {
   test.failing('the concurrency reconciler keeps the seat of a task awaiting approval', async () => {
     const user = newUser();
     const paused = await running(user);
-    // The Python agent is the only writer of this status. It sets `status` and
-    // leaves `status_created_at` alone, so this does the same.
+    // The Python agent is the only writer of this status; this writes the status
+    // attributes its approval-request transition writes.
     await ddb.send(new UpdateCommand({
       TableName: process.env.TASK_TABLE_NAME,
       Key: { task_id: paused },
-      UpdateExpression: 'SET #status = :awaiting',
+      UpdateExpression: 'SET #status = :awaiting, status_created_at = :sca',
       ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: { ':awaiting': TaskStatus.AWAITING_APPROVAL },
+      ExpressionAttributeValues: {
+        ':awaiting': TaskStatus.AWAITING_APPROVAL,
+        ':sca': `${TaskStatus.AWAITING_APPROVAL}#${new Date().toISOString()}`,
+      },
     }));
 
     await reconcileConcurrency();

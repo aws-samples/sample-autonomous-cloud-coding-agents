@@ -54,6 +54,8 @@ class TestApprovalRequest:
         task = _task(running_task)
         assert task["status"] == "AWAITING_APPROVAL"
         assert task["awaiting_approval_request_id"] == request_id
+        # The stranded-approval sweep ages the task from this timestamp.
+        assert task["status_created_at"].startswith("AWAITING_APPROVAL#")
 
     def test_cancelled_task_gets_no_approval_row(self, agent_env, running_task):
         agent_env.table(agent_env.task_table).put_item(
@@ -89,6 +91,7 @@ class TestResumeAndTimeout:
         task = _task(running_task)
         assert task["status"] == "RUNNING"
         assert "awaiting_approval_request_id" not in task
+        assert task["status_created_at"].startswith("RUNNING#")
 
     def test_resume_for_a_different_request_is_refused(self, running_task, pending_request):
         with pytest.raises(task_state.ApprovalResumeError):
