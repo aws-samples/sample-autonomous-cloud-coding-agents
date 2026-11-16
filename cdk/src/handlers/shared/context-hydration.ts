@@ -866,6 +866,38 @@ export function assembleUserPrompt(
   return parts.join('\n');
 }
 
+/** Group review comments exactly as they are rendered, keeping the first root per ID. */
+function groupReviewComments(comments: PullRequestReviewComment[]) {
+  // Group review comments into threads using in_reply_to_id
+  const rootComments = new Map<number, PullRequestReviewComment>();
+  const replies = new Map<number, PullRequestReviewComment[]>();
+
+  for (const c of comments) {
+    if (c.in_reply_to_id === undefined) {
+      // Top-level comment (thread root)
+      if (rootComments.has(c.id)) {
+        logger.warn('Duplicate root comment id detected — keeping first occurrence', {
+          comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
+        });
+        continue;
+      }
+      rootComments.set(c.id, c);
+      if (!replies.has(c.id)) {
+        replies.set(c.id, []);
+      }
+    } else {
+      // Reply to an existing thread
+      const rootId = c.in_reply_to_id;
+      if (!replies.has(rootId)) {
+        replies.set(rootId, []);
+      }
+      replies.get(rootId)!.push(c);
+    }
+  }
+
+  return { rootComments, replies };
+}
+
 /**
  * Assemble the user prompt for a PR iteration task.
  * @param taskId - the task ID.
@@ -892,32 +924,7 @@ export function assemblePrIterationPrompt(
   if (pr.review_comments.length > 0) {
     parts.push('\n### Review Comments\n');
 
-    // Group review comments into threads using in_reply_to_id
-    const rootComments = new Map<number, PullRequestReviewComment>();
-    const replies = new Map<number, PullRequestReviewComment[]>();
-
-    for (const c of pr.review_comments) {
-      if (c.in_reply_to_id === undefined) {
-        // Top-level comment (thread root)
-        if (rootComments.has(c.id)) {
-          logger.warn('Duplicate root comment id detected — keeping first occurrence', {
-            comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
-          });
-          continue;
-        }
-        rootComments.set(c.id, c);
-        if (!replies.has(c.id)) {
-          replies.set(c.id, []);
-        }
-      } else {
-        // Reply to an existing thread
-        const rootId = c.in_reply_to_id;
-        if (!replies.has(rootId)) {
-          replies.set(rootId, []);
-        }
-        replies.get(rootId)!.push(c);
-      }
-    }
+    const { rootComments, replies } = groupReviewComments(pr.review_comments);
 
     // Render threads rooted by known top-level comments
     for (const [rootId, root] of rootComments) {
@@ -986,7 +993,7 @@ export function assemblePrIterationPrompt(
 export function buildIssueScreeningText(issue: GitHubIssueContext): string {
   const parts: string[] = [sanitizeExternalContent(issue.title), sanitizeExternalContent(issue.body)];
   for (const c of issue.comments) {
-    parts.push(sanitizeExternalContent(c.body));
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
   }
   return parts.filter(p => p.length > 0).join('\n\n');
 }
@@ -994,20 +1001,33 @@ export function buildIssueScreeningText(issue: GitHubIssueContext): string {
 /**
  * Build the text screened by the guardrail for a PR task: the sanitized PR title, body,
  * review and conversation comments, plus the diff hunks and diff summary. Platform-authored
- * wrapper text (task header, branch lines, closing instructions) is excluded.
+ * wrapper text (task header, branch labels, closing instructions) is excluded.
+ * Branch names, rendered comment paths and authors remain screened.
  * @param pr - the GitHub PR context (after any token-budget trimming).
  * @returns the external PR content, joined.
  */
 export function buildPrScreeningText(pr: GitHubPullRequestContext): string {
-  const parts: string[] = [sanitizeExternalContent(pr.title), sanitizeExternalContent(pr.body)];
-  for (const c of pr.review_comments) {
-    parts.push(sanitizeExternalContent(c.body));
-    if (c.diff_hunk) {
-      parts.push(c.diff_hunk);
+  const parts: string[] = [
+    sanitizeExternalContent(pr.title), sanitizeExternalContent(pr.body), pr.base_ref, pr.head_ref,
+  ];
+  const { rootComments, replies } = groupReviewComments(pr.review_comments);
+  const appendComment = (c: PullRequestReviewComment, includeLocation: boolean): void => {
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
+    if (includeLocation) {
+      if (c.path) parts.push(c.path);
+      if (c.diff_hunk) parts.push(c.diff_hunk);
     }
+  };
+  for (const [rootId, root] of rootComments) {
+    appendComment(root, true);
+    for (const reply of replies.get(rootId) ?? []) appendComment(reply, false);
+  }
+  for (const [rootId, orphanReplies] of replies) {
+    if (rootComments.has(rootId)) continue;
+    for (const reply of orphanReplies) appendComment(reply, true);
   }
   for (const c of pr.issue_comments) {
-    parts.push(sanitizeExternalContent(c.body));
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
   }
   if (pr.diff_summary) {
     parts.push(pr.diff_summary);
