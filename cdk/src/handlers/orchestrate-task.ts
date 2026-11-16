@@ -148,6 +148,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         task.pr_number,
         workflowIsReadOnly(workflowId),
         workflowRequiresRepo(workflowId),
+        blueprintConfig.provider ?? 'github',
       );
       if (!result.passed) {
         const errorMessage = `Pre-flight check failed: ${result.failureReason}${result.failureDetail ? ' — ' + result.failureDetail : ''}`;

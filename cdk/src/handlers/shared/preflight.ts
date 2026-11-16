@@ -21,8 +21,10 @@
 // Tests: cdk/test/handlers/shared/preflight.test.ts
 
 import { resolveGitHubToken, MissingSecretError, SecretUnreadableError } from './context-hydration';
+import { getProviderOps } from './git-provider';
 import { logger } from './logger';
 import type { BlueprintConfig } from './repo-config';
+import type { GitProviderType } from './types';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -319,6 +321,86 @@ function pickPrimaryPreflightFailure(failedChecks: PreflightCheckResult[]): Pref
 }
 
 // ---------------------------------------------------------------------------
+// Provider-dispatched wrappers (delegate to GitProviderOps for non-GitHub)
+// ---------------------------------------------------------------------------
+
+async function checkProviderReachability(token: string, provider: GitProviderType): Promise<PreflightCheckResult> {
+  if (provider === 'github') return checkGitHubReachability(token);
+  const ops = getProviderOps(provider);
+  const start = Date.now();
+  const result = await ops.checkReachability(token);
+  const durationMs = Date.now() - start;
+  if (result.ok) {
+    return { check: 'git_provider_reachability', passed: true, durationMs };
+  }
+  return {
+    check: 'git_provider_reachability',
+    passed: false,
+    reason: PreflightFailureReason.GITHUB_UNREACHABLE,
+    detail: result.detail ?? `${provider} API returned HTTP ${result.status}`,
+    httpStatus: result.status,
+    durationMs,
+  };
+}
+
+async function checkProviderRepoAccess(repo: string, token: string, readOnly: boolean, provider: GitProviderType): Promise<PreflightCheckResult> {
+  if (provider === 'github') return checkRepoAccess(repo, token, readOnly);
+  const ops = getProviderOps(provider);
+  const start = Date.now();
+  const result = await ops.checkRepoAccess(repo, token);
+  const durationMs = Date.now() - start;
+  if (!result.ok) {
+    if (result.status === 404 || result.status === 403) {
+      return {
+        check: 'repo_access',
+        passed: false,
+        reason: PreflightFailureReason.REPO_NOT_FOUND_OR_NO_ACCESS,
+        detail: `${provider} API returned HTTP ${result.status} for ${repo}`,
+        httpStatus: result.status,
+        durationMs,
+      };
+    }
+    return {
+      check: 'repo_access',
+      passed: false,
+      reason: PreflightFailureReason.GITHUB_UNREACHABLE,
+      detail: result.detail ?? `${provider} API returned HTTP ${result.status} for ${repo}`,
+      httpStatus: result.status,
+      durationMs,
+    };
+  }
+  if (!readOnly && !result.pushAccess) {
+    return {
+      check: 'repo_access',
+      passed: false,
+      reason: PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS,
+      detail: `Token cannot push to ${repo} on ${provider}. Required: write access.`,
+      durationMs,
+    };
+  }
+  return { check: 'repo_access', passed: true, durationMs };
+}
+
+async function checkProviderPrAccessible(repo: string, prNumber: number, token: string, provider: GitProviderType): Promise<PreflightCheckResult> {
+  if (provider === 'github') return checkPrAccessible(repo, prNumber, token);
+  const ops = getProviderOps(provider);
+  const start = Date.now();
+  const result = await ops.checkPrAccessible(repo, prNumber, token);
+  const durationMs = Date.now() - start;
+  if (!result.ok) {
+    return {
+      check: 'pr_accessible',
+      passed: false,
+      reason: PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED,
+      detail: result.detail ?? `PR #${prNumber} in ${repo} is ${result.state ?? 'not accessible'} on ${provider}`,
+      httpStatus: result.status,
+      durationMs,
+    };
+  }
+  return { check: 'pr_accessible', passed: true, durationMs };
+}
+
+// ---------------------------------------------------------------------------
 // Main pre-flight check runner
 // ---------------------------------------------------------------------------
 
@@ -328,6 +410,7 @@ export async function runPreflightChecks(
   prNumber?: number,
   readOnly = false,
   requiresRepo = true,
+  provider: GitProviderType = 'github',
 ): Promise<PreflightResult> {
   const checks: PreflightCheckResult[] = [];
 
@@ -387,9 +470,9 @@ export async function runPreflightChecks(
     // Run reachability + repo access checks in parallel
 
     const results = await Promise.allSettled([
-      checkGitHubReachability(token),
-      checkRepoAccess(repo, token, readOnly),
-      ...(prNumber !== undefined ? [checkPrAccessible(repo, prNumber, token)] : []),
+      checkProviderReachability(token, provider),
+      checkProviderRepoAccess(repo, token, readOnly, provider),
+      ...(prNumber !== undefined ? [checkProviderPrAccessible(repo, prNumber, token, provider)] : []),
     ]);
 
     for (const result of results) {
