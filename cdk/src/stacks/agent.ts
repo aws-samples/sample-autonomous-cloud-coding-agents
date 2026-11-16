@@ -171,7 +171,7 @@ export interface AgentStackProps extends StackProps {
  * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
  * otherwise the vault is on exactly when AgentCore is (see the call site).
  */
-export function resolveLinearIdentityVault(context: unknown, agentCoreEnabled: boolean): boolean {
+function resolveLinearIdentityVault(context: unknown, agentCoreEnabled: boolean): boolean {
   if (context === true || context === 'true') return true;
   if (context === false || context === 'false') return false;
   if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
