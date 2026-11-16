@@ -42,8 +42,8 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { DeleteObjectsCommand, ListObjectVersionsCommand, S3Client } from '@aws-sdk/client-s3';
 import { ulid } from 'ulid';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../constructs/attachments-bucket';
 import { logger } from './shared/logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './shared/storage-names';
 import { makeClient } from './shared/ua';
 
 const ddb = makeClient(DynamoDBClient);

@@ -29,7 +29,7 @@ import type { ChildStatus } from '../../../src/handlers/shared/orchestration-sto
 const row = (
   sub_issue_id: string,
   child_status: ChildStatus,
-  depends_on: string[] = [],
+  depends_on: readonly string[] = [],
 ): ReconcileChild => ({ sub_issue_id, depends_on, child_status });
 
 /** Helper: map sub_issue_id → new status from a plan's updates. */
@@ -247,7 +247,7 @@ describe('computeRecoveryPlan — comment-fixing a failed child re-releases its 
     expect(u.B).toBe('blocked');
     expect(u.C).toBe('blocked');
     expect(u.D).toBe('blocked');
-    expect(plan.toRelease.sort()).toEqual(['B', 'C']);
+    expect([...plan.toRelease].sort()).toEqual(['B', 'C']);
   });
 
   test('chain: fixing the head releases only the immediate next node; deeper nodes reset to blocked', () => {
@@ -309,7 +309,7 @@ describe('computeEpicRetryPlan — re-triggering a terminal epic retries its fai
     expect(u['662']).toBe('blocked');
     expect(u.INTEG).toBe('blocked');
     // Only the two ready roots release now; the rest ride the forward cascade.
-    expect(plan.toRelease.sort()).toEqual(['660', '663']);
+    expect([...plan.toRelease].sort()).toEqual(['660', '663']);
   });
 
   test('a failed node BEHIND another failed node resets to blocked (waits for the cascade), not ready', () => {

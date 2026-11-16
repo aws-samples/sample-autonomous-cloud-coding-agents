@@ -39,7 +39,7 @@ def _clone_backoff_reporter(progress: Any, label: str):
 
     from hooks import _try_progress
 
-    def _on_retry(attempt: int, max_attempts: int, stderr: str) -> None:
+    def _on_retry(attempt: int, max_attempts: int, _stderr: str) -> None:
         _try_progress(
             progress,
             "write_agent_blocked",
@@ -185,7 +185,7 @@ def _assert_clone_root(repo_dir: str) -> None:
         )
 
 
-def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:
+def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: C901 -- 28 when the ceiling of 15 was set; must not grow
     """Clone repo, create branch, configure git auth, run mise install.
 
     Returns a RepoSetup with repo_dir, branch, notes, build_before,
@@ -692,7 +692,7 @@ def _install_commit_hook(repo_dir: str) -> None:
         shutil.copy2(hook_src, hook_dst)
         current = os.stat(hook_dst).st_mode
         exec_bits = stat.S_IXUSR | stat.S_IXGRP
-        os.chmod(hook_dst, current | exec_bits)  # nosemgrep
+        os.chmod(hook_dst, current | exec_bits)
         log("SETUP", "Installed prepare-commit-msg hook")
     except Exception as e:
         log("WARN", f"Commit hook install failed: {type(e).__name__}: {e}")

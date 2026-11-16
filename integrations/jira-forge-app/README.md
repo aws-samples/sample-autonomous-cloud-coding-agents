@@ -81,3 +81,17 @@ flags, and troubleshooting.
 ```bash
 npm test
 ```
+
+The script names its test file and sets coverage floors for `src/proxy.js`
+(lines 85 %, branches 76 %, functions 81 %). Left to find tests on its own,
+`node --test` exits 0 when it finds none; with the file named and the floors
+set, a missing or emptied test file fails. A new test file does not run until
+it is added to the `test` script in `package.json`. That script is pinned in
+`contracts/coverage-thresholds.json`: change both.
+
+Node measures only the modules that a run loads, and the script loads
+`src/proxy.js` alone (`--import=./src/proxy.js`). `src/index.js`, which hands
+the proxy to Forge, is not measured. A module added to `src/` is not measured
+either until the script loads it with an `--import` of its own. A
+`node:coverage` comment would take code out of the measurement as well, so
+`mise run check:coverage-thresholds-sync` fails on one in `src/`.

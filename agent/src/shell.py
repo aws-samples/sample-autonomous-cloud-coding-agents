@@ -124,15 +124,16 @@ def redact_secrets(text: str) -> str:
     # GitHub and generic token-like values.
     text = re.sub(r"(ghp_|github_pat_|gho_|ghs_|ghr_)[A-Za-z0-9_]+", r"\1***", text)
     text = re.sub(r"(x-access-token:)[^\s@]+", r"\1***", text)
-    text = re.sub(r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.I)
+    text = re.sub(
+        r"(authorization:\s*(?:bearer|token)\s+)[^\s]+", r"\1***", text, flags=re.IGNORECASE
+    )
     text = re.sub(
         r"([?&](?:token|access_token|api_key|apikey|password)=)[^&\s]+",
         r"\1***",
         text,
-        flags=re.I,
+        flags=re.IGNORECASE,
     )
-    text = re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
-    return text
+    return re.sub(r"(gh[opusr]_[A-Za-z0-9_]+)", "***", text)
 
 
 def _clean_env() -> dict[str, str]:
@@ -269,7 +270,7 @@ def _exit_status(returncode: int | None) -> int:
 
 
 def _run_cmd_streaming(
-    cmd: list[str], label: str, cwd: str | None, timeout: int
+    cmd: list[str], cwd: str | None, timeout: int
 ) -> subprocess.CompletedProcess:
     """Run *cmd* streaming BOTH pipes live to the log while capturing them.
 
@@ -352,7 +353,7 @@ def run_cmd(
     """
     log("CMD", redact_secrets(f"{label}: {' '.join(cmd)}"))
     if stream:
-        result = _run_cmd_streaming(cmd, label, cwd, timeout)
+        result = _run_cmd_streaming(cmd, cwd, timeout)
     else:
         result = subprocess.run(
             cmd,

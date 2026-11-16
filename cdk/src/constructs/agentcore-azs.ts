@@ -331,7 +331,7 @@ export function selectSupportedAzNames(region: string, zones: readonly Availabil
  * Note on packaging: this and `@aws-sdk/client-sts` are declared in
  * `dependencies`, not `devDependencies`, even though they are only used at synth
  * time. `import-x/no-extraneous-dependencies` only permits devDependencies under
- * `test/` and `build-tools/`, and this module lives in `src/`; moving them would
+ * `test/` and `scripts/`, and this module lives in `src/`; moving them would
  * mean widening that allowlist for a file that is genuinely part of the app.
  */
 async function defaultDescribeAzs(region: string): Promise<AvailabilityZoneInfo[]> {
