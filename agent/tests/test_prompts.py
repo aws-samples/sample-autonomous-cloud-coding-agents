@@ -4,8 +4,13 @@ from typing import Any
 
 import pytest
 
-from models import TaskConfig
-from prompt_builder import _channel_prompt_addendum, sanitize_memory_content
+from models import HydratedContext, MemoryContext, RepoSetup, TaskConfig
+from prompt_builder import (
+    _channel_prompt_addendum,
+    _render_memory_context,
+    build_system_prompt,
+    sanitize_memory_content,
+)
 from prompts import get_system_prompt
 from sanitization import sanitize_external_content
 
@@ -209,6 +214,35 @@ class TestGetSystemPrompt:
         assert get_system_prompt("knowledge/not-registered-yet-v1") == get_system_prompt(
             "coding/new-task-v1"
         )
+
+
+class TestMemoryContextRendering:
+    """One heading per kind of memory, one ``- `` line per record, in the order given."""
+
+    _MEMORY = HydratedContext(
+        user_prompt="p",
+        memory_context=MemoryContext(
+            repo_knowledge=["Uses TypeScript", "Tests run with Jest"],
+            past_episodes=["Task t0 completed", "Task t1 failed"],
+        ),
+    )
+    _RECORDS = (
+        "- Uses TypeScript\n- Tests run with Jest\n"
+        "\n**Past task episodes:**\n- Task t0 completed\n- Task t1 failed"
+    )
+
+    def test_repo_less_prompt_block(self):
+        assert _render_memory_context(self._MEMORY) == f"**Prior knowledge:**\n{self._RECORDS}"
+
+    def test_repo_less_prompt_block_without_memory(self):
+        empty = HydratedContext(user_prompt="p", memory_context=MemoryContext())
+        assert _render_memory_context(empty) == "(No previous knowledge available.)"
+        assert _render_memory_context(None) == "(No previous knowledge available.)"
+
+    def test_repo_bound_prompt_block(self):
+        setup = RepoSetup(repo_dir="/workspace/t1", branch="b", default_branch="main", notes=[])
+        prompt = build_system_prompt(_config(task_id="t1"), setup, self._MEMORY, "")
+        assert f"**Repository knowledge:**\n{self._RECORDS}" in prompt
 
 
 class TestSanitizeMemoryContent:

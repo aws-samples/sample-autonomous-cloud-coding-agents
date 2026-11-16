@@ -1,8 +1,6 @@
 ---
-title: Adr 008 definition of done
+title: "ADR-008: Definition of Done (progressive maturity)"
 ---
-
-# ADR-008: Definition of Done (progressive maturity)
 
 **Status:** proposed
 **Date:** 2026-05-19

@@ -1,5 +1,5 @@
 ---
-title: Tips for being a good citizen
+title: "Tips for being a good citizen"
 ---
 
 The platform is a shared resource - compute, model tokens, and GitHub API calls cost money and consume quotas. These practices help you get better results while keeping the platform healthy for everyone.

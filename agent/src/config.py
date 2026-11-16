@@ -174,7 +174,7 @@ def _resolve_linear_token_via_vault(
             "WARN",
             "_resolve_linear_token_via_vault: consent required (no cached grant); SM fallback",
         )
-        # nosemgrep: py-silent-success-masking -- vault needs consent; SM fallback follows
+        # vault needs consent; SM fallback follows
         return ""
     except (ClientError, BotoCoreError) as e:
         log(
@@ -185,7 +185,7 @@ def _resolve_linear_token_via_vault(
         return ""
 
 
-def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 34 when the ceiling of 15 was set; must not grow
     """Resolve the Linear OAuth access token from Secrets Manager.
 
     Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
@@ -285,7 +285,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
         except ValueError:
             # Malformed timestamp: treat as expiring so the refresh path runs.
             # Log so a bad write earlier in the chain doesn't silently trigger
@@ -496,7 +496,7 @@ def clear_jira_task_credentials() -> None:
         os.environ.pop(name, None)
 
 
-def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 21 when the ceiling of 15 was set; must not grow
     """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
@@ -581,7 +581,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
         except ValueError:
             log(
                 "WARN",

@@ -25,7 +25,7 @@ import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 /** Lifecycle expiry for screenshot artifacts. */
-export const SCREENSHOT_TTL_DAYS = 30;
+const SCREENSHOT_TTL_DAYS = 30;
 
 /**
  * Properties for ScreenshotBucket construct.

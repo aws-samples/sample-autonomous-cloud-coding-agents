@@ -714,6 +714,7 @@ async function runGrantHealthProbe(): Promise<void> {
   }
 }
 
+// eslint-disable-next-line complexity -- predates the ceiling (120 when it landed); must not grow
 export async function handler(event: ProcessorEvent | typeof GRANT_HEALTH_PROBE_EVENT): Promise<void> {
   if (isGrantHealthProbe(event)) {
     await runGrantHealthProbe();
