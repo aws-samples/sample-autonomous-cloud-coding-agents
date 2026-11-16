@@ -155,7 +155,8 @@ export interface TaskApiProps {
   /**
    * Maximum concurrent tasks per user (#441). Threaded to the get-task
    * handler so the queue-wait ETA heuristic agrees with the
-   * orchestrator's admission cap. Must match
+   * orchestrator's admission cap, and to the confirm-uploads handler,
+   * which admits against it. Must match
    * ``TaskOrchestrator.maxConcurrentTasksPerUser``.
    * @default 10
    */
@@ -566,6 +567,10 @@ export class TaskApi extends Construct {
       timeout: Duration.seconds(API_HANDLER_TIMEOUT_SECONDS),
     });
 
+    // The per-user cap for the handlers here that read it. It has to match the
+    // orchestrator's (see the prop).
+    const maxConcurrentTasksPerUser = String(props.maxConcurrentTasksPerUser ?? 10);
+
     const getTaskFn = new lambda.NodejsFunction(this, 'GetTaskFn', {
       entry: path.join(handlersDir, 'get-task.ts'),
       handler: 'handler',
@@ -575,7 +580,7 @@ export class TaskApi extends Construct {
         ...commonEnv,
         // #441: queue-position ETA heuristic must agree with the
         // orchestrator's per-user admission cap.
-        MAX_CONCURRENT_TASKS_PER_USER: String(props.maxConcurrentTasksPerUser ?? 10),
+        MAX_CONCURRENT_TASKS_PER_USER: maxConcurrentTasksPerUser,
       },
       bundling: commonBundling,
     });
@@ -756,6 +761,8 @@ export class TaskApi extends Construct {
       const confirmUploadsEnv: Record<string, string> = { ...commonEnv };
       confirmUploadsEnv.ATTACHMENTS_BUCKET_NAME = props.attachmentsBucket.bucketName;
       confirmUploadsEnv.USER_CONCURRENCY_TABLE_NAME = props.userConcurrencyTable.tableName;
+      // Without it the handler admits against its own fallback of 3.
+      confirmUploadsEnv.MAX_CONCURRENT_TASKS_PER_USER = maxConcurrentTasksPerUser;
       if (props.orchestratorFunctionArn) {
         confirmUploadsEnv.ORCHESTRATOR_FUNCTION_ARN = props.orchestratorFunctionArn;
       }
