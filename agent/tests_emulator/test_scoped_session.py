@@ -32,7 +32,7 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 import task_state
-from aws_session import configure_session, is_scoped, tenant_client
+from aws_session import SessionScopingError, configure_session, is_scoped, tenant_client
 from progress_writer import _generate_ulid, _ProgressWriter
 from telemetry import upload_trace_to_s3
 
@@ -215,15 +215,21 @@ class TestSessionRoleThatCannotBeAssumed:
         configure_session(user_id=user_id, repo="owner/repo", task_id=task_id)
         return agent_env
 
-    def test_tenant_data_calls_fail_instead_of_using_ambient_credentials(
+    def test_scoping_fails_closed_and_nothing_reaches_tenant_data(
         self, unassumable, task_id, user_id
     ):
-        with pytest.raises(ClientError) as raised:
-            tenant_client("sts").get_caller_identity()
+        # What pipeline.run_task calls first, before any work starts.
+        with pytest.raises(SessionScopingError) as raised:
+            is_scoped()
+        # Every later tenant-data call is refused the same way; none runs unscoped.
+        with pytest.raises(SessionScopingError):
+            tenant_client("sts")
         uri = upload_trace_to_s3(task_id=task_id, user_id=user_id, body=b"\x1f\x8b trace")
 
-        assert raised.value.operation_name == "AssumeRole"
-        assert raised.value.response["Error"]["Code"] == "AccessDenied"
+        cause = raised.value.__cause__
+        assert isinstance(cause, ClientError)
+        assert cause.operation_name == "AssumeRole"
+        assert cause.response["Error"]["Code"] == "AccessDenied"
         assert uri is None
         listing = unassumable.client("s3").list_objects_v2(
             Bucket=unassumable.trace_bucket, Prefix=f"traces/{user_id}/"
