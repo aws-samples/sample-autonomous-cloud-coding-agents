@@ -20,7 +20,7 @@ dependencies = [
     "requests==2.34.2", #https://pypi.org/project/requests/
     "fastapi==0.139.0", #https://pypi.org/project/fastapi/
     "uvicorn==0.50.0", #https://pypi.org/project/uvicorn/
-    "aws-opentelemetry-distro==0.18.0", #https://pypi.org/project/aws-opentelemetry-distro/
+    "aws-opentelemetry-distro==0.22.0", #https://pypi.org/project/aws-opentelemetry-distro/ (0.22.0 clears GHSA-xcq7-p3pf-p88h and GHSA-f5m9-jfrj-jjj7)
     "mcp==1.30.0", #https://pypi.org/project/mcp/ (1.30.0 clears GHSA-84m7-p3x7-pcfv)
     # CEDAR ENGINE PARITY — DO NOT BUMP IN ISOLATION.
     # cedarpy (Python, agent runtime) and @cedar-policy/cedar-wasm (TypeScript,
