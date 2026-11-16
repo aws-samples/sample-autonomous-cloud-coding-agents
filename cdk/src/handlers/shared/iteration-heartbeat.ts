@@ -44,7 +44,7 @@ import { renderMaturingReply } from './iteration-reply';
  * fight the trigger-time ack / pr_created edit. Matches the renderer's own
  * elapsed floor so the suffix is meaningful when we do edit.
  */
-export const HEARTBEAT_MIN_ELAPSED_S = 90;
+const HEARTBEAT_MIN_ELAPSED_S = 90;
 
 /** The fields the sweep reads off a RUNNING task's record (already DDB-unmarshalled). */
 export interface HeartbeatTaskView {

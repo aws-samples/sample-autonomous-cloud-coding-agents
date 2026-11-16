@@ -93,6 +93,11 @@ export function loadCredentials(): Credentials | null {
   }
 }
 
+/** Remove cached credentials, e.g. when the CLI is re-pointed at another stack's user pool. */
+export function clearCredentials(): void {
+  fs.rmSync(credentialsPath(), { force: true });
+}
+
 /** Save credentials with restricted permissions. */
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();

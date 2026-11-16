@@ -32,6 +32,7 @@ const LOOKUP_PAGE_SIZE = 25;
 const MAX_CANDIDATE_READS = 25;
 
 /** Best-effort Jira delivery, routed exclusively by the authoritative task. */
+// eslint-disable-next-line complexity -- predates the ceiling (52 when it landed); must not grow
 export async function deliverJiraDeploymentPreview(
   ddb: DynamoDBDocumentClient,
   tableName: string,

@@ -1,8 +1,6 @@
 ---
-title: Adr 007 knowledge acquisition
+title: "ADR-007: Knowledge acquisition through progressive failure"
 ---
-
-# ADR-007: Knowledge acquisition through progressive failure
 
 **Status:** proposed
 **Date:** 2026-05-19

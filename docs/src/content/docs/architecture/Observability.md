@@ -1,8 +1,6 @@
 ---
-title: Observability
+title: "Observability"
 ---
-
-# Observability
 
 For a system where agents run for hours and burn tokens autonomously, observability is load-bearing infrastructure. The platform captures task lifecycle, agent reasoning, tool use, and outcomes so operators can monitor health, debug failures, and improve agent performance over time.
 

@@ -1,8 +1,6 @@
 ---
-title: Adr 018 linear agent session interaction
+title: "ADR-018: Linear agent-session as a future interaction channel"
 ---
-
-# ADR-018: Linear agent-session as a future interaction channel
 
 **Status:** proposed
 **Date:** 2026-06-17

@@ -233,7 +233,7 @@ async function resolveTeamIds(userId: string): Promise<string[]> {
         error_name: name,
         metric_type: 'budget_team_membership_user_missing',
       });
-      return []; // nosemgrep: ts-silent-success-masking -- user budgets remain enforced; an alarm pages on skipped team enforcement
+      return []; // user budgets remain enforced; an alarm pages on skipped team enforcement
     }
     logger.error('Failed to resolve budget team membership', {
       user_id: userId,
