@@ -526,4 +526,3 @@ export function describePreservedFallback(
   }
   return { usable: true, message: '✓ Kept the existing Secrets Manager token as a fallback' };
 }
-

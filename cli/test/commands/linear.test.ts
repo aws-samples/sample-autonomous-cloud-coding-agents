@@ -842,4 +842,3 @@ describe('promptChoice', () => {
     expect(ask).toHaveBeenCalledTimes(3);
   });
 });
-
