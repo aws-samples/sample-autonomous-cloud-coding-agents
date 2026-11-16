@@ -116,11 +116,15 @@ describe('reconcile-stranded-tasks', () => {
     expect(transitionCall).toBeDefined();
     const input = transitionCall![0].input as {
       Key: { task_id: { S: string } };
-      ExpressionAttributeValues: Record<string, { S?: string }>;
+      UpdateExpression: string;
+      ExpressionAttributeValues: Record<string, { S?: string; N?: string }>;
     };
     expect(input.Key.task_id.S).toBe('t-stranded');
     expect(input.ExpressionAttributeValues[':failed'].S).toBe('FAILED');
     expect(input.ExpressionAttributeValues[':expected'].S).toBe('SUBMITTED');
+    // No orchestrator may be left to finalize this task, so the sweep stamps the retention ttl (90 days here).
+    expect(input.UpdateExpression).toContain('#ttl = :ttl');
+    expect(Number(input.ExpressionAttributeValues[':ttl'].N)).toBeGreaterThan(Date.now() / 1000 + 89 * 86400);
 
     // Events written.
     const putCalls = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
@@ -131,6 +135,8 @@ describe('reconcile-stranded-tasks', () => {
       return item.event_type.S;
     });
     expect(eventTypes).toEqual(expect.arrayContaining(['task_stranded', 'task_failed']));
+    // The task row expires with its events.
+    expect(input.ExpressionAttributeValues[':ttl'].N).toBe((putCalls[0][0].input as { Item: { ttl: { N: string } } }).Item.ttl.N);
 
     // Concurrency decrement.
     const decrementCall = (mockDdbSend.mock.calls as [{ _type: string; input: Record<string, unknown> }][])
