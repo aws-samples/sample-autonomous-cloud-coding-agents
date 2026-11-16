@@ -338,7 +338,7 @@ Each task runs in its own isolated compute session with no shared mutable state 
 |---|---|---|
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
-| Per-user concurrency | Configurable (default 3-5) | Platform config |
+| Per-user concurrency | Configurable (default 10) | Platform config |
 | System-wide max tasks | Configurable | Bounded by selected-backend quotas |
 
 ### Counter management

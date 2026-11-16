@@ -304,7 +304,7 @@ bgagent runtime status \
 
 ### `bgagent ops stuck-tasks`
 
-List tasks in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` older than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID.
+List tasks that have been in `SUBMITTED`, `HYDRATING`, or `AWAITING_APPROVAL` longer than the stranded-task reconciler thresholds (defaults: 1200s / 7200s). Text output includes Cognito email plus username UUID. `AGE(s)` / `age_seconds` is the time in the current status; rows are listed oldest-created first.
 
 ```
 bgagent ops stuck-tasks \
@@ -319,7 +319,7 @@ Compare `UserConcurrencyTable` counters with live active task counts per user. R
 
 ```
 bgagent ops concurrency \
-  --limit <n>                 Per-user limit (default: 3) \
+  --limit <n>                 Per-user limit (default: 10) \
   --output <text|json>
 ```
 

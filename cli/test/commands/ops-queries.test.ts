@@ -17,9 +17,16 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { QueryCommand } from '@aws-sdk/client-dynamodb';
 import { QueryCommand as DocQueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { findStuckTasks, buildConcurrencyReport, countActiveTasksForUser } from '../../src/ops-queries';
+import {
+  findStuckTasks,
+  buildConcurrencyReport,
+  countActiveTasksForUser,
+  DEFAULT_MAX_CONCURRENT_TASKS_PER_USER,
+} from '../../src/ops-queries';
 
 const lowLevelSend = jest.fn();
 const docSend = jest.fn();
@@ -49,7 +56,8 @@ describe('ops-queries', () => {
   });
 
   test('findStuckTasks parses each status query into a distinct, status-tagged row', async () => {
-    const oldCreated = new Date(Date.now() - 3600_000).toISOString();
+    // Older than both thresholds, as rows the index query returns always are.
+    const oldCreated = new Date(Date.now() - 3 * 3600_000).toISOString();
     // One distinct task per status query (Promise.all fires three queries).
     lowLevelSend
       .mockResolvedValueOnce({
@@ -122,6 +130,84 @@ describe('ops-queries', () => {
 
     const tasks = await findStuckTasks('us-east-1', 'TaskTable');
     expect(tasks[0]?.repo).toBeUndefined();
+  });
+
+  test('findStuckTasks ages a task by the time it entered its status, not by its creation', async () => {
+    const ago = (seconds: number) => new Date(Date.now() - seconds * 1000).toISOString();
+    lowLevelSend
+      // SUBMITTED: waited in the admission queue for three hours, picked up a minute ago.
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'picked-up-just-now' },
+          user_id: { S: 'user-1' },
+          created_at: { S: ago(3 * 3600) },
+          status_created_at: { S: `SUBMITTED#${ago(60)}` },
+        }],
+      })
+      .mockResolvedValueOnce({ Items: [] })
+      // AWAITING_APPROVAL: all created long ago; two paused ten minutes ago, one three hours ago.
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'paused-just-now' },
+          user_id: { S: 'user-1' },
+          created_at: { S: ago(5 * 3600) },
+          status_created_at: { S: `AWAITING_APPROVAL#${ago(600)}` },
+        }, {
+          // A row that still carries the entry time of an earlier status is aged
+          // from that time all the same, as the reconciler ages it.
+          task_id: { S: 'paused-just-now-earlier-entry' },
+          user_id: { S: 'user-1' },
+          created_at: { S: ago(5 * 3600) },
+          status_created_at: { S: `RUNNING#${ago(600)}` },
+        }, {
+          task_id: { S: 'paused-too-long' },
+          user_id: { S: 'user-1' },
+          created_at: { S: ago(5 * 3600) },
+          status_created_at: { S: `AWAITING_APPROVAL#${ago(3 * 3600)}` },
+        }],
+      });
+
+    const tasks = await findStuckTasks('us-east-1', 'TaskTable');
+
+    expect(tasks.map((t) => t.task_id)).toEqual(['paused-too-long']);
+    expect(tasks[0].age_seconds).toBeGreaterThanOrEqual(3 * 3600);
+    expect(tasks[0].age_seconds).toBeLessThan(3 * 3600 + 60);
+  });
+
+  test('findStuckTasks falls back to created_at when status_created_at is missing or unreadable', async () => {
+    const created = new Date(Date.now() - 3 * 3600_000).toISOString();
+    lowLevelSend
+      .mockResolvedValueOnce({
+        Items: [{ task_id: { S: 'no-status-time' }, user_id: { S: 'user-1' }, created_at: { S: created } }],
+      })
+      .mockResolvedValueOnce({
+        Items: [{
+          task_id: { S: 'bad-status-time' },
+          user_id: { S: 'user-1' },
+          created_at: { S: created },
+          status_created_at: { S: 'HYDRATING#not-a-date' },
+        }],
+      })
+      .mockResolvedValueOnce({ Items: [] });
+
+    const tasks = await findStuckTasks('us-east-1', 'TaskTable');
+
+    expect(tasks.map((t) => t.task_id).sort()).toEqual(['bad-status-time', 'no-status-time']);
+    for (const task of tasks) {
+      expect(task.age_seconds).toBeGreaterThanOrEqual(3 * 3600);
+    }
+  });
+
+  // The stack does not publish its cap, so the CLI carries a copy. Read as text:
+  // the CLI must not import the CDK package (same technique as model-id.test.ts).
+  test('the default per-user limit is the cap the stack deploys', () => {
+    const stack = fs.readFileSync(
+      path.join(__dirname, '..', '..', '..', 'cdk', 'src', 'stacks', 'agent.ts'),
+      'utf-8',
+    );
+    const deployed = /const maxConcurrentTasksPerUser = (\d+);/.exec(stack)?.[1];
+    expect(deployed).toBeDefined();
+    expect(DEFAULT_MAX_CONCURRENT_TASKS_PER_USER).toBe(Number(deployed));
   });
 
   test('countActiveTasksForUser paginates UserStatusIndex', async () => {

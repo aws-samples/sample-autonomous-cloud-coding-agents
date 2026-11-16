@@ -1065,6 +1065,9 @@ flowchart LR
     H --> X
     S --> F
     S --> X
+    S <--> Q[QUEUED]
+    Q --> F
+    Q --> X
 ```
 
 The orchestrator uses Lambda Durable Functions to manage the lifecycle durably - long-running tasks (up to 9 hours) survive transient failures and Lambda timeouts. The agent commits work regularly, so partial progress is never lost.
@@ -1073,12 +1076,13 @@ The orchestrator uses Lambda Durable Functions to manage the lifecycle durably -
 |---|---|
 | `PENDING_UPLOADS` | Initial state while presigned attachment uploads are pending confirmation |
 | `SUBMITTED` | Task accepted; orchestrator invoked asynchronously |
+| `QUEUED` | You are at your concurrency limit; the task waits for a free slot and starts automatically. See [Concurrency limits](#concurrency-limits). |
 | `HYDRATING` | Orchestrator passed admission control; assembling the agent payload |
 | `RUNNING` | Agent session started and actively working on the task |
 | `AWAITING_APPROVAL` | Agent paused at a Cedar HITL gate; waiting for your `approve` or `deny` decision. See [Approval gates](#approval-gates-cedar-hitl). |
 | `FINALIZING` | Agent session ended; task is wrapping up (post-session hooks / PR finalization) before reaching a terminal state |
 | `COMPLETED` | Agent finished and created a PR (or determined no changes were needed) |
-| `FAILED` | Something went wrong - pre-flight check failed, concurrency limit reached, guardrail blocked the content, or the agent encountered an error |
+| `FAILED` | Something went wrong - pre-flight check failed, guardrail blocked the content, the task stayed queued for more than 24 hours, or the agent encountered an error |
 | `CANCELLED` | Task was cancelled by the user |
 | `TIMED_OUT` | Task exceeded the maximum allowed duration (~8 hours, the AgentCore max session duration; the orchestrator safety-net timer is slightly longer) |
 
@@ -1088,7 +1092,7 @@ Task records in terminal states are automatically deleted after 90 days (configu
 
 ### Concurrency limits
 
-Each user can run up to 3 tasks concurrently by default (configurable via `maxConcurrentTasksPerUser` on the `TaskOrchestrator` CDK construct). If you exceed the limit, the task fails with a concurrency message. Wait for an active task to complete, or cancel one, then retry.
+Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with a file attachment over 500 KB is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
 
 There is no system-wide cap - the theoretical maximum is `number_of_users * per_user_limit`. The hard ceiling is the AgentCore concurrent sessions quota for your AWS account (check the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/) for Bedrock AgentCore in your region).
 
@@ -1103,7 +1107,7 @@ curl "$API_URL/tasks/<TASK_ID>/events" -H "Authorization: $TOKEN"
 Available events:
 
 - **Lifecycle** - `task_created`, `session_started`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
-- **Orchestration** - `admission_rejected`, `hydration_started`, `hydration_complete`
+- **Orchestration** - `admission_queued`, `queue_pickup`, `hydration_started`, `hydration_complete`
 - **Checks** - `preflight_failed`, `guardrail_blocked`
 - **Interactive** - `nudge_acknowledged`, `agent_milestone`
 - **Approvals (Cedar HITL)** - `approval_requested`, `approval_recorded`, `approval_timed_out`
@@ -1211,4 +1215,4 @@ Every task consumes model tokens, compute time, and GitHub API calls. Setting li
 
 - **Content screening** - Task descriptions and PR context are screened by Bedrock Guardrails for prompt injection. If your task is unexpectedly blocked, check the task events for a `guardrail_blocked` entry and revise your description.
 - **Idempotency** - If you're creating tasks via the API and might retry on network errors, include an `Idempotency-Key` header to prevent duplicate tasks.
-- **Concurrency** - You share a per-user concurrency limit (default: 3 tasks). If you hit the limit, wait for a task to finish or cancel one you no longer need before submitting more.
+- **Concurrency** - You share a per-user concurrency limit (default: 10 tasks). If you hit the limit, new tasks are queued and start as active ones finish; cancel one you no longer need to free a slot.

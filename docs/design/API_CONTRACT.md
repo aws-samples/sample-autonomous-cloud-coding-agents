@@ -356,7 +356,7 @@ Returns the audit trail for a task: state transitions, hydration events, session
 
 **Query parameters:** `limit` (default 50, max 100), `next_token`.
 
-**Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
+**Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_queued`, `queue_pickup`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
 
 **Correlation envelope (#245):** each event optionally carries top-level `user_id`, `repo`, and `trace_id` (the agent's OTEL trace id) so the event stream joins to structured logs and X-Ray. Each field is present only when the event's source stamped it — `task_created` predates the envelope and carries none; events from `hydration_started` onward carry `user_id`/`repo`, and agent-emitted events additionally carry `trace_id`. Fields are omitted (not `null`) when absent. See [OBSERVABILITY.md](./OBSERVABILITY.md#correlation-envelope).
 
@@ -571,10 +571,10 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | Per-task nudge limit | Default 10/min | Per task (`POST /tasks/{id}/nudge`) | `429 RATE_LIMIT_EXCEEDED` |
 | Application rate limiter (`shared/rate-limit`) | Per-endpoint | Used by `approve`, `deny`, `pending`, `nudge`, `policies` and Linear webhook/fan-out paths — **not** task creation | `429 RATE_LIMIT_EXCEEDED` |
 
-**Concurrency (not a rate limit).** Per-user concurrent task count is bounded (configurable, default 3-5). This is enforced by admission control, not by the create-task endpoint:
+**Concurrency (not a rate limit).** Per-user concurrent task count is bounded (configurable, default 10). This is enforced by admission control, not by the create-task endpoint:
 
 - `POST /v1/tasks/{task_id}/confirm-uploads` rejects with `429 RATE_LIMIT_EXCEEDED` when the user is already at their concurrency limit.
-- For the orchestrator admission path (the `SUBMITTED → HYDRATING` transition), exceeding the limit does not return an HTTP error — the task is already created. The orchestrator drives the task to `FAILED` with `error_message` "User concurrency limit reached" and emits an `admission_rejected` event.
+- For the orchestrator admission path (the `SUBMITTED → HYDRATING` transition), exceeding the limit does not return an HTTP error — the task is already created. The orchestrator parks the task as `QUEUED` and emits an `admission_queued` event. The task is admitted, oldest first, as the user's slots free up (`queue_pickup`), and fails if it is still queued 24 hours after submission.
 
 **Monthly budget admission.** Task creation checks the current UTC-month estimated spend for the authenticated user and every Cognito group captured as a team. A configured hard-stop scope at or above 100% returns `429 BUDGET_EXCEEDED` before creating a new task. Alerts-only scopes continue. Same-user idempotent replays return their existing task before this check.
 
