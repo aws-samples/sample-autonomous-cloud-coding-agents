@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
@@ -36,6 +37,45 @@ const DEFAULT_PAGE_LIMIT = 20;
 
 /** Hard page-size ceiling. */
 const MAX_PAGE_LIMIT = 100;
+
+/**
+ * Cap on DynamoDB `Query` round-trips per request. `Limit` is applied to items read,
+ * before `FilterExpression`, so a status or repo filter can leave a page short; we page
+ * until it is full. The cap bounds what one request reads; the token still advances.
+ */
+const MAX_QUERY_PAGES = 10;
+
+/**
+ * The indexes that can serve the list, each with the sort key its cursors carry.
+ * UserStatusIndex is the one the list read before #51; it groups tasks by status.
+ */
+const SORT_KEY_OF = { UserCreatedAtIndex: 'created_at', UserStatusIndex: 'status_created_at' } as const;
+
+/**
+ * True once DynamoDB has reported UserCreatedAtIndex as ACTIVE; kept for the life of this
+ * execution environment. The deploy that adds the index updates this function without
+ * waiting for DynamoDB to build it, and an index cannot be queried until it is ACTIVE.
+ * Only that deploy needs this: once every deployed stack has the index, the status check
+ * and the reading of UserStatusIndex can go.
+ */
+let createdAtIndexActive = false;
+
+/**
+ * The index to list from: UserCreatedAtIndex once it is ACTIVE, UserStatusIndex until then.
+ * @param requestId - for the warning logged while the list is read from UserStatusIndex.
+ * @returns the index name.
+ */
+async function listIndex(requestId: string): Promise<keyof typeof SORT_KEY_OF> {
+  if (!createdAtIndexActive) {
+    const { Table } = await ddb.send(new DescribeTableCommand({ TableName: TABLE_NAME }));
+    const status = Table?.GlobalSecondaryIndexes?.find((index) => index.IndexName === 'UserCreatedAtIndex')?.IndexStatus;
+    createdAtIndexActive = status === 'ACTIVE';
+    if (!createdAtIndexActive) {
+      logger.warn('UserCreatedAtIndex is not ACTIVE; listing from UserStatusIndex', { index_status: status ?? 'missing', request_id: requestId });
+    }
+  }
+  return createdAtIndexActive ? 'UserCreatedAtIndex' : 'UserStatusIndex';
+}
 
 /**
  * GET /v1/tasks — List tasks for the authenticated user.
@@ -67,7 +107,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const limit = parseLimit(params.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     const statusFilter = params.status !== undefined ? parseStatusFilter(params.status) : null;
     const repoFilter = params.repo;
-    const startKey = decodePaginationToken(params.next_token);
+    let startKey = decodePaginationToken(params.next_token);
 
     // Validate status filter — returns null for invalid values
     if (params.status !== undefined && statusFilter === null) {
@@ -96,34 +136,42 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       filterParts.push('#repo = :repo');
     }
 
-    const queryInput: Record<string, unknown> = {
-      TableName: TABLE_NAME,
-      IndexName: 'UserStatusIndex',
-      KeyConditionExpression: 'user_id = :uid',
-      ExpressionAttributeValues: exprValues,
-      ScanIndexForward: false,
-      Limit: limit,
-    };
-
-    if (filterParts.length > 0) {
-      queryInput.FilterExpression = filterParts.join(' AND ');
+    // 4. Execute query. Accumulate until the page is full or the index is exhausted;
+    // over-fetch one so a full page can tell whether another task follows. A cursor is
+    // only valid on the index that issued it, and only UserStatusIndex cursors carry
+    // status_created_at.
+    const index = startKey?.status_created_at !== undefined ? 'UserStatusIndex' : await listIndex(requestId);
+    const items: TaskRecord[] = [];
+    for (let page = 0; page < MAX_QUERY_PAGES; page += 1) {
+      const result = await ddb.send(new QueryCommand({
+        TableName: TABLE_NAME,
+        IndexName: index,
+        KeyConditionExpression: 'user_id = :uid',
+        ExpressionAttributeValues: exprValues,
+        ScanIndexForward: false,
+        Limit: limit + 1,
+        ...(filterParts.length > 0 && {
+          FilterExpression: filterParts.join(' AND '),
+          ExpressionAttributeNames: exprNames,
+        }),
+        ...(startKey && { ExclusiveStartKey: startKey }),
+      }));
+      items.push(...((result.Items ?? []) as TaskRecord[]));
+      startKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+      if (items.length > limit || !startKey) break;
     }
-    if (Object.keys(exprNames).length > 0) {
-      queryInput.ExpressionAttributeNames = exprNames;
-    }
-    if (startKey) {
-      queryInput.ExclusiveStartKey = startKey;
-    }
+    const pageItems = items.slice(0, limit);
 
-    // 4. Execute query
-    const result = await ddb.send(new QueryCommand(queryInput as any));
-    const items = (result.Items ?? []) as TaskRecord[];
-    const summaries = items.map(toTaskSummary);
+    // 5. Encode pagination token. Trimmed: resume after the last task returned
+    // (LastEvaluatedKey lies past the over-fetched one). Otherwise the raw cursor,
+    // which is only set when the page cap stopped the loop.
+    const last = pageItems[pageItems.length - 1];
+    const sortKey = SORT_KEY_OF[index];
+    const nextToken = items.length > limit
+      ? encodePaginationToken({ task_id: last.task_id, user_id: last.user_id, [sortKey]: last[sortKey] })
+      : encodePaginationToken(startKey);
 
-    // 5. Encode pagination token
-    const nextToken = encodePaginationToken(result.LastEvaluatedKey as Record<string, unknown> | undefined);
-
-    return paginatedResponse(summaries, nextToken, requestId);
+    return paginatedResponse(pageItems.map(toTaskSummary), nextToken, requestId);
   } catch (err) {
     logger.error('Failed to list tasks', { error: String(err), request_id: requestId });
     return errorResponse(500, ErrorCode.INTERNAL_ERROR, 'Internal server error.', requestId);

@@ -30,6 +30,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { apiEvent, emulatorTables } from './harness';
@@ -43,6 +44,8 @@ const run = randomUUID().slice(0, 8);
 process.env.TASK_TABLE_NAME = `emu-${run}-tasks`;
 process.env.TASK_EVENTS_TABLE_NAME = `emu-${run}-events`;
 process.env.REPO_TABLE_NAME = `emu-${run}-repos`;
+/** A task table as a stack has it before the deploy that adds UserCreatedAtIndex (#51). */
+const TASKS_BEFORE_51 = `emu-${run}-tasks-before-51`;
 
 import { handler as cancelTask } from '../../src/handlers/cancel-task';
 import { handler as createTask } from '../../src/handlers/create-task';
@@ -70,15 +73,16 @@ function submit(userId: string, idempotencyKey?: string): Promise<APIGatewayProx
 }
 
 /** GET /v1/tasks through the real handler. Returns the parsed body. */
-async function list(userId: string, query?: Record<string, string>) {
-  const result = await listTasks(apiEvent(userId, { queryStringParameters: query ?? null }));
+async function list(userId: string, query?: Record<string, string>, handler = listTasks) {
+  const result = await handler(apiEvent(userId, { queryStringParameters: query ?? null }));
   expect(result.statusCode).toBe(200);
   return JSON.parse(result.body) as { data: { task_id: string; status: string }[]; pagination: { next_token: string | null; has_more: boolean } };
 }
 
 describe('task API against the AWS Emulator', () => {
-  emulatorTables((stack) => {
+  const addIndex = emulatorTables((stack) => {
     new TaskTable(stack, 'Tasks', { tableName: process.env.TASK_TABLE_NAME });
+    new TaskTable(stack, 'TasksBefore51', { tableName: TASKS_BEFORE_51 });
     new TaskEventsTable(stack, 'Events', { tableName: process.env.TASK_EVENTS_TABLE_NAME });
     new RepoTable(stack, 'Repos', { tableName: process.env.REPO_TABLE_NAME });
   }, () => {
@@ -88,7 +92,7 @@ describe('task API against the AWS Emulator', () => {
       TableName: process.env.REPO_TABLE_NAME,
       Item: { repo: REPO, status: 'active', onboarded_at: now, updated_at: now },
     }));
-  });
+  }, { [TASKS_BEFORE_51]: [TaskTable.USER_CREATED_AT_INDEX] });
 
   test('create, get, list, cancel: one task through every handler', async () => {
     const user = newUser();
@@ -106,7 +110,7 @@ describe('task API against the AWS Emulator', () => {
     expect(cancelled.statusCode).toBe(200);
     expect((await cancelTask(apiEvent(user, byId(taskId)))).statusCode).toBe(409);
 
-    // The cancel rewrote the index sort key, so the task has moved between status filters.
+    // The cancel changed the status, so the task has moved between status filters.
     expect(data(await getTask(apiEvent(user, byId(taskId)))).status).toBe('CANCELLED');
     expect((await list(user, { status: 'CANCELLED' })).data.map((t) => t.task_id)).toEqual([taskId]);
     expect((await list(user, { status: 'SUBMITTED' })).data).toEqual([]);
@@ -167,15 +171,7 @@ describe('task API against the AWS Emulator', () => {
     expect([...seen].sort()).toEqual([...submitted].sort());
   });
 
-  // KNOWN FAILURES: executable witnesses for #51, which was found by hand on a
-  // deployed stack. `list-tasks` queries UserStatusIndex, whose sort key is
-  // `{status}#{timestamp}`, so results come back grouped by status rather than
-  // newest first, and a status filter is applied after `Limit` has already cut
-  // the page (the short page does carry a next_token, which `bgagent list` does
-  // not follow). Kept as `test.failing` so the suite stays green and flags the
-  // day the handler is fixed. Each was run once as a plain `test` to confirm it
-  // fails on its last assertion and not on setup.
-  test.failing('#51: list returns the newest task first (API_CONTRACT.md: "ordered by created_at descending")', async () => {
+  test('#51: list returns the newest task first (API_CONTRACT.md: "ordered by created_at descending")', async () => {
     const user = newUser();
     const older: string = data(await submit(user)).task_id;
     await pause(5);
@@ -185,13 +181,69 @@ describe('task API against the AWS Emulator', () => {
     expect((await list(user)).data.map((t) => t.task_id)).toEqual([newer, older]);
   });
 
-  test.failing('#51: a status filter returns the matching task when it fits the page', async () => {
+  test('#51: a status filter returns the matching task when it fits the page', async () => {
     const user = newUser();
     const first: string = data(await submit(user)).task_id;
+    // Three newer tasks: the match lies beyond the first Query, which reads limit + 1 rows.
+    await submit(user);
     await submit(user);
     await submit(user);
     await cancelTask(apiEvent(user, byId(first)));
 
     expect((await list(user, { status: 'CANCELLED', limit: '2' })).data.map((t) => t.task_id)).toEqual([first]);
   });
+
+  // The deploy that adds UserCreatedAtIndex updates the handler while DynamoDB is still
+  // building the index, and an index cannot be queried until it is ACTIVE. This walks a
+  // table through that deploy: no such index, the index being created, the index ACTIVE.
+  test('#51: the list reads UserStatusIndex until UserCreatedAtIndex is ACTIVE, then lists newest first', async () => {
+    let listBefore51!: typeof listTasks;
+    jest.isolateModules(() => {
+      const current = process.env.TASK_TABLE_NAME;
+      process.env.TASK_TABLE_NAME = TASKS_BEFORE_51;
+      // eslint-disable-next-line @typescript-eslint/no-require-imports -- a second copy of the handler, bound to this table when it loads
+      listBefore51 = require('../../src/handlers/list-tasks').handler;
+      process.env.TASK_TABLE_NAME = current;
+    });
+    const doc = makeDocClient();
+    const indexStatus = async () => (await doc.send(new DescribeTableCommand({ TableName: TASKS_BEFORE_51 })))
+      .Table?.GlobalSecondaryIndexes?.find((index) => index.IndexName === TaskTable.USER_CREATED_AT_INDEX)?.IndexStatus;
+    const ids = (page: { data: { task_id: string }[] }) => page.data.map((t) => t.task_id);
+
+    // UserStatusIndex sorts by status before time, so its order is not newest first here.
+    const user = newUser();
+    const tasks = [['oldest', 'RUNNING'], ['middle', 'COMPLETED'], ['newest', 'SUBMITTED']];
+    for (const [day, [taskId, status]] of tasks.entries()) {
+      const createdAt = `2026-01-0${day + 1}T00:00:00.000Z`;
+      await doc.send(new PutCommand({
+        TableName: TASKS_BEFORE_51,
+        Item: { task_id: taskId, user_id: user, status, repo: REPO, created_at: createdAt, status_created_at: `${status}#${createdAt}` },
+      }));
+    }
+    const byStatus = ['newest', 'oldest', 'middle'];
+
+    // 1. No such index: the list is read from UserStatusIndex, with cursors of that index.
+    const first = await list(user, { limit: '2' }, listBefore51);
+    const cursor = first.pagination.next_token ?? '';
+    expect(Buffer.from(cursor, 'base64').toString('utf-8')).toContain('"status_created_at"');
+    const second = await list(user, { limit: '2', next_token: cursor }, listBefore51);
+    expect([...ids(first), ...ids(second)]).toEqual(byStatus);
+
+    try {
+      // 2. The index is being created (the emulator holds it in CREATING for about 3 seconds).
+      // The status only moves forward, so CREATING after the list means CREATING during it.
+      await addIndex(TASKS_BEFORE_51, TaskTable.USER_CREATED_AT_INDEX);
+      const whileCreating = await list(user, undefined, listBefore51);
+      expect(await indexStatus()).toBe('CREATING');
+      expect(ids(whileCreating)).toEqual(byStatus);
+
+      // 3. The index is ACTIVE: newest first, and a cursor issued earlier still finishes its list.
+      while (await indexStatus() !== 'ACTIVE') await pause(250);
+      expect(ids(await list(user, undefined, listBefore51))).toEqual(['newest', 'middle', 'oldest']);
+      expect(ids(await list(user, { limit: '2', next_token: cursor }, listBefore51))).toEqual(['middle']);
+    } finally {
+      // A table cannot be deleted while one of its indexes is being created.
+      while (await indexStatus() === 'CREATING') await pause(250);
+    }
+  }, 30_000);
 });

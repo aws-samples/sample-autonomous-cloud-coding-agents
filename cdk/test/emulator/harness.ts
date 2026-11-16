@@ -37,7 +37,10 @@
  * id of its own (so tests need no cleanup between them).
  */
 
-import { CreateTableCommand, DeleteTableCommand, DynamoDBClient, waitUntilTableExists } from '@aws-sdk/client-dynamodb';
+import {
+  type AttributeDefinition, CreateTableCommand, DeleteTableCommand, DynamoDBClient, type GlobalSecondaryIndex,
+  UpdateTableCommand, waitUntilTableExists,
+} from '@aws-sdk/client-dynamodb';
 import { App, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import type { APIGatewayProxyEvent } from 'aws-lambda';
@@ -62,10 +65,18 @@ const TABLE_WAIT_SECONDS = 20;
  * looks correct here.
  * @param declare - instantiates the table constructs under test, each with an explicit `tableName`.
  * @param seed - writes the rows every test in the file needs, once the tables are ACTIVE.
+ * @param withoutIndexes - per table name, index names to leave out: the table as it was before a
+ *   deploy added them. The table or another index must still use their key attributes.
+ * @returns a function that adds one of those indexes, as that deploy does, from the construct's definition.
  */
-export function emulatorTables(declare: (stack: Stack) => void, seed?: () => Promise<unknown>): void {
+export function emulatorTables(
+  declare: (stack: Stack) => void,
+  seed?: () => Promise<unknown>,
+  withoutIndexes: Record<string, string[]> = {},
+): (tableName: string, indexName: string) => Promise<void> {
   let ddb: DynamoDBClient | undefined;
   const created: string[] = [];
+  const declared: Record<string, { AttributeDefinitions: AttributeDefinition[]; GlobalSecondaryIndexes?: GlobalSecondaryIndex[] }> = {};
 
   beforeAll(async () => {
     const stack = new Stack(new App(), 'EmulatorTables');
@@ -75,11 +86,13 @@ export function emulatorTables(declare: (stack: Stack) => void, seed?: () => Pro
       if (typeof table.TableName !== 'string') {
         throw new Error(`Table ${logicalId} has no literal tableName; pass one to its construct so the handler environment can name it.`);
       }
+      declared[table.TableName] = table;
       await ddb.send(new CreateTableCommand({
         TableName: table.TableName,
         AttributeDefinitions: table.AttributeDefinitions,
         KeySchema: table.KeySchema,
-        GlobalSecondaryIndexes: table.GlobalSecondaryIndexes,
+        GlobalSecondaryIndexes: table.GlobalSecondaryIndexes
+          ?.filter((index: { IndexName: string }) => !withoutIndexes[table.TableName]?.includes(index.IndexName)),
         BillingMode: table.BillingMode,
       }));
       created.push(table.TableName);
@@ -95,6 +108,12 @@ export function emulatorTables(declare: (stack: Stack) => void, seed?: () => Pro
     for (const TableName of created) await ddb?.send(new DeleteTableCommand({ TableName }));
     ddb?.destroy();
   });
+
+  return async (tableName, indexName) => {
+    const { AttributeDefinitions, GlobalSecondaryIndexes } = declared[tableName];
+    const Create = GlobalSecondaryIndexes?.find((index) => index.IndexName === indexName);
+    await ddb?.send(new UpdateTableCommand({ TableName: tableName, AttributeDefinitions, GlobalSecondaryIndexUpdates: [{ Create }] }));
+  };
 }
 
 /**

@@ -242,6 +242,24 @@ describe('TaskApi construct', () => {
     expect(replayFn![1].Properties.MemorySize).toBe(512);
   });
 
+  test('ListTasksFn gets raised timeout/memory, not the 3s/128MB defaults (#51)', () => {
+    // A filtered list pages until the page is full (up to 10 Queries).
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const listTasksFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiListTasksFn'));
+    expect(listTasksFn).toBeDefined();
+    expect(listTasksFn![1].Properties.Timeout).toBe(15);
+    expect(listTasksFn![1].Properties.MemorySize).toBe(256);
+  });
+
+  test('ListTasksFn may describe the task table: it asks whether the list index is ACTIVE (#51)', () => {
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    const listTasksPolicy = Object.entries(policies)
+      .find(([id]) => id.startsWith('TaskApiListTasksFnServiceRoleDefaultPolicy'));
+    const statements = (listTasksPolicy?.[1].Properties.PolicyDocument.Statement ?? []) as { Action: string[]; Resource: unknown }[];
+    const taskTableRead = statements.find((statement) => JSON.stringify(statement.Resource).includes('"TaskTable'));
+    expect(taskTableRead?.Action).toEqual(expect.arrayContaining(['dynamodb:Query', 'dynamodb:DescribeTable']));
+  });
+
   test('Lambda functions have correct environment variables', () => {
     const functions = baseTemplate.findResources('AWS::Lambda::Function');
 

@@ -624,3 +624,4 @@ List endpoints use token-based pagination (consistent with DynamoDB's `Exclusive
 - Pass `next_token` as query parameter for the next page
 - Tokens are short-lived and should not be stored
 - Results ordered by `created_at` descending (newest first)
+- A page can hold fewer items than `limit`, or none, while `has_more` is `true`: a list that filters (tasks by `status` or `repo`, webhooks and API keys without the revoked ones) reads a bounded number of rows per request. Follow `next_token` until `has_more` is `false`
