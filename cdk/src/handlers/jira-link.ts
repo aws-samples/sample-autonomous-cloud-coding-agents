@@ -70,7 +70,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       ConsistentRead: true,
     }));
 
-    if (!pending.Item || pending.Item.status !== 'pending') {
+    // DynamoDB TTL deletes lazily, so an expired code can still be in the table.
+    if (!pending.Item || pending.Item.status !== 'pending'
+      || typeof pending.Item.ttl !== 'number' || pending.Item.ttl < Math.floor(Date.now() / 1000)) {
       return errorResponse(404, ErrorCode.VALIDATION_ERROR, 'Invalid or expired link code.', requestId);
     }
 

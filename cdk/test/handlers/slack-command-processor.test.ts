@@ -258,6 +258,10 @@ describe('slack-command-processor handler', () => {
     expect(putCall).toBeTruthy();
     expect(putCall![0].input.Item.slack_identity).toMatch(/^pending#/);
     expect(putCall![0].input.Item.status).toBe('pending');
+    // slack-link refuses a pending row whose ttl is not a number of seconds in the future.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    expect(putCall![0].input.Item.ttl).toBeGreaterThan(nowSeconds);
+    expect(putCall![0].input.Item.ttl).toBeLessThanOrEqual(nowSeconds + 600);
     const posted = fetchMock.mock.calls.find(
       ([_url, opts]) => String((opts as { body: string }).body).includes('bgagent slack link'),
     );
