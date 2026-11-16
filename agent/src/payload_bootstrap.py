@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 import re
-from typing import Any
+from typing import Any, override
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
@@ -27,6 +27,7 @@ class PayloadFetchError(RuntimeError):
 
 
 class _NoRedirect(HTTPRedirectHandler):
+    @override
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 

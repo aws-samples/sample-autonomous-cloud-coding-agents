@@ -368,17 +368,6 @@ function wrapMicrovmError(operation: string, err: unknown): Error {
   return new Error(`${MICROVM_ERROR_MARKER} ${operation} failed: ${detail}`, { cause: safeCause });
 }
 
-/**
- * S3 object key for a task's MicroVM ``/run`` payload. Same key shape as the
- * ECS payload bucket (``ecsPayloadKey``): one object per task under its own
- * task-id prefix, deleted by the orchestrator at finalize (see
- * {@link deleteMicrovmPayload}), with the payload bucket's lifecycle-expiry rule
- * (ADR-021 sub-decision 3, ``MICROVM_PAYLOAD_TTL_DAYS``) as the backstop.
- */
-export function microvmPayloadKey(taskId: string): string {
-  return `${taskId}/payload.json`;
-}
-
 /** Remove task instructions and their saved download capability after finalization.
  * Best-effort; bucket lifecycle reaps leftovers. Deployment manifests are shared.
  */

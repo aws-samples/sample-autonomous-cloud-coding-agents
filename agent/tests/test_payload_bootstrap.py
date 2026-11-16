@@ -199,6 +199,7 @@ def test_run_hook_never_logs_the_chained_http_error_url(transport, monkeypatch, 
         lambda d: d["agent_payload"].update(task_id="task-2"),
         lambda d: d.update(platform_config=None),
     ],
+    ids=["foreign-secret-arn", "document-task-id", "payload-task-id", "no-platform-config"],
 )
 def test_same_account_workspace_redirect_or_task_substitution_is_rejected(transport, mutate):
     # Detach the document from the fixture's authenticated manifest values.

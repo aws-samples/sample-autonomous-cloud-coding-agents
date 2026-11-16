@@ -14,3 +14,10 @@
 #   cd agent && uv run vulture src --make-whitelist
 #
 # Keep this list MINIMAL. Prefer deleting dead code over allowlisting it.
+
+# payload_bootstrap._NoRedirect.redirect_request overrides urllib's
+# HTTPRedirectHandler.redirect_request and refuses every redirect, so it reads
+# none of its arguments. The parameter names are fixed by the override (renaming
+# one fails ty's invalid-method-override), and `newurl` is the only one vulture
+# does not see used elsewhere.
+newurl  # unused variable (src/payload_bootstrap.py:31)
