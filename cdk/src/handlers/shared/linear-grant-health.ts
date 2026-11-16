@@ -36,7 +36,7 @@
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 
 /** How often each workspace is probed. Linear access tokens last about a day. */
-export const GRANT_HEALTH_PROBE_INTERVAL_HOURS = 12;
+const GRANT_HEALTH_PROBE_INTERVAL_HOURS = 12;
 
 const MS_PER_MINUTE = 60_000;
 const MS_PER_HOUR = 3_600_000;
