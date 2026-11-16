@@ -167,11 +167,14 @@ class _TrajectoryWriter:
         from aws_session import platform_client
 
         region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-        self._client = platform_client("logs", region_name=region)
+        client = platform_client("logs", region_name=region)
 
         log_stream = f"trajectory/{self._task_id}"
-        with contextlib.suppress(self._client.exceptions.ResourceAlreadyExistsException):
-            self._client.create_log_stream(logGroupName=self._log_group, logStreamName=log_stream)
+        with contextlib.suppress(client.exceptions.ResourceAlreadyExistsException):
+            client.create_log_stream(logGroupName=self._log_group, logStreamName=log_stream)
+        # Only now: a client cached before the stream exists is never asked to
+        # create it again.
+        self._client = client
 
     def _put_event(self, payload: dict) -> None:
         """Serialize *payload* to JSON, truncate if needed, and write."""

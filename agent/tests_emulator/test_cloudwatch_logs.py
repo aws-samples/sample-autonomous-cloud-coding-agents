@@ -80,6 +80,36 @@ class TestTrajectoryStream:
         assert "ResourceNotFoundException" in capsys.readouterr().out
         assert len(writer._events) == 4
 
+    def test_stream_is_created_once_the_log_group_exists(
+        self, emulator, agent_env, task_id, monkeypatch
+    ):
+        group = f"{agent_env.log_group}-late"
+        monkeypatch.setenv("LOG_GROUP_NAME", group)
+        logs = emulator.client("logs")
+        writer = _TrajectoryWriter(task_id)
+
+        # No log group yet: CreateLogStream is refused and this event is lost.
+        writer.write_policy_decision("Read", True, "permit", 0.1)
+        logs.create_log_group(logGroupName=group)
+        try:
+            writer.write_policy_decision("Edit", True, "permit", 0.1)
+            streams = logs.describe_log_streams(logGroupName=group)["logStreams"]
+            events = [
+                event
+                for stream in streams
+                for event in logs.get_log_events(
+                    logGroupName=group,
+                    logStreamName=stream["logStreamName"],
+                    startFromHead=True,
+                )["events"]
+            ]
+        finally:
+            logs.delete_log_group(logGroupName=group)
+
+        assert [s["logStreamName"] for s in streams] == [f"trajectory/{task_id}"]
+        assert [json.loads(e["message"])["tool_name"] for e in events] == ["Edit"]
+        assert (writer._failure_count, writer._disabled) == (1, False)
+
 
 class TestMetricsAndErrorStreams:
     def test_metrics_report_is_written_with_native_types(self, emulator, log_group, task_id):
