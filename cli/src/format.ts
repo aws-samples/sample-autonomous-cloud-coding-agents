@@ -23,12 +23,12 @@ import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODI
 export const COST_USD_DECIMALS = 4;
 
 /** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
-export function formatCostUsd(cost: number | string): string {
+function formatCostUsd(cost: number | string): string {
   return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
 }
 
 /** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
-export function formatVerdict(passed: boolean | null, dash = '—'): string {
+function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
 

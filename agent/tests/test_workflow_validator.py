@@ -175,6 +175,11 @@ class TestIndividualRules:
         w["agent_config"]["cedar_policy_modules"] = ["builtin/hard_deny", "builtin/soft_deny", ref]
         assert ("rule-8" in validate_workflow(w)) is bad
 
+    def test_rule8_step_kind_without_a_handler_flagged(self):
+        w = _base()
+        w["steps"].insert(1, {"kind": "teleport"})
+        assert "rule-8" in validate_workflow(w)
+
     def test_rule8_unknown_deliver_target_flagged(self):
         # ADR-014 addendum: deliver_artifact.target must name a registered
         # deliverer. rule-8 catches an unknown target universally (rule-11 only

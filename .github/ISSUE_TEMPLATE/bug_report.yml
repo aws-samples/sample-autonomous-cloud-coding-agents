@@ -63,7 +63,7 @@ body:
     id: node-version
     attributes:
       label: Node version
-      description: For CDK/CLI (e.g. 20.x, 22.x). Run `node -v` if unsure.
+      description: For CDK/CLI (e.g. 22.x, 24.x). Run `node -v` if unsure.
     validations:
       required: false
   - type: input

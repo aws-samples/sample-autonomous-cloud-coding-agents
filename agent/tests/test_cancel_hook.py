@@ -93,9 +93,9 @@ class TestStopHookHonoursCancel:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-cancel",
                 progress=MagicMock(),
             )
@@ -124,9 +124,9 @@ class TestStopHookHonoursCancel:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-cancel-with-nudge",
                 progress=MagicMock(),
             )
@@ -153,9 +153,9 @@ class TestStopHookHonoursCancel:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-running",
                 progress=MagicMock(),
             )
@@ -174,9 +174,9 @@ class TestStopHookHonoursCancel:
 
         _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-cancel-milestone",
                 progress=progress,
             )
@@ -225,9 +225,9 @@ class TestCancelShortCircuitsNudgeConsumption:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-cancel-nudge-race",
                 progress=MagicMock(),
             )
@@ -281,9 +281,9 @@ class TestCancelShortCircuitsNudgeConsumption:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-cancel-real",
                 progress=MagicMock(),
             )
@@ -405,9 +405,9 @@ class TestCancelShortCircuitsNudgeConsumption:
 
         result = _run(
             hooks_mod.stop_hook(
-                hook_input={},
-                tool_use_id=None,
-                hook_context=None,
+                {},
+                None,
+                None,
                 task_id="t-live",
                 progress=MagicMock(),
             )

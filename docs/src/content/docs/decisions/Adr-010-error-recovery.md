@@ -1,8 +1,6 @@
 ---
-title: Adr 010 error recovery
+title: "ADR-010: Error recovery and rollback protocol"
 ---
-
-# ADR-010: Error recovery and rollback protocol
 
 **Status:** proposed
 **Date:** 2026-05-19

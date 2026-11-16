@@ -16,7 +16,7 @@ Modes:
 
 Flags:
   --local-events  Connect to DynamoDB Local (port 8000) for progress events.
-                  Requires: docker compose up -d && ./agent/scripts/create-local-tables.sh
+                  Requires: mise //agent:local:up (starts it and creates the tables)
 
 The second argument (after flags) is auto-detected:
   - If numeric, treated as a GitHub issue number
@@ -227,8 +227,7 @@ if [[ "$LOCAL_EVENTS" == true ]]; then
     # Verify DynamoDB Local is running
     if ! docker inspect dynamodb-local >/dev/null 2>&1; then
         echo "ERROR: DynamoDB Local is not running." >&2
-        echo "  Start it with: cd agent && docker compose up -d" >&2
-        echo "  Create tables: ./agent/scripts/create-local-tables.sh" >&2
+        echo "  Start it and create the tables with: mise //agent:local:up" >&2
         exit 1
     fi
     DOCKER_ARGS+=(
@@ -271,7 +270,7 @@ echo "  docker logs -f ${CONTAINER_NAME}        # live output"
 echo "  docker stats ${CONTAINER_NAME}          # CPU, memory, disk I/O"
 echo "  docker exec ${CONTAINER_NAME} du -sh /workspace  # disk usage"
 if [[ "$LOCAL_EVENTS" == true ]]; then
-echo "  mise run local:events                   # query progress events"
+echo "  mise //agent:local:events               # query progress events"
 fi
 echo ""
 

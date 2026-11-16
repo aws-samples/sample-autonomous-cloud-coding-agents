@@ -242,7 +242,7 @@ export interface OrchestrationReleaseContext {
  * Truncation is visible rather than silent: a reader of the child prompt sees
  * that the text was cut, instead of quietly working from half a spec.
  */
-export const PARENT_CONTEXT_MAX_CHARS = 4000;
+const PARENT_CONTEXT_MAX_CHARS = 4000;
 
 /** Cap one parent-context field, marking the cut so it is never mistaken for the whole. */
 function clampParentContext(text: string): string {
@@ -347,7 +347,7 @@ function parsePreScreenedAttachments(raw: unknown, orchestrationId: string): Att
       orchestration_id: orchestrationId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    return []; // nosemgrep: ts-silent-success-masking -- a corrupt stored JSON blob is PERMANENT, not transient: failing closed here would make every later read of this epic throw, so an epic mid-flight could never settle and no retry could ever clear it. The attachments are advisory context for the children; the warning above is the operator's signal
   }
 }
 

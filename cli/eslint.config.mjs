@@ -16,6 +16,7 @@
  *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  *  SOFTWARE.
  */
+import js from '@eslint/js';
 import tseslint from '@typescript-eslint/eslint-plugin';
 import tsparser from '@typescript-eslint/parser';
 import stylistic from '@stylistic/eslint-plugin';
@@ -28,6 +29,22 @@ import { dirname, join } from 'node:path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// Every TypeScript extension. ESLint skips a file that no `files` pattern matches
+// without a word, so a .mts or .cts file would sit outside every rule below.
+const TS_FILES = ['src/**/*.{ts,tsx,mts,cts}', 'test/**/*.{ts,tsx,mts,cts}'];
+
+const NO_MD5 = {
+  selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
+  message: 'Use the md5hash() function from the core library if you want md5',
+};
+// The name exception is this package's own REST client, which is not an SDK client.
+const NO_NAKED_SDK_CLIENT = {
+  selector: 'NewExpression:matches([callee.name=/^(?!ApiClient$).*Client$/], [callee.property.name=/Client$/])',
+  message: 'Build AWS SDK clients with makeClient(Ctor, cfg) or makeDocClient(cfg) from src/ua.ts: `new XxxClient()` drops the'
+    + ' solution user-agent segment (#319). For a class of this repository whose name merely ends in Client, add the name to'
+    + ' the exception in this selector.',
+};
 
 export default [
   // Global ignores
@@ -42,9 +59,14 @@ export default [
     ],
   },
 
-  // TypeScript source, test, and build-tools files
+  // Correctness baselines: eslint:recommended and the typescript-eslint recommended
+  // set. They come before the package block so that block wins where both set a rule.
+  { files: TS_FILES, rules: js.configs.recommended.rules },
+  ...tseslint.configs['flat/recommended'].map((config) => ({ ...config, files: TS_FILES })),
+
+  // TypeScript source and test files
   {
-    files: ['src/**/*.ts', 'test/**/*.ts', 'build-tools/**/*.ts'],
+    files: TS_FILES,
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -115,11 +137,18 @@ export default [
 
       // Core ESLint rules
       'curly': ['error', 'multi-line', 'consistent'],
+      'eqeqeq': ['error', 'always', { null: 'ignore' }],
       'no-shadow': ['off'],
       'no-return-await': 'off',
       'dot-notation': ['error'],
       'no-bitwise': ['error'],
       'no-throw-literal': ['error'],
+      // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
+      // A function above it is split, not exempted. The eslint-disable-next-line
+      // directives in src mark the functions that were above it when it landed: they
+      // must not grow. When a directive stops applying, as when its function comes to
+      // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
+      'complexity': ['error', { max: 40 }],
       'quotes': ['error', 'single', { avoidEscape: true }],
       'comma-spacing': ['error', { before: false, after: true }],
       'no-multi-spaces': ['error', { ignoreEOLComments: false }],
@@ -146,11 +175,19 @@ export default [
         ignoreRegExpLiterals: true,
       }],
       'no-console': ['error'],
+      // A coverage-ignore comment takes code out of what the coverage floors measure:
+      // test the code, or leave it counted as uncovered. These are the spellings that
+      // jest (v8-to-istanbul) and vitest honour.
+      'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
       'no-trailing-spaces': ['error'],
-      'no-restricted-syntax': ['error', {
-        selector: "CallExpression:matches([callee.name='createHash'], [callee.property.name='createHash']) Literal[value='md5']",
-        message: 'Use the md5hash() function from the core library if you want md5',
-      }],
+      'no-restricted-syntax': ['error', NO_MD5],
+      // Rules of the recommended sets that still have findings. Each one stays off
+      // until its findings are fixed; delete the line to turn the rule on.
+      '@typescript-eslint/no-explicit-any': 'off',
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
+      // Off for good: its one finding is the pattern that strips ANSI escape codes.
+      'no-control-regex': 'off',
 
       // TypeScript rules
       // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
@@ -206,10 +243,19 @@ export default [
         ],
       }],
       '@typescript-eslint/unbound-method': 'error',
+      // Promise and operator misuse that compiles (type-aware rules).
+      '@typescript-eslint/await-thenable': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/prefer-promise-reject-errors': 'error',
+      '@typescript-eslint/no-array-delete': 'error',
+      '@typescript-eslint/no-for-in-array': 'error',
+      '@typescript-eslint/no-implied-eval': 'error',
+      '@typescript-eslint/no-unsafe-unary-minus': 'error',
+      '@typescript-eslint/restrict-plus-operands': 'error',
 
       // Import rules (import/ -> import-x/)
       'import-x/no-extraneous-dependencies': ['error', {
-        devDependencies: ['**/test/**', '**/build-tools/**'],
+        devDependencies: ['**/test/**'],
         optionalDependencies: false,
         peerDependencies: true,
       }],
@@ -219,6 +265,10 @@ export default [
         alphabetize: { order: 'asc', caseInsensitive: true },
       }],
       'import-x/no-duplicates': ['error'],
+      // Runtime import cycles; `import type` edges do not count.
+      'import-x/no-cycle': ['error', { ignoreExternal: true }],
+      'import-x/no-self-import': 'error',
+      'import-x/no-useless-path-segments': 'error',
 
       // License header
       'license-header/header': ['error', join(__dirname, 'header.js')],
@@ -230,29 +280,51 @@ export default [
       'jsdoc/check-alignment': ['error'],
 
       // Jest rules
-      'jest/expect-expect': 'off',
+      // A test must call expect() itself.
+      'jest/expect-expect': 'error',
       'jest/no-conditional-expect': 'off',
-      'jest/no-done-callback': 'off',
-      'jest/no-standalone-expect': 'off',
-      'jest/valid-expect': 'off',
+      // An expect() at the top level or in a describe body runs while the file is
+      // loaded, not as part of a test.
+      'jest/no-standalone-expect': 'error',
+      // expect(x) without a matcher, and an async assertion nobody awaits, check
+      // nothing. One idiom is sound and still reported: keep the assertion promise,
+      // advance fake timers, then await it. Mark it with eslint-disable-next-line
+      // and the reason; the rule's autofix would await it on the spot and hang the test.
+      'jest/valid-expect': 'error',
       'jest/valid-title': 'off',
-      'jest/no-identical-title': 'off',
+      'jest/no-identical-title': 'error',
       'jest/no-disabled-tests': 'error',
       'jest/no-focused-tests': 'error',
+      'jest/no-alias-methods': 'error',
+      'jest/no-deprecated-functions': 'error',
+      'jest/no-done-callback': 'error',
+      'jest/no-duplicate-hooks': 'error',
+      'jest/no-export': 'error',
+      'jest/no-interpolation-in-snapshots': 'error',
+      // Jest has no `fail()`: the call is a ReferenceError, which the catch block of
+      // a try/fail/catch test swallows, so the test passes when nothing throws.
+      'jest/no-jasmine-globals': 'error',
+      'jest/no-mocks-import': 'error',
+      'jest/no-test-prefixes': 'error',
+      'jest/valid-describe-callback': 'error',
+      'jest/valid-expect-in-promise': 'error',
     },
   },
 
   // Override: allow console.log in CLI source files (console output is the product)
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-console': 'off',
+      // Every AWS SDK client in src is built by the attributed factory (#319). The whole
+      // list again: a later block replaces a rule's options.
+      'no-restricted-syntax': ['error', NO_MD5, NO_NAKED_SDK_CLIENT],
     },
   },
 
-  // Override: tests and build tooling legitimately use inline literals
+  // Override: tests legitimately use inline literals
   {
-    files: ['test/**/*.ts', 'build-tools/**/*.ts'],
+    files: ['test/**/*.{ts,tsx,mts,cts}'],
     rules: {
       '@typescript-eslint/no-magic-numbers': 'off',
     },
@@ -260,7 +332,7 @@ export default [
 
   // Override: shebang files can't have the license header at line 1
   {
-    files: ['src/bin/**/*.ts'],
+    files: ['src/bin/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'license-header/header': 'off',
     },

@@ -721,6 +721,7 @@ function isValidApprovalGateCap(value: unknown): value is number {
  * @param blueprintConfig - optional per-repo blueprint config.
  * @returns the assembled payload for the agent runtime.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (81 when it landed); must not grow
 export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: BlueprintConfig): Promise<Record<string, unknown>> {
   const { log, correlation } = envelopeFor(task);
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);

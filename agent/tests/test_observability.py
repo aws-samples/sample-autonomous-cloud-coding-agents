@@ -54,6 +54,33 @@ class TestCurrentOtelTraceId:
         ):
             assert observability.current_otel_trace_id() is None
 
+    def test_logs_the_tracer_fault_rather_than_degrading_silently(self, capfd):
+        # The degrade is justified but must not be invisible (#756): a tracer
+        # fault and "no recording span" both return None, so the WARN line is the
+        # only surviving evidence of which one happened. capfd (not capsys)
+        # because ``shell.log`` writes at the fd level — see its docstring.
+        with patch.object(
+            observability.trace, "get_current_span", side_effect=RuntimeError("tracer boom")
+        ):
+            assert observability.current_otel_trace_id() is None
+        out = capfd.readouterr().out
+        assert "current_otel_trace_id: tracer fault" in out
+        assert "RuntimeError" in out
+        assert "tracer boom" in out
+
+    def test_does_not_log_when_there_is_simply_no_recording_span(self, capfd):
+        # The common, uninteresting case: tracing disabled locally. An invalid
+        # span context is not a fault, so it must stay quiet — otherwise every
+        # progress event in a non-traced run emits a WARN and the real fault
+        # signal above becomes noise.
+        span = MagicMock()
+        ctx = MagicMock()
+        ctx.is_valid = False
+        span.get_span_context.return_value = ctx
+        with patch.object(observability.trace, "get_current_span", return_value=span):
+            assert observability.current_otel_trace_id() is None
+        assert "tracer fault" not in capfd.readouterr().out
+
 
 class TestPropagateCorrelationContext:
     """``propagate_correlation_context`` propagates the correlation envelope
