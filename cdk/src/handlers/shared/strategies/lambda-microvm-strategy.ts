@@ -597,6 +597,66 @@ function runHookPayloadDelivery(runHookPayload: string): 'inline' | 's3_pointer'
   return runHookPayload.includes('"agent_payload_s3_uri"') ? 's3_pointer' : 'inline';
 }
 
+type MicrovmSessionHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
+
+/**
+ * The error a failed RunMicrovm call escapes as. Marker-scoped so
+ * `ThrottlingException` / `ServiceQuotaExceededException` /
+ * `ResourceNotFoundException` from THIS backend classify as MicroVM faults,
+ * while identically-named AgentCore/ECS errors keep their existing
+ * classification (see MICROVM_ERROR_MARKER). Anything that is not a known
+ * rejection may have created a computer, so it stays uncertain.
+ */
+function runMicrovmStartError(err: unknown): Error {
+  const wrapped = wrapMicrovmError('RunMicrovm', err);
+  const serviceError = err as { name?: string; $metadata?: { httpStatusCode?: number } };
+  const httpStatus = serviceError?.$metadata?.httpStatusCode;
+  // A service timeout can carry a 4xx status without proving that creation
+  // never happened. Preserve uncertainty across any subsequent rejection.
+  const timedOut = httpStatus === HTTP_REQUEST_TIMEOUT
+    || ['TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(serviceError?.name ?? '');
+  const knownRejection = !timedOut && (httpStatus !== undefined
+    ? httpStatus >= 400 && httpStatus < 500
+    : ['AccessDeniedException', 'UnauthorizedException', 'ValidationException',
+      'InvalidParameterValueException', 'ResourceNotFoundException', 'ThrottlingException',
+      'TooManyRequestsException', 'ServiceQuotaExceededException', 'ConflictException']
+      .includes(serviceError?.name ?? ''));
+  if (!knownRejection) return new MicrovmStartUncertainError(wrapped.message, { cause: wrapped });
+  return wrapped;
+}
+
+/**
+ * Optional image discovery for a saved worker. Returns the handle with its
+ * verified lifecycle protocol, or unchanged when the launched image is not the
+ * deployment's pinned version or cannot be verified.
+ */
+async function discoverImageCapability(
+  taskId: string, clientToken: string, handle: MicrovmSessionHandle,
+): Promise<MicrovmSessionHandle> {
+  // Never infer capability from a requested pin or the deployment's latest image.
+  if (!handle.imageArn || handle.imageArn !== MICROVM_IMAGE_IDENTIFIER || !handle.imageVersion) return handle;
+  try {
+    const identity = { imageArn: handle.imageArn, imageVersion: handle.imageVersion };
+    const version = await getClient().send(new GetMicrovmImageVersionCommand({
+      imageIdentifier: identity.imageArn, imageVersion: identity.imageVersion,
+    }), { abortSignal: AbortSignal.timeout(MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS) });
+    if (!verifyMicrovmImageLifecycle(identity, version)) return handle;
+    const capable = { ...handle, lifecycleProtocol: MICROVM_LIFECYCLE_PROTOCOL };
+    await saveMicrovmImageCapability(taskId, clientToken, capable);
+    return capable;
+  } catch (error) {
+    // Explicit degraded mode: the saved worker remains usable, with new
+    // suspension disabled. Do not expose image environment or AWS error text.
+    const name = (error as { name?: unknown })?.name;
+    logger.warn('MicroVM image capability unavailable; automatic suspension remains disabled', {
+      task_id: taskId,
+      microvm_id: handle.microvmId,
+      error_type: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error',
+    });
+    return handle;
+  }
+}
+
 export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
   readonly type = 'lambda-microvm';
 
@@ -698,25 +758,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
     try {
       result = await getClient().send(command);
     } catch (err) {
-      // Marker-scoped so `ThrottlingException` / `ServiceQuotaExceededException`
-      // / `ResourceNotFoundException` from THIS backend classify as MicroVM
-      // faults, while identically-named AgentCore/ECS errors keep their existing
-      // classification. See MICROVM_ERROR_MARKER.
-      const wrapped = wrapMicrovmError('RunMicrovm', err);
-      const serviceError = err as { name?: string; $metadata?: { httpStatusCode?: number } };
-      const httpStatus = serviceError?.$metadata?.httpStatusCode;
-      // A service timeout can carry a 4xx status without proving that creation
-      // never happened. Preserve uncertainty across any subsequent rejection.
-      const timedOut = httpStatus === HTTP_REQUEST_TIMEOUT
-        || ['TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(serviceError?.name ?? '');
-      const knownRejection = !timedOut && (httpStatus !== undefined
-        ? httpStatus >= 400 && httpStatus < 500
-        : ['AccessDeniedException', 'UnauthorizedException', 'ValidationException',
-          'InvalidParameterValueException', 'ResourceNotFoundException', 'ThrottlingException',
-          'TooManyRequestsException', 'ServiceQuotaExceededException', 'ConflictException']
-          .includes(serviceError?.name ?? ''));
-      if (!knownRejection) throw new MicrovmStartUncertainError(wrapped.message, { cause: wrapped });
-      throw wrapped;
+      throw runMicrovmStartError(err);
     }
 
     const { microvmId, endpoint } = result;
@@ -744,7 +786,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
       throw incomplete;
     }
 
-    let handle: Extract<SessionHandle, { strategyType: 'lambda-microvm' }> = {
+    let handle: MicrovmSessionHandle = {
       sessionId: microvmId,
       strategyType: 'lambda-microvm',
       microvmId,
@@ -768,29 +810,7 @@ export class LambdaMicrovmComputeStrategy implements ComputeStrategy {
 
     // Persist the known worker above BEFORE optional image discovery. A crash or
     // failed lookup must not widen the orphan window or break ordinary coding.
-    // Never infer capability from a requested pin or the deployment's latest image.
-    if (handle.imageArn === MICROVM_IMAGE_IDENTIFIER && handle.imageVersion) {
-      try {
-        const identity = { imageArn: handle.imageArn, imageVersion: handle.imageVersion };
-        const version = await getClient().send(new GetMicrovmImageVersionCommand({
-          imageIdentifier: identity.imageArn, imageVersion: identity.imageVersion,
-        }), { abortSignal: AbortSignal.timeout(MICROVM_IMAGE_CAPABILITY_REQUEST_TIMEOUT_MS) });
-        if (verifyMicrovmImageLifecycle(identity, version)) {
-          const capable = { ...handle, lifecycleProtocol: MICROVM_LIFECYCLE_PROTOCOL };
-          await saveMicrovmImageCapability(taskId, latest.clientToken, capable);
-          handle = capable;
-        }
-      } catch (error) {
-        // Explicit degraded mode: the saved worker remains usable, with new
-        // suspension disabled. Do not expose image environment or AWS error text.
-        const name = (error as { name?: unknown })?.name;
-        logger.warn('MicroVM image capability unavailable; automatic suspension remains disabled', {
-          task_id: taskId,
-          microvm_id: microvmId,
-          error_type: typeof name === 'string' && /^[A-Za-z0-9_]{1,100}$/.test(name) ? name : 'Error',
-        });
-      }
-    }
+    handle = await discoverImageCapability(taskId, latest.clientToken, handle);
 
     // The durable handle carries actual identity/capability for later decisions.
     logger.info('Lambda MicroVM session started', {

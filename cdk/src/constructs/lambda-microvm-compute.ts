@@ -31,6 +31,7 @@ import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import sharedConstants from '../../../contracts/constants.json';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
 
 /**
@@ -358,6 +359,14 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
    * @default {} — no caller-supplied settings
    */
   readonly imageEnvironmentVariables?: Record<string, string>;
+
+  /**
+   * Secrets Manager name patterns of the channel OAuth bundles the agent may
+   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
+   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
+   */
+  readonly channelOauthSecretPatterns?: readonly string[];
 }
 
 /**
@@ -713,25 +722,30 @@ export class LambdaMicrovmCompute extends Construct {
       props.githubTokenSecret.grantRead(this.executionRole);
     }
 
-    // Workspace OAuth secrets are created after synth. Keep reads prefix-scoped;
-    // refresh and secret writes belong to control-plane resolvers.
-    this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        stack.formatArn({
+    // Secrets Manager, part 2: per-workspace Linear/Jira OAuth tokens. Same shape
+    // and same reason as `ecs-agent-cluster`'s grant (ABCA-488): the CLI creates
+    // `bgagent-linear-oauth-<slug>` / `bgagent-jira-oauth-<cloudId>` at setup, so
+    // the name is unknown at synth and a PREFIX grant is the only expressible
+    // scope. For a Linear/Jira-channel task the agent resolves that token at
+    // startup (`config.resolve_linear_api_token` /
+    // `resolve_jira_oauth_token`) to fire the 👀→✅ reaction and drive the channel
+    // MCP; without the grant the fetch hits AccessDenied and both silently no-op
+    // (logged by the token resolver, but invisible to the user in the channel).
+    //
+    // `GetSecretValue` ONLY — the agent reads; the orchestrator owns refresh /
+    // PutSecretValue.
+    const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
+    if (channelOauthSecretPatterns.length > 0) {
+      this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: channelOauthSecretPatterns.map(resourceName => stack.formatArn({
           service: 'secretsmanager',
           resource: 'secret',
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-        stack.formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+          resourceName,
+        })),
+      }));
+    }
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-Region inference-profile ARNs (parity with the AgentCore runtime and

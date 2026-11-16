@@ -1,8 +1,6 @@
 ---
-title: Deployment roles
+title: "Deployment roles"
 ---
-
-# Deployment roles
 
 This document defines least-privilege IAM policies for the CloudFormation execution role used during `cdk deploy`. The default CDK bootstrap grants `AdministratorAccess` to this role; the policies below scope it to only what ABCA needs.
 
@@ -889,7 +887,7 @@ exact names in addition to the legacy flat-layout prefixes. The execution role
 stays in the parent and is still excluded. Re-bootstrap before deploying the
 child stack. Before upgrading an existing flat deployment, set and retain
 `microvm_nested_stack=false` until its resource migration is complete; changing ownership is not an ordinary
-in-place update. See the [nested-stack runbook](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack).
+in-place update. See the [nested-stack runbook](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/645-p3-nested-stack.md).
 
 For a reviewed migration that keeps old and new resources side by side,
 `microvm_resource_name_prefix` gives the nested image, network connectors and log

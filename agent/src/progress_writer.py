@@ -518,7 +518,7 @@ class _ProgressWriter:
                 flush=True,
             )
 
-    def _put_event_best_effort(self, event_type: str, metadata: dict) -> bool:
+    def _put_event_best_effort(self, event_type: str, metadata: dict) -> bool:  # noqa: C901 -- 16 when the ceiling of 15 was set; must not grow
         """Write a single progress event item to DynamoDB.
 
         Error handling splits three ways:

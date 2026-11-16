@@ -30,7 +30,7 @@ import { makeClient } from '../ua';
 
 const API_TIMEOUT_MS = 15_000;
 const RESPONSE_RESERVE_MS = 1_000;
-export const APPROVAL_POST_COMMIT_TIMEOUT_MS = 8_000;
+const APPROVAL_POST_COMMIT_TIMEOUT_MS = 8_000;
 export const APPROVAL_AUDIT_TIMEOUT_MS = 2_000;
 let client: LambdaMicrovmsClient | undefined;
 

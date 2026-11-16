@@ -397,7 +397,7 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
 async def pre_tool_use_hook(
     hook_input: Any,
     tool_use_id: str | None,
-    hook_context: Any,
+    _hook_context: Any,
     *,
     engine: PolicyEngine,
     trajectory: _TrajectoryWriter | None = None,
@@ -541,11 +541,10 @@ async def pre_tool_use_hook(
         progress=progress,
         ts=ts_module,
         tool_use_id=tool_use_id,
-        session_id=hook_input.get("session_id", ""),
     )
 
 
-async def _handle_require_approval(
+async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 was set; must not grow
     *,
     decision: Any,
     tool_name: str,
@@ -556,7 +555,6 @@ async def _handle_require_approval(
     progress: Any,
     ts: Any,
     tool_use_id: str | None = None,
-    session_id: str = "",
 ) -> dict:
     """REQUIRE_APPROVAL branch of ``pre_tool_use_hook``.
 
@@ -1263,8 +1261,8 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
 
 async def post_tool_use_hook(
     hook_input: Any,
-    tool_use_id: str | None,
-    hook_context: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
     *,
     trajectory: _TrajectoryWriter | None = None,
     stuck_guard: StuckGuard | None = None,
@@ -1705,9 +1703,9 @@ between_turns_hooks: list[BetweenTurnsHook] = [
 
 
 async def stop_hook(
-    hook_input: Any,
-    tool_use_id: str | None,
-    hook_context: Any,
+    _hook_input: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
     *,
     task_id: str,
     progress: Any = None,
@@ -1789,6 +1787,32 @@ async def stop_hook(
     return {"decision": "block", "reason": reason}
 
 
+async def _lifecycle_tool_started(lifecycle: Any, hook_input: Any, tool_use_id: str | None) -> None:
+    """Register a tool with the MicroVM lifecycle barrier before its policy check."""
+    await lifecycle.tool_started(tool_use_id)
+    if isinstance(hook_input, dict):
+        tool_input = hook_input.get("tool_input")
+        # Legacy serialized inputs are normalized deeper in the policy hook.
+        # Keep their tool behavior, but do not infer a safe foreground-only
+        # execution from an opaque value here.
+        if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
+            lifecycle.disable_suspend()
+
+
+def _lifecycle_tool_finished(lifecycle: Any, hook_input: Any, tool_use_id: str | None) -> None:
+    """Release a tool from the MicroVM lifecycle barrier after it returns."""
+    # Background Bash may be promoted after invocation. A returned background
+    # identifier means the tool's post hook is not a reliable indication that
+    # its child stopped.
+    if isinstance(hook_input, dict):
+        response = hook_input.get("tool_response")
+        if isinstance(response, dict) and (
+            response.get("backgroundTaskId") or response.get("background_task_id")
+        ):
+            lifecycle.disable_suspend()
+    lifecycle.tool_finished(tool_use_id)
+
+
 def build_hook_matchers(
     engine: PolicyEngine,
     trajectory: _TrajectoryWriter | None = None,
@@ -1844,14 +1868,7 @@ def build_hook_matchers(
         allowed = False
         try:
             if lifecycle:
-                await lifecycle.tool_started(tool_use_id)
-                if isinstance(hook_input, dict):
-                    tool_input = hook_input.get("tool_input")
-                    # Legacy serialized inputs are normalized deeper in the
-                    # policy hook. Keep their tool behavior, but do not infer a
-                    # safe foreground-only execution from an opaque value here.
-                    if not isinstance(tool_input, dict) or tool_input.get("run_in_background"):
-                        lifecycle.disable_suspend()
+                await _lifecycle_tool_started(lifecycle, hook_input, tool_use_id)
             result = await pre_tool_use_hook(
                 hook_input,
                 tool_use_id,
@@ -1906,19 +1923,10 @@ def build_hook_matchers(
             return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
         finally:
             if lifecycle:
-                # Background Bash may be promoted after invocation. A returned
-                # background identifier means the tool's post hook is not a
-                # reliable indication that its child stopped.
-                if isinstance(hook_input, dict):
-                    response = hook_input.get("tool_response")
-                    if isinstance(response, dict) and (
-                        response.get("backgroundTaskId") or response.get("background_task_id")
-                    ):
-                        lifecycle.disable_suspend()
-                lifecycle.tool_finished(tool_use_id)
+                _lifecycle_tool_finished(lifecycle, hook_input, tool_use_id)
 
     async def _post_failure(
-        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+        _hook_input: HookInput, tool_use_id: str | None, _ctx: HookContext
     ) -> HookJSONOutput:
         if lifecycle:
             lifecycle.tool_finished(tool_use_id)

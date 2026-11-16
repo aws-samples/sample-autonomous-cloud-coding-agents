@@ -19,7 +19,6 @@
 
 import { App, CfnOutput, NestedStack, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -58,12 +57,6 @@ describe.each(IMAGE_INPUTS)('LambdaMicrovmStack %s', (mode, imageInputs) => {
       assumingRoles: [new iam.Role(stack, 'RuntimeRole', {
         assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
       })],
-      taskTable: new dynamodb.Table(stack, 'Tasks', {
-        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      }),
-      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
-        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      }),
       taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
       attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),

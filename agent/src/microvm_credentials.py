@@ -44,7 +44,7 @@ class ScopedCredentialBroker:
         closed = self._closed
 
         class Handler(BaseHTTPRequestHandler):
-            def log_message(self, format, *args):
+            def log_message(self, format, *args):  # noqa: A002 -- keeps BaseHTTPRequestHandler's parameter name
                 # Authorization headers and response bodies contain credentials.
                 del format, args
 

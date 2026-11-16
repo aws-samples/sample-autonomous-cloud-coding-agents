@@ -21,7 +21,7 @@ import { App, Stack } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import { TaskOrchestrator } from '../../src/constructs/task-orchestrator';
+import { TaskOrchestrator, type TaskOrchestratorProps } from '../../src/constructs/task-orchestrator';
 
 interface StackOverrides {
   maxConcurrentTasksPerUser?: number;
@@ -34,15 +34,7 @@ interface StackOverrides {
   guardrailId?: string;
   guardrailVersion?: string;
   /** ADR-021 P2: the identifiers the orchestrator forwards as `platform_config`. */
-  agentPlatformConfig?: {
-    taskApprovalsTableName: string;
-    nudgesTableName: string;
-    logGroupName: string;
-    artifactsBucketName: string;
-    traceArtifactsBucketName: string;
-    agentSessionRoleArn: string;
-    anthropicDefaultHaikuModel: string;
-  };
+  agentPlatformConfig?: TaskOrchestratorProps['agentPlatformConfig'];
   ecsConfig?: {
     clusterArn: string;
     taskDefinitionArn: string;

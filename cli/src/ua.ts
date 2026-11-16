@@ -48,7 +48,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 export const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /** Stable per-component label: this surface IS the bgagent CLI. */
-export const COMPONENT = 'cli';
+const COMPONENT = 'cli';
 
 /** Standard AWS SDK env var the JS v3 SDK reads natively for the `app/` segment. */
 export const APP_ID_ENV = 'AWS_SDK_UA_APP_ID';

@@ -21,7 +21,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
-import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -117,12 +116,6 @@ function instantiate(options: BuildOptions = {}): Omit<Built, 'template'> {
     });
     agentSessionRole = new AgentSessionRole(stack, 'AgentSessionRole', {
       assumingRoles: [runtimeRole],
-      taskTable: new dynamodb.Table(stack, 'TaskTable', {
-        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      }),
-      approvalsTable: new dynamodb.Table(stack, 'ApprovalReadTable', {
-        partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
-      }),
       taskScopedTables: [],
       traceArtifactsBucket: new s3.Bucket(stack, 'TraceBucket'),
       attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),

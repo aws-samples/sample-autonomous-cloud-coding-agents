@@ -22,10 +22,10 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
-import { TRACE_OBJECT_KEY_PREFIX } from '../constructs/trace-artifacts-bucket';
 import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
+import { TRACE_OBJECT_KEY_PREFIX } from './shared/storage-names';
 import type { TaskRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 

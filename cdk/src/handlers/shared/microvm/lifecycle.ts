@@ -73,7 +73,7 @@ export type SaveLifecycleResult =
 
 // Per request/read sequence. A write plus lost-reply recovery can take two such
 // budgets; the caller must also bound its whole reconciliation cycle.
-export const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
+const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
 const ddb = makeDocClient();
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME!;

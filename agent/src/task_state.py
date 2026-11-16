@@ -15,8 +15,7 @@ from shell import log, log_error_cw
 class ApprovalRow(TypedDict):
     """Schema for the approval row written by ``transact_write_approval_request``.
 
-    Mirrors the DDB column layout and the TypeScript ``ApprovalRecord``
-    discriminated union in ``cdk/src/handlers/shared/types.ts``. Used as
+    Mirrors the column layout of ``TaskApprovalsTable``. Used as
     the typed contract between the PreToolUse hook (which builds the row)
     and the transactional writer (which serializes it to DDB attributes).
     Earlier the function accepted a bare ``dict`` so missing or misspelled
@@ -233,7 +232,7 @@ def write_running(task_id: str) -> None:
         log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
 
 
-def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:
+def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:  # noqa: C901 -- 24 when the ceiling of 15 was set; must not grow
     """Transition a task to a terminal state (COMPLETED or FAILED).
 
     Updates ``status_created_at`` alongside ``status`` — see

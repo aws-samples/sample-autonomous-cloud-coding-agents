@@ -58,7 +58,13 @@ def _fetch(broker: ScopedCredentialBroker, *, token: str | None = None, path: st
     request = Request(url)  # noqa: S310 — endpoint comes from this test's loopback broker
     if token is not None:
         request.add_header("Authorization", token)
-    with build_opener(ProxyHandler({})).open(request, timeout=3) as response:
+    try:
+        response = build_opener(ProxyHandler({})).open(request, timeout=3)
+    except HTTPError as error:
+        # An error response still holds its socket; the status code survives close().
+        error.close()
+        raise
+    with response:
         assert response.headers["Cache-Control"] == "no-store"
         return json.load(response)
 

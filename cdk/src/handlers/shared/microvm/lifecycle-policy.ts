@@ -25,8 +25,8 @@ import { TaskStatus, TERMINAL_STATUSES } from '../../../constructs/task-status';
 import { MICROVM_SLEEP_AFTER_S_DEFAULT, MICROVM_SLEEP_AFTER_S_MAX } from '../types';
 
 // Initial policy values, not service limits. Live timings must validate them.
-export const MICROVM_WAKE_MARGIN_MS = 60_000;
-export const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
+const MICROVM_WAKE_MARGIN_MS = 60_000;
+const MICROVM_MIN_USEFUL_SLEEP_MS = 30_000;
 
 export interface MicrovmLifecyclePolicyInput {
   readonly snapshot: MicrovmLifecycleSnapshot;
@@ -75,6 +75,23 @@ export function decideMicrovmLifecycle(input: MicrovmLifecyclePolicyInput): Micr
     return { action: 'wait', reason: 'working', nextPollInMs };
   }
 
+  return decideAwaitingApproval({ input, sleeping, sameGate, nextPollInMs, transitionPoll, wake });
+}
+
+/** Values the gate branch shares with the caller; computed once per decision. */
+interface GateContext {
+  readonly input: MicrovmLifecyclePolicyInput;
+  readonly sleeping: boolean;
+  readonly sameGate: boolean;
+  readonly nextPollInMs: number;
+  readonly transitionPoll: number;
+  readonly wake: (reason: string) => MicrovmLifecycleDecision;
+}
+
+/** The AWAITING_APPROVAL branch of `decideMicrovmLifecycle`. */
+function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
+  const { input, sleeping, sameGate, nextPollInMs, transitionPoll, wake } = ctx;
+  const { snapshot, nowMs, sessionDeadlineMs } = input;
   const approval = snapshot.approval;
   if (approval.kind !== 'present') {
     // A failed/missing read is not permission to sleep. Preserve wake intent

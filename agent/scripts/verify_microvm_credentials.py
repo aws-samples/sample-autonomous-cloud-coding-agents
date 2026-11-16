@@ -125,11 +125,23 @@ print(json.dumps({"Credentials": creds} if sys.argv[3] == "export" else {"Versio
 """
 
 
-async def probe(mode: str, *, ambient_fallback: bool) -> dict:
+AGENT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def bundled_cli_version() -> str:
+    """Version string of the Claude CLI bundled with the installed SDK."""
     import claude_agent_sdk
+
+    cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+    return subprocess.run(
+        [str(cli), "--version"], capture_output=True, text=True, check=True, timeout=5
+    ).stdout.strip()
+
+
+async def probe(mode: str, *, ambient_fallback: bool) -> dict:
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    sys.path.insert(0, str(AGENT_ROOT / "src"))
     from bedrock_creds_helper import MICROVM_CREDENTIAL_BROKER_ENV
     from microvm_credentials import ScopedCredentialBroker
     from microvm_lifecycle import MicrovmLifecycle
@@ -139,10 +151,7 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
     state: ProbeState = {"key": "SYNTHETIC_INITIAL", "expiry": initial_expiry, "fail": False}
     stream = model_response()
     sdk_version = importlib.metadata.version("claude-agent-sdk")
-    cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
-    cli_version = subprocess.run(
-        [str(cli), "--version"], capture_output=True, text=True, check=True, timeout=5
-    ).stdout.strip()
+    cli_version = await asyncio.to_thread(bundled_cli_version)
     verified_sdk, pinned_cli = pinned_versions()
     if sdk_version != verified_sdk or cli_version != f"{pinned_cli} (Claude Code)":
         raise RuntimeError(
@@ -150,7 +159,7 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
         )
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, format, *args):
+        def log_message(self, format, *args):  # noqa: A002 -- keeps BaseHTTPRequestHandler's parameter name
             del format, args
 
         def do_GET(self):
@@ -221,7 +230,7 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
                 shlex.join(
                     [
                         sys.executable,
-                        str(Path(__file__).resolve().parents[1] / "src/bedrock_creds_helper.py"),
+                        str(AGENT_ROOT / "src/bedrock_creds_helper.py"),
                     ]
                 )
                 if mode.startswith("broker")
@@ -312,15 +321,17 @@ async def probe(mode: str, *, ambient_fallback: bool) -> dict:
                         pending.write_text(json.dumps(state))
                         pending.replace(state_file)
                     await client.query("Return one short sentence. Do not call tools.")
-                    async for message in client.receive_response():
-                        if isinstance(message, ResultMessage):
-                            results.append(
-                                {
-                                    "phase": phase,
-                                    "error": message.is_error,
-                                    **({"detail": message.result} if message.is_error else {}),
-                                }
-                            )
+                    results.extend(
+                        [
+                            {
+                                "phase": phase,
+                                "error": message.is_error,
+                                **({"detail": message.result} if message.is_error else {}),
+                            }
+                            async for message in client.receive_response()
+                            if isinstance(message, ResultMessage)
+                        ]
+                    )
             issued = (
                 [json.loads(line) for line in audit.read_text().splitlines()]
                 if audit.exists()

@@ -69,11 +69,9 @@ const outputPath = join(outputDir, 'bootstrap-template.yaml');
  * parser proves nothing — `load(dump(x)) === x` holds for any object — so it cannot
  * detect the artifact drifting from the generator that is supposed to produce it.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildTemplate(): any {
   // --- Read and parse the default template ---
   const rawTemplate = readFileSync(cdkBootstrapTemplatePath, 'utf-8');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const template: any = yaml.load(rawTemplate);
 
   // --- Step 1: Update BootstrapVariant default ---
@@ -119,7 +117,6 @@ export function buildTemplate(): any {
   interface PolicyDef {
     logicalId: string;
     policyName: string;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     policyFn: () => any;
     condition?: string;
   }
@@ -166,7 +163,6 @@ export function buildTemplate(): any {
       policyDoc.Version = '2012-10-17';
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const resource: any = {
       Type: 'AWS::IAM::ManagedPolicy',
       Properties: {
@@ -274,7 +270,6 @@ export function buildTemplate(): any {
  * file is exactly what the generator produces today.
  */
 export function renderTemplate(): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const template: any = buildTemplate();
 
   const yamlOutput = yaml.dump(template, {
@@ -306,7 +301,6 @@ export function renderTemplate(): string {
 
   return header + yamlOutput;
 }
-
 
 /** Generate the artifact, refusing to emit one that cannot bootstrap a fresh account. */
 function main(): void {

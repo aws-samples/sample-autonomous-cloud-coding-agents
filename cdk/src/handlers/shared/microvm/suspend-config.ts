@@ -23,7 +23,7 @@ import { logger } from '../logger';
 import { microvmErrorIdentity } from './control';
 import { makeClient } from '../ua';
 
-export const MICROVM_SUSPEND_CONFIG_TIMEOUT_MS = 3_000;
+const MICROVM_SUSPEND_CONFIG_TIMEOUT_MS = 3_000;
 let client: SSMClient | undefined;
 
 /**

@@ -131,7 +131,7 @@ beforeEach(() => {
   mockRead.mockReset().mockImplementation(async () => structuredClone(row));
   mockSuspendEnabled.mockReset().mockResolvedValue(true);
   mockSave.mockReset().mockImplementation(async (_snapshot, action) => {
-    if (row.intent?.action !== action || row.intent.request_id !== row.requestId) intent(action, time);
+    if (row.intent?.action !== action || row.intent?.request_id !== row.requestId) intent(action, time);
     return { status: 'saved', intent: row.intent };
   });
   strategy = {

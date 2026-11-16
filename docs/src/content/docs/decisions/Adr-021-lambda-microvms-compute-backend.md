@@ -1,8 +1,6 @@
 ---
-title: Adr 021 lambda microvms compute backend
+title: "ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend"
 ---
-
-# ADR-021: AWS Lambda MicroVMs as a third ComputeStrategy backend
 
 > Number: candidate ADR-021 (ADR-020 is the highest accepted on `main`; ADR-018 is claimed by open PR [#548](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/548), ADR-019 by open PR [#663](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/663)). Numbers are never reused. If a lower number frees before merge, renumber and coordinate with those PRs.
 
@@ -98,7 +96,7 @@ The divergence is safe because it does not weaken detection: the orchestrator st
 
 Neither the mapping nor the NotFound rule is a health decision: both are mechanical restatements of substrate state, which is what keeps the "strategy reports, orchestrator interprets" split intact.
 
-Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax)):
+Normative requirements (EARS, per [ADR-020](/sample-autonomous-cloud-coding-agents/decisions/adr-020-ears-requirements-syntax)):
 
 - When a task's Blueprint sets `compute_type: 'lambda-microvm'`, the orchestrator shall resolve the `LambdaMicrovmComputeStrategy` via `resolveComputeStrategy`.
 - When `startSession` is invoked, the strategy shall call `RunMicrovm` with `maximumDurationInSeconds` set to 28 800 (the service maximum, matching AgentCore's 8-hour session cap and sitting inside the orchestrator's ~8.5 h safety-net poll window).
@@ -384,7 +382,7 @@ P3 implements sub-decisions 1 and 2 as written: mandatory `suspendSession`/`resu
 - **Credential renewal needs a synchronous barrier.** The pinned Claude CLI returns its previous cached `awsCredentialExport` value while it refreshes in the background, which is not an acknowledged refresh after a freeze. MicroVM workers leave that export empty and give the CLI a loopback container-credential provider (`microvm_credentials.ScopedCredentialBroker`) that renews before signing a request with expired keys. `/resume` refreshes the task-scoped and ambient credentials before the barrier opens. Model calls fail fast (`API_TIMEOUT_MS`) because sockets idle across a suspend can be dropped silently.
 - **Suspension is gated on the launched image, not the deployment.** The coordinator records the actual `imageArn`/`imageVersion` returned by `RunMicrovm` and verifies the image version's declared lifecycle protocol (`ABCA_MICROVM_LIFECYCLE_PROTOCOL`, all six hooks) before allowing sleep. A legacy or unverified image keeps running and can still be woken.
 - **Suspension has a live off-switch and a per-task delay.** `microvm_approval_suspend_enabled` (default false) creates a Parameter Store switch the supervisor reads before each suspend, so pinned durable executions can stop new suspensions without redeploying; turning it off never abandons a suspended worker. A task's `microvm_sleep_after_s` (CLI `--microvm-sleep-after`, `off` = 0) is captured at submission. The default is 60 s so a default 300 s gate actually sleeps: the grace ends at 60 s and the worker wakes `MICROVM_WAKE_MARGIN_MS` (60 s) before the original deadline, i.e. at 240 s. The supervisor never suspends for less than 30 s.
-- **MicroVM resources live in a nested stack.** `microvm_nested_stack` must be selected explicitly (`true` for new and already-nested deployments, `false` to keep an existing flat installation) because moving a flat deployment's resources is not a safe migration; see [645-p3-nested-stack.md](/sample-autonomous-cloud-coding-agents/architecture/645-p3-nested-stack). Bootstrap 1.9.0 or later covers the nested role names. Stateless scheduled maintenance (concurrency/stranded reconcilers, admission pickup, upload cleanup) is also nested to keep every backend profile inside the 490-resource root budget ([ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)).
+- **MicroVM resources live in a nested stack.** `microvm_nested_stack` must be selected explicitly (`true` for new and already-nested deployments, `false` to keep an existing flat installation) because moving a flat deployment's resources is not a safe migration; see [645-p3-nested-stack.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/645-p3-nested-stack.md). Bootstrap 1.9.0 or later covers the nested role names. Stateless scheduled maintenance (concurrency/stranded reconcilers, admission pickup, upload cleanup) is also nested to keep every backend profile inside the 490-resource root budget ([ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries)).
 
 **Follow-ups, not in P3.** Each needs its own approved issue: recovering a task on a replacement worker when its suspended worker is lost (compute-agnostic continuation); approval waits without an automatic deadline; a trusted approval-writer API that removes workers' direct approvals-table writes; Linear approve/deny replies; IAM-authenticated payload bootstrap with signed per-task URLs; and a capacity-reservation rewrite.
 
@@ -445,6 +443,6 @@ P3 implements sub-decisions 1 and 2 as written: mandatory `suspendSession`/`resu
 - PR [#596](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/596) — ECS Fargate backend (pattern source for conditional wiring)
 - [AWS Lambda MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/lambda-microvms-guide.html) — developer guide; [Running and using MicroVMs](https://docs.aws.amazon.com/lambda/latest/dg/microvms-launching.html) — lifecycle APIs and hooks
 - [Agent Toolkit for AWS — aws-lambda-microvms skill](https://github.com/aws/agent-toolkit-for-aws/blob/main/skills/specialized-skills/serverless-skills/aws-lambda-microvms/SKILL.md) — operational constraints (no self-suspend, idle-policy semantics, snapshot uniqueness, size limits)
-- [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax) — EARS syntax used for the normative requirements above
+- [ADR-020](/sample-autonomous-cloud-coding-agents/decisions/adr-020-ears-requirements-syntax) — EARS syntax used for the normative requirements above
 - [CEDAR_HITL_GATES.md](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates) — approval-gate mechanics (decisions #6, #7) the suspend/resume handshake preserves; `cancel-task.ts` / `task-api.ts` — the inline best-effort + reconciler-backstop pattern the resume path mirrors
 - [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute), [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) — design docs to be updated by the implementing PRs

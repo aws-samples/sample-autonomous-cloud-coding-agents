@@ -34,7 +34,7 @@ jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
 // we mock that whole module here so we export a class the handler
 // can both throw and `instanceof`-check.
 class MockTransactionCanceledException extends Error {
-  name = 'TransactionCanceledException';
+  override name = 'TransactionCanceledException';
   CancellationReasons?: { Code?: string }[];
   constructor(reasons: { Code?: string }[]) {
     super('TransactionCanceledException');

@@ -95,7 +95,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'])('exclusive %s deployment',
       ...(backend === 'lambda-microvm' ? ['/aws/lambda-microvms/ComputeSelection-abca-agent'] : []),
     ];
     for (const name of names) {
-      expect(groups.find(resource => resource.Properties.LogGroupName === name)).toMatchObject({
+      expect(groups.find(resource => resource.Properties?.LogGroupName === name)).toMatchObject({
         DeletionPolicy: 'Delete',
         UpdateReplacePolicy: 'Delete',
       });

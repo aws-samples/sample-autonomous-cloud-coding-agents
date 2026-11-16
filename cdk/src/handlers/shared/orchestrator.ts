@@ -547,6 +547,7 @@ function isValidApprovalGateCap(value: unknown): value is number {
  * @param blueprintConfig - optional per-repo blueprint config.
  * @returns the assembled payload for the agent runtime.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (81 when it landed); must not grow
 export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: BlueprintConfig): Promise<Record<string, unknown>> {
   const { log, correlation } = envelopeFor(task);
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
@@ -994,6 +995,46 @@ export async function finalizeTask(
   return true;
 }
 
+/**
+ * The MicroVM supervisor gave up on a live worker: end the task as FAILED, or
+ * TIMED_OUT at the session deadline, unless another writer already ended it.
+ */
+async function finalizeMicrovmSupervisorFailure(
+  taskId: string,
+  pollState: PollState,
+  userId: string,
+  currentStatus: TaskStatusType,
+  correlation: ReturnType<typeof envelopeFor>['correlation'],
+): Promise<void> {
+  const reason = pollState.microvmFailureReason!;
+  // Approval/HYDRATING permit FAILED, not TIMED_OUT. This is infrastructure
+  // failure and must not invent a TIMED_OUT decision on the approval row.
+  const timeout = reason === 'session-deadline'
+    && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING);
+  const terminal = timeout ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
+  try {
+    await transitionTask(taskId, currentStatus, terminal, {
+      completed_at: new Date().toISOString(),
+      error_message: pollState.microvmFailureMessage ?? `MicroVM supervisor: ${reason}`,
+    }, pollState.microvmSupervisor?.microvmId);
+  } catch (error) {
+    const winner = await loadTask(taskId, true);
+    if (!TERMINAL_STATUSES.includes(winner.status)) throw error;
+    await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
+      final_status: winner.status, poll_attempts: pollState.attempts,
+    }, correlation);
+    await decrementConcurrency(userId);
+    return;
+  }
+  await emitTaskEvent(taskId, timeout ? 'task_timed_out' : 'task_failed', {
+    reason: 'microvm_supervisor',
+    detail: reason,
+    microvm_id: pollState.microvmSupervisor?.microvmId,
+    poll_attempts: pollState.attempts,
+  }, correlation);
+  await decrementConcurrency(userId);
+}
+
 async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId: string, task: TaskRecord): Promise<void> {
   const currentStatus = task.status;
   // Correlation envelope on this function's own log lines too, not just the
@@ -1001,32 +1042,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
   const { log, correlation } = envelopeFor(task);
 
   if (pollState.microvmFailureReason && !TERMINAL_STATUSES.includes(currentStatus)) {
-    // Approval/HYDRATING permit FAILED, not TIMED_OUT. This is infrastructure
-    // failure and must not invent a TIMED_OUT decision on the approval row.
-    const timeout = pollState.microvmFailureReason === 'session-deadline'
-      && (currentStatus === TaskStatus.RUNNING || currentStatus === TaskStatus.FINALIZING);
-    const terminal = timeout ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
-    try {
-      await transitionTask(taskId, currentStatus, terminal, {
-        completed_at: new Date().toISOString(),
-        error_message: pollState.microvmFailureMessage ?? `MicroVM supervisor: ${pollState.microvmFailureReason}`,
-      }, pollState.microvmSupervisor?.microvmId);
-    } catch (error) {
-      const winner = await loadTask(taskId, true);
-      if (!TERMINAL_STATUSES.includes(winner.status)) throw error;
-      await emitTaskEvent(taskId, `task_${winner.status.toLowerCase()}`, {
-        final_status: winner.status, poll_attempts: pollState.attempts,
-      }, correlation);
-      await decrementConcurrency(userId);
-      return;
-    }
-    await emitTaskEvent(taskId, timeout ? 'task_timed_out' : 'task_failed', {
-      reason: 'microvm_supervisor',
-      detail: pollState.microvmFailureReason,
-      microvm_id: pollState.microvmSupervisor?.microvmId,
-      poll_attempts: pollState.attempts,
-    }, correlation);
-    await decrementConcurrency(userId);
+    await finalizeMicrovmSupervisorFailure(taskId, pollState, userId, currentStatus, correlation);
     return;
   }
 

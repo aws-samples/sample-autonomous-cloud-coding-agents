@@ -1258,7 +1258,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
   let template: Template;
   let childTemplate: Template;
 
-  function assertChildReference(value: unknown, resourceType: string, attribute: string, prefix = ''): void {
+  function expectChildReference(value: unknown, resourceType: string, attribute: string, prefix = ''): void {
     const [stackId, outputPath] = (value as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'];
     expect(stackId).toMatch(/^MicrovmNestedStack/);
     expect(outputPath).toMatch(/^Outputs\./);
@@ -1384,7 +1384,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     const [, orchestrator] = Object.entries(fns)
       .find(([id]) => id.includes('TaskOrchestratorOrchestratorFn'))!;
     const env = orchestrator.Properties.Environment.Variables as Record<string, unknown>;
-    assertChildReference(env.MICROVM_IMAGE_IDENTIFIER, 'AWS::Lambda::MicrovmImage', 'ImageArn');
+    expectChildReference(env.MICROVM_IMAGE_IDENTIFIER, 'AWS::Lambda::MicrovmImage', 'ImageArn');
   });
 
   test('grants the orchestrator its launch, state, cleanup and image-capability actions, image-scoped', () => {
@@ -1531,6 +1531,9 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
           compute_types: 'lambda-microvm',
           microvm_nested_stack: true,
           microvm_region_override: true,
+          // eu-central-1 has no AWS Agent Registry; the deployment-profile
+          // check would otherwise reject the legacy default first (ADR-024).
+          enableAgentRegistry: false,
           microvm_base_image_arn: BASE_IMAGE_ARN,
           microvm_base_image_version: '1',
           microvm_artifact_sha256: 'a'.repeat(64),
@@ -1544,7 +1547,7 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
     });
 
     test('fails synth when the stack Region has no Lambda MicroVMs', () => {
-      const app = new App({ context: { compute_types: 'lambda-microvm', microvm_nested_stack: true } });
+      const app = new App({ context: { compute_types: 'lambda-microvm', microvm_nested_stack: true, enableAgentRegistry: false } });
       expect(() => new AgentStack(app, 'TestAgentStackMicrovmBadRegion', {
         env: { account: '123456789012', region: 'eu-central-1' },
       })).toThrow(/AWS Lambda MicroVMs are not available in eu-central-1/);

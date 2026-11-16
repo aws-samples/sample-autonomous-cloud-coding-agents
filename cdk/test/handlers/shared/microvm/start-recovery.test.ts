@@ -81,6 +81,7 @@ const handle = {
 let record: Record<string, any>;
 let lostResponses: number;
 let created: Map<string, Record<string, unknown>>;
+const replays: Array<[unknown, unknown]> = [];
 let now: number;
 
 beforeEach(() => {
@@ -123,7 +124,9 @@ beforeEach(() => {
     if (kind === 'terminate') return {};
     const token = command.clientToken ?? `sdk-generated-${created.size}`;
     if (!created.has(token)) created.set(token, structuredClone(command));
-    expect(created.get(token)).toEqual(command);
+    // A replay that changes the request is a different call, not a retry;
+    // afterEach asserts every replay matched its original request.
+    replays.push([created.get(token), command]);
     if (lostResponses-- > 0) {
       throw Object.assign(new Error('response lost after creation'), { name: 'TimeoutError' });
     }
@@ -131,7 +134,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => jest.restoreAllMocks());
+afterEach(() => {
+  for (const [original, replay] of replays.splice(0)) expect(replay).toEqual(original);
+  jest.restoreAllMocks();
+});
 
 function runCalls() {
   return mockMicrovmSend.mock.calls.filter(([command]) => command.kind === 'run');

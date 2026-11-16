@@ -1,5 +1,5 @@
 ---
-title: Approval gates (Cedar HITL)
+title: "Approval gates (Cedar HITL)"
 ---
 
 The platform evaluates every tool call the agent is about to make (Bash, Write, Edit, WebFetch, ...) against a Cedar policy set. Most calls resolve to a plain **Allow** or **Deny** with no human involvement. For a small, explicitly-marked set of rules, the decision is **require-approval**: the agent pauses, the task transitions to `AWAITING_APPROVAL`, and you are asked to make the call.
@@ -116,4 +116,4 @@ approval request is created; sleep never extends the approval deadline. The API
 equivalent is `microvm_sleep_after_s` (zero means off), and task details return
 the saved setting. Automatic sleep is disabled by default for new deployments.
 An operator enables it after [verifying the deployed image and
-coordinator](/sample-autonomous-cloud-coding-agents/architecture/readme#live-acceptance-for-an-installation).
+coordinator](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/docs/verification/README.md#live-acceptance-for-an-installation).

@@ -27,7 +27,7 @@ jest.mock('../../src/handlers/shared/microvm/approval-wake', () => ({
 }));
 
 class MockTransactionCanceledException extends Error {
-  name = 'TransactionCanceledException';
+  override name = 'TransactionCanceledException';
   CancellationReasons?: { Code?: string }[];
   constructor(reasons: { Code?: string }[]) {
     super('TransactionCanceledException');

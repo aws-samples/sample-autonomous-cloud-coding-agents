@@ -25,6 +25,7 @@ import { ulid } from 'ulid';
 import { logger } from './logger';
 import { APPROVAL_AUDIT_TIMEOUT_MS, approvalPostCommitOptions, wakeMicrovmAfterApproval } from './microvm/approval-wake';
 import { microvmErrorIdentity } from './microvm/control';
+import type { ApprovalDecisionRecordedEvent } from './types';
 
 export interface DecisionPostCommitInput {
   readonly ddb: DynamoDBDocumentClient;
@@ -34,7 +35,7 @@ export interface DecisionPostCommitInput {
   readonly requestId: string;
   readonly decision: 'APPROVED' | 'DENIED';
   /** Decision-specific audit fields (approve: `scope`; deny: `reason`). */
-  readonly auditMetadata: Record<string, unknown>;
+  readonly auditMetadata: Pick<ApprovalDecisionRecordedEvent, 'scope' | 'reason'>;
   readonly decidedAt: string;
   readonly nowEpoch: number;
   readonly retentionDays: number;
@@ -69,7 +70,7 @@ export async function recordDecisionPostCommit(input: DecisionPostCommitInput): 
           ...input.auditMetadata,
           decided_at: input.decidedAt,
           caller_user_id: input.callerUserId,
-        },
+        } satisfies ApprovalDecisionRecordedEvent,
       },
     }), { abortSignal });
   } catch (auditErr) {

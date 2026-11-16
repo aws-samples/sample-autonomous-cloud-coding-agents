@@ -592,66 +592,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(JSON.parse(runHookPayload).agent_payload).toBeDefined();
     });
 
-    test('uploads an oversized payload to S3 and inlines only the pointer', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      const big = { repo_url: 'org/repo', hydrated_context: { blob: 'x'.repeat(20_000) } };
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: big,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      // Same key shape as the ECS payload bucket: <task_id>/payload.json
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const put = mockS3Send.mock.calls[0][0];
-      expect(put._type).toBe('PutObject');
-      expect(put.input.Bucket).toBe(PAYLOAD_BUCKET);
-      expect(put.input.Key).toBe('TASK001/payload.json');
-      expect(put.input.ContentType).toBe('application/json');
-      // The S3 object carries the payload with platform_config merged in at the top
-      // level, so an agent that resolves the pointer gets the config with it.
-      expect(JSON.parse(put.input.Body)).toEqual({ ...big, platform_config: EXPECTED_PLATFORM_CONFIG });
-
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      const envelope = JSON.parse(runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
-      expect(envelope.agent_payload).toBeUndefined();
-      // ...and ALSO inline on the pointer envelope, deliberately duplicated: the
-      // agent must be able to read its platform configuration whether it takes it
-      // off the hook body before fetching S3 or out of the fetched object.
-      expect(envelope.platform_config).toEqual(EXPECTED_PLATFORM_CONFIG);
-      // The whole point: the hook body must sit far under the 4 KB cap.
-      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    });
-
-    test('the inline/S3 branch point IS the 4096-byte service cap, with no headroom', () => {
-      // Live-measured, NOT read off the SDK docs (which say 16,384): the service
-      // rejects 4097 with "Member must have length less than or equal to 4096".
-      // Unlike ECS (whose 8192-byte cap is shared with env vars + command, so it
-      // needs a margin), runHookPayload is the entire counted string.
-      expect(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES).toBe(4_096);
-    });
-
-    test('a payload whose envelope is EXACTLY 4096 bytes stays inline', async () => {
-      runMicrovmOk();
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(4_096),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      // Boundary is `<=`: 4096 passed the service's length validation live.
-      expect(mockS3Send).not.toHaveBeenCalled();
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      expect(Buffer.byteLength(runHookPayload, 'utf8')).toBe(4_096);
-      expect(JSON.parse(runHookPayload).agent_payload).toBeDefined();
-    });
-
     test('a payload whose envelope is 4097 bytes — one over — goes to S3', async () => {
       mockS3Send.mockResolvedValueOnce({});
       runMicrovmOk();
@@ -750,62 +690,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       ).rejects.toThrow(
         `${MICROVM_ERROR_MARKER} RunMicrovm failed: RunMicrovm returned an incomplete response`,
       );
-    });
-
-    test('a payload whose envelope is 4097 bytes — one over — goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(4_097),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBe(`s3://${PAYLOAD_BUCKET}/TASK001/payload.json`);
-      expect(envelope.agent_payload).toBeUndefined();
-    });
-
-    test('a mid-sized envelope the SDK-documented 16KB cap would have inlined goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      // Regression guard for the live-verification fix: anything from 4,097 to
-      // 16,384 bytes used to be inlined and would be REJECTED by the service.
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(13_000),
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const envelope = JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload);
-      expect(envelope.agent_payload_s3_uri).toBeDefined();
-      expect(envelope.agent_payload).toBeUndefined();
-    });
-
-    test('measures the serialized envelope in BYTES, so a multi-byte payload still goes to S3', async () => {
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      // 3-byte UTF-8 characters: 2000 chars is ~6 KB of bytes but only 2 KB of
-      // chars, so measuring String.length would have wrongly inlined this.
-      const payload = { prompt: '\u4f60'.repeat(2_000) };
-      expect(JSON.stringify({ agent_payload: payload, platform_config: EXPECTED_PLATFORM_CONFIG }).length)
-        .toBeLessThan(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(mockSend.mock.calls[0][0].input.runHookPayload).agent_payload_s3_uri).toBeDefined();
     });
 
     test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
@@ -859,50 +743,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
     test('microvmPayloadKey matches the ECS payload key shape', () => {
       expect(microvmPayloadKey('TASK001')).toBe('TASK001/payload.json');
-    });
-
-    test('throws when RunMicrovm returns no microvmId', async () => {
-      mockSend.mockResolvedValueOnce({ endpoint: ENDPOINT, state: 'PENDING' });
-
-      await expect(
-        new LambdaMicrovmComputeStrategy().startSession({
-          taskId: 'TASK001',
-          userId: 'cognito-test',
-          payload: { repo_url: 'org/repo' },
-          blueprintConfig: BLUEPRINT,
-        }),
-      ).rejects.toThrow('RunMicrovm returned an incomplete response');
-    });
-
-    test('throws when RunMicrovm returns no endpoint', async () => {
-      mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'PENDING' });
-
-      await expect(
-        new LambdaMicrovmComputeStrategy().startSession({
-          taskId: 'TASK001',
-          userId: 'cognito-test',
-          payload: { repo_url: 'org/repo' },
-          blueprintConfig: BLUEPRINT,
-        }),
-      ).rejects.toThrow('RunMicrovm returned an incomplete response');
-    });
-
-    test('MARKS the incomplete-response throw so the classifier can see the backend', async () => {
-      // Unmarked, this landed in error-classifier's generic `Session start failed`
-      // bucket, whose remedy is "Check AgentCore Runtime or ECS cluster health" —
-      // the wrong substrate entirely.
-      mockSend.mockResolvedValueOnce({ endpoint: ENDPOINT, state: 'PENDING' });
-
-      await expect(
-        new LambdaMicrovmComputeStrategy().startSession({
-          taskId: 'TASK001',
-          userId: 'cognito-test',
-          payload: { repo_url: 'org/repo' },
-          blueprintConfig: BLUEPRINT,
-        }),
-      ).rejects.toThrow(
-        `${MICROVM_ERROR_MARKER} RunMicrovm failed: RunMicrovm returned an incomplete response`,
-      );
     });
 
     test('REAPS the MicroVM when the response carries an id but no endpoint', async () => {

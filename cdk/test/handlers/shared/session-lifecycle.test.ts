@@ -100,11 +100,12 @@ describe.each(['pollSession', 'suspendSession', 'resumeSession', 'stopSession'] 
       }));
       const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
       const result = strategy[operation](microvm, { abortSignal: controller.signal });
-      const assertion = operation === 'stopSession'
-        ? expect(result).resolves.toMatchObject({ outcome: 'unconfirmed' })
-        : expect(result).rejects.toThrow('caller deadline');
       controller.abort();
-      await assertion;
+      if (operation === 'stopSession') {
+        await expect(result).resolves.toMatchObject({ outcome: 'unconfirmed' });
+      } else {
+        await expect(result).rejects.toThrow('caller deadline');
+      }
       expect(mockMicrovmSend).toHaveBeenCalledTimes(1);
       expect(mockMicrovmSend.mock.calls[0][1].abortSignal.aborted).toBe(true);
     });
@@ -233,9 +234,9 @@ describe.each(['suspendSession', 'resumeSession'] as const)('%s contract', opera
         options.abortSignal.addEventListener('abort', () => reject(Object.assign(new Error('deadline'), { name: 'AbortError' })));
       }));
       const strategy = resolveComputeStrategy({ compute_type: 'lambda-microvm', runtime_arn: '' });
-      const result = expect(strategy[operation](microvm)).rejects.toThrow('AbortError');
+      const result = strategy[operation](microvm);
       controller.abort();
-      await result;
+      await expect(result).rejects.toThrow('AbortError');
       expect(timeout).toHaveBeenCalledWith(MICROVM_LIFECYCLE_REQUEST_TIMEOUT_MS);
     } finally {
       timeout.mockRestore();

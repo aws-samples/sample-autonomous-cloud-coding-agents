@@ -158,14 +158,16 @@ process.env.GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
 
+import type { DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus } from '../../src/constructs/task-status';
-import { handler as durableHandler } from '../../src/handlers/orchestrate-task';
+import { handler as exportedHandler } from '../../src/handlers/orchestrate-task';
 import type { MicrovmLifecycleSnapshot } from '../../src/handlers/shared/microvm/lifecycle';
 import { LambdaMicrovmComputeStrategy, MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES } from '../../src/handlers/shared/strategies/lambda-microvm-strategy';
 
-/** The durable wrapper's input type omits the orchestrator event; tests pass it directly. */
-const handler = (event: { task_id: string }, context: never) =>
-  durableHandler(event as never, context);
+// The mock at the top of this file makes `withDurableExecution` return the function it is
+// given, so the export is the raw durable handler here: it takes the task event and a
+// durable context, not the Lambda invocation envelope its declared type describes.
+const handler = exportedHandler as unknown as DurableExecutionHandler<{ task_id: string }, void>;
 
 /**
  * Minimal stand-in for the durable-execution context: `step` runs its body
