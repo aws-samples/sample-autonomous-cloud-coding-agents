@@ -1,8 +1,6 @@
 ---
-title: Adr 025 trusted approval writer
+title: "ADR-025: Trusted approval writer"
 ---
-
-# ADR-025: Trusted approval writer
 
 **Status:** proposed
 **Date:** 2026-11-05
@@ -37,4 +35,4 @@ Use a small IAM-authenticated API and Lambda as the **only** worker-facing appro
 
 - [Issue #1000](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1000)
 - [Approval trust boundaries](/sample-autonomous-cloud-coding-agents/architecture/cedar-hitl-gates)
-- [ADR-021: Lambda MicroVM compute backend](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend)
+- [ADR-021: Lambda MicroVM compute backend](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend)
