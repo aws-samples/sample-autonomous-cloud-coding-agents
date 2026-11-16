@@ -169,13 +169,13 @@ export interface AgentStackProps extends StackProps {
 
 /**
  * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
- * otherwise the vault is on exactly when AgentCore is (see the call site).
+ * otherwise `byDefault` (on when Linear and AgentCore are both deployed: see the call site).
  */
-function resolveLinearIdentityVault(context: unknown, agentCoreEnabled: boolean): boolean {
+function resolveLinearIdentityVault(context: unknown, byDefault: boolean): boolean {
   if (context === true || context === 'true') return true;
   if (context === false || context === 'false') return false;
   if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
-  return agentCoreEnabled;
+  return byDefault;
 }
 
 export class AgentStack extends Stack {
@@ -337,14 +337,16 @@ export class AgentStack extends Stack {
     const toolGatewayEnabled = features.toolGateway;
 
     // RFC #249 Linear OAuth token vault (AgentCore Identity). Default ON wherever
-    // AgentCore is deployed: that already proves the region has AgentCore, and the
-    // vault refreshes the Linear grant itself, so an idle workspace cannot strand
-    // an expired refresh token in Secrets Manager. Deployments without AgentCore
-    // default to Secrets Manager. `--context enableLinearIdentityVault=true|false`
-    // overrides either way. Resolved early so the runtime env map, the
-    // LinearIdentityVault construct and the token grants share one predicate.
+    // Linear and AgentCore are both deployed: AgentCore already proves the region
+    // has it, and the vault refreshes the Linear grant itself, so an idle workspace
+    // cannot strand an expired refresh token in Secrets Manager. Deployments without
+    // AgentCore default to Secrets Manager, and without Linear there is no grant to
+    // vault. `--context enableLinearIdentityVault=true|false` overrides the default
+    // (an explicit true without Linear still fails below). Resolved early so the
+    // runtime env map, the LinearIdentityVault construct and the token grants share
+    // one predicate.
     const linearIdentityVaultEnabled = resolveLinearIdentityVault(
-      this.node.tryGetContext('enableLinearIdentityVault'), agentCoreEnabled);
+      this.node.tryGetContext('enableLinearIdentityVault'), agentCoreEnabled && features.linear);
     if (linearIdentityVaultEnabled && !features.linear) {
       throw new Error('enableLinearIdentityVault requires the linear feature; enable Linear or drop the vault switch');
     }
