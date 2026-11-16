@@ -355,3 +355,9 @@ def _clean_env(monkeypatch):
     from aws_session import reset_session_cache
 
     reset_session_cache()
+
+    # The #251 blocker latch is a module-level scalar too: a clone-failure test
+    # in test_repo.py leaves it set for whichever test runs next.
+    from hooks import reset_blocker_reason
+
+    reset_blocker_reason()
