@@ -298,13 +298,13 @@ function linearAgentSessionsProps(
 
 /**
  * Whether the Linear OAuth token vault is deployed. An explicit context value wins;
- * otherwise the vault is on exactly when AgentCore is (see the call site).
+ * otherwise `byDefault` (on when Linear and AgentCore are both deployed: see the call site).
  */
-function resolveLinearIdentityVault(context: unknown, agentCoreEnabled: boolean): boolean {
+function resolveLinearIdentityVault(context: unknown, byDefault: boolean): boolean {
   if (context === true || context === 'true') return true;
   if (context === false || context === 'false') return false;
   if (context !== undefined) throw new Error('enableLinearIdentityVault must be true or false');
-  return agentCoreEnabled;
+  return byDefault;
 }
 
 export class AgentStack extends Stack {
