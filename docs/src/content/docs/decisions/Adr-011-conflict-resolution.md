@@ -1,8 +1,6 @@
 ---
-title: Adr 011 conflict resolution
+title: "ADR-011: Conflict resolution protocol"
 ---
-
-# ADR-011: Conflict resolution protocol
 
 **Status:** proposed
 **Date:** 2026-05-19

@@ -1,5 +1,5 @@
 ---
-title: Per-repo overrides
+title: "Per-repo overrides"
 ---
 
 Blueprints can configure per-repository settings that override platform defaults. For how `model_id` is layered against the platform default, per-task overrides, and the IAM invoke allowlist — plus the cost tradeoffs of picking a different model — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration).

@@ -15,6 +15,12 @@ from config import (
 )
 from models import TaskConfig
 
+# Stamps that both `_is_expiring` helpers must treat as malformed. The two with a "Z"
+# that is not the zone suffix pin the explicit `.replace("Z", "+00:00")`: parsed raw
+# (ruff FURB162's unsafe fix) the first raises TypeError out of the resolver and the
+# second is trusted until 2099.
+_MALFORMED_EXPIRES_AT = ["this is not a date", "2099-01-01Z00:00:00", "2099-01-01Z00:00:00+00:00"]
+
 
 class TestAgentWorkspaceConstant:
     def test_default_value(self, monkeypatch):
@@ -676,7 +682,10 @@ class TestResolveLinearApiTokenRefreshPaths:
             assert isinstance(result, str)
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
 
-    def test_malformed_expires_at_treated_as_expiring_with_warn_log(self, monkeypatch, caplog):
+    @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
+    def test_malformed_expires_at_treated_as_expiring_with_warn_log(
+        self, monkeypatch, caplog, bad_stamp
+    ):
         """Bad expires_at format triggers the refresh path AND logs a WARN."""
         import json
         from unittest.mock import patch as upatch
@@ -684,7 +693,7 @@ class TestResolveLinearApiTokenRefreshPaths:
         monkeypatch.delenv("LINEAR_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        bad = self._stored(expires_at="this is not a date")
+        bad = self._stored(expires_at=bad_stamp)
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
 
@@ -1115,7 +1124,8 @@ class TestResolveJiraOauthTokenNoRefresh:
             urlopen_mock.assert_not_called()
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
 
-    def test_malformed_expires_at_fails_closed(self, monkeypatch):
+    @pytest.mark.parametrize("bad_stamp", _MALFORMED_EXPIRES_AT)
+    def test_malformed_expires_at_fails_closed(self, monkeypatch, bad_stamp):
         """Unparseable expires_at is treated as expiring → fail closed, no network call."""
         import json
         from unittest.mock import patch as upatch
@@ -1123,7 +1133,7 @@ class TestResolveJiraOauthTokenNoRefresh:
         monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
         monkeypatch.setenv("AWS_REGION", "us-east-1")
 
-        bad = self._stored(expires_at="this is not a date")
+        bad = self._stored(expires_at=bad_stamp)
         mock_sm = MagicMock()
         mock_sm.get_secret_value.return_value = {"SecretString": json.dumps(bad)}
 

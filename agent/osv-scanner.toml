@@ -12,3 +12,8 @@ reason = "opentelemetry-api tracestate parsing DoS (fixed in 1.45.1). aws-opente
 id = "GHSA-f5m9-jfrj-jjj7"
 ignoreUntil = 2026-11-28
 reason = "opentelemetry-propagator-jaeger baggage allocation (fixed in 1.45.0). Pinned exactly by aws-opentelemetry-distro; only affects services that enable the optional Jaeger propagator."
+
+[[IgnoredVulns]]
+id = "GHSA-mf5v-w3w3-f6cg"
+ignoreUntil = 2026-11-28
+reason = "opentelemetry-api denial of service through quadratic-time traceparent parsing (fixed in 1.45.2). aws-opentelemetry-distro pins opentelemetry-api exactly; the latest release (0.22.0) pins 1.45.1, so no release of the distro allows the fix yet."

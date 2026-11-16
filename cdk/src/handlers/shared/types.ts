@@ -138,9 +138,6 @@ export type RegistryListEntry = {
 /** Shared across all attachment interfaces. Add new types here (e.g., 'audio'). */
 export type AttachmentType = 'image' | 'file' | 'url';
 
-/** Delivery mechanism — discriminant for the three upload paths. */
-export type AttachmentDelivery = 'inline' | 'presigned' | 'url_fetch';
-
 /**
  * Provenance of a task's submission. Shared across inbound adapters:
  * - ``api``: CLI / Cognito-authenticated submissions
@@ -718,36 +715,6 @@ export interface ReplayBundle {
 }
 
 /**
- * Query parameters accepted by ``GET /v1/tasks/{task_id}/events``.
- *
- * Pagination is mutually exclusive: prefer ``after`` (a ULID event_id cursor
- * used by CLI polling and webhook replay to resume from a known event id)
- * over ``next_token`` (an opaque DynamoDB pagination token). If both are
- * provided, the handler uses ``after`` and logs a WARN. Neither is required
- * — callers may start from the beginning of the task's event stream.
- *
- * When a page is truncated at ``limit``, the response includes a
- * ``next_token`` so the caller can continue paginating forward regardless
- * of which mode they started with.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface GetTaskEventsQuery {
-  readonly limit?: number;
-  readonly next_token?: string;
-  /** ULID event_id cursor. Returns events with ``event_id > after``. */
-  readonly after?: string;
-  /**
-   * When truthy (``"1"`` or ``"true"``), return events in descending
-   * ``event_id`` order (newest first). Used by ``bgagent status`` to
-   * render a recency-biased snapshot without walking the full event
-   * stream. Mutually exclusive with ``after`` — the handler rejects
-   * the combination with 400.
-   */
-  readonly desc?: string;
-}
-
-/**
  * Create task request body.
  *
  * Keep in sync with ``cli/src/types.ts``.
@@ -1314,101 +1281,13 @@ export type ApprovalScope =
   | `rule:${string}`;
 
 /**
- * Approval row status values. PENDING is the only non-terminal state —
- * every other transition is final, which matches the
- * `ConditionExpression: status = :pending` guard on every mutator.
- */
-export type ApprovalStatus =
-  | 'PENDING'
-  | 'APPROVED'
-  | 'DENIED'
-  | 'TIMED_OUT'
-  | 'STRANDED';
-
-/**
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
- * union is not redefined inline in `ApprovalRecord`,
- * `PendingApprovalSummary`, `PolicyRuleSummary`, etc.
+ * union is not redefined inline in `PendingApprovalSummary`,
+ * `PolicyRuleSummary`, etc.
  */
 export type Severity = 'low' | 'medium' | 'high';
-
-/**
- * Fields shared by every approval row regardless of status. Internal
- * type — callers should consume the discriminated {@link ApprovalRecord}
- * so `status` narrows the optional fields below.
- *
- * PK = `task_id`, SK = `request_id` (ULID minted by the agent). GSI
- * `user_id-status-index` powers `GET /v1/pending` without a Scan.
- *
- * `matching_rule_ids` is a List, not a StringSet — DDB string sets
- * cannot be empty and pathological no-match soft-deny hits would fail
- * to persist (§10.1).
- */
-interface ApprovalRecordBase {
-  readonly task_id: string;
-  readonly request_id: string;
-  readonly tool_name: string;
-  readonly tool_input_preview: string;
-  readonly tool_input_sha256: string;
-  readonly reason: string;
-  readonly severity: Severity;
-  readonly matching_rule_ids: readonly string[];
-  readonly created_at: string;
-  readonly timeout_s: number;
-  readonly ttl: number;
-  readonly user_id: string;
-  readonly repo: string;
-}
-
-/** PENDING approval row — no decision recorded yet. */
-export interface PendingApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'PENDING';
-}
-
-/** APPROVED approval row — decided_at + scope are required. */
-export interface ApprovedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'APPROVED';
-  readonly decided_at: string;
-  readonly scope: ApprovalScope;
-}
-
-/** DENIED approval row — decided_at required, deny_reason optional. */
-export interface DeniedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'DENIED';
-  readonly decided_at: string;
-  readonly deny_reason?: string;
-}
-
-/** TIMED_OUT approval row — decided_at required (server-set). */
-export interface TimedOutApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'TIMED_OUT';
-  readonly decided_at: string;
-}
-
-/** STRANDED approval row — decided_at required (set by the
- *  stranded-task reconciler). No user decision was ever recorded. */
-export interface StrandedApprovalRecord extends ApprovalRecordBase {
-  readonly status: 'STRANDED';
-  readonly decided_at: string;
-}
-
-/**
- * Full approval row as stored in `TaskApprovalsTable` (design §10.1).
- *
- * Discriminated union on ``status`` so callers can narrow on the
- * status field and get exhaustiveness checking on the optional
- * decision fields. Pre-S3 this was a single interface with every
- * decision-time field optional, which let illegal combinations
- * type-check (e.g. an APPROVED record without a `scope`).
- */
-export type ApprovalRecord =
-  | PendingApprovalRecord
-  | ApprovedApprovalRecord
-  | DeniedApprovalRecord
-  | TimedOutApprovalRecord
-  | StrandedApprovalRecord;
 
 /**
  * Pending approval summary returned by `GET /v1/pending` (§7.7).
@@ -1549,22 +1428,6 @@ export interface ApprovalDecisionRecordedEvent {
   readonly caller_user_id: string;
 }
 
-/**
- * `CreateTaskRequest` extensions for HITL pre-approvals (§7.3).
- *
- * Old callers continue to work — every field is optional. New callers
- * can pre-approve common scopes (`tool_type:Read`, `bash_pattern:git
- * status*`) to avoid hitting gates for trusted operations, and can
- * raise the per-task default approval timeout above the 300s default
- * within the `[30, min(3600, maxLifetime - 300)]` bound.
- *
- * Keep in sync with ``cli/src/types.ts``.
- */
-export interface CreateTaskApprovalExtensions {
-  readonly approval_timeout_s?: number;
-  readonly initial_approvals?: readonly ApprovalScope[];
-}
-
 /** Maximum `initial_approvals` entries per §7.3. */
 export const INITIAL_APPROVALS_MAX_ENTRIES = 20;
 
@@ -1579,10 +1442,6 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  `maxLifetime - 300` clip is applied (§7.3).
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
-
-/** Default `approval_timeout_s` when the submit payload omits it.
- *  Sourced from ``contracts/constants.json`` (S9). */
-export const APPROVAL_TIMEOUT_S_DEFAULT = sharedConstants.approval_timeout_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap

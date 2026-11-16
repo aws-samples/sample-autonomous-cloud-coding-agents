@@ -1,14 +1,12 @@
 ---
-title: Linear setup guide
+title: "Linear integration setup guide"
 ---
-
-# Linear integration setup guide
 
 Set up the ABCA Linear integration so that applying a label to a Linear issue triggers an autonomous task. The agent posts progress comments back on the issue as it works, and opens a pull request.
 
 ## Prerequisites
 
-- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction))
+- ABCA CDK stack deployed (see [Developer guide](/sample-autonomous-cloud-coding-agents/developer-guide/introduction)) with the `linear` feature enabled in its [deployment profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles)
 - A Cognito user account configured (see [User guide](/sample-autonomous-cloud-coding-agents/using/overview))
 - A Linear workspace where you have **admin** access — `actor=app` installs are workspace-wide and Linear requires an admin to approve them
 - The `bgagent` CLI installed and logged in (`bgagent configure` + `bgagent login`)
@@ -237,7 +235,7 @@ Pick the teammate from the list of human members. You get a one-time code (24h T
 
 They need an ABCA account first. If they don't have one:
 
-1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/overview#joining-an-existing-deployment) for the full Cognito-side flow).
+1. **Admin** runs `bgagent admin invite-user teammate@example.com` to create their Cognito user (see [User guide → Joining an existing deployment](/sample-autonomous-cloud-coding-agents/using/authentication#joining-an-existing-deployment) for the full Cognito-side flow).
 2. **Teammate** pastes the bundle + temp password from the admin into:
 
    ```bash

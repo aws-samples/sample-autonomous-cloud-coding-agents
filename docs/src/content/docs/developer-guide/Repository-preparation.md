@@ -1,8 +1,8 @@
 ---
-title: Repository preparation
+title: "Repository preparation"
 ---
 
-The [Quick Start](./QUICK_START.mdx) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
+The [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) covers the basic setup: forking a sample repo, creating a PAT, registering a Blueprint, and storing the token in Secrets Manager. This section covers what you need beyond that.
 
 ### Pre-flight checks
 
@@ -13,7 +13,7 @@ Permission requirements vary by task type:
 - `new_task` and `pr_iteration` require Contents (read/write) and Pull requests (read/write).
 - `pr_review` only needs Triage or higher since it does not push branches.
 
-Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](/sample-autonomous-cloud-coding-agents/architecture/readme#github-pat--minimal-permissions) for when to use which token type.
+Classic PATs with `repo` + `read:org` scopes also work and are required when fine-grained tokens cannot reach the target repo (collaborator access, cross-org repos). See [agent/README.md](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/agent/README.md#github-pat--minimal-permissions) for when to use which token type.
 
 ### Quick setup (single repo)
 
@@ -75,7 +75,7 @@ Redeploy after changing Blueprints: `mise //cdk:deploy`.
 
 `networkTopology` defaults to `inline`, preserving existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`; the application consumes VPC, subnet and security-group exports. The network has no application dependencies. Plain Blueprint definitions are resolved once in `cdk/src/blueprints/definitions.ts` so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
 
-The CDK build and offline census share 122 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, and legacy additive selectors. Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and template-size warnings, backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add eight synthetic IDs to the platform defaults and assert that the SessionRole's generated IAM overflow policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
+The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and template-size warnings, backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add eight synthetic IDs to the platform defaults and assert that the SessionRole's generated IAM overflow policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
 
 ```bash
 MISE_EXPERIMENTAL=1 mise //cdk:census -- --output /tmp/stack-census
@@ -87,7 +87,7 @@ Use `--list` to see the profiles and `--profile NAME` to select them. The census
 
 Network tests compare the moved definitions, generated Name tags, endpoint security-group descriptions, exports, application service properties, shared API resources, solution attribution and provenance tags. Comparison tests fix the clock and account for existing immutable guardrail/orchestrator version IDs; the census reports those real differences. `networkReservedAzs` reserves unused address slots so removing a trailing AZ need not shift remaining subnet CIDRs. Follow the [staged AZ reduction procedure](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#reducing-azs-in-an-existing-split-network) to release old imports before changing the network.
 
-Existing inline-to-split migration remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and Blueprint ownership handoff must be separately reviewed and released; this change keeps existing removal policies and the existing Blueprint provider. The concrete follow-up requirements are recorded in [ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries#deferred-migration-work). See [Network stack topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) for fresh-install guidance and migration limits.
+Existing inline-to-split migration remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and Blueprint ownership handoff must be separately reviewed and released; this change keeps existing removal policies and the existing Blueprint provider. The concrete follow-up requirements are recorded in [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries#deferred-migration-work). See [Network stack topology](/sample-autonomous-cloud-coding-agents/getting-started/deployment-guide#network-stack-topology) for fresh-install guidance and migration limits.
 
 ### Customizing the agent image
 
@@ -97,7 +97,7 @@ The default image (`agent/Dockerfile`) includes Python, Node 24 (LTS), `git`, `g
 
 A blueprint can declare its own `security.cedarPolicies` rules on top of the built-in hard/soft-deny starter set. Hard-deny rules absolutely block a tool call; soft-deny rules pause the agent and ask a human before proceeding.
 
-See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](../../contracts/cedar-parity/) fixtures.
+See the [Cedar policy guide](/sample-autonomous-cloud-coding-agents/customizing/cedar-policies) for the full authoring reference — vocabulary (`execute_bash`, `write_file`, `context.command`, `context.file_path`), annotations (`@rule_id`, `@tier`, `@approval_timeout_s`, `@severity`, `@category`), worked examples, multi-match rules, and cross-engine parity testing with [`contracts/cedar-parity/`](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/tree/main/contracts/cedar-parity) fixtures.
 
 ### Other options
 

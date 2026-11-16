@@ -26,7 +26,7 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import { DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
+import { type ApprovalDecisionRecordedEvent, DENY_REASON_MAX_LENGTH, type DenyRequest, type DenyResponse } from './shared/types';
 import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
@@ -220,7 +220,7 @@ export async function recordDenialForUser(input: {
             decided_at: nowIso,
             caller_user_id: callerUserId,
             ...(input.decisionSource ? { decision_source: input.decisionSource } : {}),
-          },
+          } satisfies ApprovalDecisionRecordedEvent,
         },
       }));
     } catch (auditErr) {
