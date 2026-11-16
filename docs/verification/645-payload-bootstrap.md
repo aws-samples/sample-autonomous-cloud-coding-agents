@@ -89,7 +89,7 @@ Permission tests inspect synthesized IAM policies, including the `NotResource` e
 
 An offline compatibility probe generated a URL using the actual JavaScript AWS SDK with dummy credentials and passed it through the Python URL parser. That proves the observed SDK URL shape is supported; it makes no AWS authorization claim.
 
-See the [implementation checklist](./645-p3-implementation-plan.md#implementation-progress) for final suite counts. Mock authorization failures are not proof of effective AWS IAM. Conditional S3 writes and the missing-object behavior must also be checked live.
+Mock authorization failures are not proof of effective AWS IAM. Conditional S3 writes and the missing-object behavior must also be checked live.
 
 ## Coordinated deployment and rollback
 
@@ -124,4 +124,4 @@ For **both ECS and MicroVM**, retain source/image identifiers, relevant policy s
 | Attempted public MicroVM ingress | No usable public control path with explicit `NO_INGRESS`. Test while the VM is running. |
 | Environment/log inspection | Repository subprocesses do not inherit `AGENT_PAYLOAD_REF`; normal/error logs contain no signed URL. |
 
-This boundary authenticates the boot path under the deployed policy. It does **not** prove complete isolation from a fully compromised worker: compute roles still select session tags and retain other platform permissions, and a stolen bearer link can be used until it expires or is revoked. See [coordinator metadata verification](./645-coordinator-metadata.md) for the remaining task-reporting and session-tag trust limits.
+This boundary authenticates the boot path under the deployed policy. It does **not** prove complete isolation from a fully compromised worker: compute roles still select session tags and retain other platform permissions, and a stolen bearer link can be used until it expires or is revoked. The remaining task-reporting and session-tag trust limits are outside this document.
