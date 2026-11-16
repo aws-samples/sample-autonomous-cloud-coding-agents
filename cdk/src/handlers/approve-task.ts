@@ -26,7 +26,7 @@ import { extractUserId } from './shared/gateway';
 import { logger } from './shared/logger';
 import { formatMinuteBucket, RATE_LIMIT_ROW_TTL_SECONDS } from './shared/rate-limit';
 import { ErrorCode, errorResponse, successResponse } from './shared/response';
-import type { ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
+import type { ApprovalDecisionRecordedEvent, ApprovalRequest, ApprovalResponse, ApprovalScope } from './shared/types';
 import { makeDocClient } from './shared/ua';
 
 const ddb = makeDocClient();
@@ -228,7 +228,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
             scope,
             decided_at: nowIso,
             caller_user_id: callerUserId,
-          },
+          } satisfies ApprovalDecisionRecordedEvent,
         },
       }));
     } catch (auditErr) {

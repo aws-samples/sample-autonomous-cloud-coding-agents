@@ -1294,17 +1294,20 @@ describe('every channel_metadata builder carries the vault fields', () => {
     // pattern is one refactor away from a prototype-pollution sink; object spread defines
     // own properties, where the same key lands inert. semgrep rates it Blocking.
     //
-    // Asserted here rather than left to `security:sast` because of where that runs:
-    // whole-repo in the pre-push hook and in security.yml, but NOT in security-pr.yml,
-    // which runs only the ranged gates. A reintroduction therefore passes PR CI and then
-    // rejects every contributor's `git push` once it is on main — which is exactly how
-    // #879 happened. This test reds the PR that causes it instead.
+    // Asserted here as well as by `security:sast` because of how that runs. The required
+    // per-PR job (security-pr.yml) runs the registry rule packs only over what the pull
+    // request changes and fails on a finding it adds; the whole repository is scanned
+    // weekly (security.yml) and in the pre-push hook. When #879 happened there was no
+    // per-PR scan: the reintroduction passed PR CI and then rejected every contributor's
+    // `git push` once it was on main. The per-PR scan also depends on rule packs fetched
+    // at run time. This test does not: it reds the PR that causes it, in the unit tests.
     //
     // UNQUALIFIED over this file (#880 review). The first form required the first argument
     // to be a bare identifier containing "metadata", so `Object.assign(md, …)` and
     // `Object.assign(row.channelMetadata, …)` reintroduced the sink without redding the
     // test — `\w*` cannot cross a `.`. Scope stays this ONE handler on purpose; the
-    // class-level net is the whole-repo semgrep gate `security-pr.yml` omits (#235).
+    // class-level net is the semgrep gate: per pull request for what it changes, weekly
+    // and at pre-push for the whole repository (#235).
     const offenders = src
       .split('\n')
       .map((line, i) => ({ text: line.trim(), n: i + 1 }))

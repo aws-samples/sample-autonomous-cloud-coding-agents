@@ -36,20 +36,28 @@ Before any deployment action, verify:
 
 ## Deploy Workflow
 
-```bash
-export MISE_EXPERIMENTAL=1
-mise //cdk:deploy -- --require-approval never
-```
+Deploy and update with `bgagent setup`. It reads the stack's deployed features, checks Region support, reviews `cdk diff`, gates data loss, prepares the bootstrap and configures the CLI. A bare `mise //cdk:deploy` has none of those checks.
 
-`--require-approval never` lets the deploy run unattended. **In a non-interactive shell (CI, agent, script) it's required** — without it, `cdk deploy` hangs forever on the IAM/security-group approval prompt. Drop the flag if you're deploying interactively and want to review those changes.
+1. Ask the user which optional features the stack should have: `none`, or any of `slack`, `linear`, `jira`, `deployPreviewScreenshots`, `agentRegistry`, `toolGateway`. For an existing stack, read its `DeploymentFeatures` output first and offer that as the default, so nothing is removed by accident.
+2. Run setup from `cli/`. Your shell has no terminal, so pass `--features` and `--yes`. Run it in the background (about 10 minutes); the log is under `~/.bgagent/logs/<stack>/setup-deploy.log`.
+   ```bash
+   cd cli
+   node lib/bin/bgagent.js setup --region <region> --stack-name <stack> --features <list|none> --yes
+   ```
+   - A new installation also takes `--compute agentcore` (or `ecs`, `agentcore,ecs`). An existing stack keeps its backends.
+   - Pass any context the stack was deployed with, for example `-c networkTopology=split`.
+   - **Never pass `--accept-data-loss`.** If setup refuses because the change would delete state-bearing resources (tables, secrets, buckets), stop. Tell the user what would be removed, and ask them to run `node lib/bin/bgagent.js setup` themselves in a terminal, where they confirm by typing the stack name.
+3. To change code without changing features, run the same command with the stack's current features.
 
-After successful deployment, retrieve and display stack outputs:
+Use `mise //cdk:deploy -- --require-approval never` only when the user asks for it explicitly (for example, to reproduce CI). It applies `abca.deployment.json` if that file exists, and otherwise deploys every optional feature.
+
+After a successful deployment, retrieve and display stack outputs:
 ```bash
 aws cloudformation describe-stacks --stack-name backgroundagent-dev \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `GitHubTokenSecretArn`.
+Key outputs to highlight: `ApiUrl`, `RuntimeArn`, `UserPoolId`, `AppClientId`, `GitHubTokenSecretArn`, `DeploymentFeatures`.
 
 ## Diff Workflow
 

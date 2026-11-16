@@ -287,7 +287,7 @@ def _initialize_policy_engine_and_hooks(
         task_type=config.policy_principal,
         repo=config.repo_url,
         read_only=config.read_only,
-        extra_policies=cedar_policies if cedar_policies else None,
+        extra_policies=cedar_policies or None,
         **engine_kwargs,
     )
     # Surface the resolved cap + its source so operators can distinguish a
@@ -513,7 +513,7 @@ def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
         log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
 
 
-async def run_agent(
+async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must not grow
     prompt: str,
     system_prompt: str,
     config: TaskConfig,

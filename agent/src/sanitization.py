@@ -56,5 +56,4 @@ def sanitize_external_content(text: str | None) -> str:
     s = _INJECTION_PHRASES.sub("[SANITIZED_INSTRUCTION]", s)
     s = _CONTROL_CHARS.sub("", s)
     s = _BIDI_CHARS.sub("", s)
-    s = _MISPLACED_BOM.sub("", s)
-    return s
+    return _MISPLACED_BOM.sub("", s)

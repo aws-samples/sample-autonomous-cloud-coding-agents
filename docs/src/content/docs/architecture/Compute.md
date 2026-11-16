@@ -1,8 +1,6 @@
 ---
-title: Compute
+title: "Compute"
 ---
-
-# Compute
 
 Every task runs in an isolated cloud compute environment. Nothing runs on the user's machine. The agent clones the repo, writes code, runs tests, and opens a PR inside a compute session that is created for the task and destroyed when it ends.
 
@@ -25,7 +23,7 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 | **Cost model** | vCPU-hrs + GB-hrs | vCPU + mem/sec | Baseline-priced (8 GiB / 4 vCPU) with 4× vertical burst (32 GiB / 16 vCPU peak); suspended time is storage-only | EC2 + EBS | EKS control + EC2 | Underlying compute | Request + duration | EC2 metal + your ops |
 | **Fit** | **Default choice** | Repos > 2 GB image | Suspend/resume economics; approval-wait-heavy workloads; default-sized repos. Heavy sustained-memory builds stay on ECS | GPU, heavy toolchains | Max flexibility | Queued batch jobs | **Poor** (15 min cap) | Best potential, highest cost |
 
-> **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/architecture/adr-021-lambda-microvms-compute-backend).
+> **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](/sample-autonomous-cloud-coding-agents/decisions/adr-021-lambda-microvms-compute-backend).
 
 Repositories without a `compute_type` override inherit the first entry in the deployed list. An explicit Blueprint or RepoTable override must name a deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](/sample-autonomous-cloud-coding-agents/architecture/repo-onboarding) for the `ComputeStrategy` interface.
 

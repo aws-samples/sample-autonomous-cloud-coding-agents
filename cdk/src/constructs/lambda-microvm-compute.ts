@@ -43,6 +43,7 @@ import { AgentSessionRole } from './agent-session-role';
 import { inferenceProfileId, resolveBedrockGeoRegion, resolveBedrockModelIds } from './bedrock-models';
 import { grantWorkerBootstrap } from './payload-bootstrap-permissions';
 import sharedConstants from '../../../contracts/constants.json';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { LAMBDA_MICROVM_SUPPORTED_REGIONS, isLambdaMicrovmRegionSupported } from '../handlers/shared/microvm-regions';
 
 /**
@@ -639,6 +640,14 @@ export interface LambdaMicrovmComputeProps extends LambdaMicrovmImageInputs {
    * @default {} — no baked configuration
    */
   readonly imageEnvironmentVariables?: Record<string, string>;
+
+  /**
+   * Secrets Manager name patterns of the channel OAuth bundles the agent may
+   * read (ADR-024): only those of deployed trackers, so an omitted Linear or
+   * Jira leaves no grant on CLI-created secrets that outlive the feature.
+   * @default both `bgagent-linear-oauth-*` and `bgagent-jira-oauth-*` (legacy topology)
+   */
+  readonly channelOauthSecretPatterns?: readonly string[];
 }
 
 /**
@@ -1166,23 +1175,18 @@ export class LambdaMicrovmCompute extends Construct {
     //
     // `GetSecretValue` ONLY — the agent reads; the orchestrator owns refresh /
     // PutSecretValue.
-    this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        stack.formatArn({
+    const channelOauthSecretPatterns = props.channelOauthSecretPatterns ?? CHANNEL_OAUTH_SECRET_PATTERNS;
+    if (channelOauthSecretPatterns.length > 0) {
+      this.executionRole.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: channelOauthSecretPatterns.map(resourceName => stack.formatArn({
           service: 'secretsmanager',
           resource: 'secret',
           arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-linear-oauth-*',
-        }),
-        stack.formatArn({
-          service: 'secretsmanager',
-          resource: 'secret',
-          arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-          resourceName: 'bgagent-jira-oauth-*',
-        }),
-      ],
-    }));
+          resourceName,
+        })),
+      }));
+    }
 
     // Bedrock model invocation — scoped to explicit foundation-model and
     // cross-Region inference-profile ARNs (parity with the AgentCore runtime and

@@ -1,8 +1,6 @@
 ---
-title: Security
+title: "Security"
 ---
-
-# Security
 
 ABCA agents execute code with repository access. This document describes how the platform contains that risk: isolated sessions, scoped credentials, input screening, policy enforcement, and memory integrity controls. The design aligns with [AWS prescriptive guidance for agentic AI security](https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-security/best-practices.html).
 
@@ -41,7 +39,7 @@ Three authentication mechanisms protect the platform, matching its input channel
 
 **Authorization** is user-scoped: any authenticated user can submit tasks, but users can only view and cancel their own tasks (`user_id` enforcement). Both webhook and API key management enforce ownership with 404 (not 403) to avoid leaking resource existence. A platform API key inherits its creator's `user_id`, so a webhook created via a key is attributed to that owner exactly as an interactive session would be. Key scopes gate which routes a key may call (Phase 1: `webhooks:manage`); reserved scopes (`tasks:read`, `tasks:cancel`) are validated but not yet wired to any route.
 
-**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues), the [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
+**Agent credentials** - GitHub access currently uses a PAT stored in Secrets Manager. The orchestrator reads the secret at hydration time and passes it to the agent runtime. The model never receives the token in its context. Planned: replace the shared PAT with a GitHub App via AgentCore Identity Token Vault, providing per-task, repo-scoped, short-lived tokens (see [GitHub issues](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues), the [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth) two-seam design, and the [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) worked examples).
 
 **Per-session IAM scoping** - The agent does not use its long-lived compute role (the AgentCore Runtime `ExecutionRole`, ECS Fargate task role, or Lambda MicroVMs execution role) for tenant data. Instead, at task startup it assumes a per-task **SessionRole** via `sts:AssumeRole` with session tags `{user_id, repo, task_id}`, and uses the resulting short-lived credentials for all DynamoDB and S3 tenant-data access. The SessionRole's policies self-constrain on those tags:
 

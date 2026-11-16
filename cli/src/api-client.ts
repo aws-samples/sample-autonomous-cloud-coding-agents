@@ -100,8 +100,9 @@ export class ApiClient {
       const config = loadConfig();
       if (!config.registry_api_url) {
         throw new Error(
-          'registry_api_url is not set in your bgagent config. Re-run setup (or add '
-          + 'registry_api_url from the stack\'s RegistryApiUrl output) to use `bgagent registry`.',
+          'registry_api_url is not set in your bgagent config. If the stack deploys the Agent Registry, '
+          + 'run `bgagent configure --stack-name <stack>` (or add registry_api_url from its RegistryApiUrl output); '
+          + 'otherwise run `bgagent setup` and enable AWS Agent Registry (feature \'agentRegistry\').',
         );
       }
       this.registryBaseUrl = config.registry_api_url.replace(/\/+$/, '');
