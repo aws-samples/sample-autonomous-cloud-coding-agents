@@ -1114,6 +1114,78 @@ function formatDuration(seconds: number): string {
   return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
+/** The Linear issue comment for an approval event: a request waiting for a decision, the decision, a timeout or a stranded wait. */
+async function dispatchLinearApprovalNotice(
+  event: FanOutEvent,
+  task: TaskRecord,
+  effectiveType: string,
+  approvalsTable: string | undefined,
+  workspaceId: string,
+  issueId: string,
+  registryTableName: string,
+): Promise<void> {
+  if (!approvalsTable) {
+    logger.warn('[fanout/linear] approval notice skipped: TASK_APPROVALS_TABLE_NAME unset', {
+      event: 'fanout.linear.approval_unconfigured', task_id: event.task_id,
+    });
+    return;
+  }
+  // The notice compares the task's live gate with the saved row, so read the
+  // task consistently: a stale read would silently drop a real request.
+  const liveTask = (await ddb.send(new GetCommand({
+    TableName: process.env.TASK_TABLE_NAME, Key: { task_id: task.task_id }, ConsistentRead: true,
+  }))).Item as TaskRecord | undefined;
+  if (!liveTask) return;
+  const notification = await loadApprovalNotification(ddb, liveTask, effectiveType, event.metadata ?? {}, 'linear');
+  if (!notification) return;
+  const thread: LinearApprovalThread = {
+    workspaceId, issueId, taskId: task.task_id, requestId: notification.requestId, userId: notification.userId,
+  };
+  const ctx = { linearWorkspaceId: workspaceId, registryTableName };
+  const body = approvalNotificationMarkdown(notification);
+  // Retention follows the saved closure even if Linear cannot take the notice.
+  if (effectiveType !== 'approval_requested') await closeLinearApprovalThread(ddb, approvalsTable, thread);
+  const result = effectiveType === 'approval_requested'
+    ? await postIdentifiedComment(ctx, { id: await saveLinearApprovalThread(ddb, approvalsTable, thread), issueId, body })
+    : await postIssueComment(ctx, issueId, body);
+  if (!result.ok) {
+    logger.warn('Linear approval notification failed', {
+      event: 'fanout.linear.approval_post_failed',
+      task_id: task.task_id,
+      request_id: notification.requestId,
+      retryable: result.retryable,
+    });
+    if (result.retryable) throw new Error('Retryable Linear approval notification failure');
+    return;
+  }
+  await markApprovalNotificationDelivered(ddb, notification);
+  logger.info('Linear approval notification delivered', {
+    event: 'fanout.linear.approval_dispatched', task_id: task.task_id, request_id: notification.requestId,
+  });
+}
+
+/** A task that ends while waiting for approval: start the retention of its Linear reply thread. */
+async function closeEndedApprovalThread(
+  event: FanOutEvent,
+  task: TaskRecord,
+  approvalsTable: string | undefined,
+  workspaceId: string,
+  issueId: string,
+): Promise<void> {
+  // A task that ends while waiting (e.g. cancelled) leaves its reply thread
+  // open; start its retention so late replies find nothing to decide.
+  if (approvalsTable && task.awaiting_approval_request_id
+    && (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.event_type)) {
+    await closeLinearApprovalThread(ddb, approvalsTable, {
+      workspaceId,
+      issueId,
+      taskId: task.task_id,
+      requestId: task.awaiting_approval_request_id,
+      userId: task.user_id,
+    });
+  }
+}
+
 /**
  * Linear dispatcher — posts a deterministic final-status comment when a
  * Linear-origin task reaches a terminal event. Mirrors Slack's structural
@@ -1190,58 +1262,10 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
   const approvalsTable = process.env.TASK_APPROVALS_TABLE_NAME;
   const effectiveType = effectiveEventType(event);
   if (isApprovalNotification(effectiveType)) {
-    if (!approvalsTable) {
-      logger.warn('[fanout/linear] approval notice skipped: TASK_APPROVALS_TABLE_NAME unset', {
-        event: 'fanout.linear.approval_unconfigured', task_id: event.task_id,
-      });
-      return;
-    }
-    // The notice compares the task's live gate with the saved row, so read the
-    // task consistently: a stale read would silently drop a real request.
-    const liveTask = (await ddb.send(new GetCommand({
-      TableName: process.env.TASK_TABLE_NAME, Key: { task_id: task.task_id }, ConsistentRead: true,
-    }))).Item as TaskRecord | undefined;
-    if (!liveTask) return;
-    const notification = await loadApprovalNotification(ddb, liveTask, effectiveType, event.metadata ?? {}, 'linear');
-    if (!notification) return;
-    const thread: LinearApprovalThread = {
-      workspaceId, issueId, taskId: task.task_id, requestId: notification.requestId, userId: notification.userId,
-    };
-    const ctx = { linearWorkspaceId: workspaceId, registryTableName };
-    const body = approvalNotificationMarkdown(notification);
-    // Retention follows the saved closure even if Linear cannot take the notice.
-    if (effectiveType !== 'approval_requested') await closeLinearApprovalThread(ddb, approvalsTable, thread);
-    const result = effectiveType === 'approval_requested'
-      ? await postIdentifiedComment(ctx, { id: await saveLinearApprovalThread(ddb, approvalsTable, thread), issueId, body })
-      : await postIssueComment(ctx, issueId, body);
-    if (!result.ok) {
-      logger.warn('Linear approval notification failed', {
-        event: 'fanout.linear.approval_post_failed',
-        task_id: task.task_id,
-        request_id: notification.requestId,
-        retryable: result.retryable,
-      });
-      if (result.retryable) throw new Error('Retryable Linear approval notification failure');
-      return;
-    }
-    await markApprovalNotificationDelivered(ddb, notification);
-    logger.info('Linear approval notification delivered', {
-      event: 'fanout.linear.approval_dispatched', task_id: task.task_id, request_id: notification.requestId,
-    });
+    await dispatchLinearApprovalNotice(event, task, effectiveType, approvalsTable, workspaceId, issueId, registryTableName);
     return; // An approval notice never settles the task's final status.
   }
-  // A task that ends while waiting (e.g. cancelled) leaves its reply thread
-  // open; start its retention so late replies find nothing to decide.
-  if (approvalsTable && task.awaiting_approval_request_id
-    && (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.event_type)) {
-    await closeLinearApprovalThread(ddb, approvalsTable, {
-      workspaceId,
-      issueId,
-      taskId: task.task_id,
-      requestId: task.awaiting_approval_request_id,
-      userId: task.user_id,
-    });
-  }
+  await closeEndedApprovalThread(event, task, approvalsTable, workspaceId, issueId);
 
   // Iteration-UX: this task is a comment-iteration when it carries a maturing
   // reply id (set at trigger time). For those, the progress + terminal status

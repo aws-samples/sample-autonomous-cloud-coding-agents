@@ -105,6 +105,82 @@ function describeAction(row: Record<string, unknown>, task: TaskRecord): string[
   return lines;
 }
 
+/** The body of a request that is still waiting for a decision: the action, why, the deadline and how to answer. */
+function pendingLines(
+  row: Record<string, unknown>,
+  task: TaskRecord,
+  requestId: string,
+  channel: 'slack' | 'linear',
+): string[] {
+  const lines: string[] = [];
+  lines.push('', ...describeAction(row, task), '');
+  const reason = text(row.reason);
+  lines.push(reason.startsWith('Soft-deny:')
+    ? 'Why approval is required: your configured policy requires a human decision for this action.'
+    : `Why approval is required: ${reason || 'No explanation was saved with this request.'}`);
+  lines.push('Approve: allow this action once.',
+    'Deny: block this action and return the decision to the agent.');
+  const deadline = Date.parse(String(row.created_at)) + Number(row.timeout_s) * 1000;
+  if (Number.isFinite(deadline) && Number(row.timeout_s) > 0) {
+    lines.push(`Decision deadline: ${new Date(deadline).toISOString()}`);
+  }
+  if (channel === 'linear') {
+    lines.push('', 'Reply approve, or deny with an optional reason (for example "deny use the staging config"),',
+      'to this comment while signed in as the task owner.');
+  }
+  lines.push('', 'Technical details / CLI alternative',
+    `Task: ${task.task_id}`, `Request: ${requestId}`,
+    `Tool: ${text(row.tool_name, 100)}`, `Policy severity: ${text(row.severity, SEVERITY_MAX_LENGTH)}`,
+    `Policy detail: ${reason}`);
+  // Never interpolate untrusted text into suggested shell commands.
+  if ([task.task_id, requestId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
+    lines.push('Respond using the CLI while signed in as the task owner:',
+      `bgagent approve ${task.task_id} ${requestId} --scope this_call`,
+      `bgagent deny ${task.task_id} ${requestId}`);
+  }
+  lines.push('Run bgagent pending to see currently open requests.');
+  return lines;
+}
+
+/** The notification's title and text lines for an approval row in `status`. */
+function renderApproval(
+  status: string,
+  row: Record<string, unknown>,
+  task: TaskRecord,
+  requestId: string,
+  channel: 'slack' | 'linear',
+): { title: string; lines: string[] } {
+  const title = status === 'PENDING' ? 'Approval needed'
+    : status === 'APPROVED' ? 'Approval recorded'
+      : status === 'DENIED' ? 'Denial recorded'
+        : status === 'TIMED_OUT' ? 'Approval request timed out' : 'Approval wait could not continue';
+  const lines = [title];
+  if (status === 'PENDING') {
+    lines.push(...pendingLines(row, task, requestId, channel));
+  } else if (status === 'APPROVED') {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
+    lines.push(`Scope: ${text(row.scope, SCOPE_MAX_LENGTH)}`);
+    lines.push(TERMINAL_STATUSES.includes(task.status)
+      ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
+      : 'The decision is saved. The agent continues with this action.');
+  } else if (status === 'DENIED') {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
+    lines.push(`Reason: ${text(row.deny_reason) || 'No reason supplied.'}`);
+    lines.push(TERMINAL_STATUSES.includes(task.status)
+      ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
+      : 'The decision is saved. The agent receives the denial and continues without this action.');
+  } else {
+    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
+    // reason is the original policy explanation, not the cause of closure.
+    // The agent stores a polling failure in deny_reason on its timeout path.
+    const reason = status === 'TIMED_OUT'
+      ? text(row.deny_reason) || 'The configured decision deadline was reached.'
+      : text(task.error_message) || 'The agent could not continue this approval wait.';
+    lines.push(`Reason: ${reason}`);
+  }
+  return { title, lines };
+}
+
 /** Read saved state instead of showing an old, delayed "please approve" event. */
 export async function loadApprovalNotification(
   ddb: DynamoDBDocumentClient,
@@ -148,59 +224,7 @@ export async function loadApprovalNotification(
   if (status === 'PENDING'
     && (task.status !== 'AWAITING_APPROVAL' || task.awaiting_approval_request_id !== requestId)) return null;
 
-  const title = status === 'PENDING' ? 'Approval needed'
-    : status === 'APPROVED' ? 'Approval recorded'
-      : status === 'DENIED' ? 'Denial recorded'
-        : status === 'TIMED_OUT' ? 'Approval request timed out' : 'Approval wait could not continue';
-  const lines = [title];
-  if (status === 'PENDING') {
-    lines.push('', ...describeAction(row, task), '');
-    const reason = text(row.reason);
-    lines.push(reason.startsWith('Soft-deny:')
-      ? 'Why approval is required: your configured policy requires a human decision for this action.'
-      : `Why approval is required: ${reason || 'No explanation was saved with this request.'}`);
-    lines.push('Approve: allow this action once.',
-      'Deny: block this action and return the decision to the agent.');
-    const deadline = Date.parse(row.created_at) + Number(row.timeout_s) * 1000;
-    if (Number.isFinite(deadline) && Number(row.timeout_s) > 0) {
-      lines.push(`Decision deadline: ${new Date(deadline).toISOString()}`);
-    }
-    if (channel === 'linear') {
-      lines.push('', 'Reply approve, or deny with an optional reason (for example "deny use the staging config"),',
-        'to this comment while signed in as the task owner.');
-    }
-    lines.push('', 'Technical details / CLI alternative',
-      `Task: ${task.task_id}`, `Request: ${requestId}`,
-      `Tool: ${text(row.tool_name, 100)}`, `Policy severity: ${text(row.severity, SEVERITY_MAX_LENGTH)}`,
-      `Policy detail: ${reason}`);
-    // Never interpolate untrusted text into suggested shell commands.
-    if ([task.task_id, requestId].every(id => /^[A-Za-z0-9_-]{1,128}$/.test(id))) {
-      lines.push('Respond using the CLI while signed in as the task owner:',
-        `bgagent approve ${task.task_id} ${requestId} --scope this_call`,
-        `bgagent deny ${task.task_id} ${requestId}`);
-    }
-    lines.push('Run bgagent pending to see currently open requests.');
-  } else if (status === 'APPROVED') {
-    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
-    lines.push(`Scope: ${text(row.scope, SCOPE_MAX_LENGTH)}`);
-    lines.push(TERMINAL_STATUSES.includes(task.status)
-      ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
-      : 'The decision is saved. The agent continues with this action.');
-  } else if (status === 'DENIED') {
-    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
-    lines.push(`Reason: ${text(row.deny_reason) || 'No reason supplied.'}`);
-    lines.push(TERMINAL_STATUSES.includes(task.status)
-      ? `The decision is saved. Task status: ${task.status}. The task has already ended.`
-      : 'The decision is saved. The agent receives the denial and continues without this action.');
-  } else {
-    lines.push(`Task: ${task.task_id}`, `Request: ${requestId}`);
-    // reason is the original policy explanation, not the cause of closure.
-    // The agent stores a polling failure in deny_reason on its timeout path.
-    const reason = status === 'TIMED_OUT'
-      ? text(row.deny_reason) || 'The configured decision deadline was reached.'
-      : text(task.error_message) || 'The agent could not continue this approval wait.';
-    lines.push(`Reason: ${reason}`);
-  }
+  const { title, lines } = renderApproval(status, row, task, requestId, channel);
   return { title, text: lines.join('\n'), taskId: task.task_id, requestId, userId: task.user_id, marker };
 }
 
