@@ -129,12 +129,6 @@ export interface ResolvedAsset {
   readonly warnings: readonly string[];
 }
 
-/** The bundle threaded into the agent invocation payload after resolving all of a
- *  Blueprint's `registry://` refs. */
-export interface ResolvedAssetBundle {
-  readonly assets: readonly ResolvedAsset[];
-}
-
 export type ResolutionFailureReason =
   | 'NO_MATCHING_VERSION'
   | 'REMOVED'
@@ -185,7 +179,7 @@ export class RegistryRecordMalformedError extends Error {
   constructor(
     readonly reason: MalformedReason,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryRecordMalformedError';
@@ -204,7 +198,7 @@ export class RegistryPublishIncompleteError extends Error {
   constructor(
     readonly recordId: string,
     message: string,
-    readonly cause?: unknown,
+    override readonly cause?: unknown,
   ) {
     super(message);
     this.name = 'RegistryPublishIncompleteError';

@@ -17,18 +17,28 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { CloudFormationClient } from '@aws-sdk/client-cloudformation';
 import { CognitoIdentityProviderClient, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
 import { abcaUserAgent, applyDefaultAppId, APP_ID_ENV, makeClient, makeDocClient, sanitizeUaValue, SOLUTION_ID } from '../src/ua';
 
+// Shared with cdk/test/handlers/shared/ua.test.ts and agent/tests/test_ua.py: the
+// three UA modules must agree on the solution id and on what the sanitiser lets
+// through.
+const uaVectors = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', '..', 'contracts', 'ua-vectors.json'), 'utf-8'),
+) as { solution_id: string; sanitize: { input: string; expected: string; note: string }[] };
+
+describe('SOLUTION_ID', () => {
+  test('matches contracts/ua-vectors.json', () => {
+    expect(SOLUTION_ID).toBe(uaVectors.solution_id);
+  });
+});
+
 describe('sanitizeUaValue', () => {
-  test.each([
-    ['cli', 'cli'],
-    ['a/b', 'a-b'],
-    ['a#b', 'a-b'],
-    ['héllo', 'h-llo'],
-  ])('sanitizes %p -> %p', (raw, expected) => {
-    expect(sanitizeUaValue(raw)).toBe(expected);
+  test.each(uaVectors.sanitize)('sanitizes $note', ({ input, expected }) => {
+    expect(sanitizeUaValue(input)).toBe(expected);
   });
 });
 

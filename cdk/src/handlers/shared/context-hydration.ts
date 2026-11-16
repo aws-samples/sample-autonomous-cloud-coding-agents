@@ -160,7 +160,7 @@ export class GuardrailScreeningError extends Error {
  * check in the hydration catch block covers all current and future attachment error
  * types, avoiding a growing allowlist.
  */
-export class AttachmentError extends Error {
+class AttachmentError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
     this.name = 'AttachmentError';
@@ -1039,6 +1039,7 @@ export interface HydrateContextOptions {
  * @throws GuardrailScreeningError when the Bedrock Guardrail API call fails
  *         (fail-closed — propagated to prevent unscreened content from reaching the agent).
  */
+// eslint-disable-next-line complexity -- predates the ceiling (47 when it landed); must not grow
 export async function hydrateContext(task: TaskRecord, options?: HydrateContextOptions): Promise<HydratedContext> {
   const sources: string[] = [];
   let issue: GitHubIssueContext | undefined;

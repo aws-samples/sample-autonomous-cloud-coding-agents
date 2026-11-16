@@ -36,7 +36,7 @@ mise //cdk:test 2>&1 | tail -50     # Test failures
 **Common causes:**
 - Missing `mise run install` after pulling changes
 - `yarn: command not found` — Run `corepack enable && corepack prepare yarn@1.22.22 --activate`
-- Type mismatches after editing `cdk/src/handlers/shared/types.ts` without updating `cli/src/types.ts`
+- Type mismatches after editing `cdk/src/handlers/shared/types.ts` without updating `cli/src/types.ts` (or `web/src/core/api/types.ts`, where the console mirrors the type)
 
 ## Deployment Issues
 

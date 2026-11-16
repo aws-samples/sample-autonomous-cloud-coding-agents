@@ -22,13 +22,10 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 
 /** Lifecycle expiry for task attachments — matches task record retention. */
-export const ATTACHMENT_TTL_DAYS = 90;
+const ATTACHMENT_TTL_DAYS = 90;
 
 /** Noncurrent version expiry — covers the longest-running tasks. */
 const NONCURRENT_VERSION_TTL_DAYS = 7;
-
-/** S3 key prefix for all attachments. Layout: attachments/<user_id>/<task_id>/<attachment_id>/<filename> */
-export const ATTACHMENT_OBJECT_KEY_PREFIX = 'attachments/';
 
 /**
  * Properties for AttachmentsBucket construct.

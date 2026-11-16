@@ -38,6 +38,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { loadConfig, loadCredentials } from '../config';
 import { CliError } from '../errors';
+import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
 import { generateInviteCode } from '../invite-code';
 import {
@@ -515,7 +516,7 @@ async function getStackOutput(region: string, stackName: string, outputKey: stri
     const name = (err as Error)?.name ?? '';
     const message = (err as Error)?.message ?? '';
     if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // nosemgrep: ts-silent-success-masking -- missing stack is the lookup helper's null contract
+      return null; // missing stack is the lookup helper's null contract
     }
     throw err;
   }
@@ -1297,5 +1298,5 @@ export function makeJiraCommand(): Command {
       }),
   );
 
-  return jira;
+  return requireDeployedFeature(jira, 'jira');
 }
