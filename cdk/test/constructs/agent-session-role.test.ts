@@ -423,4 +423,3 @@ describe('AgentSessionRole approvals table (trusted approval writer, ADR-025)', 
     })).toThrow('approvalsTable must not appear in taskScopedTables');
   });
 });
-
