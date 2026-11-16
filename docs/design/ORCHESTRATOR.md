@@ -425,8 +425,8 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `model_id` | String? | Foundation model ID |
 | `prompt_version` | String | System prompt hash for evaluation correlation |
 | `blueprint_config` | Map? | Snapshot of `RepoConfig` at task creation |
-| `cost_usd` | Number? | Agent cost from SDK |
-| `duration_s` | Number? | Total duration |
+| `cost_usd` | String? | Agent cost from SDK, written by the agent as a string |
+| `duration_s` | String? | Total duration in seconds, written by the agent as a string |
 | `ttl` | Number? | DynamoDB TTL (default: created_at + 90 days) |
 | `created_at` / `updated_at` | String | ISO 8601 timestamps |
 
