@@ -211,8 +211,10 @@ depends = [":lint", ":drift-prevention"]
 
 # Emulator-backed integration tests (ADR-013 Tier 2a): ABCA's real handler, CLI and agent code
 # against a local AWS Emulator (https://github.com/aws/aws-emulator). Needs Docker and no AWS
-# account. Nothing here is reachable from `mise run build`. The emulator version is pinned once,
-# in scripts/aws-emulator/Dockerfile. See docs/research/aws-emulator-local-tests.md.
+# account. `mise run build` runs none of these tasks, only the unit tests of the guard's refusals.
+# The emulator version is pinned once, in scripts/aws-emulator/Dockerfile. See
+# scripts/aws-emulator/README.md for the rules and the known differences from AWS, and
+# docs/research/aws-emulator-local-tests.md for the investigation behind the tier.
 
 [tasks."emulator:up"]
 description = "Start a fresh AWS Emulator on 127.0.0.1 (builds the pinned, signature-verified image on first use)"

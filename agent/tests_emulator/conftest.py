@@ -73,6 +73,7 @@ def _refuse_non_loopback(event: str, args: tuple[Any, ...]) -> None:
     """Audit hook: refuse a connection, datagram or name lookup that would leave this machine.
 
     It covers this process only; a child process does not inherit an audit hook.
+    A reverse lookup of an address (gethostbyaddr, getnameinfo) is not covered.
     The refusal reaches the caller as an ordinary network error, so a test of
     code that swallows network errors has to assert that no request was attempted.
     When a test fails here, stub the call that tried to connect. Do not add hosts.
@@ -80,7 +81,7 @@ def _refuse_non_loopback(event: str, args: tuple[Any, ...]) -> None:
     if event in ("socket.connect", "socket.sendto", "socket.sendmsg"):
         address = args[1]
         host = address[0] if isinstance(address, tuple) else None  # a str is a Unix socket path
-    elif event in ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex"):
+    elif event in ("socket.getaddrinfo", "socket.gethostbyname"):
         host = args[0]
     else:
         return

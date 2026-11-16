@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AWS Emulator lifecycle and guarded command runner for the local/CI integration tier
 # (ADR-013 Tier 2a). Driven by the mise tasks emulator:up, emulator:down, emulator:run and
-# test:integration; nothing here is reachable from `mise run build`.
+# test:integration. `mise run build` never runs this script, only the unit tests of the other guard files.
 #
 #   emulator.sh up              build the pinned image if missing, start a FRESH emulator, wait for health
 #   emulator.sh down            stop it (all emulated state is in memory, so this is also "reset")
@@ -9,6 +9,8 @@
 #
 # `run` is for programs that use an AWS SDK. Do not use it with AWS CLI v1: that CLI forces a real
 # AWS endpoint for sqs, rds, docdb, neptune and health whatever AWS_ENDPOINT_URL says.
+#
+# Needs a container engine (see CDK_DOCKER below) and curl, which the health check uses.
 #
 # Environment:
 #   ABCA_EMULATOR_PORT   port on 127.0.0.1. Default: derived from the checkout path, so two worktrees
@@ -54,7 +56,8 @@ up() {
     # Dockerfile on stdin: no build context is sent.
     "$ENGINE" build --build-arg AWS_EMULATOR_VERSION="$VERSION" -t "$IMAGE" - < "$HERE/Dockerfile"
   fi
-  # Pre-create the shared directory; otherwise Docker on Linux creates it root-owned and the SDK cannot read it.
+  # Pre-create the shared directory; otherwise Docker on Linux creates it root-owned and the emulator,
+  # which runs as the caller, cannot write its files there.
   mkdir -p "$STATE/.aws/emulator"
   "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true
   # On Linux the files must belong to the caller; Docker Desktop (macOS) maps ownership itself.
@@ -119,12 +122,18 @@ guard() {
     || { echo "emulator: refusing to run: no healthy emulator on $ENDPOINT (run: mise run emulator:up)" >&2; exit 1; }
 }
 
+# Without curl the health check fails silently and a running emulator is reported as unhealthy.
+need_curl() {
+  command -v curl >/dev/null || { echo "emulator: curl is required (the health check uses it)" >&2; exit 1; }
+}
+
 case "${1:-}" in
-  up) up ;;
+  up) need_curl; up ;;
   down) down ;;
   run)
     shift
     [ $# -gt 0 ] || { echo "usage: emulator.sh run <command...>" >&2; exit 2; }
+    need_curl
     emulator_env
     guard
     exec "$@"

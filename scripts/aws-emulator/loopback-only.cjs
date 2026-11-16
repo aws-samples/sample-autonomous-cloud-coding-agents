@@ -9,7 +9,9 @@
 // Every TCP connection out of a Node process (http, https, http2, fetch, WebSocket, the AWS SDK)
 // goes through net.Socket.connect, so that is where one that would leave the machine is refused,
 // before a name is resolved or a packet is sent. Pipes are untouched. UDP (node:dgram) does not
-// pass through here and is not covered; no ABCA code uses it.
+// pass through here and is not covered; no ABCA code uses it. Nor does a name that code resolves
+// itself (node:dns): the URL and Linear attachment downloads do that before they connect, so a
+// test that reaches them has to stub the lookup.
 //
 // The refusal reaches the caller as an ordinary network error. A test of code that swallows
 // network errors therefore has to assert that no request was attempted.
