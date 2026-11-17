@@ -63,6 +63,9 @@ test('records only the pending request, guarded by current task ownership and st
   expect(items[0].Put.ConditionExpression).toBe('attribute_not_exists(request_id)');
   expect(items[1].Update.ConditionExpression).toBe('#status = :running AND user_id = :user');
   expect(items[1].Update.ExpressionAttributeValues[':user']).toBe('owner');
+  // The stranded-approval sweep measures from the time the task entered AWAITING_APPROVAL.
+  expect(items[1].Update.UpdateExpression).toContain('status_created_at = :sca');
+  expect(items[1].Update.ExpressionAttributeValues[':sca']).toMatch(/^AWAITING_APPROVAL#\d{4}-\d{2}-\d{2}T/);
 });
 
 test('every backend uses the same two-item transaction (no worker lease on this branch)', async () => {

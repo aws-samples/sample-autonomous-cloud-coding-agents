@@ -119,7 +119,9 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
           Update: {
             TableName: TASKS,
             Key: { task_id: input.task_id },
-            UpdateExpression: 'SET #status = :awaiting, awaiting_approval_request_id = :request',
+            // status_created_at moves with status, as on every other transition: the
+            // stranded-approval sweep and `ops stuck-tasks` measure from it.
+            UpdateExpression: 'SET #status = :awaiting, awaiting_approval_request_id = :request, status_created_at = :sca',
             ConditionExpression: '#status = :running AND user_id = :user',
             ExpressionAttributeNames: { '#status': 'status' },
             ExpressionAttributeValues: {
@@ -127,6 +129,7 @@ export async function recordWorkerRequest(input: RequestInput): Promise<Record<s
               ':running': TaskStatus.RUNNING,
               ':request': input.request_id,
               ':user': task.user_id,
+              ':sca': `${TaskStatus.AWAITING_APPROVAL}#${new Date().toISOString()}`,
             },
           },
         }],
