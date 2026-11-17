@@ -229,7 +229,7 @@ describe('LinearIntegration construct', () => {
     expect(processors[0].Properties.Timeout).toBeGreaterThanOrEqual(120);
   });
 
-  test('webhook dedup table has TTL attribute for 60s expiry', () => {
+  test('webhook dedup table has a TTL attribute', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       KeySchema: [{ AttributeName: 'dedup_key', KeyType: 'HASH' }],
       TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },

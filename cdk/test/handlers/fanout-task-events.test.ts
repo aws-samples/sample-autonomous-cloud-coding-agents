@@ -1231,8 +1231,8 @@ describe('fanout-task-events: GitHub dispatcher (Chunk J)', () => {
   // ---- Number-coercion regression (found in deploy validation) ----
 
   test('TaskRecord with string-typed cost_usd/duration_s renders without throwing (DDB Number coercion)', async () => {
-    // Regression: the DynamoDB Document-client returns Number
-    // attributes as strings. ``renderCommentBody`` calls
+    // Regression: the agent stores cost and duration as DynamoDB
+    // strings. ``renderCommentBody`` calls
     // ``costUsd.toFixed(4)`` which throws TypeError on a string,
     // causing every terminal event on a pr_iteration task to be
     // rejected by the dispatcher. The fan-out boundary must coerce.

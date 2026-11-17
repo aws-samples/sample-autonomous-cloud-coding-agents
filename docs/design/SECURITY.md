@@ -63,9 +63,10 @@ Input screening happens at two points in the pipeline, forming a defense-in-dept
 
 ### Hydration-time screening
 
-- **PR tasks** (`pr_iteration`, `pr_review`) - The assembled prompt (PR body, review comments, diff, task description) is screened through Bedrock Guardrails before the agent receives it.
-- **`new_task` with issue content** - The assembled prompt (issue body, comments, task description) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
+- **PR tasks** (`pr_iteration`, `pr_review`) - The external PR content (title, body, branch names, comment authors and bodies, rendered review paths and diff hunks, diff summary) is screened through Bedrock Guardrails before the agent receives it.
+- **`new_task` with issue content** - The external issue content (title, body, comments) is screened. When no issue content is present, hydration-time screening is skipped because the task description was already screened at submission.
 - **URL attachments** - URL attachments are fetched during hydration with full SSRF protection (DNS resolution pinning to prevent rebinding attacks, private IP blocking, redirect validation, timeout enforcement). Fetched content is screened through the same pipeline as inline attachments before being stored in S3.
+- **Platform text excluded** - Only the external content is screened, not the platform's own prompt wrapper (task header, closing instructions), so platform wording does not count toward the classifier score. The task description was already screened at submission.
 - **Fail-closed** - A Bedrock outage during hydration fails the task. A `guardrail_blocked` event is emitted when content is blocked. Attachment resolution errors (fetch failures, screening blocks, integrity failures) also fail the task — attachments are never silently dropped.
 
 ### Tool access control
@@ -150,7 +151,7 @@ flowchart LR
 | Submission | Input validation | `validation.ts`, `create-task-core.ts` | HTTP error only |
 | Submission | Repo onboarding gate | `repo-config.ts` | HTTP error only |
 | Submission | Guardrail screening | `create-task-core.ts` | HTTP error only |
-| Admission | Concurrency limit | `orchestrator.ts` | `admission_rejected` event |
+| Admission | Concurrency limit | `orchestrator.ts` | `admission_queued` event |
 | Pre-flight | GitHub access, PAT permissions, PR access | `preflight.ts` | `preflight_failed` event |
 | Hydration | Guardrail prompt screening | `context-hydration.ts` | `guardrail_blocked` event |
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |

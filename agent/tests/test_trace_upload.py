@@ -422,6 +422,32 @@ class TestAccumulatorWhenCloudWatchDisabled:
         assert len(w._events) == 1
 
 
+class TestTrajectoryStreamCreation:
+    """A CreateLogStream that fails must be tried again on the next write.
+    A client cached before the stream exists is never asked to create it."""
+
+    def test_failed_stream_creation_is_retried_on_the_next_write(self, monkeypatch):
+        monkeypatch.setenv("LOG_GROUP_NAME", "/abca/application")
+        client = MagicMock()
+        # contextlib.suppress needs a real exception class here.
+        client.exceptions.ResourceAlreadyExistsException = type(
+            "ResourceAlreadyExistsException", (Exception,), {}
+        )
+        client.create_log_stream.side_effect = [
+            RuntimeError("still throttled after the SDK's own retries"),
+            None,
+        ]
+
+        with patch("boto3.client", return_value=client):
+            w = _TrajectoryWriter("t-1")
+            w._put_event({"event": "A"})  # stream creation fails; this event is lost
+            w._put_event({"event": "B"})  # must create the stream, then write
+
+        assert client.create_log_stream.call_count == 2
+        assert client.put_log_events.call_count == 1
+        assert (w._failure_count, w._disabled) == (1, False)
+
+
 class TestTruncationCallback:
     """Accumulator cap trips fire a one-shot
     callback so the pipeline can surface ``trace_truncated`` in

@@ -162,7 +162,7 @@ node cli/lib/bin/bgagent.js events <TASK_ID> --output json
 - Check if the agent is stuck in a loop (review logs)
 
 **Concurrency limit:**
-- Default: 3 concurrent tasks per user
+- Default: 10 concurrent tasks per user
 - Wait for running tasks to complete or cancel them
 
 ## Local Agent Testing Issues

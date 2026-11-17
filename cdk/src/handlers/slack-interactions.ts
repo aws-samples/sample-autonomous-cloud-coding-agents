@@ -134,16 +134,20 @@ async function handleCancelAction(payload: SlackInteractionPayload, actionId: st
   // Attempt to cancel. QUEUED (#441) is cancellable — it removes the
   // task from the admission queue (no compute or concurrency to release).
   const CANCELLABLE_STATUSES = ['PENDING_UPLOADS', 'QUEUED', 'SUBMITTED', 'HYDRATING', 'RUNNING', 'AWAITING_APPROVAL', 'FINALIZING'];
+  // Terminal attributes as in cancel-task.ts, minus the ttl: the orchestrator
+  // stamps it when it finalizes the started task this button belongs to.
+  const now = new Date().toISOString();
   try {
     await ddb.send(new UpdateCommand({
       TableName: TASK_TABLE,
       Key: { task_id: taskId },
-      UpdateExpression: 'SET #s = :cancelled, updated_at = :now',
+      UpdateExpression: 'SET #s = :cancelled, updated_at = :now, completed_at = :now, status_created_at = :sca',
       ConditionExpression: '#s IN (:s1, :s2, :s3, :s4, :s5, :s6, :s7)',
       ExpressionAttributeNames: { '#s': 'status' },
       ExpressionAttributeValues: {
         ':cancelled': 'CANCELLED',
-        ':now': new Date().toISOString(),
+        ':now': now,
+        ':sca': `CANCELLED#${now}`,
         ':s1': CANCELLABLE_STATUSES[0],
         ':s2': CANCELLABLE_STATUSES[1],
         ':s3': CANCELLABLE_STATUSES[2],

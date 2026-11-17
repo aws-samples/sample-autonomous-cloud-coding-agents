@@ -34,6 +34,9 @@ process.env.SLACK_USER_MAPPING_TABLE_NAME = 'SlackMap';
 
 import { handler } from '../../src/handlers/slack-link';
 
+// The handler refuses a pending row whose ttl has passed, so live fixtures carry a future one.
+const FUTURE_TTL = Math.floor(Date.now() / 1000) + 600;
+
 function makeEvent(body: unknown, userId?: string): APIGatewayProxyEvent {
   return {
     body: body === null ? null : JSON.stringify(body),
@@ -75,9 +78,33 @@ describe('slack-link handler', () => {
   });
 
   test('404s when code exists but status is not pending', async () => {
-    ddbSend.mockResolvedValueOnce({ Item: { slack_identity: 'pending#XYZ', status: 'consumed' } });
+    ddbSend.mockResolvedValueOnce({ Item: { slack_identity: 'pending#XYZ', status: 'consumed', ttl: FUTURE_TTL } });
     const result = await handler(makeEvent({ code: 'XYZ123' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(404);
+  });
+
+  test('404s when the code is past its ttl', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        slack_identity: 'pending#ABC123',
+        status: 'pending',
+        ttl: Math.floor(Date.now() / 1000) - 1,
+        slack_team_id: 'T1',
+        slack_user_id: 'U_slack',
+      },
+    });
+    const result = await handler(makeEvent({ code: 'ABC123' }, 'cognito-user-1'));
+    expect(result.statusCode).toBe(404);
+    expect(ddbSend).toHaveBeenCalledTimes(1); // the Get only: nothing written or deleted
+  });
+
+  test.each([['absent', undefined], ['a string', String(FUTURE_TTL)]])('404s when the pending row has no numeric ttl (%s)', async (_shape, ttl) => {
+    ddbSend.mockResolvedValueOnce({
+      Item: { slack_identity: 'pending#ABC123', status: 'pending', ttl, slack_team_id: 'T1', slack_user_id: 'U_slack' },
+    });
+    const result = await handler(makeEvent({ code: 'ABC123' }, 'cognito-user-1'));
+    expect(result.statusCode).toBe(404);
+    expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
   test('writes confirmed mapping and deletes pending record on success', async () => {
@@ -86,6 +113,7 @@ describe('slack-link handler', () => {
         Item: {
           slack_identity: 'pending#ABC123',
           status: 'pending',
+          ttl: FUTURE_TTL,
           slack_team_id: 'T1',
           slack_user_id: 'U_slack',
         },
@@ -108,7 +136,7 @@ describe('slack-link handler', () => {
   test('normalizes the code (uppercase, trimmed)', async () => {
     ddbSend
       .mockResolvedValueOnce({
-        Item: { slack_identity: 'pending#ABC123', status: 'pending', slack_team_id: 'T1', slack_user_id: 'U1' },
+        Item: { slack_identity: 'pending#ABC123', status: 'pending', ttl: FUTURE_TTL, slack_team_id: 'T1', slack_user_id: 'U1' },
       })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({});

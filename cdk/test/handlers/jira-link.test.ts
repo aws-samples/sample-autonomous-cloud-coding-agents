@@ -34,6 +34,9 @@ process.env.JIRA_USER_MAPPING_TABLE_NAME = 'JiraMap';
 
 import { handler } from '../../src/handlers/jira-link';
 
+// The handler refuses a pending row whose ttl has passed, so live fixtures carry a future one.
+const FUTURE_TTL = Math.floor(Date.now() / 1000) + 600;
+
 function makeEvent(body: unknown, userId?: string): APIGatewayProxyEvent {
   return {
     body: body === null ? null : JSON.stringify(body),
@@ -75,9 +78,39 @@ describe('jira-link handler', () => {
   });
 
   test('404s when code exists but status is not pending', async () => {
-    ddbSend.mockResolvedValueOnce({ Item: { jira_identity: 'pending#XYZ', status: 'consumed' } });
+    ddbSend.mockResolvedValueOnce({ Item: { jira_identity: 'pending#XYZ', status: 'consumed', ttl: FUTURE_TTL } });
     const result = await handler(makeEvent({ code: 'XYZ123' }, 'cognito-user-1'));
     expect(result.statusCode).toBe(404);
+  });
+
+  test.each([false, true])('404s when the code is past its ttl (dry_run: %s)', async (dryRun) => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_identity: 'pending#link-3f8b4a2c',
+        status: 'pending',
+        ttl: Math.floor(Date.now() / 1000) - 1,
+        jira_cloud_id: 'cloud-1',
+        jira_account_id: 'acc-1',
+      },
+    });
+    const result = await handler(makeEvent({ code: 'link-3f8b4a2c', dry_run: dryRun }, 'cognito-user-1'));
+    expect(result.statusCode).toBe(404);
+    expect(ddbSend).toHaveBeenCalledTimes(1); // the Get only: nothing written or deleted
+  });
+
+  test.each([['absent', undefined], ['a string', String(FUTURE_TTL)]])('404s when the pending row has no numeric ttl (%s)', async (_shape, ttl) => {
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        jira_identity: 'pending#link-3f8b4a2c',
+        status: 'pending',
+        ttl,
+        jira_cloud_id: 'cloud-1',
+        jira_account_id: 'acc-1',
+      },
+    });
+    const result = await handler(makeEvent({ code: 'link-3f8b4a2c' }, 'cognito-user-1'));
+    expect(result.statusCode).toBe(404);
+    expect(ddbSend).toHaveBeenCalledTimes(1);
   });
 
   test('writes confirmed mapping and deletes pending record on success', async () => {
@@ -86,6 +119,7 @@ describe('jira-link handler', () => {
         Item: {
           jira_identity: 'pending#link-3f8b4a2c',
           status: 'pending',
+          ttl: FUTURE_TTL,
           jira_cloud_id: 'cloud-1',
           jira_account_id: 'acc-1',
         },
@@ -113,6 +147,7 @@ describe('jira-link handler', () => {
       Item: {
         jira_identity: 'pending#link-3f8b4a2c',
         status: 'pending',
+        ttl: FUTURE_TTL,
         jira_cloud_id: 'cloud-1',
         jira_site_url: 'https://acme.atlassian.net',
         jira_account_id: 'acc-1',
@@ -155,6 +190,7 @@ describe('jira-link handler', () => {
         Item: {
           jira_identity: 'pending#link-3f8b4a2c',
           status: 'pending',
+          ttl: FUTURE_TTL,
           jira_cloud_id: 'c',
           jira_account_id: 'a',
         },

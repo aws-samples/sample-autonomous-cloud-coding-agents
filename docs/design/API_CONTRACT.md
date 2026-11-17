@@ -263,7 +263,7 @@ Returns full details of a task. Users can only access their own tasks.
 
 | Field | Type | Description |
 |---|---|---|
-| `category` | String | One of: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `unknown` |
+| `category` | String | One of: `auth`, `network`, `concurrency`, `compute`, `agent`, `guardrail`, `config`, `timeout`, `blocked`, `unknown` |
 | `title` | String | Human-readable error title |
 | `description` | String | Detailed explanation of what went wrong |
 | `remedy` | String | Suggested action to resolve the error |
@@ -273,13 +273,13 @@ Example for a failed task:
 
 ```json
 {
-  "error_message": "User concurrency limit reached",
+  "error_message": "Pre-flight check failed: REPO_NOT_FOUND_OR_NO_ACCESS — GitHub API returned HTTP 404 for acme/widgets",
   "error_classification": {
-    "category": "concurrency",
-    "title": "Concurrency limit reached",
-    "description": "The maximum number of concurrent tasks for this user has been reached.",
-    "remedy": "Wait for an active task to complete, cancel a running task, or ask an admin to increase the limit.",
-    "retryable": true
+    "category": "auth",
+    "title": "Repository not found or inaccessible",
+    "description": "The GitHub token cannot access the target repository. It may not exist or the token lacks visibility.",
+    "remedy": "Check that the repository name is correct and the configured PAT has access to it.",
+    "retryable": false
   }
 }
 ```
@@ -356,7 +356,7 @@ Returns the audit trail for a task: state transitions, hydration events, session
 
 **Query parameters:** `limit` (default 50, max 100), `next_token`.
 
-**Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_rejected`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
+**Event types:** `task_created`, `uploads_confirmed`, `attachment_blocked`, `admission_queued`, `queue_pickup`, `preflight_failed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`. Custom blueprint steps emit `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`. (There is no `admission_passed` or `session_ended` event — admission success is implicit in the subsequent `hydration_started`, and session end is captured by the terminal event.)
 
 **Correlation envelope (#245):** each event optionally carries top-level `user_id`, `repo`, and `trace_id` (the agent's OTEL trace id) so the event stream joins to structured logs and X-Ray. Each field is present only when the event's source stamped it — `task_created` predates the envelope and carries none; events from `hydration_started` onward carry `user_id`/`repo`, and agent-emitted events additionally carry `trace_id`. Fields are omitted (not `null`) when absent. See [OBSERVABILITY.md](./OBSERVABILITY.md#correlation-envelope).
 
@@ -571,10 +571,10 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | Per-task nudge limit | Default 10/min | Per task (`POST /tasks/{id}/nudge`) | `429 RATE_LIMIT_EXCEEDED` |
 | Application rate limiter (`shared/rate-limit`) | Per-endpoint | Used by `approve`, `deny`, `pending`, `nudge`, `policies` and Linear webhook/fan-out paths — **not** task creation | `429 RATE_LIMIT_EXCEEDED` |
 
-**Concurrency (not a rate limit).** Per-user concurrent task count is bounded (configurable, default 3-5). This is enforced by admission control, not by the create-task endpoint:
+**Concurrency (not a rate limit).** Per-user concurrent task count is bounded (configurable, default 10). This is enforced by admission control, not by the create-task endpoint:
 
 - `POST /v1/tasks/{task_id}/confirm-uploads` rejects with `429 RATE_LIMIT_EXCEEDED` when the user is already at their concurrency limit.
-- For the orchestrator admission path (the `SUBMITTED → HYDRATING` transition), exceeding the limit does not return an HTTP error — the task is already created. The orchestrator drives the task to `FAILED` with `error_message` "User concurrency limit reached" and emits an `admission_rejected` event.
+- For the orchestrator admission path (the `SUBMITTED → HYDRATING` transition), exceeding the limit does not return an HTTP error — the task is already created. The orchestrator parks the task as `QUEUED` and emits an `admission_queued` event. The task is admitted, oldest first, as the user's slots free up (`queue_pickup`), and fails if it is still queued 24 hours after submission.
 
 **Monthly budget admission.** Task creation checks the current UTC-month estimated spend for the authenticated user and every Cognito group captured as a team. A configured hard-stop scope at or above 100% returns `429 BUDGET_EXCEEDED` before creating a new task. Alerts-only scopes continue. Same-user idempotent replays return their existing task before this check.
 
@@ -624,3 +624,4 @@ List endpoints use token-based pagination (consistent with DynamoDB's `Exclusive
 - Pass `next_token` as query parameter for the next page
 - Tokens are short-lived and should not be stored
 - Results ordered by `created_at` descending (newest first)
+- A page can hold fewer items than `limit`, or none, while `has_more` is `true`: a list that filters (tasks by `status` or `repo`, webhooks and API keys without the revoked ones) reads a bounded number of rows per request. Follow `next_token` until `has_more` is `false`

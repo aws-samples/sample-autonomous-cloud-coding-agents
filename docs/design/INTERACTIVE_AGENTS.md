@@ -174,7 +174,7 @@ A single AgentCore Runtime, invoked via `bedrock-agentcore:InvokeAgentRuntime` w
 Durable-execution Lambda that owns the task lifecycle from submission to terminal state.
 
 Responsibilities:
-- **Admission control** — atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`); reject with 429 if over quota.
+- **Admission control** — atomic DDB conditional update on `UserConcurrencyTable` (`active_count < max`); a task over the limit is parked as `QUEUED` (#441).
 - **State transition** `SUBMITTED → HYDRATING → RUNNING → FINALIZING → terminal`.
 - **Invocation** — calls `InvokeAgentRuntime` with SigV4.
 - **Poll loop** — waits for the agent to land a terminal status in `TaskTable`; enforces heartbeat watchdog; transitions to `FAILED` if the container dies.
@@ -197,7 +197,7 @@ The durable event spine. PK = `task_id`, SK = `event_id` (ULID), TTL enabled, **
 
 Writers:
 - `ProgressWriter` (inside the agent container) — per tool call, per turn, per milestone, cost updates, errors.
-- `OrchestratorFn` — `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_rejected`, `guardrail_blocked`.
+- `OrchestratorFn` — `task_created`, `hydration_*`, `session_started`, `task_*`, `preflight_*`, `admission_queued`, `guardrail_blocked`.
 - Cancel/reconciler handlers — `task_cancelled`, `task_stranded`.
 
 Readers:

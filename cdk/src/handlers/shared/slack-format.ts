@@ -36,7 +36,7 @@ export function truncate(text: string, maxLen: number): string {
  * @param seconds - the duration in seconds. Non-numeric values are coerced with Number().
  * @returns the formatted duration string.
  */
-export function formatDuration(seconds: number): string {
+export function formatDuration(seconds: number | string): string {
   const s = Number(seconds);
   if (s < 60) return `${Math.round(s)}s`;
   const minutes = Math.floor(s / 60);
