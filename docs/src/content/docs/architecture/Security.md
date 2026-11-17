@@ -153,7 +153,7 @@ flowchart LR
 | Submission | Input validation | `validation.ts`, `create-task-core.ts` | HTTP error only |
 | Submission | Repo onboarding gate | `repo-config.ts` | HTTP error only |
 | Submission | Guardrail screening | `create-task-core.ts` | HTTP error only |
-| Admission | Concurrency limit | `orchestrator.ts` | `admission_rejected` event |
+| Admission | Concurrency limit | `orchestrator.ts` | `admission_queued` event |
 | Pre-flight | GitHub access, PAT permissions, PR access | `preflight.ts` | `preflight_failed` event |
 | Hydration | Guardrail prompt screening | `context-hydration.ts` | `guardrail_blocked` event |
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |

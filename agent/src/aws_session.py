@@ -96,8 +96,8 @@ def configure_session(user_id: str, repo: str, task_id: str) -> None:
 
     Called once at agent startup from the resolved ``TaskConfig``. Idempotent;
     safe to call before any tenant-data client is created. Does not itself
-    assume the role — assumption is deferred until the first client is built so
-    that a missing SessionRole never delays startup. Values are stored in a
+    assume the role — the first ``get_session()`` call does, with these tags,
+    so this must run first. Values are stored in a
     module global (not ``os.environ``) so tenant identifiers do not leak into
     spawned subprocesses.
     """
@@ -183,9 +183,9 @@ def _build_scoped_session(role_arn: str) -> Any:
     # propagates to every client AND resource derived from this session, so
     # all tenant-data calls carry it. (#319)
     botocore_session.user_agent_extra = ua.static_user_agent_extra()
-    # Deferred: the first assume_role happens on first credential use, not now,
-    # so a transient STS hiccup at startup doesn't crash the agent before it
-    # has even begun.
+    # No credentials yet: get_session() resolves them once, right after this
+    # returns, so a role that cannot be assumed fails closed there instead of
+    # on every later tenant-data call. botocore re-assumes before expiry.
     botocore_session._credentials = DeferredRefreshableCredentials(
         method="sts-assume-role-session-tags",
         refresh_using=_refresh,
@@ -216,7 +216,13 @@ def get_session() -> Any:
             # reach every tenant's data (that is exactly what this control
             # prevents).
             try:
-                _session = _build_scoped_session(role_arn)
+                session = _build_scoped_session(role_arn)
+                # Assume the role now. Left to botocore it happens on the first
+                # signed request, where an STS refusal is one more error behind
+                # a best-effort wrapper and the task carries on. Cache nothing
+                # until it succeeded.
+                session.get_credentials().get_frozen_credentials()
+                _session = session
                 _scoped = True
             except Exception as exc:
                 from shell import log_error_cw

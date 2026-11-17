@@ -84,8 +84,8 @@ class TestFailSafe:
 # autouse fixture. This file's `_reset` fixture (above) itself does
 # `monkeypatch.delenv(SESSION_ROLE_ARN_ENV)`, which would MASK whether conftest's
 # `_clean_env` performs the scrub — a guard placed here passes even if the
-# conftest line is deleted. Only a fixture-free module truly
-# guards the fix.
+# conftest line is deleted. Only a module without an autouse fixture
+# of its own truly guards the fix.
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,10 @@ class TestFailSafe:
 
 
 class TestScopedSession:
+    """A test that sets the session role must script ``assume_role`` (or patch
+    ``_build_scoped_session``): a bare ``MagicMock`` client sends botocore's
+    expiry parsing into a loop that never returns."""
+
     def _arn(self, monkeypatch):
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         monkeypatch.setenv(SESSION_ROLE_ARN_ENV, "arn:aws:iam::111122223333:role/abca-session")
@@ -182,6 +186,91 @@ class TestScopedSession:
             get_session()
         # The downgrade attempt was surfaced loudly before failing.
         assert any("SESSION_SCOPING_FAILED" in m for m in logged)
+
+    def test_role_that_cannot_be_assumed_fails_closed(self, monkeypatch):
+        """STS refusing the SessionRole must abort at the first get_session(),
+        not surface later as per-call errors behind best-effort wrappers, and
+        must leave nothing cached that a later call could take for unscoped."""
+        from botocore.exceptions import ClientError
+
+        from aws_session import SessionScopingError
+
+        self._arn(monkeypatch)
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        sts = MagicMock(name="sts")
+        sts.assume_role.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+        )
+        logged: list[str] = []
+
+        with (
+            patch("boto3.client", return_value=sts),
+            patch("shell.log_error_cw", side_effect=lambda msg, **kw: logged.append(msg)),
+            pytest.raises(SessionScopingError),
+        ):
+            get_session()
+
+        sts.assume_role.assert_called_once()
+        assert any("SESSION_SCOPING_FAILED" in m for m in logged)
+        assert aws_session._session is None
+        assert aws_session._scoped is None
+
+    def test_role_that_cannot_be_assumed_stops_run_task(self, monkeypatch):
+        """An STS refusal must stop the task before it writes RUNNING or clones.
+        What stops it is the is_scoped() call in run_task's scoping log line;
+        the status and progress writes that follow are best-effort and would
+        carry on."""
+        from botocore.exceptions import ClientError
+
+        from aws_session import SessionScopingError
+        from pipeline import run_task
+
+        self._arn(monkeypatch)
+        sts = MagicMock(name="sts")
+        sts.assume_role.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "not authorized"}}, "AssumeRole"
+        )
+
+        with (
+            patch("boto3.client", return_value=sts),
+            patch("shell.log_error_cw"),
+            patch("pipeline.task_state") as task_state,
+            patch("repo.setup_repo") as setup_repo,
+            pytest.raises(SessionScopingError),
+        ):
+            run_task(
+                repo_url="owner/repo",
+                task_description="fix bug",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="test-id",
+            )
+
+        task_state.write_running.assert_not_called()
+        setup_repo.assert_not_called()
+
+    def test_assumable_role_is_assumed_once(self, monkeypatch):
+        """The resolution in get_session() is the one AssumeRole the first
+        tenant-data call would have made anyway, not an extra one."""
+        self._arn(monkeypatch)
+        configure_session(user_id="u-1", repo="owner/repo", task_id="t-abc")
+        sts = MagicMock(name="sts")
+        sts.assume_role.return_value = {
+            "Credentials": {
+                "AccessKeyId": "ASIAEXAMPLE",
+                "SecretAccessKey": "secret",
+                "SessionToken": "token",
+                "Expiration": datetime.datetime.now(datetime.UTC) + datetime.timedelta(hours=1),
+            }
+        }
+
+        with patch("boto3.client", return_value=sts):
+            session = get_session()
+            frozen = session.get_credentials().get_frozen_credentials()
+
+        assert is_scoped() is True
+        assert frozen.access_key == "ASIAEXAMPLE"
+        assert sts.assume_role.call_count == 1
 
 
 # ---------------------------------------------------------------------------

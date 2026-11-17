@@ -453,6 +453,28 @@ STACK_NAME=<stack> mise //cdk:preflight:log-delivery -- --check-only
 
 A bare `cdk deploy` (no mise, no pipeline) does **not** run the preflight. On that path, or after the rollback above, run the check command shown under *Affects* and then follow the manual steps in [Observability — AgentCore log delivery](../design/OBSERVABILITY.md#agentcore-log-delivery).
 
+### Task list keeps its old order while a new index is built (#51)
+
+**Affects:** an existing stack on its first deploy of a version that adds `UserCreatedAtIndex` to the task table. A fresh stack is not affected.
+
+**Symptom:** For a while after the deploy, `GET /v1/tasks` (`bgagent list`, the console's task list) still returns tasks grouped by status instead of newest first, and the `ListTasksFn` log has a `UserCreatedAtIndex is not ACTIVE` warning for each request that starts a list.
+
+**Root cause:** CloudFormation starts creating the index and continues with the update without waiting for it, and DynamoDB does not allow a query on an index until it is `ACTIVE`. The list handler therefore asks DynamoDB for the status of the index, and reads `UserStatusIndex`, as it did before, until the answer is `ACTIVE`. This has been tested against an emulated DynamoDB and not observed on a deployed stack; how long the build takes on a given table has not been measured.
+
+**Resolution:** None needed. The list is newest first once the index is `ACTIVE`:
+
+```bash
+aws dynamodb describe-table --table-name <TaskTableName stack output> \
+  --query "Table.GlobalSecondaryIndexes[?IndexName=='UserCreatedAtIndex'].IndexStatus"
+```
+
+Two CloudFormation limits apply to the same update. It creates one index per update, so each index a stack has not yet created (`JiraIssueIndex`, `LinearIssueIndex`, this one) needs a deploy of its own, in the order the versions added them, each once the index of the deploy before it is `ACTIVE`. And AWS recommends that an update which adds an index changes nothing else, which this version cannot follow: if the update rolls back while the index is being created, CloudFormation leaves the index in place. Delete it, wait until the status command above prints `[]`, then deploy again. DynamoDB refuses the delete in the first phase of the build; if it does, try again after a minute:
+
+```bash
+aws dynamodb update-table --table-name <TaskTableName stack output> \
+  --global-secondary-index-updates '[{"Delete": {"IndexName": "UserCreatedAtIndex"}}]'
+```
+
 ### AgentCore unsupported Availability Zones
 
 **Affects:** Fresh deploys in accounts whose default Availability Zones don't line up with the zones AgentCore supports for the region.

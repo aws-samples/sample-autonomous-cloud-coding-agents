@@ -53,7 +53,7 @@ describe('formatDuration', () => {
   });
 
   test('coerces DynamoDB numeric strings via Number()', () => {
-    // DynamoDB may round-trip numeric attributes as strings; Number() coerces them.
+    // The agent stores these as DynamoDB strings; Number() coerces them.
     expect(formatDuration('90' as unknown as number)).toBe('1m 30s');
     expect(formatDuration('3600' as unknown as number)).toBe('1h');
   });

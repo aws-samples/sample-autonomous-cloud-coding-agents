@@ -194,7 +194,7 @@ If a task fails immediately with text like the model is **not available on your 
 
 ## Step 4 - Store the GitHub token
 
-The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created an empty secret for you - now you need to put your token value in it. Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGION` matches where you deployed - if it is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
+The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK stack created a secret with a generated placeholder value for you - now you need to put your token value in it. Replace `ghp_your_token_here` with the actual token from Step 2. Make sure `REGION` matches where you deployed - if it is empty, the AWS CLI builds a malformed endpoint URL and fails silently.
 
 <Tabs syncKey="quickstart-method">
 
