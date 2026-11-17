@@ -73,6 +73,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 # Node 24; ``enable`` installs the yarn/pnpm shims onto PATH.
 RUN corepack enable && corepack prepare yarn@stable --activate || corepack enable
 
+# pip of the base image (26.2.2) vendors urllib3 2.7.0 and msgpack 1.1.2, which
+# the image scan reports as HIGH (CVE-2026-97687, CVE-2026-97689,
+# CVE-2026-114613, GHSA-6v7p-g79w-8964); pip 26.3 vendors the fixed releases.
+# Delete this line when the base image ships pip 26.3 or later.
+RUN python -m pip install --no-cache-dir --root-user-action=ignore pip==26.3
+
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
 # Pinned 2.1.319 to match the CLI bundled by claude-agent-sdk 0.2.179 (see
