@@ -40,8 +40,12 @@ _HANDLER_KINDS = frozenset(STEP_HANDLERS)
 _SIDE_EFFECTING_KINDS = frozenset({"ensure_pr", "post_review", "deliver_artifact"})
 
 # Steps that only make sense when a repo is cloned (rule 3 / rule 7).
+# self_review diffs and re-runs the agent against the cloned working tree, so it
+# is repo-only too. It is deliberately NOT in _SIDE_EFFECTING_KINDS: it commits
+# locally but never pushes or opens a PR, so it may be marked on_failure:
+# continue (advisory / fail-open).
 _REPO_ONLY_KINDS = frozenset(
-    {"clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint"}
+    {"clone_repo", "ensure_pr", "post_review", "verify_build", "verify_lint", "self_review"}
 )
 
 # Built-in (Phase 1-3) policy modules / MCP servers. Registry refs (registry://)
