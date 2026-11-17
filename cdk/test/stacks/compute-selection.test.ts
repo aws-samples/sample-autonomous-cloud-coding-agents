@@ -140,7 +140,11 @@ describe.each([
   { label: 'legacy ECS', selector: { compute_type: 'ecs' }, backends: ['agentcore', 'ecs'] },
   { label: 'ECS default with AgentCore', selector: { compute_types: ['ecs', 'agentcore'] }, backends: ['ecs', 'agentcore'] },
   { label: 'MicroVM default without AgentCore', selector: { compute_types: 'lambda-microvm,ecs' }, backends: ['lambda-microvm', 'ecs'] },
-  { label: 'all backends', selector: { compute_types: 'agentcore,ecs,lambda-microvm' }, backends: ['agentcore', 'ecs', 'lambda-microvm'] },
+  // All three backends with the inline network is an expected census rejection
+  // (`additive-agentcore+ecs+lambda-microvm-default-inline`, over the 490 budget);
+  // pin the default-on vault off so this backend-wiring test stays under
+  // CloudFormation's 500-resource limit. The vault itself is covered in agent.test.
+  { label: 'all backends', selector: { compute_types: 'agentcore,ecs,lambda-microvm', enableLinearIdentityVault: 'false' }, backends: ['agentcore', 'ecs', 'lambda-microvm'] },
 ])('additive deployment from $label', ({ selector, backends }) => {
   let template: Template;
   beforeAll(() => {
