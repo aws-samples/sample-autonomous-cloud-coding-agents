@@ -1372,9 +1372,16 @@ describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_
 
     const actions = payloadStatements.flatMap(s => Array.isArray(s.Action) ? s.Action : [s.Action]);
     expect(actions).toContain('s3:PutObject');
-    // The bucket's lifecycle rule is the reaper on this backend — unlike the ECS
-    // path the orchestrator never deletes, so the grant must not exist.
-    expect(actions).not.toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:DeleteObject');
+    expect(actions).toContain('s3:GetObject');
+    expect(actions).toContain('s3:ListBucket');
+    const deletion = payloadStatements.find(s => Array.isArray(s.Action) && s.Action.includes('s3:DeleteObject'));
+    expect(deletion!.Resource).toEqual(['payload.json', 'launch.json'].map(filename => ({
+      'Fn::Join': ['', [
+        { 'Fn::GetAtt': [expect.stringMatching(/^LambdaMicrovmComputePayloadBucket/), 'Arn'] },
+        `/*/${filename}`,
+      ]],
+    })));
   });
 
   test('cancel Lambda may terminate a MicroVM (and only terminate), image-scoped', () => {
