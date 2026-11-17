@@ -18,6 +18,7 @@
  */
 
 import { GetCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { TERMINAL_STATUSES } from '../../constructs/task-status';
 import {
   buildAdfDocument, updateIssueCommentAdf,
   type JiraFeedbackContext, type JiraUpdateResult,
@@ -28,7 +29,6 @@ import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import { isAllowedScreenshotUrl } from './screenshot-url';
 import type { TaskRecord } from './types';
-import { TERMINAL_STATUSES } from '../../constructs/task-status';
 
 const MAX_CONVERGENCE_ATTEMPTS = 4;
 

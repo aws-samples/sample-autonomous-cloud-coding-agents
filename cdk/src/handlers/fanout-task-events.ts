@@ -45,6 +45,7 @@ import type {
   DynamoDBRecord,
   DynamoDBStreamEvent,
 } from 'aws-lambda';
+import { TaskStatus } from '../constructs/task-status';
 import { clearTokenCache, resolveGitHubToken } from './shared/context-hydration';
 import { classifyError } from './shared/error-classifier';
 import { renderFailureReply } from './shared/failure-reply';
@@ -70,7 +71,6 @@ import { encodeMarkdownUrl } from './shared/screenshot-url';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
-import { TaskStatus } from '../constructs/task-status';
 
 // Re-export the shared types so existing test imports (and any future
 // caller that only imports from the handler module) continue to work.

@@ -45,6 +45,7 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { DynamoDBBatchResponse, DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import { rollupTaskCost } from './budget-rollup';
 import { createTaskCore } from './shared/create-task-core';
 import { classifyError } from './shared/error-classifier';
@@ -88,7 +89,6 @@ import { encodeMarkdownUrl } from './shared/screenshot-url';
 import { ORCHESTRATION_CHILD_TASK_INDEX_NAME } from './shared/storage-names';
 import { readTaskPrNumber } from './shared/task-pr-number';
 import { makeDocClient } from './shared/ua';
-import { TaskStatus, TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;

@@ -22,11 +22,11 @@ import {
   CognitoIdentityProviderClient,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { BatchGetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import sharedConstants from '../../../../contracts/constants.json';
 import { logger } from './logger';
 import { coerceNumericOrNull } from './numeric';
 import type { PersonalBudgetStatus } from './types';
 import { makeClient, makeDocClient } from './ua';
-import sharedConstants from '../../../../contracts/constants.json';
 
 const budgetContract = sharedConstants.monthly_budgets;
 export const BUDGET_CONFIG_PERIOD = budgetContract.config_period;

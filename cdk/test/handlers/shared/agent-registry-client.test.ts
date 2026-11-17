@@ -782,6 +782,59 @@ describe('AgentRegistryClient', () => {
     await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
   });
 
+  // --- frontmatter block without a document, or with more than one ------------
+
+  const seedSkillMd = (fake: FakeClient, skillMd: string): string =>
+    fake.seed({
+      name: 'skill/acme/readme-helper',
+      recordType: 'SKILL',
+      descriptors: { agentSkillsDefinition: { additionalData: { skillMd: { data: skillMd } } } },
+      recordVersion: '1.0.0',
+      status: 'APPROVED',
+    });
+
+  // A block that holds no YAML document is a record without frontmatter, as it is for
+  // the agent's reader (`yaml.safe_load` gives None there). It is not corrupt, so it must
+  // not be reported as MALFORMED; with no runtime it still cannot resolve. js-yaml 4
+  // returned undefined for such a block and js-yaml 5 throws on it.
+  test.each([
+    ['is empty', '---\n\n---\n# body'],
+    ['has only blank lines', '---\n  \n\n---\n# body'],
+    ['has only a comment', '---\n# no frontmatter yet\n---\n# body'],
+  ])('a SKILL.md whose frontmatter block %s is a record without frontmatter, not a malformed one', async (_label, skillMd) => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedSkillMd(fake, skillMd);
+
+    const record = await client.getRecord('skill', 'acme', 'readme-helper', '1.0.0');
+    expect(record).toMatchObject({ kind: 'skill', name: 'readme-helper', version: '1.0.0', storageMode: 'native' });
+    expect(record?.runtime).toEqual({});
+    expect(record?.publisher).toBeUndefined();
+
+    const entries = await client.listBrowseEntries({ kind: 'skill', namespace: 'acme' });
+    expect(entries).toEqual([{ malformed: false, record }]);
+
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'REMOVED' });
+  });
+
+  test('a SKILL.md whose frontmatter block holds two YAML documents is malformed (the first one does not win)', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    const runtimeB64 = Buffer.from(JSON.stringify({ prompt_fragment: 'ok' })).toString('base64');
+    // `...` ends the first document; the lines after it are a second one.
+    seedSkillMd(fake, `---\nname: acme-readme-helper\nx-abca-runtime: ${runtimeB64}\n...\nx-abca-publisher: cognito-sub-999\n---\n# body`);
+
+    const err = await client.getRecord('skill', 'acme', 'readme-helper', '1.0.0').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RegistryRecordMalformedError);
+    expect(err).toMatchObject({ reason: 'MALFORMED_FRONTMATTER' });
+
+    const parsed = parseRef('registry://skill/acme/readme-helper@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    await expect(client.resolve(parsed.ref)).rejects.toMatchObject({ reason: 'MALFORMED' });
+  });
+
   // --- 422 body must not echo raw descriptor bytes ----------------------------
 
   test('resolve MALFORMED message carries the discriminator, never the raw descriptor bytes', async () => {

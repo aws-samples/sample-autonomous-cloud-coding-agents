@@ -202,7 +202,14 @@ function parseSkillFrontmatter(skillMd: string): Record<string, unknown> {
   if (!m) return {};
   let parsed: unknown;
   try {
-    parsed = yaml.load(m[1], { json: true });
+    // `loadAll` plus a count rather than `load`: since js-yaml 5, `load` throws on a block
+    // with no document in it (empty, blank lines, only comments), which 4.x answered with
+    // undefined. Such a block is handled below; several documents remain an error.
+    const documents = yaml.loadAll(m[1], { json: true });
+    if (documents.length > 1) {
+      throw new Error('expected a single document in the stream, but found more');
+    }
+    parsed = documents[0];
   } catch (err) {
     throw new RegistryRecordMalformedError(
       'MALFORMED_FRONTMATTER',

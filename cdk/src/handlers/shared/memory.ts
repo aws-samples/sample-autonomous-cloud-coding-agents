@@ -23,10 +23,10 @@ import {
   CreateEventCommand,
   RetrieveMemoryRecordsCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
+import type { TaskStatusType } from '../../constructs/task-status';
 import { logger } from './logger';
 import { sanitizeExternalContent } from './sanitization';
 import { makeClient } from './ua';
-import type { TaskStatusType } from '../../constructs/task-status';
 
 // ---------------------------------------------------------------------------
 // Types

@@ -56,6 +56,7 @@ import {
   GetCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 import { refreshPanelAndSettle } from './orchestration-reconciler';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
@@ -66,7 +67,6 @@ import {
   type OrchestrationChildRow,
 } from './shared/orchestration-store';
 import { makeDocClient } from './shared/ua';
-import { TaskStatus, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 const ORCHESTRATION_TABLE = process.env.ORCHESTRATION_TABLE_NAME!;

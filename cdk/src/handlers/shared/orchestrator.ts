@@ -20,6 +20,7 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 import { evaluateAgentHeartbeat } from './agent-heartbeat';
 import { resolveRepositoryBackend } from './compute-backend';
 import type { SessionControlOptions, SessionHandle } from './compute-strategy';
@@ -38,7 +39,6 @@ import { resolveUrlAttachments } from './resolve-url-attachments';
 import { APPROVAL_GATE_CAP_MAX, APPROVAL_GATE_CAP_MIN, type AgentAttachmentPayload, type AttachmentRecord, type TaskRecord } from './types';
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, DEFAULT_MAX_TURNS } from './validation';
-import { TaskStatus, TERMINAL_STATUSES, VALID_TRANSITIONS, type TaskStatusType } from '../../constructs/task-status';
 
 const ddb = makeDocClient();
 

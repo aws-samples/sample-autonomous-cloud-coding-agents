@@ -275,7 +275,7 @@ export function renderTemplate(): string {
   const yamlOutput = yaml.dump(template, {
     lineWidth: 120,
     noRefs: true,
-    quotingType: "'",
+    quoteStyle: 'single',
     forceQuotes: false,
   });
 

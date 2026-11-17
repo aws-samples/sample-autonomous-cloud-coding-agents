@@ -33,7 +33,6 @@ import { randomUUID } from 'node:crypto';
 import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
-import { apiEvent, emulatorTables } from './harness';
 import { RepoTable } from '../../src/constructs/repo-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { TaskTable } from '../../src/constructs/task-table';
@@ -53,6 +52,7 @@ import { handler as getTask } from '../../src/handlers/get-task';
 import { handler as getTaskEvents } from '../../src/handlers/get-task-events';
 import { handler as listTasks } from '../../src/handlers/list-tasks';
 import { makeDocClient } from '../../src/handlers/shared/ua';
+import { apiEvent, emulatorTables } from './harness';
 
 const REPO = 'acme/widgets';
 const CONCURRENT_CANCELS = 8;

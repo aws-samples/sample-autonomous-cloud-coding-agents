@@ -18,8 +18,8 @@
  */
 
 import { type DynamoDBDocumentClient, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { logger } from './logger';
 import { LINEAR_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
+import { logger } from './logger';
 
 /**
  * The fields the standalone comment trigger needs from the newest

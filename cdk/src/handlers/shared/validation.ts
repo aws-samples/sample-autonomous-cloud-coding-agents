@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { TaskStatus } from '../../constructs/task-status';
 import {
   type CreateTaskRequest,
   type AttachmentType,
@@ -28,7 +29,6 @@ import {
   MAX_BUDGET_USD_MAX,
 } from './types';
 import { type WorkflowRequiredInputs } from './workflows';
-import { TaskStatus } from '../../constructs/task-status';
 
 /** Default maximum agent turns per task. */
 export const DEFAULT_MAX_TURNS = 100;

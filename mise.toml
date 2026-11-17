@@ -19,7 +19,7 @@ monorepo_root = true
 experimental = true
 
 [tools]
-# An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.7
+# An exact Node, here and in the cdk, cli, web and docs mise.toml: astro 7.4.10
 # declares node >=22.23.4 and yarn refuses to install on less, while `node = "22"`
 # keeps any older 22.x that is already installed. Bump the five by PR, like the
 # pins below.
@@ -29,7 +29,7 @@ node = "22.23.4"
 # no mise ecosystem): bump by PR to a release at least 7 days old (the cooldown
 # in .github/dependabot.yml) and keep `uv` equal to agent/mise.toml and to the
 # uv image in agent/Dockerfile.
-prek = "0.5.9"
+prek = "0.5.10"
 gitleaks = "8.30.1"
 # uv must be declared so it is on PATH before semgrep installs: mise's
 # `pipx.uvx` default routes pipx tools through `uv tool install` when uv is
@@ -37,9 +37,9 @@ gitleaks = "8.30.1"
 # that breaks under the mise 2026.6.x default `minimum_release_age`
 # (jdx/mise#10279; see #320).
 uv = "0.13.7"
-semgrep = "1.183.0"
-osv-scanner = "2.7.0"
-"grype" = "0.121.1"
+semgrep = "1.185.0"
+osv-scanner = "2.7.1"
+"grype" = "0.121.3"
 "aqua:zizmorcore/zizmor" = "1.32.0"
 
 [monorepo]

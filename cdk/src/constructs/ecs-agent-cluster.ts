@@ -28,6 +28,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct, type Node } from 'constructs';
+import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 import { AgentMemory } from './agent-memory';
 import { AgentSessionRole } from './agent-session-role';
 import {
@@ -40,7 +41,6 @@ import {
 import { LinearIdentityVault } from './linear-identity-vault';
 import { buildAppId } from './solution-ua-aspect';
 import { ToolGateway } from './tool-gateway';
-import { CHANNEL_OAUTH_SECRET_PATTERNS } from '../deployment/features';
 
 export interface EcsAgentClusterProps {
   readonly vpc: ec2.IVpc;

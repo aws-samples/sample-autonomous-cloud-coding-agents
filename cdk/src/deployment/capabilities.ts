@@ -18,8 +18,8 @@
  */
 
 import { Token } from 'aws-cdk-lib';
-import { DeploymentFeature, DeploymentFeatures, enabledFeatures } from './features';
 import catalog from '../../../contracts/deployment-capabilities.json';
+import { DeploymentFeature, DeploymentFeatures, enabledFeatures } from './features';
 
 /** Region data for one capability; `regions` absent means no constraint beyond core. */
 export interface Capability {

@@ -22,6 +22,7 @@ import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bed
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
+import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import type { ScreeningConfig } from './shared/attachment-screening';
 import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
@@ -82,7 +83,6 @@ import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
-import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 
 const ddb = makeDocClient();
 

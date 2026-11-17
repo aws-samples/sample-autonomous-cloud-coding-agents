@@ -18,11 +18,11 @@
  */
 
 import { Command } from 'commander';
-import { decodeBundle } from './admin';
 import { saveConfig, tryLoadConfig } from '../config';
 import { CliError } from '../errors';
 import { fetchConfigureBundleFromStack, resolveOperatorRegion } from '../stack-outputs';
 import { CliConfig } from '../types';
+import { decodeBundle } from './admin';
 
 /**
  * All four core fields (api-url, region, user-pool-id, client-id) are required

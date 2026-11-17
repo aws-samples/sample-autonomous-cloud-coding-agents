@@ -29,6 +29,7 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/li
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { ulid } from 'ulid';
+import { TaskStatus } from '../../constructs/task-status';
 import { isDegeneratePattern, parseApprovalScope } from './approval-scope';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { checkBudgetAdmission } from './budgets';
@@ -62,7 +63,6 @@ import {
 import { makeClient, makeDocClient } from './ua';
 import { computeTtlEpoch, hasTaskSpec, isValidIdempotencyKey, isValidRepo, isValidTaskDescriptionLength, MAX_ATTACHMENT_SIZE_BYTES, MAX_TASK_DESCRIPTION_LENGTH, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateAttachments, validateMaxBudgetUsd, validateMaxTurns, validatePrNumber } from './validation';
 import { disallowedWorkflowModel, getWorkflowDescriptor, isValidWorkflowRef, resolveWorkflowRef, resolveWorkflowRefError } from './workflows';
-import { TaskStatus } from '../../constructs/task-status';
 
 /**
  * Context for task creation — abstracts the auth source (Cognito vs. webhook).

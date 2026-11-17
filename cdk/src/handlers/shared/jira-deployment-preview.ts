@@ -18,6 +18,7 @@
  */
 
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { postIssueCommentAdf, updateIssueCommentAdf } from './jira-feedback';
 import { jiraPreviewDocument, updateJiraIterationComment } from './jira-preview';
 import { JiraPreviewBudget } from './jira-preview-budget';
@@ -25,7 +26,6 @@ import { jiraIssueIdentity } from './jira-task-by-issue';
 import { logger } from './logger';
 import { isIntegrationNode } from './orchestration-integration-node';
 import type { TaskRecord } from './types';
-import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 const MAX_LOOKUP_PAGES = 10;
 const LOOKUP_PAGE_SIZE = 25;
