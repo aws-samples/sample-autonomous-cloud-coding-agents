@@ -565,7 +565,7 @@ async function checkGithubToken(
     id,
     label,
     status: 'fail',
-    detail: 'GitHub token secret is empty or still the CDK placeholder. Run `bgagent github set-token`.',
+    detail: 'GitHub token secret is empty, still the CDK placeholder, or not in a GitHub token format. Run `bgagent github set-token`.',
   };
 }
 

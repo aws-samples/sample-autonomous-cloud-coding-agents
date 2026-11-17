@@ -866,6 +866,38 @@ export function assembleUserPrompt(
   return parts.join('\n');
 }
 
+/** Group review comments exactly as they are rendered, keeping the first root per ID. */
+function groupReviewComments(comments: PullRequestReviewComment[]) {
+  // Group review comments into threads using in_reply_to_id
+  const rootComments = new Map<number, PullRequestReviewComment>();
+  const replies = new Map<number, PullRequestReviewComment[]>();
+
+  for (const c of comments) {
+    if (c.in_reply_to_id === undefined) {
+      // Top-level comment (thread root)
+      if (rootComments.has(c.id)) {
+        logger.warn('Duplicate root comment id detected — keeping first occurrence', {
+          comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
+        });
+        continue;
+      }
+      rootComments.set(c.id, c);
+      if (!replies.has(c.id)) {
+        replies.set(c.id, []);
+      }
+    } else {
+      // Reply to an existing thread
+      const rootId = c.in_reply_to_id;
+      if (!replies.has(rootId)) {
+        replies.set(rootId, []);
+      }
+      replies.get(rootId)!.push(c);
+    }
+  }
+
+  return { rootComments, replies };
+}
+
 /**
  * Assemble the user prompt for a PR iteration task.
  * @param taskId - the task ID.
@@ -892,32 +924,7 @@ export function assemblePrIterationPrompt(
   if (pr.review_comments.length > 0) {
     parts.push('\n### Review Comments\n');
 
-    // Group review comments into threads using in_reply_to_id
-    const rootComments = new Map<number, PullRequestReviewComment>();
-    const replies = new Map<number, PullRequestReviewComment[]>();
-
-    for (const c of pr.review_comments) {
-      if (c.in_reply_to_id === undefined) {
-        // Top-level comment (thread root)
-        if (rootComments.has(c.id)) {
-          logger.warn('Duplicate root comment id detected — keeping first occurrence', {
-            comment_id: c.id, existing_author: rootComments.get(c.id)!.author, duplicate_author: c.author,
-          });
-          continue;
-        }
-        rootComments.set(c.id, c);
-        if (!replies.has(c.id)) {
-          replies.set(c.id, []);
-        }
-      } else {
-        // Reply to an existing thread
-        const rootId = c.in_reply_to_id;
-        if (!replies.has(rootId)) {
-          replies.set(rootId, []);
-        }
-        replies.get(rootId)!.push(c);
-      }
-    }
+    const { rootComments, replies } = groupReviewComments(pr.review_comments);
 
     // Render threads rooted by known top-level comments
     for (const [rootId, root] of rootComments) {
@@ -974,6 +981,58 @@ export function assemblePrIterationPrompt(
   }
 
   return parts.join('\n');
+}
+
+/**
+ * Build the text screened by the guardrail for an issue-based task: the sanitized
+ * issue title, body and comments only. Platform-authored wrapper text (task header,
+ * closing instructions) is excluded so it does not count toward the classifier score.
+ * @param issue - the GitHub issue context.
+ * @returns the external issue content, joined.
+ */
+export function buildIssueScreeningText(issue: GitHubIssueContext): string {
+  const parts: string[] = [sanitizeExternalContent(issue.title), sanitizeExternalContent(issue.body)];
+  for (const c of issue.comments) {
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
+}
+
+/**
+ * Build the text screened by the guardrail for a PR task: the sanitized PR title, body,
+ * review and conversation comments, plus the diff hunks and diff summary. Platform-authored
+ * wrapper text (task header, branch labels, closing instructions) is excluded.
+ * Branch names, rendered comment paths and authors remain screened.
+ * @param pr - the GitHub PR context (after any token-budget trimming).
+ * @returns the external PR content, joined.
+ */
+export function buildPrScreeningText(pr: GitHubPullRequestContext): string {
+  const parts: string[] = [
+    sanitizeExternalContent(pr.title), sanitizeExternalContent(pr.body), pr.base_ref, pr.head_ref,
+  ];
+  const { rootComments, replies } = groupReviewComments(pr.review_comments);
+  const appendComment = (c: PullRequestReviewComment, includeLocation: boolean): void => {
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
+    if (includeLocation) {
+      if (c.path) parts.push(c.path);
+      if (c.diff_hunk) parts.push(c.diff_hunk);
+    }
+  };
+  for (const [rootId, root] of rootComments) {
+    appendComment(root, true);
+    for (const reply of replies.get(rootId) ?? []) appendComment(reply, false);
+  }
+  for (const [rootId, orphanReplies] of replies) {
+    if (rootComments.has(rootId)) continue;
+    for (const reply of orphanReplies) appendComment(reply, true);
+  }
+  for (const c of pr.issue_comments) {
+    parts.push(sanitizeExternalContent(c.author), sanitizeExternalContent(c.body));
+  }
+  if (pr.diff_summary) {
+    parts.push(pr.diff_summary);
+  }
+  return parts.filter(p => p.length > 0).join('\n\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,6 +1235,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         effectiveTaskDescription = 'Review this pull request. Follow the workflow in your system instructions.';
       }
       userPrompt = assemblePrIterationPrompt(task.task_id, repo, prResult, effectiveTaskDescription);
+      let screenedPr: GitHubPullRequestContext = prResult;
 
       // Trim PR context if the assembled prompt exceeds the token budget
       let truncated = budgetResult.truncated;
@@ -1233,6 +1293,7 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
         }
 
         userPrompt = assemblePrIterationPrompt(task.task_id, repo, trimmedPr, budgetResult.taskDescription);
+        screenedPr = trimmedPr;
         const finalEstimate = estimateTokens(userPrompt);
         if (finalEstimate > USER_PROMPT_TOKEN_BUDGET) {
           logger.warn('Token budget still exceeded after trimming all comments — non-comment content too large', {
@@ -1247,8 +1308,9 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
       resolvedBranchName = prResult.head_ref;
       resolvedBaseBranch = prResult.base_ref;
 
-      // Screen assembled PR prompt through Bedrock Guardrail for prompt injection
-      const screenResult = await screenWithGuardrail(userPrompt, task.task_id);
+      // Screen the external PR content through Bedrock Guardrail for prompt injection.
+      // The platform's own wrapper text is excluded so it does not push benign content over the threshold.
+      const screenResult = await screenWithGuardrail(buildPrScreeningText(screenedPr), task.task_id);
 
       const guardrailBlocked = formatGuardrailBlocked(screenResult, 'PR context');
 
@@ -1275,10 +1337,11 @@ export async function hydrateContext(task: TaskRecord, options?: HydrateContextO
     userPrompt = assembleUserPrompt(task.task_id, repo, issue, budgetResult.taskDescription);
     const tokenEstimate = estimateTokens(userPrompt);
 
-    // Screen assembled prompt when it includes GitHub issue content (attacker-controlled input).
-    // Skipped when no issue is present — task_description is already screened at submission time.
+    // Screen GitHub issue content (attacker-controlled input) when present. Only the issue
+    // itself is screened, not the platform's wrapper text. Skipped when no issue is present —
+    // task_description is already screened at submission time.
     const screenResult = issue
-      ? await screenWithGuardrail(userPrompt, task.task_id)
+      ? await screenWithGuardrail(buildIssueScreeningText(issue), task.task_id)
       : undefined;
 
     const guardrailBlocked = formatGuardrailBlocked(screenResult, 'Task context');

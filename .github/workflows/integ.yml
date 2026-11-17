@@ -68,6 +68,9 @@ jobs:
       # reintroduces CodeQL alert #35 even though the value is unchanged.
       commit_sha: ${{ steps.decide.outputs.commit_sha }}
       head_repo: ${{ steps.decide.outputs.head_repo }}
+      # The PR under test (set only when integ applies); keys the integ job's
+      # concurrency group so runs of different PRs never cancel each other.
+      pr_number: ${{ steps.decide.outputs.pr_number }}
     steps:
       - name: Resolve applicability and post pending status
         id: decide
@@ -173,6 +176,7 @@ jobs:
           if echo "$CHANGED" | grep -Eq '^(cdk|agent)/'; then
             post_status pending "awaiting admin approval / running"
             echo "applicable=true" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
             echo "PR #$PR_NUMBER touches cdk/** or agent/** — integ applies."
           else
             post_status success "skipped — no cdk/** or agent/** changes"
@@ -191,14 +195,19 @@ jobs:
     name: CDK integ smoke (Task API)
     runs-on: ubuntu-latest
     environment: deploy
-    # Only one integ deploy at a time against the shared account. Stack names are
-    # run-unique (`int-<sha>`, see below), so this bounds shared-account cost and
-    # parallelism rather than preventing a name collision. The group is on this
-    # job, not on the workflow: at workflow level a run waiting for the `deploy`
-    # approval held the group and every later run was cancelled before `resolve`
-    # could post a status.
+    # One integ deploy at a time per PR. A concurrency group holds one running and
+    # one waiting job, and a newer job cancels the waiting one even with
+    # cancel-in-progress: false. With a single shared group, every run waiting for
+    # the `deploy` approval was cancelled as soon as another PR's build finished
+    # (#1046). Per PR, only a newer commit of the same PR supersedes a waiting run.
+    # Stack names are run-unique (`int-<sha>-<run>`, see below), so runs of
+    # different PRs do not collide; how many run at once is bounded by the
+    # `deploy` approval. Manual dispatches (main only) share one group.
+    # The group is on this job, not on the workflow: at workflow level a run
+    # waiting for the `deploy` approval held the group and every later run was
+    # cancelled before `resolve` could post a status.
     concurrency:
-      group: cdk-integ
+      group: cdk-integ-${{ needs.resolve.outputs.pr_number || 'dispatch' }}
       cancel-in-progress: false
     timeout-minutes: 45
     permissions:
@@ -219,7 +228,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           # Fall back to us-east-1 if the repo variable is unset, so the action
@@ -227,13 +236,13 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Install mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 
@@ -263,13 +272,7 @@ jobs:
           set -euo pipefail
           export INTEG_STACK_NAME="int-${HEAD_SHA:0:12}-${RUN_NUMBER}"
           echo "Integ stack name: $INTEG_STACK_NAME"
-          mise //cdk:integ -- --all --require-approval never \
-            -c stackName="integ-${{ github.run_id }}-${{ github.run_attempt }}" \
-            -c github:sha="$(git rev-parse HEAD)" \
-            -c github:ref="$(git branch --show-current || echo "detached")" \
-            -c github:actor="${{ github.triggering_actor }}" \
-            -c github:repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" \
-            -c github:clean="$([ -z "$(git status --porcelain)" ] && echo true || echo false)"
+          mise //cdk:integ
 
   # Post the final integ-smoke status back to the PR head so the check flips from
   # pending to success/failure. Skipped for workflow_dispatch (no PR to gate).
@@ -295,6 +298,11 @@ jobs:
           if [[ "$INTEG_RESULT" == "success" ]]; then
             STATE=success
             DESC="deploy → assert → destroy passed"
+          elif [[ "$INTEG_RESULT" == "cancelled" ]]; then
+            # Not a test result: superseded by a newer commit of this PR, or
+            # cancelled by hand. Leave it visibly unfinished, not failed (#1046).
+            STATE=pending
+            DESC="cancelled before it finished; re-run integ for this commit"
           else
             STATE=failure
             DESC="integ run ${INTEG_RESULT}"

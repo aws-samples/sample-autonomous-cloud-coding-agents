@@ -565,7 +565,7 @@ async function failTaskOnScreening(
     await ddb.send(new UpdateCommand({
       TableName: TABLE_NAME,
       Key: { task_id: taskId },
-      UpdateExpression: 'SET #s = :failed, #sca = :status_created_at, error_message = :err, updated_at = :now, #ttl = :ttl',
+      UpdateExpression: 'SET #s = :failed, #sca = :status_created_at, error_message = :err, updated_at = :now, completed_at = :now, #ttl = :ttl',
       ConditionExpression: '#s = :pending_uploads',
       ExpressionAttributeNames: {
         '#s': 'status',

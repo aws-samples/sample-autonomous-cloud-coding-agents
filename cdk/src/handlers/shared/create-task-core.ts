@@ -19,7 +19,8 @@
 
 // HTTP create-task path: validation, persistence, orchestrator invoke. Related: orchestrator.ts, preflight.ts.
 // Idempotent replay: same user + same Idempotency-Key → 200 + TaskDetail (no duplicate write, no orchestrator re-invoke).
-// Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/create-task.test.ts
+// Tests: cdk/test/handlers/shared/create-task-core.test.ts, cdk/test/handlers/shared/create-task-core-presign-failure.test.ts,
+// cdk/test/handlers/create-task.test.ts
 
 import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
@@ -913,15 +914,18 @@ export async function createTaskCore(
       });
       // Transition task to FAILED so it doesn't remain orphaned in PENDING_UPLOADS
       try {
+        const failedAt = new Date().toISOString();
         await ddb.send(new UpdateCommand({
           TableName: TABLE_NAME,
           Key: { task_id: taskId },
-          UpdateExpression: 'SET #s = :failed, error_message = :err, updated_at = :now',
-          ExpressionAttributeNames: { '#s': 'status' },
+          UpdateExpression: 'SET #s = :failed, error_message = :err, updated_at = :now, completed_at = :now, status_created_at = :sca, #ttl = :ttl',
+          ExpressionAttributeNames: { '#s': 'status', '#ttl': 'ttl' },
           ExpressionAttributeValues: {
             ':failed': TaskStatus.FAILED,
             ':err': 'Failed to generate upload instructions. Please try again.',
-            ':now': new Date().toISOString(),
+            ':now': failedAt,
+            ':sca': `${TaskStatus.FAILED}#${failedAt}`,
+            ':ttl': computeTtlEpoch(TASK_RETENTION_DAYS),
           },
         }));
       } catch (cleanupErr) {

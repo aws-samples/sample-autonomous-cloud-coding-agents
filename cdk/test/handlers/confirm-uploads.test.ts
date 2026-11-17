@@ -309,6 +309,9 @@ describe('confirm-uploads handler', () => {
     expect(result.statusCode).toBe(400);
     const body = JSON.parse(result.body);
     expect(body.error.code).toBe('ATTACHMENT_BLOCKED');
+    // The task is failed as a complete terminal row.
+    const failing = ddbSend.mock.calls.find((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed']);
+    expect(failing?.[0].input.UpdateExpression).toContain('completed_at = :now');
   });
 
   test('skips S3 cleanup when failTaskOnScreening loses the race (ConditionalCheckFailedException)', async () => {
