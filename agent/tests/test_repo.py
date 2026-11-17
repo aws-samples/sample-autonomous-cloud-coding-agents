@@ -823,3 +823,257 @@ class TestCloneWorkspaceGuards:
 
         with pytest.raises(RuntimeError, match="git repository at the workspace root"):
             repo._assert_clone_root(str(repo_dir))
+
+
+class _PreflightFake(FakeRunCmd):
+    """FakeRunCmd that can also script the push preflight's stderr.
+
+    The shared fake always returns an empty stderr, but the preflight classifies
+    a refusal by git's stderr, so it needs a fake that can return one.
+    """
+
+    def __init__(self, preflight_rc: int = 0, preflight_stderr: str = ""):
+        super().__init__(match_substring=True)
+        self._preflight_rc = preflight_rc
+        self._preflight_stderr = preflight_stderr
+
+    def __call__(self, cmd, label, cwd=None, timeout=600, check=True, **kwargs):
+        result = super().__call__(cmd, label, cwd=cwd, timeout=timeout, check=check, **kwargs)
+        if label == "push-preflight":
+            return SimpleNamespace(
+                returncode=self._preflight_rc, stdout="", stderr=self._preflight_stderr
+            )
+        return result
+
+
+# What GitHub prints when a token that can read the repository is refused a push.
+# The first is what the scope-less classic PAT of #801 produced; the second is
+# the 404 GitHub sends instead of a 403 when it hides a private repository.
+_DENIED_403 = (
+    "remote: Permission to owner/repo.git denied to someone.\n"
+    "fatal: unable to access 'https://github.com/owner/repo.git/': "
+    "The requested URL returned error: 403"
+)
+_DENIED_404 = (
+    "remote: Repository not found.\n"
+    "fatal: repository 'https://github.com/owner/repo.git/' not found"
+)
+
+
+class TestPushCapabilityPreflight:
+    """#801: setup_repo checks that the token can push BEFORE the agent runs.
+
+    A token can authenticate and read a repository yet be refused every write (a
+    classic PAT with no scopes reads public repositories anonymously). Without
+    this check that token passes clone and the whole agent run, and fails only at
+    the final push, after the work is done and with no way to deliver it.
+    """
+
+    def _setup(self, monkeypatch, fake):
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+    def test_writeable_task_probes_push_with_a_dry_run(self, monkeypatch):
+        fake = _PreflightFake()
+        self._setup(monkeypatch, fake)
+
+        setup = repo.setup_repo(_config(branch_name="bgagent/task-abc/feature"))
+
+        cmd = fake.cmd_for("push-preflight")
+        assert cmd is not None
+        # A dry run never sends a ref update, so the remote is not changed, and
+        # --no-verify keeps a pre-push hook from the cloned repository from running.
+        assert cmd[:4] == ["git", "push", "--dry-run", "--no-verify"]
+        assert cmd[4] == "origin"
+        # The probe targets a ref other than the task branch: on a branch that
+        # already exists on the remote, a dry run of the current HEAD can be
+        # refused as non-fast-forward, which says nothing about the token.
+        src, dst = cmd[5].split(":", 1)
+        assert src == "HEAD"
+        assert dst.startswith("refs/heads/")
+        assert dst != f"refs/heads/{setup.branch}"
+        # The credential comes from the helper at call time, never the argv.
+        assert "ghp_" not in " ".join(cmd)
+        assert "@" not in " ".join(cmd)
+
+    def test_preflight_runs_after_auth_is_configured_and_before_branch_setup(self, monkeypatch):
+        fake = _PreflightFake()
+        self._setup(monkeypatch, fake)
+
+        repo.setup_repo(_config())
+
+        labels = fake.labels()
+        assert labels.index("configure-git-credential-helper") < labels.index("push-preflight")
+        assert labels.index("push-preflight") < labels.index("create-branch")
+
+    def test_read_only_workflow_is_not_gated(self, monkeypatch):
+        # coding/pr-review-v1 is read_only and resolves its PR without pushing;
+        # requiring write access there would refuse a token that is fit for it.
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+
+        repo.setup_repo(_config(read_only=True))
+
+        assert "push-preflight" not in fake.labels()
+
+    def test_fine_grained_token_with_contents_write_passes(self, monkeypatch):
+        # A fine-grained PAT has no X-OAuth-Scopes header at all; the dry run
+        # does not look at scopes, so it passes on the server's verdict alone.
+        fake = _PreflightFake(preflight_rc=0)
+        self._setup(monkeypatch, fake)
+
+        setup = repo.setup_repo(_config(github_token="github_pat_" + "a" * 20))
+
+        assert "push-preflight" in fake.labels()
+        assert "create-branch" in fake.labels()
+        assert setup.branch
+
+    def test_classic_token_with_repo_scope_passes(self, monkeypatch):
+        fake = _PreflightFake(preflight_rc=0)
+        self._setup(monkeypatch, fake)
+
+        repo.setup_repo(_config(github_token="ghp_" + "a" * 36))
+
+        assert "create-branch" in fake.labels()
+
+    def test_classic_token_without_scopes_fails_before_the_agent_runs(self, monkeypatch):
+        import pytest
+
+        token = "ghp_" + "b" * 36
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+
+        with pytest.raises(repo.PushCapabilityError) as excinfo:
+            repo.setup_repo(_config(github_token=token))
+
+        message = str(excinfo.value)
+        # The CDK error classifier keys "Insufficient GitHub token scopes" on this
+        # phrase (cdk/src/handlers/shared/error-classifier.ts) — the same phrase
+        # the orchestrator's own preflight uses — so the task gets that title,
+        # its remedy and a non-retryable verdict.
+        assert message.startswith("Token cannot push to owner/repo")
+        assert "classic personal access token" in message
+        assert "`repo` scope" in message
+        assert "agent/README.md" in message
+        assert token not in message
+        # Nothing after the check ran: no branch, no mise install, no build.
+        labels = fake.labels()
+        assert "create-branch" not in labels
+        assert "mise-install" not in labels
+        assert "verify-build-pre" not in labels
+
+    def test_hidden_repository_404_is_a_refusal_too(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_404)
+        self._setup(monkeypatch, fake)
+
+        # The clone just read this repository, so "not found" on the push means
+        # the token may not write to it, not that the repository is missing.
+        with pytest.raises(repo.PushCapabilityError, match="Token cannot push to owner/repo"):
+            repo.setup_repo(_config(github_token="ghp_" + "b" * 36))
+
+    def test_fine_grained_refusal_names_the_contents_permission(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+
+        with pytest.raises(repo.PushCapabilityError) as excinfo:
+            repo.setup_repo(_config(github_token="github_pat_" + "c" * 20))
+
+        message = str(excinfo.value)
+        assert "fine-grained personal access token" in message
+        assert "Contents" in message
+        assert "Read and write" in message
+
+    def test_unknown_token_type_gets_both_remedies(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake(preflight_rc=128, preflight_stderr=_DENIED_403)
+        self._setup(monkeypatch, fake)
+
+        # No token in the config: gh supplies whatever it is logged in with.
+        with pytest.raises(repo.PushCapabilityError) as excinfo:
+            repo.setup_repo(_config(github_token=""))
+
+        message = str(excinfo.value)
+        assert "Contents" in message
+        assert "`repo` scope" in message
+
+    def test_git_stderr_is_redacted_in_the_error(self, monkeypatch):
+        import pytest
+
+        leaked = "ghp_" + "d" * 36
+        fake = _PreflightFake(
+            preflight_rc=128,
+            preflight_stderr=f"remote: Permission to owner/repo.git denied to {leaked}.",
+        )
+        self._setup(monkeypatch, fake)
+
+        with pytest.raises(repo.PushCapabilityError) as excinfo:
+            repo.setup_repo(_config())
+
+        assert leaked not in str(excinfo.value)
+
+    def test_transient_failure_is_not_reported_as_a_permission_problem(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake(
+            preflight_rc=128,
+            preflight_stderr=(
+                "fatal: unable to access 'https://github.com/owner/repo.git/': "
+                "The requested URL returned error: 502"
+            ),
+        )
+        self._setup(monkeypatch, fake)
+
+        # GitHub stayed unavailable through the retries: a retryable blocker, so the
+        # operator is not sent to change a token that is fine.
+        with pytest.raises(repo.DependencyUnreachableError) as excinfo:
+            repo.setup_repo(_config())
+
+        assert str(excinfo.value).startswith("BLOCKED[dependency_unreachable]:")
+
+    def test_other_failure_stops_the_task_with_the_git_error(self, monkeypatch):
+        import pytest
+
+        fake = _PreflightFake(preflight_rc=1, preflight_stderr="fatal: something unexpected")
+        self._setup(monkeypatch, fake)
+
+        # Clone already proved GitHub is reachable, and the final push runs the
+        # same command, so a dry run that fails for another reason would fail the
+        # same way after the agent's work. Stop now, carrying git's message.
+        with pytest.raises(RuntimeError, match="push-preflight failed") as excinfo:
+            repo.setup_repo(_config())
+
+        assert not isinstance(excinfo.value, repo.PushCapabilityError)
+        assert "something unexpected" in str(excinfo.value)
+
+
+class TestPushPreflightAgainstRealGit:
+    """The preflight's command against a real remote: it passes and changes nothing."""
+
+    def test_dry_run_against_a_real_remote_creates_no_ref(self, tmp_path, monkeypatch):
+        def git(*args, cwd):
+            return subprocess.run(
+                ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+            ).stdout
+
+        remote = tmp_path / "remote.git"
+        work = tmp_path / "work"
+        git("init", "--bare", "-q", str(remote), cwd=tmp_path)
+        git("init", "-q", str(work), cwd=tmp_path)
+        git("remote", "add", "origin", str(remote), cwd=work)
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "t")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "t@example.com")
+        git("commit", "-q", "--allow-empty", "-m", "init", cwd=work)
+        git("push", "-q", "origin", "HEAD:refs/heads/main", cwd=work)
+        refs_before = git("for-each-ref", cwd=remote)
+
+        repo._preflight_push_capability(_config(), str(work), progress=None)
+
+        assert git("for-each-ref", cwd=remote) == refs_before
+        assert "bgagent-push-preflight" not in refs_before

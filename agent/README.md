@@ -54,6 +54,10 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 | Org has not opted in to fine-grained tokens | Classic |
 | Targeting repos across multiple orgs | Classic (single token covers all) |
 
+#### Push check before the agent runs
+
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Right after the clone, the agent runs `git push --dry-run` through the same credential helper the final push uses. If GitHub refuses it, the task fails within seconds with `Token cannot push to <repo>`, naming the token type and the permission to add, instead of failing at the final push after the agent's work. The dry run sends no ref update, so the remote is not changed. Read-only workflows (`coding/pr-review-v1`) never push and skip the check.
+
 ### AWS Credentials
 
 The agent uses Amazon Bedrock for Claude inference. You need credentials with `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` permissions.

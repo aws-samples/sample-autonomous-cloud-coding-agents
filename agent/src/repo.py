@@ -142,6 +142,127 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
     )
 
 
+class PushCapabilityError(RuntimeError):
+    """Raised when the GitHub token can read the repository but may not push to it.
+
+    Its message starts with ``Token cannot push to <repo>``, the phrase the CDK
+    error classifier (``cdk/src/handlers/shared/error-classifier.ts``) maps to
+    "Insufficient GitHub token scopes", non-retryable. The orchestrator's own
+    preflight reports the same condition with the same phrase, so both get the same
+    classification."""
+
+
+# Ref the push preflight dry-runs to. A dry run sends no ref update, so this ref
+# is never created. It must be a name the remote does not have: a dry run to an
+# existing branch is checked for fast-forward, and a refusal on that ground says
+# nothing about the token.
+_PUSH_PREFLIGHT_REF = "refs/heads/bgagent-push-preflight"
+
+# What git prints when GitHub refuses the push itself. The clone has just read the
+# repository, so "not found" on a push means the token may not write to it:
+# GitHub sends 404 instead of 403 on a repository it does not reveal to the token.
+_PUSH_DENIED_SIGNATURES: tuple[str, ...] = (
+    "permission to",  # remote: Permission to <owner>/<repo>.git denied to <user>.
+    "write access to repository not granted",
+    "the requested url returned error: 401",
+    "the requested url returned error: 403",
+    "the requested url returned error: 404",
+    "repository not found",
+    "authentication failed",
+    "invalid username or password",
+)
+
+
+def _token_remedy(token: str, repo_url: str) -> tuple[str, str]:
+    """Return ``(token type, remedy)`` for a token GitHub refused a push.
+
+    Reads only the documented type prefix of the token; the token itself never
+    reaches the message."""
+    fine_grained = (
+        f"give the token the Contents permission with Read and write access on {repo_url}"
+    )
+    classic = "give the token the `repo` scope"
+    if token.startswith("github_pat_"):
+        return "fine-grained personal access token", fine_grained
+    if token.startswith("ghp_"):
+        return "classic personal access token", classic
+    if token.startswith(("ghs_", "ghu_")):
+        return (
+            "GitHub App token",
+            (
+                "give the app the Contents permission with Read and write access and "
+                f"install it on {repo_url}"
+            ),
+        )
+    return (
+        "GitHub token",
+        (
+            "use a fine-grained personal access token with the Contents permission with "
+            f"Read and write access on {repo_url}, or a classic one with the `repo` scope"
+        ),
+    )
+
+
+def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any) -> None:
+    """Fail the task now if the GitHub token cannot push to the repository (#801).
+
+    A token can authenticate and read a repository while every write is refused,
+    for instance a classic personal access token with no scopes, which still reads
+    public repositories. Nothing else in setup notices: such a token passes the
+    clone and the whole agent run, and the work is lost at the final push. The
+    orchestrator's preflight does not catch it either, because the REST API's
+    ``permissions.push`` describes the user's role on the repository, not what the
+    token may do.
+
+    ``git push --dry-run`` asks GitHub for the push service, which GitHub refuses
+    to a token without write access, then stops before sending anything. It goes
+    through the credential helper the final push uses, so it tests that exact path
+    for every token type, with no scope parsing: a fine-grained token sends no
+    ``X-OAuth-Scopes`` header at all. The token stays in the helper, never on
+    disk or in the command line.
+
+    Read-only workflows are not checked: they never push, and a token that may not
+    write is fit for them.
+    """
+    if config.read_only:
+        return
+    from shell import redact_secrets
+
+    log("SETUP", f"Checking that the GitHub token can push to {config.repo_url}...")
+    result = run_cmd_with_backoff(
+        [
+            "git",
+            "push",
+            "--dry-run",
+            # A dry run still runs the pre-push hook, code from the cloned repository.
+            "--no-verify",
+            "origin",
+            f"HEAD:{_PUSH_PREFLIGHT_REF}",
+        ],
+        label="push-preflight",
+        cwd=repo_dir,
+        timeout=120,
+        on_retry=_clone_backoff_reporter(progress, "push-preflight"),
+    )
+    if result.returncode == 0:
+        return
+    stderr = result.stderr or ""
+    if any(sig in stderr.lower() for sig in _PUSH_DENIED_SIGNATURES):
+        token_type, remedy = _token_remedy(config.github_token, config.repo_url)
+        first_line = next((ln.strip() for ln in stderr.splitlines() if ln.strip()), "")
+        raise PushCapabilityError(
+            f"Token cannot push to {config.repo_url}: the {token_type} can read the "
+            f"repository, but GitHub refused it write access "
+            f"({redact_secrets(first_line[:200])}). To fix it, {remedy}. The task "
+            "stopped before the agent ran, so no work was lost. Token types and the "
+            "permissions they need: agent/README.md, GitHub PAT — Minimal Permissions."
+        )
+    # Transient after the retries, an egress block, or another error: the clone
+    # proved GitHub is reachable and the final push runs this same command, so it
+    # would fail the same way after the agent's work. Classify and stop.
+    _fail_setup_command("push-preflight", config.repo_url, stderr, progress)
+
+
 def _prepare_clone_dir(repo_dir: str, notes: list[str]) -> None:
     """Guarantee a clean slate at *repo_dir* before cloning.
 
@@ -270,6 +391,9 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         label="configure-git-credential-helper",
         cwd=repo_dir,
     )
+
+    # Fail in seconds, not after the agent's whole run, on a token that may not push.
+    _preflight_push_capability(config, repo_dir, progress)
 
     # Branch setup
     head_sha_before = ""

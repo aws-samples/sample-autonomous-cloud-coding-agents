@@ -88,6 +88,22 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Insufficient GitHub token scopes');
     });
 
+    test('classifies the agent push preflight refusal as insufficient token scopes (#801)', () => {
+      // The message agent/src/repo.py raises (PushCapabilityError) when GitHub
+      // refuses the dry-run push. Git's own words in it (403, "denied") must not
+      // pull it into another category.
+      const result = classifyError(
+        'Token cannot push to owner/repo: the classic personal access token can read the '
+        + 'repository, but GitHub refused it write access (remote: Permission to '
+        + 'owner/repo.git denied to someone.). To fix it, give the token the `repo` scope. '
+        + 'The task stopped before the agent ran, so no work was lost. Token types and the '
+        + 'permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.',
+      );
+      expect(result!.category).toBe(ErrorCategory.AUTH);
+      expect(result!.title).toBe('Insufficient GitHub token scopes');
+      expect(result!.retryable).toBe(false);
+    });
+
     test('classifies bare "Token cannot interact with pull requests on" without error code', () => {
       const result = classifyError('Token cannot interact with pull requests on owner/repo');
       expect(result!.category).toBe(ErrorCategory.AUTH);
