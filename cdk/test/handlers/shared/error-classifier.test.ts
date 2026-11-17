@@ -1033,11 +1033,12 @@ describe('classifyError', () => {
     });
 
     // Regression: all numeric fields coerce through ``coerceNumericOrNull``
-    // so the DDB Document-client's string-typed Number deserialization
-    // cannot leak into downstream consumers (same bug class as the
+    // so that a string in one of them (the agent stores cost, duration
+    // and the turn counters as strings) cannot leak into downstream
+    // consumers (same bug class as the
     // ``costUsd.toFixed`` crash fixed in commit ``c09bfd7``). The cast
-    // to ``unknown as TaskRecord`` simulates a record produced by the
-    // Document client where ``Number`` attributes came back as strings.
+    // to ``unknown as TaskRecord`` simulates such a record as the
+    // Document client returns it.
     test('coerces string-typed numeric DDB fields to numbers on output', () => {
       const record = {
         ...baseRecord,

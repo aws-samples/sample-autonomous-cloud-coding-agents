@@ -75,7 +75,7 @@ interface LinearWebhookEnvelope {
  *
  * Verifies the `Linear-Signature` HMAC over the raw body, rejects stale
  * `webhookTimestamp` values (replay protection), dedups on
- * `(issue_id, action)` with a 60s TTL, and async-invokes the processor
+ * `(data.id, action, webhookTimestamp)` with an 8h TTL, and async-invokes the processor
  * Lambda so we can ack within Linear's 5s timeout.
  */
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {

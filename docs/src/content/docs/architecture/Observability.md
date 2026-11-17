@@ -94,11 +94,11 @@ The platform tracks four categories of signals, each serving different consumers
 
 Every task emits structured events at each state transition, stored in the TaskEvents table:
 
-- State transitions: `task_created`, `admission_rejected`, `uploads_confirmed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
+- State transitions: `task_created`, `admission_queued`, `queue_pickup`, `uploads_confirmed`, `hydration_started`, `hydration_complete`, `session_started`, `pr_created`, `task_completed`, `task_failed`, `task_cancelled`, `task_timed_out`
 - Blueprint custom step events: `{step_name}_started`, `{step_name}_completed`, `{step_name}_failed`
 - Guardrail events: `guardrail_blocked` (content blocked during hydration)
 
-All events carry `task_id` and `user_id` for filtering.
+All events carry `task_id` for filtering; the events the orchestrator and the agent write from `hydration_started` onward also carry `user_id` (see the coverage notes above).
 
 ### Agent execution
 

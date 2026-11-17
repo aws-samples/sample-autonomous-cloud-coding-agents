@@ -22,9 +22,18 @@ import type { APIGatewayProxyEvent } from 'aws-lambda';
 
 // --- Mocks ---
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+/** Answers DescribeTable, so that `mockSend` sees the data-plane calls only. */
+const mockDescribeTable = jest.fn();
+jest.mock('@aws-sdk/client-dynamodb', () => ({
+  DynamoDBClient: jest.fn(() => ({})),
+  DescribeTableCommand: jest.fn((input: unknown) => ({ _type: 'DescribeTable', input })),
+}));
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: mockSend })) },
+  DynamoDBDocumentClient: {
+    from: jest.fn(() => ({
+      send: (command: { _type: string }) => (command._type === 'DescribeTable' ? mockDescribeTable(command) : mockSend(command)),
+    })),
+  },
   BatchGetCommand: jest.fn((input: unknown) => ({ _type: 'BatchGet', input })),
   QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
 }));
@@ -113,9 +122,20 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
+/** A DescribeTable answer in which UserCreatedAtIndex has the given status, or is missing. */
+const describedWith = (IndexStatus?: string) => ({
+  Table: {
+    GlobalSecondaryIndexes: [
+      { IndexName: 'UserStatusIndex', IndexStatus: 'ACTIVE' },
+      ...(IndexStatus ? [{ IndexName: 'UserCreatedAtIndex', IndexStatus }] : []),
+    ],
+  },
+});
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockSend.mockResolvedValue({ Items: TASK_ITEMS });
+  mockDescribeTable.mockResolvedValue(describedWith('ACTIVE'));
 });
 
 describe('list-tasks handler', () => {
@@ -194,19 +214,6 @@ describe('list-tasks handler', () => {
     expect(body.data[0]).toMatchObject({ cost_usd: null, completed_at: null, channel_source: 'api' });
   });
 
-  test('returns pagination token when more results exist', async () => {
-    mockSend.mockResolvedValueOnce({
-      Items: [TASK_ITEMS[0]],
-      LastEvaluatedKey: { task_id: { S: 'task-1' }, user_id: { S: 'user-123' } },
-    });
-
-    const result = await handler(makeEvent());
-    const body = JSON.parse(result.body);
-
-    expect(body.pagination.has_more).toBe(true);
-    expect(body.pagination.next_token).toBeTruthy();
-  });
-
   test('returns 400 for an unknown view instead of returning tasks', async () => {
     const result = await handler(makeEvent({
       queryStringParameters: { view: 'budgets' },
@@ -254,7 +261,8 @@ describe('list-tasks handler', () => {
     await handler(event);
 
     const queryInput = MockQueryCommand.mock.calls[0][0];
-    expect(queryInput.Limit).toBe(5);
+    // limit + 1: the extra row tells a full page whether another task follows.
+    expect(queryInput.Limit).toBe(6);
   });
 
   test('returns 400 for invalid status filter', async () => {
@@ -288,5 +296,138 @@ describe('list-tasks handler', () => {
     const result = await handler(makeEvent());
 
     expect(result.statusCode).toBe(500);
+  });
+
+  describe('pagination (#51: Limit is applied before the status and repo filters)', () => {
+    test('queries UserCreatedAtIndex newest first', async () => {
+      await handler(makeEvent());
+
+      const queryInput = MockQueryCommand.mock.calls[0][0];
+      expect(queryInput.IndexName).toBe('UserCreatedAtIndex');
+      expect(queryInput.ScanIndexForward).toBe(false);
+    });
+
+    test('keeps querying past filtered-out pages until the page is full', async () => {
+      // Page 1: every row read was filtered out, but a cursor remains. Page 2 is the
+      // default reply: enough tasks to fill limit=1 plus one extra.
+      const cursor = { task_id: 'task-0', user_id: 'user-123', created_at: '2025-03-16T09:00:00Z' };
+      mockSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: cursor });
+
+      const result = await handler(makeEvent({ queryStringParameters: { status: 'RUNNING,COMPLETED', limit: '1' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockSend).toHaveBeenCalledTimes(2);
+      expect(MockQueryCommand.mock.calls[1][0].ExclusiveStartKey).toEqual(cursor);
+      expect(body.data.map((t: { task_id: string }) => t.task_id)).toEqual(['task-1']);
+      expect(body.pagination.has_more).toBe(true);
+      expect(body.pagination.next_token).not.toBeNull();
+    });
+
+    test('next_token resumes from the last task returned, not the scan boundary', async () => {
+      mockSend.mockResolvedValueOnce({ Items: TASK_ITEMS, LastEvaluatedKey: { task_id: 'task-scanned-past' } });
+
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '1' } }));
+      const body = JSON.parse(result.body);
+
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      // Boundary is the last task actually returned (task-1), so task-2 is not skipped.
+      expect(decoded).toEqual({ task_id: 'task-1', user_id: 'user-123', created_at: TASK_ITEMS[0].created_at });
+    });
+
+    test('stops after the page cap and hands back the raw cursor', async () => {
+      // Every page filters to nothing but keeps returning a cursor.
+      mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { task_id: 'task-x' } });
+
+      const result = await handler(makeEvent({ queryStringParameters: { status: 'FAILED' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(body.data).toHaveLength(0);
+      // The read is not finished, so the list must not be reported as complete.
+      expect(body.pagination.has_more).toBe(true);
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      expect(decoded).toEqual({ task_id: 'task-x' });
+    });
+  });
+
+  describe('choice of index (UserCreatedAtIndex is being built on the deploy that adds it)', () => {
+    // The handler remembers that the index is ACTIVE, so each test loads a copy of its own.
+    // That copy has its own command mocks, so these tests read the commands `mockSend` got.
+    let listTasks: typeof handler;
+    const indexesRead = () => mockSend.mock.calls.map(([command]) => command.input.IndexName);
+
+    beforeEach(() => {
+      jest.isolateModules(() => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports -- a fresh copy of the handler and its cached index status
+        listTasks = require('../../src/handlers/list-tasks').handler;
+      });
+    });
+
+    test.each([
+      ['CREATING', 'CREATING'], ['UPDATING', 'UPDATING'], ['DELETING', 'DELETING'], ['missing', undefined],
+    ])('lists from UserStatusIndex while UserCreatedAtIndex is %s', async (_state, status) => {
+      mockDescribeTable.mockResolvedValue(describedWith(status));
+      const stdout = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const result = await listTasks(makeEvent({ queryStringParameters: { limit: '1' } }));
+      const logged = stdout.mock.calls.join('');
+      stdout.mockRestore();
+      const body = JSON.parse(result.body);
+
+      expect(result.statusCode).toBe(200);
+      expect(mockDescribeTable.mock.calls.map(([command]) => command.input)).toEqual([{ TableName: 'Tasks' }]);
+      expect(indexesRead()).toEqual(['UserStatusIndex']);
+      expect(body.data.map((t: { task_id: string }) => t.task_id)).toEqual(['task-1']);
+      // The cursor is one of the index that was read.
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      expect(decoded).toEqual({ task_id: 'task-1', user_id: 'user-123', status_created_at: TASK_ITEMS[0].status_created_at });
+      // The deployment guide tells operators to look for this line.
+      expect(logged).toContain('UserCreatedAtIndex is not ACTIVE');
+    });
+
+    test('asks again on each request until the index is ACTIVE, and never after', async () => {
+      mockDescribeTable.mockResolvedValueOnce(describedWith('CREATING'));
+
+      await listTasks(makeEvent());
+      await listTasks(makeEvent());
+      await listTasks(makeEvent());
+
+      expect(indexesRead()).toEqual(['UserStatusIndex', 'UserCreatedAtIndex', 'UserCreatedAtIndex']);
+      expect(mockDescribeTable).toHaveBeenCalledTimes(2);
+    });
+
+    const token = (key: Record<string, string>) => Buffer.from(JSON.stringify(key)).toString('base64');
+    const createdAtKey = { task_id: 'task-1', user_id: 'user-123', created_at: TASK_ITEMS[0].created_at };
+
+    test('a status_created_at cursor is read from UserStatusIndex without a status check', async () => {
+      const key = { task_id: 'task-1', user_id: 'user-123', status_created_at: TASK_ITEMS[0].status_created_at };
+
+      await listTasks(makeEvent({ queryStringParameters: { next_token: token(key) } }));
+
+      expect(mockDescribeTable).not.toHaveBeenCalled();
+      expect(mockSend.mock.calls[0][0].input).toMatchObject({ IndexName: 'UserStatusIndex', ExclusiveStartKey: key });
+    });
+
+    test.each([
+      ['ACTIVE', 'UserCreatedAtIndex'],
+      // UserCreatedAtIndex is not read before it is ACTIVE; DynamoDB refuses this key on
+      // UserStatusIndex, so the request is a 500.
+      ['CREATING', 'UserStatusIndex'],
+    ])('a created_at cursor follows the status check: %s reads %s', async (status, index) => {
+      mockDescribeTable.mockResolvedValue(describedWith(status));
+
+      await listTasks(makeEvent({ queryStringParameters: { next_token: token(createdAtKey) } }));
+
+      expect(mockSend.mock.calls.map(([command]) => command.input)).toMatchObject([{ IndexName: index, ExclusiveStartKey: createdAtKey }]);
+    });
+
+    test('a status check that fails is a 500, and no index is read', async () => {
+      mockDescribeTable.mockRejectedValueOnce(new Error('AccessDeniedException'));
+
+      const result = await listTasks(makeEvent());
+
+      expect(result.statusCode).toBe(500);
+      expect(mockSend).not.toHaveBeenCalled();
+    });
   });
 });

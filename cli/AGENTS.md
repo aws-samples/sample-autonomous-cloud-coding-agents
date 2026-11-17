@@ -42,6 +42,7 @@ The suite is sealed off from the machine it runs on (`test/setup/`):
 | `cli/src/auth.ts` | WRITE | Cognito login, token cache (`~/.bgagent/credentials.json`) |
 | `cli/src/types.ts` | WRITE | API types (mirror of `cdk/.../types.ts`) |
 | `cli/test/` | WRITE | Jest tests |
+| `cli/test/emulator/` | WRITE | Emulator-backed tests (`*.emulator.ts`): real CLI code against a local AWS Emulator. Not part of the unit run: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
 
 ## Code style
 
