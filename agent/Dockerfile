@@ -12,21 +12,23 @@ ARG GH_VERSION=2.103.3
 #
 # `mise:latest` was the worst case: a tag with no version at all, republished
 # whenever upstream feels like it. Pinning is what makes a rebuild depend on OUR
-# changes rather than on upstream's release schedule.
+# changes rather than on upstream's release schedule. The mise stage names a
+# release for the same reason: `latest` beside a digest does not say which
+# release the digest is, and its age cannot be checked against the cooldown.
 #
 # Each digest is a multi-platform index, so `--platform=$TARGETPLATFORM` still
 # selects the right architecture — verified to include linux/arm64.
 #
 # To bump: `docker buildx imagetools inspect <image>:<tag>` and copy the Digest.
 # Keep the tag alongside the digest; it documents what the digest is meant to be.
-FROM --platform=$TARGETPLATFORM jdxcode/mise:latest@sha256:df5adf538c92d86f9807e738c7c7a9b32a1ae06edf441ede141333e3fe6a2cd9 AS mise
+FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e90e15f7642885f74f3ca93074491038a2b9c43e4b897f21 AS mise
 
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
 FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gh-builder
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
+FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
@@ -73,7 +75,7 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 
 # Install Claude Code CLI (the Python SDK requires this binary)
 # Then update known vulnerable transitive packages where fixed versions exist.
-# Pinned 2.1.301 to match the CLI bundled by claude-agent-sdk 0.2.168 (see
+# Pinned 2.1.319 to match the CLI bundled by claude-agent-sdk 0.2.179 (see
 # agent/pyproject.toml) — the SDK and the on-PATH CLI must agree on the control
 # protocol. The Claude 5.5 models the platform defaults to (#953) are rejected
 # by CLI builds older than 2.1.280 ("does not support this model"), so this pin
@@ -90,7 +92,7 @@ RUN corepack enable && corepack prepare yarn@stable --activate || corepack enabl
 # after the install so the native binary is placed at build time, and hard-verify
 # it exec's (``claude --version`` fails the build if the shim is still on PATH).
 RUN npm install -g npm@latest && \
-    npm install -g @anthropic-ai/claude-code@2.1.301 && \
+    npm install -g @anthropic-ai/claude-code@2.1.319 && \
     CLAUDE_NPM_ROOT="$(npm root -g)/@anthropic-ai/claude-code" && \
     npm --prefix "${CLAUDE_NPM_ROOT}" update tar minimatch glob cross-spawn picomatch && \
     node "${CLAUDE_NPM_ROOT}/install.cjs" && \

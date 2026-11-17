@@ -43,7 +43,7 @@ from shell import log, log_error_cw
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    import httpx
+    import httpx2
 
 #: Env var carrying the Gateway MCP endpoint URL. Set on the compute
 #: environment (AgentCore runtime env / ECS container) by the CDK
@@ -72,9 +72,15 @@ REMOTE_REPO_CONFIG_TOOL = "abca_repo_config"
 #: How long a single Gateway round-trip may take before we give up.
 _GATEWAY_TIMEOUT_S = 20.0
 
+#: Read timeout of the HTTP client under the MCP session. The server may hold a
+#: response stream open, so it is longer than one round-trip; each request is
+#: still bounded by ``_GATEWAY_TIMEOUT_S`` (``read_timeout_seconds`` below). It
+#: is the value the mcp 1.x transport applied by default (``sse_read_timeout``).
+_GATEWAY_STREAM_READ_TIMEOUT_S = 300.0
 
-def _sigv4_auth(region: str) -> httpx.Auth:
-    """Build an ``httpx.Auth`` that SigV4-signs each request for the Gateway.
+
+def _sigv4_auth(region: str) -> httpx2.Auth:
+    """Build an ``httpx2.Auth`` that SigV4-signs each request for the Gateway.
 
     Credentials come from the **compute role's** ambient chain (the AgentCore
     runtime execution role / ECS task role) — that is the principal the CDK
@@ -82,7 +88,7 @@ def _sigv4_auth(region: str) -> httpx.Auth:
     SessionRole. We therefore sign with botocore's ambient credentials rather
     than ``aws_session``'s tag-scoped session.
     """
-    import httpx
+    import httpx2
     from botocore.auth import SigV4Auth
     from botocore.awsrequest import AWSRequest
 
@@ -94,11 +100,11 @@ def _sigv4_auth(region: str) -> httpx.Auth:
     if credentials is None:
         raise RuntimeError("no AWS credentials available to sign the Gateway request")
 
-    class _SigV4(httpx.Auth):
-        # SigV4 signs a hash of the body, so httpx must buffer it before auth.
+    class _SigV4(httpx2.Auth):
+        # SigV4 signs a hash of the body, so httpx2 must buffer it before auth.
         requires_request_body = True
 
-        def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response]:
+        def auth_flow(self, request: httpx2.Request) -> Generator[httpx2.Request, httpx2.Response]:
             # Re-freeze on every request so a rotation within THIS credentials
             # chain is picked up — botocore's RefreshableCredentials (what the
             # task/execution role resolves to on ECS/AgentCore) refreshes the
@@ -116,7 +122,7 @@ def _sigv4_auth(region: str) -> httpx.Auth:
             )
             SigV4Auth(frozen, GATEWAY_SERVICE, region).add_auth(aws_request)
             # Copy the signed headers (Authorization, X-Amz-Date,
-            # X-Amz-Security-Token, …) back onto the outgoing httpx request.
+            # X-Amz-Security-Token, …) back onto the outgoing httpx2 request.
             request.headers.update(dict(aws_request.headers))
             yield request
 
@@ -142,10 +148,10 @@ def _match_remote_tool(tools: list[Any], suffix: str) -> str:
 def _result_to_text(result: Any) -> str:
     """Flatten an MCP ``CallToolResult`` into a text payload for the SDK.
 
-    Prefers ``structuredContent`` (the tool's JSON return) when present,
+    Prefers ``structured_content`` (the tool's JSON return) when present,
     otherwise concatenates any text content blocks.
     """
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if structured:
         return json.dumps(structured)
     texts = [
@@ -158,18 +164,16 @@ def _result_to_text(result: Any) -> str:
 
 async def _call_gateway(url: str, region: str, tool_suffix: str, arguments: dict[str, Any]) -> Any:
     """Open a SigV4-signed MCP session to ``url`` and invoke the federated tool."""
-    from datetime import timedelta
-
+    import httpx2
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     auth = _sigv4_auth(region)
+    timeout = httpx2.Timeout(_GATEWAY_TIMEOUT_S, read=_GATEWAY_STREAM_READ_TIMEOUT_S)
     async with (
-        streamablehttp_client(url=url, auth=auth, timeout=_GATEWAY_TIMEOUT_S) as (
-            read,
-            write,
-            _get_session_id,
-        ),
+        # The transport does not close a client it is handed, so this block does.
+        httpx2.AsyncClient(auth=auth, timeout=timeout) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write),
         ClientSession(read, write) as session,
     ):
         await session.initialize()
@@ -178,7 +182,7 @@ async def _call_gateway(url: str, region: str, tool_suffix: str, arguments: dict
         return await session.call_tool(
             remote_name,
             arguments,
-            read_timeout_seconds=timedelta(seconds=_GATEWAY_TIMEOUT_S),
+            read_timeout_seconds=_GATEWAY_TIMEOUT_S,
         )
 
 
@@ -198,7 +202,7 @@ _REPO_CONFIG_DESCRIPTION = (
 #: and surfaced as a tool error; anything outside this set is treated as an
 #: unexpected (likely coding/deployment) bug and logged loudly (see below).
 def _expected_gateway_errors() -> tuple[type[BaseException], ...]:
-    """Resolve the expected-error tuple lazily (``mcp``/``httpx`` are optional).
+    """Resolve the expected-error tuple lazily (``mcp``/``httpx2`` are optional).
 
     Imported inside the function so a missing transport dependency can't break
     module import; if either is unavailable we still catch ``OSError`` /
@@ -206,15 +210,15 @@ def _expected_gateway_errors() -> tuple[type[BaseException], ...]:
     """
     expected: list[type[BaseException]] = [OSError, TimeoutError]
     try:
-        import httpx
+        import httpx2
 
-        expected.append(httpx.HTTPError)
+        expected.append(httpx2.HTTPError)
     except ImportError:
         pass
     try:
-        from mcp.shared.exceptions import McpError
+        from mcp.shared.exceptions import MCPError
 
-        expected.append(McpError)
+        expected.append(MCPError)
     except ImportError:
         pass
     return tuple(expected)
@@ -268,7 +272,7 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
         }
     return {
         "content": [{"type": "text", "text": _result_to_text(result)}],
-        "isError": bool(getattr(result, "isError", False)),
+        "isError": bool(getattr(result, "is_error", False)),
     }
 
 

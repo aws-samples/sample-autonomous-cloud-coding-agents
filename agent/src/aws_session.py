@@ -62,6 +62,19 @@ _CHAINED_SESSION_DURATION_S = 3600
 # IAM session-tag value constraints: keys <=128 chars, values <=256 chars.
 _MAX_TAG_VALUE_LEN = 256
 
+# Retry mode of every client and resource built in this module, unless the
+# caller's Config or the environment (AWS_RETRY_MODE) names another. botocore
+# 1.44 changed its default from "legacy" (5 attempts, 10 for DynamoDB) to
+# "standard" (3 attempts, 4 for DynamoDB, and a retry quota). The agent keeps the
+# default it ran with before, so that an SDK update does not change how long a
+# throttled or failing call is retried. Changing the mode is a product decision,
+# not a side effect of a version bump.
+RETRY_MODE = "legacy"
+
+# The variable botocore reads the retry mode from. When it is set, this module
+# names no mode and botocore applies the operator's choice, as it always did.
+_RETRY_MODE_ENV = "AWS_RETRY_MODE"
+
 _lock = threading.Lock()
 _session: Any = None  # cached boto3.Session (scoped or plain)
 _scoped: bool | None = None  # None until first resolution; True if tag-scoped
@@ -230,6 +243,7 @@ def _build_scoped_session(role_arn: str) -> Any:
     # propagates to every client AND resource derived from this session, so
     # all tenant-data calls carry it. (#319)
     botocore_session.user_agent_extra = ua.static_user_agent_extra()
+    _name_retry_mode(botocore_session)
     # No credentials yet: get_session() resolves them once, right after this
     # returns, so a role that cannot be assumed fails closed there instead of
     # on every later tenant-data call. botocore re-assumes before expiry.
@@ -296,6 +310,7 @@ def get_session() -> Any:
 
             botocore_session = get_botocore_session()
             botocore_session.user_agent_extra = ua.static_user_agent_extra()
+            _name_retry_mode(botocore_session)
             region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
             if region:
                 botocore_session.set_config_variable("region", region)
@@ -311,6 +326,33 @@ def is_scoped() -> bool:
     return bool(_scoped)
 
 
+def _retry_mode() -> str | None:
+    """The retry mode this module names, or ``None`` when it names none.
+
+    ``None`` when ``AWS_RETRY_MODE`` is set: botocore then reads the operator's
+    choice itself, exactly as before its default changed. See ``RETRY_MODE``.
+    """
+    return None if os.environ.get(_RETRY_MODE_ENV) else RETRY_MODE
+
+
+def _name_retry_mode(botocore_session: Any) -> None:
+    """Name the retry mode on a botocore session, for every client it builds."""
+    mode = _retry_mode()
+    if mode:
+        botocore_session.set_config_variable("retry_mode", mode)
+
+
+def _base_client_config() -> Any:
+    """``ua.client_config()`` (the static md/ UA) with the retry mode named."""
+    from botocore.config import Config
+
+    import ua
+
+    config = ua.client_config()
+    mode = _retry_mode()
+    return config.merge(Config(retries={"mode": mode})) if mode else config
+
+
 def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return ``kwargs`` with the static md/ UA merged into any ``config``.
 
@@ -320,17 +362,24 @@ def _merge_ua_config(kwargs: dict[str, Any]) -> dict[str, Any]:
     the argument, so a naive merge would silently drop the caller's extra. We
     therefore *concatenate* both extras (caller first, then ours) so neither is
     lost — matching the scoped-session path, which keeps both segments. (#319)
+
+    The retry mode (``RETRY_MODE``) is merged in the same way. ``retries`` is one
+    mapping, which ``merge`` replaces whole, so a caller's own retry settings are
+    carried over and the mode is added only where the caller named none.
     """
     from botocore.config import Config
 
     import ua
 
-    ua_config = ua.client_config()
+    ua_config = _base_client_config()
     existing = kwargs.get("config")
     if existing is None:
         kwargs["config"] = ua_config
         return kwargs
 
+    caller_retries = getattr(existing, "retries", None)
+    if caller_retries and ua_config.retries:
+        ua_config = ua_config.merge(Config(retries={**ua_config.retries, **caller_retries}))
     caller_extra = getattr(existing, "user_agent_extra", None)
     if caller_extra:
         # merge() would let our user_agent_extra win outright; instead keep both

@@ -129,6 +129,13 @@ def _setup_agent_env(config: TaskConfig) -> tuple[str | None, str | None]:
     Returns (otlp_endpoint, otlp_protocol) for logging.
     """
     os.environ["CLAUDE_CODE_USE_BEDROCK"] = "1"
+    # Claude Code 2.1.311 and later load model settings on Bedrock from a signed
+    # file on downloads.claude.ai. A task keeps the model table built into the
+    # pinned CLI, as before that release: the platform's DNS allowlist
+    # (cdk/src/constructs/dns-firewall.ts) does not name that host, and what a
+    # model may do should change with a reviewed CLI bump, not between two runs
+    # of one image.
+    os.environ["CLAUDE_CODE_MODEL_CATALOG"] = "off"
     os.environ["AWS_REGION"] = config.aws_region
     os.environ["ANTHROPIC_MODEL"] = config.anthropic_model
     os.environ["GITHUB_TOKEN"] = config.github_token
@@ -631,7 +638,8 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
         hooks=hooks,
         max_budget_usd=config.max_budget_usd,
         stderr=_on_stderr,
-        **({"mcp_servers": mcp_servers} if mcp_servers else {}),
+        # An empty dict is the option's default, so it is passed as it is.
+        mcp_servers=mcp_servers,
     )
 
     result = AgentResult()

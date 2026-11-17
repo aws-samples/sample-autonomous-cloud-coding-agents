@@ -503,12 +503,13 @@ class TestSetupAgentEnv:
         # this — so config's default must be the us.* inference profile.
         import os
 
-        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL and
-        # CLAUDE_CODE_USE_BEDROCK straight to os.environ. Pre-claim them through
-        # monkeypatch so its teardown restores them and this test can't leak into
-        # order-dependent neighbors (#523).
+        # _setup_agent_env writes ANTHROPIC_DEFAULT_HAIKU_MODEL,
+        # CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_MODEL_CATALOG straight to
+        # os.environ. Pre-claim them through monkeypatch so its teardown restores
+        # them and this test can't leak into order-dependent neighbors (#523).
         monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
         monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+        monkeypatch.setenv("CLAUDE_CODE_MODEL_CATALOG", "")
 
         config = _config(haiku_model="us.anthropic.claude-haiku-4-5-20251001-v1:0")
         _setup_agent_env(config)
@@ -516,6 +517,20 @@ class TestSetupAgentEnv:
             os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"]
             == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         )
+
+    def test_model_catalog_is_switched_off(self, monkeypatch):
+        # Claude Code 2.1.311 and later fetch model settings on Bedrock from
+        # downloads.claude.ai unless this variable says "off". The platform's DNS
+        # allowlist does not name that host, and a task keeps the model table of
+        # the pinned CLI, whatever value the process was started with.
+        import os
+
+        monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "")
+        monkeypatch.setenv("CLAUDE_CODE_MODEL_CATALOG", "on")
+
+        _setup_agent_env(_config())
+        assert os.environ["CLAUDE_CODE_MODEL_CATALOG"] == "off"
 
     def test_config_default_haiku_model_is_an_inference_profile(self):
         # The platform default (no override) must be a GEO-PREFIXED profile, never a

@@ -27,7 +27,7 @@ class TestIssueComment:
     def test_frozen(self):
         c = IssueComment(id=1, author="alice", body="text")
         with pytest.raises(ValidationError):
-            c.author = "bob"
+            c.author = "bob"  # ty: ignore[invalid-assignment]
 
     def test_model_dump(self):
         c = IssueComment(id=99, author="alice", body="text")
@@ -60,7 +60,7 @@ class TestGitHubIssue:
     def test_frozen(self):
         issue = GitHubIssue(title="Bug", number=1)
         with pytest.raises(ValidationError):
-            issue.title = "Feature"
+            issue.title = "Feature"  # ty: ignore[invalid-assignment]
 
 
 class TestSanitizationAtConstruction:
@@ -137,7 +137,7 @@ class TestMemoryContext:
     def test_frozen(self):
         mc = MemoryContext()
         with pytest.raises(ValidationError):
-            mc.repo_knowledge = ["new"]
+            mc.repo_knowledge = ["new"]  # ty: ignore[invalid-assignment]
 
 
 class TestHydratedContext:
@@ -167,7 +167,7 @@ class TestHydratedContext:
     def test_frozen(self):
         hc = HydratedContext(user_prompt="test")
         with pytest.raises(ValidationError):
-            hc.user_prompt = "changed"
+            hc.user_prompt = "changed"  # ty: ignore[invalid-assignment]
 
     def test_model_validate_from_dict(self):
         data = {
@@ -428,7 +428,7 @@ class TestRepoSetup:
     def test_frozen(self):
         setup = RepoSetup(repo_dir="/workspace/abc", branch="b")
         with pytest.raises(ValidationError):
-            setup.repo_dir = "/other"
+            setup.repo_dir = "/other"  # ty: ignore[invalid-assignment]
 
     def test_model_dump(self):
         setup = RepoSetup(
@@ -459,7 +459,7 @@ class TestTokenUsage:
     def test_frozen(self):
         u = TokenUsage(input_tokens=100)
         with pytest.raises(ValidationError):
-            u.input_tokens = 200
+            u.input_tokens = 200  # ty: ignore[invalid-assignment]
 
 
 class TestAgentResult:

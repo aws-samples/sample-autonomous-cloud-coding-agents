@@ -43,7 +43,7 @@ class TestPreparedAttachment:
             size_bytes=100,
         )
         with pytest.raises(ValidationError):
-            att.filename = "other.txt"
+            att.filename = "other.txt"  # ty: ignore[invalid-assignment]
 
     def test_rejects_extra_fields(self):
         with pytest.raises(ValidationError):
