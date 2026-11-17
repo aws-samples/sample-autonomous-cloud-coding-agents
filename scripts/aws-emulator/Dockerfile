@@ -12,7 +12,7 @@
 # from this line, and CI builds this same file. Bump it here and nowhere else.
 # Use the three-part version from https://github.com/aws/aws-emulator/releases (versions.json lists
 # a fourth component, e.g. 1.0.385.1, that the package file names do not carry).
-ARG AWS_EMULATOR_VERSION=1.0.385
+ARG AWS_EMULATOR_VERSION=1.0.481
 
 # Pinned by digest like every other external image in this repository (see agent/Dockerfile).
 # The digest is a multi-platform index (linux/amd64 + linux/arm64). To bump:
@@ -51,7 +51,7 @@ RUN set -eu; \
       || { echo "package is not signed by the pinned AWS publishing key" >&2; cat /tmp/verify.status >&2; exit 1; }
 
 FROM base
-# Bind-mount the verified package instead of ADD/COPY so the ~160 MB archive is not kept as a layer.
+# Bind-mount the verified package instead of ADD/COPY so the archive (well over 100 MB) is not kept as a layer.
 RUN --mount=type=bind,from=verified,source=/tmp/aws-emulator.rpm,target=/tmp/aws-emulator.rpm \
     rpm -i /tmp/aws-emulator.rpm && mkdir -p /home/emulator && chown 1000 /home/emulator
 USER 1000

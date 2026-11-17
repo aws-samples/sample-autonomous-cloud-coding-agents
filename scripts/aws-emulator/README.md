@@ -17,7 +17,7 @@ mise run emulator:down
 ```
 
 - The suites are `cdk/test/emulator/*.emulator.ts`, `cli/test/emulator/*.emulator.ts` and `agent/tests_emulator/`. The unit runs cannot pick them up: the unit `testMatch` does not match `*.emulator.ts`, and the agent's unit run collects `tests/` only.
-- The first `emulator:up` builds the image (about 1 GB) from the [Dockerfile](Dockerfile), once per version: it downloads the signed package, about 160 to 180 MB, and verifies it.
+- The first `emulator:up` builds the image (about 1 GB) from the [Dockerfile](Dockerfile), once per version: it downloads the signed package, about 170 to 190 MB, and verifies it.
 - Emulated state is in memory and there is no reset call. `emulator:up` always starts a fresh emulator, and `emulator:down` discards everything.
 - The port is derived from the checkout path, so two worktrees can run the tier at the same time. The header of [emulator.sh](emulator.sh), the wrapper behind these tasks, lists the variables that override the port, the state directory, the version and the container engine.
 - After a failed `test:integration` the emulator stays up for inspection (`docker logs abca-aws-emulator-<port>`) until `emulator:down` or the next `emulator:up`. Its per-run credentials stay on disk (mode 0600) under the user cache directory, and it is started with an idle timeout of one hour.
@@ -45,7 +45,7 @@ A green run says how the code behaves against the emulator, not against AWS. Not
 | DynamoDB: conditions, update expressions, transactions with per-item cancellation reasons, index keys and projections, `Limit` before filter, pagination including the 1 MB page, reserved words | Permissions of any kind. A missing grant is invisible; identity policies are evaluated in some paths and not others |
 | S3 objects: put, get, head, delete, versions, presigned GET | Presigned POST policy enforcement (see the differences below) |
 | Secrets Manager: version stages, delete then restore, the error names and the one message text ABCA matches | Deployment correctness of the platform stack |
-| Cognito: admin user operations, password login, refresh, change password, token claims | First-login password rotation, the hosted UI, MFA |
+| Cognito: admin user operations, password login, first-login password rotation, refresh, change password, token claims other than `iss` | The hosted UI, MFA |
 | STS: `AssumeRole` with session tags returning usable credentials | The AgentCore runtime, identity vault and registry; ECS and MicroVM task lifecycles |
 | CloudWatch Logs: stream creation and writes | Anything that depends on eventual consistency, `TransactionConflict` or TTL timing |
 
@@ -55,13 +55,13 @@ The agent suite contains tests that expect a denial: cross-tenant calls refused 
 
 Some operations ABCA calls do not work on the emulator and stay on mocks:
 
-- Answered with 501 `NotImplemented`: `InvokeAgentRuntime`, `StopRuntimeSession`, `RetrieveMemoryRecords`, `GetResourceOauth2Token`, `CompleteResourceTokenAuth`, `UpdateRegistry`, `UpdateRegistryRecordStatus`, and `RespondToAuthChallenge` for `NEW_PASSWORD_REQUIRED`. ABCA catches the error from `StopRuntimeSession`, `RetrieveMemoryRecords` and `GetResourceOauth2Token` and continues, so a test of those paths is green while exercising only the fallback (rule 6).
-- Answered with timestamps the JavaScript SDK refuses: `GetRegistry`, `GetRegistryRecord`, `ListRegistryRecords`, and `SubmitRegistryRecordForApproval`, which takes effect on the server and then fails in the client.
+- Answered with 501 `NotImplemented`: `InvokeAgentRuntime`, `StopRuntimeSession`, `RetrieveMemoryRecords`, `GetResourceOauth2Token`, `CompleteResourceTokenAuth` and `UpdateRegistry`. ABCA catches the error from `StopRuntimeSession`, `RetrieveMemoryRecords` and `GetResourceOauth2Token` and continues, so a test of those paths is green while exercising only the fallback (rule 6).
+- In the agent registry two answers stop ABCA's code, and neither has been compared with AWS. A second record under a name the registry already holds is answered with `ConflictException`, whatever its `recordVersion` (the AWS SDK documents record names as unique within a registry); ABCA publishes each version of an asset under the same name, so only the first can be published. `DeleteRegistry` is answered with `ConflictException` while the registry holds a record (the AWS SDK documents that the records are removed with the registry); the registry custom resource retries it and deletes no record, so its Delete does not complete while a record exists.
 - `ApplyGuardrail` needs a test-side HTTP/1.1 request handler: the bedrock-runtime client negotiates HTTP/2 and the emulator offers only HTTP/1.1.
 
 ## Known differences from AWS
 
-Recorded on emulator 1.0.385. Keep this table and the lists above current when the version pin moves or a test finds another difference.
+Recorded on emulator 1.0.481. Keep this table and the lists above current when the version pin moves or a test finds another difference.
 
 | Difference | Consequence |
 |---|---|
@@ -69,11 +69,12 @@ Recorded on emulator 1.0.385. Keep this table and the lists above current when t
 | A `Query` on an index that `UpdateTable` is still creating is answered; AWS does not allow it until the index is `ACTIVE`. The emulator does report the index as `CREATING`, for about 3 seconds | Code that queries an index before it is `ACTIVE` passes here and fails on AWS. Code that asks for the index status first, as the task list does, can be tested |
 | Index reads always reflect the preceding write, and a transaction is never cancelled with `TransactionConflict` | A read-after-write through a GSI can never miss here, and the retry for a conflicting transaction cannot be reached |
 | Throttling and partial batches occur only at the limits the emulator models, which are AWS's documented ones: a provisioned table past its units, one partition key written past 1,000 write units in a second (three puts of about 390 KB), a `BatchGetItem` past 16 MB | ABCA's on-demand tables with ordinary rows do not reach them. A test with large rows on one key can be throttled, and those branches can be exercised on purpose |
-| About a dozen malformed expression forms are accepted, and a condition comparing an attribute with itself lets the write through | A typo of that kind passes here and is refused by AWS |
+| About ten malformed expression forms are accepted, and a condition comparing an attribute with itself lets the write through | A typo of that kind passes here and is refused by AWS |
 | Presigned POST: the policy and the signature are not enforced the way S3 enforces them | A test that the bucket refuses an upload outside the policy cannot be written here |
-| A stream emits a `MODIFY` record for a write that changes nothing | Never assert on record or invocation counts |
+| A bucket holds at most 1,000 objects, counting every version and delete marker; a write that adds one more is refused with `ValidationException` | A listing at the default page size never has a second page, so the second page of the upload cleanup loop cannot be reached here |
 | A force-deleted secret keeps its name blocked for about 0.5 seconds | Remove-then-recreate in one test needs a retry |
 | `ListSecrets` returns more than 100 results in one page; ECS `RunTask` accepts overrides over 8,192 characters | Two historical ABCA defects would have passed |
+| The `iss` claim of a Cognito token names the emulator, `https://127.0.0.1:<port>/<pool id>` in the tier; AWS issues `https://cognito-idp.<region>.amazonaws.com/<pool id>` | A verifier that derives the issuer from the pool id, as the one in the API's authorizer does, refuses every token the emulator issues |
 
 ## Keeping the tier away from real AWS
 
@@ -98,16 +99,16 @@ What is outside the guard:
 - Layer 4 refuses connections, not every DNS question. In Node, code that resolves a host itself before it connects (`node:dns`, as the URL and Linear attachment downloads do) still sends a DNS query; in Python, a reverse lookup of an address does. A test that reaches such code has to stub the lookup.
 - When a command the wrapper starts resolves to a mise shim, as `yarn` can inside `mise run`, mise applies its `[env]` again after the wrapper has removed the variables. An `AWS_*` variable that comes back is refused by layer 2. A token is not checked again and stays in the jest processes, where layer 4 keeps it on the machine.
 - `emulator:up` runs the container engine with the caller's environment. If Docker uses the ECR credential helper for `public.ecr.aws`, an image build asks ECR Public for a token with real credentials when it pulls the base image (a read-only call; reasoned from the tooling, not observed).
-- The port is published on the host's loopback interface only, but other containers on the same Docker engine can reach it.
+- The port is published on the host's loopback interface only, but other containers on the same Docker engine can reach it. They can also reach the ports that the emulator opens for resource endpoints, which check no request signature; the wrapper does not publish them. `RunMicrovm` opens one, also when the call is refused, and no test of the tier calls it.
 
 ## Moving the version pin
 
 There is one pin, the `ARG AWS_EMULATOR_VERSION` line in the [Dockerfile](Dockerfile). The wrapper reads it from there, and CI builds the same file.
 
 1. Run `ABCA_EMULATOR_VERSION=<new> mise run test:integration`, with the three-part version from the emulator's [releases](https://github.com/aws/aws-emulator/releases). ABCA's own suites on the candidate version are the gate for a bump; the release notes are the second check.
-2. Edit the `ARG` line, and bring the tables above up to date with what changed.
-3. Delete the previous image: `docker image rm abca-aws-emulator:<old tag>`. The wrapper does not remove old images.
+2. Edit the `ARG` line, and bring the tables and lists above up to date with what changed. The suites show only what a test asserts. The other statements hold for the release that "Recorded on emulator" names: probe them again and move that line, or leave it.
+3. Remove what the move leaves behind with `docker image rm abca-aws-emulator:<tag>`: the previous pin's image, and the candidate's tag from step 1, which carries the checksum of the Dockerfile before the edit. The wrapper does not remove old images.
 
 The image tag carries the version and a checksum of the Dockerfile, so a change to either is rebuilt. The package is verified against the AWS publishing key, pinned by fingerprint: a key rotation fails the build until the fingerprint is updated from the emulator's user guide.
 
-Pinning is not optional. Upstream ships several releases a day and behavior changes between them: release 1.0.382 changed the `iss` claim of Cognito tokens, which the `cli` suite asserts. Security fixes go into the newest release only. The exposure is small by construction: the emulator is published on host loopback only, holds no real credentials or data, and the CI job has no AWS credential and no repository secret, only the job's read-only `GITHUB_TOKEN`.
+Pinning is not optional. Upstream ships several releases a day and behavior changes between them: release 1.0.382 changed the `iss` claim of Cognito tokens, which the `cli` suite asserts, and release 1.0.471 changed it back. Security fixes go into the newest release only. The exposure is small by construction: the emulator is published on host loopback only, holds no real credentials or data, and the CI job has no AWS credential and no repository secret, only the job's read-only `GITHUB_TOKEN`.

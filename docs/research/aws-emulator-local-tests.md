@@ -30,7 +30,7 @@ The main things that pull request adds to the proof of concept described in the 
 - `.github/workflows/emulator.yml`, exactly as in [Appendix A](#appendix-a-workflow).
 - Tests of the guard's refusals in the unit suites, so that a guard that stops refusing fails the required build: `cdk/test/scripts/aws-emulator-guard.test.ts` and `agent/tests/test_emulator_guard.py`.
 - `scripts/aws-emulator/README.md` (how to run the tier, its rules, the known differences), which also covers what the README criterion of issue #61 asks for, at another path; lines in the four `AGENTS.md` guides; and the amendment of ADR-013.
-- The fixes in the two tables below. Each fix that changes behaviour has a unit test that fails without it (the one about numbers stored as strings changes comments and types only, and is checked by the compiler), and where an emulator test witnessed the defect it is now a plain test. The emulator suites then hold 12 `cdk` tests (2 still `test.failing`, both waiting for PR #1009), 7 `cli` tests (1 `test.failing`, an emulator gap) and 43 agent tests.
+- The fixes in the two tables below. Each fix that changes behaviour has a unit test that fails without it (the one about numbers stored as strings changes comments and types only, and is checked by the compiler), and where an emulator test witnessed the defect it is now a plain test. The emulator suites then hold 12 `cdk` tests (2 still `test.failing`, both waiting for PR #1009), 7 `cli` tests (1 `test.failing`, an emulator gap, until the pin moved: see the end of this section) and 43 agent tests.
 
 | Defect (details under [Defects found](#defects-found-during-the-investigation)) | Outcome |
 |---|---|
@@ -68,11 +68,16 @@ Found while fixing, and not listed further down:
 
 PR #1035 merged on 2026-11-16 (UTC), after the hand-over, and the pull request was rebased onto it. Where the rest of this document calls #1035 open, or describes `dead-code-pr.yml`, it describes the day of the hand-over: #1035 replaced that workflow with a zero-tolerance dead-code check in the build. The pull request carries the seven `knip.json` entries that [Fit with pull request #1035](#fit-with-pull-request-1035) found it would need, and the mise version that every workflow which installs mise now pins, in `emulator.yml` and in Appendix A.
 
-What [Costs and risks](#costs-and-risks) lists as not verified still is, with three exceptions:
+What [Costs and risks](#costs-and-risks) lists as not verified still was when the pull request was opened, with three exceptions:
 
-- The tier has since run on Linux. On arm64, in an Ubuntu 24.04 container with its own Docker daemon, `mise run test:integration` built the image through `emulator.sh up`, passed the three suites and stopped the emulator, four runs out of four, and the two guard suites passed there as well. These runs were made before the rebase onto #1035; the rebased tree has run on macOS only. The `linux/amd64` package was built into an image, and the three suites passed against that emulator under emulation. No test process has run on x86_64, and the workflow has not run on GitHub.
+- The tier has since run on Linux. On arm64, in an Ubuntu 24.04 container with its own Docker daemon, `mise run test:integration` built the image through `emulator.sh up`, passed the three suites and stopped the emulator, four runs out of four, and the two guard suites passed there as well. These runs were made before the rebase onto #1035; the rebased tree had then run on macOS only. The `linux/amd64` package was built into an image, and the three suites passed against that emulator under emulation. No test process had run on x86_64, and the workflow had not run on GitHub.
 - The pull request is rebased onto #1035, and `mise run build` passes there with the gates #1035 added, which this investigation had only simulated one by one.
 - A red check that is not required does not hold the merge queue: `dead-code-pr` failed on the merge groups of #664 and #665 on 2026-08-12, and both merged.
+
+After the pull request was opened:
+
+- Its workflow ran on GitHub for the first time and passed: a GitHub-hosted x86_64 runner built the image and ran the 62 tests, in three minutes for the job. That is the first test process on x86_64 and the first run of the workflow.
+- The pin moved from 1.0.385 to 1.0.481, the second release published after it. The suites showed two changes, both in Cognito and both made by release 1.0.471: `RespondToAuthChallenge` for `NEW_PASSWORD_REQUIRED` is implemented, so the `cli` test of the first sign-in is a plain test and no `test.failing` waits for an emulator gap; and the `iss` claim of a token names the emulator again, as it did on 1.0.367. The README's table of differences and its lists of what does not work were then probed again on both releases. More had changed with no test to show it: `UpdateRegistryRecordStatus` is implemented, the four agent-registry answers parse in the JavaScript SDK, `DeleteRegistry` refuses a registry that holds records, a write that changes nothing emits no stream record, fewer malformed expressions are accepted, and other containers can reach the ports the emulator opens for resource endpoints. That table and those lists are current for 1.0.481; where this document describes the emulator, it describes 1.0.385. When the pin moved, 1.0.481 had run on macOS only.
 
 ## What the emulator is
 

@@ -193,18 +193,14 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     expect(loadCredentials()).toBeNull();
   });
 
-  // Emulator 1.0.385 answers 501 NotImplemented for RespondToAuthChallenge with
-  // NEW_PASSWORD_REQUIRED, so the rotation itself cannot run yet (upstream:
-  // aws/aws-emulator issues/things-that-do-not-work/
-  // 20261029T182116Z-cognito-idp-mfa-challenge-state-machine-mfa-setup.md). The
-  // body is the test we want; when an emulator release makes it pass, jest
-  // reports this case as failed and `.failing` can simply be dropped.
-  test.failing('first sign-in rotates the temporary password (blocked by an emulator gap)', async () => {
+  test('first sign-in rotates the temporary password', async () => {
     const email = await invitedUser();
 
     await login(email, TEMP_PASSWORD, () => Promise.resolve(PASSWORD));
 
     expect(loadCredentials()).not.toBeNull();
+    await expect(login(email, TEMP_PASSWORD)).rejects.toThrow(/incorrect password/);
+    await expect(login(email, PASSWORD)).resolves.toBeUndefined();
   });
 
   test('login caches an ID token for the user, and an expired cache is refreshed', async () => {
@@ -216,7 +212,12 @@ describe('bgagent sign-in against an AWS Emulator', () => {
     expect(fs.statSync(credentialsFile()).mode % 0o1000).toBe(0o600);
     const claims = idTokenClaims(cached!.id_token);
     expect(claims).toMatchObject({ email, token_use: 'id', aud: loadConfig().client_id });
-    expect(claims.iss).toBe(`https://cognito-idp.${REGION}.amazonaws.com/${loadConfig().user_pool_id}`);
+    // For a pool that a stack creates, the emulator names its own endpoint as
+    // the issuer, where AWS names
+    // https://cognito-idp.<region>.amazonaws.com/<pool id> (upstream:
+    // aws/aws-emulator issues/things-that-do-not-work/
+    // 20261115T035031Z-cognito-identity-cognito-idp-the-cognito-id-token.md).
+    expect(claims.iss).toBe(`${process.env.AWS_ENDPOINT_URL}/${loadConfig().user_pool_id}`);
     await expect(getAuthToken()).resolves.toBe(cached!.id_token);
 
     saveCredentials({ ...cached!, token_expiry: new Date(0).toISOString() });
