@@ -661,9 +661,10 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         "user_id": user_id or "",
         "repo": engine.repo,
     }
-    deadline_epoch = approval_deadline_epoch(row["created_at"], effective_timeout)
-    if deadline_epoch is not None:
-        row["deadline_epoch"] = deadline_epoch
+    row["deadline_epoch"] = approval_deadline_epoch(row["created_at"], effective_timeout)
+    # DynamoDB expiry for the row and its tool-input preview: the retention main
+    # always had (deadline plus the cleanup margin), on every backend.
+    row["ttl"] = row["deadline_epoch"] + CLEANUP_MARGIN_120S
     deadline = _ApprovalDeadline.from_recorded(row["created_at"], effective_timeout)
 
     # Step 6 — bump counters BEFORE the write so cap/rate checks on

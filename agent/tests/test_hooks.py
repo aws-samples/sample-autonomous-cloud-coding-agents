@@ -1521,6 +1521,36 @@ class TestTimedOutPath:
         assert "write_approval_timed_out" in progress.milestones()
 
 
+class TestApprovalRowExpiry:
+    """Approval rows keep DynamoDB's ``ttl`` next to the explicit deadline."""
+
+    def test_row_expires_after_its_deadline_plus_the_cleanup_margin(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "APPROVED", "scope": "tool_type:Bash", "decided_at": "t1"},
+        )
+        _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+        [(_, _, row)] = fake_task_state.write_calls
+        parsed = datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        created = int(parsed.timestamp())
+        assert row["deadline_epoch"] == created + row["timeout_s"]
+        assert row["ttl"] == row["deadline_epoch"] + hooks.CLEANUP_MARGIN_120S
+
+
 class TestChunk8aOutcomeEventSchema:
     """Chunk 8a: outcome events must carry the fields the
     ApprovalMetricsPublisher Lambda needs for its CloudWatch metrics:
