@@ -398,7 +398,7 @@ class _ProgressWriter:
     # Circuit-breaker proxies (finding #8): keep the historical
     # ``writer._disabled`` / ``writer._failure_count`` surface working as
     # read-only attributes.  Callers in ``hooks.py`` and tests inspect
-    # these directly — see ``_emit_nudge_milestone`` which reads
+    # these directly — see ``hooks._try_progress`` which reads
     # ``getattr(progress, "_disabled", False)``.  We back them with the
     # shared state so external readers see the consolidated view.
     # ------------------------------------------------------------------

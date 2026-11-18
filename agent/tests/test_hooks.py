@@ -305,6 +305,64 @@ class TestSelfRecloneGuard:
             "git commit -m wip && gh repo clone owner/repo /w/repo", "owner/repo"
         )
 
+    def test_blocks_a_clone_on_its_own_line_after_a_line_with_a_text_flag(self):
+        # A line break ends a command as ``&&`` does. The ``-b`` and the ``-m``
+        # belong to the command on the line above, not to the clone.
+        assert _is_self_reclone(
+            "cd /workspace\ngit checkout -b fix/foo\ngh repo clone owner/repo repo2", "owner/repo"
+        )
+        assert _is_self_reclone(
+            'git commit -m "wip"\ngit clone https://github.com/owner/repo x', "owner/repo"
+        )
+        clone = "gh repo clone owner/repo x"
+        for command in (
+            f"git commit -m 'wip'\n{clone}",
+            # below a body that itself runs over several lines
+            f'gh pr comment 7 --body "first line\nsecond line"\n{clone}',
+            # an apostrophe in a comment opens no string that ends in the last line
+            f"# don't lose the branch\ngit checkout -b fix/foo\n{clone}\necho 'done'",
+            # below a here-document: in a string, and with an indented last line
+            f'git commit -m "$(cat <<\'EOF\'\nfor a 5" disk\nEOF\n)"\n{clone}',
+            f"cat > setup.sh <<-EOF\n\tpython -m venv .venv\n\tEOF\n{clone}",
+            # in a here-document that a shell reads, as before
+            f"bash <<'EOF'\nset -e\n{clone}\nEOF",
+            # below the two characters of the operator where they begin no text
+            f"echo $((1 << 4))\ngit checkout -b fix/foo\n{clone}",
+            f"cat > a.txt <<EOF\ntext\nEOF\ngit commit -m 'it began with <<EOF'\n{clone}",
+            # below a body in single quotes that runs over two lines
+            f"git commit -m 'first line\nsecond line'\n{clone}",
+            # below a here-document whose text holds an apostrophe
+            f"cat > notes.txt <<EOF\ndon't forget\nEOF\ngit checkout -b fix/foo\n{clone}",
+        ):
+            assert _is_self_reclone(command, "owner/repo"), command
+
+    def test_a_line_of_text_that_reads_like_a_clone_is_no_command(self):
+        # The counterpart: a line break inside quotes ends no command, and the
+        # lines of a here-document belong to the command that reads them,
+        # whatever quotes they hold.
+        clone = "git clone https://github.com/owner/repo"
+        for command in (
+            # an escaped double quote in the first line of the body, and in a later one
+            f'gh pr create --title "docs" --body "for a 5\\" disk\n{clone}\ndone"',
+            f'gh pr create --title "docs" --body "first\nfor a 5\\" disk\n{clone}\ndone"',
+            # a single quote written as '\'' inside a body in single quotes
+            f"git commit -m 'it'\\''s documented\n{clone}'",
+            # a second string that begins in the line where the first one ends
+            f'git commit -m "docs:\nsetup" -m "see\n{clone}"',
+            # a body that holds the two characters of the here-document operator
+            f'gh pr create --title "docs" --body "first\nx << 2\n{clone}"',
+            # a here-document: read as a body, in a string, with an indented end
+            f"gh pr create --title docs --body-file - <<'EOF'\n## Setup\n{clone}\nEOF",
+            f'git commit -m "$(cat <<\'EOF\'\nfor a 5" disk\n{clone}\nEOF\n)"',
+            f"gh pr create --title docs --body-file - <<-EOF\n\t{clone}\n\tEOF\ngit status",
+            # a blank before the word, and a text that names the word
+            f"gh pr create --title docs --body-file - << 'EOF'\n## Setup\n{clone}\nEOF",
+            f"gh pr create --title docs --body-file - <<'EOF'\nthe EOF line ends it\n{clone}\nEOF",
+            # the task repository named by the line below a clone of another one
+            "git clone https://github.com/other/dep.git\ngh pr view 7 --repo owner/repo",
+        ):
+            assert not _is_self_reclone(command, "owner/repo"), command
+
     def test_still_ignores_prose_after_a_body_flag_in_the_same_segment(self):
         # The counterpart: within one segment, a verb appearing after the body
         # value opens is prose. These must stay allowed.
@@ -1466,6 +1524,25 @@ class TestPostToolUseFailure:
         assert "stuck-guard STEER injected: Bash|cd /workspace/repo/services/api" in logged
         assert not _pieces_in(_URL_VALUE.lower(), logged.lower())
 
+    def test_the_log_line_of_the_advisory_is_screened_as_one_text(self, capfd):
+        # The log line names the call by the guard's signature. For a tool
+        # without a command or a file path that is its whole input.
+        value = _LETTERS + "0123"
+        event = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "mcp__deploy__run",
+            "tool_input": {"aws_secret_access_key": value, "stage": "prod"},
+            "tool_use_id": "tu-1",
+            "error": "fatal: the deployment was refused",
+            "is_interrupt": False,
+        }
+        callback = self._callback()
+        results = [_run(callback(event, "tu-1", {})) for _ in range(3)]
+        assert "STOP retrying" in results[2]["hookSpecificOutput"]["additionalContext"]
+        logged = capfd.readouterr().out
+        assert "stuck-guard STEER injected: mcp__deploy__run|" in logged
+        assert not _pieces_in(value.lower(), logged.lower())
+
     def test_max_turns_summary_is_screened_again_when_it_is_read(self, monkeypatch):
         # Whatever writes the latch: nothing leaves it unscreened.
         monkeypatch.setattr(
@@ -1591,6 +1668,112 @@ class TestBuildHookMatchers:
         assert "PreToolUse" in matchers
         assert "PostToolUse" in matchers
 
+    # The SDK calls the closures that build_hook_matchers returns, not the hook
+    # functions that the other tests call. What a closure hands on to its hook
+    # is checked here.
+    def _callbacks(self, engine, **kwargs) -> dict:
+        matchers = build_hook_matchers(
+            engine, task_id="t", user_id="u-1", repo_url="owner/repo", **kwargs
+        )
+        return {event: matcher[0].hooks[0] for event, matcher in matchers.items()}
+
+    def test_the_pre_tool_use_callback_allows_denies_and_fails_closed(self):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        trajectory = MagicMock()
+        pre = self._callbacks(engine, trajectory=trajectory)["PreToolUse"]
+
+        def decide(command: str) -> tuple[str, str]:
+            output = _run(pre(_hook_input(command=command), "tu-1", {}))["hookSpecificOutput"]
+            return output["permissionDecision"], output["permissionDecisionReason"]
+
+        assert decide("npm test")[0] == "allow"
+        assert decide("rm -rf /")[0] == "deny"
+        assert trajectory.write_policy_decision.called
+        # The repository of the task reaches the guard against a second clone.
+        decision, reason = decide("gh repo clone owner/repo")
+        assert decision == "deny"
+        assert "ALREADY cloned" in reason
+        # An error inside the gate is a deny, whatever the SDK would make of it.
+        with patch.object(engine, "evaluate_tool_use", side_effect=RuntimeError("boom")):
+            decision, reason = decide("npm test")
+        assert decision == "deny"
+        assert "fail-closed" in reason
+
+    def test_the_pre_tool_use_callback_asks_for_approval_in_the_name_of_the_task_and_its_user(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        monkeypatch.setattr(hooks, "task_state", fake_task_state)
+        _prime_approval(
+            fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
+        )
+        pre = self._callbacks(engine_with_soft_gate, progress=progress)["PreToolUse"]
+
+        result = _run(pre(_hook_input(), "tu-1", {}))
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+        [(task_id, _request_id, row)] = fake_task_state.write_calls
+        assert (task_id, row["user_id"]) == ("t", "u-1")
+        assert "write_approval_requested" in progress.milestones()
+
+    def test_the_post_tool_use_callback_reports_to_the_progress_and_the_trajectory(self, progress):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        trajectory = MagicMock()
+        post = self._callbacks(engine, progress=progress, trajectory=trajectory)["PostToolUse"]
+        key = "AKIA" + "IOSFODNN7EXAMPLE"
+        hook_input = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pip install x || echo $AWS_ACCESS_KEY_ID"},
+            "tool_response": {"stdout": f"Could not resolve host: pypi.org\n{key}", "stderr": ""},
+        }
+
+        output = _run(post(hook_input, "tu-1", {}))["hookSpecificOutput"]
+
+        assert key not in output["updatedToolOutput"]["stdout"]
+        assert trajectory.write_output_screening_decision.called
+        assert "write_agent_blocked" in progress.milestones()
+
+    def test_both_tool_result_callbacks_feed_one_guard(self):
+        # The guard counts the failures among the last tool calls. The calls
+        # that complete reach it through the other callback: an agent that has
+        # recovered is not reported as repeating a failure.
+        from stuck_guard import WINDOW, WINDOW_FAIL_THRESHOLD
+
+        callbacks = self._callbacks(PolicyEngine(task_type="new_task", repo="owner/repo"))
+        failed = _failed_bash(
+            "mise //cdk:test", "Exit code 134\nFATAL ERROR: JavaScript heap out of memory"
+        )
+        completed = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/main.py"},
+            "tool_response": "x = 1",
+        }
+        for _ in range(WINDOW):
+            _run(callbacks["PostToolUseFailure"](failed, "tu-1", {}))
+        assert "last tool calls repeated" in (last_stuck_summary() or "")
+        # The calls that complete bring the failures in the window below the
+        # number that counts as repeating, and one more failure does not lift it.
+        for _ in range(WINDOW - WINDOW_FAIL_THRESHOLD + 1):
+            _run(callbacks["PostToolUse"](completed, "tu-2", {}))
+        _run(callbacks["PostToolUseFailure"](failed, "tu-3", {}))
+        assert last_stuck_summary() is None
+
+    def test_the_stop_callback_injects_a_denial_that_the_engine_holds(self, progress, capfd):
+        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
+        stop = self._callbacks(engine, progress=progress)["Stop"]
+        engine.queue_denial_injection(request_id="r1", reason="not this way", decided_at="t1")
+
+        result = _run(stop({}, None, {}))
+
+        assert result["decision"] == "block"
+        assert "<user_denial" in result["reason"]
+        assert "not this way" in result["reason"]
+        milestones = [c[1]["milestone"] for c in progress.calls if c[0] == "write_agent_milestone"]
+        assert milestones == ["user_denial_injected"]
+        assert "Injecting 1 denial(s) for task t" in capfd.readouterr().out
+
 
 # ===========================================================================
 # Chunk 3: REQUIRE_APPROVAL path integration (§6.5, IMPL-24)
@@ -1683,6 +1866,7 @@ class _FakeTaskState:
         # Hooks into the write / resume path so tests can inject errors.
         self.write_raises: Exception | None = None
         self.resume_raises: Exception | None = None
+        self.best_effort_raises: Exception | None = None
 
     def transact_write_approval_request(
         self, task_id: str, request_id: str, approval_row: dict, *, client=None
@@ -1706,6 +1890,8 @@ class _FakeTaskState:
         client=None,
     ) -> bool:
         self.update_calls.append((task_id, request_id, new_status, reason))
+        if self.best_effort_raises is not None:
+            raise self.best_effort_raises
         return self.best_effort_return
 
     def increment_approval_gate_count_in_ddb(self, task_id: str, *, client=None) -> bool:
@@ -1720,6 +1906,8 @@ class _FakeTaskState:
         # Race-path branch: any call AFTER
         # ``best_effort_update_approval_status`` is the IMPL-24 re-read.
         if self.update_calls and self.reread_row is not _FakeTaskState._SENTINEL_UNSET:
+            if isinstance(self.reread_row, Exception):
+                raise self.reread_row
             return self.reread_row
         if not self.get_row_script:
             # Default: row still PENDING (drives poll to timeout).
@@ -2210,6 +2398,38 @@ class TestApprovedPath:
 
 
 class TestDeniedPath:
+    def test_another_call_of_the_denied_rule_is_refused_without_a_second_request(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # The user denied `echo foo`. `echo foo2` is another input that the same
+        # rule gates: it is refused at once and the user is not asked again.
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "DENIED", "deny_reason": "build makefile first", "decided_at": "t1"},
+        )
+
+        def decide(command: str) -> dict:
+            return _run(
+                pre_tool_use_hook(
+                    _hook_input(command=command),
+                    "tu-1",
+                    {},
+                    engine=engine_with_soft_gate,
+                    task_id="01KTASK",
+                    user_id="u-1",
+                    progress=progress,
+                    task_state_module=fake_task_state,
+                )
+            )["hookSpecificOutput"]
+
+        assert decide("echo foo")["permissionDecision"] == "deny"
+        retry = decide("echo foo2")
+        assert retry["permissionDecision"] == "deny"
+        assert "Recent DENIED on rule 'test_bash_foo'" in retry["permissionDecisionReason"]
+        assert "build makefile first" in retry["permissionDecisionReason"]
+        assert len(fake_task_state.write_calls) == 1
+
     def test_denied_returns_deny_queues_injection_and_caches(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -2408,6 +2628,34 @@ class TestCacheHitObservability:
 
 
 class TestTimedOutPath:
+    def test_a_timeout_does_not_count_as_a_denial_of_the_rule(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Nobody answered the request for `echo foo`. The same call is refused
+        # for a while, but another call that the rule gates is asked about again:
+        # nobody said no to the rule.
+        _fast_poll(monkeypatch)
+        engine_with_soft_gate._task_default_timeout_s = 30
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        same = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo"})
+        assert same.reason.startswith("Recent TIMED_OUT")
+        other = engine_with_soft_gate.evaluate_tool_use("Bash", {"command": "echo foo2"})
+        assert other.outcome.value == "require_approval"
+
     def test_timeout_writes_timed_out_and_denies(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
     ):
@@ -2656,6 +2904,39 @@ class TestLateApprovalRace:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "write_approval_late_win" not in progress.milestones()
 
+    def test_an_error_of_the_timed_out_write_still_reads_the_row_again(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # The write of TIMED_OUT fails with an error of its own (throttling, the
+        # network). The user's approval may be on the row all the same.
+        fake_task_state.best_effort_raises = RuntimeError("ThrottlingException")
+        result = self._race_run(
+            fake_task_state,
+            progress,
+            engine_with_soft_gate,
+            monkeypatch,
+            {"status": "APPROVED", "scope": "tool_type:Bash", "decided_at": "t1"},
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert "write_approval_late_win" in progress.milestones()
+
+    def test_an_error_of_the_second_read_leaves_the_call_timed_out(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        result = self._race_run(
+            fake_task_state,
+            progress,
+            engine_with_soft_gate,
+            monkeypatch,
+            RuntimeError("ProvisionedThroughputExceededException"),
+        )
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        milestones = progress.milestones()
+        assert "write_approval_late_win" not in milestones
+        assert "write_approval_timed_out" in milestones
+        # The task still goes back to RUNNING.
+        assert len(fake_task_state.resume_calls) == 1
+
 
 # --- Cap + rate-limit + resume failure branches --------------------------
 
@@ -2741,6 +3022,38 @@ class TestResumeFailure:
         )
         assert "write_approval_resume_failed" in progress.milestones()
 
+    def test_any_other_resume_error_denies_the_approved_call(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Throttling, the network: the task record still says that the task
+        # waits for this approval, so the approved call must not run.
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state,
+            {"status": "APPROVED", "scope": "tool_type:Bash", "decided_at": "t1"},
+        )
+        fake_task_state.resume_raises = RuntimeError("ProvisionedThroughputExceededException")
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "approval resume failed" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        milestones = progress.milestones()
+        assert "write_approval_resume_failed" in milestones
+        assert "write_approval_granted" not in milestones
+        assert not engine_with_soft_gate.allowlist.matches("Bash", {"command": "echo bar"})
+
 
 class TestWriteFailure:
     def test_write_cancelled_denies(
@@ -2784,6 +3097,62 @@ class TestWriteFailure:
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "write_approval_write_failed" in progress.milestones()
+
+    def test_any_other_write_error_denies_and_is_not_waited_for(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Throttling, the network: neither of the two errors the hook knows by
+        # name. No request was written, so there is no answer to wait for.
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
+        )
+        fake_task_state.write_raises = RuntimeError("ThrottlingException")
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            result["hookSpecificOutput"]["permissionDecisionReason"]
+            == "approval system unavailable"
+        )
+        assert "write_approval_write_failed" in progress.milestones()
+        assert fake_task_state.get_calls == []
+        assert fake_task_state.resume_calls == []
+
+    def test_without_a_task_id_the_call_is_denied_and_nothing_is_written(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id=None,
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "no task_id" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert fake_task_state.write_calls == []
+        assert progress.calls == []
 
 
 # --- Timeout clipping + ceiling shrinking --------------------------------
@@ -2866,6 +3235,68 @@ class TestTimeoutCapping:
         assert capped[0][1]["reason"] == "maxLifetime_ceiling"
         # matching_rule_ids is omitted when reason is maxLifetime_ceiling.
         assert capped[0][1]["matching_rule_ids"] is None
+        # Of the 200 s that are left, 120 are kept for the cleanup.
+        assert capped[0][1]["effective_timeout_s"] == 80
+        assert fake_task_state.write_calls[0][2]["timeout_s"] == 80
+
+    def test_a_gate_is_refused_when_less_than_the_shortest_window_is_left(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        _fast_poll(monkeypatch)
+        _prime_approval(
+            fake_task_state, {"status": "APPROVED", "scope": "this_call", "decided_at": "t1"}
+        )
+
+        def decide(remaining: int) -> dict:
+            monkeypatch.setattr(hooks, "_remaining_maxlifetime_s", lambda: remaining)
+            return _run(
+                pre_tool_use_hook(
+                    _hook_input(),
+                    "tu-1",
+                    {},
+                    engine=engine_with_soft_gate,
+                    task_id="01KTASK",
+                    user_id="u-1",
+                    progress=progress,
+                    task_state_module=fake_task_state,
+                )
+            )["hookSpecificOutput"]
+
+        # After the 120 s for the cleanup, 149 s leave one second less than the
+        # shortest window of 30 s: nobody could answer in time, nobody is asked.
+        refused = decide(149)
+        assert refused["permissionDecision"] == "deny"
+        assert "insufficient maxLifetime" in refused["permissionDecisionReason"]
+        assert fake_task_state.write_calls == []
+        assert "write_approval_requested" not in progress.milestones()
+        # One second more, and the request is written with that shortest window.
+        assert decide(150)["permissionDecision"] == "allow"
+        assert fake_task_state.write_calls[0][2]["timeout_s"] == 30
+
+    def test_the_hook_waits_no_longer_than_the_window_it_reports(
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+    ):
+        # Nobody answers. With 200 s left the hook gives up after 80 s, not
+        # after the 300 s that were asked for: the cleanup keeps its 120 s.
+        _fast_poll(monkeypatch)
+        monkeypatch.setattr(hooks, "_remaining_maxlifetime_s", lambda: 200)
+        engine_with_soft_gate._task_default_timeout_s = 300
+
+        result = _run(
+            pre_tool_use_hook(
+                _hook_input(),
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert hooks.time.monotonic() == 80
 
     def test_ceiling_shrinking_emits_once(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch

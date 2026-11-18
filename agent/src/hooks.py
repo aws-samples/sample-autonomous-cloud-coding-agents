@@ -345,11 +345,27 @@ _CLONE_CMD_RE = re.compile(
 # quoted text routinely contains a clone command as documentation. Splitting on
 # ``\n`` put that quoted line in its own segment with no preceding free-text
 # flag, so the guard blocked a legitimate ``gh pr create`` — the exact
-# false-positive the free-text list exists to prevent.
+# false-positive the free-text list exists to prevent. A line break that ENDS a
+# command does separate: see ``_command_lines``.
 # A backslash at end-of-line continues the SAME command onto the next line.
 _LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n[ \t]*")
 
 _SHELL_SEPARATOR_RE = re.compile(r"(?:&&|\|\||[;&|])")
+
+# The operator of a here-document and its word: ``<<EOF``, ``<<-'EOF'``.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)(\w+)\1")
+
+# What one line holds that opens no string: taken out of the line, a quote that
+# is left opens a string that goes on in the next line.
+_CLOSED_TEXT_RE = re.compile(
+    r"""
+    \\.                    # an escaped character
+    | (?<!\S)\#.*          # a comment, to the end of the line
+    | '[^']*'              # a string in single quotes
+    | "(?:[^"\\]|\\.)*"    # a string in double quotes
+    """,
+    re.VERBOSE,
+)
 
 _FREE_TEXT_ARG_RE = re.compile(
     r"(?:^|\s)(?:-m|--message|--body|--body-file|-b|--title|-t|-F|--field|--raw-field)\b",
@@ -369,6 +385,39 @@ def _repo_slug_variants(repo_url: str) -> list[str]:
     if not slug:
         return []
     return [slug, f"{slug}.git"]
+
+
+def _command_lines(command: str) -> list[str]:
+    """Split *command* at the line breaks that end a command.
+
+    A line break inside quotes belongs to the string (a ``--body`` or ``-m``
+    value written over several lines). The lines below ``<<EOF``, up to and with
+    the line that is ``EOF``, belong to the command that reads them, whatever
+    quotes they hold; an operator whose word is no line further down begins no
+    such text (a shift in an arithmetic expression, ``<<`` in a quoted body).
+    """
+    lines = command.split("\n")
+    last = {line.strip(): number for number, line in enumerate(lines)}
+    commands: list[list[str]] = []
+    quote = ""  # the quote of a string that the lines so far leave open
+    word = None  # the word that ends the here-document the line stands in
+    for number, line in enumerate(lines):
+        if quote or word is not None:
+            commands[-1].append(line)
+        else:
+            commands.append([line])
+        if word is not None:
+            if line.strip() == word:
+                word = None
+            continue
+        # Also in a line that stands inside a string: ``"$(cat <<'EOF'``.
+        operator = _HEREDOC_RE.search(line)
+        if operator and last.get(operator[2], -1) > number:
+            word = operator[2]
+        # With the quote of an open string in front, the line closes it or not.
+        opener = re.search("['\"]", _CLOSED_TEXT_RE.sub("", quote + line))
+        quote = opener[0] if opener else ""
+    return ["\n".join(one) for one in commands]
 
 
 def _is_self_reclone(command: str, repo_url: str) -> bool:
@@ -401,6 +450,9 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
     # the slug was never found in the verb's segment — a wrapped self re-clone
     # walked straight through.
     normalized = _LINE_CONTINUATION_RE.sub(" ", command)
+    # A line break that ends a command separates like ``;``: the ``-b`` of a
+    # ``git checkout -b`` on the line above does not make a clone prose.
+    normalized = ";".join(_command_lines(normalized))
     for segment in _SHELL_SEPARATOR_RE.split(normalized):
         clone = _CLONE_CMD_RE.search(segment)
         if clone is None:
@@ -1354,14 +1406,17 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     """Call a progress-writer method, swallowing errors.
 
     Progress is best-effort observability; a throttled DDB write must not
-    break the approval flow. ``_emit_nudge_milestone`` uses a similar
-    pattern for nudges.
+    break the approval flow, and a milestone that cannot be written must not
+    hold back the nudge, the denial or the advisory that it reports.
 
     Escalation: repeated consecutive failures of the same ``method_name``
     are tracked per-process and escalated to ERROR after
     ``_TRY_PROGRESS_ESCALATE_AFTER`` so a silent live-stream outage
     becomes operator-visible.
     """
+    # Only skip when ``_disabled`` is explicitly True on a real ProgressWriter.
+    # ``getattr(..., False)`` is not safe — ``MagicMock`` returns an auto-mock
+    # attribute for any access, which evaluates truthy.
     if getattr(progress, "_disabled", False) is True:
         log("WARN", f"progress {method_name!r} skipped: circuit breaker open")
         return
@@ -1371,7 +1426,7 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
         return
     try:
         method(**kwargs)
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # defensive, writers never raise
         prev = _try_progress_consecutive_failures.get(method_name, 0)
         count = prev + 1
         if count >= _TRY_PROGRESS_ESCALATE_AFTER:
@@ -1618,10 +1673,15 @@ def _observe_tool_result(
         log("WARN", f"stuck-guard raised (ignored): {type(exc).__name__}: {exc}")
     if action is None or action.kind != "steer":
         return None
-    _emit_nudge_milestone(
-        {"progress": progress}, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN]
+    _try_progress(
+        progress,
+        "write_agent_milestone",
+        milestone="stuck_steer",
+        details=action.message[:_NUDGE_PREVIEW_LEN],
     )
-    log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
+    # Screened as one text here: the guard was handed the strings of the input
+    # screened one by one.
+    log("NUDGE", f"stuck-guard STEER injected: {_screened(action.signature)}")
     return action.message
 
 
@@ -1723,43 +1783,6 @@ def _reset_injected_nudges_for_tests() -> None:
     _INJECTED_NUDGES = {}
 
 
-def _emit_nudge_milestone(ctx: dict, milestone: str, details: str) -> None:
-    """Emit ``agent_milestone`` to the progress writer.
-
-    Best-effort — swallow errors so stream visibility failures never block
-    nudge injection itself.  ``ctx`` may carry a ``progress`` ref stamped by
-    :func:`stop_hook`.  Skips (with a log line in each case) when:
-
-    - no ``progress`` ref is stamped on ``ctx`` (tests, early-boot, or a
-      hook invoked outside :func:`stop_hook`'s dispatch)
-    - the progress writer's circuit breaker has tripped after repeated
-      DDB write failures (``ProgressWriter._disabled``)
-    - the underlying ``write_agent_milestone`` raises despite the writer's
-      own fail-open contract
-
-    Surfacing these as log lines (instead of silent drops) lets
-    ``--trace`` mode and CloudWatch Logs show when an ack could not be
-    delivered to the durable event stream.
-    """
-    progress = ctx.get("progress")
-    if progress is None:
-        log("DEBUG", f"nudge milestone {milestone!r} skipped: no progress writer in ctx")
-        return
-    # Only skip when ``_disabled`` is explicitly True on a real ProgressWriter.
-    # ``getattr(..., False)`` is not safe — ``MagicMock`` returns an auto-mock
-    # attribute for any access, which evaluates truthy.
-    if getattr(progress, "_disabled", False) is True:
-        log(
-            "WARN",
-            f"nudge milestone {milestone!r} skipped: progress writer circuit breaker open",
-        )
-        return
-    try:
-        progress.write_agent_milestone(milestone=milestone, details=details)
-    except Exception as exc:  # pragma: no cover — defensive, writers never raise
-        log("WARN", f"nudge milestone {milestone!r} progress write failed: {exc}")
-
-
 def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     """Read pending nudges for the task and return them as XML user messages.
 
@@ -1840,7 +1863,12 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         "…" if count > 1 or len(first_msg) == _NUDGE_PREVIEW_LEN else ""
     )
     # Emit the ack BEFORE returning the injection list.
-    _emit_nudge_milestone(ctx, "nudge_acknowledged", details)
+    _try_progress(
+        ctx.get("progress"),
+        "write_agent_milestone",
+        milestone="nudge_acknowledged",
+        details=details,
+    )
 
     return [formatted] if formatted else []
 
@@ -1869,7 +1897,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     # re-inject the same denial on every subsequent Stop seam.
     try:
         pending = engine.drain_denial_injections()
-    except Exception as exc:  # pragma: no cover — defensive
+    except Exception as exc:  # defensive
         log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
         # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
         return []
@@ -1895,10 +1923,11 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     # ``nudge_acknowledged``; this is an additive milestone not in the
     # enumerated milestone list, so keep the name distinct from the
     # enumerated ``approval_*`` prefix.
-    _emit_nudge_milestone(
-        ctx,
-        "user_denial_injected",
-        f"{count} denial(s) injected (ids={','.join(request_ids)})",
+    _try_progress(
+        ctx.get("progress"),
+        "write_agent_milestone",
+        milestone="user_denial_injected",
+        details=f"{count} denial(s) injected (ids={','.join(request_ids)})",
     )
     return ["\n".join(blocks)] if blocks else []
 
@@ -1930,10 +1959,11 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
         return []
     if record and record.get("status") == "CANCELLED":
         ctx["_cancel_requested"] = True
-        _emit_nudge_milestone(
-            ctx,
-            "cancel_detected",
-            "Task cancelled by user; stopping agent after this turn.",
+        _try_progress(
+            ctx.get("progress"),
+            "write_agent_milestone",
+            milestone="cancel_detected",
+            details="Task cancelled by user; stopping agent after this turn.",
         )
     return []
 
