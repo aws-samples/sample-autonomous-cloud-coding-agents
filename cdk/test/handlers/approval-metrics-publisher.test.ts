@@ -32,6 +32,7 @@ interface RecordOpts {
   readonly milestone?: string;
   readonly metadata?: Record<string, unknown>;
   readonly eventID?: string;
+  readonly sequenceNumber?: string;
 }
 
 function streamRecord(opts: RecordOpts = {}): DynamoDBRecord {
@@ -44,6 +45,7 @@ function streamRecord(opts: RecordOpts = {}): DynamoDBRecord {
     milestone = 'approval_requested',
     metadata = {},
     eventID,
+    sequenceNumber = '1',
   } = opts;
 
   // Encode metadata into DDB Stream attribute shape. Matches what
@@ -69,7 +71,7 @@ function streamRecord(opts: RecordOpts = {}): DynamoDBRecord {
         timestamp: { S: timestamp },
         metadata: { M: metaAttr },
       },
-      SequenceNumber: '1',
+      SequenceNumber: sequenceNumber,
       SizeBytes: 100,
       StreamViewType: 'NEW_IMAGE',
     },
@@ -333,7 +335,7 @@ describe('approval-metrics-publisher handler', () => {
     // a poison pill because parseApprovalRecord returns null, which
     // is a skip, not a throw. So we mock the classifier indirectly
     // via a getter that throws on metadata access.
-    const poison = streamRecord({ milestone: 'approval_requested', eventID: 'poison-1' });
+    const poison = streamRecord({ milestone: 'approval_requested', eventID: 'poison-1', sequenceNumber: '4901' });
     // Replace metadata M with a getter that throws on iteration.
     Object.defineProperty(poison.dynamodb!.NewImage!.metadata!, 'M', {
       get() {
@@ -343,8 +345,13 @@ describe('approval-metrics-publisher handler', () => {
 
     const capture = captureEmfLines();
     try {
-      const result = await handler(streamEvent([poison, streamRecord({ milestone: 'approval_requested', eventID: 'good-1' })]));
-      expect(result.batchItemFailures).toEqual([{ itemIdentifier: 'poison-1' }]);
+      const result = await handler(streamEvent([
+        poison,
+        streamRecord({ milestone: 'approval_requested', eventID: 'good-1', sequenceNumber: '4902' }),
+      ]));
+      // The stream sequence number, which is what Lambda checkpoints on — not
+      // the eventID ('poison-1'), which is no position in the shard.
+      expect(result.batchItemFailures).toEqual([{ itemIdentifier: '4901' }]);
     } finally {
       capture.restore();
     }
@@ -379,8 +386,8 @@ describe('approval-metrics-publisher handler', () => {
     // operator's ability to distinguish "no approval traffic" from
     // "pipeline is broken" during a DLQ-driven replay of poison
     // records. Regression guard per Chunk 8 silent-failure M5.
-    const poison1 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-a' });
-    const poison2 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-b' });
+    const poison1 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-a', sequenceNumber: '4901' });
+    const poison2 = streamRecord({ milestone: 'approval_requested', eventID: 'poison-b', sequenceNumber: '4902' });
     for (const rec of [poison1, poison2]) {
       Object.defineProperty(rec.dynamodb!.NewImage!.metadata!, 'M', {
         get() {
@@ -397,10 +404,10 @@ describe('approval-metrics-publisher handler', () => {
       capture.restore();
     }
 
-    // Both records flagged for partial-batch retry.
+    // Both records flagged for partial-batch retry, by sequence number.
     expect(result!.batchItemFailures).toEqual([
-      { itemIdentifier: 'poison-a' },
-      { itemIdentifier: 'poison-b' },
+      { itemIdentifier: '4901' },
+      { itemIdentifier: '4902' },
     ]);
     // Heartbeat MUST fire despite 100% of records being poison.
     const names = capture.lines.map(metricOf).filter((m) => m !== null).map((m) => m!.name);

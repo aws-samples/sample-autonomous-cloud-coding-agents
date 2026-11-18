@@ -56,6 +56,7 @@ import { claimTerminalReply, releaseReplyClaim, terminalReplyClaimed } from './s
 import {
   buildAdfDocument,
   postIssueCommentAdf,
+  type AdfParagraph,
 } from './shared/jira-feedback';
 import { updateJiraIterationComment } from './shared/jira-preview';
 import {
@@ -724,6 +725,21 @@ function resolveCommentTarget(task: TaskRecord): number | null {
 }
 
 /**
+ * The PR link to show for an event. The agent stores ``pr_url`` on the task
+ * only with its terminal status, after it wrote the ``pr_created`` milestone,
+ * so the task read made for that milestone often comes too early. The
+ * milestone carries the URL itself, as its ``details`` text
+ * (``agent/src/pipeline.py``), so that is the fallback.
+ */
+function prUrlFor(task: TaskRecord, event: FanOutEvent): string | null {
+  if (task.pr_url) return task.pr_url;
+  const details = event.metadata?.details;
+  return effectiveEventType(event) === 'pr_created' && typeof details === 'string' && /^https:\/\/\S+$/.test(details)
+    ? details
+    : null;
+}
+
+/**
  * Resolve the GitHub token ARN for a task. Per-repo config wins; fall
  * back to the Lambda's platform default env var so freshly-onboarded
  * repos without an override still work.
@@ -834,7 +850,7 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     repo: task.repo,
     latestEventType: renderedEventType,
     latestEventAt: event.timestamp,
-    prUrl: task.pr_url ?? null,
+    prUrl: prUrlFor(task, event),
     // The agent stores these fields as DynamoDB strings (see
     // ``shared/numeric.ts``). Without coercion
     // ``costUsd.toFixed(4)`` throws ``TypeError`` and the dispatcher
@@ -880,7 +896,29 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
       });
       clearTokenCache();
       const freshToken = await resolveGitHubToken(tokenArn);
-      result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+      try {
+        result = await upsertTaskComment({ ...upsertParams, token: freshToken });
+      } catch (retryErr) {
+        // The freshly read token is refused as well, so it is expired or
+        // revoked: redelivering the record cannot change that. Channel-
+        // terminal like the 4xx answers below; anything else is rethrown.
+        if (
+          !(retryErr instanceof Error)
+          || retryErr.name !== 'GitHubCommentError'
+          || (retryErr as { httpStatus?: unknown }).httpStatus !== 401
+        ) {
+          throw retryErr;
+        }
+        logger.warn('[fanout/github] 401 from GitHub with a fresh token too — swallowing per channel policy', {
+          event: 'fanout.github.api_error',
+          task_id: event.task_id,
+          event_id: event.event_id,
+          http_status: 401,
+          token_arn: tokenArn,
+          error: retryErr.message,
+        });
+        return;
+      }
     } else if (
       isGhErr
       && typeof httpStatus === 'number'
@@ -1226,9 +1264,10 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
       return;
     }
     // First-run PR-opened comment. Skip if we've already posted it, or if
-    // there's no PR URL yet (nothing to link).
-    if (task.linear_pr_comment_event_id || !task.pr_url) return;
-    const prBody = renderLinearPrOpenedComment(task.pr_url, task.pr_number ?? null);
+    // neither the task nor the milestone gives a PR URL (nothing to link).
+    const prUrl = prUrlFor(task, event);
+    if (task.linear_pr_comment_event_id || !prUrl) return;
+    const prBody = renderLinearPrOpenedComment(prUrl, task.pr_number ?? null);
     const prResult = await postIssueComment(
       { linearWorkspaceId: workspaceId, registryTableName },
       issueId,
@@ -1389,7 +1428,8 @@ async function dispatchToLinear(event: FanOutEvent): Promise<void> {
  * iteration. Idempotent: claims the one reply by conditionally stamping
  * ``ack_replied_at`` on the task record, so a redelivered terminal stream
  * record never double-replies (mirrors the reconciler's orchestration-iteration
- * ack). Best-effort — never throws into the dispatcher.
+ * ack). Best-effort, with one exception: a reply that failed while attempts
+ * remain throws, so that the stream record is delivered again.
  */
 async function replyToStandaloneTrigger(
   event: FanOutEvent,
@@ -1492,18 +1532,26 @@ async function replyToStandaloneTrigger(
     // both a redelivery from retrying AND the progress writers from touching the
     // reply again (they read the claim as "an outcome has landed"), leaving the
     // human's request looking unanswered forever. Hand it back — but only while
-    // attempts remain, since each release re-wakes this handler via the task
-    // record's own stream.
+    // attempts remain, so a reply that can never land is not retried without end.
     const release = await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp);
     if (release !== 'exhausted') {
-      // A retry is still coming. Return before the reaction swap so the comment
-      // does not read ✅ next to a reply that still says "On it".
+      // Stop before the reaction swap so the comment does not read ✅ next to a
+      // reply that still says "On it".
       logger.warn('[fanout/linear] terminal reply edit failed — deferring to another attempt', {
         event: 'fanout.linear.terminal_reply_failed',
         task_id: task.task_id,
         issue_id: issueId,
         release,
       });
+      if (release === 'released') {
+        // The retry has to be asked for: the release is a write to the task table,
+        // and this Lambda reads only the stream of the task EVENTS table. Reporting
+        // the record as failed is what delivers the event again. ('not_ours' means
+        // another delivery owns the reply, so there is nothing to retry.)
+        throw new Error(
+          `[fanout/linear] terminal reply failed for task ${task.task_id} — escalating for batch retry`,
+        );
+      }
       return;
     }
     // No attempt is coming, so fall through and let the reaction carry the
@@ -1551,6 +1599,40 @@ async function sumIterationCostForIssue(
 }
 
 export { renderJiraFinalStatusComment };
+
+/**
+ * Clarify-and-hold on a Jira issue: the first run stopped to ask a question
+ * and shipped nothing (``code_changed === false``, no PR), so the comment is
+ * that question — "✅ Task completed" would read as done. Null for any other
+ * outcome, including an iteration that answered without changing code. Jira
+ * has no reply-to-resume path (Linear has one), hence the closing line.
+ *
+ * The question is the agent's own text and may spell out the ``@bgagent``
+ * mention, and Jira attributes this comment to the user who authorized the
+ * app. So it opens with ``🤖 ABCA ``, a marker ``isKnownAbcaComment``
+ * (``shared/comment-trigger.ts``) refuses to read as a trigger, with the
+ * emoji outside the bold run so the marker survives a wiki-text body too.
+ */
+function renderJiraHoldQuestion(task: TaskRecord, event: FanOutEvent): ReadonlyArray<AdfParagraph> | null {
+  if (
+    task.channel_metadata?.trigger_comment_id
+    || event.event_type !== 'task_completed'
+    || task.code_changed !== false
+    || task.pr_url
+  ) {
+    return null;
+  }
+  const question = typeof task.answer_text === 'string' ? task.answer_text.trim() : '';
+  return [
+    [{ text: '🤖 ' }, { text: 'ABCA has a question before it starts', strong: true }],
+    // One paragraph per line: an ADF text node does not honor newlines.
+    ...(question || 'Could you share a bit more detail so I build the right thing?')
+      .split(/\r?\n/)
+      .map((line) => (line ? [{ text: line }] : [])),
+    [{ text: 'Add the details to the issue, then re-apply the trigger label to run it again.' }],
+    [{ text: `task ${task.task_id}`, em: true }],
+  ];
+}
 
 /**
  * Jira dispatcher — posts a deterministic final-status comment when a
@@ -1642,8 +1724,15 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   // error_message is empty (the task_completed case).
   const classification = classifyError(task.error_message);
 
-  const paragraphs = renderJiraFinalStatusComment({
-    eventType: event.event_type,
+  // A completed iteration whose build is red is not a clean success: it gets
+  // the failure pointer and frame, as it does on Linear, in the reconciler and
+  // when ``jira-preview.ts`` re-renders the comment.
+  const eventType = isIteration && event.event_type === 'task_completed' && task.build_passed === false
+    ? 'task_failed'
+    : event.event_type;
+
+  const paragraphs = renderJiraHoldQuestion(task, event) ?? renderJiraFinalStatusComment({
+    eventType,
     prUrl: task.pr_url ?? null,
     // The agent stores cost, duration and the turn counters as DynamoDB
     // strings; coerce so toFixed/comparisons work. Same pattern the
@@ -1683,7 +1772,7 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     );
     if (!claim.won) return;
 
-    const pointerKind: JiraFinishedPointerKind = event.event_type !== 'task_completed'
+    const pointerKind: JiraFinishedPointerKind = eventType !== 'task_completed'
       ? 'details'
       : (task.code_changed === false ? 'answer' : 'result');
     const updateResult = await updateJiraIterationComment(
@@ -1694,12 +1783,13 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
       { body: buildAdfDocument(renderJiraFinishedPointer(pointerKind)), terminal: true },
     );
     if (!updateResult.ok) {
-      const release = await releaseReplyClaim(
-        ddb,
-        tableName,
-        task.task_id,
-        claim.stamp,
-      );
+      // A transient failure hands the claim back and retries the record while
+      // attempts remain. A status comment that cannot be edited at all (it was
+      // deleted, or the attempts are spent) must not take the outcome with it:
+      // the claim stays and the result is posted below as its own comment.
+      const release = updateResult.retryable
+        ? await releaseReplyClaim(ddb, tableName, task.task_id, claim.stamp)
+        : undefined;
       logger.warn('[fanout/jira] iteration pointer update failed (non-fatal)', {
         event: 'fanout.jira.iteration_pointer_failed',
         task_id: task.task_id,
@@ -1713,7 +1803,6 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
           `[fanout/jira] transient Jira iteration pointer failure for task ${task.task_id}`,
         );
       }
-      return;
     }
 
     const finalResult = await postIssueCommentAdf(
@@ -1960,10 +2049,11 @@ export async function routeEvent(
  *     future refactor (e.g. a stricter ``parseStreamRecord``) from
  *     crashing the whole batch.
  *
- * On any caught throw we push ``{ itemIdentifier: record.eventID }`` so
- * Lambda retries ONLY that record, isolating the poison pill per
- * design §6 + §8.9 expectations. Successful records are NOT in
- * ``batchItemFailures`` and advance the stream checkpoint normally.
+ * On any caught throw we push the record's stream sequence number as the
+ * ``itemIdentifier``: it is the only value Lambda can checkpoint a shard
+ * on. Lambda checkpoints at the lowest one reported and retries from
+ * there — the failed record and those after it, not the ones before it —
+ * which isolates the poison pill per design §6 + §8.9 expectations.
  *
  * Two review findings shaped this shape: the fanout handler used to return
  * ``void`` despite ``reportBatchItemFailures: true``, and a ``routeEvent``
@@ -1993,6 +2083,7 @@ export const handler = async (
 
   for (const record of event.Records) {
     processed++;
+    const sequenceNumber = record.dynamodb?.SequenceNumber;
     try {
       const ev = parseStreamRecord(record);
       if (!ev) {
@@ -2028,8 +2119,8 @@ export const handler = async (
       // attempt has a chance to succeed. Without this push, a transient
       // failure would be silently dropped — the regression that
       // motivated this fix.
-      if (outcome.infraRejections.length > 0 && record.eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: record.eventID });
+      if (outcome.infraRejections.length > 0 && sequenceNumber !== undefined) {
+        batchItemFailures.push({ itemIdentifier: sequenceNumber });
       }
     } catch (err) {
       // Poison-pill isolation: one record's unhandled throw must not
@@ -2037,21 +2128,20 @@ export const handler = async (
       // paths that can reach here (notably AccessDeniedException from
       // ``resolveTokenSecretArn``).
       //
-      // ``eventID`` is the stream-record identifier Lambda uses for the
-      // retry cursor; on Kinesis-style event-source-mappings with
+      // The sequence number is the stream-record identifier Lambda uses
+      // for the retry cursor; on Kinesis-style event-source-mappings with
       // ``reportBatchItemFailures: true`` the service retries all
       // records at-or-after the lowest-sequence failure. Returning even
       // one failed itemIdentifier is enough to preserve ordering across
       // the whole batch for that task.
-      const eventID = record.eventID;
       logger.warn('[fanout] record threw — flagging for partial-batch retry', {
         event: 'fanout.record.failed',
-        event_id: eventID,
+        event_id: record.eventID,
         error: err instanceof Error ? err.message : String(err),
         error_name: err instanceof Error ? err.name : undefined,
       });
-      if (eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: eventID });
+      if (sequenceNumber !== undefined) {
+        batchItemFailures.push({ itemIdentifier: sequenceNumber });
       }
     }
   }
