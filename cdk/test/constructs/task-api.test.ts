@@ -102,6 +102,31 @@ function createStackWithBudget(): { stack: Stack; template: Template } {
   return { stack, template: Template.fromStack(stack) };
 }
 
+// Presigned-upload flow: the attachments bucket and the user-concurrency table
+// together are what make TaskApi create the confirm-uploads Lambda.
+function createStackWithAttachments(overrides?: Partial<TaskApiProps>): { stack: Stack; template: Template } {
+  const app = new App();
+  const stack = new Stack(app, 'TestStack');
+  const taskTable = new dynamodb.Table(stack, 'TaskTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+  });
+  const taskEventsTable = new dynamodb.Table(stack, 'TaskEventsTable', {
+    partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'event_id', type: dynamodb.AttributeType.STRING },
+  });
+  const userConcurrencyTable = new dynamodb.Table(stack, 'UserConcurrencyTable', {
+    partitionKey: { name: 'user_id', type: dynamodb.AttributeType.STRING },
+  });
+  new TaskApi(stack, 'TaskApi', {
+    taskTable,
+    taskEventsTable,
+    attachmentsBucket: new s3.Bucket(stack, 'AttachmentsBucket'),
+    userConcurrencyTable,
+    ...overrides,
+  });
+  return { stack, template: Template.fromStack(stack) };
+}
+
 // Full surface: webhookTable AND apiKeyTable both provided (all tables in the
 // same app/stack — CDK forbids cross-app resource references).
 function createStackWithWebhooksAndApiKeys(): { stack: Stack; template: Template } {
@@ -246,6 +271,24 @@ describe('TaskApi construct', () => {
     expect(replayFn).toBeDefined();
     expect(replayFn![1].Properties.Timeout).toBe(15);
     expect(replayFn![1].Properties.MemorySize).toBe(512);
+  });
+
+  test('ListTasksFn gets raised timeout/memory, not the 3s/128MB defaults (#51)', () => {
+    // A filtered list pages until the page is full (up to 10 Queries).
+    const functions = baseTemplate.findResources('AWS::Lambda::Function');
+    const listTasksFn = Object.entries(functions).find(([id]) => id.startsWith('TaskApiListTasksFn'));
+    expect(listTasksFn).toBeDefined();
+    expect(listTasksFn![1].Properties.Timeout).toBe(15);
+    expect(listTasksFn![1].Properties.MemorySize).toBe(256);
+  });
+
+  test('ListTasksFn may describe the task table: it asks whether the list index is ACTIVE (#51)', () => {
+    const policies = baseTemplate.findResources('AWS::IAM::Policy');
+    const listTasksPolicy = Object.entries(policies)
+      .find(([id]) => id.startsWith('TaskApiListTasksFnServiceRoleDefaultPolicy'));
+    const statements = (listTasksPolicy?.[1].Properties.PolicyDocument.Statement ?? []) as { Action: string[]; Resource: unknown }[];
+    const taskTableRead = statements.find((statement) => JSON.stringify(statement.Resource).includes('"TaskTable'));
+    expect(taskTableRead?.Action).toEqual(expect.arrayContaining(['dynamodb:Query', 'dynamodb:DescribeTable']));
   });
 
   test('Lambda functions have correct environment variables', () => {
@@ -655,6 +698,24 @@ describe('TaskApi construct with webhooks', () => {
         ]),
       },
     });
+  });
+});
+
+describe('TaskApi construct — confirm-uploads admission cap', () => {
+  /** MAX_CONCURRENT_TASKS_PER_USER as the confirm-uploads Lambda receives it. */
+  function confirmUploadsCap(template: Template): unknown {
+    const confirmUploadsFn = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .find(([id]) => id.startsWith('TaskApiConfirmUploadsFn'));
+    expect(confirmUploadsFn).toBeDefined();
+    return confirmUploadsFn![1].Properties.Environment.Variables.MAX_CONCURRENT_TASKS_PER_USER;
+  }
+
+  test('ConfirmUploadsFn gets the per-user cap (default 10), not the handler fallback of 3', () => {
+    expect(confirmUploadsCap(createStackWithAttachments().template)).toBe('10');
+  });
+
+  test('ConfirmUploadsFn respects custom maxConcurrentTasksPerUser', () => {
+    expect(confirmUploadsCap(createStackWithAttachments({ maxConcurrentTasksPerUser: 5 }).template)).toBe('5');
   });
 });
 

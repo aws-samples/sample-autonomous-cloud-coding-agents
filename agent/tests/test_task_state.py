@@ -176,8 +176,9 @@ class TestWriteSessionInfo:
 class TestWriteRunningMaintainsStatusCreatedAt:
     """Regression guard: ``write_running`` must rewrite ``status_created_at``
     so the ``UserStatusIndex`` GSI sort key reflects the current status.
-    Without this, ``bga list`` sorts by the stale SUBMITTED prefix and newly
-    running / completed / cancelled tasks appear after stale SUBMITTED rows.
+    Its readers rely on that: the queue-position lookup in ``get-task``
+    selects on the prefix, and the stranded-task sweep and
+    ``bgagent ops stuck-tasks`` age a task by the timestamp.
     """
 
     def test_writes_status_created_at_with_running_prefix(self, monkeypatch):
@@ -249,6 +250,36 @@ class TestWriteTerminalMaintainsStatusCreatedAt:
         sca_ts = values[":sca"].split("#", 1)[1]
         completed_at = values[":t"]
         assert sca_ts == completed_at
+
+
+class TestApprovalTransitionsMaintainStatusCreatedAt:
+    """The stranded-approval sweep ages a paused task by the timestamp inside
+    ``status_created_at``. Both approval transitions must rewrite it, or the
+    sweep's two-hour limit runs from the start of RUNNING."""
+
+    def test_approval_request_stamps_awaiting_approval(
+        self, approval_tables_env, approval_row, monkeypatch
+    ):
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-11-15T03:30:00Z")
+        client = MagicMock()
+
+        task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][1]["Update"]
+        assert "status_created_at = :sca" in upd["UpdateExpression"]
+        assert upd["ExpressionAttributeValues"][":sca"] == {
+            "S": "AWAITING_APPROVAL#2026-11-15T03:30:00Z"
+        }
+
+    def test_resume_stamps_running(self, approval_tables_env, monkeypatch):
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-11-15T03:35:00Z")
+        client = MagicMock()
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
+        assert "status_created_at = :sca" in upd["UpdateExpression"]
+        assert upd["ExpressionAttributeValues"][":sca"] == {"S": "RUNNING#2026-11-15T03:35:00Z"}
 
 
 class TestWriteTerminalTraceS3Uri:

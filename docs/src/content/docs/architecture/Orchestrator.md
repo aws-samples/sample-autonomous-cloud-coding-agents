@@ -199,7 +199,7 @@ Assembles the agent's user prompt and transitions the task to `HYDRATING`. The i
 
 **PR workflows (`coding/pr-iteration-v1` / `coding/pr-review-v1`):** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
 
-Regardless of workflow, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
+Regardless of workflow, the external GitHub content (issue or PR title, body, comment authors and bodies, plus PR branch names, rendered review paths and diff) is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
 
 ### Step 4: Session start
 
@@ -348,7 +348,7 @@ Each task runs in its own isolated compute session with no shared mutable state 
 |---|---|---|
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
-| Per-user concurrency | Configurable (default 3-5) | Platform config |
+| Per-user concurrency | Configurable (default 10) | Platform config |
 | System-wide max tasks | Configurable | Bounded by selected-backend quotas |
 
 ### Counter management
@@ -435,14 +435,14 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `model_id` | String? | Foundation model ID |
 | `prompt_version` | String | System prompt hash for evaluation correlation |
 | `blueprint_config` | Map? | Snapshot of `RepoConfig` at task creation |
-| `cost_usd` | Number? | Agent cost from SDK |
-| `duration_s` | Number? | Total duration |
+| `cost_usd` | String? | Agent cost from SDK, written by the agent as a string |
+| `duration_s` | String? | Total duration in seconds, written by the agent as a string |
 | `ttl` | Number? | DynamoDB TTL (default: created_at + 90 days) |
 | `created_at` / `updated_at` | String | ISO 8601 timestamps |
 
-> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
+> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/blocked/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
 
-**GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse).
+**GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `UserCreatedAtIndex` (PK: `user_id`, SK: `created_at`; the task list, newest first), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse), `LinearIssueIndex` (PK: `linear_issue_id`, SK: `created_at`, sparse), `JiraIssueIndex` (PK: `jira_issue_identity`, SK: `created_at`, sparse).
 
 ### TaskEvents table
 

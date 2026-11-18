@@ -39,6 +39,8 @@ mise //cdk:destroy          # destroy stack
 
 Construct tests: synthesize each distinct stack config once in `beforeAll`, assert against cached `Template` — do not re-synth per test. Bundling is disabled globally via `test/setup/disable-bundling.ts` (see Common mistakes).
 
+Emulator-backed tests (`test/emulator/*.emulator.ts`) run real handlers against a local AWS Emulator. `mise //cdk:test` does not run them: use `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md).
+
 ## Primary locations
 
 | Path | Access | Purpose |

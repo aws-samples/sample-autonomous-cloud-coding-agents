@@ -1,0 +1,14 @@
+# Findings accepted temporarily in the agent image scan (`mise //agent:security:image`).
+# An entry applies to the whole image. Each one expires (exp:YYYY-MM-DD is the first
+# day, in UTC, on which it no longer applies) so that the scan fails again and the
+# finding is re-reviewed. Nothing warns ahead of that day: the weekly expiry warning
+# reads only the osv-scanner.toml files. Remove an entry as soon as a fixed release is
+# available.
+
+# golang.org/x/net/html, quadratic text-node parsing (GO-2026-6860), reported for
+# usr/local/bin/gh. On 2026-11-16 no gh release requires x/net >= 0.62.0, which has the
+# fix: 2.103.3 requires 0.60.0, 2.104.0 requires 0.61.0, cli/cli trunk 0.62.0. The
+# functions the advisory names (html.Parse and the parser behind it) are not linked into
+# the binary: gh keeps only the tokenizer (`govulncheck -mode binary` and `go tool nm`).
+# Remove this with the GH_VERSION bump in agent/Dockerfile that brings x/net 0.62.0.
+CVE-2026-78661 exp:2026-12-16

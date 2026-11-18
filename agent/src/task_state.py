@@ -189,9 +189,11 @@ def write_running(task_id: str) -> None:
     Updates ``status_created_at`` alongside ``status`` so the
     ``UserStatusIndex`` GSI sort key reflects the current status.  Writers
     that transition the task (``create-task-core``, ``cancel-task``,
-    ``reconcile-stranded-tasks``) all rewrite this field; keeping Python
-    in sync is required for ``bga list`` to return tasks in the expected
-    order.
+    ``reconcile-stranded-tasks``) all rewrite this field, and Python must
+    too.  Its readers take the prefix for the current status (the
+    queue-position lookup in ``get-task``) and the timestamp for when that
+    status was entered (the stranded-task sweep in
+    ``reconcile-stranded-tasks`` and ``bgagent ops stuck-tasks``).
     """
     try:
         table = _get_table()
@@ -703,7 +705,8 @@ def transact_write_approval_request(
                         "TableName": task_table,
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
-                            "SET #s = :awaiting, awaiting_approval_request_id = :rid"
+                            "SET #s = :awaiting, awaiting_approval_request_id = :rid, "
+                            "status_created_at = :sca"
                         ),
                         "ConditionExpression": "#s = :running",
                         "ExpressionAttributeNames": {"#s": "status"},
@@ -711,6 +714,7 @@ def transact_write_approval_request(
                             ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
                             ":running": {"S": _STATUS_RUNNING},
                             ":rid": {"S": request_id},
+                            ":sca": {"S": f"{_STATUS_AWAITING_APPROVAL}#{_now_iso()}"},
                         },
                     }
                 },
@@ -763,14 +767,15 @@ def transact_resume_from_approval(
                         "TableName": task_table,
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
-                            "SET #s = :running, agent_heartbeat_at = :heartbeat "
-                            "REMOVE awaiting_approval_request_id"
+                            "SET #s = :running, agent_heartbeat_at = :heartbeat, "
+                            "status_created_at = :sca REMOVE awaiting_approval_request_id"
                         ),
                         "ConditionExpression": (
                             "#s = :awaiting AND awaiting_approval_request_id = :rid"
                         ),
                         "ExpressionAttributeNames": {"#s": "status"},
                         "ExpressionAttributeValues": {
+                            ":sca": {"S": f"{_STATUS_RUNNING}#{_now_iso()}"},
                             ":running": {"S": _STATUS_RUNNING},
                             ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
                             ":rid": {"S": request_id},

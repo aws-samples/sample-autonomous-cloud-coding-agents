@@ -227,8 +227,10 @@ export interface TaskRecord {
   readonly updated_at: string;
   readonly started_at?: string;
   readonly completed_at?: string;
-  readonly cost_usd?: number;
-  readonly duration_s?: number;
+  /** The agent stores these two and the turn counters below as DynamoDB
+   *  Strings; read them through ``coerceNumericOrNull``. */
+  readonly cost_usd?: number | string;
+  readonly duration_s?: number | string;
   readonly build_passed?: boolean;
   /**
    * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
@@ -278,10 +280,10 @@ export interface TaskRecord {
   readonly artifact_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
-  readonly turns_attempted?: number;
+  readonly turns_attempted?: number | string;
   /** Rev-5 DATA-1: turns that actually completed (clamped to
    *  `max_turns` when `agent_status='error_max_turns'`). */
-  readonly turns_completed?: number;
+  readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
@@ -936,12 +938,12 @@ export interface AgentAttachmentPayload {
 /**
  * Map a DynamoDB task record to the API detail response shape.
  *
- * All numeric fields sourced from the DDB record are routed through
- * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
- * ``Number`` attributes as JavaScript ``string``s in some code paths
- * (see ``shared/numeric.ts`` for rationale), and any downstream caller
- * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
- * "number" crashes at runtime. Coercing uniformly here means no caller
+ * The numeric fields that may be stored as strings are routed through
+ * ``coerceNumericOrNull`` — the agent stores some of them as DynamoDB
+ * String attributes, which arrive as JavaScript ``string``s
+ * (see ``shared/numeric.ts`` for rationale), and a downstream caller
+ * that calls ``.toFixed`` on a string-typed "number" crashes at
+ * runtime, while ``+`` concatenates. Coercing uniformly here means no caller
  * has to guess which TaskDetail numeric fields are safe — do not bypass
  * the helper when adding new numeric fields.
  *

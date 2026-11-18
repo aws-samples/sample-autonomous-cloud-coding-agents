@@ -835,8 +835,8 @@ async function dispatchToGitHubComment(event: FanOutEvent): Promise<void> {
     latestEventType: renderedEventType,
     latestEventAt: event.timestamp,
     prUrl: task.pr_url ?? null,
-    // DDB returns numeric attributes as strings at the Document-client
-    // boundary (see ``shared/numeric.ts``). Without coercion
+    // The agent stores these fields as DynamoDB strings (see
+    // ``shared/numeric.ts``). Without coercion
     // ``costUsd.toFixed(4)`` throws ``TypeError`` and the dispatcher
     // is rejected for every terminal event.
     durationS: coerceNumericOrNull(
@@ -1645,8 +1645,8 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
   const paragraphs = renderJiraFinalStatusComment({
     eventType: event.event_type,
     prUrl: task.pr_url ?? null,
-    // DDB returns numeric attributes as strings at the Document-client
-    // boundary; coerce so toFixed/comparisons work. Same pattern the
+    // The agent stores cost, duration and the turn counters as DynamoDB
+    // strings; coerce so toFixed/comparisons work. Same pattern the
     // GitHub + Linear dispatchers use.
     costUsd: coerceNumericOrNull(
       task.cost_usd,

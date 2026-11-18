@@ -1125,7 +1125,7 @@ async function finalizeTaskOutcome(taskId: string, pollState: PollState, userId:
       log.info('Agent did not write memory — writing fallback episode');
       try {
         // Coerce at the shared helper rather than ``Number(...)`` so a
-        // corrupt string ``cost_usd`` from the DDB Document client
+        // corrupt ``cost_usd`` (the agent stores it as a string)
         // collapses to ``undefined`` (and logs a warn) rather than
         // rendering ``Cost: $NaN.`` into the episode text — see
         // ``memory.ts::writeMinimalEpisode`` line 325 which calls

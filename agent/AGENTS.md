@@ -49,6 +49,7 @@ Unit tests cannot reach AWS through botocore. `tests/conftest.py` removes the cr
 | `agent/src/prompts/` | WRITE | System prompts per workflow |
 | `agent/src/progress_writer.py` | WRITE | TaskEvents emission |
 | `agent/tests/` | WRITE | pytest suite |
+| `agent/tests_emulator/` | WRITE | Emulator-backed tests: real agent code against a local AWS Emulator. The unit run does not collect them: `mise run test:integration` from the repository root (needs Docker). Rules and known differences from AWS: [scripts/aws-emulator/README.md](../scripts/aws-emulator/README.md). |
 | `agent/README.md` | WRITE | Env vars, PAT notes |
 | `cli/src/commands/watch.ts` | WRITE (if event schema changes) | Event consumer |
 

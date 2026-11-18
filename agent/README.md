@@ -476,6 +476,7 @@ agent/
 │   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
+├── tests_emulator/      Emulator-backed tests: real agent code against a local AWS Emulator (`mise run test:integration`; not collected by the unit run)
 ```
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
