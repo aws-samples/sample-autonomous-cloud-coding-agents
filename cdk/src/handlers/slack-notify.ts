@@ -76,8 +76,8 @@ const TERMINAL_EVENTS = new Set<string>([
  * but ``agent_error`` was not — operators would page twice on a single
  * agent failure if a sibling channel happened to fail.
  *
- * Each entry is an attribute name; ``null`` means the event type is
- * intentionally NOT deduped (lifecycle events ``task_created`` /
+ * Each entry is an attribute name; ``null`` means the event type
+ * claims no marker (lifecycle events ``task_created`` /
  * ``session_started`` use the per-event ``slack_*_msg_ts`` conditional
  * persists instead, which is the right shape since they need to store
  * a value, not just a presence marker).
@@ -91,6 +91,16 @@ const SLACK_DEDUP_ATTRIBUTE: Record<string, string | null> = {
   agent_error: 'slack_dispatched_agent_error',
   task_created: null,
   session_started: null,
+};
+
+/**
+ * The ``channel_metadata`` attribute in which a lifecycle event stores
+ * the ts of the message it posted. A record that arrives when its
+ * attribute is already set is a replay and is skipped before the post.
+ */
+const SLACK_POSTED_MSG_ATTRIBUTE: Record<string, string | undefined> = {
+  task_created: 'slack_created_msg_ts',
+  session_started: 'slack_session_msg_ts',
 };
 
 /** Event types this dispatcher renders. Must stay in sync with the
@@ -198,7 +208,6 @@ function classifySlackError(slackErrorCode: string): 'terminal' | 'retryable' {
  * its standard ``fanout.dispatcher.rejected`` channel without failing
  * the batch.
  */
-// eslint-disable-next-line complexity -- predates the ceiling (46 when it landed); must not grow
 export async function dispatchSlackEvent(
   event: SlackDispatchEvent,
   ddb: DynamoDBDocumentClient,
@@ -233,39 +242,6 @@ export async function dispatchSlackEvent(
   }));
   const task = taskResult.Item as TaskRecord | undefined;
   if (!task || task.channel_source !== 'slack') return;
-
-  // Dedup any event that should only ever post once per task even
-  // under partial-batch retry (terminals, agent_error). The orchestrator
-  // can also write multiple events of the same kind (retries,
-  // reconciler), so the ``ADD`` on the ``channel_metadata.<attr>``
-  // marker claims the right to post for the whole event class.
-  // ``slack_notified_terminal`` covers all 5 terminals collectively;
-  // ``slack_dispatched_agent_error`` covers agent_error separately so
-  // the operator gets the first agent_error but not duplicates from
-  // sibling-channel-failure retries (PR #79 review #4).
-  const dedupAttr = SLACK_DEDUP_ATTRIBUTE[eventType];
-  if (dedupAttr) {
-    try {
-      await ddb.send(new UpdateCommand({
-        TableName: tableName,
-        Key: { task_id: taskId },
-        UpdateExpression: `SET channel_metadata.${dedupAttr} = :t`,
-        ConditionExpression: `attribute_not_exists(channel_metadata.${dedupAttr})`,
-        ExpressionAttributeValues: { ':t': true },
-      }));
-    } catch (err) {
-      if ((err as Error)?.name === 'ConditionalCheckFailedException') {
-        logger.info('[fanout/slack] notification already sent, skipping duplicate', {
-          event: 'fanout.slack.dedup_hit',
-          task_id: taskId,
-          event_type: eventType,
-          dedup_attr: dedupAttr,
-        });
-        return;
-      }
-      throw err;
-    }
-  }
 
   const channelMeta = task.channel_metadata;
   if (!channelMeta?.slack_team_id || !channelMeta?.slack_channel_id) {
@@ -312,42 +288,8 @@ export async function dispatchSlackEvent(
     slackPayload.thread_ts = threadTs;
   }
 
-  const response = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Authorization': `Bearer ${botToken}`,
-    },
-    body: JSON.stringify(slackPayload),
-  });
-  const result = await response.json() as { ok: boolean; ts?: string; error?: string };
-  if (!result.ok) {
-    const errorCode = result.error ?? 'unknown';
-    const failureMessage = `slack chat.postMessage failed: ${errorCode} (task_id=${taskId} event_type=${eventType})`;
-    // Retryable codes (``ratelimited``, ``service_unavailable``,
-    // ``internal_error``) propagate as a plain Error so the router
-    // classifies them as infra rejections and Lambda retries the
-    // record. Terminal codes (``channel_not_found``, ``not_authed``,
-    // ``invalid_blocks``) are wrapped in SlackApiError so the router
-    // swallows them — retrying ``channel_not_found`` won't help.
-    if (classifySlackError(errorCode) === 'retryable') {
-      // Surface ``Retry-After`` (Slack's rate-limit header, in seconds)
-      // so operators reading CloudWatch can see when the next retry
-      // should succeed rather than guessing from sustained warn rate
-      // (PR #79 review #4 mitigation). Header is a string per fetch
-      // Headers spec; coerce defensively for the log.
-      const retryAfter = response.headers.get('retry-after');
-      logger.warn('[fanout/slack] retryable Slack API error', {
-        event: 'fanout.slack.retryable_api_error',
-        task_id: taskId,
-        event_type: eventType,
-        slack_error_code: errorCode,
-        retry_after_seconds: retryAfter ?? undefined,
-      });
-      throw new Error(failureMessage);
-    }
-    throw new SlackApiError(failureMessage);
-  }
+  const result = await postOnce(event, ddb, tableName, channelMeta, botToken, slackPayload);
+  if (!result) return;
 
   // Reactions always use the real channel id even for DMs.
   const reactionChannel = channelMeta.slack_channel_id;
@@ -505,6 +447,153 @@ export async function dispatchSlackEvent(
     team_id: channelMeta.slack_team_id,
     channel_id: channelMeta.slack_channel_id,
   });
+}
+
+/**
+ * Post ``payload`` unless an earlier delivery already posted for this
+ * event. Returns the ``chat.postMessage`` result, or ``null`` for such a
+ * duplicate.
+ */
+async function postOnce(
+  event: SlackDispatchEvent,
+  ddb: DynamoDBDocumentClient,
+  tableName: string,
+  channelMeta: Record<string, string>,
+  botToken: string,
+  payload: Record<string, unknown>,
+): Promise<{ ts?: string } | null> {
+  const { task_id: taskId, event_type: eventType } = event;
+
+  // A lifecycle record that the stream delivers again (partial-batch
+  // retry of this record or of an earlier one in its batch) must not
+  // post again: the row read at dispatch entry already holds the ts of
+  // the message this event produced. A second post, deleted again by
+  // the conditional persist of that ts, would notify the user twice and
+  // put the event's reaction back on a task that may have finished since.
+  const postedAttr = SLACK_POSTED_MSG_ATTRIBUTE[eventType];
+  if (postedAttr && channelMeta[postedAttr]) {
+    logger.info('[fanout/slack] notification already sent, skipping duplicate', {
+      event: 'fanout.slack.dedup_hit',
+      task_id: taskId,
+      event_type: eventType,
+      dedup_attr: postedAttr,
+    });
+    return null;
+  }
+
+  // Dedup any event that should only ever post once per task even
+  // under partial-batch retry (terminals, agent_error). The orchestrator
+  // can also write multiple events of the same kind (retries,
+  // reconciler), so the ``ADD`` on the ``channel_metadata.<attr>``
+  // marker claims the right to post for the whole event class.
+  // ``slack_notified_terminal`` covers all 5 terminals collectively;
+  // ``slack_dispatched_agent_error`` covers agent_error separately so
+  // the operator gets the first agent_error but not duplicates from
+  // sibling-channel-failure retries (PR #79 review #4).
+  const dedupAttr = SLACK_DEDUP_ATTRIBUTE[eventType];
+  if (dedupAttr) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: tableName,
+        Key: { task_id: taskId },
+        UpdateExpression: `SET channel_metadata.${dedupAttr} = :t`,
+        ConditionExpression: `attribute_not_exists(channel_metadata.${dedupAttr})`,
+        ExpressionAttributeValues: { ':t': true },
+      }));
+    } catch (err) {
+      if ((err as Error)?.name === 'ConditionalCheckFailedException') {
+        logger.info('[fanout/slack] notification already sent, skipping duplicate', {
+          event: 'fanout.slack.dedup_hit',
+          task_id: taskId,
+          event_type: eventType,
+          dedup_attr: dedupAttr,
+        });
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  try {
+    return await postMessage(botToken, payload, taskId, eventType);
+  } catch (err) {
+    // The router delivers the record again after anything but a
+    // ``SlackApiError``. Give the claim back first: the retry would
+    // otherwise find the marker, skip the record as a duplicate, and
+    // the message (for a terminal, the task's only final one) would
+    // never be posted. The price is the at-least-once one: a post that
+    // Slack accepted but whose answer was lost is posted again by the
+    // retry. Best-effort: the post failure is what the router has to see.
+    if (dedupAttr && !(err instanceof SlackApiError)) {
+      try {
+        await ddb.send(new UpdateCommand({
+          TableName: tableName,
+          Key: { task_id: taskId },
+          UpdateExpression: `REMOVE channel_metadata.${dedupAttr}`,
+        }));
+      } catch (releaseErr) {
+        logger.error('[fanout/slack] dedup claim not released — the retry will be skipped and the message lost', {
+          event: 'fanout.slack.dedup_release_failed',
+          error_id: 'FANOUT_SLACK_DEDUP_RELEASE_FAILED',
+          task_id: taskId,
+          event_type: eventType,
+          dedup_attr: dedupAttr,
+          error: releaseErr instanceof Error ? releaseErr.message : String(releaseErr),
+        });
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * ``chat.postMessage``. Returns Slack's answer to a post it accepted;
+ * throws ``SlackApiError`` for a terminal Slack error and a plain
+ * ``Error`` for one a retry can fix.
+ */
+async function postMessage(
+  botToken: string,
+  payload: Record<string, unknown>,
+  taskId: string,
+  eventType: string,
+): Promise<{ ts?: string }> {
+  const response = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Authorization': `Bearer ${botToken}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json() as { ok: boolean; ts?: string; error?: string };
+  if (!result.ok) {
+    const errorCode = result.error ?? 'unknown';
+    const failureMessage = `slack chat.postMessage failed: ${errorCode} (task_id=${taskId} event_type=${eventType})`;
+    // Retryable codes (``ratelimited``, ``service_unavailable``,
+    // ``internal_error``) propagate as a plain Error so the router
+    // classifies them as infra rejections and Lambda retries the
+    // record. Terminal codes (``channel_not_found``, ``not_authed``,
+    // ``invalid_blocks``) are wrapped in SlackApiError so the router
+    // swallows them — retrying ``channel_not_found`` won't help.
+    if (classifySlackError(errorCode) === 'retryable') {
+      // Surface ``Retry-After`` (Slack's rate-limit header, in seconds)
+      // so operators reading CloudWatch can see when the next retry
+      // should succeed rather than guessing from sustained warn rate
+      // (PR #79 review #4 mitigation). Header is a string per fetch
+      // Headers spec; coerce defensively for the log.
+      const retryAfter = response.headers.get('retry-after');
+      logger.warn('[fanout/slack] retryable Slack API error', {
+        event: 'fanout.slack.retryable_api_error',
+        task_id: taskId,
+        event_type: eventType,
+        slack_error_code: errorCode,
+        retry_after_seconds: retryAfter ?? undefined,
+      });
+      throw new Error(failureMessage);
+    }
+    throw new SlackApiError(failureMessage);
+  }
+  return result;
 }
 
 /** Map event types to the emoji reaction that should be on the original

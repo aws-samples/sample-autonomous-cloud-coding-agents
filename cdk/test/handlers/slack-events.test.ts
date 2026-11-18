@@ -78,13 +78,14 @@ function makeEvent(body: string, headers: Record<string, string> = {}): APIGatew
   };
 }
 
-function signedEvent(body: string, retryNum?: string): APIGatewayProxyEvent {
+function signedEvent(body: string, retryNum?: string, retryReason?: string): APIGatewayProxyEvent {
   const ts = currentTs();
   const headers: Record<string, string> = {
     'X-Slack-Signature': sign(body, ts),
     'X-Slack-Request-Timestamp': ts,
   };
   if (retryNum) headers['X-Slack-Retry-Num'] = retryNum;
+  if (retryReason) headers['X-Slack-Retry-Reason'] = retryReason;
   return makeEvent(body, headers);
 }
 
@@ -153,6 +154,50 @@ describe('slack-events handler', () => {
     const result = await handler(signedEvent(body, '1'));
     expect(result.statusCode).toBe(200);
     // No lambda invocation because the retry is short-circuited
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('processes the first retry of a mention whose first delivery got an HTTP error', async () => {
+    // The first delivery was answered 5xx or 429 (Secrets Manager throttled the
+    // signing-secret read, API Gateway throttled the request). This handler
+    // answers a mention with a non-2xx status only when it did not invoke the
+    // processor, so nothing was submitted: the retry is the user's request.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+        return Promise.resolve({ SecretString: SIGNING_SECRET });
+      }
+      return Promise.resolve({ SecretString: 'xoxb-bot' });
+    });
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> hi', ts: '1.0' },
+    });
+    const result = await handler(signedEvent(body, '1', 'http_error'));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    // The first delivery may have been processed, only too slowly for Slack.
+    ['1', 'http_timeout'],
+    ['1', 'unknown_error'],
+    // The reason describes the attempt before this one, not the first delivery:
+    // that one may have been processed and then timed out.
+    ['2', 'http_error'],
+  ])('drops retry %s of a mention with reason %s without reprocessing', async (retryNum, retryReason) => {
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> hi', ts: '1.0' },
+    });
+    const result = await handler(signedEvent(body, retryNum, retryReason));
+    expect(result.statusCode).toBe(200);
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 

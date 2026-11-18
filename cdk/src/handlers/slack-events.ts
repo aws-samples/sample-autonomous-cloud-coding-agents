@@ -65,6 +65,15 @@ interface SlackEventPayload {
 /** Event types where retries are idempotent and must be re-processed. */
 const RETRY_ALLOWED_EVENT_TYPES = new Set(['app_uninstalled', 'tokens_revoked']);
 
+/**
+ * `X-Slack-Retry-Reason` values that say the previous delivery failed outright:
+ * Slack got an error status, or no connection at all
+ * (https://docs.slack.dev/apis/events-api/#retries). `http_timeout` and
+ * `unknown_error` are left out on purpose: a delivery that was only too slow for
+ * Slack may have been processed.
+ */
+const FAILED_DELIVERY_RETRY_REASONS = new Set(['http_error', 'connection_failed', 'ssl_error', 'too_many_redirects']);
+
 export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
     if (!event.body) {
@@ -107,10 +116,19 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // a double-submit. For security-critical revocation events, we MUST process
     // retries so a transient failure on first delivery doesn't leave the workspace
     // with a live bot token after uninstall.
+    //
+    // One retry of a user-facing event is processed: the first one, when Slack says
+    // the first delivery failed rather than timed out. This handler answers a
+    // mention with a non-2xx status only when it did not invoke the processor, so
+    // nothing was submitted, and acknowledging the retry would lose the request
+    // without any feedback. Later retries stay acknowledged: their reason describes
+    // only the attempt before them, so the first delivery may have been processed.
     const retryNum = event.headers['X-Slack-Retry-Num'] ?? event.headers['x-slack-retry-num'];
+    const retryReason = event.headers['X-Slack-Retry-Reason'] ?? event.headers['x-slack-retry-reason'];
+    const firstDeliveryFailed = retryNum === '1' && FAILED_DELIVERY_RETRY_REASONS.has(retryReason ?? '');
     const eventType = payload.type === 'event_callback' ? payload.event?.type : undefined;
-    if (retryNum && !(eventType && RETRY_ALLOWED_EVENT_TYPES.has(eventType))) {
-      logger.info('Acknowledging Slack retry without reprocessing', { retry_num: retryNum, event_type: eventType });
+    if (retryNum && !firstDeliveryFailed && !(eventType && RETRY_ALLOWED_EVENT_TYPES.has(eventType))) {
+      logger.info('Acknowledging Slack retry without reprocessing', { retry_num: retryNum, retry_reason: retryReason, event_type: eventType });
       return jsonResponse(200, { ok: true });
     }
 
