@@ -1152,6 +1152,10 @@ export class AgentStack extends Stack {
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
         userConcurrencyTable: userConcurrencyTable.table,
+        // ECS parity: NUDGES_TABLE_NAME in the container env, without which the
+        // agent's nudge reader is off. No task-role grant: the agent reads the
+        // table through the SessionRole, which lists it above.
+        taskNudgesTable: taskNudgesTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
         // ECS parity: pass the Memory construct (not just its id) so the task
@@ -1782,11 +1786,11 @@ export class AgentStack extends Stack {
     }
 
     // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
-    // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
-    // rejection path can post a Linear comment + ❌. The orchestrator only
-    // resolves a token when `task.channel_source === 'linear'`, but the
-    // IAM grant is unconditional (per-workspace secrets are created lazily
-    // by `bgagent linear setup`).
+    // OAuth-secret-prefix grant into the orchestrator so that it can post the
+    // queued notice as a Linear comment when a task is queued at the
+    // concurrency cap. The orchestrator only resolves a token when
+    // `task.channel_source === 'linear'`, but the IAM grant is unconditional
+    // (per-workspace secrets are created lazily by `bgagent linear setup`).
     if (linearIntegration) {
       linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
       orchestrator.fn.addEnvironment(
@@ -1905,7 +1909,7 @@ export class AgentStack extends Stack {
       }
 
       // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
-      // grant into the orchestrator so the concurrency-cap rejection path
+      // grant into the orchestrator so the concurrency-cap queueing path
       // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
       // comment. The orchestrator only resolves a token when
       // `task.channel_source === 'jira'`, but the IAM grant is unconditional

@@ -52,6 +52,16 @@ export interface EcsAgentClusterProps {
   readonly memoryId?: string;
 
   /**
+   * Table of mid-task nudges (`bgagent nudge`). When provided, the container
+   * gets `NUDGES_TABLE_NAME`; without it the agent's nudge reader is off, so a
+   * nudge the API accepted for an ECS task is never delivered. The agent reads
+   * the table through the SessionRole, which must list it; without a SessionRole
+   * the task role is granted the two calls the reader makes. Omitted in isolated
+   * construct tests → no env, no grant.
+   */
+  readonly taskNudgesTable?: dynamodb.ITable;
+
+  /**
    * Optional Fargate task sizing overrides. Any unset field uses the generous
    * default; a consumer with a lighter repo should shrink the build task to cut
    * cost. See {@link EcsTaskSizing}.
@@ -257,6 +267,7 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   'TASK_TABLE_NAME',
   'TASK_EVENTS_TABLE_NAME',
   'USER_CONCURRENCY_TABLE_NAME',
+  'NUDGES_TABLE_NAME',
   'LOG_GROUP_NAME',
   'GITHUB_TOKEN_SECRET_ARN',
   'MEMORY_ID',
@@ -414,6 +425,10 @@ export class EcsAgentCluster extends Construct {
       TASK_TABLE_NAME: props.taskTable.tableName,
       TASK_EVENTS_TABLE_NAME: props.taskEventsTable.tableName,
       USER_CONCURRENCY_TABLE_NAME: props.userConcurrencyTable.tableName,
+      // Mid-task nudges, parity with the AgentCore runtime env: without the
+      // table name the agent's nudge reader is off, and a nudge the API accepted
+      // for an ECS task is never delivered.
+      ...(props.taskNudgesTable && { NUDGES_TABLE_NAME: props.taskNudgesTable.tableName }),
       LOG_GROUP_NAME: logGroup.logGroupName,
       GITHUB_TOKEN_SECRET_ARN: props.githubTokenSecret.secretArn,
       ...(props.memoryId && { MEMORY_ID: props.memoryId }),
@@ -556,6 +571,8 @@ export class EcsAgentCluster extends Construct {
       props.agentSessionRole.admitComputeRole(taskRole);
     } else {
       props.taskTable.grantReadWriteData(taskRole);
+      // The two calls of the agent's nudge reader: read pending, mark consumed.
+      props.taskNudgesTable?.grant(taskRole, 'dynamodb:Query', 'dynamodb:UpdateItem');
       props.taskEventsTable.grantReadWriteData(taskRole);
     }
     // UserConcurrencyTable is user-scoped (not task_id leading-key-able) and is

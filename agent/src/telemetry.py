@@ -547,8 +547,10 @@ def print_metrics(metrics: dict):
     human-readable table to stdout for operator console inspection.
 
     Native types (int, float, bool, None) are preserved in the JSON payload.
-    None values become JSON ``null`` and are excluded by ``ispresent()``
-    filters in the dashboard queries. Raw ``error`` text is never logged verbatim.
+    None values become JSON ``null``. The ``parse`` patterns of the dashboard
+    queries match a real value only, so their ``ispresent()`` filters leave an
+    event with a ``null`` out. ``error`` text is logged after a scan that
+    replaces secret patterns (see ``_metrics_payload_for_logging``).
     """
     safe = _metrics_payload_for_logging(metrics)
     json_payload: dict = {"event": "METRICS_REPORT", **safe}

@@ -155,13 +155,18 @@ export class TaskDashboard extends Construct {
     );
 
     // --- Row 3: Build and lint verification ---
+    // The agent writes `null` when no build or lint ran (a task without a
+    // repository, a crashed task, a build command that could not run). The two
+    // patterns match `true` and `false` but not `null`, so that `ispresent`
+    // drops such an event instead of counting it as a failed run.
     this.dashboard.addWidgets(
       new cloudwatch.LogQueryWidget({
         title: 'Build Pass Rate (24h)',
         logGroupNames: [logGroup.logGroupName],
         queryLines: [
           'filter @message like "METRICS_REPORT"',
-          'parse @message /"build_passed":\\s*(?<bp_raw>[^,}]+)/',
+          // [tf][a-z]+, not true|false: AWS's `parse` examples show no `|`, and it could not be tried here.
+          'parse @message /"build_passed":\\s*(?<bp_raw>[tf][a-z]+)/',
           'filter ispresent(bp_raw)',
           'stats sum(bp_raw = "true") / count(*) * 100 as build_pass_rate_pct by bin(1h)',
         ],
@@ -174,7 +179,8 @@ export class TaskDashboard extends Construct {
         logGroupNames: [logGroup.logGroupName],
         queryLines: [
           'filter @message like "METRICS_REPORT"',
-          'parse @message /"lint_passed":\\s*(?<lp_raw>[^,}]+)/',
+          // [tf][a-z]+ for the same reason as in the build widget.
+          'parse @message /"lint_passed":\\s*(?<lp_raw>[tf][a-z]+)/',
           'filter ispresent(lp_raw)',
           'stats sum(lp_raw = "true") / count(*) * 100 as lint_pass_rate_pct by bin(1h)',
         ],

@@ -1250,6 +1250,29 @@ describe('AgentStack with the ECS substrate gate (--context compute_type=ecs)', 
       Memory: '16384',
     });
   });
+
+  test('both ECS task definitions name the nudges table, so a nudge reaches an ECS agent', () => {
+    // Without NUDGES_TABLE_NAME the agent's nudge reader switches itself off:
+    // `bgagent nudge` answers 202, the row is written, and nothing reads it.
+    const nudgesTable = Object.keys(template.findResources('AWS::DynamoDB::Table'))
+      .find(id => id.startsWith('TaskNudgesTable'));
+    expect(nudgesTable).toBeDefined();
+    const definitions = Object.values(template.findResources('AWS::ECS::TaskDefinition'));
+    expect(definitions).toHaveLength(2);
+    for (const definition of definitions) {
+      expect(definition.Properties.ContainerDefinitions[0].Environment).toContainEqual({
+        Name: 'NUDGES_TABLE_NAME',
+        Value: { Ref: nudgesTable },
+      });
+    }
+    // The agent reads the table with the per-task SessionRole, as it does the
+    // other task tables: the task role itself gets no statement on it.
+    const rolesGrantedTheTable = Object.entries(template.findResources('AWS::IAM::Policy'))
+      .filter(([, policy]) => JSON.stringify(policy).includes(nudgesTable!))
+      .map(([id]) => id.replace(/DefaultPolicy.*$/, ''));
+    expect(rolesGrantedTheTable).toContain('AgentSessionRole');
+    expect(rolesGrantedTheTable).not.toContain('EcsAgentClusterTaskRole');
+  });
 });
 
 describe('AgentStack with the Lambda MicroVMs substrate gate (--context compute_type=lambda-microvm)', () => {

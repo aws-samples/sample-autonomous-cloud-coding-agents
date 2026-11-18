@@ -376,6 +376,18 @@ export class TaskApi extends Construct {
         metricName: 'TaskApiWebAcl',
         sampledRequestsEnabled: true,
       },
+      // Sampling keeps the name and value of every header of a sampled request
+      // for three hours, readable with wafv2:GetSampledRequests. Two headers are
+      // a complete credential: `Authorization` (the Cognito token) and
+      // `X-API-Key` (the platform stores only the hash of that key). WAF writes
+      // REDACTED in their place; the rules still inspect the real request, and
+      // the header names match in any letter case.
+      dataProtectionConfig: {
+        dataProtections: [{
+          action: 'SUBSTITUTION',
+          field: { fieldType: 'SINGLE_HEADER', fieldKeys: ['authorization', 'x-api-key'] },
+        }],
+      },
       rules: [
         {
           // CRS for task paths that accept large bodies (inline base64
