@@ -25,6 +25,12 @@ import { makeDocClient } from './ua';
 const ddb = makeDocClient();
 
 /**
+ * Time limit of one identifier query. Without one a Linear that accepts the
+ * request and does not answer holds the caller until its own Lambda timeout.
+ */
+const REQUEST_TIMEOUT_MS = 5_000;
+
+/**
  * Linear issue identifier shape, e.g. `ENG-42`. Linear identifiers are
  * `<TEAM_KEY>-<NUMBER>` where the key is uppercase letters and digits is
  * a positive integer. We bound the team key length [1,10] and number
@@ -106,17 +112,19 @@ query IssueByIdentifier($identifier: String!) {
  *
  * Routing strategy:
  * 1. Scan active workspaces (one round-trip — typical stacks have 1–2).
- * 2. If any row's `team_keys` contains the identifier's team key (`ENG`),
- *    query that workspace directly and return on hit.
- * 3. Otherwise fall back to iterating every active workspace until one
- *    returns a match. This handles rows written before `team_keys` existed
- *    (it back-fills only on the next `setup` / `add-workspace` re-run) and
- *    the rare case where a team was added in Linear after the workspace was
- *    registered.
+ * 2. Query the workspaces whose `team_keys` contain the identifier's team
+ *    key (`ENG`) and return the one that has the issue.
+ * 3. Otherwise fall back to the remaining active workspaces. This handles
+ *    rows written before `team_keys` existed (it back-fills only on the next
+ *    `setup` / `add-workspace` re-run) and the rare case where a team was
+ *    added in Linear after the workspace was registered.
+ *
+ * In either step, two workspaces that both have the issue give null: the
+ * identifier does not say which one is meant.
  *
  * @param identifier `ENG-42`-style Linear issue identifier
  * @param registryTableName name of LinearWorkspaceRegistryTable
- * @returns issue location, or null if no workspace contains the issue
+ * @returns issue location, or null if no workspace, or more than one, contains the issue
  */
 export async function findLinearIssueByIdentifier(
   identifier: string,
@@ -155,47 +163,44 @@ export async function findLinearIssueByIdentifier(
   // Compare uppercase since Linear team keys are upper-case but inbound text
   // (PR titles, branch names) is mixed-case.
   const teamKey = identifier.split('-', 1)[0]?.toUpperCase();
-  const prefixMatch = teamKey
-    ? active.find((ws) => ws.team_keys?.some((k) => k.toUpperCase() === teamKey))
-    : undefined;
+  const listsTeam = (ws: (typeof active)[number]): boolean =>
+    ws.team_keys?.some((k) => k.toUpperCase() === teamKey) ?? false;
 
-  // Try the prefix-matched workspace first.
-  if (prefixMatch) {
-    const resolved = await resolveLinearOauthToken(prefixMatch.linear_workspace_id, registryTableName);
-    if (resolved) {
+  // The workspaces that list the team first; the others (legacy rows without
+  // `team_keys`, post-registration team adds) only when none of those has the
+  // issue. Every workspace of a group is asked, because an identifier is unique
+  // inside one workspace only: when two of them have it, nothing says which one
+  // the caller means, and the first to answer may be another tenant's issue.
+  for (const group of [active.filter(listsTeam), active.filter((ws) => !listsTeam(ws))]) {
+    let hit: LinearIssueLocation | undefined;
+    for (const ws of group) {
+      const resolved = await resolveLinearOauthToken(ws.linear_workspace_id, registryTableName);
+      if (!resolved) continue;
+
       const found = await queryIssueByIdentifier(resolved.accessToken, identifier);
-      if (found) {
-        return {
-          issueId: found,
-          linearWorkspaceId: prefixMatch.linear_workspace_id,
-          workspaceSlug: prefixMatch.workspace_slug,
-        };
+      if (!found) continue;
+      if (hit) {
+        logger.warn('Linear issue lookup: identifier exists in more than one workspace — not guessing', {
+          identifier,
+          workspace_slugs: [hit.workspaceSlug, ws.workspace_slug],
+        });
+        return null;
       }
-    }
-  }
-
-  // Fallback: iterate workspaces NOT already tried via prefix-match.
-  // Covers legacy rows without `team_keys` and post-registration team adds.
-  for (const ws of active) {
-    if (prefixMatch && ws.linear_workspace_id === prefixMatch.linear_workspace_id) continue;
-    const resolved = await resolveLinearOauthToken(ws.linear_workspace_id, registryTableName);
-    if (!resolved) continue;
-
-    const found = await queryIssueByIdentifier(resolved.accessToken, identifier);
-    if (found) {
-      return {
+      hit = {
         issueId: found,
         linearWorkspaceId: ws.linear_workspace_id,
         workspaceSlug: ws.workspace_slug,
       };
     }
+    if (hit) return hit;
   }
   return null;
 }
 
 /**
  * Issue the GraphQL query to Linear; return the issue UUID on hit, null
- * on miss. Never throws — caller iterates onto the next workspace.
+ * on miss. Never throws and gives up after {@link REQUEST_TIMEOUT_MS} —
+ * caller iterates onto the next workspace.
  *
  * Uses `issueVcsBranchSearch` because it accepts the human-readable
  * identifier directly (the regular `issue(id:)` query needs a UUID,
@@ -204,9 +209,12 @@ export async function findLinearIssueByIdentifier(
  * issue rows.
  */
 async function queryIssueByIdentifier(accessToken: string, identifier: string): Promise<string | null> {
-  let resp: Response;
+  let body: {
+    data?: { issueVcsBranchSearch?: { id?: string; identifier?: string } | null };
+    errors?: unknown;
+  };
   try {
-    resp = await fetch('https://api.linear.app/graphql', {
+    const resp = await fetch('https://api.linear.app/graphql', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -216,7 +224,14 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
         query: ISSUE_BY_IDENTIFIER_QUERY,
         variables: { identifier },
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    if (!resp.ok) {
+      logger.warn('Linear issue lookup: graphql non-2xx', { identifier, status: resp.status });
+      return null;
+    }
+    // Inside the try: a body that is not JSON rejects here.
+    body = (await resp.json()) as typeof body;
   } catch (err) {
     logger.warn('Linear issue lookup: graphql request failed', {
       identifier,
@@ -225,15 +240,6 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
     return null; // nosemgrep: ts-silent-success-masking -- per-workspace GraphQL blip returns miss; caller tries the next workspace
   }
 
-  if (!resp.ok) {
-    logger.warn('Linear issue lookup: graphql non-2xx', { identifier, status: resp.status });
-    return null;
-  }
-
-  const body = (await resp.json()) as {
-    data?: { issueVcsBranchSearch?: { id?: string; identifier?: string } | null };
-    errors?: unknown;
-  };
   if (body.errors) {
     logger.warn('Linear issue lookup: graphql errors', { identifier, errors: body.errors });
     return null;

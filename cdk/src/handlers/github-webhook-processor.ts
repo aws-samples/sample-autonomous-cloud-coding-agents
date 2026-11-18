@@ -35,6 +35,7 @@ import { renderPreviewBlock } from './shared/iteration-reply';
 import { deliverJiraDeploymentPreview } from './shared/jira-deployment-preview';
 import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
 import {
+  type LinearIssueLocation,
   extractLinearIdentifier,
   extractLinearIdentifierFromBranch,
   findLinearIssueByIdentifier,
@@ -62,9 +63,10 @@ const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 const SCREENSHOT_PUBLIC_HOST = process.env.SCREENSHOT_PUBLIC_HOST!;
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
 // Optional — when set, the processor also tries to post the
-// screenshot comment onto a linked Linear issue. Resolved from the
-// GitHub PR title/body via a Linear-identifier regex (e.g. `ENG-42`),
-// then looked up across all active workspaces in the registry.
+// screenshot comment onto a linked Linear issue: the issue of the task
+// that opened the PR, else the one resolved from the GitHub PR
+// branch/title/body via a Linear-identifier regex (e.g. `ENG-42`) and
+// looked up across the active workspaces in the registry.
 const LINEAR_WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
 /**
@@ -401,7 +403,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       ?? extractLinearIdentifier(pr.title)
       ?? extractLinearIdentifier(pr.body);
     if (identifier) {
-      const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
+      const linearIssue = await linearIssueFor(task, repo, identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
       if (linearIssue) {
         const ctx = {
           linearWorkspaceId: linearIssue.linearWorkspaceId,
@@ -458,6 +460,37 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * The Linear issue a deployment's preview belongs on.
+ *
+ * The task that opened the pull request records its own issue and workspace, and
+ * that is the answer whenever it is there. An identifier such as `ENG-7` is unique
+ * inside one workspace only: on a stack with two workspaces that both have it, a
+ * lookup by identifier can return the other tenant's issue. The lookup stays for a
+ * pull request that has no ABCA Linear task.
+ *
+ * The task counts only when it is a task of the deployment's repository, as on
+ * the Jira path: the task id comes from the branch name, which whoever opens a
+ * pull request chooses.
+ */
+async function linearIssueFor(
+  task: TaskRecord | undefined,
+  repo: string,
+  identifier: string,
+  registryTableName: string,
+): Promise<LinearIssueLocation | null> {
+  const meta = task?.channel_metadata;
+  if (task?.repo === repo && meta?.linear_issue_id && meta.linear_workspace_id) {
+    return {
+      issueId: meta.linear_issue_id,
+      linearWorkspaceId: meta.linear_workspace_id,
+      // Labels a log line only.
+      workspaceSlug: meta.linear_workspace_slug ?? '',
+    };
+  }
+  return findLinearIssueByIdentifier(identifier, registryTableName);
 }
 
 /**

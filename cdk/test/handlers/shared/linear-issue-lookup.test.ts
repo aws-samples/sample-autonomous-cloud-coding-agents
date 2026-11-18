@@ -17,13 +17,27 @@
  *  SOFTWARE.
  */
 
-// `findLinearIssueByIdentifier` needs the registry scan and the GraphQL call
-// mocked, so it is covered elsewhere. This file locks in the pure identifier
-// parsers, whose g-flagged regex `lastIndex` reset behavior is easy to regress.
+// Two halves. The pure identifier parsers, whose g-flagged regex `lastIndex`
+// reset behavior is easy to regress, and `findLinearIssueByIdentifier`, with the
+// registry scan, the token resolver and Linear's GraphQL endpoint mocked.
+
+// The registry scan of the lookup.
+const ddbSend = jest.fn();
+jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({})) }));
+jest.mock('@aws-sdk/lib-dynamodb', () => ({
+  DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
+  ScanCommand: jest.fn((input: unknown) => ({ input })),
+}));
+
+const resolveTokenMock = jest.fn();
+jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
+  resolveLinearOauthToken: (...args: unknown[]) => resolveTokenMock(...args),
+}));
 
 import {
   extractLinearIdentifier,
   extractLinearIdentifierFromBranch,
+  findLinearIssueByIdentifier,
 } from '../../../src/handlers/shared/linear-issue-lookup';
 
 describe('extractLinearIdentifier', () => {
@@ -107,5 +121,100 @@ describe('extractLinearIdentifierFromBranch', () => {
     expect(extractLinearIdentifierFromBranch(null)).toBeNull();
     expect(extractLinearIdentifierFromBranch(undefined)).toBeNull();
     expect(extractLinearIdentifierFromBranch('')).toBeNull();
+  });
+});
+
+describe('findLinearIssueByIdentifier', () => {
+  const REGISTRY = 'LinearWorkspaceRegistry';
+
+  /** The active registry rows, in the order the Scan returns them. */
+  function registryHolds(...rows: Array<{ id: string; teamKeys?: string[] }>): void {
+    ddbSend.mockResolvedValue({
+      Items: rows.map((row) => ({
+        linear_workspace_id: row.id,
+        workspace_slug: row.id.replace('ws-', ''),
+        status: 'active',
+        ...(row.teamKeys && { team_keys: row.teamKeys }),
+      })),
+    });
+  }
+
+  /** Linear's answer per workspace: the id of the issue it has under ENG-7, if it has one. */
+  function linearHas(issueIdByWorkspace: Record<string, string>): jest.SpyInstance {
+    return jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const workspace = (init!.headers as Record<string, string>).Authorization.replace('Bearer token-of-', '');
+      const id = issueIdByWorkspace[workspace];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { issueVcsBranchSearch: id ? { id, identifier: 'ENG-7' } : null } }),
+      } as Response;
+    });
+  }
+
+  beforeEach(() => {
+    ddbSend.mockReset();
+    resolveTokenMock.mockReset().mockImplementation(async (workspaceId: string) => ({
+      accessToken: `token-of-${workspaceId}`,
+    }));
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('asks the workspace that lists the team, and no other, when it has the issue', async () => {
+    registryHolds({ id: 'ws-globex', teamKeys: ['OPS'] }, { id: 'ws-acme', teamKeys: ['ENG'] });
+    const linear = linearHas({ 'ws-acme': 'issue-acme' });
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual({
+      issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme',
+    });
+    expect(linear).toHaveBeenCalledTimes(1);
+  });
+
+  test('falls back to a workspace that does not list the team', async () => {
+    // A row written before team keys were recorded, or a team added in Linear after
+    // the workspace was registered.
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] }, { id: 'ws-globex' });
+    linearHas({ 'ws-globex': 'issue-globex' });
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual({
+      issueId: 'issue-globex', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex',
+    });
+  });
+
+  test.each([
+    ['both list the team', ['ENG']],
+    ['neither records its teams', undefined],
+  ])('returns null when two workspaces have the identifier and %s', async (_label, teamKeys) => {
+    // An identifier is unique inside one workspace only. Taking the first workspace
+    // that answers puts one tenant's preview on the other tenant's issue.
+    registryHolds({ id: 'ws-acme', teamKeys }, { id: 'ws-globex', teamKeys });
+    linearHas({ 'ws-acme': 'issue-acme', 'ws-globex': 'issue-globex' });
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+  });
+
+  test('a 200 whose body is not JSON is a miss, not a rejection', async () => {
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] });
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError('Unexpected token <')),
+    } as unknown as Response);
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+  });
+
+  test('gives up on a Linear that takes the request and never answers', async () => {
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] });
+    // The request's time limit, already run out: `AbortSignal.timeout` runs on a
+    // timer that jest's fake timers do not drive.
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new Error('timed out')));
+    jest.spyOn(global, 'fetch').mockImplementation((_url, init) => new Promise<Response>((_resolve, reject) => {
+      // No answer ever comes: only the signal of the request ends the wait.
+      if (init?.signal?.aborted) reject(init.signal.reason as Error);
+    }));
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+    expect(timeoutSpy).toHaveBeenCalledWith(5_000);
   });
 });

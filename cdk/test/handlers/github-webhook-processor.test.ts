@@ -295,6 +295,64 @@ describe('github-webhook-processor handler', () => {
     expect(linearArg[2]).toMatch(/https:\/\/d1\.cloudfront\.net\/screenshots\/owner_repo\/abc1234-42-[0-9a-f]{16}\.png/);
   });
 
+  test('a Linear task\'s preview goes to the issue and workspace on its own record, not to an identifier lookup', async () => {
+    // Two workspaces on one stack, acme and globex, each with a team ENG and an
+    // issue ENG-7. The identifier in the branch cannot tell them apart; the task
+    // that opened the pull request names globex's issue.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7 fix login', body: '', head: { ref: 'bgagent/01TASKID/eng-7-fix-login', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Attributes: {
+        repo: 'owner/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-globex', linear_workspace_id: 'ws-globex', linear_workspace_slug: 'globex' },
+      },
+    });
+    extractFromBranchMock.mockReturnValueOnce('ENG-7');
+    // What a lookup by identifier answers here: the workspace it happens to ask first.
+    findLinearIssueMock.mockResolvedValue({ issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme' });
+    postIssueCommentMock.mockResolvedValueOnce({ ok: true });
+
+    await handler(payload());
+
+    expect(postIssueCommentMock).toHaveBeenCalledTimes(1);
+    expect(postIssueCommentMock).toHaveBeenCalledWith(
+      { linearWorkspaceId: 'ws-globex', registryTableName: 'LinearWorkspaceRegistry' },
+      'issue-globex',
+      expect.stringContaining('https://d1.cloudfront.net/screenshots/'),
+    );
+    expect(findLinearIssueMock).not.toHaveBeenCalled();
+  });
+
+  test('a task of another repository does not lend its Linear issue to this deployment', async () => {
+    // A task id is no secret: it is in the branch name of every ABCA pull request.
+    // A pull request in owner/repo whose branch names a task of other/repo must not
+    // get its preview posted on that task's issue. It is looked up by identifier,
+    // as a pull request without an ABCA Linear task is.
+    resolveGitHubTokenMock.mockResolvedValue('gh-tok');
+    fetchOk([{ number: 17, state: 'open', title: 'ENG-7', body: '', head: { ref: 'bgagent/01OTHERSTASK/eng-7-x', sha: 'abc1234' } }]);
+    captureScreenshotMock.mockResolvedValueOnce(new Uint8Array([1]));
+    s3Send.mockResolvedValueOnce({});
+    upsertTaskCommentMock.mockResolvedValueOnce({ commentId: 'cmt-1' });
+    ddbSend.mockReset().mockResolvedValue({
+      Attributes: {
+        repo: 'other/repo',
+        channel_source: 'linear',
+        channel_metadata: { linear_issue_id: 'issue-of-other-repo', linear_workspace_id: 'ws-globex' },
+      },
+    });
+    extractFromBranchMock.mockReturnValueOnce('ENG-7');
+    findLinearIssueMock.mockResolvedValue(null);
+
+    await handler(payload());
+
+    expect(findLinearIssueMock).toHaveBeenCalledWith('ENG-7', 'LinearWorkspaceRegistry');
+    expect(postIssueCommentMock).not.toHaveBeenCalled();
+  });
+
   test('branch-name identifier wins over a predecessor named in the PR body (stacked PR)', async () => {
     // A stacked PR closes one issue but its body mentions the PREDECESSOR
     // issue first ("cherry-picked from predecessor branch ..."). Branch-first
