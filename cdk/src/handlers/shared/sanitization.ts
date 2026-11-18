@@ -106,17 +106,28 @@ function stripDangerousTags(text: string): string {
  *   more: that part is kept and NESTED_TAGS_MARKER stands for the rest; a text with no
  *   "<" left is complete. A "<" that starts no tag is no exception: it can start one
  *   after a removal, as the first of "<<b>a>" does.
+ *
+ * `strip` is one pass over the dangerous tags; without it a pass removes the remaining
+ * HTML tags. That replace is written out in the loop, not handed in as a function, so
+ * that its result is seen to be the text of the next replace: static analysis (CodeQL,
+ * js/incomplete-multi-character-sanitization) reports a tag-removing replace that it
+ * cannot see repeated. A pass only removes text.
  */
-function stripUntilStable(s: string, strip: (text: string) => string): string {
+function stripUntilStable(s: string, strip?: (text: string) => string): string {
+  // The text is head + tail, and tail holds no ">".
+  let head = s;
+  let tail = '';
   for (let pass = 0; pass < MAX_STRIP_PASSES; pass++) {
-    const end = s.lastIndexOf('>') + 1;
-    const head = s.slice(0, end);
-    const stripped = strip(head);
-    if (stripped === head) return s;
-    s = stripped + s.slice(end);
+    const end = head.lastIndexOf('>') + 1;
+    tail = head.slice(end) + tail;
+    const stripped = strip ? strip(head.slice(0, end)) : head.slice(0, end).replace(HTML_TAGS, '');
+    // Nothing was removed: the same length is the same text.
+    if (stripped.length === end) return stripped + tail;
+    head = stripped;
   }
-  const first = s.indexOf('<');
-  return first < 0 ? s : s.slice(0, first) + NESTED_TAGS_MARKER;
+  const rest = head + tail;
+  const first = rest.indexOf('<');
+  return first < 0 ? rest : rest.slice(0, first) + NESTED_TAGS_MARKER;
 }
 
 /**
@@ -149,7 +160,7 @@ export function sanitizeExternalContent(text: string): string {
   sanitized = stripUntilStable(sanitized, stripDangerousTags);
 
   // 4. Strip remaining HTML tags (preserve inner text)
-  sanitized = stripUntilStable(sanitized, (head) => head.replace(HTML_TAGS, ''));
+  sanitized = stripUntilStable(sanitized);
 
   // 5. Neutralize embedded instruction patterns
   sanitized = sanitized.replace(INSTRUCTION_PREFIXES, '[SANITIZED_PREFIX] $1:');
