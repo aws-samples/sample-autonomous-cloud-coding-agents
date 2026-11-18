@@ -23,7 +23,6 @@ import {
   computeExpiresAt,
   exchangeAuthorizationCode,
   generatePkce,
-  isAccessTokenExpiring,
   LINEAR_AUTHORIZE_ENDPOINT,
   LINEAR_OAUTH_SCOPES,
   LINEAR_TOKEN_ENDPOINT,
@@ -147,33 +146,6 @@ describe('buildAuthorizationUrl', () => {
     }));
     expect(parsed.searchParams.get('actor')).toBe('app');
     expect(parsed.searchParams.get('prompt')).toBe('consent');
-  });
-});
-
-describe('isAccessTokenExpiring', () => {
-  test('returns false for a token expiring well in the future', () => {
-    const future = new Date(Date.now() + 3600 * 1000).toISOString();
-    expect(isAccessTokenExpiring(future)).toBe(false);
-  });
-
-  test('returns true within the 60s threshold', () => {
-    const soon = new Date(Date.now() + 30 * 1000).toISOString();
-    expect(isAccessTokenExpiring(soon)).toBe(true);
-  });
-
-  test('returns true for a past expiry', () => {
-    const past = new Date(Date.now() - 60 * 1000).toISOString();
-    expect(isAccessTokenExpiring(past)).toBe(true);
-  });
-
-  test('returns true for a malformed expires_at (defensive: prefer over-refresh)', () => {
-    expect(isAccessTokenExpiring('not a date')).toBe(true);
-  });
-
-  test('respects custom threshold', () => {
-    const fiveMinutesOut = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-    expect(isAccessTokenExpiring(fiveMinutesOut, 10)).toBe(false);
-    expect(isAccessTokenExpiring(fiveMinutesOut, 600)).toBe(true);
   });
 });
 

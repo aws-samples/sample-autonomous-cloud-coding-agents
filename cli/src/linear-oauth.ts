@@ -119,27 +119,6 @@ export function linearOauthSecretName(workspaceSlug: string): string {
 }
 
 /**
- * Compute when an access token should be considered "stale and needs
- * refresh." We refresh if there's <60s left on the access token —
- * gives Lambda invocations a clean buffer to make the upstream call
- * without racing the actual expiry.
- */
-const REFRESH_THRESHOLD_SECONDS = 60;
-
-export function isAccessTokenExpiring(
-  expiresAt: string,
-  thresholdSeconds: number = REFRESH_THRESHOLD_SECONDS,
-): boolean {
-  const expiry = new Date(expiresAt).getTime();
-  if (Number.isNaN(expiry)) {
-    // Treat malformed expires_at as expired — better to over-refresh than
-    // proceed with a token that may have rotated under us.
-    return true;
-  }
-  return Date.now() + thresholdSeconds * 1000 >= expiry;
-}
-
-/**
  * PKCE pair: a random `code_verifier` and the SHA-256 base64url digest
  * (`code_challenge`). Linear supports both `S256` and `plain`; we always
  * use `S256` because the wire-format cost is identical and stronger.
@@ -173,7 +152,6 @@ export function buildAuthorizationUrl(opts: {
   redirectUri: string;
   state: string;
   codeChallenge: string;
-  scopes?: readonly string[];
   actorApp?: boolean;
   forceConsent?: boolean;
 }): string {
@@ -184,7 +162,7 @@ export function buildAuthorizationUrl(opts: {
     // RFC 6749 §3.3: scope is a space-separated list. Linear rejects
     // comma-separated scopes with "Invalid redirect_uri" — the error
     // is misleading; verified by 2.0b smoke test 2026-05-19.
-    scope: (opts.scopes ?? LINEAR_OAUTH_SCOPES).join(' '),
+    scope: LINEAR_OAUTH_SCOPES.join(' '),
     state: opts.state,
     code_challenge: opts.codeChallenge,
     code_challenge_method: 'S256',
@@ -300,7 +278,7 @@ async function parseTokenResponse(
  * what must not be shown. Reporting which required field is wrong is also more useful
  * than a truncated blob, so this is not a redaction that costs debuggability.
  */
-function describeTokenShape(value: unknown): string {
+export function describeTokenShape(value: unknown): string {
   if (typeof value !== 'object' || value === null) {
     return `not a JSON object (got ${value === null ? 'null' : typeof value})`;
   }

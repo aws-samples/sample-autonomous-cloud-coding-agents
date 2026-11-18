@@ -17,8 +17,12 @@
  *  SOFTWARE.
  */
 
+import { PassThrough } from 'stream';
+import { PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { ApiClient } from '../../src/api-client';
 import { makeSlackCommand, resolveSlackTeamId } from '../../src/commands/slack';
+import * as config from '../../src/config';
+import * as promptSecretMod from '../../src/prompt-secret';
 
 jest.mock('../../src/api-client');
 
@@ -33,6 +37,20 @@ jest.mock('@aws-sdk/lib-dynamodb', () => {
 });
 
 const ddbSend = jest.fn();
+
+// CloudFormation — `setup` reads the app manifest and the three secret ARNs from stack outputs.
+const cfnSend = jest.fn();
+jest.mock('@aws-sdk/client-cloudformation', () => ({
+  ...jest.requireActual('@aws-sdk/client-cloudformation'),
+  CloudFormationClient: jest.fn(() => ({ send: cfnSend })),
+}));
+
+// Secrets Manager — `setup` stores the three credentials.
+const smSend = jest.fn();
+jest.mock('@aws-sdk/client-secrets-manager', () => ({
+  ...jest.requireActual('@aws-sdk/client-secrets-manager'),
+  SecretsManagerClient: jest.fn(() => ({ send: smSend })),
+}));
 
 describe('slack command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
@@ -148,6 +166,115 @@ describe('slack command', () => {
     test('exits when the installation table name is unavailable', async () => {
       await expect(resolveSlackTeamId('us-east-1', null, undefined)).rejects.toThrow('process.exit');
       expect(ddbSend).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('slack setup', () => {
+    const SIGNING_SECRET = 'a'.repeat(32);
+    const CLIENT_SECRET = 'b'.repeat(32);
+    let loadConfigSpy: jest.SpiedFunction<typeof config.loadConfig>;
+    let promptSecretSpy: jest.SpiedFunction<typeof promptSecretMod.promptSecret>;
+    let errorSpy: jest.SpiedFunction<typeof console.error>;
+
+    beforeEach(() => {
+      cfnSend.mockReset().mockResolvedValue({
+        Stacks: [{
+          Outputs: [
+            { OutputKey: 'SlackAppManifestJson', OutputValue: '{"oauth_config":{"redirect_urls":["https://api.example.test/v1/slack/oauth/callback"]}}' },
+            { OutputKey: 'SlackSigningSecretArn', OutputValue: 'arn:signing-secret' },
+            { OutputKey: 'SlackClientSecretArn', OutputValue: 'arn:client-secret' },
+            { OutputKey: 'SlackClientIdSecretArn', OutputValue: 'arn:client-id' },
+          ],
+        }],
+      });
+      smSend.mockReset().mockResolvedValue({});
+      loadConfigSpy = jest.spyOn(config, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof config.loadConfig>);
+      promptSecretSpy = jest.spyOn(promptSecretMod, 'promptSecret');
+      errorSpy = jest.spyOn(console, 'error').mockImplementation();
+    });
+
+    afterEach(() => {
+      loadConfigSpy.mockRestore();
+      promptSecretSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    const runSetup = () => makeSlackCommand().parseAsync(['node', 'test', 'setup']);
+    const stored = () => smSend.mock.calls.map(([command]) => (command as PutSecretValueCommand).input);
+    const printed = () => consoleSpy.mock.calls.map((c) => String(c[0])).join('\n');
+
+    describe('with the Client ID read from a pipe', () => {
+      // The two secrets come from the hidden prompt, replaced here; the Client ID is not a
+      // secret and comes from the visible prompt, which reads the real stdin of the test.
+      let stdin: PassThrough;
+      let restore: () => void;
+
+      beforeEach(() => {
+        promptSecretSpy.mockResolvedValueOnce(SIGNING_SECRET).mockResolvedValueOnce(CLIENT_SECRET);
+        stdin = new PassThrough();
+        const original = Object.getOwnPropertyDescriptor(process, 'stdin');
+        Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
+        const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+        restore = () => {
+          stderrSpy.mockRestore();
+          if (original) Object.defineProperty(process, 'stdin', original);
+        };
+      });
+
+      afterEach(() => restore());
+
+      test('stores the three credentials and builds the install link from the Client ID', async () => {
+        stdin.end('  12345.67890  \n');
+
+        await runSetup();
+
+        expect(stored()).toEqual([
+          { SecretId: 'arn:signing-secret', SecretString: SIGNING_SECRET },
+          { SecretId: 'arn:client-secret', SecretString: CLIENT_SECRET },
+          { SecretId: 'arn:client-id', SecretString: '12345.67890' },
+        ]);
+        expect(printed()).toContain('https://slack.com/oauth/v2/authorize?client_id=12345.67890&');
+      });
+
+      test('fails, and stores nothing, when the input ends before the Client ID', async () => {
+        // The prompt this command had never answered at the end of the input: node then ran
+        // out of work and exited with code 0, as if the credentials had been stored.
+        stdin.end();
+
+        await expect(runSetup()).rejects.toThrow('No input provided.');
+        expect(smSend).not.toHaveBeenCalled();
+      });
+    });
+
+    test('asks again until all three values look like Slack credentials', async () => {
+      const promptLineSpy = jest.spyOn(promptSecretMod, 'promptLine');
+      // Round 1: a value is missing. Round 2: none has the right form. Round 3: all good.
+      promptSecretSpy
+        .mockResolvedValueOnce('').mockResolvedValueOnce(CLIENT_SECRET)
+        .mockResolvedValueOnce('not-hex').mockResolvedValueOnce('too-short')
+        .mockResolvedValueOnce(SIGNING_SECRET).mockResolvedValueOnce(CLIENT_SECRET);
+      promptLineSpy
+        .mockResolvedValueOnce('12345.67890')
+        .mockResolvedValueOnce('A0123456789')
+        .mockResolvedValueOnce('12345.67890');
+      try {
+        await runSetup();
+
+        expect(promptLineSpy).toHaveBeenCalledTimes(3);
+        expect(promptLineSpy).toHaveBeenCalledWith('Client ID');
+        const errors = errorSpy.mock.calls.map((c) => String(c[0]));
+        expect(errors).toEqual([
+          '\n✗ All three values are required. Try again.\n',
+          '\n✗ Signing Secret must be 32 hex characters.',
+          '✗ Client Secret must be 32 hex characters.',
+          '✗ Client ID should be numeric (e.g. 12345.67890).',
+          '\nCheck Basic Information → App Credentials and try again.\n',
+        ]);
+        // Only the round that passed the checks is stored.
+        expect(stored().map((s) => s.SecretString)).toEqual([SIGNING_SECRET, CLIENT_SECRET, '12345.67890']);
+      } finally {
+        promptLineSpy.mockRestore();
+      }
     });
   });
 });

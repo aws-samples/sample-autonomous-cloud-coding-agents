@@ -18,8 +18,8 @@
  */
 
 // Companion to jira.test.ts: covers the Linear adapter's CLI helper twins
-// (openBrowser / upsertOauthSecret / command surface). These mirror the Jira
-// helpers and were previously untested at the unit level.
+// (upsertOauthSecret / command surface). These mirror the Jira helpers and
+// were previously untested at the unit level.
 import {
   CreateSecretCommand,
   type GetSecretValueCommand,
@@ -29,15 +29,11 @@ import {
 import { PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   makeLinearCommand,
-  openBrowser,
   upsertOauthSecret,
 } from '../../src/commands/linear';
 import * as configMod from '../../src/config';
 import type { StoredLinearOauthToken } from '../../src/linear-oauth';
 import * as promptSecretMod from '../../src/prompt-secret';
-
-const execFileMock = jest.fn();
-jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
 
 const linearLinkMock = jest.fn();
 jest.mock('../../src/api-client', () => ({
@@ -101,36 +97,6 @@ function sampleToken(overrides: Partial<StoredLinearOauthToken> = {}): StoredLin
     ...overrides,
   };
 }
-
-describe('linear openBrowser', () => {
-  beforeEach(() => execFileMock.mockReset());
-
-  test('resolves true when the OS opener succeeds', async () => {
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
-    await expect(openBrowser('https://example.test')).resolves.toBe(true);
-  });
-
-  test('resolves false when the OS opener errors', async () => {
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(new Error('no opener')));
-    await expect(openBrowser('https://example.test')).resolves.toBe(false);
-  });
-
-  test.each([
-    ['darwin', 'open'],
-    ['win32', 'cmd'],
-    ['linux', 'xdg-open'],
-  ] as const)('invokes %s on %s', async (platform, expectedCmd) => {
-    const original = Object.getOwnPropertyDescriptor(process, 'platform');
-    Object.defineProperty(process, 'platform', { configurable: true, value: platform });
-    execFileMock.mockImplementation((_cmd: string, _args: string[], cb: (e: Error | null) => void) => cb(null));
-    try {
-      await openBrowser('https://example.test');
-      expect(execFileMock.mock.calls[0]?.[0]).toBe(expectedCmd);
-    } finally {
-      if (original) Object.defineProperty(process, 'platform', original);
-    }
-  });
-});
 
 describe('linear upsertOauthSecret', () => {
   const mockSend = jest.fn();

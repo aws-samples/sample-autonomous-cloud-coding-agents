@@ -48,6 +48,7 @@ const awaitOauthCallbackMock = jest.fn(
     ),
 );
 jest.mock('../../src/oauth-callback-server', () => ({
+  ...jest.requireActual('../../src/oauth-callback-server'),
   awaitOauthCallback: (...args: Parameters<typeof awaitOauthCallbackMock>) => awaitOauthCallbackMock(...args),
   CALLBACK_URL: 'http://localhost:8080/oauth/callback',
 }));
@@ -63,6 +64,7 @@ jest.mock('../../src/linear-oauth', () => {
 
 const promptSecretMock = jest.fn();
 jest.mock('../../src/prompt-secret', () => ({
+  ...jest.requireActual('../../src/prompt-secret'),
   promptSecret: (...args: unknown[]) => promptSecretMock(...args),
 }));
 
@@ -325,6 +327,31 @@ describe('linear commands on a registry that already holds a workspace', () => {
 
       expect(bundleWrites).toEqual([]);
       expect(puts('registry-table')).toEqual([]);
+    });
+
+    test('ends by linking the admin to the member they pick, never to the app\'s own user', async () => {
+      // The same picker that ends `setup`, called with this command's own workspace, user
+      // and table. The bot comes first in Linear's answer: unfiltered, it would be choice 1.
+      linear.members = [
+        { id: 'bot', name: 'bgagent', email: 'bot-uuid@oauthapp.linear.app' },
+        { id: 'user-maya', name: 'Maya K', email: 'maya@example.test' },
+      ];
+      // Enter keeps the client id of the app already installed; then the first member listed.
+      typed = ['', '1'];
+
+      const printed = await run('add-workspace', 'beta', '--no-browser');
+
+      expect(puts('user-mapping-table')).toEqual([{
+        linear_identity: 'org-beta#user-maya',
+        platform_user_id: 'sub-abc',
+        linear_workspace_id: 'org-beta',
+        linear_user_id: 'user-maya',
+        linked_at: expect.any(String),
+        status: 'active',
+        link_method: 'add_workspace_oauth',
+      }]);
+      expect(printed).toContain('    1. Maya K (maya@example.test)');
+      expect(printed.join('\n')).not.toContain('oauthapp.linear.app');
     });
 
     test('names `setup` as the command to run again, never itself', async () => {

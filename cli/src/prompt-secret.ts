@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import * as readline from 'readline';
+
 /** Buffered bytes not yet split into a line (non-TTY piped stdin). */
 let pipedBuffer = '';
 /** Lines read from stdin, not yet consumed by a `promptSecret` call. */
@@ -96,16 +98,12 @@ export function __resetPipedSecretStateForTest(): void {
   pipedEnded = false;
 }
 
-/** Masked stdin prompt for secrets (TTY) or piped stdin (non-TTY, one line per call). */
-export function promptSecret(label: string): Promise<string> {
+/**
+ * Read one line from a terminal in raw mode. Echoes `mask` for each character typed, or the
+ * character itself when no mask is given. Ctrl-C rejects.
+ */
+function readRawLine(mask?: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    process.stderr.write(label);
-
-    if (!process.stdin.isTTY) {
-      readPipedLine().then((line) => resolve(line.trim())).catch(reject);
-      return;
-    }
-
     process.stdin.setRawMode(true);
     process.stdin.resume();
     let value = '';
@@ -129,7 +127,7 @@ export function promptSecret(label: string): Promise<string> {
           }
         } else {
           value += char;
-          process.stderr.write('*');
+          process.stderr.write(mask ?? char);
         }
       }
     };
@@ -140,4 +138,46 @@ export function promptSecret(label: string): Promise<string> {
     };
     process.stdin.on('data', onData);
   });
+}
+
+/** Masked stdin prompt for secrets (TTY) or piped stdin (non-TTY, one line per call). */
+export function promptSecret(label: string): Promise<string> {
+  process.stderr.write(label);
+  if (!process.stdin.isTTY) {
+    return readPipedLine().then((line) => line.trim());
+  }
+  return readRawLine('*');
+}
+
+/**
+ * Visible stdin prompt for one line, with an optional default that is taken on
+ * empty input (Enter without typing). For values that are not secret: use
+ * `promptSecret` for those.
+ *
+ * On a terminal it reads in raw mode, as `promptSecret` does, so that a
+ * `promptLine` followed by a `promptSecret` works: `readline.createInterface`
+ * + `rl.close()` would leave stdin in an EOF state and the next prompt would
+ * reject at once on its own readline `close` event. Without a terminal it
+ * reads one line through readline and rejects when the input ends before a
+ * line: an answer that was not given must not count as Enter.
+ *
+ * Known gap: once a `promptSecret` on the same pipe has read the input to its
+ * end, no end is left for this prompt to meet. It then never settles, and node
+ * exits with code 0 when nothing else is pending.
+ */
+export function promptLine(label: string, defaultValue?: string): Promise<string> {
+  process.stderr.write(defaultValue ? `${label} [${defaultValue}]: ` : `${label}: `);
+  if (!process.stdin.isTTY) {
+    return new Promise((resolve, reject) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      // Resolve before closing: close() emits 'close' at once, and the handler below
+      // would reject the line that was just read.
+      rl.once('line', (line) => {
+        resolve(line.trim() || defaultValue || '');
+        rl.close();
+      });
+      rl.once('close', () => reject(new Error('No input provided.')));
+    });
+  }
+  return readRawLine().then((value) => value || defaultValue || '');
 }

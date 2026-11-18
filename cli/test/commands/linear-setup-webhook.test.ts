@@ -58,6 +58,7 @@ const awaitOauthCallbackMock = jest.fn(
     ),
 );
 jest.mock('../../src/oauth-callback-server', () => ({
+  ...jest.requireActual('../../src/oauth-callback-server'),
   awaitOauthCallback: (...args: Parameters<typeof awaitOauthCallbackMock>) => awaitOauthCallbackMock(...args),
   CALLBACK_URL: 'http://localhost:8080/oauth/callback',
 }));
@@ -400,6 +401,87 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       .map((put) => [put.input.SecretId, (JSON.parse(String(put.input.SecretString)) as { webhook_signing_secret?: string }).webhook_signing_secret]);
     expect(bundleWrites).toEqual([[PER_WORKSPACE_NAME, 'lin_wh_suppliedByOperator']]);
     expect(printed).toContain('  ✓ Using the webhook signing secret you entered');
+  });
+
+  test('ends by linking the admin to the member they pick, never to the app\'s own user', async () => {
+    // With actor=app the token belongs to the app's bot user, so `setup` cannot tell who ran
+    // it: it lists the members and asks. The row it then writes is the only user mapping the
+    // CLI writes itself, under the key the webhook processor looks a Linear user up by.
+    smSend.mockImplementation((cmd: unknown) => {
+      if (cmd instanceof GetSecretValueCommand) {
+        if (cmd.input.SecretId === WEBHOOK_ARN) return Promise.resolve({ SecretString: OTHER_WS_SECRET });
+        return Promise.reject(new ResourceNotFoundException({ message: 'no', $metadata: {} }));
+      }
+      if (cmd instanceof CreateSecretCommand) return Promise.resolve({ ARN: 'arn:x' });
+      return Promise.resolve({});
+    });
+    // The bot comes first in Linear's answer: unfiltered, it would be choice 1.
+    fetchMock.mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          viewer: { id: 'bot' },
+          organization: { id: 'org-demo', name: 'Demo', urlKey: 'demo' },
+          teams: { nodes: [] },
+          users: {
+            nodes: [
+              { id: 'bot', name: 'bgagent', email: 'bot-uuid@oauthapp.linear.app' },
+              { id: 'u-1', name: 'Admin', email: 'admin@demo.test' },
+            ],
+          },
+        },
+      }),
+    }));
+    typed = ['1'];
+    // The picker reads through readline only when stdin is not a terminal. Pinned, so that
+    // the test does not wait for keys when this file is run from a shell.
+    const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue(
+      { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
+    );
+    const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(
+      { id_token: FAKE_ID_TOKEN } as ReturnType<typeof configMod.loadCredentials>,
+    );
+    const printed: string[] = [];
+    const logSpy = jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      const line = args.map(String).join(' ');
+      printed.push(line);
+      const m = line.match(/[?&]state=([^&\s]+)/);
+      if (m) capturedState = decodeURIComponent(m[1]);
+    });
+    try {
+      await makeLinearCommand().parseAsync([
+        'node', 'bgagent', 'setup', 'demo',
+        '--client-id', 'cid', '--client-secret', 'csecret',
+        '--webhook-secret', 'lin_wh_suppliedByOperator', '--no-browser',
+      ]);
+    } finally {
+      typed = [];
+      if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+      else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+      cfgSpy.mockRestore();
+      credSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+
+    const userMappings = ddbSend.mock.calls
+      .map((c) => c[0])
+      .filter((cmd): cmd is InstanceType<typeof PutCommand> =>
+        cmd instanceof PutCommand && cmd.input.TableName === 'user-mapping-table')
+      .map((put) => put.input.Item);
+    expect(userMappings).toEqual([{
+      linear_identity: 'org-demo#u-1',
+      platform_user_id: 'sub-abc',
+      linear_workspace_id: 'org-demo',
+      linear_user_id: 'u-1',
+      linked_at: expect.any(String),
+      status: 'active',
+      link_method: 'auto_setup_oauth',
+    }]);
+    expect(printed).toContain('    1. Admin (admin@demo.test)');
+    expect(printed.join('\n')).not.toContain('oauthapp.linear.app');
   });
 
   describe('refuses before anything is written', () => {

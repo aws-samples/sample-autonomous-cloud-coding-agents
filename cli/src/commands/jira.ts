@@ -17,9 +17,6 @@
  *  SOFTWARE.
  */
 
-import { execFile } from 'child_process';
-import * as readline from 'readline';
-import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
@@ -36,7 +33,8 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { loadConfig, loadCredentials } from '../config';
+import { cognitoSubFromSession } from '../auth';
+import { loadConfig } from '../config';
 import { CliError } from '../errors';
 import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
@@ -58,9 +56,10 @@ import {
   refreshAccessToken,
   StoredJiraOauthToken,
 } from '../jira-oauth';
-import { awaitOauthCallback, CALLBACK_URL } from '../oauth-callback-server';
-import { promptSecret } from '../prompt-secret';
+import { awaitOauthCallback, CALLBACK_URL, openBrowser, randomState } from '../oauth-callback-server';
+import { promptLine, promptSecret } from '../prompt-secret';
 import { loadActiveRepoConfig } from '../repo-lookup';
+import { findStackOutput } from '../stack-outputs';
 import { makeClient, makeDocClient } from '../ua';
 
 /** Default label that triggers an ABCA task when applied to a Jira issue. */
@@ -152,36 +151,6 @@ export function renderJiraAppTemplate(opts: JiraAppTemplateOptions = {}): string
     'workflow transitions appear from the dedicated Jira app account.',
     bar,
   ].join('\n');
-}
-
-/**
- * Spawn the OS-default browser to open the given URL. Returns false on
- * failure so callers can fall back to printing the URL.
- */
-export function openBrowser(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let opener: { cmd: string; args: string[] };
-    if (process.platform === 'darwin') {
-      opener = { cmd: 'open', args: [url] };
-    } else if (process.platform === 'win32') {
-      opener = { cmd: 'cmd', args: ['/c', 'start', '""', url] };
-    } else {
-      opener = { cmd: 'xdg-open', args: [url] };
-    }
-    execFile(opener.cmd, opener.args, (err) => {
-      resolve(!err);
-    });
-  });
-}
-
-/**
- * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
- */
-function randomState(): string {
-  const STATE_BYTES = 32;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { randomBytes } = require('crypto') as typeof import('crypto');
-  return randomBytes(STATE_BYTES).toString('base64url');
 }
 
 /**
@@ -478,50 +447,6 @@ async function resolveJiraUser(
   );
 }
 
-function promptLine(label: string): Promise<string> {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(label.endsWith(' ') ? label : `${label} `, (answer) => {
-      rl.close();
-      resolve(answer);
-    });
-  });
-}
-
-function extractCognitoSub(): string {
-  const creds = loadCredentials();
-  if (!creds?.id_token) {
-    throw new Error('not authenticated — run `bgagent login`');
-  }
-  const JWT_SEGMENTS = 3; // header.payload.signature
-  const parts = creds.id_token.split('.');
-  if (parts.length !== JWT_SEGMENTS) {
-    throw new Error('malformed id_token in ~/.bgagent/credentials.json');
-  }
-  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
-  if (!payload.sub) {
-    throw new Error('id_token missing `sub` claim');
-  }
-  return payload.sub;
-}
-
-async function getStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
-  try {
-    const cfn = makeClient(CloudFormationClient, { region });
-    const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
-    const outputs = result.Stacks?.[0]?.Outputs ?? [];
-    const output = outputs.find((o) => o.OutputKey === outputKey);
-    return output?.OutputValue ?? null;
-  } catch (err) {
-    const name = (err as Error)?.name ?? '';
-    const message = (err as Error)?.message ?? '';
-    if (name === 'ValidationError' && /does not exist/i.test(message)) {
-      return null; // missing stack is the lookup helper's null contract
-    }
-    throw err;
-  }
-}
-
 export function makeJiraCommand(): Command {
   const jira = new Command('jira')
     .description('Manage Jira Cloud integration');
@@ -561,8 +486,8 @@ export function makeJiraCommand(): Command {
           workspaceRegistryTable,
           webhookSecretArn,
         ] = await Promise.all([
-          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'JiraWebhookSecretArn'),
+          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'JiraWebhookSecretArn'),
         ]);
 
         const missing: string[] = [];
@@ -576,19 +501,7 @@ export function makeJiraCommand(): Command {
         }
 
         // ─── Resolve caller identity ─────────────────────────────────────
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        let cognitoSub: string;
-        try {
-          cognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const cognitoSub = cognitoSubFromSession();
 
         // ─── Atlassian OAuth app credentials ─────────────────────────────
         console.log('bgagent jira setup');
@@ -687,7 +600,7 @@ export function makeJiraCommand(): Command {
           resources.forEach((r, i) => {
             console.log(`    [${i + 1}] ${r.name}  (${r.url})`);
           });
-          const pick = (await promptLine(`  Select site [1-${resources.length}]:`)).trim();
+          const pick = (await promptLine(`  Select site [1-${resources.length}]`)).trim();
           const idx = Number.parseInt(pick, 10) - 1;
           if (Number.isNaN(idx) || idx < 0 || idx >= resources.length) {
             throw new CliError(`Invalid selection '${pick}'.`);
@@ -836,7 +749,7 @@ export function makeJiraCommand(): Command {
       .action(async (cloudId: string, opts) => {
         const config = loadConfig();
         const region = opts.region || config.region;
-        const registryTableName = await getStackOutput(
+        const registryTableName = await findStackOutput(
           region,
           opts.stackName,
           'JiraWorkspaceRegistryTableName',
@@ -960,8 +873,8 @@ export function makeJiraCommand(): Command {
         const region = opts.region || config.region;
         const stackName = opts.stackName;
         const [workspaceRegistryTable, webhookSecretArn] = await Promise.all([
-          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'JiraWebhookSecretArn'),
+          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'JiraWebhookSecretArn'),
         ]);
         const missing: string[] = [];
         if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
@@ -1034,8 +947,8 @@ export function makeJiraCommand(): Command {
         const stackName = opts.stackName;
 
         const [workspaceRegistryTable, userMappingTable] = await Promise.all([
-          getStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
-          getStackOutput(region, stackName, 'JiraUserMappingTableName'),
+          findStackOutput(region, stackName, 'JiraWorkspaceRegistryTableName'),
+          findStackOutput(region, stackName, 'JiraUserMappingTableName'),
         ]);
         const missing: string[] = [];
         if (!workspaceRegistryTable) missing.push('JiraWorkspaceRegistryTableName');
@@ -1047,11 +960,7 @@ export function makeJiraCommand(): Command {
           );
         }
 
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        const callerCognitoSub = extractCognitoSub();
+        const callerCognitoSub = cognitoSubFromSession();
 
         const sm = makeClient(SecretsManagerClient, { region });
         const ddb = makeDocClient({ region });
@@ -1235,8 +1144,8 @@ export function makeJiraCommand(): Command {
         const region = opts.region || config.region;
 
         const [tableName, repoTableName] = await Promise.all([
-          getStackOutput(region, opts.stackName, 'JiraProjectMappingTableName'),
-          getStackOutput(region, opts.stackName, 'RepoTableName'),
+          findStackOutput(region, opts.stackName, 'JiraProjectMappingTableName'),
+          findStackOutput(region, opts.stackName, 'RepoTableName'),
         ]);
         if (!tableName || !repoTableName) {
           console.error(
