@@ -81,6 +81,7 @@ import {
   claimRollup,
   clearRollupClaim,
   loadOrchestration,
+  ORCHESTRATION_META_SK,
   setRetryCommentId,
   setStatusCommentId,
   type OrchestrationChildRow,
@@ -564,9 +565,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   const plan = computeReconcilePlan(outcome, children);
   const now = new Date().toISOString();
 
-  // 1. Persist status updates (terminal child + any skips). Each is
-  //    conditional on the row not already being in the target state so a
-  //    replayed event is a no-op.
+  // 1. Persist status updates: the terminal child first, then any skips. Each
+  //    is conditional, so a replayed event changes no status.
+  //
+  //    ``stale``: the task of this event no longer decides its row. A task
+  //    record is written again long after it ended (the screenshot of a later
+  //    push to its branch is stamped on it), and each such write arrives here
+  //    with the old terminal status. By then a comment may have repaired the
+  //    child, or a retry reset it, and the row keeps the old task id until it
+  //    is released again. Such an event must not put the old verdict back.
+  let stale = false;
   for (const update of plan.statusUpdates) {
     // ``toRelease`` rows are handled by releaseChild below (which flips
     // them to released conditionally); skip them here to avoid a
@@ -576,14 +584,22 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     // (blocked/ready). Without this, a skip cascade racing a recovery re-release
     // could stamp a `released`/`releasing`/running child terminal-`skipped`,
     // letting the epic claim its once-only rollup while work is still in flight.
-    // Other resets (failed→ready/blocked) keep the plain not-already-there guard.
     const skipGuard = update.child_status === 'skipped';
     const values: Record<string, unknown> = { ':s': update.child_status, ':now': now };
-    let condition = 'child_status <> :s';
+    let condition: string;
     if (skipGuard) {
       values[':blocked'] = 'blocked';
       values[':ready'] = 'ready';
       condition = 'child_status IN (:blocked, :ready)';
+    } else {
+      // The terminal child itself. Its task decides the row while the row
+      // names that task and is `released` (a first delivery) or already holds
+      // this verdict (a redelivery). The store checks that at the moment of
+      // the write, so a repair or a new release that lands after this
+      // invocation read the rows is not undone.
+      values[':tid'] = evt.taskId;
+      values[':running'] = 'released';
+      condition = 'child_task_id = :tid AND (child_status = :running OR child_status = :s)';
     }
     try {
       await ddb.send(new UpdateCommand({
@@ -594,8 +610,16 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
         ExpressionAttributeValues: values,
       }));
     } catch (err) {
-      if (isConditionalCheckFailed(err)) continue; // already in target / not a skippable source
-      throw err;
+      if (!isConditionalCheckFailed(err)) throw err;
+      if (skipGuard) continue; // not a skippable source
+      logger.info('Reconciler left a row alone: its status is no longer decided by this task', {
+        orchestration_id: orchestrationId,
+        sub_issue_id: subIssueId,
+        task_id: evt.taskId,
+        task_status: outcome.status,
+      });
+      stale = true;
+      break; // the skips follow from the verdict that was just refused
     }
   }
 
@@ -614,9 +638,10 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
   //     human-pulled-back one) and idempotent on replay. The ❌ reaction + the
   //     failure reason on the panel convey "it failed"; a reply re-runs it (the
   //     retry re-drives the state not-started → running). Skip the integration
-  //     node (synthetic id, no real issue). Best-effort; never throws.
+  //     node (synthetic id, no real issue), and a stale event (the issue shows
+  //     what a later run did). Best-effort; never throws.
   const settleChannel = channelForMeta(snapshot.meta);
-  if (settleChannel && !plan.terminalSucceeded && !isIntegrationNode(subIssueId)) {
+  if (settleChannel && !plan.terminalSucceeded && !stale && !isIntegrationNode(subIssueId)) {
     const channel = settleChannel;
     const childRef = issueRef(subIssueId, snapshot.meta.credentials_ref);
     try {
@@ -713,10 +738,11 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
       'main',
       budget,
     );
+    const started = new Set(results.filter((r) => r.kind === 'released').map((r) => r.subIssueId));
     logger.info('Reconciler released children', {
       orchestration_id: orchestrationId,
       trigger_sub_issue_id: subIssueId,
-      released: results.filter((r) => r.kind === 'released').length,
+      released: started.size,
       terminally_failed: results.filter((r) => r.kind === 'create_failed_terminal').length,
       requested: releasableRows.length,
       ...(budget !== undefined && { concurrency_budget: budget }),
@@ -730,6 +756,10 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
     freshChildren = await applyTerminalCreateFailures(
       ddb, ORCHESTRATION_TABLE, orchestrationId, freshChildren, results, now,
     );
+    // The view was read before the release. A child started just now is running:
+    // without this the panel calls it blocked until the next event of the epic.
+    freshChildren = freshChildren.map((c) =>
+      (started.has(c.sub_issue_id) ? { ...c, child_status: 'released' as const } : c));
   }
 
   // Refresh the panel + settle the parent state against the fresh view.
@@ -749,7 +779,8 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * Best-effort; only when the orchestration's surface has a usable adapter. The
  * panel BODY edit is idempotent (same body = no-op), so it always runs; the
  * parent-STATE mirror is claimed once via ``claimRollup`` on the first
- * all-terminal caller.
+ * all-terminal caller, which gives the claim back when its edit of the panel
+ * does not land.
  */
 export async function refreshPanelAndSettle(
   orchestrationId: string,
@@ -820,7 +851,7 @@ export async function refreshPanelAndSettle(
   // all-terminal caller. The panel BODY edit is naturally idempotent.
   const won = !allTerminal || await claimRollup(ddb, ORCHESTRATION_TABLE, orchestrationId, now);
 
-  const newId = lookupValueOr(await upsertEpicPanel({
+  const panel = await upsertEpicPanel({
     channel,
     parent: issueRef(meta.parent_issue_ref, meta.credentials_ref, meta.release_context),
     ...(meta.status_comment_id !== undefined && { statusCommentId: meta.status_comment_id }),
@@ -834,7 +865,8 @@ export async function refreshPanelAndSettle(
     mirrorParentState: allTerminal ? won : false,
     ...(meta.release_context?.trigger_label !== undefined
       && { labelFilter: meta.release_context.trigger_label }),
-  }), null);
+  });
+  const newId = lookupValueOr(panel, null);
   // Persist a freshly-created panel comment id so later edits reuse it.
   if (newId && !meta.status_comment_id) {
     try {
@@ -846,6 +878,18 @@ export async function refreshPanelAndSettle(
     }
   }
 
+  // The claim tells every later settle (a redelivery, the sweep) that the final
+  // status is on the parent. When the edit of the panel did not land it is not,
+  // and keeping the claim would leave the parent as it is for good: hand it
+  // back, and leave the retry comment to the settle that lands. Only for a panel
+  // that has a comment to edit: there a result without an id is a failed edit
+  // (the adapter's null, or a throw). Without one it is also what a surface
+  // that hands back no ids reports for a comment it did post.
+  if (allTerminal && won && meta.status_comment_id !== undefined && !panel.ok) {
+    await releaseRollupClaim(orchestrationId, now);
+    return;
+  }
+
   // Settle the `@bgagent retry` comment that asked for this run, if one did.
   // The retry path can only ack it (👀) — it finishes the moment the work is
   // dispatched — so the comment the user is watching has no outcome unless this
@@ -853,6 +897,36 @@ export async function refreshPanelAndSettle(
   // way the parent-state mirror is.
   if (allTerminal && won && meta.retry_comment_id) {
     await settleRetryComment(orchestrationId, meta.retry_comment_id, children, channel, meta);
+  }
+}
+
+/**
+ * Give back the once-only claim of a settle whose panel edit did not land, so
+ * that the next settle (a redelivery, the sweep's next run) tries again.
+ *
+ * Conditional on the stamp this invocation wrote. The edit can take seconds to
+ * fail; if the epic was re-opened and settled again meanwhile, the stamp is
+ * that settle's, and removing it would settle the parent a second time.
+ * Best-effort: a claim that cannot be given back is the state before this
+ * existed.
+ */
+async function releaseRollupClaim(orchestrationId: string, stamp: string): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: ORCHESTRATION_TABLE,
+      Key: { orchestration_id: orchestrationId, sub_issue_id: ORCHESTRATION_META_SK },
+      UpdateExpression: 'REMOVE rollup_posted_at',
+      ConditionExpression: 'rollup_posted_at = :ours',
+      ExpressionAttributeValues: { ':ours': stamp },
+    }));
+    logger.warn('Final panel edit did not land — gave the settle claim back for another attempt', {
+      orchestration_id: orchestrationId,
+    });
+  } catch (err) {
+    if (isConditionalCheckFailed(err)) return; // re-opened or settled again since: not ours
+    logger.warn('Could not give the settle claim back (non-fatal)', {
+      orchestration_id: orchestrationId, error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -942,19 +1016,28 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
     return;
   }
 
+  // A source that left its branch where it was changed nothing downstream: an
+  // iteration that only answered a question, a re-stack with nothing to merge.
+  // The agent reports that as code_changed=false (the head it checked out is
+  // the head it ended on). Such a source neither repairs a failed node nor
+  // gives its dependents anything to merge; only the panel is refreshed. An
+  // absent value (an agent that does not report it) counts as a change.
+  const branchMoved = evt.codeChanged !== false;
+
   // RECOVERY cascade. If this successful iteration was a fix on a
   // node that is currently ``failed`` (a human commented a fix on a ❌ sub-issue),
   // un-fail it and re-release the dependents that were transitively ``skipped``
   // when it first failed — so the WHOLE epic can recover, not just this one PR.
   // No-ops cleanly when the node wasn't failed (the normal forward cascade below
   // handles a healthy iteration's dependents).
-  await maybeRecoverFailedNode(orchestrationId, snapshot, changedSubIssueId, now);
+  if (branchMoved) await maybeRecoverFailedNode(orchestrationId, snapshot, changedSubIssueId, now);
 
-  const steps = planDirectRestack(snapshot.children, changedSubIssueId);
+  const steps = branchMoved ? planDirectRestack(snapshot.children, changedSubIssueId) : [];
   if (steps.length === 0) {
-    logger.info('Restack cascade: no started direct dependents to re-stack', {
+    logger.info('Restack cascade: nothing to re-stack (branch unchanged, or no started direct dependent)', {
       orchestration_id: orchestrationId,
       changed_sub_issue_id: changedSubIssueId,
+      branch_moved: branchMoved,
     });
     // The cascade source (this re-stack/iteration) itself just completed and
     // carried a '🔄 updating' row on the panel. With no dependents to ripple
