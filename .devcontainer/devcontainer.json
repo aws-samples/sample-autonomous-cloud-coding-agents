@@ -1,0 +1,9 @@
+{
+  "name": "ABCA",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "postCreateCommand": ["bash", ".devcontainer/setup.sh"],
+  "waitFor": "postCreateCommand"
+}
