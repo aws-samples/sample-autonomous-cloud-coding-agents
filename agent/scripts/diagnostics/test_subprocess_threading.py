@@ -154,8 +154,6 @@ async def _run_tests(py_cmd: list[str], node_cmd: list[str] | None, node_version
     print(f"Python:     {sys.version}")
     print(f"Platform:   {sys.platform}")
     print(f"Loop:       {type(loop).__name__}")
-    policy = asyncio.get_event_loop_policy()
-    print(f"Policy:     {type(policy).__module__}.{type(policy).__name__}")
     if node_cmd:
         print(f"Node.js:    {node_version}")
     else:

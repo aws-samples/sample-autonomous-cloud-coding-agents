@@ -288,7 +288,7 @@ def build_gateway_server() -> Any:
 
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
-    except ImportError as exc:  # pragma: no cover - SDK always present in the container
+    except ImportError as exc:  # SDK always present in the container
         # Feature-detect: no SDK means the bridge can't be built, so return None
         # (like the URL-unset path above) to disable the tool rather than abort
         # startup — callers treat None as "gateway tool not offered", not failure.
@@ -318,7 +318,7 @@ def build_gateway_server() -> Any:
     # Thin SDK closure over _repo_config_impl (tested directly, so the wrapper
     # itself is not exercised by unit tests).
     @tool("repo_config", _REPO_CONFIG_DESCRIPTION, {"repo": str})
-    async def repo_config(args: dict[str, Any]) -> dict[str, Any]:  # pragma: no cover
+    async def repo_config(args: dict[str, Any]) -> dict[str, Any]:
         return await _repo_config_impl(gateway_url, region, args)
 
     return create_sdk_mcp_server(name=GATEWAY_SERVER_NAME, tools=[repo_config])

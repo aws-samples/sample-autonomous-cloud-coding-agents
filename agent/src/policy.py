@@ -1061,7 +1061,7 @@ class PolicyEngine:
         # _eval_tier is only reached from evaluate_tool_use AFTER the
         # ``_disabled``/``_cedarpy is None`` guard, so the attribute is
         # narrowed to a live module here.
-        if self._cedarpy is None:  # pragma: no cover — invariant guard
+        if self._cedarpy is None:  # invariant guard
             raise RuntimeError("eval called on disabled engine")
         result = self._cedarpy.is_authorized(request, policies_text, entities)
         if getattr(result.diagnostics, "errors", []):

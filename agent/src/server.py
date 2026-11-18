@@ -9,7 +9,6 @@ and return a small JSON acceptance immediately. Task progress is tracked in
 DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
-import asyncio
 import contextlib as _ctx_for_debug
 import json
 import logging
@@ -43,6 +42,7 @@ from models import TaskResult
 from observability import propagate_correlation_context
 from pipeline import run_task
 from shared_constants import SHARED_CONSTANTS
+from shell import redact_secrets
 
 # --- _debug_cw / _warn_cw failure counter -------------------------------
 # Shared counter for BOTH the debug and warn CloudWatch writers. AgentCore
@@ -57,25 +57,6 @@ _debug_cw_failures = 0
 _debug_cw_failures_lock = threading.Lock()
 _DEBUG_CW_FAILURE_EMIT_EVERY = 5
 
-# Only redact secrets at least this long — replacing very short strings
-# would mangle unrelated text that happens to contain them.
-_MIN_REDACTABLE_SECRET_LEN = 12
-
-
-def _redact_cached_credentials(text: str) -> str:
-    """Remove cached env secrets from debug text before stdout / CloudWatch."""
-    out = text
-    for env_key in (
-        "GITHUB_TOKEN",
-        "LINEAR_API_TOKEN",
-        "JIRA_API_TOKEN",
-        "JIRA_APP_ACTOR_SHARED_SECRET",
-    ):
-        secret = os.environ.get(env_key) or ""
-        if len(secret) >= _MIN_REDACTABLE_SECRET_LEN:
-            out = out.replace(secret, f"<{env_key}_REDACTED>")
-    return out
-
 
 def _emit_stdout_line(stamped: str) -> None:
     """Write one line to stdout via ``os.write`` (fd 1).
@@ -84,7 +65,7 @@ def _emit_stdout_line(stamped: str) -> None:
     instead of ``print``/``sys.stdout.write`` keeps lines visible in
     local runs without tripping CodeQL's cleartext-logging sinks (which
     model print and TextIOWrapper.write only) — callers MUST have
-    already routed content through ``_redact_cached_credentials``.
+    already routed content through ``shell.redact_secrets``.
     """
     line = (stamped + "\n").encode("utf-8", errors="replace")
     try:
@@ -108,7 +89,7 @@ def _debug_cw(msg: str, *, task_id: str | None = None) -> None:
     Always prints to stdout so local docker-compose runs see the line
     immediately. CloudWatch writes are best-effort fire-and-forget.
     """
-    msg = _redact_cached_credentials(msg)
+    msg = redact_secrets(msg)
     stamped = f"[server/debug] {msg}"
     _emit_stdout_line(stamped)
 
@@ -159,7 +140,7 @@ def _warn_cw(msg: str, *, task_id: str | None = None) -> None:
     # get the same sanitizer + non-print sink treatment (CodeQL
     # clear-text-logging models print/TextIOWrapper.write only; content
     # is redacted above regardless).
-    msg = _redact_cached_credentials(msg)
+    msg = redact_secrets(msg)
     stamped = f"[server/warn] {msg}"
     _emit_stdout_line(stamped)
 
@@ -237,19 +218,6 @@ def _debug_cw_write_blocking(log_group: str, task_id: str | None, stamped: str) 
             f"[server/debug/self] CloudWatch write failed: {type(_exc).__name__}: {_exc}",
             flush=True,
         )
-
-
-# Log the active event loop policy at import time.
-# CRITICAL: use plain ``print`` here, NOT ``_debug_cw``, to avoid spawning a
-# daemon thread during module import. In-container, that thread's first
-# boto3 call contends with uvicorn's startup for the single scarce CPU
-# slot and can make ``GET /ping`` return slow enough for AgentCore's
-# health-check to fail.
-_policy = asyncio.get_event_loop_policy()
-print(
-    f"[server/debug] boot: event_loop_policy={type(_policy).__module__}.{type(_policy).__name__}",
-    flush=True,
-)
 
 
 # Suppress noisy /ping health check access logs from uvicorn
@@ -1396,7 +1364,7 @@ def _aws_silent_log(msg: str, *, tag: str) -> None:
     Routes through the same ``os.write`` sink and credential redaction as
     ``_debug_cw``, so local runs and the ``capfd``-based tests still see the line.
     """
-    _emit_stdout_line(f"[server/{tag}] {_redact_cached_credentials(msg)}")
+    _emit_stdout_line(f"[server/{tag}] {redact_secrets(msg)}")
 
 
 def _build_hook_log(msg: str) -> None:

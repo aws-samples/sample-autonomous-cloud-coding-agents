@@ -81,8 +81,9 @@ _scoped: bool | None = None  # None until first resolution; True if tag-scoped
 _ambient_lock = threading.Lock()
 _ambient_credentials: dict[int, Any] = {}
 
-# Session-tag values, set once at startup by ``configure_session`` from the
-# resolved TaskConfig. Kept in private module state — NOT os.environ — so the
+# Session-tag values, set by ``configure_session``: ``run_task`` calls it twice
+# per task, first with its arguments as they came and then with the resolved
+# TaskConfig. Kept in private module state — NOT os.environ — so the
 # tenant identifiers are not inherited by the untrusted repo subprocesses the
 # agent spawns (build/test/tooling). Read by ``_session_tags`` at assume time.
 _tags: dict[str, str] = {}
@@ -124,7 +125,9 @@ def build_session_tags(user_id: str, repo: str, task_id: str) -> list[dict[str, 
 def configure_session(user_id: str, repo: str, task_id: str) -> None:
     """Record session-tag values in private module state for later use.
 
-    Called once at agent startup from the resolved ``TaskConfig``. Idempotent;
+    ``run_task`` calls it twice per task: first with its arguments as they
+    came, so that a failure while the configuration is built is recorded under
+    the task's own tags, and then with the resolved ``TaskConfig``. Idempotent;
     safe to call before any tenant-data client is created. Does not itself
     assume the role — the first ``get_session()`` call does, with these tags,
     so this must run first. Values are stored in a

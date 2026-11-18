@@ -576,6 +576,36 @@ class TestWriteTerminalReplayFields:
         assert "orphaned" not in out
 
 
+class TestWriteTerminalIterationOutcome:
+    """What the reply to an iteration on a pull request, and the resume of a task
+    that was held for a question, are decided from: whether the branch moved, the
+    agent's answer when it did not, and the commit the run ended on."""
+
+    def test_answer_of_a_run_that_changed_nothing_is_written(self, monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_terminal(
+            "t-iter",
+            "COMPLETED",
+            {"code_changed": False, "answer_text": "It is in src/login.py", "head_sha": "a" * 40},
+        )
+        expr = calls[0]["UpdateExpression"]
+        values = calls[0]["ExpressionAttributeValues"]
+        assert "code_changed = :cc" in expr
+        assert "answer_text = :ans" in expr
+        assert "head_sha = :hsha" in expr
+        # False is a value here, not an absence: the platform reads it as
+        # "answered, nothing changed", and an absent attribute as "updated".
+        assert values[":cc"] is False
+        assert values[":ans"] == "It is in src/login.py"
+        assert values[":hsha"] == "a" * 40
+
+
 class TestWriteTraceUriConditional:
     """L4 item 1a — ``write_trace_uri_conditional`` persists
     ``trace_s3_uri`` on an already-terminal record as a self-heal

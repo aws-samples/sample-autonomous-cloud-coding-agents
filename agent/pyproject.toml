@@ -262,10 +262,6 @@ skip_covered = true
 exclude_lines = ["^ *if TYPE_CHECKING:$", "^ *[.][.][.]$"]
 partial_branches = []
 
-[tool.ty.rules]
-# asyncio.get_event_loop_policy() is deprecated in 3.14+; still valid on 3.13.
-deprecated = "ignore"
-
 [tool.ty.environment]
 python-version = "3.13"
 extra-paths = ["src"]

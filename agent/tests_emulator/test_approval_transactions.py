@@ -56,6 +56,8 @@ class TestApprovalRequest:
         assert task["awaiting_approval_request_id"] == request_id
         # The stranded-approval sweep ages the task from this timestamp.
         assert task["status_created_at"].startswith("AWAITING_APPROVAL#")
+        # updated_at moves with the status, to the same moment.
+        assert task["status_created_at"] == "AWAITING_APPROVAL#" + task["updated_at"]
 
     def test_cancelled_task_gets_no_approval_row(self, agent_env, running_task):
         agent_env.table(agent_env.task_table).put_item(
