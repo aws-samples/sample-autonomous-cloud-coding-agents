@@ -20,6 +20,7 @@
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { resolveLinearOauthToken } from './linear-oauth-resolver';
 import { logger } from './logger';
+import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound } from './lookup-result';
 import { makeDocClient } from './ua';
 
 const ddb = makeDocClient();
@@ -61,13 +62,20 @@ export function extractLinearIdentifier(text: string | null | undefined): string
 /**
  * Pull the Linear identifier out of an ABCA-generated git branch name.
  *
- * This is the *authoritative* identifier source for the screenshot
- * router, and it must be tried before PR title/body. ABCA derives every
- * task branch as `bgagent/{taskId}/{slug}` where the slug is
- * `slugify("ENG-151: <title>")` — so the identifier is ALWAYS the
- * leading slug segment (see `generateBranchName` / `slugify` in
- * `gateway.ts`, and the `${identifier}: ${title}` description built in
+ * This is the first identifier source the screenshot router tries for
+ * a pull request that has no Linear task record, before PR title/body.
+ * ABCA derives a task branch as `bgagent/{taskId}/{slug}` from the task
+ * description; for a task started from an issue that is
+ * `slugify("ENG-151: <title>")`, so the identifier leads the slug
+ * (see `generateBranchName` / `slugify` in `gateway.ts`, and the
+ * `${identifier}: ${title}` description built in
  * `linear-webhook-processor.ts` / `orchestration-release.ts`).
+ *
+ * The result is a candidate, not a fact. The branch is upper-cased as a
+ * whole, so any word followed by a number matches (`upgrade-node-22`
+ * gives `NODE-22`), and a task started from a comment has no identifier
+ * in its branch at all. The router looks the candidate up and goes on to
+ * title and body when no workspace has such an issue.
  *
  * Why branch-first matters: in a stacked sub-issue
  * orchestration, an agent's PR *body* commonly narrates the predecessor
@@ -119,17 +127,19 @@ query IssueByIdentifier($identifier: String!) {
  *    `setup` / `add-workspace` re-run) and the rare case where a team was
  *    added in Linear after the workspace was registered.
  *
- * In either step, two workspaces that both have the issue give null: the
+ * In either step, two workspaces that both have the issue give no location: the
  * identifier does not say which one is meant.
  *
  * @param identifier `ENG-42`-style Linear issue identifier
  * @param registryTableName name of LinearWorkspaceRegistryTable
- * @returns issue location, or null if no workspace, or more than one, contains the issue
+ * @returns the issue's location; absent when every active workspace answered and
+ *   none has the issue; a failure when that cannot be said, because the registry
+ *   or a workspace could not be asked, or because two workspaces have the issue
  */
 export async function findLinearIssueByIdentifier(
   identifier: string,
   registryTableName: string,
-): Promise<LinearIssueLocation | null> {
+): Promise<LookupResult<LinearIssueLocation>> {
   let active: Array<{
     linear_workspace_id: string;
     workspace_slug: string;
@@ -151,12 +161,12 @@ export async function findLinearIssueByIdentifier(
     logger.warn('Linear issue lookup: failed to scan workspace registry', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- registry scan failure degrades to "issue not found"; logged WARN, caller iterates safely
+    return lookupFailed(err);
   }
 
   if (active.length === 0) {
     logger.info('Linear issue lookup: no active workspaces in registry', { identifier });
-    return null;
+    return LOOKUP_ABSENT;
   }
 
   // Identifier prefix is the part before the first dash (`ENG-42` → `ENG`).
@@ -165,6 +175,9 @@ export async function findLinearIssueByIdentifier(
   const teamKey = identifier.split('-', 1)[0]?.toUpperCase();
   const listsTeam = (ws: (typeof active)[number]): boolean =>
     ws.team_keys?.some((k) => k.toUpperCase() === teamKey) ?? false;
+
+  // Set when a workspace gave no answer: "no workspace has it" is then not known.
+  let unanswered = false;
 
   // The workspaces that list the team first; the others (legacy rows without
   // `team_keys`, post-registration team adds) only when none of those has the
@@ -175,32 +188,39 @@ export async function findLinearIssueByIdentifier(
     let hit: LinearIssueLocation | undefined;
     for (const ws of group) {
       const resolved = await resolveLinearOauthToken(ws.linear_workspace_id, registryTableName);
-      if (!resolved) continue;
+      if (!resolved) {
+        unanswered = true;
+        continue;
+      }
 
       const found = await queryIssueByIdentifier(resolved.accessToken, identifier);
-      if (!found) continue;
+      if (!found.ok) {
+        if (isLookupFailure(found)) unanswered = true;
+        continue;
+      }
       if (hit) {
         logger.warn('Linear issue lookup: identifier exists in more than one workspace — not guessing', {
           identifier,
           workspace_slugs: [hit.workspaceSlug, ws.workspace_slug],
         });
-        return null;
+        return lookupFailed(new Error('The identifier exists in more than one workspace'));
       }
       hit = {
-        issueId: found,
+        issueId: found.value,
         linearWorkspaceId: ws.linear_workspace_id,
         workspaceSlug: ws.workspace_slug,
       };
     }
-    if (hit) return hit;
+    if (hit) return lookupFound(hit);
   }
-  return null;
+  return unanswered ? lookupFailed(new Error('Not every workspace could be asked')) : LOOKUP_ABSENT;
 }
 
 /**
- * Issue the GraphQL query to Linear; return the issue UUID on hit, null
- * on miss. Never throws and gives up after {@link REQUEST_TIMEOUT_MS} —
- * caller iterates onto the next workspace.
+ * Issue the GraphQL query to Linear; return the issue UUID on hit, absent
+ * when Linear answers that no issue matches (it documents `null` for that),
+ * and a failure when it gave no usable answer. Never throws and gives up
+ * after {@link REQUEST_TIMEOUT_MS} — caller iterates onto the next workspace.
  *
  * Uses `issueVcsBranchSearch` because it accepts the human-readable
  * identifier directly (the regular `issue(id:)` query needs a UUID,
@@ -208,7 +228,7 @@ export async function findLinearIssueByIdentifier(
  * exactly this — VCS integrations resolving `<key>-<n>` strings to
  * issue rows.
  */
-async function queryIssueByIdentifier(accessToken: string, identifier: string): Promise<string | null> {
+async function queryIssueByIdentifier(accessToken: string, identifier: string): Promise<LookupResult<string>> {
   let body: {
     data?: { issueVcsBranchSearch?: { id?: string; identifier?: string } | null };
     errors?: unknown;
@@ -228,7 +248,7 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
     });
     if (!resp.ok) {
       logger.warn('Linear issue lookup: graphql non-2xx', { identifier, status: resp.status });
-      return null;
+      return lookupFailed(new Error(`Linear answered HTTP ${resp.status}`));
     }
     // Inside the try: a body that is not JSON rejects here.
     body = (await resp.json()) as typeof body;
@@ -237,20 +257,20 @@ async function queryIssueByIdentifier(accessToken: string, identifier: string): 
       identifier,
       error: err instanceof Error ? err.message : String(err),
     });
-    return null; // nosemgrep: ts-silent-success-masking -- per-workspace GraphQL blip returns miss; caller tries the next workspace
+    return lookupFailed(err);
   }
 
   if (body.errors) {
     logger.warn('Linear issue lookup: graphql errors', { identifier, errors: body.errors });
-    return null;
+    return lookupFailed(body.errors);
   }
   const hit = body.data?.issueVcsBranchSearch;
-  if (!hit?.id) return null;
+  if (!hit?.id) return LOOKUP_ABSENT;
   // Sanity: the response identifier must match what we asked for.
   // `issueVcsBranchSearch` is a fuzzy match against branch-name patterns;
   // exact-match the identifier to avoid linking to a near-neighbor issue.
   if (hit.identifier && hit.identifier.toUpperCase() !== identifier.toUpperCase()) {
-    return null;
+    return LOOKUP_ABSENT;
   }
-  return hit.id;
+  return lookupFound(hit.id);
 }

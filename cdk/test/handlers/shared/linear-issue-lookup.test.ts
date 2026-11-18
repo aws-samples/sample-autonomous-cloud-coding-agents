@@ -39,6 +39,7 @@ import {
   extractLinearIdentifierFromBranch,
   findLinearIssueByIdentifier,
 } from '../../../src/handlers/shared/linear-issue-lookup';
+import { LOOKUP_ABSENT, isLookupFailure, lookupFound } from '../../../src/handlers/shared/lookup-result';
 
 describe('extractLinearIdentifier', () => {
   test('returns null for null / undefined / empty input', () => {
@@ -117,6 +118,13 @@ describe('extractLinearIdentifierFromBranch', () => {
     expect(extractLinearIdentifierFromBranch('feature/some-thing')).toBeNull();
   });
 
+  test('reads any word followed by a number as an identifier', () => {
+    // The branch is upper-cased as a whole, so the caller gets a candidate, not
+    // a fact: only the lookup says whether a workspace has such an issue.
+    expect(extractLinearIdentifierFromBranch('feature/upgrade-node-22')).toBe('NODE-22');
+    expect(extractLinearIdentifierFromBranch('bgagent/01TASK/add-oauth-2-login-eng-42')).toBe('OAUTH-2');
+  });
+
   test('returns null on null/undefined/empty', () => {
     expect(extractLinearIdentifierFromBranch(null)).toBeNull();
     expect(extractLinearIdentifierFromBranch(undefined)).toBeNull();
@@ -164,9 +172,9 @@ describe('findLinearIssueByIdentifier', () => {
     registryHolds({ id: 'ws-globex', teamKeys: ['OPS'] }, { id: 'ws-acme', teamKeys: ['ENG'] });
     const linear = linearHas({ 'ws-acme': 'issue-acme' });
 
-    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual({
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual(lookupFound({
       issueId: 'issue-acme', linearWorkspaceId: 'ws-acme', workspaceSlug: 'acme',
-    });
+    }));
     expect(linear).toHaveBeenCalledTimes(1);
   });
 
@@ -176,24 +184,78 @@ describe('findLinearIssueByIdentifier', () => {
     registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] }, { id: 'ws-globex' });
     linearHas({ 'ws-globex': 'issue-globex' });
 
-    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual({
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual(lookupFound({
       issueId: 'issue-globex', linearWorkspaceId: 'ws-globex', workspaceSlug: 'globex',
-    });
+    }));
   });
 
   test.each([
     ['both list the team', ['ENG']],
     ['neither records its teams', undefined],
-  ])('returns null when two workspaces have the identifier and %s', async (_label, teamKeys) => {
+  ])('gives no location when two workspaces have the identifier and %s', async (_label, teamKeys) => {
     // An identifier is unique inside one workspace only. Taking the first workspace
-    // that answers puts one tenant's preview on the other tenant's issue.
+    // that answers puts one tenant's preview on the other tenant's issue. It is
+    // not "absent" either: the caller must not go on to a weaker identifier.
     registryHolds({ id: 'ws-acme', teamKeys }, { id: 'ws-globex', teamKeys });
     linearHas({ 'ws-acme': 'issue-acme', 'ws-globex': 'issue-globex' });
 
-    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+    expect(isLookupFailure(await findLinearIssueByIdentifier('ENG-7', REGISTRY))).toBe(true);
   });
 
-  test('a 200 whose body is not JSON is a miss, not a rejection', async () => {
+  test('is absent when every workspace answers that it has no such issue', async () => {
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] }, { id: 'ws-globex' });
+    const linear = linearHas({});
+
+    await expect(findLinearIssueByIdentifier('NODE-22', REGISTRY)).resolves.toEqual(LOOKUP_ABSENT);
+    expect(linear).toHaveBeenCalledTimes(2);
+  });
+
+  test('is absent when the registry has no active workspace', async () => {
+    registryHolds();
+
+    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toEqual(LOOKUP_ABSENT);
+  });
+
+  test('an issue that Linear returns under another identifier is no match', async () => {
+    // The search is fuzzy: asked for ENG-70 it may answer with ENG-7.
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] });
+    linearHas({ 'ws-acme': 'issue-acme' });
+
+    await expect(findLinearIssueByIdentifier('ENG-70', REGISTRY)).resolves.toEqual(LOOKUP_ABSENT);
+  });
+
+  test.each([
+    ['its token cannot be resolved', () => resolveTokenMock.mockImplementation(async (id: string) => (
+      id === 'ws-globex' ? null : { accessToken: `token-of-${id}` }
+    ))],
+    ['Linear answers it with HTTP 500', () => jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => (
+      (init!.headers as Record<string, string>).Authorization.endsWith('ws-globex')
+        ? { ok: false, status: 500 } as Response
+        : { ok: true, status: 200, json: async () => ({ data: { issueVcsBranchSearch: null } }) } as Response
+    ))],
+    ['Linear answers it with GraphQL errors', () => jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => ({
+      ok: true,
+      status: 200,
+      json: async () => ((init!.headers as Record<string, string>).Authorization.endsWith('ws-globex')
+        ? { errors: [{ message: 'Internal server error' }] }
+        : { data: { issueVcsBranchSearch: null } }),
+    } as Response))],
+  ])('is not absent when one workspace has no such issue and the other could not be asked: %s', async (_label, breakGlobex) => {
+    // "No workspace has it" is not known then, so the answer is a failure.
+    registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] }, { id: 'ws-globex', teamKeys: ['ENG'] });
+    linearHas({});
+    breakGlobex();
+
+    expect(isLookupFailure(await findLinearIssueByIdentifier('ENG-7', REGISTRY))).toBe(true);
+  });
+
+  test('a registry that cannot be read is a failure, not an absent issue', async () => {
+    ddbSend.mockRejectedValue(new Error('ProvisionedThroughputExceededException'));
+
+    expect(isLookupFailure(await findLinearIssueByIdentifier('ENG-7', REGISTRY))).toBe(true);
+  });
+
+  test('a 200 whose body is not JSON is a failure of the lookup, not a rejection', async () => {
     registryHolds({ id: 'ws-acme', teamKeys: ['ENG'] });
     jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
@@ -201,7 +263,7 @@ describe('findLinearIssueByIdentifier', () => {
       json: () => Promise.reject(new SyntaxError('Unexpected token <')),
     } as unknown as Response);
 
-    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+    expect(isLookupFailure(await findLinearIssueByIdentifier('ENG-7', REGISTRY))).toBe(true);
   });
 
   test('gives up on a Linear that takes the request and never answers', async () => {
@@ -214,7 +276,7 @@ describe('findLinearIssueByIdentifier', () => {
       if (init?.signal?.aborted) reject(init.signal.reason as Error);
     }));
 
-    await expect(findLinearIssueByIdentifier('ENG-7', REGISTRY)).resolves.toBeNull();
+    expect(isLookupFailure(await findLinearIssueByIdentifier('ENG-7', REGISTRY))).toBe(true);
     expect(timeoutSpy).toHaveBeenCalledWith(5_000);
   });
 });

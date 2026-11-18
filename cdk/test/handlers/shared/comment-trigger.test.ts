@@ -55,9 +55,35 @@ describe('parseCommentTrigger', () => {
     });
   });
 
+  test('a mention that ends a sentence triggers, and its full stop goes with it', () => {
+    expect(parseCommentTrigger('Please rebase this onto main, @bgagent.'))
+      .toEqual({ triggered: true, instruction: 'Please rebase this onto main,' });
+    expect(parseCommentTrigger('@bgagent. The tests fail on CI, please fix them'))
+      .toEqual({ triggered: true, instruction: 'The tests fail on CI, please fix them' });
+    expect(parseCommentTrigger('@bgagent... any update?'))
+      .toEqual({ triggered: true, instruction: 'any update?' });
+    // Alone it is a bare mention: an empty instruction, not the instruction ".".
+    expect(parseCommentTrigger('@bgagent.')).toEqual({ triggered: true, instruction: '' });
+  });
+
+  test('keeps a code block of a Jira comment as the reviewer wrote it', () => {
+    const code = 'steps:\n  - name: build\n    run: make';
+    // What the processor parses: the comment's ADF body, converted to markdown.
+    const body = extractDescriptionMarkdown({
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '@bgagent replace the step with:' }] },
+        { type: 'codeBlock', content: [{ type: 'text', text: code }] },
+      ],
+    });
+
+    expect(parseCommentTrigger(body).instruction).toBe(`replace the step with:\n\n\`\`\`\n${code}\n\`\`\``);
+  });
+
   test.each([
     'ping @bgagentbot',
     'email foo@bgagent.io',
+    'see @bgagent.io',
     'handle-like prefix foo@bgagent fix it',
     'ordinary human discussion',
     '',
