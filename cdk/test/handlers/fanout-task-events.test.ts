@@ -2387,6 +2387,22 @@ describe('renderLinearFinalStatusComment', () => {
     expect(body).not.toMatch(/cancelled:\s/);
   });
 
+  test('❌ task_timed_out reads "Task timed out", not the raw subtype "timed_out"', () => {
+    // The only subscribed subtype with an underscore in it. The Jira renderer
+    // of the same comment prints it in words.
+    const body = renderLinearFinalStatusComment({
+      eventType: 'task_timed_out',
+      prUrl: null,
+      costUsd: 0.1,
+      turns: 5,
+      maxTurns: 5,
+      durationS: 3600,
+      taskId: 't-timeout',
+      errorTitle: null,
+    });
+    expect(body.split('\n')[0]).toBe('❌ **Task timed out**');
+  });
+
   describe('clarify-before-spend — needsInput hold', () => {
     test('renders the question as 💬, not a ✅/❌, with no cost/turns subtitle', () => {
       const body = renderLinearFinalStatusComment({

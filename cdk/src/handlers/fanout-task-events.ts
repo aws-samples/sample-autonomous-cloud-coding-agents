@@ -1097,7 +1097,7 @@ export function renderLinearFinalStatusComment(args: {
     header = `⚠️ **Shipped a PR but stopped early${reason}** — review and decide if more work is needed`;
   } else {
     const reason = args.errorTitle ? `: ${args.errorTitle}` : '';
-    header = `❌ **Task ${args.eventType.replace(/^task_/, '')}${reason}**`;
+    header = `❌ **Task ${args.eventType.replace(/^task_/, '').replace(/_/g, ' ')}${reason}**`;
   }
 
   const costStr = args.costUsd != null ? `$${args.costUsd.toFixed(2)}` : '—';
