@@ -36,6 +36,12 @@ const FIX_GITHUB_APP_TOKEN = 'gh' + 's_' + 'A'.repeat(48);
 // An installation token of the stateless format, ghs_<app id>_<JWT>: three
 // base64url parts, which may hold "-" and "_", joined by dots.
 const FIX_GITHUB_APP_TOKEN_STATELESS = 'gh' + 's_123456_' + ['eyJ' + 'hbGciOi'.repeat(5), 'eyJ' + 'pYXQi-_'.repeat(40), 's1G-n_'.repeat(30)].join('.');
+// The JWT of that token alone: what stands behind "Bearer" need not be a
+// GitHub token.
+const FIX_JWT_SIGNED = FIX_GITHUB_APP_TOKEN_STATELESS.slice(('gh' + 's_123456_').length);
+// What the pattern for the older GitHub tokens takes for one of them: a prefix
+// and 36 letters and digits. A signature can hold such a run by chance.
+const FIX_LIKE_AN_OLDER_TOKEN = 'gh' + 'p_' + 'Zz9'.repeat(12);
 const FIX_GITHUB_FINE_GRAINED_SHORT = 'github' + '_pat_' + 'ABCDEFGHIJKLMNOPQRSTUV_' + '1'.repeat(20);
 // 40 characters of the alphabet of an AWS secret access key.
 const FIX_AWS_SECRET = 'aB3/'.repeat(9) + 'aB3x';
@@ -160,8 +166,24 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(input)).toBe(expected);
   });
 
-  // The pattern runs last: what another pattern replaced together with such
-  // a token before it existed is replaced as before.
+  // The signature of such a token is random text and can hold a run that an
+  // earlier pattern takes for a secret of its own and replaces by its marker,
+  // inside the token. The rest behind that marker belongs to the token as
+  // well.
+  test.each([
+    ['a run in the signature that looks like an older token', `${FIX_GITHUB_APP_TOKEN_STATELESS}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`, ''],
+    [
+      'two such runs, the second like an AWS key id',
+      `${FIX_GITHUB_APP_TOKEN_STATELESS}${FIX_LIKE_AN_OLDER_TOKEN}-${FIX_AWS_KEY}-${'s1G-n_'.repeat(10)}`,
+      '',
+    ],
+    ['a bracket behind the token that is no marker', FIX_GITHUB_APP_TOKEN_STATELESS, '[0]'],
+  ])('replaces a stateless GitHub App installation token whole past an inner marker: %s', (_what, token, behind) => {
+    expect(scanDenyReason(`GITHUB_TOKEN=${token}${behind}`)).toBe(`GITHUB_TOKEN=[REDACTED-GITHUB_APP_TOKEN]${behind}`);
+  });
+
+  // The pattern runs behind the older ones: what one of them replaced
+  // together with such a token before it existed is replaced as before.
   test.each([
     ['after Bearer', `Authorization: Bearer ${FIX_GITHUB_APP_TOKEN_STATELESS}`, 'Authorization: [REDACTED-GENERIC_BEARER]'],
     [
@@ -178,6 +200,39 @@ describe('scanDenyReason', () => {
     'see ghs_2024_hazard_statements_and_pictograms.v2.csv',
   ])('does not take "ghs_" and digits alone for a token: %s', (input) => {
     expect(scanDenyReason(input)).toBe(input);
+  });
+
+  // A bearer token ends in random text as well (the signature of a JWT).
+  // Where that holds a run an earlier pattern replaces, the Bearer pattern
+  // stops at the marker; the rest behind it belongs to the token.
+  test.each([
+    ['a GitHub App token', `${FIX_GITHUB_APP_TOKEN_STATELESS}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`],
+    ['a JWT that is no GitHub token', `${FIX_JWT_SIGNED}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}`],
+    ['two such runs, the second like an AWS key id', `${FIX_JWT_SIGNED}${FIX_LIKE_AN_OLDER_TOKEN}-${FIX_AWS_KEY}-${'s1G-n_'.repeat(10)}`],
+    ['the run at the end of the token', `${FIX_JWT_SIGNED}${FIX_LIKE_AN_OLDER_TOKEN}`],
+    ['padding behind the rest', `${FIX_JWT_SIGNED}${FIX_LIKE_AN_OLDER_TOKEN}-${'s1G-n_'.repeat(10)}==`],
+  ])('replaces a bearer token whole past an inner marker: %s', (_what, token) => {
+    expect(scanDenyReason(`Authorization: Bearer ${token}`)).toBe('Authorization: [REDACTED-GENERIC_BEARER]');
+  });
+
+  test.each([
+    ['a marker behind a space', `Authorization: Bearer ${FIX_JWT_SIGNED} ${FIX_AWS_KEY}`, 'Authorization: [REDACTED-GENERIC_BEARER] [REDACTED-AWS_KEY]'],
+    [
+      'two markers of other patterns, as a file about the scanner holds them',
+      'key [REDACTED-AWS_KEY][REDACTED-GITHUB_TOKEN]-tail',
+      'key [REDACTED-AWS_KEY][REDACTED-GITHUB_TOKEN]-tail',
+    ],
+  ])('takes only what follows a bearer marker directly for the rest of a token: %s', (_what, input, expected) => {
+    expect(scanDenyReason(input)).toBe(expected);
+  });
+
+  test('leaves the other patterns their match of the rest of a bearer token', () => {
+    // The entry for the rest of a bearer token runs last. Directly behind the
+    // Bearer pattern it would take the marker of the key id, and the pattern
+    // for connection strings needs that marker to replace this URL as a
+    // whole: the password would stay.
+    const input = `s3://Bearer ${'x'.repeat(24)}-${FIX_AWS_KEY}:pa/ss@host`;
+    expect(scanDenyReason(input)).toBe('[REDACTED-CONNECTION_STRING]');
   });
 
   test('takes text with a colon for a git remote URL token up to 512 characters', () => {

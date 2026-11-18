@@ -19,6 +19,14 @@ _APP_TOKEN = (
     "gh" + "s_123456_" + ".".join(["eyJ" + "hbGciOi" * 5, "eyJ" + "pYXQi-_" * 40, "s1G-n_" * 30])
 )
 
+# The JWT of that token alone: what stands behind "Bearer" need not be a
+# GitHub token.
+_JWT = _APP_TOKEN.removeprefix("gh" + "s_123456_")
+
+# What the pattern for the older GitHub tokens takes for one of them: a prefix
+# and 36 letters and digits. A signature can hold such a run by chance.
+_LIKE_AN_OLDER_TOKEN = "gh" + "p_" + "Zz9" * 12
+
 
 class TestScanResultDefaults:
     def test_clean_result(self):
@@ -176,6 +184,30 @@ class TestScanToolOutput:
         assert result.redacted_content == redacted
 
     @pytest.mark.parametrize(
+        ("token", "behind"),
+        [
+            pytest.param(
+                _APP_TOKEN + _LIKE_AN_OLDER_TOKEN + "-" + "s1G-n_" * 10,
+                "",
+                id="a run in the signature that looks like an older token",
+            ),
+            pytest.param(
+                _APP_TOKEN + _LIKE_AN_OLDER_TOKEN + "-AKIAIOSFODNN7EXAMPLE-" + "s1G-n_" * 10,
+                "",
+                id="two such runs, the second like an AWS key id",
+            ),
+            pytest.param(_APP_TOKEN, "[0]", id="a bracket behind the token that is no marker"),
+        ],
+    )
+    def test_stateless_app_token_is_replaced_whole_past_an_inner_marker(self, token, behind):
+        # The signature of such a token is random text and can hold a run
+        # that an earlier pattern takes for a secret of its own and replaces
+        # by its marker, inside the token. The rest behind that marker
+        # belongs to the token as well.
+        result = scan_tool_output(f"GITHUB_TOKEN={token}{behind}")
+        assert result.redacted_content == f"GITHUB_TOKEN=[REDACTED-GITHUB_APP_TOKEN]{behind}"
+
+    @pytest.mark.parametrize(
         ("content", "redacted", "finding"),
         [
             pytest.param(
@@ -195,8 +227,8 @@ class TestScanToolOutput:
     def test_stateless_app_token_leaves_the_other_patterns_their_match(
         self, content, redacted, finding
     ):
-        # The pattern runs last: what another pattern replaced together with
-        # such a token before it existed is replaced as before.
+        # The pattern runs behind the older ones: what one of them replaced
+        # together with such a token before it existed is replaced as before.
         result = scan_tool_output(content)
         assert result.findings == [finding]
         assert result.redacted_content == redacted
@@ -302,6 +334,63 @@ class TestScanToolOutput:
         content = "The bearer of good news arrived early."
         result = scan_tool_output(content)
         assert result.has_sensitive_content is False
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            pytest.param(
+                _APP_TOKEN + _LIKE_AN_OLDER_TOKEN + "-" + "s1G-n_" * 10,
+                id="a GitHub App token",
+            ),
+            pytest.param(
+                _JWT + _LIKE_AN_OLDER_TOKEN + "-" + "s1G-n_" * 10,
+                id="a JWT that is no GitHub token",
+            ),
+            pytest.param(
+                _JWT + _LIKE_AN_OLDER_TOKEN + "-AKIAIOSFODNN7EXAMPLE-" + "s1G-n_" * 10,
+                id="two such runs, the second like an AWS key id",
+            ),
+            pytest.param(_JWT + _LIKE_AN_OLDER_TOKEN, id="the run at the end of the token"),
+            pytest.param(
+                _JWT + _LIKE_AN_OLDER_TOKEN + "-" + "s1G-n_" * 10 + "==",
+                id="padding behind the rest",
+            ),
+        ],
+    )
+    def test_bearer_token_is_replaced_whole_past_an_inner_marker(self, token):
+        # A bearer token ends in random text as well (the signature of a JWT).
+        # Where that holds a run an earlier pattern replaces, the Bearer
+        # pattern stops at the marker; the rest behind it belongs to the token.
+        result = scan_tool_output(f"Authorization: Bearer {token}")
+        assert result.redacted_content == "Authorization: [REDACTED-BEARER_TOKEN]"
+
+    @pytest.mark.parametrize(
+        ("content", "redacted"),
+        [
+            pytest.param(
+                f"Authorization: Bearer {_JWT} AKIAIOSFODNN7EXAMPLE",
+                "Authorization: [REDACTED-BEARER_TOKEN] [REDACTED-AWS_KEY]",
+                id="a marker behind a space",
+            ),
+            pytest.param(
+                "key [REDACTED-AWS_KEY][REDACTED-GITHUB_TOKEN]-tail",
+                "key [REDACTED-AWS_KEY][REDACTED-GITHUB_TOKEN]-tail",
+                id="two markers of other patterns, as a file about the scanner holds them",
+            ),
+        ],
+    )
+    def test_only_what_follows_a_bearer_marker_directly_is_the_rest_of_a_token(
+        self, content, redacted
+    ):
+        assert scan_tool_output(content).redacted_content == redacted
+
+    def test_rest_of_a_bearer_token_leaves_the_other_patterns_their_match(self):
+        # The entry for the rest of a bearer token runs last. Directly behind
+        # the Bearer pattern it would take the marker of the key id, and the
+        # pattern for connection strings needs that marker to replace this URL
+        # as a whole: the password would stay.
+        content = "s3://Bearer " + "x" * 24 + "-AKIAIOSFODNN7EXAMPLE:pa/ss@host"
+        assert scan_tool_output(content).redacted_content == "[REDACTED-CONNECTION_STRING]"
 
     # ---- Connection strings ----
 

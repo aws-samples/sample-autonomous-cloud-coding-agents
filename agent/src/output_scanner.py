@@ -121,12 +121,26 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # GitHub App installation tokens of the stateless format that GitHub issues
     # since 2026: ghs_<app id>_<JWT>, about 520 characters. The JWT is known by
     # its first characters, "eyJ"; its three base64url parts and the dots
-    # between them are taken as one run, which keeps the scan linear. Last on
-    # purpose: the patterns above meet the text they met before this one was
-    # added, so what they replace (such a token after "Bearer", in a git URL
-    # or as the password of a URL) stays as it was, and this one takes the
-    # tokens they leave.
-    ("GITHUB_APP_TOKEN", re.compile(r"ghs_[0-9]+_eyJ[A-Za-z0-9._-]+")),
+    # between them are taken as one run, which keeps the scan linear. Behind
+    # the patterns above on purpose: they meet the text they met before this
+    # one was added, so what they replace (such a token after "Bearer", in a
+    # git URL or as the password of a URL) stays as it was, and this one takes
+    # the tokens they leave. A token runs on through a marker: its signature
+    # is random text, and where that holds by chance what a pattern above
+    # replaces (36 letters and digits behind "ghp_", say), the marker of that
+    # pattern stands inside the token, with the rest of the token behind it.
+    ("GITHUB_APP_TOKEN", re.compile(r"ghs_[0-9]+_eyJ(?:[A-Za-z0-9._-]+|\[REDACTED-[A-Z_]+\])+")),
+    # The rest of a bearer token. What stands behind "Bearer" ends in random
+    # text as well (the signature of a JWT). Where a pattern above has put its
+    # marker inside such a token, the Bearer pattern stopped at that marker.
+    # This entry takes the Bearer marker, each marker that follows it directly
+    # and the characters of a bearer token behind it, and leaves the one
+    # Bearer marker, which is why it has that pattern's label. Last, so that
+    # each pattern above meets the text it met before.
+    (
+        "BEARER_TOKEN",
+        re.compile(r"\[REDACTED-BEARER_TOKEN\](?:\[REDACTED-[A-Z_]+\][a-zA-Z0-9\-._~+/=]*)+"),
+    ),
 ]
 
 

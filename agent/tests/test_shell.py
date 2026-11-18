@@ -127,9 +127,9 @@ class TestRedactSecrets:
         # about 520 characters. The rule for the prefix stops at the first "."
         # or "-" of the JWT, so the payload and the signature stayed in the log
         # line. The full stop behind the token goes with it: a token holds dots.
-        # A signature is random: about one in 12,000 holds a prefix of the first
-        # rule, which that rule replaces by a second marker. The rest behind
-        # that marker belongs to the token as well.
+        # A signature is random and can hold a prefix of the first rule, which
+        # that rule replaces by a second marker. The rest behind that marker
+        # belongs to the token as well.
         assert redact_secrets(text) == redacted
 
     @pytest.mark.parametrize("prefix", ["gh" + "p_", "gh" + "o_", "gh" + "r_", "github" + "_pat_"])
