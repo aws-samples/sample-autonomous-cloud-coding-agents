@@ -60,6 +60,7 @@ import { handler } from '../../src/handlers/deny-task';
 // hook trips on AWS / GitHub / Slack tokens even inside tests).
 const FIX_AWS_KEY = 'AK' + 'IAIOSFODNN7EXAMPLE';
 const FIX_GITHUB_PAT = 'gh' + 'p_' + 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij';
+const FIX_PEM_BEGIN = '-----' + 'BEGIN' + ' PRIVATE KEY' + '-----';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
@@ -171,6 +172,44 @@ describe('deny-task — secret redaction', () => {
     const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
     const reason = tx.TransactItems[0].Update.ExpressionAttributeValues[':reason'];
     expect(reason.length).toBeLessThanOrEqual(2000);
+  });
+
+  // The scanner module that the handler calls; nothing in this file mocks it.
+  const scanner = jest.requireActual<typeof import('../../src/handlers/shared/deny-reason-scanner')>(
+    '../../src/handlers/shared/deny-reason-scanner',
+  );
+
+  test('scans only the first 20,000 characters of an oversized reason', async () => {
+    mockSend.mockResolvedValue({});
+    // 540 KB of key headers and no END marker: the private-key pattern
+    // walks from every header to the end of the text it is given.
+    const longReason = FIX_PEM_BEGIN.repeat(20_000);
+    const scan = jest.spyOn(scanner, 'scanDenyReason');
+    const res = await handler(
+      makeEvent({
+        body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: longReason }),
+      }),
+    );
+    const scanned = scan.mock.calls.map(([text]) => text);
+    scan.mockRestore();
+    expect(scanned.map((text) => text.length)).toEqual([20_000]);
+    expect(scanned[0]).toBe(longReason.slice(0, 20_000));
+    expect(res.statusCode).toBe(202);
+  });
+
+  test('stores an ordinary reason longer than 20,000 characters as if all of it were scanned', async () => {
+    mockSend.mockResolvedValue({});
+    // A key id across the 2,000-character cut, then ordinary words: 27,219 characters.
+    const longReason = `${'x'.repeat(1989)} ${FIX_AWS_KEY} leaked. ${'do not push to main. '.repeat(1200)}`;
+    await handler(
+      makeEvent({
+        body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: longReason }),
+      }),
+    );
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const reason = tx.TransactItems[0].Update.ExpressionAttributeValues[':reason'];
+    expect(reason).toBe(scanner.scanDenyReason(longReason).slice(0, 2000));
+    expect(reason).not.toContain(FIX_AWS_KEY.slice(0, 10));
   });
 });
 

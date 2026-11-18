@@ -100,9 +100,15 @@ export async function handler(
 
     // Sanitize + truncate the reason BEFORE any further processing.
     // The agent and audit event will both see the scanned form; the
-    // raw text is never persisted anywhere.
+    // raw text is never persisted anywhere. The scan is given at most
+    // ten times the stored length: it can take time quadratic in its
+    // input, and it runs before the rate limit. The margin is for
+    // redactions, which shorten the text. The stored reason is that of
+    // scanning everything unless redactions take up more than nine
+    // tenths of the scanned part; only then can it hold the start of a
+    // secret that the bound cut in two.
     const sanitizedReason = rawReason
-      ? scanDenyReason(rawReason).slice(0, DENY_REASON_MAX_LENGTH)
+      ? scanDenyReason(rawReason.slice(0, 10 * DENY_REASON_MAX_LENGTH)).slice(0, DENY_REASON_MAX_LENGTH)
       : '';
 
     const nowIso = new Date().toISOString();
