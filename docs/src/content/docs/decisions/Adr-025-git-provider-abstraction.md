@@ -1,15 +1,13 @@
 ---
-title: Adr 025 git provider abstraction
+title: "ADR-025: Git provider abstraction"
 ---
-
-# ADR-025: Git provider abstraction
 
 **Status:** proposed
 **Date:** 2026-11-10
 **Issue:** [#456](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/456)
 **Amends:** ADR-016 (credential types), ADR-017 (custom token secrets), ADR-024 §1 (optional features)
 
-Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/architecture/readme#lifecycle), this decision remains proposed until its implementing PR merges.
+Per the [ADR lifecycle](/sample-autonomous-cloud-coding-agents/decisions/readme#lifecycle), this decision remains proposed until its implementing PR merges.
 
 ## Context
 
@@ -95,11 +93,11 @@ Each provider declares what it supports. Callers branch on capabilities, not on 
 
 ### 7. Optional providers
 
-Each non-GitHub provider is an optional `DeploymentFeatures` key ([ADR-024](/sample-autonomous-cloud-coding-agents/architecture/adr-024-deployment-profiles)), which amends ADR-024 §1. The key gates the provider's egress domains, webhook route and grants. The orchestrator accepts the intersection of implemented and enabled providers, so a resolver-valid row cannot fail late at the DNS firewall. GitHub stays core.
+Each non-GitHub provider is an optional `DeploymentFeatures` key ([ADR-024](/sample-autonomous-cloud-coding-agents/decisions/adr-024-deployment-profiles)), which amends ADR-024 §1. The key gates the provider's egress domains, webhook route and grants. The orchestrator accepts the intersection of implemented and enabled providers, so a resolver-valid row cannot fail late at the DNS firewall. GitHub stays core.
 
 ### 8. Inbound webhooks for non-GitHub providers
 
-- **One receiver.** Non-GitHub providers share one webhook receiver, one dedup table and one processor, which dispatches on provider. This avoids adding a route, secret, table and two Lambdas per provider against the 490-resource application stack budget ([ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries)).
+- **One receiver.** Non-GitHub providers share one webhook receiver, one dedup table and one processor, which dispatches on provider. This avoids adding a route, secret, table and two Lambdas per provider against the 490-resource application stack budget ([ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries)).
 - **GitHub keeps its route.** GitHub keeps its existing route, because installed webhooks point at it.
 - **Deferred.** The route path and the dedup key format are fixed in the implementing PR.
 
@@ -164,8 +162,8 @@ Work in `orchestrator.ts`, `orchestrate-task.ts`, `server.py` and `hooks.py` sta
 - Issue [#456](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/456): GitLab integration
 - PR [#824](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/824) and its review: Bitbucket provider
 - Issues [#1021](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/1021) (repository onboarding API), [#50](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/50) (GitHub App), [#249](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/249) (Token Vault)
-- [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks): workflow `repo_config.provider`
-- [ADR-016](/sample-autonomous-cloud-coding-agents/architecture/adr-016-pluggable-identity-and-auth): credential taxonomy
-- [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding): operator CLI onboarding
-- [ADR-020](/sample-autonomous-cloud-coding-agents/architecture/adr-020-ears-requirements-syntax): EARS requirements
-- [ADR-023](/sample-autonomous-cloud-coding-agents/architecture/adr-023-cloudformation-stack-boundaries), [ADR-024](/sample-autonomous-cloud-coding-agents/architecture/adr-024-deployment-profiles): stack budget and optional features
+- [ADR-014](/sample-autonomous-cloud-coding-agents/decisions/adr-014-workflow-driven-tasks): workflow `repo_config.provider`
+- [ADR-016](/sample-autonomous-cloud-coding-agents/decisions/adr-016-pluggable-identity-and-auth): credential taxonomy
+- [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding): operator CLI onboarding
+- [ADR-020](/sample-autonomous-cloud-coding-agents/decisions/adr-020-ears-requirements-syntax): EARS requirements
+- [ADR-023](/sample-autonomous-cloud-coding-agents/decisions/adr-023-cloudformation-stack-boundaries), [ADR-024](/sample-autonomous-cloud-coding-agents/decisions/adr-024-deployment-profiles): stack budget and optional features
