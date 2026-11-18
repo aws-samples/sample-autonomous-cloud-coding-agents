@@ -40,6 +40,7 @@ const INSTRUCTION_PREFIXES = /^(SYSTEM|ASSISTANT|Human)\s*:/gim;
 const INJECTION_PHRASES = /(?:ignore previous instructions|disregard (?:above|previous|all)|new instructions\s*:)/gi;
 
 /** ASCII control characters except tab (0x09), LF (0x0A), CR (0x0D). */
+// eslint-disable-next-line no-control-regex -- the sanitizer strips control characters, so its pattern names them
 const CONTROL_CHARS = /[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
 
 /** Unicode bidirectional formatting characters and misplaced BOM. */

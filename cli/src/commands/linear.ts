@@ -967,7 +967,7 @@ export function makeLinearCommand(): Command {
         'Finish a hosted consent: the authorization code shown on the consent page. Uses the PKCE '
         + 'verifier saved by the first run, so it must be the same machine and the same workspace.',
       )
-      // eslint-disable-next-line complexity -- predates the ceiling (115 when it landed); must not grow
+      // eslint-disable-next-line complexity -- predates the ceiling (99, down from 115 when it landed); must not grow
       .action(async (slug: string, opts) => {
         assertWorkspaceSlug(slug);
         const config = loadConfig();

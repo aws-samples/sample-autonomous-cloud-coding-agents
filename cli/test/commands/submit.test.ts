@@ -758,6 +758,14 @@ describe('submit command', () => {
         Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }),
         'Upload timed out for diagram.png after 120s.',
       ],
+      [
+        // What fetch rejects with when its signal fires: a DOMException, which is not an
+        // Error of the realm Jest runs this file in.
+        'as a timeout when fetch rejects with its own abort error',
+        new DOMException('This operation was aborted', 'AbortError'),
+        'Upload timed out for diagram.png after 120s.',
+      ],
+      ['with the message of a thrown object', { message: 'socket hang up' }, 'Upload failed for diagram.png: socket hang up'],
     ])('reports an upload that fails %s', async (_how, thrown, message) => {
       fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
       mockCreateTask.mockResolvedValue(pendingUploads('diagram.png'));

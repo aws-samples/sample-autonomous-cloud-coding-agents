@@ -104,7 +104,7 @@ export function makeSubmitCommand(): Command {
     )
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
-    // eslint-disable-next-line complexity -- predates the ceiling (70 when it landed); must not grow
+    // eslint-disable-next-line complexity -- predates the ceiling (69, down from 70 when it landed); must not grow
     .action(async (opts) => {
       if (opts.pr !== undefined && isNaN(opts.pr)) {
         throw new CliError('--pr must be a valid number.');
@@ -421,15 +421,15 @@ async function uploadViaPresignedPost(
       signal: controller.signal,
     });
   } catch (err) {
-    const e = err instanceof Error ? err : new Error(String(err));
-    if (e.name === 'AbortError') {
+    const { name, message } = err as { name?: string; message?: string };
+    if (name === 'AbortError') {
       throw new CliError(
         `Upload timed out for ${instruction.filename} after ${UPLOAD_TIMEOUT_MS / 1000}s. ` +
         'Check your network connection and try again.',
       );
     }
     throw new CliError(
-      `Upload failed for ${instruction.filename}: ${e.message}`,
+      `Upload failed for ${instruction.filename}: ${message ?? String(err)}`,
     );
   } finally {
     clearTimeout(timeout);

@@ -150,7 +150,7 @@ export async function deliverJiraDeploymentPreview(
       const commentId = existing.Item?.jira_preview_comment_id;
       if (typeof commentId === 'string') {
         const result = await budget.run(() => updateIssueCommentAdf(ctx, issueKey, commentId, document));
-        if (!result.ok) throw new Error('Jira preview comment update failed');
+        if (!result.ok) throw new Error('Jira preview comment update failed', { cause: error });
       } else {
         logger.warn('Jira preview POST already claimed without a saved comment id', {
           event: 'screenshot.jira_delivery_claimed', task_id: task.task_id,

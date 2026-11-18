@@ -125,7 +125,9 @@ export default [
       '@stylistic/quotes': ['error', 'single', { avoidEscape: true }],
       '@stylistic/comma-dangle': ['error', 'always-multiline'],
       '@stylistic/comma-spacing': ['error', { before: false, after: true }],
-      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false }],
+      // The exceptions of the core rule this replaced: the plugin's own default also lets
+      // two spaces inside an import attribute pass.
+      '@stylistic/no-multi-spaces': ['error', { ignoreEOLComments: false, exceptions: { Property: true, ImportAttribute: false } }],
       '@stylistic/array-bracket-spacing': ['error', 'never'],
       '@stylistic/array-bracket-newline': ['error', 'consistent'],
       '@stylistic/object-curly-spacing': ['error', 'always'],
@@ -169,13 +171,16 @@ export default [
       'no-throw-literal': ['error'],
       // One fixed ceiling on cyclomatic complexity, the same number in cdk, cli and web.
       // A function above it is split, not exempted. The eslint-disable-next-line
-      // directives in src mark the functions that were above it when it landed: they
-      // must not grow. When a directive stops applying, as when its function comes to
-      // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
+      // directives in src mark the functions that were above it when it landed. The
+      // first number in the parenthesis of a directive is the record: the value the
+      // function had then, lowered whenever a change makes the function smaller. They
+      // must not grow, and test/eslint-config.test.ts holds each to its record. When a
+      // directive stops applying, as when its function comes to fit, the eslint task
+      // (--fix) deletes it and eslint:check reports it as unused.
       'complexity': ['error', { max: 40 }],
       // These two core formatting rules stay on beside their @stylistic forks, which each
-      // leave one check out: the space in `catch (`, and the space after the comma of an
-      // array hole (`[, second]`).
+      // leave checks out: the space in `catch (`, and the space after the comma of an
+      // array hole (`[, second]`) and at the trailing comma of a type parameter list.
       'comma-spacing': ['error', { before: false, after: true }],
       'keyword-spacing': ['error'],
       'eol-last': ['error', 'always'],
@@ -193,9 +198,6 @@ export default [
       // until its findings are fixed; delete the line to turn the rule on.
       '@typescript-eslint/no-explicit-any': 'off',
       'no-useless-assignment': 'off',
-      'preserve-caught-error': 'off',
-      // Off for good: its one finding is the sanitizer that strips control characters.
-      'no-control-regex': 'off',
 
       // TypeScript rules
       // Dead-code parity with Python ruff F401 (#282): unused imports/locals/params
@@ -368,6 +370,14 @@ export default [
           message: NO_CDK_IN_HANDLERS,
         }],
       }],
+    },
+  },
+
+  // One catch of this file still throws a new error without the caught one as its cause.
+  {
+    files: ['src/handlers/shared/repo-config.ts'],
+    rules: {
+      'preserve-caught-error': 'off',
     },
   },
 
