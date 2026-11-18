@@ -294,6 +294,12 @@ class TestComputeTurnsCompleted:
         # Edge case: attempted == max_turns; min() is a no-op.
         assert _compute_turns_completed(10, max_turns=10) == 10
 
+    def test_limit_of_zero_is_no_cap(self):
+        # The SDK hands --max-turns to the CLI only for a truthy value, so a run
+        # with max_turns 0 (MAX_TURNS=0 in batch mode, a Blueprint with
+        # agent.maxTurns 0 on ECS) has no turn limit. Its turns are not zero.
+        assert _compute_turns_completed(37, max_turns=0) == 37
+
     def test_none_turns_attempted_round_trips(self):
         # Missing SDK count must round-trip as None so writers can detect
         # "no turn counter available" vs "zero turns".

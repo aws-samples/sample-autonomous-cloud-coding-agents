@@ -1,16 +1,19 @@
 """Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
+import json
 import os
 import re
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from models import AgentResult, RepoSetup, TaskConfig
+from models import AgentResult, RepoSetup, TaskConfig, TokenUsage
 from pipeline import (
+    _branch_has_new_commits,
     _chain_prior_agent_error,
     _resolve_overall_task_status,
     _should_post_start_comment,
@@ -380,6 +383,9 @@ class TestRepoLessPipeline:
         # milestone is recorded. Task succeeds with the artifact URI set.
         assert result["status"] == "success"
         assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/repoless-1/result.md"
+        # What the agent spent is on the result, as it is for a coding task.
+        assert result["cost_usd"] == 0.02
+        assert result["turns_attempted"] == 2
         # Agent ran from the workspace, not a repo dir, with the repo-less prompt
         # (no Repository: / branch placeholders), and the prompt was substituted.
         assert "Repository:" not in captured_cwd["system_prompt"]
@@ -2562,6 +2568,298 @@ class TestDeliveryGateReadsThePushedBranch:
 
         assert run.result["status"] == "error"
         assert "deliverable=no_pr" in run.result["error"]
+
+    def test_pushed_commit_whose_subject_is_not_utf8_is_counted(self, tmp_path):
+        # The check runs for every task that ends without a pull request, so it
+        # must not be able to raise. `git commit` converts a subject that is not
+        # UTF-8 itself; a commit object written by another tool keeps its bytes
+        # and `git log` prints them as they are.
+        setup = self._clone_with_unpushed_commit(tmp_path)
+        head = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=setup.repo_dir,
+            check=True,
+            capture_output=True,
+        )
+        written = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=setup.repo_dir,
+            input=head.stdout.replace(b"agent work", b"caf\xe9"),
+            check=True,
+            capture_output=True,
+        )
+        sha = written.stdout.decode().strip()
+        self._git(setup.repo_dir, "push", "-q", "origin", f"{sha}:refs/heads/{self.BRANCH}")
+
+        assert _branch_has_new_commits(setup.repo_dir, "main", self.BRANCH) is True
+
+
+class TestCrashedTaskIsReported:
+    """A task whose pipeline raises is recorded FAILED by the handler at the bottom of
+    ``run_task``. That record is all the platform shows of the task afterwards: it
+    has to say what the agent spent and how long the task ran."""
+
+    @staticmethod
+    def _crash(
+        *, setup_error: Exception | None = None, agent_result: AgentResult | None = None
+    ) -> SimpleNamespace:
+        """Run a task that raises in the repository setup (``setup_error``) or, once
+        the agent has returned ``agent_result``, in ``ensure_pr``.
+
+        The pipeline's clock is stubbed: the repository setup takes 5 minutes and
+        the agent 40. Returns the FAILED payload and the ``print_metrics`` mock."""
+        clock = SimpleNamespace(now=1_000_000.0)
+
+        def setup_repo(_config, progress=None):
+            clock.now += 300
+            if setup_error:
+                raise setup_error
+            return RepoSetup(repo_dir="/workspace/repo", branch="bgagent/test/branch")
+
+        async def run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            clock.now += 2400
+            return agent_result
+
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        with (
+            patch("runner.run_agent", side_effect=run_agent),
+            patch("pipeline.build_system_prompt", return_value="sys"),
+            patch("pipeline.discover_project_config", return_value=None),
+            patch("repo.setup_repo", side_effect=setup_repo),
+            patch("pipeline.task_span", return_value=span),
+            patch("pipeline.task_state") as task_state,
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", side_effect=RuntimeError("gh pr create timed out")),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics") as print_metrics,
+            patch("pipeline.time") as pipeline_time,
+            pytest.raises(RuntimeError),
+        ):
+            pipeline_time.time.side_effect = lambda: clock.now
+            task_state.get_task.return_value = None
+            from pipeline import run_task
+
+            run_task(
+                repo_url="o/r",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-crash",
+            )
+        task_state.write_terminal.assert_called_once()
+        _task_id, status, payload = task_state.write_terminal.call_args.args
+        assert status == "FAILED"
+        return SimpleNamespace(failed=payload, print_metrics=print_metrics)
+
+    def test_crash_after_the_agent_keeps_what_the_agent_reported(self):
+        # The agent finished, then opening the pull request raised. What the agent
+        # spent is known and has to be on the FAILED record like on every other
+        # terminal record: the monthly budgets are rolled up from its cost_usd.
+        crashed = self._crash(
+            agent_result=AgentResult(
+                status="success",
+                turns=7,
+                num_turns=7,
+                cost_usd=1.25,
+                session_id="sess-1",
+                usage=TokenUsage(
+                    input_tokens=1200,
+                    output_tokens=340,
+                    cache_read_input_tokens=5000,
+                    cache_creation_input_tokens=60,
+                ),
+            )
+        )
+
+        assert crashed.failed["error"] == "RuntimeError: gh pr create timed out"
+        from_the_agent = {
+            "agent_status": "success",
+            "cost_usd": 1.25,
+            "turns": 7,
+            "turns_attempted": 7,
+            "turns_completed": 7,
+            "session_id": "sess-1",
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_read_input_tokens": 5000,
+            "cache_creation_input_tokens": 60,
+        }
+        assert {key: crashed.failed[key] for key in from_the_agent} == from_the_agent
+
+    def test_setup_failure_records_how_long_the_task_ran(self):
+        # The clone failed after five minutes. No agent ran, so the agent's fields
+        # stay at their defaults, but the task did run for five minutes.
+        crashed = self._crash(setup_error=RuntimeError("clone failed"))
+
+        assert crashed.failed["status"] == "error"
+        assert crashed.failed["agent_status"] == "unknown"
+        assert crashed.failed["cost_usd"] is None
+        assert crashed.failed["duration_s"] == 300.0
+
+    def test_crash_after_the_agent_is_timed_like_a_finished_run(self):
+        # A finished run reports the time since the agent started (40 minutes
+        # here), without the repository setup before it (5 minutes). A run that
+        # crashes in a post-hook is on the same clock.
+        crashed = self._crash(agent_result=_agent_succeeded())
+
+        assert crashed.failed["duration_s"] == 2400.0
+
+    def test_crashed_task_emits_the_event_the_dashboard_counts(self):
+        # The dashboard computes its success rate and task counts from the
+        # METRICS_REPORT event, which only print_metrics emits: without it a
+        # crashed task is not counted as a failure, it is not counted at all.
+        crashed = self._crash(setup_error=RuntimeError("clone failed"))
+
+        crashed.print_metrics.assert_called_once_with(crashed.failed)
+
+
+# ---------------------------------------------------------------------------
+# What the agent step is given: the prompt, the system prompt, .mcp.json
+# ---------------------------------------------------------------------------
+
+
+class TestWhatTheAgentStepIsGiven:
+    """What ``run_task`` hands to the agent step. The prompt building and the
+    ``.mcp.json`` handling run for real: only the repository setup, the agent
+    itself and the post-hooks are stubbed."""
+
+    @pytest.fixture
+    def agent_step(self, tmp_path):
+        """The stubbed agent step of a task whose clone is ``tmp_path``. It records
+        its prompt, system prompt and config, and the servers that ``.mcp.json``
+        names at the moment the agent starts."""
+        step = SimpleNamespace(ran=False)
+
+        def servers_in_mcp_json(repo_dir: str) -> list[str]:
+            mcp_json = Path(repo_dir, ".mcp.json")
+            if not mcp_json.exists():
+                return []
+            return sorted(json.loads(mcp_json.read_text())["mcpServers"])
+
+        async def run_agent(prompt, system_prompt, config, cwd, trajectory=None):
+            step.ran = True
+            step.prompt, step.system_prompt, step.config = prompt, system_prompt, config
+            step.mcp_servers = servers_in_mcp_json(cwd)
+            return _agent_succeeded()
+
+        span = MagicMock()
+        span.__enter__ = MagicMock(return_value=span)
+        span.__exit__ = MagicMock(return_value=False)
+        with (
+            patch("runner.run_agent", side_effect=run_agent),
+            patch(
+                "repo.setup_repo",
+                return_value=RepoSetup(repo_dir=str(tmp_path), branch="bgagent/test/branch"),
+            ),
+            patch("pipeline.task_span", return_value=span),
+            patch("pipeline.task_state") as task_state,
+            patch("pipeline.ensure_committed", return_value=False),
+            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_pr", return_value="https://github.com/o/r/pull/1"),
+            patch("pipeline.get_disk_usage", return_value=0),
+            patch("pipeline.print_metrics"),
+        ):
+            task_state.get_task.return_value = None
+            step.task_state = task_state
+            yield step
+
+    @staticmethod
+    def _run_task(**task_kwargs) -> dict:
+        from pipeline import run_task
+
+        return run_task(
+            repo_url="o/r",
+            task_description="x",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            task_id="t-given",
+            **task_kwargs,
+        )
+
+    def test_linear_server_committed_to_the_repository_is_removed(self, agent_step, tmp_path):
+        # ADR-016: the agent must have no Linear tools. The CLI loads the
+        # repository's .mcp.json, a Linear task has the Linear token in its
+        # environment and the permission mode is bypassPermissions, so the entry
+        # has to be gone from the file before the agent starts.
+        (tmp_path / ".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "linear-server": {"type": "sse", "url": "https://mcp.linear.app/sse"},
+                        "docs": {"command": "docs-mcp"},
+                    }
+                }
+            )
+        )
+
+        self._run_task()
+
+        assert agent_step.mcp_servers == ["docs"]
+
+    def test_linear_server_from_a_registry_asset_is_removed_after_the_merge(self, agent_step):
+        # The registry merge writes its servers into .mcp.json after that first
+        # scrub, so the pipeline scrubs once more behind the merge. The asset's
+        # name says nothing; its URL is Linear's.
+        def mcp_server(name: str, url: str) -> dict:
+            return {
+                "kind": "mcp_server",
+                "namespace": "acme",
+                "name": name,
+                "version": "1.0.0",
+                "runtime": {"transport": "http", "url": url},
+            }
+
+        self._run_task(
+            resolved_assets=[
+                mcp_server("tracker", "https://mcp.linear.app/sse"),
+                mcp_server("pdf", "https://pdf.example.com/mcp"),
+            ]
+        )
+
+        assert agent_step.mcp_servers == ["acme__pdf"]
+
+    def test_orchestrator_context_is_what_the_agent_runs_on(self, agent_step):
+        # Every deployed task arrives with a hydrated context. Its prompt was
+        # assembled, screened and budgeted by the orchestrator: the agent must run
+        # on that text, not on a prompt rebuilt in the container from the task
+        # description, and on the issue, branches and memory that came with it.
+        self._run_task(
+            hydrated_context={
+                "version": 1,
+                "user_prompt": "HYDRATED PROMPT",
+                "issue": {"number": 42, "title": "Login page is slow", "body": "Takes 9 s."},
+                "memory_context": {"repo_knowledge": ["Uses Jest"]},
+                "sources": ["issue", "memory"],
+                "token_estimate": 12,
+                "truncated": False,
+                "resolved_branch_name": "bgagent/t-given/login-page-is-slow",
+                "resolved_base_branch": "bgagent/t-parent/session-store",
+            }
+        )
+
+        assert agent_step.prompt == "HYDRATED PROMPT"
+        assert "Uses Jest" in agent_step.system_prompt
+        assert agent_step.config.issue.title == "Login page is slow"
+        assert agent_step.config.branch_name == "bgagent/t-given/login-page-is-slow"
+        assert agent_step.config.base_branch == "bgagent/t-parent/session-store"
+
+    def test_context_of_a_newer_schema_fails_the_task_with_the_contract_error(self, agent_step):
+        # An orchestrator that is ahead of the agent image sends a context this
+        # agent cannot parse. The task must fail with the validation error that
+        # names the mismatch, before anything else runs.
+        with pytest.raises(ValidationError, match="schema version 99 is not supported"):
+            self._run_task(hydrated_context={"user_prompt": "x", "version": 99})
+
+        assert agent_step.ran is False
+        agent_step.task_state.write_terminal.assert_called_once()
+        _task_id, status, payload = agent_step.task_state.write_terminal.call_args.args
+        assert status == "FAILED"
+        assert "schema version 99 is not supported" in payload["error"]
 
 
 class TestBatchEntryPoint:

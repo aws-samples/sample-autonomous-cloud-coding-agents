@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import os
@@ -382,8 +381,6 @@ def _run_repoless_task(
     memory_written = False
     effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
     if effective_memory_id and config.user_id:
-        import memory as agent_memory
-
         memory_written = agent_memory.write_task_episode(
             memory_id=effective_memory_id,
             actor=f"user:{config.user_id}",
@@ -393,29 +390,15 @@ def _run_repoless_task(
             duration_s=round(duration, 1),
         )
 
-    usage = agent_result.usage
-    turns_attempted = agent_result.num_turns or agent_result.turns
     result = TaskResult(
         status=overall_status,
-        agent_status=agent_result.status,
+        **_agent_result_fields(agent_result, config.max_turns),
         pr_url=None,
         artifact_uri=artifact_uri,
-        cost_usd=agent_result.cost_usd,
-        turns=turns_attempted,
-        turns_attempted=turns_attempted,
-        turns_completed=_compute_turns_completed(
-            turns_attempted=turns_attempted,
-            max_turns=config.max_turns,
-        ),
         duration_s=round(duration, 1),
         task_id=config.task_id,
         memory_written=memory_written,
         error=result_error,
-        session_id=agent_result.session_id or None,
-        input_tokens=usage.input_tokens if usage else None,
-        output_tokens=usage.output_tokens if usage else None,
-        cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
-        cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
         otel_trace_id=current_otel_trace_id(),
     )
@@ -519,14 +502,7 @@ def _starts_with_needs_input_marker(result_text: str | None) -> bool:
     marker buried mid-answer is not a hold signal — it prevents a stray mention
     of the token in prose from tripping the hold).
     """
-    if not result_text:
-        return False
-    for line in result_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        return stripped.startswith(NEEDS_INPUT_MARKER)
-    return False
+    return bool(result_text) and result_text.lstrip().startswith(NEEDS_INPUT_MARKER)
 
 
 def _strip_needs_input_marker(result_text: str) -> str:
@@ -647,14 +623,15 @@ def _branch_has_new_commits(repo_dir: str, default_branch: str, branch: str) -> 
     question: did this child add anything on top of its base? Best-effort — a
     git failure returns ``False`` (assume nothing landed, the conservative read
     for a gate whose job is to catch a lost deliverable); a branch that was
-    never pushed is such a failure, an unknown ref."""
+    never pushed is such a failure, an unknown ref. The output stays bytes: it
+    is only tested for being empty, and decoding it would raise on a commit
+    subject that is not UTF-8."""
     try:
         res = subprocess.run(
             ["git", "log", f"origin/{default_branch}..origin/{branch}", "--oneline"],
             cwd=repo_dir,
             check=False,
             capture_output=True,
-            text=True,
             timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
@@ -744,12 +721,42 @@ def _compute_turns_completed(
     ``is_error``, so the runner reports it as ``error``, not ``error_max_turns``,
     and no status can complete more turns than the cap.
 
+    A ``max_turns`` that is not positive is no cap (the SDK hands the CLI a turn
+    limit only for a truthy value), so the count is returned as it is.
+
     Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
     round-trip a missing SDK count without inventing a fake zero.
     """
-    if not turns_attempted:
+    if not turns_attempted or max_turns <= 0:
         return turns_attempted
     return min(turns_attempted, max_turns)
+
+
+def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> dict:
+    """The ``TaskResult`` fields that are taken from the agent's result.
+
+    One mapping for every terminal write (repo-less, repo-bound and crash), so
+    that a task which crashes after its agent ran records what the agent spent
+    like any other task. Empty when the agent never returned a result (a crash
+    during setup): the ``TaskResult`` defaults then apply.
+    """
+    if agent_result is None:
+        return {}
+    usage = agent_result.usage
+    turns_attempted = agent_result.num_turns or agent_result.turns
+    return {
+        "agent_status": agent_result.status,
+        "cost_usd": agent_result.cost_usd,
+        # Legacy field (= turns_attempted) kept for back-compat.
+        "turns": turns_attempted,
+        "turns_attempted": turns_attempted,
+        "turns_completed": _compute_turns_completed(turns_attempted, max_turns),
+        "session_id": agent_result.session_id or None,
+        "input_tokens": usage.input_tokens if usage else None,
+        "output_tokens": usage.output_tokens if usage else None,
+        "cache_read_input_tokens": usage.cache_read_input_tokens if usage else None,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens if usage else None,
+    }
 
 
 def _write_memory(
@@ -973,6 +980,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
         # — survives refactors and reads cleanly. Stays None until the Linear
         # `react_task_started` call assigns the actual reaction id.
         linear_eyes_reaction_id: str | None = None
+        # Declared up-front as well, for the duration the crash handler records:
+        # the time since the pipeline started, until the agent starts and this
+        # clock is reset (a finished run reports the time since the agent
+        # started). A task that fails during setup then shows how long it ran.
+        start_time = time.time()
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -1229,15 +1241,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             log("TASK", "Starting agent...")
             if config.max_budget_usd:
                 log("TASK", f"Budget limit: ${config.max_budget_usd:.2f}")
-            # Warn if uvloop is the active policy — subprocess SIGCHLD conflicts.
-            policy = asyncio.get_event_loop_policy()
-            policy_name = type(policy).__name__
-            if "uvloop" in policy_name.lower():
-                log(
-                    "WARN",
-                    f"uvloop detected ({policy_name}) — this may cause subprocess "
-                    f"SIGCHLD conflicts with the Claude Agent SDK",
-                )
             with task_span("task.agent_execution") as agent_span:
                 try:
                     agent_result = _execute_agent_step(
@@ -1560,7 +1563,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
             # Gating honors each verify step's declared ``gate`` via the runner's
             # gate_status (#301); an undeclared verify_lint never gates (legacy).
-            agent_status = agent_result.status
             build_ok = _apply_post_hook_gates(
                 _workflow,
                 read_only=workflow_read_only,
@@ -1584,21 +1586,12 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # Delivery gate: a create-strategy new-work task that
             # reported success but opened no PR AND landed no commit shipped
             # nothing — fail it loudly (retryable) instead of a false COMPLETED
-            # that would poison a stacked orchestration DAG (#247). The branch-diff is only run
-            # when the gate is actually in play (success + no pr_url) so a normal
-            # PR-producing run pays nothing. See :func:`_apply_delivery_gate`.
-            gate_in_play = (
-                overall_status == "success"
-                and not pr_url
-                and not workflow_read_only
-                and not artifact_workflow
-                and not needs_input
-                and ensure_pr_strategy == "create"
-            )
-            commit_landed = (
-                _branch_has_new_commits(setup.repo_dir, setup.default_branch, setup.branch)
-                if gate_in_play
-                else False
+            # that would poison a stacked orchestration DAG (#247). Which runs the
+            # gate applies to is decided in :func:`_apply_delivery_gate` alone; the
+            # branch-diff it may read is skipped only when there is a PR, so a
+            # normal PR-producing run pays nothing.
+            commit_landed = not pr_url and _branch_has_new_commits(
+                setup.repo_dir, setup.default_branch, setup.branch
             )
             overall_status, result_error = _apply_delivery_gate(
                 overall_status,
@@ -1687,25 +1680,14 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 answer_text = clarification_q or _strip_needs_input_marker(answer_text)
 
             # Build TaskResult
-            usage = agent_result.usage
-            turns_attempted = agent_result.num_turns or agent_result.turns
-            turns_completed = _compute_turns_completed(
-                turns_attempted=turns_attempted,
-                max_turns=config.max_turns,
-            )
             result = TaskResult(
                 status=overall_status,
-                agent_status=agent_status,
+                **_agent_result_fields(agent_result, config.max_turns),
                 pr_url=pr_url,
                 # None, not True, for a build whose command could not run: the
                 # gate did not run, and write_terminal then stores no verdict.
                 build_passed=None if build_inert else build_passed,
                 lint_passed=lint_passed,
-                cost_usd=agent_result.cost_usd,
-                # Legacy field (= turns_attempted) kept for back-compat.
-                turns=turns_attempted,
-                turns_attempted=turns_attempted,
-                turns_completed=turns_completed,
                 duration_s=round(duration, 1),
                 task_id=config.task_id,
                 disk_before=format_bytes(disk_before),
@@ -1714,11 +1696,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 prompt_version=prompt_version or None,
                 memory_written=memory_written,
                 error=result_error,
-                session_id=agent_result.session_id or None,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
-                cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
                 # An artifact workflow carries its artifact
                 # URI here so the platform can read the plan and seed sub-issues;
@@ -1748,6 +1725,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
+            usage = agent_result.usage
             if usage:
                 root_span.set_attribute("agent.input_tokens", usage.input_tokens)
                 root_span.set_attribute("agent.output_tokens", usage.output_tokens)
@@ -1797,14 +1775,16 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 status="error",
                 error=combined,
                 task_id=config.task_id,
-                agent_status=agent_for_chain.status if agent_for_chain else "unknown",
+                **_agent_result_fields(agent_for_chain, config.max_turns),
+                duration_s=round(time.time() - start_time, 1),
                 trace_s3_uri=crash_trace_s3_uri,
                 # Still inside `with task_span()`, so the id is live — capture it
                 # here too or FAILED tasks (the primary post-mortem case for the
                 # replay bundle, #515) persist otel_trace_id: null.
                 otel_trace_id=current_otel_trace_id(),
             )
-            task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
+            crash_dict = crash_result.model_dump()
+            task_state.write_terminal(config.task_id, "FAILED", crash_dict)
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
             # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
             # `linear_eyes_reaction_id` is initialized to None at the top of
@@ -1821,6 +1801,11 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # and fires on the platform side even when this crash path runs,
             # so posting here would double-comment. (Contrast the Linear ❌
             # reaction above, which the fan-out plane does not replicate.)
+            #
+            # METRICS_REPORT, as on every other terminal path: the dashboard
+            # counts tasks and failures from this event alone. Last, so that
+            # neither the FAILED write nor the reaction above waits for it.
+            print_metrics(crash_dict)
             raise
 
 
