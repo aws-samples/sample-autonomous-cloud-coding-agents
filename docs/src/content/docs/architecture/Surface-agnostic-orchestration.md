@@ -45,8 +45,8 @@ forks) and reduces the current Linear/Jira duplication (both already expose para
 - **Fixed** — the engine used to call surface operations directly
   (`upsertStatusComment`, `swapIssueReaction`/`swapCommentReaction`,
   `transitionIssueState`, `revertIssueToNotStarted`, `postIssueComment`,
-  `reportIssueFailure`, `reactToComment`, `replyToComment`, `upsertThreadedReply`,
-  `sweepTransientNotes`, `fetchSubIssueGraph`) from `orchestration-rollup.ts`,
+  `reportIssueFailure`, `reactToComment`, `replyToComment`, `upsertThreadedReply`)
+  from `orchestration-rollup.ts`,
   `orchestration-reconciler.ts`, `linear-webhook-processor.ts`, and
   `iteration-heartbeat-sweep.ts`. All of those now go through a `Channel`.
 - **Fixed** — the orchestration row FIELDS are now channel-neutral with dual-read
@@ -76,10 +76,6 @@ interface Channel {
   revertState?(issue)                               // the one sanctioned backward move
   postThreadedReply?(issue, parent, body)
   upsertThreadedReply?(issue, parent, body, existing?, {preservePreview, skipIfSettled, repairIfOverwritten})
-  sweepNotes?(issue, keep?)                         // collapse transient planning notes
-
-  // --- graph (surface-specific derivation, uniform result) ---
-  fetchChildGraph?(parent): Promise<ChannelSubIssueNode[]>;  // Linear: `blocks` relations
 }
 ```
 
@@ -100,7 +96,9 @@ Linear-webhook entry path, which is surface-specific by definition.
 surface" the design allows):**
 - **Blocking / dependency relations** — Linear models these as native `blocks`
   issue-relations; another surface may have no equivalent and derive the DAG differently.
-  So `fetchChildGraph` is the adapter's job; the engine only consumes the resulting DAG.
+  So reading the graph is the job of a per-surface graph source
+  (`orchestration-graph-source.ts`), not of the `Channel`; the engine only consumes the
+  resulting DAG.
 - **Comment formatting** — Linear takes markdown; Jira takes ADF (Atlassian Document
   Format). The adapter renders; the engine passes structured intent.
 - **Reaction vocabulary** — mapped per surface inside the adapter (Linear emoji vs
@@ -132,9 +130,7 @@ is the counter-example that tests it, because it is a chat product rather than a
   `ts` is the `CommentRef`, and `chat.update` is what lets one panel mature in place.
 - **It OMITS `transitionState` / `revertState`** — Slack has no workflow state. They are
   absent rather than stubbed to a silent success, because returning `true` would tell the
-  engine the platform mirrored a state it never moved. `sweepNotes` and `fetchChildGraph`
-  are omitted too (bulk message deletion needs its own product decision; there is no
-  dependency model to read a DAG from).
+  engine the platform mirrored a state it never moved.
 - **The engine drives it unmodified.** A rollup test runs the real Slack adapter through
   `upsertEpicPanel` with `mirrorParentState: true` — asking for a state mirror Slack
   cannot perform — and asserts the panel still lands, the ✅ marker goes on the thread
