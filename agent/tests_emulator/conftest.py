@@ -128,6 +128,7 @@ class Emulator:
     task_table: str
     task_events_table: str
     task_approvals_table: str
+    task_nudges_table: str
     trace_bucket: str
     log_group: str
 
@@ -139,12 +140,13 @@ class Emulator:
 
 
 # Key schemas of the tables these tests exercise. They mirror task-table.ts,
-# task-events-table.ts and task-approvals-table.ts under cdk/src/constructs/; the
-# agent uses none of their GSIs.
+# task-events-table.ts, task-approvals-table.ts and task-nudges-table.ts under
+# cdk/src/constructs/; the agent uses none of their GSIs.
 _TABLE_KEYS = {
     "task_table": [("task_id", "HASH")],
     "task_events_table": [("task_id", "HASH"), ("event_id", "RANGE")],
     "task_approvals_table": [("task_id", "HASH"), ("request_id", "RANGE")],
+    "task_nudges_table": [("task_id", "HASH"), ("nudge_id", "RANGE")],
 }
 
 
@@ -194,6 +196,7 @@ def emulator() -> Any:
         "task_table": f"abca-emu-{run_id}-TaskTable",
         "task_events_table": f"abca-emu-{run_id}-TaskEventsTable",
         "task_approvals_table": f"abca-emu-{run_id}-TaskApprovalsTable",
+        "task_nudges_table": f"abca-emu-{run_id}-TaskNudgesTable",
     }
     emu = Emulator(
         endpoint=endpoint,
@@ -249,10 +252,12 @@ def _reset_agent_module_state() -> None:
     next one, with the previous test's table names and session.
     """
     import aws_session
+    import nudge_reader
     import progress_writer
     import task_state
 
     aws_session.reset_session_cache()
+    nudge_reader._reset_cache_for_tests()
     progress_writer._reset_circuit_breakers()
     task_state._table = None
 
@@ -272,6 +277,7 @@ def agent_env(emulator: Emulator, monkeypatch: pytest.MonkeyPatch) -> Emulator:
     monkeypatch.setenv("TASK_TABLE_NAME", emulator.task_table)
     monkeypatch.setenv("TASK_EVENTS_TABLE_NAME", emulator.task_events_table)
     monkeypatch.setenv("TASK_APPROVALS_TABLE_NAME", emulator.task_approvals_table)
+    monkeypatch.setenv("NUDGES_TABLE_NAME", emulator.task_nudges_table)
     monkeypatch.setenv("TRACE_ARTIFACTS_BUCKET_NAME", emulator.trace_bucket)
     return emulator
 

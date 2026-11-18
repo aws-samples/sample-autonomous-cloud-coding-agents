@@ -68,22 +68,25 @@ function stripUntilStable(s: string, pattern: RegExp): string {
 export function sanitizeExternalContent(text: string): string {
   if (!text) return text || '';
 
-  // 1. Strip dangerous HTML tags with their content
-  let sanitized = stripUntilStable(text, DANGEROUS_TAGS);
+  // Steps 1 and 2 go first: removed last, an invisible character inside a
+  // tag, a prefix or a phrase would hide it from steps 3 to 5.
 
-  // 2. Strip remaining HTML tags (preserve inner text)
-  sanitized = stripUntilStable(sanitized, HTML_TAGS);
+  // 1. Strip control characters (keep tab, LF, CR)
+  let sanitized = text.replace(CONTROL_CHARS, '');
 
-  // 3. Neutralize embedded instruction patterns
-  sanitized = sanitized.replace(INSTRUCTION_PREFIXES, '[SANITIZED_PREFIX] $1:');
-  sanitized = sanitized.replace(INJECTION_PHRASES, '[SANITIZED_INSTRUCTION]');
-
-  // 4. Strip control characters (keep tab, LF, CR)
-  sanitized = sanitized.replace(CONTROL_CHARS, '');
-
-  // 5. Strip Unicode bidirectional overrides and misplaced BOM
+  // 2. Strip Unicode bidirectional overrides and misplaced BOM
   sanitized = sanitized.replace(BIDI_CHARS, '');
   sanitized = sanitized.replace(MISPLACED_BOM, '');
+
+  // 3. Strip dangerous HTML tags with their content
+  sanitized = stripUntilStable(sanitized, DANGEROUS_TAGS);
+
+  // 4. Strip remaining HTML tags (preserve inner text)
+  sanitized = stripUntilStable(sanitized, HTML_TAGS);
+
+  // 5. Neutralize embedded instruction patterns
+  sanitized = sanitized.replace(INSTRUCTION_PREFIXES, '[SANITIZED_PREFIX] $1:');
+  sanitized = sanitized.replace(INJECTION_PHRASES, '[SANITIZED_INSTRUCTION]');
 
   return sanitized;
 }

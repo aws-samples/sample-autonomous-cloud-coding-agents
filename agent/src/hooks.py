@@ -1489,12 +1489,9 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     if ctx.get("_cancel_requested"):
         return []
 
-    try:
-        pending = nudge_reader.read_pending(task_id)
-    except Exception as exc:
-        log("WARN", f"nudge read_pending raised: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; DDB blip must not block agent
-        return []
+    # The reader is fail-open: a DynamoDB error is logged there and comes back
+    # as no pending nudges, so it cannot block the agent.
+    pending = nudge_reader.read_pending(task_id)
 
     # Filter out any nudges already injected in this process (regardless of
     # whether mark_consumed succeeded previously).
@@ -1504,12 +1501,7 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
     if not pending:
         return []
 
-    try:
-        formatted = nudge_reader.format_as_user_message(pending)
-    except Exception as exc:
-        log("WARN", f"nudge format failed: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; bad nudge must not block agent
-        return []
+    formatted = nudge_reader.format_as_user_message(pending)
 
     # Record injection BEFORE mark_consumed so a persistent mark_consumed
     # failure cannot cause re-injection on a later turn.
@@ -1519,12 +1511,10 @@ def _nudge_between_turns_hook(ctx: dict) -> list[str]:
         if nid:
             task_set.add(nid)
 
-    # Mark-consumed is best-effort; log failures but do not block injection.
+    # Mark-consumed is best-effort: it logs a failure and returns False, and
+    # the injection goes ahead.
     for n in pending:
-        try:
-            nudge_reader.mark_consumed(task_id, n["nudge_id"])
-        except Exception as exc:
-            log("WARN", f"nudge mark_consumed raised: {type(exc).__name__}: {exc}")
+        nudge_reader.mark_consumed(task_id, n["nudge_id"])
 
     count = len(pending)
     log("NUDGE", f"Injecting {count} nudge(s) for task {task_id}")

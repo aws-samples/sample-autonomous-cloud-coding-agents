@@ -42,6 +42,22 @@ interface SecretPattern {
   readonly regex: RegExp;
 }
 
+// Where the password of a URL would stand: not a placeholder and nothing
+// else. The placeholders are {name} and ${NAME}, also with doubled braces,
+// %s, %v, %(name)s and <name>. A name is letters, "_" and "."; in <name>
+// it is small letters or capitals, not both, "_" and "-". A digit is taken
+// only as a positional argument, {0}. That keeps out a password that
+// somebody left the brackets of a placeholder around (MongoDB Atlas hands
+// out "<password>"): it usually holds a digit or mixes small letters and
+// capitals. A URL with a placeholder for a password is a template in
+// source code or documentation, not a credential, and is left as it is,
+// as the agent's scanner leaves it (the agent reads files through that
+// one, and a marker in place of such a line would keep it from editing the
+// line). Forms that a real password can have are not among them ($NAME,
+// [name], a plain word), and a password that only begins or ends with a
+// placeholder is replaced as before.
+const NOT_ONLY_A_PLACEHOLDER = String.raw`(?!(?:\$?(?:\{[A-Za-z_.]*\}|\{[0-9]{1,2}\}|\{\{[A-Za-z_.]*\}\})|%[sv]|%\([A-Za-z_.]+\)s|<[a-z_-]+>|<[A-Z_-]+>)@)`;
+
 // Ordered most-specific → most-generic so a narrower replacement
 // cannot be consumed by a broader one.
 const PATTERNS: readonly SecretPattern[] = [
@@ -51,19 +67,34 @@ const PATTERNS: readonly SecretPattern[] = [
   },
   {
     name: 'AWS_KEY',
-    regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+    // A secret access key that follows the id after a colon goes with it
+    // (<id>:<secret>, in a URL or not). CONNECTION_STRING counts on this
+    // pattern running before it.
+    regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b(?::[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+]))?/g,
   },
   {
     name: 'AWS_SECRET',
-    // AWS secret-access-key: 40 base64-ish chars with optional
-    // ``aws_secret_access_key=`` / ``AWS_SECRET_ACCESS_KEY`` prefix.
-    regex: /\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*[A-Za-z0-9/+]{40}\b/g,
+    // AWS secret-access-key: 40 base64-ish chars after the key's name
+    // (env var, INI or the JSON ``SecretAccessKey``), quoted or not.
+    regex: /(?:aws_secret_access_key|SecretAccessKey|AWS_SECRET_ACCESS_KEY)[\s=:"']+[A-Za-z0-9/+=]{40}/gi,
   },
   {
     name: 'GITHUB_TOKEN',
     // Matches classic + fine-grained GitHub tokens (`ghp_`, `gho_`,
-    // `ghu_`, `ghs_`, `ghr_`, `github_pat_`).
-    regex: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b|\bgithub_pat_[A-Za-z0-9_]{80,}\b/g,
+    // `ghu_`, `ghs_`, `ghr_`, `github_pat_`). The length varies across
+    // token generations, so there is a minimum and no maximum.
+    regex: /(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}/g,
+  },
+  {
+    name: 'GITHUB_URL_TOKEN',
+    // Credentials embedded in a git remote URL
+    // (https://x-access-token:TOKEN@github.com/...). A token holds no ":"
+    // and has no length limit (GitHub App tokens are about 520 characters
+    // since 2026, and vary). Any other text before the "@" counts up to
+    // 512 characters: unlimited, a text that repeats "x-access-token:" is
+    // scanned from each one to the end of the run, which is quadratic.
+    // The u flag makes the limit count characters, not UTF-16 units.
+    regex: new RegExp(String.raw`x-access-token:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@:"']+|[^\s@"']{1,512})@`, 'gu'),
   },
   {
     name: 'SLACK_TOKEN',
@@ -71,7 +102,36 @@ const PATTERNS: readonly SecretPattern[] = [
   },
   {
     name: 'GENERIC_BEARER',
-    regex: /\b(?:Bearer|bearer)\s+[A-Za-z0-9._~+/=-]{20,}/g,
+    regex: /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/gi,
+  },
+  {
+    name: 'CONNECTION_STRING',
+    // scheme://user:password@host. The user and the password hold no
+    // whitespace, "/" or quote, so a plain URL is not matched up to a
+    // ":" and an "@" that merely follow it in the text. The user may hold
+    // an "@" (an e-mail address as login), the password may not.
+    // Second form: the user ends in the marker that AWS_KEY has put there.
+    // What follows up to the "@" (the rest of a password, or ":" and a
+    // password or session token) may have any length while it holds no
+    // further ":" and no "["; any other text counts up to 256 characters.
+    // Without this form the rest of such a URL, with any secret in it,
+    // would stay readable. The limit, and the stop at "[" (where the next
+    // marker would begin), keep the scan linear. The u flag makes the
+    // limit count characters, as the agent's scanner does.
+    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']+:${NOT_ONLY_A_PLACEHOLDER}[^\s@/"']+|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
+  },
+  {
+    name: 'GITHUB_APP_TOKEN',
+    // GitHub App installation tokens of the stateless format that GitHub
+    // issues since 2026: ghs_<app id>_<JWT>, about 520 characters. The JWT
+    // is known by its first characters, "eyJ"; its three base64url parts
+    // and the dots between them are taken as one run, which keeps the scan
+    // linear. Last, against the order of this list, on purpose: the
+    // patterns above meet the text they met before this one was added, so
+    // what they replace (such a token after "Bearer", in a git URL or as
+    // the password of a URL) stays as it was, and this one takes the
+    // tokens they leave.
+    regex: /ghs_[0-9]+_eyJ[A-Za-z0-9._-]+/g,
   },
 ];
 

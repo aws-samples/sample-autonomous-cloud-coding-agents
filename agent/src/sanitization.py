@@ -2,8 +2,8 @@
 
 Mirrors the TypeScript sanitizeExternalContent() in
 cdk/src/handlers/shared/sanitization.ts. Both implementations
-must produce identical output for the same input — cross-language
-parity is verified by shared test fixtures.
+must produce identical output for the same input. No shared fixture
+checks that: change the two together and give both the same test cases.
 
 Applied to: memory records (before hashing on write, before injection
 on read), GitHub issue/PR content (TS side only — Python agent receives
@@ -50,10 +50,12 @@ def sanitize_external_content(text: str | None) -> str:
     """
     if not text:
         return text or ""
-    s = _strip_until_stable(text, _DANGEROUS_TAGS)
+    # Invisible characters go first: removed last, one of them inside a tag,
+    # a prefix or a phrase would hide it from the patterns below.
+    s = _CONTROL_CHARS.sub("", text)
+    s = _BIDI_CHARS.sub("", s)
+    s = _MISPLACED_BOM.sub("", s)
+    s = _strip_until_stable(s, _DANGEROUS_TAGS)
     s = _strip_until_stable(s, _HTML_TAGS)
     s = _INSTRUCTION_PREFIXES.sub(r"[SANITIZED_PREFIX] \1:", s)
-    s = _INJECTION_PHRASES.sub("[SANITIZED_INSTRUCTION]", s)
-    s = _CONTROL_CHARS.sub("", s)
-    s = _BIDI_CHARS.sub("", s)
-    return _MISPLACED_BOM.sub("", s)
+    return _INJECTION_PHRASES.sub("[SANITIZED_INSTRUCTION]", s)
