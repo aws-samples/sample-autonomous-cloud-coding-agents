@@ -386,3 +386,11 @@ def _clean_env(monkeypatch):
     from hooks import reset_blocker_reason
 
     reset_blocker_reason()
+
+    # The OpenTelemetry context is per thread. The server tests run the body of the
+    # task thread on the main thread, where its correlation baggage stays attached,
+    # and mcp 2.x copies the current context into `_meta` of every request it sends:
+    # a later test that compares a whole request found `baggage` in it.
+    from opentelemetry import context
+
+    context.attach(context.Context())
