@@ -22,9 +22,11 @@
 // helpers and were previously untested at the unit level.
 import {
   CreateSecretCommand,
+  type GetSecretValueCommand,
   PutSecretValueCommand,
   ResourceExistsException,
 } from '@aws-sdk/client-secrets-manager';
+import { PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   makeLinearCommand,
   openBrowser,
@@ -51,13 +53,34 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
   };
 });
 
-// CloudFormation — `getStackOutput` resolves stack outputs at setup time.
+// CloudFormation — `findStackOutput` resolves stack outputs at setup time.
 const cfnSend = jest.fn();
 jest.mock('@aws-sdk/client-cloudformation', () => {
   const actual = jest.requireActual('@aws-sdk/client-cloudformation');
   return {
     ...actual,
     CloudFormationClient: jest.fn(() => ({ send: cfnSend })),
+  };
+});
+
+// DynamoDB — `backfill-secret-provenance` reads the workspace registry and updates its rows;
+// `list-projects` looks a workspace up in it.
+const ddbSend = jest.fn();
+jest.mock('@aws-sdk/lib-dynamodb', () => {
+  const actual = jest.requireActual('@aws-sdk/lib-dynamodb');
+  return {
+    ...actual,
+    DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
+  };
+});
+
+// linear-vault: PARTIAL mock of the one call that reaches AgentCore.
+const mintLinearTokenFromVaultMock = jest.fn();
+jest.mock('../../src/linear-vault', () => {
+  const actual = jest.requireActual('../../src/linear-vault');
+  return {
+    ...actual,
+    mintLinearTokenFromVault: (...args: unknown[]) => mintLinearTokenFromVaultMock(...args),
   };
 });
 
@@ -194,7 +217,7 @@ describe('makeLinearCommand', () => {
     }
   });
 
-  test('setup aborts with a clear error when stack outputs are missing (covers getStackOutput)', async () => {
+  test('setup aborts with a clear error when stack outputs are missing (covers findStackOutput)', async () => {
     cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
     const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
     try {
@@ -235,6 +258,16 @@ describe('makeLinearCommand', () => {
     const flags = (appTemplate?.options ?? []).map((o) => o.long);
     expect(flags).not.toContain('--bot-name');
     expect(flags).toContain('--app-name');
+  });
+
+  test('app-template offers no --aws-callback-url: the CLI sends no redirect URI of the operator\'s choosing', () => {
+    // The option made the template print any URL as the app's Redirect URI. `setup` and
+    // `add-workspace` send the loopback, the consent page or the vault callback and nothing
+    // else, so an app registered with that URL failed consent with "Invalid redirect_uri".
+    const appTemplate = makeLinearCommand().commands.find((c) => c.name() === 'app-template');
+    const flags = (appTemplate?.options ?? []).map((o) => o.long);
+    expect(flags).not.toContain('--aws-callback-url');
+    expect(flags).toContain('--vault-callback-url');
   });
 });
 
@@ -310,5 +343,202 @@ describe('linear list-projects --slug', () => {
     expect(err[0]).toContain('acme');
     expect(err[0]).toContain(reason);
     expect(out.join('\n')).not.toMatch(/has no projects yet/);
+  });
+
+  test('asks the Identity vault first for a workspace that is on it', async () => {
+    // Such a workspace has no access token in its bundle, by design. The command has to hand
+    // the registry and the stack's workload name to the lookup, or it fails on the workspaces
+    // that work.
+    cfnSend.mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
+          { OutputKey: 'LinearVaultWorkloadName', OutputValue: 'wl-of-this-stack' },
+        ],
+      }],
+    });
+    ddbSend.mockReset().mockResolvedValue({
+      Items: [{
+        workspace_slug: 'acme', linear_workspace_id: 'org-acme', provider_name: 'bgagent-linear-oauth-acme', vault_user_id: 'linear-ws-acme',
+      }],
+    });
+    smSend.mockResolvedValue({ SecretString: JSON.stringify({ refresh_token: '' }) });
+    mintLinearTokenFromVaultMock.mockReset().mockResolvedValue({ kind: 'token', accessToken: 'vault-tok' });
+
+    await listProjects({ ok: true, status: 200, body: { data: { projects: { nodes: [{ id: 'p-1', name: 'Roadmap' }] } } } });
+
+    expect(mintLinearTokenFromVaultMock).toHaveBeenCalledWith({
+      region: 'us-west-2',
+      workloadName: 'wl-of-this-stack',
+      providerName: 'bgagent-linear-oauth-acme',
+      userId: 'linear-ws-acme',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('https://api.linear.app/graphql', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer vault-tok' }),
+    }));
+    expect(out).toContain('  Roadmap');
+    expect(err).toEqual([]);
+  });
+
+  test('skips a workspace that has no usable token, and says why', async () => {
+    smSend.mockResolvedValue({ SecretString: JSON.stringify({ refresh_token: 'r' }) });
+
+    await listProjects({ ok: true, status: 200, body: { data: { projects: { nodes: [] } } } });
+
+    expect(err).toEqual(['Skipping \'acme\': secret bgagent-linear-oauth-acme is missing access_token']);
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(out).toContain('No projects listed: 1 of 1 workspace(s) could not be queried (see the errors above).');
+  });
+});
+
+describe('linear invite-user', () => {
+  const originalFetch = global.fetch;
+  // The member pick is read through readline only when stdin is not a terminal, which it is
+  // when one file is run from a shell. Pinned, so that the test does not wait for keys.
+  const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+
+  afterEach(() => {
+    if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+    else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+    global.fetch = originalFetch;
+  });
+
+  test('asks the Identity vault first for a workspace that is on it', async () => {
+    // The command carries its own copy of the rule `list-projects` and `onboard-project` take
+    // from resolveWorkspaceAccessToken: the bundle of such a workspace holds no token.
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
+          { OutputKey: 'LinearUserMappingTableName', OutputValue: 'user-mapping-table' },
+          { OutputKey: 'LinearVaultWorkloadName', OutputValue: 'wl-of-this-stack' },
+        ],
+      }],
+    });
+    ddbSend.mockReset().mockResolvedValue({
+      Items: [{
+        workspace_slug: 'acme',
+        linear_workspace_id: 'org-acme',
+        oauth_secret_arn: 'arn:acme',
+        status: 'active',
+        provider_name: 'bgagent-linear-oauth-acme',
+        vault_user_id: 'linear-ws-acme',
+      }],
+    });
+    smSend.mockReset().mockResolvedValue({ SecretString: JSON.stringify({ refresh_token: '' }) });
+    mintLinearTokenFromVaultMock.mockReset().mockResolvedValue({ kind: 'token', accessToken: 'vault-tok' });
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: { users: { nodes: [{ id: 'user-maya', name: 'Maya K' }] } } }),
+    })) as unknown as typeof fetch;
+    const idToken = `x.${Buffer.from(JSON.stringify({ sub: 'sub-abc' })).toString('base64url')}.y`;
+    const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
+    const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue({ id_token: idToken } as ReturnType<typeof configMod.loadCredentials>);
+    const logSpy = jest.spyOn(console, 'log').mockImplementation();
+    // The progress line goes to stdout and the prompt to stderr, without console.log.
+    const outSpy = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const errSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const readline = jest.requireActual<typeof import('readline')>('readline');
+    const rlSpy = jest.spyOn(readline, 'createInterface').mockReturnValue({
+      once: (event: string, cb: (line: string) => void) => {
+        if (event === 'line') cb('1');
+      },
+      close: jest.fn(),
+    } as unknown as ReturnType<typeof readline.createInterface>);
+    try {
+      await makeLinearCommand().parseAsync(['node', 'bgagent', 'invite-user', 'acme']);
+    } finally {
+      cfgSpy.mockRestore();
+      credSpy.mockRestore();
+      logSpy.mockRestore();
+      outSpy.mockRestore();
+      errSpy.mockRestore();
+      rlSpy.mockRestore();
+    }
+
+    expect(mintLinearTokenFromVaultMock).toHaveBeenCalledWith({
+      region: 'us-west-2',
+      workloadName: 'wl-of-this-stack',
+      providerName: 'bgagent-linear-oauth-acme',
+      userId: 'linear-ws-acme',
+    });
+    expect(global.fetch).toHaveBeenCalledWith('https://api.linear.app/graphql', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer vault-tok' }),
+    }));
+    const invite = ddbSend.mock.calls.map(([cmd]) => cmd).find((cmd) => cmd instanceof PutCommand);
+    expect(invite?.input.Item).toMatchObject({ linear_workspace_id: 'org-acme', linear_user_id: 'user-maya', status: 'pending' });
+  });
+});
+
+describe('linear backfill-secret-provenance', () => {
+  const STACK_WIDE_ARN = 'arn:stack-wide-webhook-secret';
+  let out: string[];
+  let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+
+  beforeEach(() => {
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
+          { OutputKey: 'LinearWebhookSecretArn', OutputValue: STACK_WIDE_ARN },
+        ],
+      }],
+    });
+    // Each workspace stores a signing secret of its own: none equals the stack-wide one.
+    smSend.mockReset().mockImplementation(async (cmd: GetSecretValueCommand) => (
+      cmd.input.SecretId === STACK_WIDE_ARN
+        ? { SecretString: 'lin_wh_stackWide' }
+        : { SecretString: JSON.stringify({ webhook_signing_secret: `lin_wh_${cmd.input.SecretId}` }) }
+    ));
+    out = [];
+    cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation((line?: unknown) => { out.push(String(line)); });
+  });
+
+  afterEach(() => {
+    cfgSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  /** Run the command on a registry of active workspaces; `update` answers the write for each. */
+  async function backfill(slugs: string[], update: (slug: string) => Promise<unknown>): Promise<void> {
+    ddbSend.mockReset().mockImplementation(async (cmd: unknown) => {
+      if (cmd instanceof ScanCommand) {
+        return {
+          Items: slugs.map((slug) => ({
+            workspace_slug: slug, linear_workspace_id: `org-${slug}`, oauth_secret_arn: `arn:${slug}`, status: 'active',
+          })),
+        };
+      }
+      if (cmd instanceof UpdateCommand) return update(String(cmd.input.Key?.linear_workspace_id).slice('org-'.length));
+      throw new Error('unexpected command');
+    });
+    await makeLinearCommand().parseAsync(['node', 'bgagent', 'backfill-secret-provenance']);
+  }
+
+  test('reports a workspace whose row disappeared during the run as skipped, and does not count it', async () => {
+    // `remove-workspace --purge` between the scan and the write. The write is conditional on
+    // the row still being there, so that it is not put back; the command printed "skipped"
+    // and then "recorded" for that workspace, and counted it.
+    const rowGone = Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' });
+
+    await backfill(['alpha', 'gamma'], (slug) => (slug === 'gamma' ? Promise.reject(rowGone) : Promise.resolve({})));
+
+    expect(out.filter((line) => /alpha|gamma|Recorded/.test(line))).toEqual([
+      '  ✓ alpha: recorded as owning its secret',
+      '  · gamma: row changed underneath the backfill — skipped',
+      '✓ Recorded 1 workspace(s).',
+    ]);
+  });
+
+  test('stops on any other failure of the write', async () => {
+    const throttled = Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+
+    await expect(backfill(['alpha'], () => Promise.reject(throttled))).rejects.toThrow('Rate exceeded');
+
+    expect(out.filter((line) => line.includes('recorded as owning'))).toEqual([]);
   });
 });

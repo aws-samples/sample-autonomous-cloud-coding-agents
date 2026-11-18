@@ -18,14 +18,12 @@
  */
 
 // #612 review B2 (issue #611 AC#3): end-to-end `linear setup` regression test
-// for the SECOND-WORKSPACE RE-RUN case. The pure decision
-// (`resolveWebhookSecretAction`) and the fail-closed pre-read
-// (`readExistingWebhookSecret`) are unit-tested in linear-oauth.test.ts; this
+// for the SECOND-WORKSPACE RE-RUN case. The fail-closed pre-read
+// (`readExistingWebhookSecret`) is unit-tested in linear-oauth.test.ts; this
 // file closes the remaining gap by driving the `setup` ACTION through
-// `parseAsync` (with a mocked OAuth flow) and asserting the FINAL per-workspace
+// `parseAsync` (with a mocked OAuth flow) and asserting the per-workspace
 // `PutSecretValue` payload — i.e. a re-run keeps THIS workspace's `lin_wh_`
 // secret and never clobbers it with the stack-wide (other workspace's) one.
-// Covers linear.ts's secretAction branch + mirror-back guard.
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -65,8 +63,8 @@ jest.mock('../../src/oauth-callback-server', () => ({
 }));
 
 // linear-oauth: PARTIAL mock — keep the real code under test
-// (readExistingWebhookSecret + resolveWebhookSecretAction + name/expiry/PKCE/URL
-// helpers), stub only the network OAuth-code exchange.
+// (readExistingWebhookSecret + name/expiry/PKCE/URL helpers), stub only the
+// network OAuth-code exchange.
 const exchangeAuthorizationCodeMock = jest.fn();
 jest.mock('../../src/linear-oauth', () => {
   const actual = jest.requireActual('../../src/linear-oauth');
@@ -267,8 +265,10 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     // Under --no-browser the wizard prints the authorization URL (which carries
     // ?state=…). Capture it so awaitOauthCallback echoes the SAME state and the
     // wizard's state check passes.
+    const printed: string[] = [];
     const logSpy = jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       const line = args.map(String).join(' ');
+      printed.push(line);
       const m = line.match(/[?&]state=([^&\s]+)/);
       if (m) capturedState = decodeURIComponent(m[1]);
     });
@@ -276,7 +276,7 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       const program = makeLinearCommand();
       await program.parseAsync([
         'node', 'bgagent', 'setup', 'demo',
-        // Empty webhook secret = "skip", which is what exercises the PRESERVE path
+        // Empty webhook secret = keep the stored one, which is the PRESERVE path
         // this test is about. Passed as a flag so the run stays non-interactive.
         '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', '', '--no-browser',
       ]);
@@ -303,6 +303,7 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       expect(bundle.webhook_signing_secret).toBe(THIS_WS_SECRET);
       expect(bundle.webhook_signing_secret).not.toBe(OTHER_WS_SECRET);
     }
+    expect(printed).toContain('  ✓ Preserving this workspace\'s existing webhook signing secret (re-run — not overwriting)');
 
     // The stack-wide ARN is never overwritten by setup (rotation is
     // update-webhook-secret's job) — no PutSecretValue targets it.
@@ -325,15 +326,20 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     expect((registryPut as InstanceType<typeof PutCommand>).input.Item?.webhook_secret_owned).toBe(true);
   });
 
-  test('records ownership when the operator supplies this workspace\'s own secret', async () => {
-    // The other reachable provenance path: nothing stored, operator pastes the secret
-    // read off the app being onboarded. Ownership is proven by where the value came
-    // from, so it must be recorded here too — otherwise a first install looks
-    // indistinguishable from one that inherited its secret.
+  test.each([
+    ['with nothing stored', undefined],
+    ['in place of the one stored', priorWorkspaceBundle()],
+  ])('records ownership when the operator supplies this workspace\'s own secret (%s)', async (_stored, bundle) => {
+    // The other reachable provenance path: the operator pastes the secret read off the
+    // app being onboarded, on a first install or over the one an earlier run stored.
+    // Ownership is proven by where the value came from, so it must be recorded here
+    // too — otherwise a first install looks indistinguishable from one that inherited
+    // its secret.
     smSend.mockImplementation((cmd: unknown) => {
       if (cmd instanceof GetSecretValueCommand) {
         const id = (cmd as GetSecretValueCommand).input.SecretId;
         if (id === WEBHOOK_ARN) return Promise.resolve({ SecretString: OTHER_WS_SECRET });
+        if (bundle) return Promise.resolve({ SecretString: bundle });
         return Promise.reject(new ResourceNotFoundException({ message: 'no', $metadata: {} }));
       }
       if (cmd instanceof CreateSecretCommand) {
@@ -349,8 +355,10 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(
       { id_token: FAKE_ID_TOKEN } as ReturnType<typeof configMod.loadCredentials>,
     );
+    const printed: string[] = [];
     const logSpy = jest.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
       const line = args.map(String).join(' ');
+      printed.push(line);
       const m = line.match(/[?&]state=([^&\s]+)/);
       if (m) capturedState = decodeURIComponent(m[1]);
     });
@@ -370,6 +378,16 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       .map((c) => c[0])
       .find((cmd) => cmd instanceof PutCommand && cmd.input.TableName === 'registry-table');
     expect((registryPut as InstanceType<typeof PutCommand>).input.Item?.webhook_secret_owned).toBe(true);
+
+    // The bundle is written once, with the secret in it. It used to be written without the
+    // secret, then the registry row above, then the bundle again: a second write that failed
+    // left a row that says the workspace owns a secret its bundle did not hold.
+    const bundleWrites = smSend.mock.calls
+      .map((c) => c[0])
+      .filter((cmd): cmd is InstanceType<typeof PutSecretValueCommand> => cmd instanceof PutSecretValueCommand)
+      .map((put) => [put.input.SecretId, (JSON.parse(String(put.input.SecretString)) as { webhook_signing_secret?: string }).webhook_signing_secret]);
+    expect(bundleWrites).toEqual([[PER_WORKSPACE_NAME, 'lin_wh_suppliedByOperator']]);
+    expect(printed).toContain('  ✓ Using the webhook signing secret you entered');
   });
 
   describe('refuses before anything is written', () => {
@@ -493,6 +511,39 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
 
       await expect(runSetup('')).rejects.toThrow(/no webhook signing secret of its own/);
       expect(writes()).toEqual([]);
+    });
+
+    test('a value that is not a signing secret, without telling a first install to skip it', async () => {
+      // Nothing is stored for this workspace, so an empty value is refused as well, and
+      // `update-webhook-secret`, which the message used to name for later, refuses a
+      // workspace that is not installed: the advice led from one refusal to the next.
+      stubSecrets(undefined);
+      stubRegistry(() => Promise.resolve({ Items: [] }));
+
+      const refusal = await runSetup('abc').catch((err: Error) => err.message);
+
+      expect(refusal).toMatch(/does not look like a Linear webhook signing secret/);
+      expect(refusal).not.toMatch(/skip|Enter|update-webhook-secret/);
+      expect(writes()).toEqual([]);
+    });
+
+    test('a value that is not a signing secret, saying that Enter keeps a secret already stored', async () => {
+      stubSecrets(priorWorkspaceBundle());
+      stubRegistry(() => Promise.resolve({ Items: [DEMO_ROW] }));
+
+      const refusal = await runSetup('abc').catch((err: Error) => err.message);
+
+      expect(refusal).toMatch(/press Enter to keep the one already stored/);
+      expect(refusal).not.toMatch(/skip/);
+      expect(writes()).toEqual([]);
+    });
+
+    test('and the help of --webhook-secret says what an empty value does: keep, not skip', () => {
+      const setup = makeLinearCommand().commands.find((c) => c.name() === 'setup');
+      const help = setup?.options.find((o) => o.long === '--webhook-secret')?.description;
+
+      expect(help).toMatch(/empty value to keep the secret already stored/);
+      expect(help).not.toMatch(/skip/);
     });
 
     test.each([

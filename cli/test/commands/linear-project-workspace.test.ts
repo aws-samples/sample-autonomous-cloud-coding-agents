@@ -30,6 +30,17 @@ import {
   resolveWorkspaceAccessToken,
 } from '../../src/commands/linear';
 
+// linear-vault: PARTIAL mock of the one call that reaches AgentCore. Only a lookup that is
+// given a registry asks the vault; the names it derives stay the real ones.
+const mintLinearTokenFromVaultMock = jest.fn();
+jest.mock('../../src/linear-vault', () => {
+  const actual = jest.requireActual('../../src/linear-vault');
+  return {
+    ...actual,
+    mintLinearTokenFromVault: (...args: unknown[]) => mintLinearTokenFromVaultMock(...args),
+  };
+});
+
 const PROJECT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const PROJECT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 // Hex letters in the final group on purpose: a UUID ending in twelve consecutive
@@ -179,6 +190,60 @@ describe('resolveWorkspaceAccessToken', () => {
       reason: 'secret bgagent-linear-oauth-acme is missing access_token',
     });
   });
+
+  describe('for a workspace on the Identity vault', () => {
+    // Such a workspace has no access token in its bundle, by design: read alone, the bundle
+    // makes `onboard-project` and `list-projects` fail on the workspaces that work.
+    const VAULT_ROW = {
+      workspace_slug: 'acme',
+      linear_workspace_id: ORG_ACME,
+      provider_name: 'bgagent-linear-oauth-acme',
+      vault_user_id: 'linear-ws-acme',
+      status: 'active',
+    };
+    const resolve = (row: Record<string, unknown>, bundle: Record<string, unknown>) => resolveWorkspaceAccessToken({
+      slug: 'acme',
+      sm: fakeSm({ 'bgagent-linear-oauth-acme': bundle }),
+      ddb: fakeDdb([row]),
+      registryTableName: 'registry',
+      region: 'us-east-1',
+      vaultWorkloadName: 'wl',
+    });
+
+    beforeEach(() => {
+      mintLinearTokenFromVaultMock.mockReset().mockResolvedValue({ kind: 'token', accessToken: 'vault-tok' });
+    });
+
+    test('mints from the vault, under the subject the registry row records', async () => {
+      await expect(resolve(VAULT_ROW, { refresh_token: '' })).resolves.toEqual({ kind: 'token', accessToken: 'vault-tok' });
+      expect(mintLinearTokenFromVaultMock).toHaveBeenCalledWith({
+        region: 'us-east-1',
+        workloadName: 'wl',
+        providerName: 'bgagent-linear-oauth-acme',
+        userId: 'linear-ws-acme',
+      });
+    });
+
+    test('derives the subject from the workspace id for a row that records none', async () => {
+      // A workspace onboarded before the subject was recorded has its grant under that form.
+      const { vault_user_id: _recorded, ...legacyRow } = VAULT_ROW;
+      await resolve(legacyRow, { refresh_token: '' });
+      expect(mintLinearTokenFromVaultMock).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: `linear-workspace-${ORG_ACME}` }),
+      );
+    });
+
+    test('falls back to the token in the bundle when the vault has no live grant', async () => {
+      mintLinearTokenFromVaultMock.mockResolvedValue({ kind: 'consent-required' });
+      await expect(resolve(VAULT_ROW, { access_token: 'tok-acme' })).resolves.toEqual({ kind: 'token', accessToken: 'tok-acme' });
+    });
+
+    test('does not ask the vault for a workspace whose row names no provider', async () => {
+      const { provider_name: _provider, vault_user_id: _recorded, ...secretsManagerRow } = VAULT_ROW;
+      await expect(resolve(secretsManagerRow, { access_token: 'tok-acme' })).resolves.toEqual({ kind: 'token', accessToken: 'tok-acme' });
+      expect(mintLinearTokenFromVaultMock).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('findProjectOwnerWorkspace', () => {
@@ -294,8 +359,8 @@ describe('findProjectOwnerWorkspace', () => {
 });
 
 // The asymmetry is the point: "differs from stack-wide" proves ownership because
-// mirroring can copy nothing else, while "equals stack-wide" proves nothing because a
-// healthy first install stamps the same real secret into both slots.
+// mirroring could copy nothing else, while "equals stack-wide" proves nothing because a
+// healthy first install of an older release stamped the same real secret into both slots.
 describe('classifyWebhookSecretProvenance', () => {
   const STACK_WIDE = 'lin_wh_firstWorkspaceSecret';
 

@@ -43,6 +43,7 @@ import {
 } from '@aws-sdk/client-bedrock-agentcore-control';
 import { CliError } from './errors';
 import { LINEAR_AUTHORIZE_ENDPOINT, LINEAR_OAUTH_SCOPES, LINEAR_TOKEN_ENDPOINT } from './linear-oauth';
+import { CALLBACK_URL } from './oauth-callback-server';
 import { makeClient } from './ua';
 
 /** Consent-time parameters. Part of the vault's cache key, so every resolve must
@@ -272,7 +273,7 @@ export async function mintLinearTokenFromVault(args: {
         resourceCredentialProviderName: args.providerName,
         scopes: [...LINEAR_OAUTH_SCOPES],
         oauth2Flow: 'USER_FEDERATION',
-        resourceOauth2ReturnUrl: args.returnUrl ?? 'http://localhost:8080/oauth/callback',
+        resourceOauth2ReturnUrl: args.returnUrl ?? CALLBACK_URL,
         // Must match what consent sent: customParameters are part of the vault's
         // cache key, so omitting them reports "needs consent" despite a live grant.
         customParameters: { ...LINEAR_VAULT_CUSTOM_PARAMS },
