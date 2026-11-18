@@ -17,7 +17,9 @@ import task_state
 from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
 from config import (
     AGENT_WORKSPACE,
+    DEFAULT_WORKFLOW_ID,
     NEEDS_INPUT_MARKER,
+    REPO_LESS_DEFAULT_WORKFLOW_ID,
     build_config,
     clear_jira_task_credentials,
     get_config,
@@ -326,7 +328,7 @@ def _execute_agent_step(
     """
     from workflow import StepContext, load_workflow, run_workflow
 
-    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
     wf = load_workflow(workflow_id)
     ctx = StepContext(
         workflow=wf,
@@ -424,7 +426,7 @@ def _run_repoless_task(
     from prompt_builder import build_repoless_system_prompt
     from workflow import StepContext, load_workflow, run_workflow
 
-    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
+    workflow_id = (config.resolved_workflow or {}).get("id", REPO_LESS_DEFAULT_WORKFLOW_ID)
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
 
@@ -1325,7 +1327,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # "Starting" comment on the Jira issue through the Forge app actor
             # (or legacy OAuth fallback). No-op for non-Jira tasks.
             # Best-effort; failures are logged, never block.
-            workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+            workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
             if _should_post_start_comment(config.channel_source, workflow_id):
                 comment_task_started(
                     config.channel_source,
@@ -1491,7 +1493,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             _workflow = None
             try:
                 _workflow = load_workflow(
-                    (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+                    (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
                 )
                 ensure_pr_strategy = next(
                     (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),

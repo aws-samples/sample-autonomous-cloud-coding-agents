@@ -23,7 +23,7 @@ import pytest
 import runner
 from clarification_tool import CLARIFICATION_SERVER_NAME, CLARIFICATION_TOOL_NAME
 from gateway_tools import GATEWAY_SERVER_NAME
-from models import AgentResult, TaskConfig
+from models import AgentResult, TaskConfig, TokenUsage
 from runner import (
     _CLAUDE_VERSION_PROBE_TIMEOUT_S,
     _DISALLOWED_TOOLS,
@@ -737,16 +737,19 @@ class TestRegisterGatewayServer:
 
 
 def _run_agent(
-    monkeypatch, *messages: Any, config: TaskConfig | None = None, trajectory: Any = None
+    monkeypatch, *messages: Any, config: TaskConfig | None = None, **run_agent_kwargs: Any
 ) -> SimpleNamespace:
     """Run ``run_agent`` over ``messages`` in place of what the Claude Code CLI sends.
 
     The SDK client is replaced, so no CLI is started and nothing reaches Bedrock;
     the environment setup, the version probe, the policy engine and the gateway
-    bridge are stubbed too. Returns the ``AgentResult``, the progress writer the
-    run wrote its events to (a mock) and the options the client was built with.
+    bridge are stubbed too. ``run_agent_kwargs`` (``cwd``, ``trajectory``) are
+    passed on. Returns the ``AgentResult``, the progress writer the run wrote its
+    events to (a mock), the options the client was built with and the hooks that
+    stand in for those of the policy engine.
     """
     seen: dict[str, Any] = {}
+    hooks: dict[str, Any] = {}
 
     class Client:
         def __init__(self, options):
@@ -766,13 +769,13 @@ def _run_agent(
     monkeypatch.setattr(sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(runner, "_setup_agent_env", lambda _config: None)
     monkeypatch.setattr(runner, "_log_claude_cli_version", lambda: None)
-    monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_kw: (None, {}))
+    monkeypatch.setattr(runner, "_initialize_policy_engine_and_hooks", lambda **_kw: (None, hooks))
     monkeypatch.setattr(runner, "_register_gateway_server", lambda _servers: None)
     monkeypatch.setattr(runner, "_ProgressWriter", MagicMock(return_value=progress))
     result: AgentResult = asyncio.run(
-        runner.run_agent("prompt", "system", config or _config(), trajectory=trajectory)
+        runner.run_agent("prompt", "system", config or _config(), **run_agent_kwargs)
     )
-    return SimpleNamespace(result=result, progress=progress, options=seen["options"])
+    return SimpleNamespace(result=result, progress=progress, options=seen["options"], hooks=hooks)
 
 
 def _result(**fields: Any) -> sdk.ResultMessage:
@@ -820,6 +823,60 @@ class TestClarificationToolIsOfferedPerWorkflow:
         # artifact. A question asked through the tool would be dropped and the
         # task would end COMPLETED.
         assert self._offered(monkeypatch, "knowledge/web-research-v1") is False
+
+
+class TestOptionsOfTheSdkClient:
+    """``run_agent`` hands the SDK client one options object. The tool lock, the
+    policy hooks and the limits of the task all travel in it, and the session runs
+    without whatever that call leaves out. The helpers that compute the pieces have
+    tests of their own; these check that the pieces arrive."""
+
+    def test_session_gets_the_tool_lock_the_hooks_and_the_limits_of_the_task(self, monkeypatch):
+        config = _config(max_turns=7, max_budget_usd=1.5)
+        run = _run_agent(monkeypatch, _result(), config=config, cwd="/w")
+
+        options = run.options
+        # The one hard lock on the tools that leave work running after the
+        # session: under bypassPermissions ``allowed_tools`` restricts nothing.
+        assert options.disallowed_tools == _DISALLOWED_TOOLS
+        # Cedar policy, output screening, cancellation and nudges all run as hooks.
+        assert options.hooks is run.hooks
+        assert options.permission_mode == "bypassPermissions"
+        assert options.setting_sources == ["project"]
+        assert options.system_prompt == "system"
+        assert options.cwd == "/w"
+        assert options.max_turns == 7
+        assert options.max_budget_usd == 1.5
+
+    def test_read_only_task_gets_neither_a_write_tool_nor_the_clarification_tool(self, monkeypatch):
+        config = _config(read_only=True, allowed_tools=["Bash", "Read", "Write", "Edit"])
+        options = _run_agent(monkeypatch, _result(), config=config).options
+
+        assert options.allowed_tools == ["Bash", "Read"]
+        assert options.mcp_servers == {}
+
+
+class TestCleanResult:
+    """The message that ends a run says how the run went. The runner copies it onto
+    the ``AgentResult``: the pipeline takes the task's verdict, its cost and its
+    token counts from there, and the final text is what a task without a repository
+    delivers."""
+
+    def test_status_final_text_cost_and_usage_are_recorded(self, monkeypatch):
+        run = _run_agent(
+            monkeypatch,
+            _result(
+                result="The cache is never invalidated.",
+                total_cost_usd=0.42,
+                usage={"input_tokens": 1200, "output_tokens": 340},
+            ),
+        )
+
+        assert run.result.status == "success"
+        assert run.result.result_text == "The cache is never invalidated."
+        assert run.result.cost_usd == 0.42
+        assert run.result.session_id == "session"
+        assert run.result.usage == TokenUsage(input_tokens=1200, output_tokens=340)
 
 
 # Credential-shaped values, assembled here so that this file holds no such literal:

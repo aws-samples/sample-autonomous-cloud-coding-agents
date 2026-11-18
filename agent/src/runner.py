@@ -337,8 +337,9 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
 # (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
 # Bash child dies with the MicroVM on return, so it can't produce
 # arrives-later work the way a cloud Workflow does; the deliver-artifact
-# deferral guard (deliverers._reject_if_deferral) is the backstop for anything
-# that still ends in a placeholder.
+# deferral guard (deliverers._reject_if_deferral) is the backstop for a final
+# message that still names that background machinery; a promise in ordinary
+# words is not matched.
 _DISALLOWED_TOOLS = [
     "Workflow",
     "Task",
@@ -718,8 +719,6 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
                 result.status = subtype
                 result.cost_usd = getattr(message, "total_cost_usd", None)
                 result.num_turns = getattr(message, "num_turns", 0)
-                result.duration_ms = getattr(message, "duration_ms", 0)
-                result.duration_api_ms = getattr(message, "duration_api_ms", 0)
                 result.session_id = getattr(message, "session_id", "") or ""
 
                 err_payload = getattr(message, "result", None)
