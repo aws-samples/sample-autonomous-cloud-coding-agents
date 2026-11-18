@@ -394,7 +394,7 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
  */
 const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
 
-/** Refuse a slug that {@link SLUG_RE} does not accept: the first check of every command that takes one. */
+/** Refuse a slug that {@link SLUG_RE} does not accept: the first check of the five commands that take the slug as their argument. */
 function assertWorkspaceSlug(slug: string): void {
   if (!SLUG_RE.test(slug)) {
     throw new CliError(

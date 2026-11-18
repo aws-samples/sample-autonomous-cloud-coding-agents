@@ -20,6 +20,7 @@
 // Companion to jira.test.ts: covers the Linear adapter's CLI helper twins
 // (upsertOauthSecret / command surface). These mirror the Jira helpers and
 // were previously untested at the unit level.
+import { PassThrough } from 'stream';
 import {
   CreateSecretCommand,
   type GetSecretValueCommand,
@@ -33,6 +34,7 @@ import {
 } from '../../src/commands/linear';
 import * as configMod from '../../src/config';
 import type { StoredLinearOauthToken } from '../../src/linear-oauth';
+import * as oauthCallbackMod from '../../src/oauth-callback-server';
 import * as promptSecretMod from '../../src/prompt-secret';
 
 const linearLinkMock = jest.fn();
@@ -164,7 +166,11 @@ describe('makeLinearCommand', () => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const readline = require('readline') as typeof import('readline');
-    // Linear's promptLine uses the non-TTY branch (rl.once('line', …)) under Jest.
+    // The prompt reads through readline (rl.once('line', …)) only when stdin is not a terminal,
+    // which it is when this file is run from a shell. Pinned, so that the test does not wait
+    // for keys.
+    const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     const rlMock = {
       once: (event: string, cb: (line: string) => void) => {
         if (event === 'line') cb('y');
@@ -179,6 +185,8 @@ describe('makeLinearCommand', () => {
       expect(linearLinkMock).toHaveBeenCalledWith('link-abc');
       expect(logSpy.mock.calls.some((c) => String(c[0]).includes('Linear account linked'))).toBe(true);
     } finally {
+      if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+      else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
       logSpy.mockRestore();
       rlSpy.mockRestore();
     }
@@ -479,6 +487,162 @@ describe('linear invite-user', () => {
     }));
     const invite = ddbSend.mock.calls.map(([cmd]) => cmd).find((cmd) => cmd instanceof PutCommand);
     expect(invite?.input.Item).toMatchObject({ linear_workspace_id: 'org-acme', linear_user_id: 'user-maya', status: 'pending' });
+  });
+});
+
+describe('linear add-workspace with its answers on a pipe', () => {
+  // The one Linear command that asks a secret after a visible question: the client id, then,
+  // after the consent in the browser, the webhook signing secret, then the member pick. Real
+  // streams and the real readline: a stream in the place of stdin, as a script or an agent
+  // that runs the command provides one.
+  const originalFetch = global.fetch;
+  const STATE = 'state-of-this-run';
+  let stdin: PassThrough;
+  /** What happens to stdin while the operator is in the browser and no prompt is waiting. */
+  let duringConsent: () => void;
+  /** Lines written to stdin when the prompt whose label holds the key is asked. */
+  let answers: Record<string, string>;
+  let restore: () => void;
+
+  /**
+   * What the run comes to within a short time. A run that never settles is one that node ends
+   * with exit code 0 in the middle: nothing is left for it to wait for.
+   */
+  function outcome(run: Promise<unknown>): Promise<string> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve('never settles'), 500);
+      void run
+        .then(() => 'completed', (err: Error) => `error: ${err.message}`)
+        .then((result) => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+    });
+  }
+
+  beforeEach(() => {
+    // Every test brings its own stdin: each starts with a reader that has read nothing.
+    promptSecretMod.__resetPipedSecretStateForTest();
+    duringConsent = () => undefined;
+    answers = {};
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{
+        Outputs: [
+          { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
+          { OutputKey: 'LinearUserMappingTableName', OutputValue: 'user-mapping-table' },
+        ],
+      }],
+    });
+    // `alpha` is onboarded; its bundle holds the app's client id and secret, which Enter keeps.
+    ddbSend.mockReset().mockImplementation(async (cmd: unknown) => {
+      if (!(cmd instanceof ScanCommand) || cmd.input.FilterExpression) return {};
+      return { Items: [{ workspace_slug: 'alpha', linear_workspace_id: 'org-alpha', oauth_secret_arn: 'arn:alpha', status: 'active' }] };
+    });
+    smSend.mockReset().mockImplementation(async (cmd: unknown) => (
+      cmd instanceof CreateSecretCommand
+        ? { ARN: 'arn:beta' }
+        : { SecretString: JSON.stringify({ client_id: 'client-id', client_secret: 'client-secret' }) }
+    ));
+    // The code exchange and every Linear query go through fetch.
+    global.fetch = jest.fn(async (url: unknown) => ({
+      ok: true,
+      status: 200,
+      json: async () => (String(url).endsWith('/oauth/token')
+        ? { access_token: 'tok-beta', refresh_token: 'refresh-beta', token_type: 'Bearer', expires_in: 3600, scope: 'read write' }
+        : {
+          data: {
+            viewer: { id: 'bot' },
+            organization: { id: 'org-beta', name: 'Beta', urlKey: 'beta' },
+            teams: { nodes: [] },
+            users: { nodes: [{ id: 'user-maya', name: 'Maya K', email: 'maya@example.test' }] },
+          },
+        }),
+    })) as unknown as typeof fetch;
+
+    stdin = new PassThrough();
+    const original = Object.getOwnPropertyDescriptor(process, 'stdin');
+    Object.defineProperty(process, 'stdin', { value: stdin, configurable: true });
+    const idToken = `x.${Buffer.from(JSON.stringify({ sub: 'sub-abc' })).toString('base64url')}.y`;
+    const spies = [
+      jest.spyOn(configMod, 'loadConfig').mockReturnValue(
+        { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
+      ),
+      jest.spyOn(configMod, 'loadCredentials').mockReturnValue({ id_token: idToken } as ReturnType<typeof configMod.loadCredentials>),
+      jest.spyOn(oauthCallbackMod, 'randomState').mockReturnValue(STATE),
+      jest.spyOn(oauthCallbackMod, 'awaitOauthCallback').mockImplementation(async () => {
+        duringConsent();
+        return { kind: 'direct-oauth', code: 'auth-code', state: STATE };
+      }),
+      jest.spyOn(console, 'log').mockImplementation(),
+      jest.spyOn(process.stdout, 'write').mockImplementation(() => true),
+      // Every prompt writes its label to stderr before it reads.
+      jest.spyOn(process.stderr, 'write').mockImplementation((...written: unknown[]) => {
+        const asked = Object.keys(answers).find((label) => String(written[0]).includes(label));
+        if (asked) setImmediate(() => stdin.write(answers[asked]));
+        return true;
+      }),
+    ];
+    restore = () => {
+      spies.forEach((spy) => spy.mockRestore());
+      if (original) Object.defineProperty(process, 'stdin', original);
+      global.fetch = originalFetch;
+    };
+  });
+
+  afterEach(() => restore());
+
+  const addWorkspace = (): Promise<string> => outcome(
+    makeLinearCommand().parseAsync(['node', 'bgagent', 'add-workspace', 'beta', '--no-browser']),
+  );
+  /** What the run stored: the names of the bundles, and the items put into the two tables. */
+  const stored = () => ({
+    bundles: smSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof CreateSecretCommand)
+      .map((cmd) => JSON.parse(String(cmd.input.SecretString)) as StoredLinearOauthToken),
+    rows: ddbSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof PutCommand)
+      .map((cmd) => ({ table: cmd.input.TableName, ...cmd.input.Item })),
+  });
+
+  test.each([
+    ['each answer is written as its prompt asks', () => {
+      answers = { 'Linear Client ID': '\n', 'Webhook signing secret': 'lin_wh_beta\n', 'Which one is you?': '1\n' };
+    }],
+    ['all three answers are written at once', () => {
+      stdin.write('\nlin_wh_beta\n1\n');
+    }],
+  ])('adds the workspace when %s', async (_how, feed) => {
+    feed();
+
+    expect(await addWorkspace()).toBe('completed');
+
+    expect(stored().bundles).toEqual([expect.objectContaining({
+      client_id: 'client-id', workspace_id: 'org-beta', access_token: 'tok-beta', webhook_signing_secret: 'lin_wh_beta',
+    })]);
+    expect(stored().rows).toEqual([
+      expect.objectContaining({ table: 'registry-table', workspace_slug: 'beta', webhook_secret_owned: true }),
+      expect.objectContaining({ table: 'user-mapping-table', linear_user_id: 'user-maya', platform_user_id: 'sub-abc' }),
+    ]);
+  });
+
+  test('fails, and stores nothing, when the pipe is closed during the consent', async () => {
+    // `printf '\n' | bgagent linear add-workspace beta`. The run used to end here with exit
+    // code 0, after the app was authorized in Linear: the prompt for the signing secret was
+    // printed and never answered.
+    stdin.write('\n');
+    duringConsent = () => stdin.end();
+
+    expect(await addWorkspace()).toBe('error: Webhook signing secret is required.');
+
+    expect(stored()).toEqual({ bundles: [], rows: [] });
+  });
+
+  test('fails after the workspace is stored when the pipe ends before the member pick', async () => {
+    // The command stores the workspace before it asks who the operator is. An input that ends
+    // there is an error: the run must not end with exit code 0 as if the link had been made.
+    stdin.end('\nlin_wh_beta\n');
+
+    expect(await addWorkspace()).toBe('error: No input provided.');
+
+    expect(stored().rows).toEqual([expect.objectContaining({ table: 'registry-table', workspace_slug: 'beta' })]);
   });
 });
 

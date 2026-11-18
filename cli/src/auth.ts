@@ -315,12 +315,14 @@ function sessionClaims(): { 'sub'?: string; 'email'?: string; 'cognito:username'
     throw new CliError('Not authenticated. Run `bgagent login` first.');
   }
   const JWT_SEGMENTS = 3; // header.payload.signature
-  const parts = creds.id_token.split('.');
+  // String(): a file edited by hand can hold a token that is not a string.
+  const parts = String(creds.id_token).split('.');
   if (parts.length !== JWT_SEGMENTS) {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }
   try {
-    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    // `?? {}`: a payload of JSON null reads as a token without claims, not as a TypeError.
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) ?? {};
   } catch {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }

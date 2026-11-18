@@ -40,14 +40,20 @@ async function runRemove(args: string[]): Promise<void> {
 
 describe('linear remove-workspace command', () => {
   let logSpy: jest.SpiedFunction<typeof console.log>;
+  // The confirmation is read through readline only when stdin is not a terminal, which it is
+  // when this file is run from a shell. Pinned, so that the tests do not wait for keys.
+  const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 
   beforeEach(() => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
     mockRemove.mockReset();
     installMockClient();
     logSpy = jest.spyOn(console, 'log').mockImplementation();
   });
 
   afterEach(() => {
+    if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+    else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
     logSpy.mockRestore();
   });
 

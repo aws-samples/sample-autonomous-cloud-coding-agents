@@ -307,7 +307,7 @@ describe('auth', () => {
 
   describe('cognitoSubFromSession', () => {
     /** A credentials file as `bgagent login` writes it, around the given ID token. */
-    function session(idToken?: string): void {
+    function session(idToken?: unknown): void {
       fs.writeFileSync(path.join(tmpDir, 'credentials.json'), JSON.stringify({
         id_token: idToken,
         refresh_token: 'refresh-token',
@@ -332,6 +332,16 @@ describe('auth', () => {
         'the payload of the ID token is not JSON',
         () => session(`header.${Buffer.from('not json').toString('base64url')}.sig`),
         'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the ID token is a number, in a file edited by hand',
+        () => session(12345),
+        'Credentials file is corrupt. Run `bgagent login` to re-authenticate.',
+      ],
+      [
+        'the payload of the ID token is the JSON null',
+        () => session(`header.${Buffer.from('null').toString('base64url')}.sig`),
+        'Could not read your account identity. Run `bgagent login` to re-authenticate.',
       ],
       [
         'the ID token carries no sub claim',
