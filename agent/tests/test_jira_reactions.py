@@ -605,6 +605,41 @@ class TestPrTransitionSelection:
         # No review-named, no In Progress name, only a Done transition → skip.
         post.assert_not_called()
 
+    def test_already_in_review_is_not_moved_back_to_in_progress(self, monkeypatch):
+        """An iteration pushes to the PR of an issue that is already In Review.
+        From there the workflow offers In Progress (rework) and Done, and the
+        last rung of the ladder is In Progress: taking it moves the card back."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("21", "In Progress", category="indeterminate"),
+            _transition("11", "Done", category="done"),
+            current_name="In Review",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        post.assert_not_called()
+
+    def test_in_progress_stays_put_when_the_board_has_no_review_status(self, monkeypatch):
+        """In Progress is itself a rung of the ladder, so the category fallback
+        below it (here: On Hold) is not a step forward."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        issue = _issue_resp(
+            _transition("31", "On Hold", category="indeterminate"),
+            _transition("11", "Done", category="done"),
+            current_name="In Progress",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_pr_opened("jira", JIRA_META)
+        post.assert_not_called()
+
     def test_override_status_on_pr(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         meta = {**JIRA_META, "jira_status_on_pr": "Code Review"}

@@ -28,6 +28,8 @@ export interface JiraFinalStatusInput {
   readonly durationS: number | null;
   readonly taskId: string;
   readonly errorTitle: string | null;
+  /** What the agent said in a run that made no commit; shown on a completed run. */
+  readonly answerText?: string | null;
 }
 
 export type JiraFinishedPointerKind = 'result' | 'details' | 'answer';
@@ -64,7 +66,13 @@ export function renderJiraFinalStatusComment(
 
   let headerRuns: AdfTextRun[];
   if (isCompleted) {
-    headerRuns = [{ text: '✅ Task completed', strong: true }];
+    // This comment can carry the agent's own text (the answer below), which
+    // may spell out the ``@bgagent`` mention, and Jira attributes it to the
+    // setup user on a site without the Forge app. The webhook processor tells
+    // ABCA's comments by their leading marker (``isKnownAbcaComment``): the
+    // emoji stays outside the bold run so the marker survives a wiki-text
+    // body, where bold is an asterisk.
+    headerRuns = [{ text: '✅ ' }, { text: 'Task completed', strong: true }];
   } else if (shippedDespiteFailure) {
     const reason = args.errorTitle ? ` — ${args.errorTitle}` : '';
     headerRuns = [
@@ -85,8 +93,14 @@ export function renderJiraFinalStatusComment(
     ? formatDuration(args.durationS)
     : '—';
 
+  // A completed run without a commit answered a question (an ``@bgagent``
+  // question on an open PR): the answer goes under the header, one paragraph
+  // per line, because an ADF text node does not honor newlines. The agent
+  // stores its last message for a failed run too; that is not an answer.
+  const answer = isCompleted ? (args.answerText ?? '').trim() : '';
   const paragraphs: AdfParagraph[] = [
     headerRuns,
+    ...(answer ? answer.split(/\r?\n/) : []).map((line) => (line ? [{ text: line }] : [])),
     [{ text: `cost: ${costStr} • turns: ${turnsStr} • duration: ${durationStr}` }],
   ];
   if (args.prUrl) {

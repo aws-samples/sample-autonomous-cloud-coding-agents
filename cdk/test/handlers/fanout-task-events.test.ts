@@ -2583,6 +2583,68 @@ describe('fanout-task-events: Jira dispatcher', () => {
     }));
   });
 
+  test('standalone iteration that answered a question posts the answer in its result', async () => {
+    // The reviewer asked a question and the agent replied without a commit:
+    // the pointer says "answer posted below", so the result has to carry it.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      code_changed: false,
+      answer_text: 'Because the queue already retries.\n\nSee worker.ts.',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    expect(adfText(mockUpdateIssueCommentAdf.mock.calls[0][3])).toBe('💬 Finished — answer posted below.');
+    // The header stays first (it is the marker the webhook processor knows
+    // ABCA's own comments by); each line of the answer is its own paragraph.
+    expect(adfText(mockPostIssueCommentAdf.mock.calls[0][2])).toBe([
+      '✅ Task completed',
+      'Because the queue already retries.',
+      '',
+      'See worker.ts.',
+      'cost: $0.55 • turns: 27 / 100 • duration: 3m 41s',
+      'PR: https://github.com/owner/repo/pull/13',
+      'task t-jira',
+    ].join('\n'));
+  });
+
+  test('the answer comment is never read as a trigger, even when the answer spells out the mention', async () => {
+    // As for the question of a held run below: on a site without the Forge app
+    // Jira attributes this comment to the setup user, and it now carries the
+    // agent's own text. The webhook processor tells it by its leading marker.
+    mockGet({
+      ...TASK_RECORD_JIRA,
+      code_changed: false,
+      answer_text: 'Nothing to change. For the other layout, comment "@bgagent use layout B".',
+      channel_metadata: {
+        ...TASK_RECORD_JIRA.channel_metadata,
+        trigger_comment_id: 'human-comment-1',
+        iteration_reply_comment_id: 'status-comment-1',
+      },
+    });
+
+    await handler({ Records: [mkEvent('task_completed', 't-jira')] });
+
+    const body = mockPostIssueCommentAdf.mock.calls[0][2] as {
+      _adf: ReadonlyArray<ReadonlyArray<{ text: string; strong?: boolean }>>;
+    };
+    // As the processor reads the comment back: from an ADF body (marks are lost) ...
+    const fromAdf = adfText(body);
+    // ... and from a wiki-text body, where bold is an asterisk.
+    const fromWiki = body._adf
+      .map((runs) => runs.map((run) => (run.strong ? `*${run.text}*` : run.text)).join(''))
+      .join('\n\n');
+    for (const readBack of [fromAdf, fromWiki]) {
+      expect(readBack).toContain('@bgagent');
+      expect(parseCommentTrigger(readBack).triggered).toBe(false);
+    }
+  });
+
   test('standalone iteration that completes with a red build is reported as a failure', async () => {
     // A build that was already red before the iteration does not fail the task
     // (the gate counts regressions only), so it ends COMPLETED with
@@ -3143,8 +3205,10 @@ describe('renderJiraFinalStatusComment', () => {
     const text = flatten(paragraphs);
     expect(text).toContain('✅');
     expect(text).toContain('PR: https://github.com/o/r/pull/7');
-    // The header run is bold (ADF strong mark) — the serializer maps this.
-    expect(paragraphs[0][0]).toEqual({ text: '✅ Task completed', strong: true });
+    // The header is bold (ADF strong mark) — the serializer maps this. The
+    // emoji stays outside the bold run: read back as wiki text the comment
+    // then still starts with the marker ABCA knows its own comments by.
+    expect(paragraphs[0]).toEqual([{ text: '✅ ' }, { text: 'Task completed', strong: true }]);
     // The URL run carries an href so buildAdfDocument emits a clickable
     // link mark — a bare URL in ADF text is NOT auto-linked.
     // Find the run whose text is the URL and assert its href.
@@ -3256,6 +3320,29 @@ describe('renderJiraFinalStatusComment', () => {
     }));
     expect(text).toContain('turns: 27 ');
     expect(text).not.toContain('27 /');
+  });
+
+  test('shows the answer of a completed run between the header and the metrics', () => {
+    const input = {
+      prUrl: null,
+      costUsd: 0.5,
+      turns: 3,
+      maxTurns: 100,
+      durationS: 60,
+      taskId: 't',
+      errorTitle: null,
+      answerText: '  Because the queue already retries.  ',
+    };
+    expect(flatten(renderJiraFinalStatusComment({ ...input, eventType: 'task_completed' }))).toBe([
+      '✅ Task completed',
+      'Because the queue already retries.',
+      'cost: $0.50 • turns: 3 / 100 • duration: 1m',
+      'task t',
+    ].join('\n'));
+    // The agent stores its last message for every run without a commit. On a
+    // failed run that is not an answer, and the failure frame stays as it is.
+    expect(flatten(renderJiraFinalStatusComment({ ...input, eventType: 'task_failed' })))
+      .not.toContain('queue');
   });
 
   test('task-id footer run is italic (ADF em mark)', () => {

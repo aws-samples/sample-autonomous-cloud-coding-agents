@@ -141,6 +141,21 @@ const issueRef = (
     },
   }),
 });
+
+/**
+ * A child's issue reference with the status names of its own project mapping.
+ * The child row carries them (the agent reads the same ones for that issue),
+ * and a child can sit in another Jira project than its parent.
+ */
+const childIssueRef = (
+  children: readonly OrchestrationChildRow[],
+  subIssueId: string,
+  workspaceId: string,
+): IssueRef => issueRef(
+  subIssueId,
+  workspaceId,
+  children.find((c) => c.sub_issue_id === subIssueId)?.channel_metadata,
+);
 // createTaskCore rejects idempotency keys longer than this; synthesized keys
 // slice to fit the validated /^[A-Za-z0-9_-]{1,128}$/ pattern.
 const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
@@ -1255,6 +1270,7 @@ async function replyToIterationComment(
       durationS: evt.durationS ?? null,
       taskId: evt.taskId,
       errorTitle: classifyError(evt.errorMessage)?.title ?? null,
+      answerText: evt.answerText,
     }));
     if (existing) {
       const pointer = await updateJiraIterationComment(
@@ -1377,7 +1393,10 @@ async function replyToIterationComment(
     noChange ? 'needs_input' : (succeeded ? 'succeeded' : 'failed'),
   );
   if (succeeded && !noChange) {
-    await channel.transitionState?.(issueRef(changedSubIssueId, workspaceId), 'in_review');
+    await channel.transitionState?.(
+      childIssueRef(snapshot.children, changedSubIssueId, workspaceId),
+      'in_review',
+    );
   }
 }
 

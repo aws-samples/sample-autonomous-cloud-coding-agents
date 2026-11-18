@@ -614,7 +614,8 @@ def _transition(
 
     Resolves ``(cloud_id, issue_key)``, fetches the current status + valid
     transitions, skips if the card is already at/past the target band
-    (``max_source_rank``), selects a transition via the resolution ladder, and
+    (``max_source_rank``), selects a transition via the resolution ladder (cut
+    at the card's own status when that is one of its names), and
     POSTs it. Every failure mode — disabled, open circuit, missing token, empty
     transition list, no match, network / HTTP error — is logged and swallowed
     so the pipeline is never affected.
@@ -664,6 +665,14 @@ def _transition(
             f"issue={issue_key} — skipping",
         )
         return
+
+    # A status that is itself a rung of the ladder ends the ladder there: the
+    # rungs below it and the category fallback would move the card backward or
+    # sideways (In Review to In Progress, In Progress to On Hold).
+    current_name = str(current_status.get("name") or "").strip().lower()
+    if current_name in prefer_names:
+        prefer_names = prefer_names[: prefer_names.index(current_name)]
+        fallback_category = None
 
     chosen = _select_transition(
         transitions,
@@ -722,8 +731,9 @@ def transition_pr_opened(
     Resolution: ``jira_status_on_pr`` override → a destination named
     ``In Review`` (or a common review-column synonym) → any
     ``indeterminate``-category destination (Linear's In Review→In Progress
-    fallback, so a stock board isn't silently skipped, #605). Skips only if the
-    issue is already Done. Best-effort; no-op for non-Jira tasks.
+    fallback, so a stock board isn't silently skipped, #605). Skips if the
+    issue is already Done; an issue that is on one of these names only moves to
+    a name that comes before it. Best-effort; no-op for non-Jira tasks.
     """
     override = (channel_metadata or {}).get("jira_status_on_pr")
     _transition(

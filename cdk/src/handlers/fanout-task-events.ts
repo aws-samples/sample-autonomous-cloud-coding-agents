@@ -1759,6 +1759,9 @@ async function dispatchToJira(event: FanOutEvent): Promise<void> {
     ),
     taskId: task.task_id,
     errorTitle: classification?.title ?? null,
+    // An iteration that answered a question: the pointer below says "answer
+    // posted below", so the result carries what the agent said.
+    answerText: task.answer_text,
   });
 
   if (isIteration && iterationReplyId) {

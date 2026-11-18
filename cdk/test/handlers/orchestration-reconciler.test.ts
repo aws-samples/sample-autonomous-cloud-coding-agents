@@ -144,6 +144,8 @@ function taskRecord(fields: {
   error_message?: string;
   // Whether the agent actually edited code; false marks a question/answer run.
   code_changed?: boolean;
+  // What the agent said in a run without a commit.
+  answer_text?: string;
   iteration_reply_comment_id?: string;
   cost_usd?: number;
   duration_s?: number;
@@ -157,6 +159,7 @@ function taskRecord(fields: {
   if (fields.status) img.status = { S: fields.status };
   if (fields.build_passed !== undefined) img.build_passed = { BOOL: fields.build_passed };
   if (fields.code_changed !== undefined) img.code_changed = { BOOL: fields.code_changed };
+  if (fields.answer_text) img.answer_text = { S: fields.answer_text };
   if (fields.cost_usd !== undefined) img.cost_usd = { N: String(fields.cost_usd) };
   if (fields.duration_s !== undefined) img.duration_s = { N: String(fields.duration_s) };
   if (fields.turns_attempted !== undefined) img.turns_attempted = { N: String(fields.turns_attempted) };
@@ -774,6 +777,7 @@ function mockCascade(children: Array<{
   child_task_id?: string;
   child_branch_name?: string;
   linear_identifier?: string;
+  channel_metadata?: Record<string, string>;
 }>, metaOverrides: Record<string, unknown> = {}): void {
   const meta = {
     sub_issue_id: '#meta',
@@ -798,6 +802,7 @@ function mockCascade(children: Array<{
     ...(c.child_task_id && { child_task_id: c.child_task_id }),
     ...(c.child_branch_name && { child_branch_name: c.child_branch_name }),
     ...(c.linear_identifier && { linear_identifier: c.linear_identifier }),
+    ...(c.channel_metadata && { channel_metadata: c.channel_metadata }),
   }));
   ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
     if (cmd._type === 'Query') return { Items: [meta, ...rows] }; // loadOrchestration
@@ -1345,6 +1350,93 @@ describe('orchestration-reconciler handler — the iteration ack reply', () => {
       href: expect.stringContaining('/pull/'),
     }));
     expect(upsertThreadedReplyMock).not.toHaveBeenCalled();
+  });
+
+  test('a Jira orchestration iteration that answered a question posts the answer in its result', async () => {
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+        code_changed: false,
+        answer_text: 'Because the queue already retries.',
+      })],
+    } as never);
+
+    // The status comment points at the answer ...
+    const pointer = jiraUpdateIssueCommentAdfMock.mock.calls.find(
+      (([, , commentId]) => commentId === 'jira-status-1'),
+    );
+    expect(pointer![3]).toEqual({
+      _adf: [[{ text: '💬 Finished — answer posted below.', strong: true }]],
+    });
+    // ... so the result posted below it has to carry it, right after the header.
+    expect(jiraPostIssueCommentAdfMock).toHaveBeenCalledTimes(1);
+    const [, issueKey, result] = jiraPostIssueCommentAdfMock.mock.calls[0];
+    expect(issueKey).toBe('KAN-2');
+    const lines = (result._adf as Array<Array<{ text: string }>>)
+      .map((runs) => runs.map((run) => run.text).join(''));
+    expect(lines.slice(0, 2)).toEqual(['✅ Task completed', 'Because the queue already retries.']);
+  });
+
+  test('a Jira iteration advances the sub-issue with the review status of its own project mapping', async () => {
+    // The agent moved KAN-2 to the mapped status when it pushed. Without that
+    // name the adapter falls back to its name heuristic, which can take the
+    // rework transition from the mapped status back to In Progress.
+    mockCascade(
+      [{
+        sub_issue_id: 'KAN-2',
+        child_status: 'succeeded',
+        child_task_id: 'task-A',
+        child_branch_name: 'branch-A',
+        channel_metadata: { jira_issue_key: 'KAN-2', jira_status_on_pr: 'QA Review' },
+      }],
+      {
+        channel_source: 'jira',
+        parent_issue_ref: 'KAN-1',
+        credentials_ref: 'cloud-1',
+      },
+    );
+
+    await handler({
+      Records: [taskRecord({
+        task_id: 'iter-task-1',
+        status: 'COMPLETED',
+        orchestration_id: 'orch_1',
+        orchestration_sub_issue_id: 'KAN-2',
+        orchestration_iteration: true,
+        trigger_comment_id: 'human-cmt-1',
+        trigger_comment_issue_id: 'KAN-2',
+        iteration_reply_comment_id: 'jira-status-1',
+      })],
+    } as never);
+
+    expect(jiraTransitionIssueStateMock).toHaveBeenCalledWith(
+      { cloudId: 'cloud-1', registryTableName: 'JiraWorkspaceRegistry' },
+      'KAN-2',
+      'in_review',
+      { inReview: 'QA Review' },
+      undefined,
+    );
   });
 
   test('a failed Jira terminal update releases the claim for redelivery', async () => {

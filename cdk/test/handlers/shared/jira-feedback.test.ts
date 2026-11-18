@@ -285,6 +285,69 @@ describe('jira-feedback: transitionIssueState', () => {
       { allowRegression: true },
     )).resolves.toBe(true);
   });
+
+  /** The issue read: a status of the in-progress band and the statuses it can move to. */
+  function snapshotResponse(current: string, destinations: Record<string, string>): Response {
+    return {
+      ...mockResponse(200),
+      text: async () => JSON.stringify({
+        fields: { status: { name: current, statusCategory: { key: 'indeterminate' } } },
+        transitions: Object.entries(destinations).map(([id, name]) => ({
+          id,
+          hasScreen: false,
+          to: { name, statusCategory: { key: name === 'Done' ? 'done' : 'indeterminate' } },
+        })),
+      }),
+    } as Response;
+  }
+
+  test('leaves an issue that is already In Review there instead of taking the rework transition', async () => {
+    // From In Review the workflow offers In Progress (rework) and Done. The
+    // last rung of the review ladder is 'in progress': taking it moves the card back.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Review', { 11: 'In Progress', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // the read, no transition
+  });
+
+  test('leaves an epic that is already In Progress there when it is re-opened', async () => {
+    // 'in progress' is not offered from In Progress, and the category fallback
+    // would take the first other status of the band: In Review.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 21: 'In Review', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-1', 'started', {}, { allowRegression: true }))
+      .resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('moves an In Progress issue up the ladder to In Review', async () => {
+    // On Hold is offered first; the review status is taken by its name.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 11: 'On Hold', 21: 'In Review', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string))
+      .toEqual({ transition: { id: '21' } });
+  });
+
+  test('leaves an In Progress issue there when the board has no review status', async () => {
+    // Without a review status the category fallback would take On Hold.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 31: 'On Hold', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
@@ -399,6 +462,31 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
       { text: ' ' },
       { text: 'task-1', code: true },
     ]);
+  });
+
+  test('renders a whole-line italic as emphasis instead of literal underscores', () => {
+    // The liveness line of the iteration heartbeat and the footer of the epic panel.
+    expect(parseMarkdownRuns('_3m elapsed · running build_')).toEqual([
+      { text: '3m elapsed · running build', em: true },
+    ]);
+    expect(parseMarkdownRuns(
+      '_One live panel — updates in place as the epic progresses; no comment stream._',
+    )).toEqual([
+      { text: 'One live panel — updates in place as the epic progresses; no comment stream.', em: true },
+    ]);
+  });
+
+  test('keeps a code run inside an italic line free of emphasis (ADF allows code only with a link)', () => {
+    expect(parseMarkdownRuns('_3m elapsed · running `mise run build`_')).toEqual([
+      { text: '3m elapsed · running ', em: true },
+      { text: 'mise run build', code: true },
+    ]);
+  });
+
+  test('leaves underscores that do not wrap the whole line alone', () => {
+    expect(parseMarkdownRuns('fix user_id and task_id')).toEqual([{ text: 'fix user_id and task_id' }]);
+    expect(parseMarkdownRuns('_private stays as typed')).toEqual([{ text: '_private stays as typed' }]);
+    expect(parseMarkdownRuns('__')).toEqual([{ text: '__' }]);
   });
 
   test('maps each paragraph to an ADF paragraph node, preserving order', () => {
@@ -627,6 +715,38 @@ describe('jira-feedback: updateIssueComment', () => {
     expect((fetchMock.mock.calls[1][1].headers as Record<string, string>).Authorization)
       .toBe('Bearer fresh');
     expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
+  test('the retry after a forced refresh is still an update of the same comment', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(200));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueCommentAdf(CTX, 'ENG-42', '10001', buildAdfDocument([])))
+      .resolves.toEqual({ ok: true });
+
+    const commentUrl = 'https://api.atlassian.com/ex/jira/cloud-uuid-1/rest/api/3/issue/ENG-42/comment/10001';
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, (init as RequestInit).method])).toEqual([
+      [commentUrl, 'PUT'],
+      [commentUrl, 'PUT'],
+    ]);
+  });
+
+  test('an update whose forced refresh returns the same token gives up after one PUT', async () => {
+    // The default resolver mock hands back the same token for the forced refresh.
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueCommentAdf(CTX, 'ENG-42', '10001', buildAdfDocument([])))
+      .resolves.toEqual({ ok: false, retryable: false });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
   });
 
   test('returns false for a missing comment and never throws on a resolver failure', async () => {
