@@ -94,19 +94,18 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
     if egress_detected and host:
         detail = f"{label} could not reach {host!r} (host not allowlisted)"
         _record_blocker_reason("egress_denied", detail, host)
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_agent_blocked",
-                kind="egress_denied",
-                detail=detail,
-                remediation_hint=(
-                    f"Allowlist {host!r} in the DNS Firewall rule group if it is a "
-                    "legitimate dependency, then resubmit. The agent never widens egress itself."
-                ),
-                retryable=False,
-                resource=host,
-            )
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="egress_denied",
+            detail=detail,
+            remediation_hint=(
+                f"Allowlist {host!r} in the DNS Firewall rule group if it is a "
+                "legitimate dependency, then resubmit. The agent never widens egress itself."
+            ),
+            retryable=False,
+            resource=host,
+        )
         from progress_writer import format_blocker_reason
 
         raise DependencyUnreachableError(format_blocker_reason("egress_denied", detail, host))
@@ -124,19 +123,18 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
 
     detail = f"{label} failed after bounded retries"
     _record_blocker_reason("dependency_unreachable", detail, resource)
-    if progress is not None:
-        _try_progress(
-            progress,
-            "write_agent_blocked",
-            kind="dependency_unreachable",
-            detail=detail,
-            remediation_hint=(
-                "The dependency/registry stayed unreachable after retries. "
-                "Check network/DNS reachability from the agent VPC, then retry the task."
-            ),
-            retryable=True,
-            resource=resource,
-        )
+    _try_progress(
+        progress,
+        "write_agent_blocked",
+        kind="dependency_unreachable",
+        detail=detail,
+        remediation_hint=(
+            "The dependency/registry stayed unreachable after retries. "
+            "Check network/DNS reachability from the agent VPC, then retry the task."
+        ),
+        retryable=True,
+        resource=resource,
+    )
     raise DependencyUnreachableError(
         format_blocker_reason("dependency_unreachable", detail, resource)
     )

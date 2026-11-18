@@ -17,7 +17,6 @@ import hooks
 from hooks import (
     _denial_between_turns_hook,
     _is_self_reclone,
-    _reset_blocker_reason_for_tests,
     build_hook_matchers,
     detect_egress_denial,
     last_blocker_reason,
@@ -30,14 +29,12 @@ from policy import PolicyEngine
 
 
 @pytest.fixture(autouse=True)
-def _reset_blocker_latch():
-    """Clear the #251 blocker latch and the stuck-guard summary between tests so
-    one test's detected blocker or spin doesn't leak into the next (both are
-    module-level, process-lifetime)."""
-    _reset_blocker_reason_for_tests()
+def _reset_stuck_summary():
+    """Clear the stuck-guard summary between tests so one test's spin doesn't
+    leak into the next (module-level, process-lifetime). The #251 blocker latch
+    is cleared before every test of the suite by ``conftest.py``."""
     reset_stuck_summary()
     yield
-    _reset_blocker_reason_for_tests()
     reset_stuck_summary()
 
 
@@ -3153,6 +3150,37 @@ class TestWriteFailure:
         assert "no task_id" in result["hookSpecificOutput"]["permissionDecisionReason"]
         assert fake_task_state.write_calls == []
         assert progress.calls == []
+
+    def test_an_input_that_cannot_be_hashed_is_denied_and_nothing_is_written(
+        self, fake_task_state, progress, engine_with_soft_gate
+    ):
+        # The approval row and the recent-decision cache are keyed by the
+        # engine's hash of the tool input. An input that JSON cannot represent
+        # has no such hash: the engine refuses the call, also when its command
+        # is one the soft rule gates, and no request is opened for it.
+        hook_input = _hook_input()
+        hook_input["tool_input"]["env"] = {"PATH", "HOME"}
+
+        result = _run(
+            pre_tool_use_hook(
+                hook_input,
+                "tu-1",
+                {},
+                engine=engine_with_soft_gate,
+                task_id="01KTASK",
+                user_id="u-1",
+                progress=progress,
+                task_state_module=fake_task_state,
+            )
+        )
+
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (
+            result["hookSpecificOutput"]["permissionDecisionReason"]
+            == "fail-closed: unhashable_tool_input"
+        )
+        assert fake_task_state.write_calls == []
+        assert "write_approval_requested" not in progress.milestones()
 
 
 # --- Timeout clipping + ceiling shrinking --------------------------------

@@ -37,7 +37,7 @@ import task_state
 from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
 from output_scanner import _PATTERNS, scan_tool_output
-from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome, approval_deadline_epoch
+from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome, _sha256_tool_input, approval_deadline_epoch
 from progress_writer import _generate_ulid
 from shared_constants import SHARED_CONSTANTS
 from shell import log, log_error_cw, redact_secrets
@@ -118,20 +118,13 @@ def _truncate(text: str | None, max_len: int) -> str:
     return text[: max_len - ELLIPSIS_LEN] + "..."
 
 
-def _tool_input_preview(tool_input: Any, max_len: int = TOOL_INPUT_PREVIEW_MAX) -> str:
+def _tool_input_preview(tool_input: dict) -> str:
     """Return an ANSI-stripped, truncated preview of ``tool_input`` for DDB.
 
-    Uses ``json.dumps`` so dict/list inputs render as stable JSON rather
-    than Python repr (avoids leaking ``OrderedDict(...)`` wrappers etc.).
-    Falls back to ``str()`` on any serialization error; never raises.
+    Uses ``json.dumps`` so the input renders as stable JSON rather than
+    Python repr (avoids leaking ``OrderedDict(...)`` wrappers etc.).
     """
-    try:
-        rendered = (
-            tool_input if isinstance(tool_input, str) else json.dumps(tool_input, default=str)
-        )
-    except (TypeError, ValueError):
-        rendered = str(tool_input)
-    return _truncate(_strip_ansi(rendered), max_len)
+    return _truncate(_strip_ansi(json.dumps(tool_input, default=str)), TOOL_INPUT_PREVIEW_MAX)
 
 
 # ---------------------------------------------------------------------------
@@ -206,10 +199,6 @@ def reset_blocker_reason() -> None:
     """
     global _LAST_BLOCKER_REASON
     _LAST_BLOCKER_REASON = None
-
-
-# Back-compat alias for test fixtures that import the old name.
-_reset_blocker_reason_for_tests = reset_blocker_reason
 
 
 # Latch of the stuck-guard's "why it's spinning" summary, refreshed with every
@@ -655,7 +644,7 @@ async def pre_tool_use_hook(
         # cache-driven denies are visible in the live stream + retained audit
         # record. No new approval row is written and the gate counter is NOT
         # bumped — the original gate already accounted for the decision.
-        if progress is not None and decision.cache_hit_metadata is not None:
+        if decision.cache_hit_metadata is not None:
             _try_progress(
                 progress,
                 "write_policy_decision_cached",
@@ -671,20 +660,19 @@ async def pre_tool_use_hook(
         # observability without altering the outcome.
         if getattr(decision, "fail_closed", False):
             _record_blocker_reason("policy_fail_closed", decision.reason)
-            if progress is not None:
-                _try_progress(
-                    progress,
-                    "write_agent_blocked",
-                    kind="policy_fail_closed",
-                    detail=decision.reason,
-                    remediation_hint=(
-                        "The Cedar policy engine errored or was unavailable "
-                        "(fail-closed). Check the agent policy-engine logs and the "
-                        "policy bundle; this is a misconfiguration, not an "
-                        "intentional deny."
-                    ),
-                    retryable=False,
-                )
+            _try_progress(
+                progress,
+                "write_agent_blocked",
+                kind="policy_fail_closed",
+                detail=decision.reason,
+                remediation_hint=(
+                    "The Cedar policy engine errored or was unavailable "
+                    "(fail-closed). Check the agent policy-engine logs and the "
+                    "policy bundle; this is a misconfiguration, not an "
+                    "intentional deny."
+                ),
+                retryable=False,
+            )
         log("POLICY", f"DENIED: {tool_name} — {decision.reason}")
         return _deny_response(decision.reason)
 
@@ -702,7 +690,7 @@ async def pre_tool_use_hook(
     )
 
 
-async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 was set; must not grow
+async def _handle_require_approval(  # noqa: C901 -- 23, down from 35 when the ceiling of 15 was set; must not grow
     *,
     decision: Any,
     tool_name: str,
@@ -731,28 +719,26 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     # cap_exceeded milestone carries the configured cap so dashboards
     # reflect the blueprint override.
     if engine.approval_gate_count >= engine.approval_gate_cap:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_cap_exceeded",
-                request_id=request_id,
-                count=engine.approval_gate_count,
-                cap=engine.approval_gate_cap,
-            )
+        _try_progress(
+            progress,
+            "write_approval_cap_exceeded",
+            request_id=request_id,
+            count=engine.approval_gate_count,
+            cap=engine.approval_gate_cap,
+        )
         return _deny_response(f"approval-gate cap exceeded ({engine.approval_gate_cap}/task)")
 
     # Step 2 — per-minute rate limit. ``approvals_in_last_minute`` prunes
     # on read so the comparison is against the current sliding window.
     rate = engine.approvals_in_last_minute
     if rate >= APPROVAL_RATE_LIMIT:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_rate_limit_exceeded",
-                request_id=request_id,
-                rate=rate,
-                limit=APPROVAL_RATE_LIMIT,
-            )
+        _try_progress(
+            progress,
+            "write_approval_rate_limit_exceeded",
+            request_id=request_id,
+            rate=rate,
+            limit=APPROVAL_RATE_LIMIT,
+        )
         return _deny_response(f"approval-gate rate limit exceeded ({APPROVAL_RATE_LIMIT}/min)")
 
     # Step 3 — effective timeout with floor/ceiling math. Emit
@@ -764,7 +750,7 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         task_default_timeout_s=engine.task_default_timeout_s,
         remaining_lifetime_s=remaining_lifetime,
     )
-    if clip_reason is not None and progress is not None:
+    if clip_reason is not None:
         _try_progress(
             progress,
             "write_approval_timeout_capped",
@@ -783,7 +769,6 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         remaining_lifetime is not None
         and remaining_lifetime - CLEANUP_MARGIN_120S < 2 * engine.task_default_timeout_s
         and engine.mark_ceiling_shrinking_emitted()
-        and progress is not None
     ):
         _try_progress(
             progress,
@@ -803,7 +788,7 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
         )
 
     # Step 5 — build the approval row.
-    tool_input_sha256 = _sha256_tool_input_for_row(tool_input)
+    tool_input_sha256 = _sha256_tool_input(tool_input)
     row = {
         "task_id": task_id,
         "request_id": request_id,
@@ -840,58 +825,53 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     # another ``approval_gate_cap`` worth of gates. Failure is best-effort —
     # the counter is a safety bound, not a correctness bound — so we keep
     # going on error and accept the (bounded) restart-retry amplification.
-    if task_id:
-        await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
+    await asyncio.to_thread(ts.increment_approval_gate_count_in_ddb, task_id)
 
     # Step 7 — cross-table atomic transition.
     try:
         await asyncio.to_thread(ts.transact_write_approval_request, task_id, request_id, row)
     except ts.ApprovalWriteError as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"cancelled: {exc.cancellation_reasons}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"cancelled: {exc.cancellation_reasons}",
+        )
         return _deny_response("approval system unavailable (write cancelled)")
     except ts.ApprovalTablesUnavailable as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"tables unavailable: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"tables unavailable: {exc}",
+        )
         return _deny_response("approval system unavailable (tables unconfigured)")
     except Exception as exc:
         log(
             "ERROR",
             f"approval request write failed: {type(exc).__name__}: {exc}",
         )
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_write_failed",
-                request_id=request_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_write_failed",
+            request_id=request_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return _deny_response("approval system unavailable")
 
     # Step 8 — ``approval_requested`` milestone so the user's stream
     # shows the gate immediately.
-    if progress is not None:
-        _try_progress(
-            progress,
-            "write_approval_requested",
-            request_id=request_id,
-            tool_name=tool_name,
-            input_preview=row["tool_input_preview"],
-            reason=decision.reason,
-            severity=row["severity"],
-            timeout_s=effective_timeout,
-            matching_rule_ids=list(decision.matching_rule_ids),
-        )
+    _try_progress(
+        progress,
+        "write_approval_requested",
+        request_id=request_id,
+        tool_name=tool_name,
+        input_preview=row["tool_input_preview"],
+        reason=decision.reason,
+        severity=row["severity"],
+        timeout_s=effective_timeout,
+        matching_rule_ids=list(decision.matching_rule_ids),
+    )
 
     # Step 9 — register the exact persisted gate and its ORIGINAL deadline.
     # The SDK wrapper already tracks this tool; direct/legacy callers without a
@@ -968,23 +948,21 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     try:
         await asyncio.to_thread(ts.transact_resume_from_approval, task_id, request_id)
     except ts.ApprovalResumeError as exc:
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_resume_failed",
-                request_id=request_id,
-                error=f"cancelled: {exc.cancellation_reasons}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_resume_failed",
+            request_id=request_id,
+            error=f"cancelled: {exc.cancellation_reasons}",
+        )
         return _deny_response("task no longer awaiting approval")
     except Exception as exc:
         log("WARN", f"approval resume raised: {type(exc).__name__}: {exc}")
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_resume_failed",
-                request_id=request_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
+        _try_progress(
+            progress,
+            "write_approval_resume_failed",
+            request_id=request_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return _deny_response("approval resume failed")
 
     # Step 12 — terminal branches.
@@ -998,17 +976,16 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
                 # Malformed scope from the API — log loudly but still
                 # allow this one call (the user did approve it).
                 log("WARN", f"invalid approved scope {scope!r}: {exc}")
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_granted",
-                request_id=request_id,
-                scope=scope,
-                decided_at=outcome.get("decided_at"),
-                # Propagate the row's ``created_at`` so the
-                # ApprovalMetricsPublisher can compute decision latency.
-                created_at=row.get("created_at"),
-            )
+        _try_progress(
+            progress,
+            "write_approval_granted",
+            request_id=request_id,
+            scope=scope,
+            decided_at=outcome.get("decided_at"),
+            # Propagate the row's ``created_at`` so the
+            # ApprovalMetricsPublisher can compute decision latency.
+            created_at=row.get("created_at"),
+        )
         return _allow_response(f"User approved ({scope})")
 
     # DENIED or TIMED_OUT — cache + queue injection.
@@ -1048,18 +1025,17 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
             reason=outcome.get("reason", ""),
             decided_at=outcome.get("decided_at"),
         )
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_denied",
-                request_id=request_id,
-                reason=outcome.get("reason", ""),
-                decided_at=outcome.get("decided_at"),
-                # Propagate the row's ``created_at`` so the
-                # ApprovalMetricsPublisher can compute decision latency.
-                created_at=row.get("created_at"),
-            )
-    elif progress is not None:
+        _try_progress(
+            progress,
+            "write_approval_denied",
+            request_id=request_id,
+            reason=outcome.get("reason", ""),
+            decided_at=outcome.get("decided_at"),
+            # Propagate the row's ``created_at`` so the
+            # ApprovalMetricsPublisher can compute decision latency.
+            created_at=row.get("created_at"),
+        )
+    else:
         _try_progress(
             progress,
             "write_approval_timed_out",
@@ -1145,14 +1121,13 @@ def _reconcile_late_decision(
         return outcome
     status = row.get("status")
     if status == "APPROVED":
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_late_win",
-                request_id=request_id,
-                outcome="APPROVED",
-                reason="user decision landed during TIMED_OUT write",
-            )
+        _try_progress(
+            progress,
+            "write_approval_late_win",
+            request_id=request_id,
+            outcome="APPROVED",
+            reason="user decision landed during TIMED_OUT write",
+        )
         return {
             "status": "APPROVED",
             "scope": row.get("scope"),
@@ -1162,14 +1137,13 @@ def _reconcile_late_decision(
     if status == "CANCELLED":
         return {"status": "CANCELLED", "reason": row.get("cancellation_reason")}
     if status == "DENIED":
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_approval_late_win",
-                request_id=request_id,
-                outcome="DENIED",
-                reason="user decision landed during TIMED_OUT write",
-            )
+        _try_progress(
+            progress,
+            "write_approval_late_win",
+            request_id=request_id,
+            outcome="DENIED",
+            reason="user decision landed during TIMED_OUT write",
+        )
         return {
             "status": "DENIED",
             "reason": row.get("deny_reason") or "denied",
@@ -1363,26 +1337,6 @@ def _remaining_maxlifetime_s() -> int | None:
     return max(0, remaining)
 
 
-def _sha256_tool_input_for_row(tool_input: Any) -> str:
-    """Stable SHA-256 of ``tool_input`` for the approval row + cache key.
-
-    Re-derives hashing here (rather than importing ``policy._sha256_tool_input``)
-    so the hook's failure-mode is independent of the engine's internals and
-    to keep import graphs shallow. The engine's own cache uses the same
-    algorithm; the approval row and ``RecentDecisionCache`` need the same
-    key shape.
-    """
-    import hashlib
-
-    try:
-        serialized = (
-            tool_input if isinstance(tool_input, str) else json.dumps(tool_input, sort_keys=True)
-        )
-    except (TypeError, ValueError):
-        serialized = str(tool_input)
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
 def _iso_now() -> str:
     """ISO 8601 UTC timestamp in the ``YYYY-MM-DDTHH:MM:SSZ`` form."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1408,6 +1362,8 @@ def _try_progress(progress: Any, method_name: str, /, **kwargs: Any) -> None:
     Progress is best-effort observability; a throttled DDB write must not
     break the approval flow, and a milestone that cannot be written must not
     hold back the nudge, the denial or the advisory that it reports.
+    ``progress`` may be ``None`` (a hook that runs without a writer): it has
+    no such method, so the event is skipped with a DEBUG line.
 
     Escalation: repeated consecutive failures of the same ``method_name``
     are tracked per-process and escalated to ERROR after
@@ -1627,21 +1583,20 @@ def _observe_tool_result(
         # "Failed to connect to localhost port 3000"): no latch either.
         if host and not _LOOPBACK_HOST_RE.fullmatch(host):
             _record_blocker_reason("egress_denied", detail, host)
-        if progress is not None:
-            _try_progress(
-                progress,
-                "write_agent_blocked",
-                kind="egress_denied",
-                detail=detail,
-                remediation_hint=(
-                    f"Allowlist {host!r} in the DNS Firewall rule group"
-                    if host
-                    else "Allowlist the required host in the DNS Firewall rule group"
-                )
-                + " if it is a legitimate dependency. The agent never widens egress itself.",
-                retryable=False,
-                resource=host,
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="egress_denied",
+            detail=detail,
+            remediation_hint=(
+                f"Allowlist {host!r} in the DNS Firewall rule group"
+                if host
+                else "Allowlist the required host in the DNS Firewall rule group"
             )
+            + " if it is a legitimate dependency. The agent never widens egress itself.",
+            retryable=False,
+            resource=host,
+        )
 
     if stuck_guard is None:
         return None
@@ -1895,12 +1850,7 @@ def _denial_between_turns_hook(ctx: dict) -> list[str]:
     # ``drain_denial_injections`` clears the queue; this is deliberate
     # so a transient SDK failure that drops the injection does not
     # re-inject the same denial on every subsequent Stop seam.
-    try:
-        pending = engine.drain_denial_injections()
-    except Exception as exc:  # defensive
-        log("WARN", f"denial drain raised: {type(exc).__name__}: {exc}")
-        # nosemgrep: py-silent-success-masking -- fail-open hook; denial injection is best-effort
-        return []
+    pending = engine.drain_denial_injections()
     if not pending:
         return []
 
