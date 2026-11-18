@@ -19,7 +19,7 @@
 
 import { withDurableExecution, type DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
-import { resolveComputeStrategy } from './shared/compute-strategy';
+import { resolveComputeStrategy, type SessionHandle } from './shared/compute-strategy';
 import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
 import { reportIssueFailure } from './shared/linear-feedback';
@@ -58,6 +58,20 @@ interface OrchestrateTaskEvent {
    * durable-execution idempotency) can mistake it for a replay.
    */
   readonly queue_pickup_id?: string;
+}
+
+/**
+ * A MicroVM start that failed before registration. The start step never retries
+ * (a retry could launch a second computer), so it returns the failure and a
+ * separate retried step records it.
+ */
+interface MicrovmStartFailure {
+  readonly microvmStartFailure: { readonly fromStatus: TaskRecord['status']; readonly errorMessage: string };
+}
+type StartSessionResult = SessionHandle | MicrovmStartFailure | null;
+
+function isMicrovmStartFailure(result: StartSessionResult): result is MicrovmStartFailure {
+  return result !== null && 'microvmStartFailure' in result;
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
@@ -184,7 +198,7 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
 
   // Step 4: Start agent session — resolve compute strategy, invoke runtime, transition to RUNNING
   // Returns the full SessionHandle (serializable) so ECS polling can use it in step 5.
-  const sessionHandle = await context.step('start-session', async () => {
+  const startResult: StartSessionResult = await context.step('start-session', async (): Promise<StartSessionResult> => {
     let autoRetried = false;
     let failureStatus: TaskRecord['status'] = TaskStatus.HYDRATING;
     // Hoisted out of the `try` so the catch can reap a MicroVM that STARTED but
@@ -242,16 +256,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         compute_metadata: computeMetadata,
         ...(handle.strategyType === 'agentcore' && { agent_runtime_arn: handle.runtimeArn }),
       });
-      try {
+      // A MicroVM's session_started is its own durable step below: the guest can
+      // mark the task RUNNING before this point, and the event must not depend
+      // on which writer got there first.
+      if (handle.strategyType !== 'lambda-microvm') {
         await emitTaskEvent(taskId, 'session_started', {
           session_id: handle.sessionId,
           strategy_type: handle.strategyType,
         }, correlation);
-      } catch (emitErr) {
-        if (handle.strategyType !== 'lambda-microvm') throw emitErr;
-        log.warn('session_started event failed after the MicroVM was registered', {
-          session_id: handle.sessionId, error: String(emitErr),
-        });
       }
 
       log.info('Session started', {
@@ -338,17 +350,21 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
         : String(err);
       const errorMessage = `Session start failed: ${detail}${retriedNote}`;
       if (blueprintConfig.compute_type === 'lambda-microvm') {
-        // The durable finalization step below owns the terminal event and the
-        // concurrency release. Replaying this step after FAILED must not repeat them.
+        // This step never retries, so it cannot launch twice. Record FAILED here
+        // too, so a re-run of this step sees the closed task and launches
+        // nothing; a transient write error must not fail the step, so the
+        // retried `record-start-failure` step below makes the write stick. The
+        // terminal event and seat release stay with finalization.
         try {
           await transitionTask(taskId, failureStatus, TaskStatus.FAILED, {
             completed_at: new Date().toISOString(), error_message: errorMessage,
           });
         } catch (transitionErr) {
-          const current = await loadTask(taskId, true);
-          if (!TERMINAL_STATUSES.includes(current.status)) throw transitionErr;
+          log.warn('Could not record the MicroVM start failure yet; a retried step records it', {
+            error: String(transitionErr),
+          });
         }
-        return null;
+        return { microvmStartFailure: { fromStatus: failureStatus, errorMessage } };
       }
       await failTask(taskId, failureStatus, errorMessage, task.user_id, true, task.repo);
       throw err;
@@ -356,6 +372,37 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
   }, blueprintConfig.compute_type === 'lambda-microvm'
     ? { retryStrategy: () => ({ shouldRetry: false }) }
     : undefined);
+
+  if (isMicrovmStartFailure(startResult)) {
+    const { fromStatus, errorMessage } = startResult.microvmStartFailure;
+    await context.step('record-start-failure', async () => {
+      try {
+        await transitionTask(taskId, fromStatus, TaskStatus.FAILED, {
+          completed_at: new Date().toISOString(), error_message: errorMessage,
+        });
+      } catch (transitionErr) {
+        const current = await loadTask(taskId, true);
+        if (!TERMINAL_STATUSES.includes(current.status)) throw transitionErr;
+      }
+    });
+  }
+  const sessionHandle = isMicrovmStartFailure(startResult) ? null : startResult;
+
+  if (sessionHandle?.strategyType === 'lambda-microvm') {
+    // Once per execution, after either writer registered the worker.
+    await context.step('session-started-event', async () => {
+      try {
+        await emitTaskEvent(taskId, 'session_started', {
+          session_id: sessionHandle.sessionId,
+          strategy_type: sessionHandle.strategyType,
+        }, correlation);
+      } catch (emitErr) {
+        log.warn('session_started event failed after the MicroVM was registered', {
+          session_id: sessionHandle.sessionId, error: String(emitErr),
+        });
+      }
+    });
+  }
 
   if (!sessionHandle) {
     // The task ended before registration, including a persisted start failure.

@@ -437,6 +437,58 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
   });
 
+  test('a transient error recording the start failure is retried without a second launch', async () => {
+    let failed = false;
+    mockMicrovmSend.mockRejectedValue(Object.assign(new Error('denied'), { name: 'AccessDeniedException' }));
+    mockClaimStart.mockImplementation(async () => ({ clientToken: 'TASK001', closed: failed }));
+    mockTransitionTask
+      .mockImplementationOnce(async () => { throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' }); })
+      .mockImplementation(async (_id, _from, to) => { failed = to === TaskStatus.FAILED; });
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? (failed ? TaskStatus.FAILED : TaskStatus.HYDRATING) : TaskStatus.SUBMITTED,
+    }));
+    const { ctx, stepConfigs } = fakeContext();
+    await handler({ task_id: 'TASK001' }, {
+      ...ctx,
+      // The durable runtime retries a failed step under its default strategy.
+      step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
+        try {
+          return await ctx.step(name, fn, config);
+        } catch (error) {
+          if (name !== 'record-start-failure') throw error;
+          return ctx.step(name, fn, config);
+        }
+      },
+    } as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(1);
+    expect(failed).toBe(true);
+    expect(stepConfigs['start-session'].retryStrategy(new Error('failed'), 1)).toEqual({ shouldRetry: false });
+    expect(stepConfigs['record-start-failure']).toBeUndefined(); // default retries
+    expect(mockFinalizeTask).toHaveBeenCalledTimes(1);
+  });
+
+  test('emits session_started once when the guest marks the task RUNNING first', async () => {
+    runMicrovmOk();
+    // The strategy saved the handle and the guest already reported RUNNING.
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: consistentRead ? TaskStatus.RUNNING : TaskStatus.SUBMITTED,
+      session_id: MICROVM_ID,
+    }));
+    const { ctx, steps } = fakeContext();
+    await handler({ task_id: 'TASK001' }, ctx as never);
+    expect(mockTransitionTask).not.toHaveBeenCalledWith('TASK001', TaskStatus.HYDRATING, TaskStatus.RUNNING, expect.anything());
+    const started = mockEmitTaskEvent.mock.calls.filter(([, type]) => type === 'session_started');
+    expect(started).toHaveLength(1);
+    expect(started[0][2]).toEqual({ session_id: MICROVM_ID, strategy_type: 'lambda-microvm' });
+    expect(steps.indexOf('session-started-event')).toBeGreaterThan(steps.indexOf('start-session'));
+  });
+
   test('durable replay after registration recovers one computer without a second transition', async () => {
     runMicrovmOk();
     let savedHandle: unknown;
