@@ -36,9 +36,10 @@
  *              JEST_FREE_KEYS; scripts.test, verbatim
  *   agent      [tool.coverage.run] and [tool.coverage.report] in
  *              pyproject.toml, every key; the coverage flags of the test task
- *              in mise.toml, which win over those tables; pytest's addopts,
- *              verbatim; no config file that would be read before
- *              pyproject.toml
+ *              in mise.toml, which win over those tables and name
+ *              pyproject.toml as the file coverage.py reads; pytest's addopts,
+ *              verbatim, and its settings for which tests it collects; no
+ *              config file that would be read before pyproject.toml
  *   web        the test block of vite.config.ts, every key except those in
  *              VITEST_FREE_KEYS; no root; scripts.test, verbatim
  *   jira-forge-app  scripts.test, verbatim: node:test has no config file, so
@@ -102,6 +103,13 @@ const TASK_FREE_KEYS = ['depends', 'description'];
 const AGENT_SHADOW_CONFIGS = ['pytest.toml', '.pytest.toml', 'pytest.ini', '.pytest.ini', '.coveragerc', '.coveragerc.toml', 'setup.cfg', 'tox.ini'];
 
 /**
+ * The settings of [tool.pytest.ini_options] that decide which tests pytest 9 collects. With a pattern that leaves
+ * test modules out, pytest runs fewer tests and every gate stays green, so each of these has to be in the contract
+ * with the same value, or in neither.
+ */
+const PYTEST_COLLECTION_KEYS = ['testpaths', 'python_files', 'python_classes', 'python_functions', 'norecursedirs', 'collect_imported_tests'];
+
+/**
  * Config files that the launcher of a pinned command reads on top of the manifest the contract pins,
  * by the directories it looks in. mise 2026.10 merges each of these names into the mise.toml next
  * to it, or reads it in its place; yarn 1.22 and npm take settings for the way a script is run from
@@ -153,9 +161,13 @@ function toml(file: string, key: string): string {
   }
 }
 
-/** A TOML table of plain values (booleans, numbers, strings, arrays of those) as an object. */
-function tomlTable(file: string, key: string): Json {
-  return Object.fromEntries(toml(file, key).split('\n').filter(Boolean).map((line) => {
+/**
+ * A TOML table of plain values (booleans, numbers, strings, arrays of those) as an object: every key, or only
+ * ``keys`` of a table that also holds values this check cannot read.
+ */
+function tomlTable(file: string, key: string, keys?: string[]): Json {
+  const lines = toml(file, key).split('\n').filter(line => line && (!keys || keys.some(name => line.startsWith(`${name} = `))));
+  return Object.fromEntries(lines.map((line) => {
     const eq = line.indexOf(' = ');
     try {
       if (eq < 1) throw new Error('not a key = value line');
@@ -277,19 +289,29 @@ function checkAgent(contract: Json): void {
   pinKeys('agent/pyproject.toml [tool.coverage.run]', tomlTable('agent/pyproject.toml', 'tool.coverage.run'), 'pytest.agent.run', run);
   pinKeys('agent/pyproject.toml [tool.coverage.report]', tomlTable('agent/pyproject.toml', 'tool.coverage.report'), 'pytest.agent.report', report);
 
-  // pytest-cov flags win over pyproject.toml. --cov-report only chooses output formats.
+  // pytest-cov flags win over pyproject.toml. --cov-report only chooses output formats. --cov-config names the file
+  // that holds the two tables above: without it coverage.py reads the file a COVERAGE_RCFILE variable names instead.
   const flags = args(toml('agent/mise.toml', 'tasks.test.run')).filter(arg => /^--(no-)?cov/.test(arg) && !arg.startsWith('--cov-report='));
   const expected = [
     ...(run.source as string[]).map(source => `--cov=${source}`),
+    '--cov-config=pyproject.toml',
     ...(run.branch ? ['--cov-branch'] : []),
     `--cov-fail-under=${report.fail_under}`,
   ];
-  pin('agent/mise.toml tasks.test.run coverage flags', flags.sort(), 'pytest.agent (run.source, run.branch, report.fail_under)', expected.sort());
+  pin('agent/mise.toml tasks.test.run coverage flags', flags.sort(), 'pytest.agent (run.source, run.branch, report.fail_under) with --cov-config=pyproject.toml', expected.sort());
 
   // pytest puts its addopts setting in front of that command line, where a flag can switch coverage off or keep the
   // tests from running. It is pinned whole: no list of such flags is ever complete. pytest 9 refuses a pyproject.toml
   // that also fills [tool.pytest] itself, so this table is the one in force.
-  pin('agent/pyproject.toml [tool.pytest.ini_options] addopts', toml('agent/pyproject.toml', 'tool.pytest.ini_options.addopts'), 'pytest.agent.addopts', section(contract, 'pytest', 'agent').addopts);
+  const pytest = section(contract, 'pytest', 'agent');
+  pin('agent/pyproject.toml [tool.pytest.ini_options] addopts', toml('agent/pyproject.toml', 'tool.pytest.ini_options.addopts'), 'pytest.agent.addopts', pytest.addopts);
+
+  // Only these keys are read: the table also holds the warning filters, and mise prints a pattern with a backslash
+  // or a double quote in a form tomlTable does not parse.
+  const collection = tomlTable('agent/pyproject.toml', 'tool.pytest.ini_options', PYTEST_COLLECTION_KEYS);
+  for (const key of PYTEST_COLLECTION_KEYS) {
+    pin(`agent/pyproject.toml [tool.pytest.ini_options] ${key}`, collection[key], `pytest.agent.${key}`, pytest[key]);
+  }
 
   checked += 1;
   for (const name of AGENT_SHADOW_CONFIGS.filter(file => existsSync(join(root, 'agent', file)))) {

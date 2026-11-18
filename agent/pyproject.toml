@@ -84,13 +84,6 @@ min_confidence = 80
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
-skips = [
-    "B101",  # assert_used — tests use assert, ruff S101 handles per-file
-    "B602",  # subprocess shell=True — needed for shell tool execution
-    "B603",  # subprocess calls — needed for shell tool execution
-    "B607",  # partial executable paths — sh -c pattern is safe
-    "B701",  # jinja2_autoescape_false — templates are LLM prompts, not web HTML
-]
 
 
 [dependency-groups]
@@ -173,7 +166,7 @@ ignore = [
 max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
-"tests_emulator/**" = ["S101", "S106", "S108", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; test tokens; /tmp paths; literal assertions; fixtures taken for their effect; their own boto3 session
+"tests_emulator/**" = ["S101", "PLR2004", "ARG", "TID251"]  # emulator-backed tests (mise run test:integration): assert; literal assertions; fixtures taken for their effect; their own boto3 session
 "src/entrypoint.py" = ["E402"]  # re-export shim: importlib.reload() call must precede re-export from-imports
 # aws_session.py is the one module that builds boto3 clients, resources and sessions:
 # it attaches the solution User-Agent (#319). TID251 is one rule for the whole
@@ -257,7 +250,7 @@ source = ["src"]
 relative_files = true
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 89
 precision = 2
 show_missing = true
 skip_covered = true

@@ -304,7 +304,13 @@ run = "gitleaks git . --config .gitleaks.toml --staged --no-banner --redact --ve
 
 [tasks."security:sast"]
 description = "SAST scan with semgrep (auto + OWASP top 10)"
-run = "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --error --quiet ."
+# No --quiet, and a last command that fails when semgrep loaded no rule: the
+# comment of security:sast:range below says why.
+run = [
+  "mkdir -p test-reports && rm -f test-reports/semgrep-sast.sarif",
+  "semgrep scan --config auto --config p/python --config p/typescript --config p/owasp-top-ten --config p/security-audit --sarif-output=test-reports/semgrep-sast.sarif --error .",
+  '''node -e 'const sarif = JSON.parse(require("fs").readFileSync("test-reports/semgrep-sast.sarif", "utf8")); if (!sarif.runs[0].tool.driver.rules.length) { console.error("security:sast: semgrep loaded 0 rules, so nothing was checked (did semgrep.dev answer with empty rule packs?). Rerun the task; do not treat this run as a pass."); process.exit(1); }' ''',
+]
 
 [tasks."security:sast:range"]
 description = "Registry SAST ratcheted to newly-introduced findings only (per-PR gate). Set SEMGREP_SAST_BASELINE, e.g. origin/main."
@@ -451,6 +457,8 @@ depends = [
   ":drift-prevention"
 ]
 
+# A `run` list, not `depends`: mise starts dependencies together, and the build must
+# not begin before the install has finished.
 [tasks.default]
 description = "Install + build"
-depends = [":install", ":build"]
+run = [{ task = "install" }, { task = "build" }]
