@@ -112,21 +112,6 @@ export async function lookupTaskByLinearIssue(
 }
 
 /**
- * Back-compatible wrapper: the task, or null for both a miss and a failure.
- *
- * Prefer {@link lookupTaskByLinearIssue} on any path that replies to a user, so a
- * lookup failure isn't reported to them as "this isn't an ABCA issue".
- */
-export async function resolveTaskByLinearIssue(
-  ddb: DynamoDBDocumentClient,
-  taskTableName: string,
-  linearIssueId: string,
-): Promise<LinearIssueTask | null> {
-  const res = await lookupTaskByLinearIssue(ddb, taskTableName, linearIssueId);
-  return res.kind === 'found' ? res.task : null;
-}
-
-/**
  * Extract a PR number from a task's ``pr_number`` (preferred) or by parsing
  * ``/pull/<n>`` out of ``pr_url``. Returns null when neither yields a number —
  * the task ran but never opened a PR, so there's nothing to iterate on.

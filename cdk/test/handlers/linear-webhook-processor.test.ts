@@ -1228,7 +1228,9 @@ describe('probeLinearIssueContext', () => {
     expect(body.query).toContain('content'); // ADR-016 — doc bodies pre-hydrated
     expect(body.query).toContain('documentsForCount'); // true-total count connection
     expect(result).toEqual({
-      attachmentTitles: ['spec.pdf'],
+      // The paperclip is an upload: the processor fetches and attaches it, so
+      // the hint does not list it.
+      attachmentTitles: [],
       attachments: [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }],
       projectName: 'P1',
       projectHasDocuments: true,
