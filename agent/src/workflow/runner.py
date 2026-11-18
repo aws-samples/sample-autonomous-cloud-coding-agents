@@ -216,6 +216,7 @@ class WorkflowCheckpoint:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            # nosemgrep: py-silent-success-masking -- no checkpoint: run_workflow skips no step
             return {}
         # Guard against a stale checkpoint from a different task on a reused mount.
         if raw.get("task_id") != self._task_id:

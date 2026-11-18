@@ -279,6 +279,7 @@ def _proxy_error_code(raw_body: str) -> str | None:
     try:
         payload = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError):
+        # nosemgrep: py-silent-success-masking -- not JSON: the caller logs it as unclassified
         return None
     if not isinstance(payload, dict):
         return None

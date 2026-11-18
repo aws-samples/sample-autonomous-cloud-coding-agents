@@ -346,6 +346,7 @@ def _current_branch(repo_dir: str) -> str | None:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
+        # nosemgrep: py-silent-success-masking -- git failed: reconcile_agent_branch moves nothing
         return None
     if res.returncode != 0:
         return None

@@ -1331,6 +1331,7 @@ def _remaining_maxlifetime_s() -> int | None:
                 started = started.replace(tzinfo=UTC)
             started_epoch = int(started.timestamp())
     except (ValueError, AttributeError):
+        # nosemgrep: py-silent-success-masking -- start unknown: the gate gets no lifetime ceiling
         return None
     elapsed = int(time.time()) - started_epoch
     remaining = max_lifetime - elapsed
