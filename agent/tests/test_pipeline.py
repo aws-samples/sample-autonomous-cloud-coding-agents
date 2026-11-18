@@ -1,5 +1,7 @@
 """Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
+import hashlib
+import io
 import json
 import os
 import re
@@ -22,6 +24,18 @@ from post_hooks import VerifyOutcome
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
+
+# One attachment as the orchestrator describes it in the payload (AttachmentConfig).
+_REPORT_ATTACHMENT = {
+    "attachment_id": "att-1",
+    "type": "file",
+    "content_type": "text/plain",
+    "filename": "report.txt",
+    "s3_uri": "s3://attachments-bkt/attachments/u-1/t-1/att-1/report.txt",
+    "s3_version_id": "v1",
+    "size_bytes": 2048,
+    "checksum_sha256": "0" * 64,
+}
 
 
 class TestStartCommentPolicy:
@@ -392,6 +406,221 @@ class TestRepoLessPipeline:
         assert "repoless-1" in captured_cwd["system_prompt"]  # {task_id} substituted
         assert "{task_id}" not in captured_cwd["system_prompt"]
 
+    def _run_with_report(self, workspace: Path, monkeypatch, *, stored: bytes) -> SimpleNamespace:
+        """Run a research task without a repository that carries one attachment.
+
+        The attachment is ``report.txt`` as admission stored it; ``stored`` is what
+        the bucket hands back for it. The task arrives as the orchestrator sends
+        it: a hydrated context whose prompt is the description only, because for a
+        task without a repository it leaves the attachments to the agent. The
+        agent workspace is ``workspace``, and the stubbed agent reads the file its
+        prompt names. Returns what the agent saw, the S3 client, the task-state
+        mock, and the result or the message of the error the task raised."""
+        report = b"Q3 revenue grew 12 percent.\n"
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        monkeypatch.setattr("pipeline.AGENT_WORKSPACE", str(workspace))
+        monkeypatch.setattr("config.AGENT_WORKSPACE", str(workspace))
+        s3 = MagicMock()
+        s3.get_object.return_value = {"Body": io.BytesIO(stored)}
+        run = SimpleNamespace(
+            report=report, s3=s3, agent_ran=False, read=None, result=None, raised=None
+        )
+
+        async def run_agent(prompt, _system_prompt, _config, cwd, trajectory=None):
+            run.agent_ran = True
+            run.prompt = prompt
+            run.cwd = Path(cwd)
+            named = re.search(r"`Read (\S+)`", prompt)
+            if named:
+                run.named_path = Path(named.group(1))
+                run.read = run.named_path.read_bytes()
+            return AgentResult(
+                status="success", turns=2, cost_usd=0.02, num_turns=2, result_text="Revenue grew."
+            )
+
+        with (
+            patch("runner.run_agent", side_effect=run_agent),
+            patch("pipeline.task_span", return_value=self._mock_span()),
+            patch("pipeline.task_state") as run.task_state,
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+            patch("aws_session.tenant_client", return_value=s3),
+        ):
+            from pipeline import run_task
+
+            try:
+                run.result = run_task(
+                    task_description="Summarise the attached report",
+                    aws_region="us-east-1",
+                    task_id="repoless-att",
+                    resolved_workflow={"id": "knowledge/web-research-v1", "version": "1.0.0"},
+                    hydrated_context={
+                        "version": 1,
+                        "user_prompt": "Summarise the attached report",
+                        "sources": ["task_description"],
+                    },
+                    attachments=[
+                        {
+                            **_REPORT_ATTACHMENT,
+                            "size_bytes": len(report),
+                            "checksum_sha256": hashlib.sha256(report).hexdigest(),
+                        }
+                    ],
+                )
+            except RuntimeError as exc:
+                run.raised = str(exc)
+        return run
+
+    def test_repoless_task_gets_its_attachments(self, tmp_path, monkeypatch):
+        run = self._run_with_report(tmp_path, monkeypatch, stored=b"Q3 revenue grew 12 percent.\n")
+
+        # The file is in the directory the agent runs in, and the prompt names it
+        # after the task itself, as for a task with a repository.
+        assert run.raised is None
+        assert run.result["status"] == "success"
+        assert run.prompt.startswith("Summarise the attached report")
+        assert run.read == run.report
+        assert run.named_path.is_relative_to(run.cwd)
+        # Read at the object version that admission screened.
+        run.s3.get_object.assert_called_once_with(
+            Bucket="attachments-bkt", Key="attachments/u-1/t-1/att-1/report.txt", VersionId="v1"
+        )
+
+    def test_repoless_task_whose_attachment_was_replaced_fails_before_the_agent_runs(
+        self, tmp_path, monkeypatch
+    ):
+        run = self._run_with_report(tmp_path, monkeypatch, stored=b"not what was screened\n")
+
+        assert run.agent_ran is False
+        assert "Attachment download/verification failed" in run.raised
+        run.task_state.write_terminal.assert_called_once()
+        _task_id, status, payload = run.task_state.write_terminal.call_args.args
+        assert status == "FAILED"
+        assert "integrity check failed" in payload["error"]
+
+    def _run_with_task_record(
+        self, monkeypatch, *, trace_uri: str | None = None, **get_task
+    ) -> SimpleNamespace:
+        """Run a research task without a repository, with a memory configured.
+
+        ``get_task`` is how the read of the task record behaves once the agent has
+        returned (``return_value`` or ``side_effect``). With ``trace_uri`` the task
+        was submitted with --trace and its trajectory uploads to that URI. Returns
+        the result, the S3 client, the milestones in the order they were written,
+        and the mocks of the episode write, the terminal write and the write that
+        puts a trace URI on a record that is already terminal."""
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+
+        async def run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            return AgentResult(
+                status="success", turns=2, cost_usd=0.02, num_turns=2, result_text="Findings ..."
+            )
+
+        s3 = MagicMock()
+        progress = MagicMock()
+        with (
+            patch("runner.run_agent", side_effect=run_agent),
+            patch("pipeline.task_span", return_value=self._mock_span()),
+            patch("pipeline._ProgressWriter", return_value=progress),
+            patch("pipeline.task_state.get_task", **get_task),
+            patch("pipeline.task_state.write_terminal") as write_terminal,
+            patch("pipeline.task_state.write_trace_uri_conditional") as write_trace_uri,
+            patch("pipeline.agent_memory.write_task_episode", return_value=True) as write_episode,
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=trace_uri),
+            patch("aws_session.tenant_client", return_value=s3),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Research approaches to rate limiting",
+                aws_region="us-east-1",
+                task_id="repoless-rec",
+                user_id="u-1",
+                memory_id="mem-1",
+                trace=trace_uri is not None,
+                resolved_workflow={"id": "knowledge/web-research-v1", "version": "1.0.0"},
+            )
+        return SimpleNamespace(
+            result=result,
+            s3=s3,
+            milestones=[call.args[0] for call in progress.write_agent_milestone.call_args_list],
+            write_episode=write_episode,
+            write_terminal=write_terminal,
+            write_trace_uri=write_trace_uri,
+        )
+
+    def test_cancelled_repoless_task_delivers_and_remembers_nothing(self, monkeypatch):
+        # The user cancelled while the agent ran: cancel-task has written
+        # CANCELLED, and the Stop hook ended the agent after its current turn. As
+        # on the repo lane, nothing may follow: no artifact of a half-finished
+        # answer, no delivered_comment event, no episode in the user's memory.
+        run = self._run_with_task_record(monkeypatch, return_value={"status": "CANCELLED"})
+
+        run.s3.put_object.assert_not_called()
+        assert run.milestones == [
+            "step:context:start",
+            "step:context:succeeded",
+            "step:research:start",
+            "step:research:succeeded",
+            "agent_execution_complete",
+            "task_cancelled_acknowledged",
+        ]
+        run.write_episode.assert_not_called()
+        # The record is CANCELLED already; the terminal write would be refused.
+        run.write_terminal.assert_not_called()
+        assert run.result == {
+            "status": "cancelled",
+            "task_id": "repoless-rec",
+            "turns": 2,
+            "turns_attempted": 2,
+        }
+
+    def test_cancelled_repoless_task_keeps_its_trace(self, monkeypatch):
+        # --trace: what was captured before the cancel is uploaded, and its URI
+        # is put on the CANCELLED record, as on the repo lane. Before the cancel
+        # check existed the refused terminal write did that on its way out.
+        trace_uri = "s3://traces-bkt/traces/u-1/repoless-rec.jsonl.gz"
+
+        run = self._run_with_task_record(
+            monkeypatch, trace_uri=trace_uri, return_value={"status": "CANCELLED"}
+        )
+
+        assert run.result["status"] == "cancelled"
+        run.write_trace_uri.assert_called_once_with("repoless-rec", trace_uri)
+
+    def test_repoless_task_that_was_not_cancelled_is_delivered_and_remembered(self, monkeypatch):
+        run = self._run_with_task_record(monkeypatch, return_value={"status": "RUNNING"})
+
+        assert run.result["status"] == "success"
+        assert run.result["artifact_uri"] == "s3://artifacts-bkt/artifacts/repoless-rec/result.md"
+        run.s3.put_object.assert_called_once()
+        assert run.milestones == [
+            "step:context:start",
+            "step:context:succeeded",
+            "step:research:start",
+            "step:research:succeeded",
+            "step:deliver:start",
+            "delivered_comment",
+            "step:deliver:succeeded",
+            "agent_execution_complete",
+        ]
+        assert run.write_episode.call_args.kwargs["status"] == "COMPLETED"
+        assert run.write_terminal.call_args.args[1] == "COMPLETED"
+
+    def test_task_record_that_cannot_be_read_does_not_hold_back_the_delivery(self, monkeypatch):
+        # Fail-open, as on the repo lane: a failed read is not a cancellation.
+        import task_state
+
+        run = self._run_with_task_record(
+            monkeypatch, side_effect=task_state.TaskFetchError("throttled")
+        )
+
+        assert run.result["status"] == "success"
+        run.s3.put_object.assert_called_once()
+
     @patch("runner.run_agent")
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
@@ -431,6 +660,11 @@ class TestRepoLessPipeline:
 
         mock_setup_repo.assert_not_called()
         assert result["status"] == "error"
+        # The error is the agent step's own: the workflow stops there, and the
+        # delivery step that follows it is not attempted on top.
+        assert result["error"] == (
+            "repo-less run_agent produced no result: RuntimeError: model exploded"
+        )
         # Terminal state persisted as FAILED (not left dangling / not COMPLETED).
         terminal_calls = [
             c for c in mock_task_state.write_terminal.call_args_list if c.args[1] == "FAILED"
@@ -658,6 +892,9 @@ class TestRepoLessPipeline:
         assert result["status"] == "success"
         assert result["pr_url"] == "https://github.com/org/repo/pull/1"
 
+    @pytest.mark.parametrize(
+        "requires_repo", [True, None], ids=["written-out", "left-to-the-coding-domain"]
+    )
     @patch("runner.run_agent")
     @patch("pipeline.build_system_prompt")
     @patch("pipeline.discover_project_config")
@@ -673,6 +910,7 @@ class TestRepoLessPipeline:
         _mock_build_prompt,
         mock_run_agent,
         monkeypatch,
+        requires_repo,
     ):
         # A REPO-FUL artifact workflow clones for context but its terminal outcome
         # is a DOCUMENT, not a PR. It must take the repo-bound path (clone), then
@@ -683,6 +921,10 @@ class TestRepoLessPipeline:
         # AND requires_repo), not by a workflow id, and without a test the branch
         # could be deleted or inverted silently. Getting it wrong means opening an
         # empty PR for a document task, or running a build that was never wanted.
+        #
+        # A coding workflow requires a repository whether its file says so or
+        # leaves the line out (the domain default, Workflow.resolved_requires_repo):
+        # both spellings have to select the branch.
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
         monkeypatch.setenv("AWS_REGION", "us-east-1")
         mock_setup_repo.return_value = RepoSetup(
@@ -709,7 +951,7 @@ class TestRepoLessPipeline:
         artifact_wf = base_wf.model_copy(
             update={
                 "id": "synthetic/artifact-repoful-v1",
-                "requires_repo": True,
+                "requires_repo": requires_repo,
                 "terminal_outcomes": base_wf.terminal_outcomes.model_copy(
                     update={"primary": "artifact"}
                 ),
@@ -722,9 +964,15 @@ class TestRepoLessPipeline:
                 "pipeline._deliver_plan_artifact",
                 return_value="s3://artifacts-bkt/artifacts/artifact-1/result.md",
             ) as mock_deliver,
-            patch("pipeline.ensure_pr") as mock_ensure_pr,
-            patch("pipeline.verify_build") as mock_verify_build,
-            patch("pipeline.ensure_committed") as mock_ensure_committed,
+            # Stubbed with what the real hooks return, so that a run that takes
+            # the build and pull-request hooks after all fails in the assertions
+            # below, not on a stub's return value or on a real lint command.
+            patch("pipeline.ensure_pr", return_value=None) as mock_ensure_pr,
+            patch(
+                "pipeline.verify_build", return_value=VerifyOutcome(passed=True)
+            ) as mock_verify_build,
+            patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+            patch("pipeline.ensure_committed", return_value=False) as mock_ensure_committed,
             patch("pipeline.get_disk_usage", return_value=0),
             patch("pipeline.print_metrics"),
             patch("pipeline._maybe_upload_trace", return_value=None),
@@ -2204,6 +2452,61 @@ class TestJiraCredentialIsolation:
                 run_task(channel_source=channel_source)
 
 
+class TestSessionTagsAroundTheConfiguration:
+    """A task whose configuration cannot be built never reaches the pipeline's own
+    FAILED write: ``run_task`` raises and the caller records the error (the backup
+    write of ``server._run_task_background``). That write assumes the per-task
+    SessionRole, whose DynamoDB grant covers only the item named by the ``task_id``
+    session tag, so the tags have to be set before the configuration is built."""
+
+    @staticmethod
+    def _session_tags() -> dict[str, str]:
+        import aws_session
+
+        return {tag["Key"]: tag["Value"] for tag in aws_session._session_tags()}
+
+    def test_task_whose_configuration_is_rejected_is_already_tagged(self):
+        from pipeline import run_task
+
+        # A descriptor field this agent image does not know (an orchestrator
+        # deployed ahead of the runtime image): AttachmentConfig forbids extras.
+        attachment = {**_REPORT_ATTACHMENT, "scan_verdict": "clean"}
+
+        with pytest.raises(ValueError, match=r"Attachment\[0\] validation failed"):
+            run_task(
+                repo_url="owner/repo",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                task_id="t-1",
+                user_id="u-1",
+                attachments=[attachment],
+            )
+
+        assert self._session_tags() == {"user_id": "u-1", "repo": "owner/repo", "task_id": "t-1"}
+
+    def test_started_task_is_tagged_from_its_resolved_configuration(self):
+        from pipeline import run_task
+
+        # Local batch mode passes no task id: one is generated while the
+        # configuration is built, and that is the id the session has to carry.
+        with (
+            patch("pipeline.task_span", side_effect=RuntimeError("stop before the pipeline")),
+            pytest.raises(RuntimeError, match="stop before the pipeline"),
+        ):
+            run_task(
+                repo_url="owner/repo",
+                task_description="x",
+                github_token="ghp_test",
+                aws_region="us-east-1",
+                user_id="u-1",
+            )
+
+        tags = self._session_tags()
+        assert re.fullmatch(r"[0-9a-f]{12}", tags.pop("task_id"))
+        assert tags == {"user_id": "u-1", "repo": "owner/repo"}
+
+
 class TestEarlyAckOrdering:
     """#616 review N4 — the early-ACK reorder must hold under future edits.
 
@@ -2464,6 +2767,128 @@ class TestTurnsCompletedAtTheCap:
 
         assert run.result["turns_attempted"] == 11
         assert run.result["turns_completed"] == 10
+
+
+class TestEpisodeRecordsHowTheTaskEnded:
+    """The episode written to the repository's memory is handed to later tasks on
+    that repository as a past episode. It has to carry the verdict the task record
+    carries, not the result of the post-agent build."""
+
+    @staticmethod
+    def _run(agent_result: AgentResult, **run_kwargs) -> tuple[str, str]:
+        """The status of the task's result, and the status its episode was written with."""
+        with (
+            patch("pipeline._extract_agent_notes", return_value=None),
+            patch("pipeline.agent_memory.write_task_episode", return_value=True) as write_episode,
+        ):
+            run = _run_pipeline(agent_result, memory_id="mem-1", **run_kwargs)
+        write_episode.assert_called_once()
+        return run.result["status"], write_episode.call_args.kwargs["status"]
+
+    def test_agent_stopped_at_its_turn_limit_over_a_green_build_is_remembered_as_failed(self):
+        stopped = AgentResult(
+            status="error",
+            error="Agent session error (subtype='error_max_turns')",
+            turns=11,
+            num_turns=11,
+        )
+
+        assert self._run(stopped, max_turns=10) == ("error", "FAILED")
+
+    def test_task_completed_over_a_build_that_was_already_red_is_remembered_as_completed(self):
+        # The regression-only gate: the build failed before the agent ran and
+        # still fails, so it does not fail the task.
+        red_before = RepoSetup(
+            repo_dir="/workspace/repo", branch="bgagent/test/branch", build_before=False
+        )
+
+        outcome = self._run(_agent_succeeded(), setup=red_before, build=VerifyOutcome(passed=False))
+
+        assert outcome == ("success", "COMPLETED")
+
+    def test_task_that_delivered_nothing_is_remembered_as_failed(self, tmp_path):
+        # The delivery gate: the agent and the build are fine, but there is no
+        # pull request and no commit on the branch (tmp_path is not a repository).
+        nothing_pushed = RepoSetup(repo_dir=str(tmp_path), branch="bgagent/test/branch")
+
+        outcome = self._run(_agent_succeeded(), setup=nothing_pushed, pr_url=None)
+
+        assert outcome == ("error", "FAILED")
+
+    def test_hold_for_input_is_remembered_as_completed(self):
+        # Clarify-and-hold ends COMPLETED without a build or a pull request.
+        outcome = self._run(_agent_succeeded(clarification_question="Which page?"))
+
+        assert outcome == ("success", "COMPLETED")
+
+
+class TestStepMilestonesOfThePostHooks:
+    """The workflow runner announces each step it runs (``step:<name>:start``, then
+    the step's status), but on the repo lane it runs the agent step only: the build
+    and the pull request are inline post-hooks. The pipeline announces those two
+    itself, under the names the workflow gives them. The console takes its
+    "Checking" and "Pull request" stages, and its build lines, from these events."""
+
+    @staticmethod
+    def _milestones(agent_result: AgentResult, **run_kwargs) -> list[str]:
+        """The milestones of one run, in the order they were written."""
+        progress = MagicMock()
+        with patch("pipeline._ProgressWriter", return_value=progress):
+            _run_pipeline(agent_result, **run_kwargs)
+        return [call.args[0] for call in progress.write_agent_milestone.call_args_list]
+
+    def test_build_and_pull_request_are_announced_between_the_agent_and_the_pr(self):
+        assert self._milestones(_agent_succeeded()) == [
+            "repo_setup_complete",
+            "step:implement:start",
+            "step:implement:succeeded",
+            "agent_execution_complete",
+            "step:build:start",
+            "step:build:succeeded",
+            "step:open_pr:start",
+            "pr_created",
+        ]
+
+    def test_steps_carry_the_names_their_workflow_declares(self):
+        # coding/pr-iteration-v1 calls its steps iterate, build and resolve_pr.
+        milestones = self._milestones(
+            _agent_succeeded(),
+            resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
+            pr_number="7",
+        )
+
+        assert milestones[-4:] == [
+            "step:build:start",
+            "step:build:succeeded",
+            "step:resolve_pr:start",
+            "pr_created",
+        ]
+
+    def test_build_that_failed_is_announced_as_failed(self):
+        # The pull request is opened all the same, so that the diff can be seen.
+        milestones = self._milestones(_agent_succeeded(), build=VerifyOutcome(passed=False))
+
+        assert milestones[-4:] == [
+            "step:build:start",
+            "step:build:failed",
+            "step:open_pr:start",
+            "pr_created",
+        ]
+
+    def test_build_whose_command_could_not_run_gets_no_verdict(self):
+        # Nothing was built: neither "succeeded" nor "failed" is true of it, as on
+        # the task record and in the pull request.
+        milestones = self._milestones(
+            _agent_succeeded(), build=VerifyOutcome(passed=False, inert=True)
+        )
+
+        assert milestones[-3:] == ["step:build:start", "step:open_pr:start", "pr_created"]
+
+    def test_hold_for_input_announces_no_post_hook_step(self):
+        # Clarify-and-hold runs neither the build nor the pull request.
+        milestones = self._milestones(_agent_succeeded(clarification_question="Which page?"))
+
+        assert milestones[-1] == "agent_execution_complete"
 
 
 class TestLinearIssueAtTerminal:

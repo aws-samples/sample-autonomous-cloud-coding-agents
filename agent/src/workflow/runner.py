@@ -11,7 +11,8 @@ branches that were scattered through ``pipeline.py``: each existing helper
 (``setup_repo``, ``run_agent``, ``verify_build``, ``ensure_pr``, …) becomes a
 *step handler* keyed by ``StepKind`` in ``STEP_HANDLERS``. ``run_workflow``
 executes the steps in order, honours each step's ``on_failure`` policy, emits a
-``step:<name>:start`` / ``:complete`` progress milestone per boundary, and
+progress milestone at both boundaries of a step (``step:<name>:start``, then
+``step:<name>:succeeded``, ``:failed`` or ``:skipped``), and
 checkpoints completed steps so a resumed session skips work already done
 (WORKFLOWS.md §"Step execution semantics").
 
@@ -290,7 +291,8 @@ def run_workflow(
     mechanism, not a transitional seam: the repo-bound pipeline drives just the
     agentic ``run_agent`` step through the runner (clone / context / post-hooks
     stay on the proven inline path with their hard-won cancel-safety), while the
-    repo-less path (``_run_repoless_task``) passes ``None`` so every step runs.
+    repo-less path (``_run_repoless_task``) runs every step, in two calls: the
+    delivery after its cancel check, everything else before it.
 
     On resume, deterministic side-effect-free steps already recorded in the
     checkpoint are skipped; everything else re-runs (idempotently).
@@ -411,7 +413,9 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
     leans "orchestrator hydrates, the agent step only consumes"); this handler is
     that consumer. It sets BOTH prompts the ``run_agent`` step needs:
 
-    - ``ctx.user_prompt`` — the hydrated ``user_prompt`` when present.
+    - ``ctx.user_prompt`` — the hydrated ``user_prompt`` when present, unless the
+      caller already set one: the pipeline's prompt is the hydrated one with the
+      attachment references appended, and must not be replaced by the bare one.
     - ``ctx.system_prompt`` — built via the existing ``build_system_prompt`` so
       the workflow path produces the same system prompt as ``pipeline.run_task``
       (repo_url/branch/workspace/max_turns/setup_notes/memory_context + overrides
@@ -420,7 +424,7 @@ def _handle_hydrate_context(step: Step, ctx: StepContext) -> StepOutcome:
       the ``RepoSetup``; when absent (repo-less workflows) the system prompt is
       left to the caller, since ``build_system_prompt`` is repo-shaped today.
     """
-    if ctx.hydrated is not None:
+    if ctx.hydrated is not None and not ctx.user_prompt:
         ctx.user_prompt = ctx.hydrated.user_prompt
 
     built_system_prompt = False
