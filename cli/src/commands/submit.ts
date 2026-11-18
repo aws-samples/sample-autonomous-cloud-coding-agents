@@ -73,13 +73,13 @@ export function makeSubmitCommand(): Command {
     .option(
       '--workflow <id>',
       'Workflow to run, as <id>[@<constraint>] (e.g. coding/new-task-v1). '
-        + 'Overrides the workflow implied by --pr/--review-pr; omit to let the server resolve a default.',
+        + 'Overrides the workflow implied by --pr/--review-pr; without any of the three, coding/new-task-v1 is sent.',
     )
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
     .option(
       '--attachment <path-or-url>',
-      'Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline; URLs are fetched by the agent.',
+      'Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; URLs are fetched by the platform before the agent starts.',
       collect<string>,
       [] as readonly string[],
     )
@@ -201,8 +201,12 @@ export function makeSubmitCommand(): Command {
         if (attachmentArgs.length > 10) {
           throw new CliError('Maximum 10 attachments per task.');
         }
+        let inlineBytes = 0;
         for (const arg of attachmentArgs) {
-          attachments.push(resolveAttachmentArg(arg));
+          const attachment = resolveAttachmentArg(arg, inlineBytes);
+          // The decoded size, as the API counts it; a URL or a file to upload adds nothing.
+          inlineBytes += Buffer.byteLength(attachment.data ?? '', 'base64');
+          attachments.push(attachment);
         }
       }
 
@@ -253,18 +257,15 @@ export function makeSubmitCommand(): Command {
       let task = createResponse;
       if (createResponse.upload_instructions && createResponse.upload_instructions.length > 0) {
         process.stderr.write(`Uploading ${createResponse.upload_instructions.length} attachment(s)...\n`);
+        // The files declared for upload, in the order of the request. Two of them can have the
+        // same name (before/shot.png, after/shot.png): each instruction takes the next of its name.
+        const toUpload = attachmentArgs.filter((_, i) => attachments[i].expected_size_bytes !== undefined);
         for (const instruction of createResponse.upload_instructions) {
-          const localAtt = attachments.find(a => a.filename === instruction.filename);
-          if (!localAtt || !localAtt.filename) {
+          const next = toUpload.findIndex(arg => path.basename(safeResolvePath(arg)) === instruction.filename);
+          if (next < 0) {
             throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
           }
-          const filePath = attachmentArgs.find(arg =>
-            !isUrlArg(arg) && path.basename(safeResolvePath(arg)) === instruction.filename,
-          );
-          if (!filePath) {
-            throw new CliError(`Cannot locate local file for presigned upload: ${instruction.filename}`);
-          }
-          await uploadViaPresignedPost(safeResolvePath(filePath), instruction);
+          await uploadViaPresignedPost(safeResolvePath(toUpload.splice(next, 1)[0]), instruction);
           process.stderr.write(`  Uploaded: ${instruction.filename}\n`);
         }
 
@@ -304,13 +305,15 @@ function safeResolvePath(userPath: string): string {
 
 const MAX_INLINE_SIZE_BYTES = 500 * 1024; // 500 KB
 
-/** MIME type lookup by file extension. */
+/** Inline data the API accepts in one request, all files together (MiB). */
+const MAX_TOTAL_INLINE_SIZE_MB = 3;
+const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+
+/** MIME type lookup by file extension: the types the API accepts. */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
   '.txt': 'text/plain',
   '.log': 'text/x-log',
   '.csv': 'text/csv',
@@ -319,23 +322,15 @@ const MIME_BY_EXT: Record<string, string> = {
   '.pdf': 'application/pdf',
 };
 
-const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-
-/** True when the attachment argument is a URL (http:// or https://) rather
- *  than a local file path. Mirrors the scheme detection in
- *  ``resolveAttachmentArg`` so URL vs. local-file classification stays
- *  consistent across the upload-confirmation path. A bare ``http://`` is
- *  still a URL here (it's rejected as non-HTTPS earlier in resolution); the
- *  point is that it must never be treated as a local file path. */
-function isUrlArg(arg: string): boolean {
-  return arg.startsWith('https://') || arg.startsWith('http://');
-}
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 
 /**
  * Resolve a CLI --attachment argument to an Attachment object.
  * Handles URLs (https://...) and local file paths.
+ *
+ * @param inlineBytes - size of the files this request already carries inline.
  */
-function resolveAttachmentArg(arg: string): Attachment {
+function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
   // URL detection: starts with https://
   // Omit content_type for URLs — the server-side resolver determines the
   // actual content type from the HTTP response's Content-Type header.
@@ -369,8 +364,8 @@ function resolveAttachmentArg(arg: string): Attachment {
 
   const type: AttachmentType = IMAGE_MIMES.has(contentType) ? 'image' : 'file';
 
-  if (stat.size > MAX_INLINE_SIZE_BYTES) {
-    // Large file: use presigned upload path (metadata only, no data)
+  if (stat.size > MAX_INLINE_SIZE_BYTES || inlineBytes + stat.size > MAX_TOTAL_INLINE_SIZE_BYTES) {
+    // Large file, or no room left in the request: use presigned upload path (metadata only, no data)
     return {
       type,
       content_type: contentType,
@@ -425,15 +420,16 @@ async function uploadViaPresignedPost(
       body: form,
       signal: controller.signal,
     });
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (e.name === 'AbortError') {
       throw new CliError(
         `Upload timed out for ${instruction.filename} after ${UPLOAD_TIMEOUT_MS / 1000}s. ` +
         'Check your network connection and try again.',
       );
     }
     throw new CliError(
-      `Upload failed for ${instruction.filename}: ${err.message ?? String(err)}`,
+      `Upload failed for ${instruction.filename}: ${e.message}`,
     );
   } finally {
     clearTimeout(timeout);

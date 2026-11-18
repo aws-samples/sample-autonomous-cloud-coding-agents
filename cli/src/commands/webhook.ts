@@ -31,6 +31,12 @@ import {
   sendWebhookTestRequest,
 } from '../webhook-test';
 
+/** Webhooks `list` returns when --limit is not given: the page size the API defaults to. */
+const DEFAULT_LIST_LIMIT = 20;
+
+/** Requests one `list` sends at most, so that a list that never ends cannot keep it running. */
+const MAX_LIST_PAGES = 100;
+
 export function makeWebhookCommand(): Command {
   const webhook = new Command('webhook')
     .description('Manage webhook integrations');
@@ -58,10 +64,22 @@ export function makeWebhookCommand(): Command {
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const client = new ApiClient({ apiKey: opts.apiKey });
-        const result = await client.listWebhooks({
+        let result = await client.listWebhooks({
           includeRevoked: opts.includeRevoked,
           limit: opts.limit,
         });
+        // The API reads a bounded number of rows per request, so a page can hold fewer
+        // webhooks than asked for, or none, while more exist: follow next_token until the
+        // webhooks asked for are there or the list ends.
+        const wanted = opts.limit > 0 ? opts.limit : DEFAULT_LIST_LIMIT;
+        for (let page = 1; page < MAX_LIST_PAGES && result.data.length < wanted && result.pagination.next_token; page += 1) {
+          const next = await client.listWebhooks({
+            includeRevoked: opts.includeRevoked,
+            limit: wanted - result.data.length,
+            nextToken: result.pagination.next_token,
+          });
+          result = { data: [...result.data, ...next.data], pagination: next.pagination };
+        }
 
         if (opts.output === 'json') {
           console.log(formatJson(result));

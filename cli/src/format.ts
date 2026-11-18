@@ -103,7 +103,7 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   // detector reads the same field. On a terminal task the last beat is just noise
   // next to Completed/Duration. The relative age is what an operator actually
   // needs, so it is rendered alongside the timestamp rather than instead of it.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+  if (task.agent_heartbeat_at && !TERMINAL_STATUSES.includes(task.status)) {
     lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
   }
   if (task.duration_s !== null) {
@@ -157,7 +157,7 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
       // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
       // final status) and where the agent has not beaten — same rule as the detail
       // view, so the two never disagree.
-      t.agent_heartbeat_at && !isTerminalStatus(t.status)
+      t.agent_heartbeat_at && !TERMINAL_STATUSES.includes(t.status)
         ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
         : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
@@ -287,7 +287,7 @@ export function formatStatusSnapshot(
   // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
   // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
   // beside a final status) and when the agent has not beaten yet.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+  if (task.agent_heartbeat_at && !TERMINAL_STATUSES.includes(task.status)) {
     const age = relativeTime(task.agent_heartbeat_at, now) ?? PLACEHOLDER;
     lines.push(`  Heartbeat:     ${age} ago`);
   }
@@ -351,7 +351,7 @@ function formatDescriptionLines(description: string): string[] {
  *  only useful diagnostic. */
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
-  if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;
+  if (!TERMINAL_STATUSES.includes(task.status)) return null;
   const cls = task.error_classification;
   const msg = task.error_message?.trim();
   if (cls && cls.category !== 'unknown') {
@@ -576,10 +576,6 @@ function truncate(text: string, maxLen: number): string {
 
 const PLACEHOLDER = '—';
 
-function isTerminalStatus(status: string): boolean {
-  return (TERMINAL_STATUSES as readonly string[]).includes(status);
-}
-
 function elapsedDescription(task: TaskDetail, now: number): string {
   // Use ``started_at`` → ``completed_at`` (or ``now``) as the primary
   // elapsed-time source. This matches what the user observed during the
@@ -591,7 +587,7 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const start = task.started_at ?? task.created_at;
   const startMs = Date.parse(start);
   if (Number.isNaN(startMs)) {
-    if (isTerminalStatus(task.status) && task.duration_s != null) {
+    if (TERMINAL_STATUSES.includes(task.status) && task.duration_s != null) {
       return `${humanizeSeconds(task.duration_s)} total`;
     }
     return PLACEHOLDER;
@@ -599,7 +595,7 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const endMs = task.completed_at ? Date.parse(task.completed_at) : now;
   if (Number.isNaN(endMs)) return PLACEHOLDER;
   const diffS = Math.max(0, Math.round((endMs - startMs) / 1000));
-  const suffix = isTerminalStatus(task.status) ? 'total' : 'elapsed';
+  const suffix = TERMINAL_STATUSES.includes(task.status) ? 'total' : 'elapsed';
   return `${humanizeSeconds(diffS)} ${suffix}`;
 }
 
@@ -639,7 +635,7 @@ function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | 
 }
 
 function describeCurrent(task: TaskDetail, activity: TaskEvent | null): string {
-  if (isTerminalStatus(task.status)) {
+  if (TERMINAL_STATUSES.includes(task.status)) {
     return `task ${task.status.toLowerCase()}`;
   }
   if (!activity) return PLACEHOLDER;

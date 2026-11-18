@@ -22,6 +22,12 @@ import { ApiClient } from '../api-client';
 import { formatApiKeyCreated, formatApiKeyDetail, formatApiKeyList, formatJson } from '../format';
 import { API_KEY_SCOPES, ApiKeyScope } from '../types';
 
+/** Keys `list` returns when --limit is not given: the page size the API defaults to. */
+const DEFAULT_LIST_LIMIT = 20;
+
+/** Requests one `list` sends at most, so that a list that never ends cannot keep it running. */
+const MAX_LIST_PAGES = 100;
+
 /**
  * Parse a comma-separated `--scopes` value into validated scope strings.
  * Throws (via commander's InvalidArgumentError) on an unknown scope so the
@@ -71,10 +77,22 @@ export function makeApiKeyCommand(): Command {
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const client = new ApiClient();
-        const result = await client.listApiKeys({
+        let result = await client.listApiKeys({
           includeRevoked: opts.includeRevoked,
           limit: opts.limit,
         });
+        // The API reads a bounded number of rows per request, so a page can hold fewer
+        // keys than asked for, or none, while more exist: follow next_token until the
+        // keys asked for are there or the list ends.
+        const wanted = opts.limit > 0 ? opts.limit : DEFAULT_LIST_LIMIT;
+        for (let page = 1; page < MAX_LIST_PAGES && result.data.length < wanted && result.pagination.next_token; page += 1) {
+          const next = await client.listApiKeys({
+            includeRevoked: opts.includeRevoked,
+            limit: wanted - result.data.length,
+            nextToken: result.pagination.next_token,
+          });
+          result = { data: [...result.data, ...next.data], pagination: next.pagination };
+        }
 
         if (opts.output === 'json') {
           console.log(formatJson(result));

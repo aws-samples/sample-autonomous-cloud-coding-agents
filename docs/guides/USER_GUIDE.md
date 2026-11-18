@@ -686,8 +686,8 @@ node lib/bin/bgagent.js submit --repo owner/repo --task "Implement this design" 
 
 The CLI automatically routes attachments through the optimal upload path:
 
-- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body).
-- **Files > 500 KB** use presigned upload (uploaded directly to S3, then confirmed).
+- **Files ≤ 500 KB** are sent inline (base64-encoded in the request body), up to 3 MB in total.
+- **Files > 500 KB**, and smaller files once 3 MB are sent inline, use presigned upload (uploaded directly to S3, then confirmed).
 - **URLs** are validated at submission and fetched during context hydration with SSRF protection.
 
 **Security screening:**
@@ -777,7 +777,7 @@ node lib/bin/bgagent.js watch <TASK_ID>
 node lib/bin/bgagent.js watch <TASK_ID> --output json
 ```
 
-Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`. Press Ctrl+C to exit early without affecting the task.
+Exit codes: `0` on `COMPLETED`, `1` on `FAILED` / `CANCELLED` / `TIMED_OUT`, `2` when the CLI gives up because the API kept failing (the task may still be running: run the command again to resume). Press Ctrl+C to exit early without affecting the task.
 
 ### Steering a running task (nudge)
 
@@ -1106,7 +1106,7 @@ Task records in terminal states are automatically deleted after 90 days (configu
 
 ### Concurrency limits
 
-Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with a file attachment over 500 KB is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
+Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with an uploaded file attachment (a file over 500 KB, or a smaller one once 3 MB are sent inline) is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
 
 There is no system-wide cap - the theoretical maximum is `number_of_users * per_user_limit`. The hard ceiling is the AgentCore concurrent sessions quota for your AWS account (check the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/) for Bedrock AgentCore in your region).
 

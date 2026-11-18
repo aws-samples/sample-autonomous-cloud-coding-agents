@@ -689,9 +689,15 @@ describe('watch command — polling', () => {
       mockGetTask.mockResolvedValueOnce({ status: 'RUNNING' });
 
       const cmd = makeWatchCommand();
-      await expect(cmd.parseAsync(['node', 'test', 'task-503-storm'])).rejects.toThrow(
+      const run = cmd.parseAsync(['node', 'test', 'task-503-storm']);
+      await expect(run).rejects.toThrow(
         /Exceeded retry budget.*Re-run .bgagent watch/,
       );
+      // The message counts the six requests that failed, and the exit code is the one
+      // `--wait` gives up with: 1 is what a task that ended FAILED returns.
+      await expect(run).rejects.toThrow(/after 6 transient failures/);
+      await expect(run).rejects.toBeInstanceOf(CliError);
+      await expect(run).rejects.toHaveProperty('exitCode', 2);
     } finally {
       global.setTimeout = realSetTimeout;
     }
@@ -799,9 +805,12 @@ describe('watch command — polling', () => {
       mockGetTask.mockResolvedValue({ status: 'RUNNING' });
 
       const cmd = makeWatchCommand();
-      await expect(cmd.parseAsync(['node', 'test', 'task-exhaust'])).rejects.toThrow(
+      const run = cmd.parseAsync(['node', 'test', 'task-exhaust']);
+      await expect(run).rejects.toThrow(
         /Exceeded retry budget .* Re-run `bgagent watch/,
       );
+      // An API that is down from the first request ends the same way: exit code 2.
+      await expect(run).rejects.toHaveProperty('exitCode', 2);
       // 6 attempts: 5 retries + the initial call.
       expect(mockGetTaskEvents).toHaveBeenCalledTimes(6);
     } finally {

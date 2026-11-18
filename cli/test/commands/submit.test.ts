@@ -24,6 +24,7 @@ import { ApiClient } from '../../src/api-client';
 import { makeSubmitCommand } from '../../src/commands/submit';
 import { ApiError } from '../../src/errors';
 import { abortableSleep } from '../../src/retry';
+import { Attachment } from '../../src/types';
 
 jest.mock('../../src/api-client');
 // The pauses between two reads of a task whose uploads are being confirmed: over at once.
@@ -649,6 +650,121 @@ describe('submit command', () => {
       }
       await expect(cmd.parseAsync(argv)).rejects.toThrow(/exceeds 20 entries/);
       expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('attachments', () => {
+    const originalFetch = global.fetch;
+    const submitted = { task_id: 'task-1', status: 'SUBMITTED' };
+    let stderrSpy: jest.SpiedFunction<typeof process.stderr.write>;
+    let cwdSpy: jest.SpiedFunction<typeof process.cwd>;
+    let dir: string;
+
+    beforeEach(() => {
+      // What the command takes for the working directory: an attachment has to be inside it.
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-submit-'));
+      cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(dir);
+      stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      global.fetch = jest.fn(async () => new Response(null, { status: 204 })) as typeof global.fetch;
+      mockCreateTask.mockResolvedValue(submitted);
+      mockConfirmUploads.mockResolvedValue(submitted);
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      cwdSpy.mockRestore();
+      stderrSpy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    const submitWith = (...files: string[]) => makeSubmitCommand().parseAsync([
+      'node', 'test',
+      '--repo', 'owner/repo',
+      '--task', 'look at these',
+      ...files.flatMap(file => ['--attachment', path.join(dir, file)]),
+    ]);
+
+    /** What the API answers when it waits for the upload of each of these files. */
+    const pendingUploads = (...filenames: string[]) => ({
+      task_id: 'task-1',
+      status: 'PENDING_UPLOADS',
+      upload_instructions: filenames.map((filename, i) => ({
+        attachment_id: `att-${i}`,
+        filename,
+        upload_url: 'https://attachments.example/',
+        upload_fields: { 'key': `attachments/user-1/task-1/att-${i}/${filename}`, 'Content-Type': 'image/png' },
+        upload_expires_at: '2026-01-01T00:10:00Z',
+      })),
+    });
+
+    // The API takes PNG and JPEG images only: validateAttachments answers 400 for the other two.
+    test.each(['.gif', '.webp'])('refuses a %s file before anything is sent', async (ext) => {
+      fs.writeFileSync(path.join(dir, `diagram${ext}`), 'x');
+
+      await expect(submitWith(`diagram${ext}`)).rejects.toThrow(new RegExp(
+        `^Unsupported file type '\\${ext}' .* Supported: \\.png, \\.jpg, \\.jpeg, \\.txt, \\.log, \\.csv, \\.md, \\.json, \\.pdf$`,
+      ));
+      expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+
+    test('sends at most 3 MB of files inline and uploads the ones beyond it', async () => {
+      // Seven files of 450 KB: each is small enough to go inline, together they are 3.08 MB,
+      // and the API refuses a request that carries more than 3 MB of inline data.
+      const names = [1, 2, 3, 4, 5, 6, 7].map(n => `shot-${n}.png`);
+      for (const name of names) fs.writeFileSync(path.join(dir, name), Buffer.alloc(450 * 1024));
+      mockCreateTask.mockResolvedValue(pendingUploads('shot-7.png'));
+
+      await submitWith(...names);
+
+      const sent = mockCreateTask.mock.calls[0][0].attachments as Attachment[];
+      expect(sent.map(a => a.filename)).toEqual(names);
+      expect(sent.slice(0, 6).map(a => Buffer.from(a.data ?? '', 'base64').length)).toEqual(Array(6).fill(450 * 1024));
+      expect(sent[6]).toEqual({ type: 'image', content_type: 'image/png', filename: 'shot-7.png', expected_size_bytes: 450 * 1024 });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(mockConfirmUploads).toHaveBeenCalledWith('task-1');
+    });
+
+    test('uploads the right file for each upload when files have the same name', async () => {
+      // "shot.png" in three folders: the first is small and goes inline, the other two are over
+      // the 500 KB inline limit, so the API answers with two uploads of "shot.png".
+      for (const [folder, size, content] of [['first', 10, 1], ['second', 600 * 1024, 2], ['third', 600 * 1024, 3]] as const) {
+        fs.mkdirSync(path.join(dir, folder));
+        fs.writeFileSync(path.join(dir, folder, 'shot.png'), Buffer.alloc(size, content));
+      }
+      mockCreateTask.mockResolvedValue(pendingUploads('shot.png', 'shot.png'));
+
+      await submitWith('first/shot.png', 'second/shot.png', 'third/shot.png');
+
+      const uploaded = await Promise.all(jest.mocked(global.fetch).mock.calls.map(async ([, init]) => {
+        const file = (init?.body as FormData).get('file') as Blob;
+        return new Uint8Array(await file.arrayBuffer())[0];
+      }));
+      expect(uploaded).toEqual([2, 3]);
+    });
+
+    test('fails when the API waits for an upload that no --attachment declared', async () => {
+      fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
+      mockCreateTask.mockResolvedValue(pendingUploads('other.png'));
+
+      await expect(submitWith('diagram.png')).rejects.toThrow('No local file found for upload instruction: other.png');
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['with its reason', new TypeError('fetch failed'), 'Upload failed for diagram.png: fetch failed'],
+      ['with a reason that is not an Error', 'socket closed', 'Upload failed for diagram.png: socket closed'],
+      [
+        'as a timeout when the request was aborted',
+        Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }),
+        'Upload timed out for diagram.png after 120s.',
+      ],
+    ])('reports an upload that fails %s', async (_how, thrown, message) => {
+      fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
+      mockCreateTask.mockResolvedValue(pendingUploads('diagram.png'));
+      jest.mocked(global.fetch).mockRejectedValue(thrown);
+
+      await expect(submitWith('diagram.png')).rejects.toThrow(message);
+      expect(mockConfirmUploads).not.toHaveBeenCalled();
     });
   });
 

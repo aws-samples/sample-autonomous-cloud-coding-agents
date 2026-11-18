@@ -18,7 +18,7 @@
  */
 
 import { Command } from 'commander';
-import { saveConfig, tryLoadConfig } from '../config';
+import { clearCredentials, saveConfig, tryLoadConfig } from '../config';
 import { CliError } from '../errors';
 import { fetchConfigureBundleFromStack, resolveOperatorRegion } from '../stack-outputs';
 import { CliConfig } from '../types';
@@ -114,6 +114,8 @@ export function makeConfigureCommand(): Command {
         return;
       }
 
+      // The next command would send a token of the previous user pool to the new API.
+      if (existing?.user_pool_id && existing.user_pool_id !== merged.user_pool_id) clearCredentials();
       saveConfig(merged as CliConfig);
       console.log('Configuration saved.');
     });

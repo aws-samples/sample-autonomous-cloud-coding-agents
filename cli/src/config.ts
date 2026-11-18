@@ -28,7 +28,7 @@ const CONFIG_FILE = 'config.json';
 const CREDENTIALS_FILE = 'credentials.json';
 
 /** Owner-only read/write — credentials must never be group/world readable. */
-export const SECRET_FILE_MODE = 0o600;
+const SECRET_FILE_MODE = 0o600;
 
 /** Returns the config directory path (~/.bgagent or BGAGENT_CONFIG_DIR). */
 export function getConfigDir(): string {
@@ -43,7 +43,8 @@ function credentialsPath(): string {
   return path.join(getConfigDir(), CREDENTIALS_FILE);
 }
 
-function ensureConfigDir(): void {
+/** Create the config directory, owner-only, unless it exists. */
+export function ensureConfigDir(): void {
   const dir = getConfigDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -98,13 +99,20 @@ export function clearCredentials(): void {
   fs.rmSync(credentialsPath(), { force: true });
 }
 
+/** Write a file that only its owner may read, whether it is new or already there. */
+export function writeSecretFile(file: string, content: string): void {
+  fs.writeFileSync(file, content, { mode: SECRET_FILE_MODE });
+  // writeFileSync only honors `mode` when CREATING the file; overwriting a
+  // pre-existing loose-permissions file leaves its bits untouched. chmod
+  // makes the 0600 intent durable across rewrites. Regular files only: a
+  // path the user chose may be a device such as /dev/null.
+  if (fs.statSync(file).isFile()) {
+    fs.chmodSync(file, SECRET_FILE_MODE);
+  }
+}
+
 /** Save credentials with restricted permissions. */
 export function saveCredentials(creds: Credentials): void {
   ensureConfigDir();
-  const p = credentialsPath();
-  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: SECRET_FILE_MODE });
-  // writeFileSync only honors `mode` when CREATING the file; overwriting a
-  // pre-existing loose-permissions file leaves its bits untouched. chmod
-  // makes the 0600 intent durable across re-logins.
-  fs.chmodSync(p, SECRET_FILE_MODE);
+  writeSecretFile(credentialsPath(), JSON.stringify(creds, null, 2) + '\n');
 }

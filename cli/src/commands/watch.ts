@@ -20,9 +20,11 @@
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { debug, isVerbose } from '../debug';
+import { CliError } from '../errors';
 import { COST_USD_DECIMALS, formatJson } from '../format';
 import { abortableSleep, isTransientError, transientRetryDelayMs } from '../retry';
-import { TERMINAL_STATUSES, TaskDetail, TaskEvent } from '../types';
+import { TERMINAL_STATUSES, TaskDetail, TaskEvent, TaskStatusType } from '../types';
+import { EXIT_CODE_WAIT_ABORTED, exitCodeForStatus } from '../wait';
 
 /**
  * Adaptive polling cadence (design INTERACTIVE_AGENTS.md §5.3).
@@ -338,8 +340,8 @@ interface PollOptions {
  * Transient 5xx / network errors are retried with jittered exponential
  * backoff up to ``MAX_TRANSIENT_RETRIES`` times; 4xx errors propagate
  * immediately (the next call would return the same failure). On retry
- * exhaustion we throw a ``CliError``-like message that tells the user
- * to re-run ``bgagent watch`` — the event cursor is durable, so
+ * exhaustion we throw a ``CliError`` with exit code 2 that tells the
+ * user to re-run ``bgagent watch`` — the event cursor is durable, so
  * resuming is safe.
  */
 async function pollTaskEvents(
@@ -382,7 +384,7 @@ async function pollTaskEvents(
 
     if (options.signal.aborted) return;
 
-    if ((TERMINAL_STATUSES as readonly string[]).includes(task.status)) {
+    if (TERMINAL_STATUSES.includes(task.status)) {
       debug(`[watch/poll] task reached terminal status=${task.status}`);
       options.onTerminal(task);
       return;
@@ -399,7 +401,8 @@ async function pollTaskEvents(
  *   - 5xx / network errors → retry after jittered backoff, up to
  *     ``MAX_TRANSIENT_RETRIES`` total attempts.
  *   - 4xx errors → rethrow immediately (deterministic; retrying is futile).
- *   - Exhausted retries → throw with a "re-run to resume" hint.
+ *   - Exhausted retries → throw with a "re-run to resume" hint and exit
+ *     code 2 (the task may still be running; 1 means it ended badly).
  *   - Abort during retry sleep → throw the original error up (caller will
  *     check ``signal.aborted`` and exit cleanly).
  *
@@ -435,9 +438,12 @@ async function withTransientRetry<T>(
       }
       if (attempt > MAX_TRANSIENT_RETRIES) {
         const e = err instanceof Error ? err : new Error(String(err));
-        throw new Error(
-          `Exceeded retry budget after ${MAX_TRANSIENT_RETRIES} transient failures `
+        // The count of failed requests (the retries and the one that tripped), and the
+        // exit code of a wait that gave up: the task may still be running.
+        throw new CliError(
+          `Exceeded retry budget after ${attempt} transient failures `
           + `(${label}): ${e.message}. Re-run \`bgagent watch <id>\` to resume.`,
+          EXIT_CODE_WAIT_ABORTED,
         );
       }
       const delayMs = transientRetryDelayMs(attempt);
@@ -454,7 +460,7 @@ async function withTransientRetry<T>(
 interface SnapshotResult {
   readonly latestEventId: string | null;
   readonly events: TaskEvent[];
-  readonly taskStatus: string;
+  readonly taskStatus: TaskStatusType;
 }
 
 /** Fetch the latest events + current task status. Used both to detect a
@@ -564,7 +570,7 @@ export function makeWatchCommand(): Command {
         const formatter = makeFormatter(isJson);
 
         // Task already terminated — print the snapshot tail and exit.
-        if ((TERMINAL_STATUSES as readonly string[]).includes(snapshot.taskStatus)) {
+        if (TERMINAL_STATUSES.includes(snapshot.taskStatus)) {
           debug(`[watch] task already terminal status=${snapshot.taskStatus} — printing tail`);
           for (const ev of snapshot.events) {
             formatter.emit(ev);
@@ -578,13 +584,7 @@ export function makeWatchCommand(): Command {
             // rather than erroring out after already streaming the tail.
             let terminalTask: Pick<TaskDetail, 'task_id' | 'status' | 'error_classification' | 'error_message'> = {
               task_id: taskId,
-              // ``snapshot.taskStatus`` is the live-stream's last
-              // observed status string. We cast to the narrowed
-              // ``TaskStatusType`` because by the terminal-event
-              // path it must be one of the API's known terminal
-              // values; the GET below replaces it with the
-              // canonical record on success anyway.
-              status: snapshot.taskStatus as TaskDetail['status'],
+              status: snapshot.taskStatus,
               error_classification: null,
               error_message: null,
             };
@@ -599,7 +599,7 @@ export function makeWatchCommand(): Command {
             }
             logInfo(isJson, formatTerminalMessage(terminalTask));
           }
-          process.exitCode = snapshot.taskStatus === 'COMPLETED' ? 0 : 1;
+          process.exitCode = exitCodeForStatus(snapshot.taskStatus);
           return;
         }
 
@@ -660,6 +660,6 @@ async function runPolling(
     if (!isJson) {
       logInfo(isJson, formatTerminalMessage(task));
     }
-    process.exitCode = task.status === 'COMPLETED' ? 0 : 1;
+    process.exitCode = exitCodeForStatus(task.status);
   }
 }

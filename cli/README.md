@@ -61,6 +61,8 @@ bgagent configure \
 
 First-time configure needs all four core fields. The easiest paths are `--stack-name backgroundagent-dev --region …` (same outputs as `bgagent platform outputs`) or `--from-bundle` after `admin invite-user`. Individual flags override stack-derived values.
 
+Pointing the CLI at another user pool removes the cached login (`~/.bgagent/credentials.json`): its tokens belong to the previous deployment. Run `bgagent login` again.
+
 ### `bgagent login`
 
 Authenticate with Cognito and cache tokens locally.
@@ -105,7 +107,7 @@ At least one of `--issue` or `--task` is required.
 
 The repository must be onboarded to the platform via a `Blueprint` CDK construct. If the repo is not onboarded, the API returns a `REPO_NOT_ONBOARDED` error.
 
-When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise.
+When `--wait` is used, the CLI polls until the task reaches a terminal status (COMPLETED, FAILED, CANCELLED, TIMED_OUT) and exits with code 0 for COMPLETED or 1 otherwise. If the CLI stops waiting before that (the API keeps failing, or the maximum wait is reached), it exits with code 2: the task may still be running.
 
 ### `bgagent list`
 
