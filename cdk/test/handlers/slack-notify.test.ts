@@ -909,6 +909,32 @@ describe('dispatchSlackEvent', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  test('a workspace whose bot token is scheduled for deletion is skipped, not retried', async () => {
+    // The workspace removed the app while its task was still running. The
+    // token secret is in its recovery window, where Secrets Manager refuses
+    // the read with InvalidRequestException. No retry can post there: the
+    // record must be skipped like one of a workspace without a token, not
+    // rejected until it reaches the dead-letter queue.
+    ddbSend.mockResolvedValueOnce({
+      Item: {
+        task_id: 't1',
+        channel_source: 'slack',
+        channel_metadata: { slack_team_id: 'T_REMOVED', slack_channel_id: 'C1' },
+        repo: 'org/repo',
+      },
+    });
+    smSend.mockRejectedValueOnce(Object.assign(
+      new Error("You can't perform this operation on the secret because it was marked for deletion."),
+      { name: 'InvalidRequestException' },
+    ));
+
+    await dispatchSlackEvent(mkEvent('t1', 'task_completed'), ddb);
+
+    // Only the task read: nothing claimed, nothing posted.
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   test('a claim that cannot be given back is logged and does not hide the post failure', async () => {
     // The release is best-effort. If it fails the retry will be skipped
     // as a duplicate, so operators need a signal of their own; the
@@ -949,6 +975,38 @@ describe('dispatchSlackEvent', () => {
   });
 
   // -------------------------------------------------------------------
+  // Which message carries the reactions
+  // -------------------------------------------------------------------
+
+  test.each([
+    // A mention written as a reply inside a thread: the thread's first
+    // message belongs to somebody else, and to other tasks of the thread.
+    ['the mention itself when the task records it', { slack_thread_ts: '100.0001', slack_message_ts: '200.0002' }, '200.0002'],
+    // A task created before the attribute existed.
+    ['the thread root when the task records no message of its own', { slack_thread_ts: '100.0001' }, '100.0001'],
+  ])('reactions go on %s, the post into the thread', async (_target, timestamps, reactionTs) => {
+    ddbSend
+      .mockResolvedValueOnce({
+        Item: {
+          task_id: 't1',
+          channel_source: 'slack',
+          channel_metadata: { slack_team_id: 'T1', slack_channel_id: 'C1', ...timestamps },
+          repo: 'org/repo',
+        },
+      })
+      .mockResolvedValueOnce({}); // persist of the session message ts
+
+    await dispatchSlackEvent(mkEvent('t1', 'session_started'), ddb);
+
+    const bodies = (method: string) => fetchMock.mock.calls
+      .filter(([url]) => url === `https://slack.com/api/${method}`)
+      .map(([, opts]) => JSON.parse((opts as { body: string }).body));
+    expect(bodies('chat.postMessage')).toEqual([expect.objectContaining({ channel: 'C1', thread_ts: '100.0001' })]);
+    expect(bodies('reactions.remove')).toEqual([{ channel: 'C1', timestamp: reactionTs, name: 'eyes' }]);
+    expect(bodies('reactions.add')).toEqual([{ channel: 'C1', timestamp: reactionTs, name: 'hourglass_flowing_sand' }]);
+  });
+
+  // -------------------------------------------------------------------
   // Replay of a lifecycle record whose message is already recorded
   // -------------------------------------------------------------------
 
@@ -956,12 +1014,12 @@ describe('dispatchSlackEvent', () => {
     ['task_created', 'slack_created_msg_ts'],
     ['session_started', 'slack_session_msg_ts'],
   ])('a replayed %s does not post again when %s is already recorded', async (eventType, postedAttr) => {
-    // The stream delivers the record again (a sibling channel failed, or
-    // an earlier record of the batch did). The task row read at entry
-    // already holds the ts of the message this event produced: posting a
-    // second one only to delete it again notifies the user twice, and
-    // the reaction update would put the hourglass back on a task that
-    // may have finished in the meantime.
+    // The stream delivers the record again (an earlier record of its
+    // batch failed). The task row read at entry already holds the ts of
+    // the message this event produced: posting a second one only to
+    // delete it again notifies the user twice, and the reaction update
+    // would put the hourglass back on a task that may have finished in
+    // the meantime.
     ddbSend.mockResolvedValueOnce({
       Item: {
         task_id: 't1',

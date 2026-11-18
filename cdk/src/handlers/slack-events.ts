@@ -191,27 +191,12 @@ async function handleAppMention(
   // Use source: 'mention' so the processor knows there's no response_url —
   // it should use chat.postMessage with the bot token instead.
   //
-  // For natural language mentions like "@Shoof fix the bug in org/repo#42",
-  // extract the repo pattern and reorder so submit gets "org/repo#42 fix the bug".
-  // The submit handler expects: submit <repo> <description...>
-  //
-  // When no repo is present we still forward the mention (rather than erroring
-  // here): the processor falls back to the channel's onboarded default repo
-  // (`bgagent slack onboard-channel`), and only replies with guidance if no
-  // default exists. Keeping that decision in one place (the processor) avoids
-  // duplicating the channel-mapping lookup in the events handler.
-  const repoPattern = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+(?:#\d+)?)\b/;
-  const repoMatch = text.match(repoPattern);
-  let commandText: string;
-  if (repoMatch) {
-    const repo = repoMatch[0];
-    const description = text.replace(repo, '').replace(/\s+/g, ' ').trim();
-    commandText = `submit ${repo} ${description}`.trim();
-  } else {
-    // No repo token — forward the whole text; the processor treats it as the
-    // task description against the channel default repo (or replies with help).
-    commandText = `submit ${text}`;
-  }
+  // The text is forwarded as the user wrote it, line breaks included. Which
+  // word of "@Shoof fix the bug in org/repo#42" is the repo, or whether the
+  // channel's onboarded default repo applies (`bgagent slack onboard-channel`),
+  // is decided in one place, the processor: it can ask what is onboarded, and
+  // a slash alone ("CI/CD", "and/or", a file path) does not make a repo.
+  const commandText = `submit ${text}`;
 
   // Extract file references from the Slack event (if any attached)
   const rawFiles = Array.isArray(event.files) ? event.files as Array<Record<string, unknown>> : [];
@@ -225,6 +210,10 @@ async function handleAppMention(
       url_private_download: String(f.url_private_download),
     }));
 
+  // Two timestamps: replies go to the thread, reactions on the mention itself.
+  // They differ when the mention is a reply inside a thread, whose first
+  // message may be somebody else's and may carry the reactions of other tasks.
+  const mentionTs = messageTs ?? threadTs;
   const mentionPayload: MentionEvent = {
     text: commandText,
     user_id: userId,
@@ -232,11 +221,11 @@ async function handleAppMention(
     channel_id: channelId,
     source: 'mention',
     mention_thread_ts: threadTs ?? messageTs,
+    mention_message_ts: mentionTs,
     ...(files.length > 0 && { files }),
   };
 
   // React with :eyes: immediately so the user knows the bot saw their message.
-  const mentionTs = threadTs ?? messageTs;
   if (mentionTs) {
     const botToken = await getSlackSecret(`${SLACK_SECRET_PREFIX}${teamId}`);
     if (botToken) {
@@ -268,7 +257,7 @@ async function handleAppMention(
       await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: mentionTs, name: 'x' });
       await slackFetch(botToken, 'chat.postMessage', {
         channel: channelId,
-        thread_ts: mentionTs,
+        thread_ts: threadTs ?? mentionTs,
         text: ':x: Something went wrong forwarding your request. Please try again.',
       });
     }

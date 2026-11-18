@@ -27,10 +27,56 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
 
 // Imported after the mock is registered.
 import {
+  getSlackSecret,
   invalidateSlackSecretCache,
   verifySlackRequest,
   verifySlackSignature,
 } from '../../../src/handlers/shared/slack-verify';
+
+describe('getSlackSecret', () => {
+  const BOT_TOKEN_SECRET = 'bgagent/slack/T1';
+
+  beforeEach(() => {
+    smSendMock.mockReset();
+    invalidateSlackSecretCache(BOT_TOKEN_SECRET);
+  });
+
+  test('returns null for a secret that is scheduled for deletion', async () => {
+    // A workspace removed the app: its bot token is deleted with a recovery
+    // window, and until that ends GetSecretValue answers with this error
+    // instead of ResourceNotFoundException.
+    smSendMock.mockRejectedValueOnce(Object.assign(
+      new Error("You can't perform this operation on the secret because it was marked for deletion."),
+      { name: 'InvalidRequestException' },
+    ));
+
+    await expect(getSlackSecret(BOT_TOKEN_SECRET)).resolves.toBeNull();
+  });
+
+  test('rethrows the same error for a secret that is not a bot token', async () => {
+    // The signing secret and the OAuth credentials are read by ARN. Absent
+    // means "not populated yet" to their callers, and in that state the
+    // events endpoint answers a url_verification without a signature: a
+    // signing secret that cannot be read must stay an error.
+    smSendMock.mockRejectedValueOnce(Object.assign(
+      new Error("You can't perform this operation on the secret because it was marked for deletion."),
+      { name: 'InvalidRequestException' },
+    ));
+
+    await expect(
+      getSlackSecret('arn:aws:secretsmanager:us-east-1:123456789012:secret:SigningSecret-AbCdEf'),
+    ).rejects.toThrow('marked for deletion');
+  });
+
+  test('rethrows an InvalidRequestException that is not about a pending deletion', async () => {
+    smSendMock.mockRejectedValueOnce(Object.assign(
+      new Error('The request is not valid for the current state of the secret.'),
+      { name: 'InvalidRequestException' },
+    ));
+
+    await expect(getSlackSecret(BOT_TOKEN_SECRET)).rejects.toThrow('not valid for the current state');
+  });
+});
 
 describe('verifySlackSignature', () => {
   const signingSecret = 'test-signing-secret-abc123';

@@ -37,7 +37,8 @@
  *   - Threaded replies under the original ``@mention`` / ``task_created``
  *     message via ``slack_thread_ts``.
  *   - DM channel-id → user-id rewrite for ``D``-prefixed channels.
- *   - Emoji reaction swaps on the root message per event type.
+ *   - Emoji reaction swaps on the root message per event type (on the
+ *     mention itself where the task records ``slack_message_ts``).
  *   - Intermediate message cleanup (``slack_session_msg_ts`` +
  *     ``slack_created_msg_ts``) on terminal events.
  *   - Slack API errors are logged and swallowed at the router boundary;
@@ -58,7 +59,8 @@ import type { TaskRecord } from './shared/types';
 
 /** Terminal event types the Slack dispatcher dedups on. Stored in
  *  ``channel_metadata.slack_notified_terminal`` via a conditional write
- *  so a retry can never double-post the final outcome. */
+ *  so a replay does not post the final outcome again (``postOnce`` names
+ *  the one exception: a post whose answer was lost). */
 const TERMINAL_EVENTS = new Set<string>([
   'task_completed',
   'task_failed',
@@ -291,9 +293,12 @@ export async function dispatchSlackEvent(
   const result = await postOnce(event, ddb, tableName, channelMeta, botToken, slackPayload);
   if (!result) return;
 
-  // Reactions always use the real channel id even for DMs.
+  // Reactions always use the real channel id even for DMs. They go on the
+  // mention itself (``slack_message_ts``), which for a mention written as
+  // a reply is not the first message of the thread. A task created before
+  // that attribute existed has only the thread.
   const reactionChannel = channelMeta.slack_channel_id;
-  const reactionTarget = threadTs ?? result.ts;
+  const reactionTarget = channelMeta.slack_message_ts ?? threadTs ?? result.ts;
   if (reactionTarget) {
     await updateReaction(botToken, reactionChannel, reactionTarget, eventType);
   }
@@ -465,10 +470,10 @@ async function postOnce(
   const { task_id: taskId, event_type: eventType } = event;
 
   // A lifecycle record that the stream delivers again (partial-batch
-  // retry of this record or of an earlier one in its batch) must not
-  // post again: the row read at dispatch entry already holds the ts of
-  // the message this event produced. A second post, deleted again by
-  // the conditional persist of that ts, would notify the user twice and
+  // retry of an earlier record in its batch) must not post again: the
+  // row read at dispatch entry already holds the ts of the message
+  // this event produced. A second post, deleted again by the
+  // conditional persist of that ts, would notify the user twice and
   // put the event's reaction back on a task that may have finished since.
   const postedAttr = SLACK_POSTED_MSG_ATTRIBUTE[eventType];
   if (postedAttr && channelMeta[postedAttr]) {

@@ -89,6 +89,13 @@ function signedEvent(body: string, retryNum?: string, retryReason?: string): API
   return makeEvent(body, headers);
 }
 
+/** JSON bodies of the calls made to one Slack Web API method, in call order. */
+function slackCalls(method: string): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => String(url) === `https://slack.com/api/${method}`)
+    .map(([, opts]) => JSON.parse((opts as { body: string }).body));
+}
+
 describe('slack-events handler', () => {
   beforeEach(() => {
     ddbSend.mockReset();
@@ -143,6 +150,22 @@ describe('slack-events handler', () => {
     const body = JSON.stringify({ type: 'event_callback', event: { type: 'app_mention' } });
     const result = await handler(makeEvent(body, {}));
     expect(result.statusCode).toBe(500);
+  });
+
+  test('refuses an unsigned url_verification when the signing secret is scheduled for deletion', async () => {
+    // Not "not populated yet": the secret exists and cannot be read, so the
+    // request cannot be verified and must not be answered.
+    smSend.mockImplementation(() => Promise.reject(Object.assign(
+      new Error("You can't perform this operation on the secret because it was marked for deletion."),
+      { name: 'InvalidRequestException' },
+    )));
+    invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
+    const body = JSON.stringify({ type: 'url_verification', challenge: 'abc123' });
+
+    const result = await handler(makeEvent(body, {}));
+
+    expect(result.statusCode).toBe(500);
+    expect(result.body).not.toContain('abc123');
   });
 
   test('drops non-critical retries without reprocessing', async () => {
@@ -309,6 +332,100 @@ describe('slack-events handler', () => {
       ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
     );
     expect(postedReply).toBeFalsy();
+  });
+
+  test.each([
+    // A slash word need not be a repo, and the first one need not be the
+    // repo: the processor decides, it can ask what is onboarded.
+    ['<@BOT> fix the CI/CD pipeline', 'submit fix the CI/CD pipeline'],
+    ['<@BOT> make the client/server handshake retry in acme/api#7', 'submit make the client/server handshake retry in acme/api#7'],
+    // Line breaks and indentation are part of what the user wrote.
+    ['<@BOT> fix this in org/repo:\n  line two', 'submit fix this in org/repo:\n  line two'],
+  ])('forwards the text of a mention as written: %j', async (text, forwarded) => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text, ts: '1.0' },
+    });
+
+    await handler(signedEvent(body));
+
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    expect(JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload)).text).toBe(forwarded);
+  });
+
+  describe('a mention written as a reply inside a thread', () => {
+    // ts is the mention itself, thread_ts the first message of the thread,
+    // which somebody else may have written.
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> fix A in acme/api', ts: '200.0002', thread_ts: '100.0001' },
+    });
+
+    beforeEach(() => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      });
+      smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+        if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+          return Promise.resolve({ SecretString: SIGNING_SECRET });
+        }
+        return Promise.resolve({ SecretString: 'xoxb-bot' });
+      });
+    });
+
+    test('gets the :eyes: reaction itself and is forwarded with both timestamps', async () => {
+      lambdaSend.mockResolvedValueOnce({});
+
+      const result = await handler(signedEvent(body));
+
+      expect(result.statusCode).toBe(200);
+      expect(slackCalls('reactions.add')).toEqual([{ channel: 'C1', timestamp: '200.0002', name: 'eyes' }]);
+      const [invokeCmd] = lambdaSend.mock.calls[0];
+      const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+      expect(payload.mention_thread_ts).toBe('100.0001');
+      expect(payload.mention_message_ts).toBe('200.0002');
+    });
+
+    test('is marked :x: itself when forwarding fails, with the reply in its thread', async () => {
+      lambdaSend.mockRejectedValueOnce(new Error('lambda outage'));
+
+      await handler(signedEvent(body));
+
+      expect(slackCalls('reactions.remove')).toEqual([{ channel: 'C1', timestamp: '200.0002', name: 'eyes' }]);
+      expect(slackCalls('reactions.add')).toEqual([
+        { channel: 'C1', timestamp: '200.0002', name: 'eyes' },
+        { channel: 'C1', timestamp: '200.0002', name: 'x' },
+      ]);
+      expect(slackCalls('chat.postMessage')).toEqual([expect.objectContaining({ channel: 'C1', thread_ts: '100.0001' })]);
+    });
+  });
+
+  test('a top-level mention is forwarded with its own ts as thread and as message', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> fix A in acme/api', ts: '200.0002' },
+    });
+
+    await handler(signedEvent(body));
+
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+    expect(payload.mention_thread_ts).toBe('200.0002');
+    expect(payload.mention_message_ts).toBe('200.0002');
   });
 
   test('app_mention with Lambda invoke failure swaps :eyes: to :x:', async () => {
