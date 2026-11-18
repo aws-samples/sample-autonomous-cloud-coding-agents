@@ -156,10 +156,13 @@ export function computeLambdaMicrovmPolicy(): iam.PolicyDocument {
           // Passed as `operatorRole` on AWS::Lambda::NetworkConnector (required
           // for VPC_EGRESS connectors).
           'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
-          // Nested deployments pin these two physical names to the parent name;
-          // no generated child-stack prefix or role-name wildcard is needed.
+          // Nested deployments pin these two physical names to the parent stack
+          // name: `backgroundagent-dev` or a suffixed `backgroundagent-dev-<name>`,
+          // the same stack-name scope as the rest of this bundle.
           'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+          'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmBuildRole',
           'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
+          'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmConnectorRole',
         ],
       }),
       // A shared value is required because durable executions retain their

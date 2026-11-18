@@ -460,7 +460,7 @@ Both flat and nested MicroVM layouts support the optional
 tool gateway and Linear Identity vault without exceeding the template budget.
 
 New MicroVM installations must explicitly select `microvm_nested_stack=true`
-(bootstrap bundle 1.9.0).
+(bootstrap bundle 1.12.0 or later; `mise //cdk:preflight` checks it).
 Before upgrading an existing flat MicroVM deployment, save
 `"microvm_nested_stack": false` in its CDK context or pass
 `--context microvm_nested_stack=false` on every deploy. Keep this escape hatch

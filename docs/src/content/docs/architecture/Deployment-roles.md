@@ -880,10 +880,12 @@ The second statement, `MicrovmPassRoles`, is the one exception to the rule that 
 
 P3 additionally requires **bundle 1.8.0** for `MicrovmSuspendConfiguration`.
 
-The nested MicroVM layout requires **bundle 1.9.0**. Its child stack uses the
-explicit parent-derived names `backgroundagent-dev-MicrovmBuildRole` and
-`backgroundagent-dev-MicrovmConnectorRole`; `MicrovmPassRoles` admits those two
-exact names in addition to the legacy flat-layout prefixes. The execution role
+The nested MicroVM layout requires **bundle 1.12.0**. Its child stack uses the
+explicit parent-derived names `<stack>-MicrovmBuildRole` and
+`<stack>-MicrovmConnectorRole`, where `<stack>` is `backgroundagent-dev` or a
+suffixed `backgroundagent-dev-<name>`; `MicrovmPassRoles` admits those names, for
+the default and suffixed stacks, in addition to the legacy flat-layout prefixes.
+Bundles 1.9.0–1.11.0 admitted only the default stack's two names. The execution role
 stays in the parent and is still excluded. Re-bootstrap before deploying the
 child stack. Before upgrading an existing flat deployment, set and retain
 `microvm_nested_stack=false` until its resource migration is complete; changing ownership is not an ordinary
@@ -939,7 +941,9 @@ suspension, so disable can reach executions already running.
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*",
         "arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*",
         "arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole",
-        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole"
+        "arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmBuildRole",
+        "arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole",
+        "arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmConnectorRole"
       ],
       "Sid": "MicrovmPassRoles"
     },

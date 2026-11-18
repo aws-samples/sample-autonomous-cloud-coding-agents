@@ -74,8 +74,12 @@ import { allPolicies } from './policies';
  * 1.10.0 → 1.11.0 merges `main`'s 1.8.0 (#987), whose number collided again: it
  * grants the operator console stack's Cognito managed-login domain
  * (`cognito-idp:*UserPoolDomain`). Re-bootstrap: an account on 1.10.0 lacks it.
+ * 1.11.0 → 1.12.0 lets a suffixed stack (`backgroundagent-dev-<name>`) pass its
+ * nested MicroVM build and connector-operator roles; 1.11.0 admitted only the
+ * default stack's two names. Re-bootstrap: an account on 1.11.0 cannot deploy a
+ * nested MicroVM layout under any other stack name.
  */
-export const BOOTSTRAP_VERSION = '1.11.0';
+export const BOOTSTRAP_VERSION = '1.12.0';
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
