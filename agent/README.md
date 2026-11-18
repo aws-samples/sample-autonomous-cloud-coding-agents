@@ -56,7 +56,17 @@ Set an expiration (90 days recommended) and store it in Secrets Manager the same
 
 #### Push check before the agent runs
 
-A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Right after the clone, the agent runs `git push --dry-run` through the same credential helper the final push uses. If GitHub refuses it, the task fails within seconds with `Token cannot push to <repo>`, naming the token type and the permission to add, instead of failing at the final push after the agent's work. The dry run sends no ref update, so the remote is not changed. Read-only workflows (`coding/pr-review-v1`) never push and skip the check.
+A token can read a repository and still be refused every push. A classic PAT with no scopes, for instance, still reads public repositories. Once the clone's remote and credential helper are set, the agent runs `git push --dry-run` through the same helper the final push uses. When GitHub refuses it, the task fails within seconds instead of at the final push after the agent's work:
+
+| GitHub's answer | Task error |
+|-----------------|------------|
+| The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
+| The token is invalid, expired or revoked | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Cannot push to <repo>`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `Token cannot push to <repo>`, naming that cause |
+| No answer (GitHub or the network down, after retries) | `BLOCKED[dependency_unreachable]`, retryable |
+
+The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Read-only workflows (`coding/pr-review-v1`) never push and skip the check.
 
 ### AWS Credentials
 

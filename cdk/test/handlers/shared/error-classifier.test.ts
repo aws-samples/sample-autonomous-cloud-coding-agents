@@ -88,19 +88,36 @@ describe('classifyError', () => {
       expect(result!.title).toBe('Insufficient GitHub token scopes');
     });
 
-    test('classifies the agent push preflight refusal as insufficient token scopes (#801)', () => {
-      // The message agent/src/repo.py raises (PushCapabilityError) when GitHub
-      // refuses the dry-run push. Git's own words in it (403, "denied") must not
-      // pull it into another category.
+    // The errors agent/src/repo.py raises (PushCapabilityError) when GitHub refuses
+    // the dry-run push, in the form the pipeline persists them: prefixed with the
+    // exception's type name.
+    test.each([
+      ['remote denial', 'remote: Permission to owner/repo.git denied to someone.'],
+      ['HTTP 403', 'fatal: unable to access \'https://github.com/owner/repo.git/\': The requested URL returned error: 403'],
+    ])('classifies the agent push preflight refusal quoting a %s line as insufficient token scopes (#801)', (_label, gitLine) => {
+      // The git line embedded in it ("denied", "403") must not move it to another title.
       const result = classifyError(
-        'Token cannot push to owner/repo: the classic personal access token can read the '
-        + 'repository, but GitHub refused it write access (remote: Permission to '
-        + 'owner/repo.git denied to someone.). To fix it, give the token the `repo` scope. '
-        + 'The task stopped before the agent ran, so no work was lost. Token types and the '
-        + 'permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.',
+        'PushCapabilityError: Token cannot push to owner/repo: the classic personal access '
+        + `token can read the repository, but GitHub refused it write access (${gitLine}). `
+        + 'To fix it, give the token the `repo` scope. The task stopped before the agent ran, '
+        + 'so no work was lost. Token types and the permissions they need: agent/README.md, '
+        + 'GitHub PAT — Minimal Permissions.',
       );
       expect(result!.category).toBe(ErrorCategory.AUTH);
       expect(result!.title).toBe('Insufficient GitHub token scopes');
+      expect(result!.retryable).toBe(false);
+    });
+
+    test('classifies the agent push preflight credential rejection as an auth blocker (#801)', () => {
+      const result = classifyError(
+        'PushCapabilityError: BLOCKED[auth_failure]: GitHub rejected the token when asked to '
+        + 'push (fatal: Authentication failed for \'https://github.com/owner/repo.git/\'): it is '
+        + 'invalid, expired or revoked. Replace the GitHub token secret, then resubmit. The task '
+        + 'stopped before the agent ran, so no work was lost. (resource: owner/repo)',
+      );
+      expect(result!.category).toBe(ErrorCategory.BLOCKED);
+      expect(result!.title).toBe('Blocked: authentication rejected');
+      expect(result!.description).toContain('owner/repo');
       expect(result!.retryable).toBe(false);
     });
 

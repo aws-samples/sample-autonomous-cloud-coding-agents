@@ -154,6 +154,7 @@ flowchart LR
 | Admission | Concurrency limit | `orchestrator.ts` | `admission_queued` event |
 | Pre-flight | GitHub access, PAT permissions, PR access | `preflight.ts` | `preflight_failed` event |
 | Hydration | Guardrail prompt screening | `context-hydration.ts` | `guardrail_blocked` event |
+| Repo setup | GitHub token may push (dry-run push, skipped for read-only workflows) | `agent/src/repo.py` | `agent_blocked` event, task `FAILED` before the agent runs |
 | Hydration | Budget/quota resolution | `orchestrator.ts` | Persisted on task record |
 | Execution | Tool-call policy (Cedar) | `agent/src/hooks.py`, `agent/src/policy.py` | `POLICY_DECISION` telemetry |
 | Execution | Output secret screening | `agent/src/output_scanner.py` | `OUTPUT_SCREENING` telemetry |
