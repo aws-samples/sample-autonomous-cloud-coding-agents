@@ -71,6 +71,12 @@ describe('linear-link handler', () => {
     expect(result.statusCode).toBe(400);
   });
 
+  test('400s when the code is not a string', async () => {
+    const result = await handler(makeEvent({ code: 12345 }, 'cognito-user-1'));
+    expect(result.statusCode).toBe(400);
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
   test('404s when code is not found', async () => {
     ddbSend.mockResolvedValueOnce({ Item: undefined });
     const result = await handler(makeEvent({ code: 'XYZ123' }, 'cognito-user-1'));

@@ -42,6 +42,14 @@ import { handler } from '../../src/handlers/linear-remove-workspace';
 
 const ADMIN = 'cognito-admin-sub';
 
+/**
+ * The rows the endpoint may tear down, as it has to put it to DynamoDB in the
+ * scan filter and again in the condition of the revoke: active, or revoked by
+ * anything but this endpoint. Spelled out rather than imported, so that a
+ * change to the handler's expression fails here.
+ */
+const REMOVABLE_ROW = '#status = :active OR (#status = :revoked AND (attribute_not_exists(revoked_reason) OR revoked_reason <> :reason))';
+
 function makeEvent(opts: {
   slug?: string;
   userId?: string;
@@ -88,14 +96,19 @@ function activeRow(overrides: Record<string, unknown> = {}) {
  *   2. `ExclusiveStartKey` advances a page cursor over the seeded rows.
  *   3. `LastEvaluatedKey` is returned whenever unexamined rows remain, even
  *      if this page matched nothing.
- * The seeded rows are held in table order; the handler's filter (slug +
- * `status='active'`) is applied to the examined slice. A handler that
- * examines only one arbitrary row (Limit: 1) and never follows the key can
- * therefore miss a matching row that sits on a later page.
+ * The seeded rows are held in table order; the handler's filter is applied to
+ * the examined slice, as far as the values the scan binds say what it asks
+ * for: the slug, an active status, and, when `:revoked` is bound too, a row
+ * revoked for any reason but `:reason` (or for none). The exact expression is
+ * pinned by a test below. A handler that examines only one arbitrary row
+ * (Limit: 1) and never follows the key can therefore miss a matching row that
+ * sits on a later page. `pageSize` puts a page boundary (DynamoDB's 1 MB)
+ * between seeded rows for a scan that sends no `Limit`.
  */
 function routeDdb(opts: {
   registryRow?: Record<string, unknown> | null;
   registryRows?: Record<string, unknown>[];
+  pageSize?: number;
 } = {}) {
   const rows: Record<string, unknown>[] = opts.registryRows
     ?? (opts.registryRow === undefined
@@ -104,13 +117,16 @@ function routeDdb(opts: {
 
   ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
     if (cmd._type === 'Scan' && cmd.input.TableName === 'LinearRegistry') {
-      const slug = (cmd.input.ExpressionAttributeValues as Record<string, unknown>)?.[':slug'];
+      const values = (cmd.input.ExpressionAttributeValues ?? {}) as Record<string, unknown>;
       const start = Number((cmd.input.ExclusiveStartKey as { _idx?: number } | undefined)?._idx ?? 0);
-      const limit = cmd.input.Limit as number | undefined;
+      const limit = (cmd.input.Limit as number | undefined) ?? opts.pageSize;
       const end = limit === undefined ? rows.length : Math.min(rows.length, start + limit);
       const examined = rows.slice(start, end);
       // Apply the handler's FilterExpression to the examined slice only.
-      const matched = examined.filter((r) => r.status === 'active' && r.workspace_slug === slug);
+      const matched = examined.filter((r) => r.workspace_slug === values[':slug'] && (
+        r.status === values[':active']
+        || (values[':revoked'] !== undefined && r.status === values[':revoked'] && r.revoked_reason !== values[':reason'])
+      ));
       const more = end < rows.length;
       return Promise.resolve({
         Items: matched,
@@ -197,10 +213,10 @@ describe('linear-remove-workspace handler', () => {
       ':reason': 'admin_removed',
       ':uid': ADMIN,
     });
-    // The revoke is conditional on the row still being active, so two
-    // concurrent DELETEs can't both believe they won (a filtered Scan is a
-    // TOCTOU on its own; only the condition settles it).
-    expect(updateCall![0].input.ConditionExpression).toBe('#status = :active');
+    // The revoke is conditional on the row still being one this endpoint has
+    // not removed, so two concurrent DELETEs can't both believe they won (a
+    // filtered Scan is a TOCTOU on its own; only the condition settles it).
+    expect(updateCall![0].input.ConditionExpression).toBe(REMOVABLE_ROW);
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
 
     // Secret deleted — and asserted on *what* was deleted and *how*. A bare
@@ -341,28 +357,100 @@ describe('linear-remove-workspace handler', () => {
     expect(firstScan![0].input.Limit).toBeUndefined();
   });
 
-  test('already-revoked workspace is treated as not-found (fail-closed, no re-revoke)', async () => {
-    // The registry scan filters on status='active', so an already-revoked
-    // row simply doesn't match — the router models that by returning no
-    // items for a non-active seed. The 404 does not distinguish revoked from
-    // missing, and avoids a second destructive pass.
-    routeDdb({ registryRow: activeRow({ status: 'revoked' }) });
+  test('a workspace this endpoint already removed is treated as not-found (fail-closed, no re-revoke)', async () => {
+    // The registry scan leaves out a row revoked with `admin_removed`, the
+    // reason this endpoint writes, so it simply doesn't match. The 404 does
+    // not distinguish removed from missing, and avoids a second destructive pass.
+    routeDdb({ registryRow: activeRow({ status: 'revoked', revoked_reason: 'admin_removed' }) });
     smSend.mockReset();
     const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     expect(result.statusCode).toBe(404);
     expect(smSend).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['Linear rejected its refresh token', 'refresh_token_rejected'],
+    ['the vault asked for consent', 'vault_consent_required'],
+    ['an operator revoked it by hand, with no reason', undefined],
+  ])('removes a workspace that is revoked because %s: its secret is still there', async (_why, revokedReason) => {
+    // Revoking a row for a dead grant deletes nothing, so the secret with the
+    // OAuth client secret and the signing secret is still in Secrets Manager.
+    // Answering 404 here left it there with no way to remove it.
+    routeDdb({ registryRow: activeRow({ status: 'revoked', revoked_reason: revokedReason }) });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+
+    // Marked as an admin removal, which is terminal: a `vault_consent_required`
+    // row would otherwise turn active again when the vault next answers.
+    expect(findRevoke()![0].input.Key).toEqual({ linear_workspace_id: 'ws-uuid-1' });
+    expect(findRevoke()![0].input.ExpressionAttributeValues).toMatchObject({ ':reason': 'admin_removed', ':uid': ADMIN });
+    expect(smSend.mock.calls.map(([c]) => c.input)).toEqual([{
+      SecretId: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme-AbCd',
+      ForceDeleteWithoutRecovery: true,
+    }]);
+    expect(JSON.parse(result.body).data).toMatchObject({ status: 'revoked', secret: 'deleted' });
+  });
+
+  test('403s for a caller who is not the admin of a workspace revoked for a dead grant', async () => {
+    routeDdb({ registryRow: activeRow({ status: 'revoked', revoked_reason: 'refresh_token_rejected' }) });
+    const result = await handler(makeEvent({ slug: 'acme', userId: 'not-the-admin' }));
+    expect(result.statusCode).toBe(403);
+    expect(smSend).not.toHaveBeenCalled();
+    expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Update' || c._type === 'Delete')).toHaveLength(0);
+  });
+
+  test.each([
+    ['on the same scan page', undefined],
+    ['on a later scan page', 1],
+  ])('an active workspace wins over a dead row that still carries its slug (%s)', async (_where, pageSize) => {
+    // A Linear workspace can give up its urlKey and another can take it, so one
+    // slug can name a revoked row and an active one. The admin means the live
+    // one; removing the dead one and reporting success would leave it running.
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+        activeRow({ linear_workspace_id: 'ws-live' }),
+      ],
+      pageSize,
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+    expect(findRevoke()![0].input.Key).toEqual({ linear_workspace_id: 'ws-live' });
+    expect(JSON.parse(result.body).data.linear_workspace_id).toBe('ws-live');
+  });
+
+  test('a dead row is still the one removed when the pages after it hold no active row for the slug', async () => {
+    routeDdb({
+      registryRows: [
+        activeRow({ linear_workspace_id: 'ws-dead', status: 'revoked', revoked_reason: 'refresh_token_rejected' }),
+        activeRow({ linear_workspace_id: 'ws-other', workspace_slug: 'other' }),
+      ],
+      pageSize: 1,
+    });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+    expect(findRevoke()![0].input.Key).toEqual({ linear_workspace_id: 'ws-dead' });
+  });
+
   test('the registry scan fail-closes on status via the FilterExpression (pins the filter to the handler)', async () => {
-    // Assert the handler itself sends #status = :active — the revoke-oracle
+    // Assert the handler itself sends the status filter — the revoke-oracle
     // prevention property lives in this filter, not in the test router.
     routeDdb({ registryRow: null });
     await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
     const scanCall = ddbSend.mock.calls.find(
       ([c]) => c._type === 'Scan' && c.input.TableName === 'LinearRegistry',
     );
-    expect(scanCall![0].input.FilterExpression).toContain('#status');
-    expect(scanCall![0].input.ExpressionAttributeValues).toMatchObject({ ':active': 'active' });
+    expect(scanCall![0].input.FilterExpression).toBe(`workspace_slug = :slug AND (${REMOVABLE_ROW})`);
+    expect(scanCall![0].input.ExpressionAttributeNames).toEqual({ '#status': 'status' });
+    expect(scanCall![0].input.ExpressionAttributeValues).toEqual({
+      ':slug': 'acme',
+      ':active': 'active',
+      ':revoked': 'revoked',
+      ':reason': 'admin_removed',
+    });
     // Read-your-writes: a default eventually-consistent Scan can hand back a
     // row a just-completed setup (or a peer removal) has already changed.
     // Same reasoning as `shared/jira-tenant-registry.ts:32-46`.
@@ -507,12 +595,11 @@ describe('linear-remove-workspace handler', () => {
   });
 
   // ─── Concurrency + scan bounds ──────────────────────────────────────────
-  test('a lost race (row no longer active at write time) 404s and never deletes the secret', async () => {
+  test('a lost race (row already removed at write time) 404s and never deletes the secret', async () => {
     // The filtered Scan and the Update are two round trips, so a peer DELETE
-    // (or the resolver latching the row) can land in between. The
-    // ConditionExpression is what catches that; without it both callers would
-    // "succeed" and the second would delete a secret the first already
-    // accounted for.
+    // can land in between. The ConditionExpression is what catches that;
+    // without it both callers would "succeed" and the second would delete a
+    // secret the first already accounted for.
     routeDdb();
     const baseImpl = ddbSend.getMockImplementation()!;
     ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
