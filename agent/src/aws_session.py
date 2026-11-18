@@ -130,6 +130,25 @@ def configure_session(user_id: str, repo: str, task_id: str) -> None:
         _tags = tags
 
 
+def release_session(task_id: str) -> None:
+    """Forget the finished task's session so a reused server can start the next task.
+
+    ``configure_session`` refuses a new identity while a session exists, which
+    keeps one task from borrowing another's scoped credentials. Once that task
+    has finished, its session must be dropped so the next task can build its
+    own. A session that belongs to a different task is left alone.
+    """
+    global _session, _scoped, _tags
+    with _lock:
+        if _tags.get("task_id", "") != task_id:
+            return
+        _session = None
+        _scoped = None
+        _tags = {}
+    with _ambient_lock:
+        _ambient_credentials.clear()
+
+
 def reset_session_cache() -> None:
     """Drop the cached session and tags. For tests that toggle config."""
     global _session, _scoped, _tags

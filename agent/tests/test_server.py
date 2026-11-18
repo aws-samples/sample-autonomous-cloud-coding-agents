@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -328,6 +328,45 @@ def test_run_task_background_starts_and_stops_heartbeat(monkeypatch):
     # with a 0.05s cadence.
     assert len(heartbeat_calls) >= 1
     assert heartbeat_calls[0] == "t-heartbeat"
+
+
+def test_a_reused_server_runs_successive_tasks(monkeypatch):
+    """Each finished task releases its session, so the next task can build its own."""
+    import aws_session
+
+    aws_session.reset_session_cache()
+    monkeypatch.delenv(aws_session.SESSION_ROLE_ARN_ENV, raising=False)
+    monkeypatch.setattr(server.task_state, "write_heartbeat", lambda _task_id: None)
+    monkeypatch.setattr(server.task_state, "write_terminal", lambda *a, **kw: None)
+    seen: list[str] = []
+
+    def fake_run_task(**kwargs):
+        # What run_task does first: configure, then resolve the session.
+        aws_session.configure_session(user_id="u", repo="o/r", task_id=kwargs["task_id"])
+        with patch("boto3.Session", return_value=MagicMock()):
+            aws_session.get_session()
+        seen.append(kwargs["task_id"])
+
+    monkeypatch.setattr(server, "run_task", fake_run_task)
+
+    def run(task_id: str) -> None:
+        server._run_task_background(
+            task_id=task_id,
+            repo_url="o/r",
+            task_description="x",
+            issue_number="",
+            github_token="",
+            anthropic_model="",
+            max_turns=10,
+            max_budget_usd=None,
+            aws_region="us-east-1",
+        )
+
+    run("t-first")
+    run("t-second")
+
+    assert seen == ["t-first", "t-second"]
+    assert aws_session._session is None
 
 
 def test_run_task_background_propagates_correlation_envelope(monkeypatch):

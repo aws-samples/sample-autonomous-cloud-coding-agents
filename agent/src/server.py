@@ -553,6 +553,12 @@ def _run_task_background(
         stop_heartbeat.set()
         if hb_thread is not None and hb_thread.is_alive():
             hb_thread.join(timeout=3)
+        # After the last write for this task: a reused server must be able to
+        # build the next task's session (#904 review).
+        if task_id:
+            from aws_session import release_session
+
+            release_session(task_id)
 
 
 def _extract_invocation_params(inp: dict, request: Request) -> dict:
