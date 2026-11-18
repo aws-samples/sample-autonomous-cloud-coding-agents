@@ -33,10 +33,12 @@ function withPipedStdin(
     isTTY?: boolean;
     setEncoding: jest.Mock;
     resume: jest.Mock;
+    pause: jest.Mock;
   };
   fake.isTTY = false;
   fake.setEncoding = jest.fn();
   fake.resume = jest.fn();
+  fake.pause = jest.fn();
 
   const original = Object.getOwnPropertyDescriptor(process, 'stdin');
   Object.defineProperty(process, 'stdin', { value: fake, configurable: true });
@@ -280,6 +282,19 @@ describe('a visible and a secret prompt on one piped input', () => {
 
       expect(await waiting).toBe(expected);
     });
+  });
+
+  test('reads no further than the answers that were asked for: an input without end stays in the pipe', async () => {
+    // `yes | bgagent linear link <code>`. The reader stayed on stdin and took everything that
+    // arrived while the command did its work: with a slow API call, until node ran out of memory.
+    stdin.write('y\n');
+    expect(await outcome(promptLine('Continue? [Y/n]'))).toBe('line "y"');
+
+    stdin.write('y\n'.repeat(1000));
+    await tick();
+    expect(stdin.readableLength).toBe(2000);
+
+    expect(await outcome(promptSecret('Secret: '))).toBe('line "y"');
   });
 
   describe('after another reader of stdin (a readline that was closed)', () => {

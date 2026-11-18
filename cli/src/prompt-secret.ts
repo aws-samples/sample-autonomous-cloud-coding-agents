@@ -61,6 +61,11 @@ function ensurePipedListener(): void {
   process.stdin.on('data', (chunk: string) => {
     pipedBuffer += chunk;
     drainPipedBuffer();
+    // No prompt is waiting: stop reading until the next one asks. An input without end,
+    // `yes | bgagent linear link <code>`, is otherwise read into memory while the command works.
+    if (pipedLineWaiters.length === 0) {
+      process.stdin.pause();
+    }
   });
   process.stdin.on('end', () => {
     pipedEnded = true;
@@ -83,8 +88,8 @@ function ensurePipedListener(): void {
 /** The next line of piped stdin, or `null` when the input ends before one. */
 function readPipedLine(): Promise<string | null> {
   ensurePipedListener();
-  // Another reader, a readline that was closed, leaves stdin paused, and a listener put on a
-  // paused stream does not start it again.
+  // The listener above pauses stdin when no prompt is waiting, and so does another reader, a
+  // readline that was closed. A listener put on a paused stream does not start it again.
   process.stdin.resume();
   drainPipedBuffer();
   if (pipedLineQueue.length > 0) {
