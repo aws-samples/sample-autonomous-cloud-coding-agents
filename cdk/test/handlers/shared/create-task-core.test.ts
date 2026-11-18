@@ -212,7 +212,7 @@ describe('createTaskCore', () => {
 
   test('returns 400 when team membership exceeds the rollup transaction limit', async () => {
     const error = new Error(
-      'User user-1 belongs to 99 teams; budget rollup supports at most 98.',
+      'The user this task is billed to belongs to 99 teams; budget rollup supports at most 98.',
     );
     error.name = 'BudgetScopeLimitError';
     mockCheckBudgetAdmission.mockRejectedValue(error);
@@ -330,6 +330,51 @@ describe('createTaskCore', () => {
     expect(result.statusCode).toBe(201);
   });
 
+  // One row for each way a single entry is refused, with the whole message.
+  test.each([
+    ['is no scope', 42, 'Invalid initial_approvals entry "42": missing prefix.'],
+    [
+      'stands for a waiting call',
+      ' this_call ',
+      'Invalid initial_approvals entry "this_call": it stands for a call that is waiting for approval, '
+        + 'so it cannot be granted in advance. Name the tool or the group, for example "tool_type:Bash".',
+    ],
+    [
+      'is a pattern that matches everything',
+      'write_path: ** ',
+      'Invalid initial_approvals entry "write_path:**": pattern is too broad. '
+        + 'Use a more specific pattern, or "all_session" if you intend to allow everything.',
+    ],
+  ])('refuses an initial_approvals entry that %s and says why', async (_what, entry, message) => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug', initial_approvals: ['tool_type:Bash', entry] } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('stores each initial_approvals entry as the scope it was parsed to', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'Fix the bug',
+        initial_approvals: [' tool_type:Bash ', 'bash_pattern: git status', 'all_session', 'rule:force_push_any'],
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+    const taskPut = mockSend.mock.calls.find(
+      ([command]) => command._type === 'Put' && command.input.TableName === 'Tasks',
+    );
+    expect(taskPut![0].input.Item.initial_approvals).toEqual(
+      ['tool_type:Bash', 'bash_pattern:git status', 'all_session', 'rule:force_push_any'],
+    );
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
@@ -439,6 +484,69 @@ describe('createTaskCore', () => {
     const result = await createTaskCore({ repo: 'org/repo' }, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
+  });
+
+  // The body is parsed JSON, so the field can hold any JSON type.
+  const NOT_A_STRING: [string, unknown][] = [
+    ['a number', 42],
+    ['an object', { text: 'Fix the bug' }],
+    ['a list', ['Fix the bug']],
+  ];
+
+  test.each(NOT_A_STRING)('returns 400 for a task_description that is %s', async (_what, description) => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: description } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid task_description. Must be a string.',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  // With an issue number the workflow's inputs are satisfied without reading the description.
+  test.each(NOT_A_STRING)('returns 400 for a task_description that is %s beside an issue number', async (_what, description) => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 7, task_description: description } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid task_description. Must be a string.',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('returns 400 for attachments that are not a list, instead of creating the task without them', async () => {
+    const result = await createTaskCore(
+      {
+        repo: 'org/repo',
+        task_description: 'see the attached log',
+        attachments: { type: 'file', filename: 'log.txt', data: 'aGVsbG8=' },
+      } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'attachments must be an array',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('takes a task_description of null for an absent one', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 7, task_description: null } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
   });
 
   test('returns 400 when guardrail blocks description', async () => {
@@ -837,6 +945,49 @@ describe('createTaskCore', () => {
     );
     expect(result.statusCode).toBe(400);
     expect(result.body).toContain('pr_number is only allowed');
+  });
+
+  test.each([0, -1, 1.5, '12', '../../../other-org/private-repo/issues/7'])(
+    'returns 400 for issue_number %j',
+    async (issueNumber) => {
+      // Hydration requests /repos/<repo>/issues/<issue_number> with the
+      // repository's token: a text with dot segments names another repository.
+      const result = await createTaskCore(
+        { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: issueNumber } as any,
+        makeContext(),
+        'req-issue-invalid',
+      );
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error).toMatchObject({
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid issue_number. Must be a positive integer.',
+      });
+      expect(mockSend).not.toHaveBeenCalled();
+    },
+  );
+
+  test('stores a valid issue_number on the task and on its task_created event', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', issue_number: 42 },
+      makeContext(),
+      'req-issue-valid',
+    );
+    expect(result.statusCode).toBe(201);
+    expect(JSON.parse(result.body).data.issue_number).toBe(42);
+    expect(getPersistedTaskRecord().issue_number).toBe(42);
+    expect(mockSend.mock.calls[1][0].input.Item.metadata.issue_number).toBe(42);
+  });
+
+  test('takes an issue_number of null for an absent one', async () => {
+    // What a typed client sends for an optional field it leaves out.
+    const result = await createTaskCore(
+      { repo: 'org/repo', workflow_ref: 'coding/new-task-v1', task_description: 'fix the typo', issue_number: null } as any,
+      makeContext(),
+      'req-issue-null',
+    );
+    expect(result.statusCode).toBe(201);
+    expect(getPersistedTaskRecord()).not.toHaveProperty('issue_number');
+    expect(mockSend.mock.calls[1][0].input.Item.metadata.issue_number).toBeNull();
   });
 
   test('returns 400 for an unknown workflow_ref', async () => {

@@ -26,6 +26,7 @@ import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
 import { makeDocClient } from './shared/ua';
+import { MAX_INLINE_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_INLINE_SIZE_BYTES } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
@@ -429,15 +430,6 @@ async function checkChannelAccess(teamId: string, channelId: string): Promise<{ 
 
 // ─── Slack File Extraction ───────────────────────────────────────────────────
 
-/**
- * Size limits for the files of a Slack message. They reach createTaskCore as
- * inline attachments, so these are the limits of validateAttachments for
- * inline data (validation.ts, which does not export them): 500 KB per file
- * and 3 MB per task.
- */
-const SLACK_FILE_MAX_SIZE_BYTES = 500 * 1024;
-const SLACK_FILES_MAX_TOTAL_MB = 3;
-const SLACK_FILES_MAX_TOTAL_BYTES = SLACK_FILES_MAX_TOTAL_MB * 1024 * 1024;
 /** Max number of file attachments per Slack message. */
 const SLACK_FILE_MAX_COUNT = 10;
 
@@ -478,13 +470,15 @@ async function extractSlackFileAttachments(
   }
 
   // The bytes accepted so far, and why a file of `bytes` more is refused, if it is.
+  // The files reach createTaskCore as inline attachments, so the limits are those
+  // of validateAttachments for inline data: 500 KB per file and 3 MB per task.
   let totalBytes = 0;
   const sizeError = (bytes: number): string | undefined => {
-    if (bytes > SLACK_FILE_MAX_SIZE_BYTES) {
-      return `too large, ${Math.ceil(bytes / 1024)} KB > ${SLACK_FILE_MAX_SIZE_BYTES / 1024} KB limit`;
+    if (bytes > MAX_INLINE_ATTACHMENT_SIZE_BYTES) {
+      return `too large, ${Math.ceil(bytes / 1024)} KB > ${MAX_INLINE_ATTACHMENT_SIZE_BYTES / 1024} KB limit`;
     }
-    if (totalBytes + bytes > SLACK_FILES_MAX_TOTAL_BYTES) {
-      return `more than ${SLACK_FILES_MAX_TOTAL_MB} MB of attachments in total`;
+    if (totalBytes + bytes > MAX_TOTAL_INLINE_SIZE_BYTES) {
+      return `more than ${MAX_TOTAL_INLINE_SIZE_BYTES / (1024 * 1024)} MB of attachments in total`;
     }
     return undefined;
   };

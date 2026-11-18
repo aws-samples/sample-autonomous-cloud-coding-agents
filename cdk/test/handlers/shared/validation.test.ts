@@ -378,8 +378,15 @@ describe('pagination token encode/decode', () => {
     expect(decodePaginationToken(undefined)).toBeUndefined();
   });
 
-  test('decode returns undefined for invalid base64', () => {
-    expect(decodePaginationToken('not-valid-base64!!!')).toBeUndefined();
+  test('decode returns null for a token that is no cursor', () => {
+    // null and not undefined: a caller has to tell a damaged token from no token.
+    expect(decodePaginationToken('not-valid-base64!!!')).toBeNull();
+    // A real token that lost its end.
+    expect(decodePaginationToken('eyJ0YXNrX2lkIjoiMDFL')).toBeNull();
+    // JSON, but no object: DynamoDB takes nothing else for a start key.
+    for (const json of ['1', '"a"', '[1]', 'null']) {
+      expect(decodePaginationToken(Buffer.from(json).toString('base64'))).toBeNull();
+    }
   });
 });
 
@@ -603,6 +610,40 @@ describe('validateAttachments', () => {
     }]);
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.error).toContain('not both');
+  });
+
+  test('rejects attachments that are not a list', () => {
+    // One attachment object where a list is expected counted as no attachments:
+    // the task was created without it and nothing told the client.
+    const result = validateAttachments({ type: 'file', filename: 'log.txt', data: 'aGVsbG8=' } as never);
+    expect(result).toEqual({ valid: false, error: 'attachments must be an array' });
+  });
+
+  test('takes attachments of null for none', () => {
+    expect(validateAttachments(null as never)).toEqual({ valid: true, parsed: [] });
+  });
+
+  test('rejects an entry that is null', () => {
+    expect(validateAttachments([null])).toEqual({
+      valid: false,
+      error: "attachments[0].type must be 'image', 'file', or 'url'",
+    });
+  });
+
+  test.each([
+    ['image', 'image/png'],
+    ['file', 'text/plain'],
+  ])('rejects a url on an attachment of type %s', (type, contentType) => {
+    // Only type 'url' is fetched. The entry passed for a presigned upload that
+    // declares no size, and the task then waited for an upload nobody would make.
+    const result = validateAttachments([{ type, url: 'https://example.com/shot.png', content_type: contentType }]);
+    expect(result).toEqual({ valid: false, error: "attachments[0]: url is only allowed for type 'url'" });
+  });
+
+  test('rejects data that is not a string', () => {
+    // Took the same way: no decoded data, and no declared size asked for.
+    const result = validateAttachments([{ type: 'file', data: 123, content_type: 'text/plain' }]);
+    expect(result).toEqual({ valid: false, error: 'attachments[0]: data must be a base64 string' });
   });
 
   test('rejects inline data exceeding 500 KB', () => {

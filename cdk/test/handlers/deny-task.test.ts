@@ -125,6 +125,33 @@ describe('deny-task — auth + validation', () => {
     const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
     expect(tx.TransactItems[0].Update.ExpressionAttributeValues[':reason']).toBe('');
   });
+
+  test.each([
+    ['a number', 42],
+    ['an object', { text: 'too risky' }],
+    ['a list', ['too risky']],
+  ])('400 when reason is %s', async (_what, reason) => {
+    // The body is parsed JSON, so the field can hold any JSON type.
+    const res = await handler(
+      makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny', reason }) }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Invalid reason. Must be a string.',
+    });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  test('a reason of null is no reason', async () => {
+    mockSend.mockResolvedValue({});
+    const res = await handler(
+      makeEvent({ body: JSON.stringify({ request_id: '01K', decision: 'deny', reason: null }) }),
+    );
+    expect(res.statusCode).toBe(202);
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    expect(tx.TransactItems[0].Update.ExpressionAttributeValues[':reason']).toBe('');
+  });
 });
 
 describe('deny-task — secret redaction', () => {

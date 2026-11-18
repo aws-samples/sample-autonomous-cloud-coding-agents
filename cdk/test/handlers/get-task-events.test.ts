@@ -348,6 +348,27 @@ describe('get-task-events handler', () => {
     expect(queryInput.ExpressionAttributeValues).toEqual({ ':tid': 'task-1' });
   });
 
+  test('a valid next_token is the ExclusiveStartKey of the query', async () => {
+    const key = { task_id: 'task-1', event_id: '01KQH5Y3F7Z6C0E1D2B3A4G5H6' };
+    const token = Buffer.from(JSON.stringify(key)).toString('base64');
+
+    const result = await handler(makeEvent({ queryStringParameters: { next_token: token } }));
+
+    expect(result.statusCode).toBe(200);
+    expect(MockQueryCommand.mock.calls[0][0].ExclusiveStartKey).toEqual(key);
+  });
+
+  test('returns 400 for a next_token that cannot be decoded', async () => {
+    // A token that lost its end. Taken for no token, it restarted the events at the
+    // first page with status 200, and the client took that page for the next one.
+    const cut = Buffer.from('{"task_id":"task-1').toString('base64');
+    const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
+
+    expect(result.statusCode).toBe(400);
+    expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid next_token.' });
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   test('neither after nor next_token preserves original from-beginning behavior', async () => {
     await handler(makeEvent());
 

@@ -97,6 +97,10 @@ export async function handler(
       );
     }
     const { request_id, reason: rawReason } = parsed;
+    // The body is parsed JSON: the scan below reads the reason as text.
+    if (rawReason != null && typeof rawReason !== 'string') {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid reason. Must be a string.', requestId);
+    }
 
     // Sanitize + truncate the reason BEFORE any further processing.
     // The agent and audit event will both see the scanned form; the

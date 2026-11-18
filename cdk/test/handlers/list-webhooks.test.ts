@@ -149,6 +149,16 @@ describe('list-webhooks handler', () => {
       expect(mockSend.mock.calls[0][0].input.ExclusiveStartKey).toEqual(key);
     });
 
+    test('returns 400 for a next_token that cannot be decoded', async () => {
+      // Taken for no token, it restarted the list at the first page with status 200.
+      const cut = Buffer.from('{"webhook_id":"w').toString('base64');
+      const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
+
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid next_token.' });
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
     test('a single page short of the limit reports has_more=false with no token', async () => {
       // Fewer active webhooks than requested, index exhausted (no LastEvaluatedKey).
       mockSend.mockResolvedValueOnce({ Items: [makeRecord(2), makeRecord(1)] });

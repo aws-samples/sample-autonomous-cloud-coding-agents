@@ -689,9 +689,9 @@ describe('slack-command-processor handler', () => {
       ]);
     });
 
-    // The processor keeps its own copy of the two limits (validation.ts does
-    // not export them). These cases sit on both sides of each limit and fail
-    // when the copy and validateAttachments stop agreeing.
+    // The processor reads the two limits from validation.ts. These cases sit on
+    // both sides of each limit and fail when the processor and
+    // validateAttachments stop agreeing.
     test.each([
       ['a file of exactly 500 KB', [500 * 1024], true],
       ['a file of 500 KB and one byte', [500 * 1024 + 1], false],

@@ -157,15 +157,18 @@ export function parseLimit(limitParam: string | undefined, defaultLimit: number,
 /**
  * Decode a base64-encoded pagination token to a DynamoDB ExclusiveStartKey.
  * @param token - the base64 pagination token.
- * @returns the decoded key object, or undefined if token is absent or invalid.
+ * @returns the decoded key object, undefined if there is no token, or null if the
+ *   token is no cursor (the caller answers 400: taken for no token, a damaged one
+ *   would restart the list at its first page).
  */
-export function decodePaginationToken(token: string | undefined): Record<string, unknown> | undefined {
+export function decodePaginationToken(token: string | undefined): Record<string, unknown> | null | undefined {
   if (!token) return undefined;
   try {
-    const json = Buffer.from(token, 'base64').toString('utf-8');
-    return JSON.parse(json) as Record<string, unknown>;
+    const key: unknown = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+    // DynamoDB takes nothing but an object for a start key.
+    return typeof key === 'object' && key !== null && !Array.isArray(key) ? key as Record<string, unknown> : null;
   } catch {
-    return undefined; // nosemgrep: ts-silent-success-masking -- invalid pagination token is rejected; undefined is the decode contract, not masked infra failure
+    return null; // nosemgrep: ts-silent-success-masking -- null is the answer for a token that cannot be decoded, and every caller refuses it with a 400
   }
 }
 
@@ -253,7 +256,7 @@ export function computeTtlEpoch(retentionDays: number): number {
 }
 
 /**
- * Validate a pr_number value from a request body.
+ * Validate a pr_number or issue_number value from a request body.
  * @param value - the raw value from the request.
  * @returns the valid number, null if invalid (caller should return 400), or undefined if absent.
  */
@@ -272,11 +275,11 @@ export function validatePrNumber(value: unknown): number | null | undefined {
 /** Maximum attachments per task. */
 export const MAX_ATTACHMENTS_PER_TASK = 10;
 /** Maximum decoded size for inline attachments. */
-const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
+export const MAX_INLINE_ATTACHMENT_SIZE_BYTES = 500 * 1024;
 /** Maximum total decoded inline size per request (MiB). */
 const MAX_TOTAL_INLINE_SIZE_MB = 3;
 /** Maximum total decoded inline size per request. */
-const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+export const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
 /** Maximum total attachment size per task (MiB). */
 const MAX_TOTAL_ATTACHMENT_SIZE_MB = 50;
 /** Maximum size per attachment (inline or presigned, decoded). */
@@ -542,8 +545,11 @@ export type AttachmentValidationResult =
 export function validateAttachments(
   attachments: unknown[] | undefined,
 ): AttachmentValidationResult {
-  if (!attachments || !Array.isArray(attachments) || attachments.length === 0) {
+  if (!attachments) {
     return { valid: true, parsed: [] };
+  }
+  if (!Array.isArray(attachments)) {
+    return { valid: false, error: 'attachments must be an array' };
   }
   if (attachments.length > MAX_ATTACHMENTS_PER_TASK) {
     return { valid: false, error: `Maximum ${MAX_ATTACHMENTS_PER_TASK} attachments per task` };
@@ -554,8 +560,8 @@ export function validateAttachments(
   const parsed: ValidatedAttachment[] = [];
 
   for (const [i, att] of (attachments as Record<string, unknown>[]).entries()) {
-    // Type validation
-    if (!att.type || typeof att.type !== 'string' || !VALID_ATTACHMENT_TYPES.has(att.type)) {
+    // Type validation (an entry of null has no type either)
+    if (!att || !att.type || typeof att.type !== 'string' || !VALID_ATTACHMENT_TYPES.has(att.type)) {
       return { valid: false, error: `attachments[${i}].type must be 'image', 'file', or 'url'` };
     }
 
@@ -572,17 +578,22 @@ export function validateAttachments(
       if (!isValidHttpsUrl(att.url)) {
         return { valid: false, error: `attachments[${i}]: must be a valid HTTPS URL` };
       }
-    } else {
-      if (att.data && att.url) {
-        return { valid: false, error: `attachments[${i}]: provide data or url, not both` };
-      }
+    } else if (att.url) {
+      // Only type 'url' is fetched. Without this, an image or a file with a url and
+      // no data passed for a presigned upload that declares no size.
+      const reason = att.data ? 'provide data or url, not both' : "url is only allowed for type 'url'";
+      return { valid: false, error: `attachments[${i}]: ${reason}` };
     }
 
     // Decode inline data
     let decoded: Buffer | undefined;
 
-    if (att.data && typeof att.data === 'string') {
-      decoded = Buffer.from(att.data as string, 'base64');
+    if (att.data) {
+      // Data of another JSON type passed for a presigned upload in the same way.
+      if (typeof att.data !== 'string') {
+        return { valid: false, error: `attachments[${i}]: data must be a base64 string` };
+      }
+      decoded = Buffer.from(att.data, 'base64');
       if (decoded.length > MAX_INLINE_ATTACHMENT_SIZE_BYTES) {
         return { valid: false, error: `attachments[${i}]: inline data exceeds 500 KB limit. Use presigned upload for larger files.` };
       }
