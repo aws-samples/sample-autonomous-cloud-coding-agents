@@ -24,7 +24,7 @@ import type { ComputeStrategy, SessionControlOptions, SessionHandle, SessionStat
 import { logger } from '../logger';
 import { microvmErrorIdentity } from './control';
 import {
-  intentMatchesGate, readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent,
+  intentMatchesGate, readMicrovmLifecycleSnapshot, readMicrovmSuspendCheckpoint, saveMicrovmLifecycleIntent,
   type MicrovmLifecycleSnapshot,
 } from './lifecycle';
 import { decideMicrovmLifecycle, type MicrovmLifecycleDecision } from './lifecycle-policy';
@@ -61,6 +61,8 @@ export interface MicrovmSupervisorState {
   readonly nextPollInMs: number;
   /** Persisted across replay so unchanged healthy polls do not repeat a log record. */
   readonly diagnosticSignature?: string;
+  /** Suspend intent generation whose guest checkpoint was found; spares re-reading it each poll. */
+  readonly checkpointedGeneration?: string;
 }
 
 export interface MicrovmSupervisorInput {
@@ -229,6 +231,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
   let wakeRepairWanted = false;
   let awaitingDecisionConsumption = false;
   let suspendEnabled = input.suspendEnabled;
+  let suspendCheckpointConfirmed: boolean | undefined;
   const result = (outcome: SupervisorOutcome): MicrovmSupervisorResult => {
     if (outcome.kind === 'continue') {
       if (!readFailed) {state = { ...state, consecutivePollFailures: 0 };} else if (state.consecutivePollFailures >= MICROVM_MAX_POLL_FAILURES) {
@@ -292,7 +295,23 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     sessionDeadlineMs: state.sessionDeadlineMs,
     pollIntervalMs: input.pollIntervalMs,
     suspendEnabled,
+    suspendCheckpointConfirmed,
   });
+
+  /**
+   * For a SUSPENDED worker parked on its current gate: did the guest record the
+   * checkpoint for this suspend intent? A guest that declined (another tool was
+   * running) records none, and the service froze it anyway.
+   */
+  const checkSuspendCheckpoint = async (current: MicrovmLifecycleSnapshot): Promise<boolean | undefined> => {
+    const intent = current.intent;
+    if (observed !== 'SUSPENDED' || current.status !== TaskStatus.AWAITING_APPROVAL
+      || intent?.action !== 'suspend' || !intentMatchesGate(current)) return undefined;
+    if (state.checkpointedGeneration === intent.generation) return true;
+    const found = await readMicrovmSuspendCheckpoint(input.taskId, intent.generation, options);
+    if (found) state = { ...state, checkpointedGeneration: intent.generation };
+    return found;
+  };
 
   /** Phase 1: read the task and the worker. Returns a result when the cycle ends here. */
   const observe = async (): Promise<MicrovmSupervisorResult | undefined> => {
@@ -360,6 +379,7 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
   /** Phase 3: the policy decision, with the wake-repair override and live suspend switch. */
   const decide = async () => {
     suspendEnabled = input.suspendEnabled && state.lifetimeVerified;
+    suspendCheckpointConfirmed = await checkSuspendCheckpoint(snapshot!);
     let decision = policy();
     if ((wakeRepairWanted || (state.recovery?.kind === 'wake'
       && (observed === 'SUSPENDING' || observed === 'SUSPENDED')))

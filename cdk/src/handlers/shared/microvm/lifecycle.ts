@@ -18,12 +18,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import type { SessionControlOptions, SessionHandle } from '../compute-strategy';
 import { readMicrovmImageMetadata, supportsMicrovmLifecycle } from './image-capability';
 import { APPROVAL_STATUSES, ApprovalStatusValue, TaskStatus, type TaskStatusType } from '../../../constructs/task-status';
+import { logger } from '../logger';
 import type { ApprovalStatus } from '../types';
 import { makeDocClient } from '../ua';
+import { microvmErrorIdentity } from './control';
 
 type MicrovmHandle = Extract<SessionHandle, { strategyType: 'lambda-microvm' }>;
 export type LifecycleAction = 'suspend' | 'resume';
@@ -77,6 +79,7 @@ const MICROVM_LIFECYCLE_STORE_TIMEOUT_MS = 5_000;
 const ddb = makeDocClient();
 const TASK_TABLE = process.env.TASK_TABLE_NAME!;
 const APPROVALS_TABLE = process.env.TASK_APPROVALS_TABLE_NAME!;
+const EVENTS_TABLE = process.env.TASK_EVENTS_TABLE_NAME!;
 const LIVE_TASK_STATUSES: readonly TaskStatusType[] = [TaskStatus.HYDRATING, TaskStatus.RUNNING, TaskStatus.AWAITING_APPROVAL];
 
 function storeSignal(options?: SessionControlOptions): AbortSignal {
@@ -305,5 +308,57 @@ export async function saveMicrovmLifecycleIntent(
       return { status: 'stale' };
     }
     throw error;
+  }
+}
+
+/** Newest events read per page, and pages read, when looking for a guest checkpoint. */
+const CHECKPOINT_PAGE_SIZE = 50;
+const CHECKPOINT_MAX_PAGES = 4;
+
+/**
+ * Whether the guest recorded its suspend checkpoint for this intent generation.
+ *
+ * The guest writes the checkpoint before answering `/suspend` with 200. When it
+ * declines instead (another tool is still running), it answers 200 without a
+ * checkpoint, yet the service still freezes the VM. So a SUSPENDED worker with no
+ * checkpoint for its intent declined and must be woken. A frozen guest writes
+ * nothing afterwards, so its checkpoint sits among the newest events.
+ *
+ * Returns undefined when the read fails: unknown is not evidence either way.
+ */
+export async function readMicrovmSuspendCheckpoint(
+  taskId: string, generation: string, options?: SessionControlOptions,
+): Promise<boolean | undefined> {
+  const abortSignal = options?.abortSignal
+    ? AbortSignal.any([options.abortSignal, AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS)])
+    : AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS);
+  try {
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    for (let page = 0; page < CHECKPOINT_MAX_PAGES; page++) {
+      const result = await ddb.send(new QueryCommand({
+        TableName: EVENTS_TABLE,
+        KeyConditionExpression: 'task_id = :task',
+        FilterExpression: 'event_type = :type AND metadata.milestone = :milestone AND metadata.generation = :generation',
+        ExpressionAttributeValues: {
+          ':task': taskId,
+          ':type': 'agent_milestone',
+          ':milestone': 'microvm_suspend_checkpoint',
+          ':generation': generation,
+        },
+        ScanIndexForward: false,
+        ConsistentRead: true,
+        Limit: CHECKPOINT_PAGE_SIZE,
+        ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+      }), { abortSignal });
+      if ((result.Items?.length ?? 0) > 0) return true;
+      exclusiveStartKey = result.LastEvaluatedKey;
+      if (!exclusiveStartKey) return false;
+    }
+    return false;
+  } catch (error) {
+    logger.warn('MicroVM suspend checkpoint could not be read; leaving the worker as is this cycle', {
+      task_id: taskId, generation, ...microvmErrorIdentity(error),
+    });
+    return undefined;
   }
 }

@@ -60,8 +60,11 @@ jest.mock('../../../../src/handlers/shared/ua', () => {
 const suffix = randomUUID();
 const tasks = `lifecycle-tasks-${suffix}`;
 const approvals = `lifecycle-approvals-${suffix}`;
-Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals });
-import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent } from '../../../../src/handlers/shared/microvm/lifecycle';
+const events = `lifecycle-events-${suffix}`;
+Object.assign(process.env, { TASK_TABLE_NAME: tasks, TASK_APPROVALS_TABLE_NAME: approvals, TASK_EVENTS_TABLE_NAME: events });
+import {
+  readMicrovmLifecycleSnapshot, readMicrovmSuspendCheckpoint, saveMicrovmLifecycleIntent,
+} from '../../../../src/handlers/shared/microvm/lifecycle';
 import { claimMicrovmStart, saveMicrovmImageCapability, saveMicrovmStartHandle } from '../../../../src/handlers/shared/microvm/start';
 import { superviseMicrovm, type MicrovmSupervisorState } from '../../../../src/handlers/shared/microvm/supervisor';
 
@@ -86,6 +89,38 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
           ...(name === approvals ? [{ AttributeName: 'request_id', KeyType: 'RANGE' as const }] : [])],
       }));
     }
+    // The task events table's key schema: task_id + ULID event_id.
+    await raw.send(new CreateTableCommand({
+      TableName: events,
+      BillingMode: 'PAY_PER_REQUEST',
+      AttributeDefinitions: [{ AttributeName: 'task_id', AttributeType: 'S' }, { AttributeName: 'event_id', AttributeType: 'S' }],
+      KeySchema: [{ AttributeName: 'task_id', KeyType: 'HASH' }, { AttributeName: 'event_id', KeyType: 'RANGE' }],
+    }));
+  });
+
+  test('finds the checkpoint item the guest writes, for its generation only', async () => {
+    const taskId = `checkpoint-${randomUUID()}`;
+    // The item `progress_writer.write_microvm_checkpoint` writes, then later events.
+    await admin.send(new PutCommand({
+      TableName: events,
+      Item: {
+        task_id: taskId,
+        event_id: '01KCHECKPOINT0000000000000',
+        event_type: 'agent_milestone',
+        metadata: { milestone: 'microvm_suspend_checkpoint', request_id: 'gate', generation: 'generation-two' },
+        timestamp: new Date().toISOString(),
+        user_id: 'user',
+      },
+    }));
+    for (let n = 0; n < 3; n++) {
+      await admin.send(new PutCommand({
+        TableName: events,
+        Item: { task_id: taskId, event_id: `01KLATER00000000000000000${n}`, event_type: 'microvm_supervisor', metadata: {} },
+      }));
+    }
+    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-two')).toBe(true);
+    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-one')).toBe(false);
+    expect(await readMicrovmSuspendCheckpoint(`other-${randomUUID()}`, 'generation-two')).toBe(false);
   });
   beforeEach(async () => {
     mockBeforeSend.mockReset();
@@ -124,7 +159,7 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
     await approval('gate');
   });
   afterAll(async () => {
-    try { for (const name of [tasks, approvals]) await raw.send(new DeleteTableCommand({ TableName: name })); } finally { for (const client of mockClients) client.destroy(); raw.destroy(); }
+    try { for (const name of [tasks, approvals, events]) await raw.send(new DeleteTableCommand({ TableName: name })); } finally { for (const client of mockClients) client.destroy(); raw.destroy(); }
   });
   async function approval(requestId: string) {
     await admin.send(new PutCommand({

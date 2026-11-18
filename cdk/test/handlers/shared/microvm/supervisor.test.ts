@@ -24,6 +24,7 @@ import type { MicrovmLifecycleSnapshot } from '../../../../src/handlers/shared/m
 
 const mockRead = jest.fn();
 const mockSave = jest.fn();
+const mockCheckpoint = jest.fn();
 const mockSuspendEnabled = jest.fn();
 jest.mock('../../../../src/handlers/shared/microvm/suspend-config', () => ({
   readMicrovmSuspendEnabled: (...args: unknown[]) => mockSuspendEnabled(...args),
@@ -33,6 +34,7 @@ jest.mock('../../../../src/handlers/shared/microvm/lifecycle', () => ({
   ...jest.requireActual('../../../../src/handlers/shared/microvm/lifecycle'),
   readMicrovmLifecycleSnapshot: (...args: unknown[]) => mockRead(...args),
   saveMicrovmLifecycleIntent: (...args: unknown[]) => mockSave(...args),
+  readMicrovmSuspendCheckpoint: (...args: unknown[]) => mockCheckpoint(...args),
 }));
 jest.mock('../../../../src/handlers/shared/logger', () => ({ logger: mockLogger }));
 
@@ -109,6 +111,8 @@ function run(previous?: MicrovmSupervisorState, change: Partial<MicrovmSuperviso
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // A guest that accepted the suspend recorded its checkpoint.
+  mockCheckpoint.mockReset().mockResolvedValue(true);
   time = NOW;
   generation = 0;
   jest.spyOn(Date, 'now').mockImplementation(() => time);
@@ -385,6 +389,47 @@ test('an intended long sleep stays asleep and does not fail heartbeat liveness',
   const result = await run();
   expect(result).toMatchObject({ kind: 'continue', deferHeartbeat: true });
   expect(result.state.recovery).toBeUndefined();
+  expect(strategy.resumeSession).not.toHaveBeenCalled();
+});
+
+test('a guest that declined the suspend is woken although the intent matches the gate', async () => {
+  // Another tool was running: the guest answered 200 declined, recorded no
+  // checkpoint, and the service froze the VM anyway (#904 review).
+  intent('suspend');
+  strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
+  mockCheckpoint.mockResolvedValue(false);
+  const suspended = row.intent!.generation;
+  const result = await run();
+  expect(mockCheckpoint).toHaveBeenCalledWith('task', suspended, expect.anything());
+  expect(result.kind).toBe('continue');
+  expect(strategy.resumeSession).toHaveBeenCalledTimes(1);
+  expect(row.intent?.action).toBe('resume');
+});
+
+test('an unreadable checkpoint leaves an intended sleep alone this cycle', async () => {
+  intent('suspend');
+  strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
+  mockCheckpoint.mockResolvedValue(undefined);
+  expect((await run()).kind).toBe('continue');
+  expect(strategy.resumeSession).not.toHaveBeenCalled();
+});
+
+test('a confirmed checkpoint is read once per suspend intent', async () => {
+  intent('suspend');
+  strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
+  const first = await run();
+  expect(first.state.checkpointedGeneration).toBe(row.intent!.generation);
+  await run(first.state);
+  expect(mockCheckpoint).toHaveBeenCalledTimes(1);
+  expect(strategy.resumeSession).not.toHaveBeenCalled();
+});
+
+test('a worker still SUSPENDING is not judged before its hook answers', async () => {
+  intent('suspend');
+  strategy.pollSession.mockResolvedValue(observation('SUSPENDING'));
+  mockCheckpoint.mockResolvedValue(false);
+  await run();
+  expect(mockCheckpoint).not.toHaveBeenCalled();
   expect(strategy.resumeSession).not.toHaveBeenCalled();
 });
 

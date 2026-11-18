@@ -36,6 +36,13 @@ export interface MicrovmLifecyclePolicyInput {
   readonly pollIntervalMs: number;
   /** Stops new suspends; already-sleeping VMs can still wake or terminate. */
   readonly suspendEnabled: boolean;
+  /**
+   * For a SUSPENDED worker with a matching suspend intent: whether the guest
+   * recorded its checkpoint for that intent. False means the guest declined
+   * (another tool was running) and the service froze it anyway. Undefined is
+   * unknown — no lookup was needed or it failed — and changes nothing.
+   */
+  readonly suspendCheckpointConfirmed?: boolean;
 }
 
 export type MicrovmLifecycleDecision = (
@@ -119,6 +126,11 @@ function decideAwaitingApproval(ctx: GateContext): MicrovmLifecycleDecision {
   if (sleeping) {
     if (!sameGate || snapshot.intent?.action !== 'suspend' || snapshot.intent.deadline_ms !== approval.deadlineMs) {
       return wake('unintended-suspension');
+    }
+    // A declined suspend still freezes the VM: wake it, or the tool that made
+    // the guest decline stays frozen until the gate is answered.
+    if (input.substrate.microvmState === 'SUSPENDED' && input.suspendCheckpointConfirmed === false) {
+      return wake('suspend-declined');
     }
     return { action: 'wait', reason: 'intentionally-suspended', nextPollInMs: Math.min(nextPollInMs, wakeAt - nowMs) };
   }

@@ -21,12 +21,13 @@ const mockSend = jest.fn();
 jest.mock('../../../../src/handlers/shared/ua', () => ({ makeDocClient: () => ({ send: mockSend }) }));
 process.env.TASK_TABLE_NAME = 'LifecycleTasks';
 process.env.TASK_APPROVALS_TABLE_NAME = 'LifecycleApprovals';
+process.env.TASK_EVENTS_TABLE_NAME = 'LifecycleEvents';
 
-import { GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import sharedConstants from '../../../../../contracts/constants.json';
 import type { MicrovmObservedState } from '../../../../src/handlers/shared/compute-strategy';
 import {
-  readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot,
+  readMicrovmLifecycleSnapshot, readMicrovmSuspendCheckpoint, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot,
   type MicrovmLifecycleIntent,
 } from '../../../../src/handlers/shared/microvm/lifecycle';
 import { decideMicrovmLifecycle, type MicrovmLifecyclePolicyInput } from '../../../../src/handlers/shared/microvm/lifecycle-policy';
@@ -157,6 +158,17 @@ describe('MicroVM lifecycle policy', () => {
     expect(policy('RUNNING', { nowMs: DEADLINE - 80_000 }))
       .toMatchObject({ action: 'wait', reason: 'short-window', nextPollInMs: 20_000 });
     expect(policy('RUNNING', { nowMs: DEADLINE - 90_000 })).toMatchObject({ action: 'suspend' });
+  });
+  test('a declined suspend wakes a SUSPENDED worker; a confirmed or unknown checkpoint keeps it asleep', () => {
+    const asleep = { snapshot: snapshot({ intent: intent() }) };
+    expect(policy('SUSPENDED', { ...asleep, suspendCheckpointConfirmed: false }))
+      .toMatchObject({ action: 'resume', requestReady: true, reason: 'suspend-declined' });
+    expect(policy('SUSPENDED', { ...asleep, suspendCheckpointConfirmed: true }))
+      .toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
+    expect(policy('SUSPENDED', asleep)).toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
+    // The hook may still be answering while SUSPENDING: no verdict yet.
+    expect(policy('SUSPENDING', { ...asleep, suspendCheckpointConfirmed: false }))
+      .toMatchObject({ action: 'wait', reason: 'intentionally-suspended' });
   });
   test('intended sleep waits until wake margin even with an oversized poll interval', () => {
     expect(policy('SUSPENDED', { snapshot: snapshot({ intent: intent() }), pollIntervalMs: 900_000, suspendEnabled: false }))
@@ -338,5 +350,36 @@ describe('MicroVM lifecycle store', () => {
   test('definite permission failure with no committed intent remains an error', async () => {
     mockSend.mockRejectedValueOnce(new Error('access denied')).mockResolvedValueOnce({ Item: task }).mockResolvedValueOnce({ Item: row });
     await expect(saveMicrovmLifecycleIntent(snapshot(), 'suspend', NOW)).rejects.toThrow('access denied');
+  });
+});
+
+describe('readMicrovmSuspendCheckpoint', () => {
+  test('finds this generation\'s checkpoint among the newest events, consistently read', async () => {
+    mockSend.mockResolvedValueOnce({ Items: [{ event_type: 'agent_milestone' }] });
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(true);
+    const [command] = mockSend.mock.calls[0];
+    expect(command).toBeInstanceOf(QueryCommand);
+    expect(command.input).toMatchObject({
+      TableName: 'LifecycleEvents',
+      ScanIndexForward: false,
+      ConsistentRead: true,
+      ExpressionAttributeValues: {
+        ':task': 'task', ':milestone': 'microvm_suspend_checkpoint', ':generation': 'generation-one',
+      },
+    });
+  });
+  test('pages back a bounded distance and reports a missing checkpoint as declined', async () => {
+    mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { task_id: 'task', event_id: 'x' } });
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(false);
+    expect(mockSend).toHaveBeenCalledTimes(4);
+  });
+  test('stops at the start of the stream', async () => {
+    mockSend.mockResolvedValueOnce({ Items: [] });
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(false);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+  });
+  test('a failed read is unknown, not a decline', async () => {
+    mockSend.mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ThrottlingException' }));
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBeUndefined();
   });
 });
