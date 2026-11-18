@@ -41,6 +41,10 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
   ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
+  // The two core formatting rules that stay on beside their @stylistic forks: what the
+  // forks leave out.
+  ['src/a.ts', 'try { run(); } catch(err) { report(err); }', ['keyword-spacing']],
+  ['src/a.ts', 'export const [,second] = pair;', ['comma-spacing']],
 ];
 
 /**

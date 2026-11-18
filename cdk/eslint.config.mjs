@@ -146,7 +146,7 @@ export default [
       }],
       '@stylistic/quote-props': ['error', 'consistent-as-needed'],
       '@stylistic/key-spacing': ['error'],
-      '@stylistic/no-multiple-empty-lines': ['error'],
+      '@stylistic/no-multiple-empty-lines': ['error', { max: 1 }],
       '@stylistic/no-trailing-spaces': ['error'],
       '@stylistic/no-extra-semi': ['error'],
       '@stylistic/spaced-comment': ['error', 'always', {
@@ -173,37 +173,18 @@ export default [
       // must not grow. When a directive stops applying, as when its function comes to
       // fit, the eslint task (--fix) deletes it and eslint:check reports it as unused.
       'complexity': ['error', { max: 40 }],
-      'quotes': ['error', 'single', { avoidEscape: true }],
+      // These two core formatting rules stay on beside their @stylistic forks, which each
+      // leave one check out: the space in `catch (`, and the space after the comma of an
+      // array hole (`[, second]`).
       'comma-spacing': ['error', { before: false, after: true }],
-      'no-multi-spaces': ['error', { ignoreEOLComments: false }],
-      'array-bracket-spacing': ['error', 'never'],
-      'array-bracket-newline': ['error', 'consistent'],
-      'object-curly-spacing': ['error', 'always'],
-      'object-curly-newline': ['error', { multiline: true, consistent: true }],
-      'object-property-newline': ['error', { allowAllPropertiesOnSameLine: true }],
       'keyword-spacing': ['error'],
-      'brace-style': ['error', '1tbs', { allowSingleLine: true }],
-      'space-before-blocks': 'error',
       'eol-last': ['error', 'always'],
       'no-duplicate-imports': ['error'],
-      'key-spacing': ['error'],
-      'semi': ['error', 'always'],
-      'quote-props': ['error', 'consistent-as-needed'],
-      'no-multiple-empty-lines': ['error', { max: 1 }],
-      'max-len': ['error', {
-        code: 150,
-        ignoreUrls: true,
-        ignoreStrings: true,
-        ignoreTemplateLiterals: true,
-        ignoreComments: true,
-        ignoreRegExpLiterals: true,
-      }],
       'no-console': ['error'],
       // A coverage-ignore comment takes code out of what the coverage floors measure:
       // test the code, or leave it counted as uncovered. These are the spellings that
       // jest (v8-to-istanbul) and vitest honour.
       'no-warning-comments': ['error', { terms: ['istanbul ignore', 'c8 ignore', 'v8 ignore', 'node:coverage'], location: 'anywhere' }],
-      'no-trailing-spaces': ['error'],
       'no-restricted-syntax': ['error', NO_MD5],
       // A holder that a closure reads before its one assignment cannot become a const
       // (the Lazy ARN holders in stacks/agent.ts).
@@ -400,7 +381,6 @@ export default [
       // Table-driven assertions and long expected strings read better on one line
       // than wrapped.
       '@stylistic/max-len': 'off',
-      'max-len': 'off',
       // NOTE: `no-shadow` is deliberately NOT relaxed here. It is
       // correctness-adjacent in test code — a shadowed `row` or `mock` inside a
       // nested describe is a common way to assert against the wrong fixture and

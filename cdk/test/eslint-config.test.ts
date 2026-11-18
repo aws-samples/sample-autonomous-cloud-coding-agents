@@ -18,6 +18,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 /**
@@ -51,6 +52,10 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
   ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
+  // The two core formatting rules that stay on beside their @stylistic forks: what the
+  // forks leave out.
+  ['src/a.ts', 'try { run(); } catch(err) { report(err); }', ['keyword-spacing']],
+  ['src/a.ts', 'export const [,second] = pair;', ['comma-spacing']],
 ];
 
 /**
@@ -84,3 +89,18 @@ test('eslint.config.mjs reports each snippet with exactly the rules listed', () 
   const reported = JSON.parse(stdout) as string[][];
   expect(CASES.map(([file, code], index) => [file, code, reported[index]])).toEqual(CASES);
 }, 60_000);
+
+/**
+ * ESLint looks for an eslint.config.* file from the directory of each file it lints. One in
+ * a subdirectory would replace the package's configuration for the files below it while
+ * lint stays green, so the eslint tasks name the file: --config applies it to every file.
+ */
+test('the eslint tasks name eslint.config.mjs', () => {
+  const commands = fs.readFileSync(path.resolve(__dirname, '..', 'mise.toml'), 'utf-8')
+    .split('\n')
+    .filter((line) => line.includes('/.bin/eslint '));
+  expect(commands).toHaveLength(2);
+  for (const command of commands) {
+    expect(command).toContain('/.bin/eslint --config eslint.config.mjs ');
+  }
+});
