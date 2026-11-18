@@ -87,6 +87,8 @@ class TestIsTransientCmdFailure:
         assert is_transient_cmd_failure("fatal: Could not resolve host: github.com")
         assert is_transient_cmd_failure("The requested URL returned error: 503")
         assert is_transient_cmd_failure("npm ERR! 429 Too Many Requests")
+        # git prints a rate limit as the status code alone (#801: the push preflight).
+        assert is_transient_cmd_failure("The requested URL returned error: 429")
         assert is_transient_cmd_failure("getaddrinfo EAI_AGAIN registry.npmjs.org")
 
     def test_permanent_failures_are_not_transient(self):

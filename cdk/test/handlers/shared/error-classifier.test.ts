@@ -89,35 +89,45 @@ describe('classifyError', () => {
     });
 
     // The errors agent/src/repo.py raises (PushCapabilityError) when GitHub refuses
-    // the dry-run push, in the form the pipeline persists them: prefixed with the
-    // exception's type name.
+    // the dry-run push, verbatim as the pipeline persists them (prefixed with the
+    // exception's type name), printed from the agent code for #801's test cases.
     test.each([
-      ['remote denial', 'remote: Permission to owner/repo.git denied to someone.'],
-      ['HTTP 403', 'fatal: unable to access \'https://github.com/owner/repo.git/\': The requested URL returned error: 403'],
-    ])('classifies the agent push preflight refusal quoting a %s line as insufficient token scopes (#801)', (_label, gitLine) => {
-      // The git line embedded in it ("denied", "403") must not move it to another title.
-      const result = classifyError(
-        'PushCapabilityError: Token cannot push to owner/repo: the classic personal access '
-        + `token can read the repository, but GitHub refused it write access (${gitLine}). `
-        + 'To fix it, give the token the `repo` scope. The task stopped before the agent ran, '
-        + 'so no work was lost. Token types and the permissions they need: agent/README.md, '
-        + 'GitHub PAT — Minimal Permissions.',
-      );
-      expect(result!.category).toBe(ErrorCategory.AUTH);
-      expect(result!.title).toBe('Insufficient GitHub token scopes');
-      expect(result!.retryable).toBe(false);
-    });
-
-    test('classifies the agent push preflight credential rejection as an auth blocker (#801)', () => {
-      const result = classifyError(
-        'PushCapabilityError: BLOCKED[auth_failure]: GitHub rejected the token when asked to '
-        + 'push (fatal: Authentication failed for \'https://github.com/owner/repo.git/\'): it is '
-        + 'invalid, expired or revoked. Replace the GitHub token secret, then resubmit. The task '
-        + 'stopped before the agent ran, so no work was lost. (resource: owner/repo)',
-      );
-      expect(result!.category).toBe(ErrorCategory.BLOCKED);
-      expect(result!.title).toBe('Blocked: authentication rejected');
-      expect(result!.description).toContain('owner/repo');
+      [
+        'a token without write access',
+        'PushCapabilityError: Token cannot push to owner/repo: GitHub refused the classic personal access token write access (remote: Permission to owner/repo.git denied to <token user>). To fix it, give the token the `repo` scope. The task stopped before the agent ran, so no work was lost. Token types and the permissions they need: agent/README.md, GitHub PAT — Minimal Permissions.',
+        ErrorCategory.AUTH,
+        'Insufficient GitHub token scopes',
+      ],
+      [
+        'a rejected credential',
+        'PushCapabilityError: BLOCKED[auth_failure]: GitHub did not accept a token for the push (remote: Invalid username or token. Password authentication is not supported.): it is missing, invalid, expired or revoked. Replace the GitHub token secret, then resubmit. The task stopped before the agent ran, so no work was lost. (resource: owner/repo)',
+        ErrorCategory.BLOCKED,
+        'Blocked: authentication rejected',
+      ],
+      [
+        'an archived repository',
+        'PushCapabilityError: Repository owner/repo is archived on GitHub, so it is read-only (remote: This repository was archived so it is read-only.). Unarchive it or target another repository. The task stopped before the agent ran, so no work was lost.',
+        ErrorCategory.CONFIG,
+        'Repository is archived',
+      ],
+      [
+        'SAML SSO enforcement',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: it enforces SAML single sign-on and the token is not authorized for it. To fix it, authorize the classic token for the organization (GitHub > Settings > Developer settings > Personal access tokens > Tokens (classic) > Configure SSO) (remote: The 'acme' organization has enabled or enforced SAML SSO.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+      [
+        'an IP allow list',
+        "PushCapabilityError: GitHub organization policy blocks pushes to owner/repo: its IP allow list does not include the agent's address. To fix it, add the agent's egress IP addresses to the organization's IP allow list (remote: Although you appear to have the correct authorization credentials, the `acme` organization has an IP allow list enabled, and your IP address is not permitted to access this resource.). The task stopped before the agent ran, so no work was lost.",
+        ErrorCategory.AUTH,
+        'GitHub organization policy blocks the token',
+      ],
+    ])('classifies the agent push preflight refusal for %s (#801)', (_label, message, category, title) => {
+      // The git line quoted in each ("denied", "403", "credentials") must not move it
+      // to another title, and none gets the scope remedy unless scopes are the cause.
+      const result = classifyError(message);
+      expect(result!.category).toBe(category);
+      expect(result!.title).toBe(title);
       expect(result!.retryable).toBe(false);
     });
 

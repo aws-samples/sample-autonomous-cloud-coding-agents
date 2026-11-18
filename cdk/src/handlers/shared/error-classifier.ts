@@ -126,6 +126,31 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    // The agent's push preflight (agent/src/repo.py): SAML SSO or an IP allow list
+    // blocks the token, which scopes would not fix.
+    pattern: /GitHub organization policy blocks pushes to/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'GitHub organization policy blocks the token',
+      description: 'The organization that owns the repository enforces SAML single sign-on or an IP allow list, and the GitHub token does not satisfy it.',
+      remedy: 'Do what the error detail names: authorize the token for the organization\'s SAML single sign-on, or add the agent\'s egress IP addresses to the organization\'s IP allow list. Then resubmit.',
+      retryable: false,
+      errorClass: ErrorClass.SERVICE,
+    },
+  },
+  {
+    // The agent's push preflight: no token change makes an archived repository writable.
+    pattern: /is archived on GitHub, so it is read-only/i,
+    classification: {
+      category: ErrorCategory.CONFIG,
+      title: 'Repository is archived',
+      description: 'The repository is archived on GitHub, so nothing can be pushed to it.',
+      remedy: 'Unarchive the repository on GitHub, or submit the task against another repository.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,

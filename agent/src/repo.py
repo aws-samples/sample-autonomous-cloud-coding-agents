@@ -1,6 +1,7 @@
 """Repository setup: clone, branch, mise install, initial build."""
 
 import os
+import re
 import subprocess
 from typing import Any, NamedTuple, NoReturn
 
@@ -63,7 +64,7 @@ class DependencyUnreachableError(RuntimeError):
 
 
 def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -> NoReturn:
-    """Handle a failed clone/fetch after bounded retries.
+    """Handle a failed clone, fetch or push preflight after bounded retries.
 
     Three-way classification, in priority order:
 
@@ -76,10 +77,11 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
        reaches for the identical stderr (they must not disagree).
     2. **Transient** — a DNS/registry blip that survived the retries with no
        nameable host: report a retryable ``dependency_unreachable`` blocker.
-    3. **Permanent** — repo not found, auth denied: re-raise a plain
-       ``RuntimeError`` carrying the redacted git stderr, preserving the original
-       ``check=True`` behavior so the classifier routes it to the right (auth /
-       not-found) remedy rather than mislabeling it retryable.
+    3. **Permanent** — repo not found, auth denied, any other git error: re-raise
+       a plain ``RuntimeError`` carrying the redacted git stderr, preserving the
+       original ``check=True`` behavior so it is never mislabeled retryable. The
+       classifier names an auth or not-found remedy when the stderr matches one of
+       its patterns, and "Unexpected error" otherwise.
 
     Never widens creds/egress — it only reports."""
     # (1) Egress denial takes priority over the transient set: several signatures
@@ -143,19 +145,27 @@ def _fail_setup_command(label: str, resource: str, stderr: str, progress: Any) -
 
 
 class PushCapabilityError(RuntimeError):
-    """Raised when GitHub refuses the GitHub token a push to the repository.
+    """Raised when GitHub refuses the push the preflight tries.
 
     The message is the contract with the CDK error classifier
     (``cdk/src/handlers/shared/error-classifier.ts``), which matches it anywhere in
-    the persisted error (the pipeline prefixes the type name):
+    the persisted error (the pipeline prefixes the type name). Per ``cause``:
 
-    - a token that lacks write access: contains ``Token cannot push to <repo>``,
-      classified "Insufficient GitHub token scopes", non-retryable. The orchestrator's
-      preflight uses the same phrase, but its message also carries the
-      ``INSUFFICIENT_GITHUB_REPO_PERMISSIONS`` code, which matches first and is titled
-      "Insufficient GitHub permissions": same category and verdict, another title.
-    - a credential GitHub rejects outright: a ``BLOCKED[auth_failure]`` reason.
-    - an archived repository: neither, since no token change fixes it."""
+    - ``no_write``: contains ``Token cannot push to <repo>``, classified
+      "Insufficient GitHub token scopes". The orchestrator's preflight uses the same
+      phrase, but its message also carries the ``INSUFFICIENT_GITHUB_REPO_PERMISSIONS``
+      code, which matches first and is titled "Insufficient GitHub permissions": same
+      category and verdict, another title.
+    - ``credential_rejected``: a ``BLOCKED[auth_failure]`` reason.
+    - ``org_policy``: contains ``GitHub organization policy blocks pushes to``.
+    - ``archived``: contains ``is archived on GitHub, so it is read-only``.
+
+    ``cause`` also picks the live ``agent_blocked`` event, so it cannot disagree
+    with the message."""
+
+    def __init__(self, message: str, *, cause: str) -> None:
+        super().__init__(message)
+        self.cause = cause
 
 
 # Ref the push preflight dry-runs to. A dry run sends no ref update, so the remote
@@ -164,9 +174,9 @@ class PushCapabilityError(RuntimeError):
 # token.
 _PUSH_PREFLIGHT_REF = "refs/heads/bgagent-push-preflight"
 
-# GitHub refuses the push service to a token without write access. GitHub can answer
-# 404 "Repository not found" instead of 403; the clone has just read this repository
-# with the same credential, so here a 404 is a refused push, not a missing repository.
+# GitHub refuses the push service to a token without write access, with 403 or with
+# 404 "Repository not found". The clone has just fetched this repository, so it
+# exists: here a 404 is a refused push, not a missing repository.
 _PUSH_REFUSED_SIGNATURES: tuple[str, ...] = (
     "permission to",  # remote: Permission to <owner>/<repo>.git denied to <user>.
     "write access to repository not granted",
@@ -175,39 +185,51 @@ _PUSH_REFUSED_SIGNATURES: tuple[str, ...] = (
     "repository not found",
 )
 
-# GitHub does not accept the credential at all: invalid, expired or revoked. A
-# public repository clones without one (git sends credentials only when challenged),
-# so such a token gets this far.
+# GitHub did not accept a credential for the push, or none was sent. An invalid
+# token fails earlier (the orchestrator's preflight and ``gh repo clone`` both send
+# it), so here it was revoked or expired after the clone, or the helper supplied none.
 _CREDENTIAL_REJECTED_SIGNATURES: tuple[str, ...] = (
     "the requested url returned error: 401",
     "authentication failed",
     "invalid username or password",
+    "invalid username or token",
+    "could not read username",
+    "terminal prompts disabled",
 )
 
-# Refusals whose cause is the repository or the organization, not the token's
-# permissions, each with its remedy. Checked before the generic refusal: GitHub sends
-# them with a 403 too.
+# Refusals caused by an organization policy, not by the token's permissions: GitHub
+# sends them with a 403 too. Whole phrases from GitHub's ``remote:`` lines, which a
+# user, organization or repository name (one word) cannot contain.
 _ORG_POLICY_REFUSALS: tuple[tuple[str, str], ...] = (
     (
-        "saml",
+        "saml sso",
         (
-            "the organization enforces SAML single sign-on and the token is not authorized "
-            "for it. To fix it, authorize the token for the organization (GitHub > Settings "
-            "> Personal access tokens > Configure SSO)"
+            "it enforces SAML single sign-on and the token is not authorized for it. To fix "
+            "it, authorize the classic token for the organization (GitHub > Settings > "
+            "Developer settings > Personal access tokens > Tokens (classic) > Configure SSO)"
         ),
     ),
     (
         "ip allow list",
         (
-            "the organization's IP allow list does not include the agent's address. To fix "
-            "it, add the agent's egress IP addresses to the organization's IP allow list"
+            "its IP allow list does not include the agent's address. To fix it, add the "
+            "agent's egress IP addresses to the organization's IP allow list"
         ),
     ),
 )
+_ARCHIVED_SIGNATURE = "this repository was archived so it is read-only"
+
+# The live event for each refusal cause: (blocker kind, detail).
+_REFUSAL_EVENTS: dict[str, tuple[str, str]] = {
+    "no_write": ("auth_failure", "GitHub refused the token a push to {repo}"),
+    "credential_rejected": ("auth_failure", "GitHub did not accept a token for {repo}"),
+    "org_policy": ("auth_failure", "An organization policy blocks the token for {repo}"),
+    "archived": ("unknown_environmental", "{repo} is archived on GitHub (read-only)"),
+}
 
 
 class _TokenRemedy(NamedTuple):
-    kind: str  # the token type, as the error names it
+    label: str  # the token type, as the error names it
     remedy: str
 
 
@@ -219,7 +241,8 @@ def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
     if token.startswith("github_pat_"):
         return _TokenRemedy(
             "fine-grained personal access token",
-            f"give the token the Contents permission with Read and write access on {repo_url}",
+            f"include {repo_url} in the token's repository access and give it the "
+            "Contents permission with Read and write access",
         )
     if token.startswith("ghp_"):
         return _TokenRemedy("classic personal access token", "give the token the `repo` scope")
@@ -231,69 +254,82 @@ def _token_remedy(token: str, repo_url: str) -> _TokenRemedy:
         )
     return _TokenRemedy(
         "GitHub token",
-        "use a fine-grained personal access token with the Contents permission with "
-        f"Read and write access on {repo_url}, or a classic one with the `repo` scope",
+        f"use a fine-grained personal access token with access to {repo_url} and the "
+        "Contents permission with Read and write access, or a classic one with the "
+        "`repo` scope",
     )
 
 
-def _matching_line(stderr: str, signatures: tuple[str, ...]) -> str:
-    """The first stderr line naming one of *signatures*, redacted: the line that
-    says why, not a ``warning:`` git may print before it."""
+def _quoted_line(lines: list[str], signatures: tuple[str, ...]) -> str:
+    """The first line naming one of *signatures*, as the error quotes it: the line
+    that says why, not a ``warning:`` before it. Redacted, and without the login
+    GitHub names in ``denied to <user>``."""
     from shell import redact_secrets
 
-    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
     line = next((ln for ln in lines if any(s in ln.lower() for s in signatures)), "")
-    return redact_secrets((line or (lines[0] if lines else ""))[:200])
+    line = re.sub(r"(?i)(denied to )\S+", r"\1<token user>", line or (lines[0] if lines else ""))
+    return redact_secrets(line[:200])
 
 
 def _push_refusal(config: TaskConfig, stderr: str) -> PushCapabilityError | None:
-    """Classify a refused dry-run push; ``None`` when GitHub did not refuse it."""
+    """Classify a failed dry-run push; ``None`` when GitHub did not refuse it."""
     from progress_writer import format_blocker_reason
+    from shell import is_transient_cmd_failure
 
+    # A failure that outlasted the retries or a blocked host is never a refusal, so
+    # a policy phrase can never make it permanent; _fail_setup_command takes it.
+    if is_transient_cmd_failure(stderr):
+        return None
+    lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+    remote = " ".join(ln.lower() for ln in lines if ln.lower().startswith("remote:"))
     low = stderr.lower()
     repo_url = config.repo_url
     no_loss = "The task stopped before the agent ran, so no work was lost."
+    if _ARCHIVED_SIGNATURE in remote:
+        return PushCapabilityError(
+            f"Repository {repo_url} is archived on GitHub, so it is read-only "
+            f"({_quoted_line(lines, (_ARCHIVED_SIGNATURE,))}). Unarchive it or target "
+            f"another repository. {no_loss}",
+            cause="archived",
+        )
+    for signature, cause in _ORG_POLICY_REFUSALS:
+        if signature in remote:
+            return PushCapabilityError(
+                f"GitHub organization policy blocks pushes to {repo_url}: {cause} "
+                f"({_quoted_line(lines, (signature,))}). {no_loss}",
+                cause="org_policy",
+            )
     if any(sig in low for sig in _CREDENTIAL_REJECTED_SIGNATURES):
-        line = _matching_line(stderr, _CREDENTIAL_REJECTED_SIGNATURES)
+        line = _quoted_line(lines, _CREDENTIAL_REJECTED_SIGNATURES)
         return PushCapabilityError(
             format_blocker_reason(
                 "auth_failure",
-                f"GitHub rejected the token when asked to push ({line}): it is invalid, "
-                f"expired or revoked. Replace the GitHub token secret, then resubmit. {no_loss}",
+                f"GitHub did not accept a token for the push ({line}): it is missing, "
+                f"invalid, expired or revoked. Replace the GitHub token secret, then "
+                f"resubmit. {no_loss}",
                 repo_url,
-            )
+            ),
+            cause="credential_rejected",
         )
-    if "archived" in low:
-        line = _matching_line(stderr, ("archived",))
-        return PushCapabilityError(
-            f"Cannot push to {repo_url}: GitHub reports the repository is archived, so it "
-            f"is read-only ({line}). Unarchive it or target another repository. {no_loss}"
-        )
-    for signature, cause in _ORG_POLICY_REFUSALS:
-        if signature in low:
-            line = _matching_line(stderr, (signature,))
-            return PushCapabilityError(
-                f"Token cannot push to {repo_url}: {cause} ({line}). {no_loss}"
-            )
     if any(sig in low for sig in _PUSH_REFUSED_SIGNATURES):
-        line = _matching_line(stderr, _PUSH_REFUSED_SIGNATURES)
         token_type, remedy = _token_remedy(config.github_token, repo_url)
         return PushCapabilityError(
-            f"Token cannot push to {repo_url}: the {token_type} can read the "
-            f"repository, but GitHub refused it write access ({line}). To fix it, "
+            f"Token cannot push to {repo_url}: GitHub refused the {token_type} write "
+            f"access ({_quoted_line(lines, _PUSH_REFUSED_SIGNATURES)}). To fix it, "
             f"{remedy}. {no_loss} Token types and the permissions they need: "
-            "agent/README.md, GitHub PAT — Minimal Permissions."
+            "agent/README.md, GitHub PAT — Minimal Permissions.",
+            cause="no_write",
         )
     return None
 
 
 def _preflight_probe_commit(repo_dir: str) -> str:
-    """A commit to dry-run push that every clone has, an empty repository's too.
+    """Make a commit to dry-run push, in any clone, an empty repository's too.
 
     ``HEAD`` names no commit in a clone of an empty repository, so pushing it fails
-    before git contacts the remote. This commit, of the empty tree, exists in any
-    clone; making it writes one unreferenced object and leaves ``HEAD``, the index
-    and the working tree alone."""
+    before git contacts the remote. This commit's tree is the empty tree, which git
+    knows without storing it, so making the commit writes one unreferenced object and
+    leaves ``HEAD``, the index and the working tree alone."""
     tree = run_cmd(
         ["git", "hash-object", "-t", "tree", "/dev/null"],
         label="push-preflight-tree",
@@ -318,6 +354,56 @@ def _preflight_probe_commit(repo_dir: str) -> str:
 
 # Seconds one dry-run attempt may take. It only lists the remote's refs.
 _PUSH_PREFLIGHT_TIMEOUT_S = 120
+
+
+def _fail_push_preflight_timeout(
+    config: TaskConfig, exc: subprocess.TimeoutExpired, progress: Any
+) -> NoReturn:
+    """Report a dry run GitHub did not answer in time: retryable, not a build timeout.
+
+    ``run_cmd_with_backoff`` does not retry a timeout, so the reason says one attempt
+    rather than claiming retries."""
+    from hooks import _record_blocker_reason, _try_progress
+    from progress_writer import format_blocker_reason
+    from shell import redact_secrets
+
+    output = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+    if output:
+        log("WARN", f"push-preflight output before the timeout: {redact_secrets(output[-500:])}")
+    detail = f"push-preflight got no answer from GitHub within {_PUSH_PREFLIGHT_TIMEOUT_S}s"
+    _record_blocker_reason("dependency_unreachable", detail, config.repo_url)
+    if progress is not None:
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind="dependency_unreachable",
+            detail=detail,
+            remediation_hint="Check GitHub's status and the agent VPC's reachability, then retry.",
+            retryable=True,
+            resource=config.repo_url,
+        )
+    raise DependencyUnreachableError(
+        format_blocker_reason("dependency_unreachable", detail, config.repo_url)
+    )
+
+
+def _report_refusal(refusal: PushCapabilityError, config: TaskConfig, progress: Any) -> None:
+    """Emit the live ``agent_blocked`` event that matches *refusal*'s cause."""
+    from hooks import _record_blocker_reason, _try_progress
+
+    kind, detail = _REFUSAL_EVENTS[refusal.cause]
+    detail = detail.format(repo=config.repo_url)
+    _record_blocker_reason(kind, detail, config.repo_url)
+    if progress is not None:
+        _try_progress(
+            progress,
+            "write_agent_blocked",
+            kind=kind,
+            detail=detail,
+            remediation_hint="The task error names the cause and the fix; resubmit after it.",
+            retryable=False,
+            resource=config.repo_url,
+        )
 
 
 def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any) -> None:
@@ -355,7 +441,8 @@ def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any)
                 "push",
                 "--dry-run",
                 # A dry run still runs the pre-push hook. Skip it: the probe tests the
-                # credential, and no hook a hook manager or core.hooksPath set up runs.
+                # credential, and no hook from a global core.hooksPath or a git
+                # template may block or slow it.
                 "--no-verify",
                 "origin",
                 f"+{probe}:{_PUSH_PREFLIGHT_REF}",
@@ -365,35 +452,15 @@ def _preflight_push_capability(config: TaskConfig, repo_dir: str, progress: Any)
             timeout=_PUSH_PREFLIGHT_TIMEOUT_S,
             on_retry=_clone_backoff_reporter(progress, "push-preflight"),
         )
-    except subprocess.TimeoutExpired:
-        # Unhandled, the timeout would surface as a build timeout. It is GitHub or the
-        # network that did not answer: report it as the retryable transient it is.
-        _fail_setup_command(
-            "push-preflight",
-            config.repo_url,
-            f"operation timed out after {_PUSH_PREFLIGHT_TIMEOUT_S}s",
-            progress,
-        )
+    except subprocess.TimeoutExpired as exc:
+        # Unhandled, the timeout would be classified as a build timeout.
+        _fail_push_preflight_timeout(config, exc, progress)
     if result.returncode == 0:
         return
     stderr = result.stderr or ""
     refusal = _push_refusal(config, stderr)
     if refusal is not None:
-        if progress is not None:
-            from hooks import _try_progress
-
-            _try_progress(
-                progress,
-                "write_agent_blocked",
-                kind="auth_failure",
-                detail=f"GitHub refused the token a push to {config.repo_url}",
-                remediation_hint=(
-                    "See the task error for the cause and the fix, then resubmit. The "
-                    "agent never widens its own credentials."
-                ),
-                retryable=False,
-                resource=config.repo_url,
-            )
+        _report_refusal(refusal, config, progress)
         raise refusal
     # Not a refusal: a transient failure that outlasted the retries, an egress block,
     # or another git error. The final push goes through the same remote, credential

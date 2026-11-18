@@ -61,10 +61,10 @@ A token can read a repository and still be refused every push. A classic PAT wit
 | GitHub's answer | Task error |
 |-----------------|------------|
 | The token may not write | `Token cannot push to <repo>`, naming the token type and the permission to add |
-| The token is invalid, expired or revoked | `BLOCKED[auth_failure]`: replace the token secret |
-| The repository is archived | `Cannot push to <repo>`: unarchive it or target another repository |
-| The organization enforces SAML single sign-on, or an IP allow list | `Token cannot push to <repo>`, naming that cause |
-| No answer (GitHub or the network down, after retries) | `BLOCKED[dependency_unreachable]`, retryable |
+| No credential accepted (the token was revoked or expired after the clone; an invalid one already fails at `preflight_failed`) | `BLOCKED[auth_failure]`: replace the token secret |
+| The repository is archived | `Repository <repo> is archived on GitHub`: unarchive it or target another repository |
+| The organization enforces SAML single sign-on, or an IP allow list | `GitHub organization policy blocks pushes to <repo>`, naming the policy and its fix |
+| No answer: GitHub or the network down after retries, or no reply within 120 s | `BLOCKED[dependency_unreachable]`, retryable |
 
 The dry run sends no ref update, so the remote is not changed. It checks write access only: branch rules and push protection are evaluated on a real push. Read-only workflows (`coding/pr-review-v1`) never push and skip the check.
 

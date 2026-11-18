@@ -5,7 +5,7 @@
 [[IgnoredVulns]]
 id = "GHSA-fc5q-39xc-vjpf"
 ignoreUntil = 2026-12-16
-reason = "picomatch regular-expression denial of service on a crafted glob pattern (every release through 4.0.7, the latest; the advisory was updated on 2026-11-17, and on 2026-11-18 no fixed release exists). The locked copies, 2.3.2, 4.0.5 and 4.0.7, belong to build, test and lint tooling only (jest, vitest, vite, astro, knip, typescript-eslint, the ESLint stylistic plugin, the docs link validator); no runtime dependency of cdk, cli or web reaches picomatch, so no Lambda bundle, the CLI or the console ships it. They match only patterns from this repository's own configuration, never a pattern from a request. #1052 accepts the same advisory."
+reason = "picomatch regular-expression denial of service on a crafted glob pattern (every release through 4.0.7, the latest; the advisory was updated on 2026-11-17, and on 2026-11-18 no fixed release exists). The locked copies, 2.3.2, 4.0.5 and 4.0.7, belong to build, test and lint tooling only (jest, vitest, vite, astro, knip, typescript-eslint, the ESLint stylistic plugin, the docs link validator); no runtime dependency of cdk, cli or web reaches picomatch, so no Lambda bundle, the CLI or the console ships it. The docs site lists it among its production dependencies (through astro), but builds to static files that ship no matcher. They match only patterns from this repository's own configuration, never a pattern from a request. This entry covers yarn.lock only: the agent image's global claude-code npm tree carries its own copy (agent/Dockerfile updates it with npm update), which the image scan (trivy --ignore-unfixed) will report once a fixed release exists. #1052 accepts the same advisory."
 
 [[IgnoredVulns]]
 id = "GHSA-g3hv-75wg-m249"
