@@ -261,6 +261,13 @@ fail_under = 80
 precision = 2
 show_missing = true
 skip_covered = true
+# These two lists replace coverage.py's defaults, which honour `# pragma: no cover` and
+# `# pragma: no branch`: one such comment took a whole function or class out of what
+# fail_under measures. No comment does that now. What stays out is code that cannot
+# run: the imports under `if TYPE_CHECKING:` and a `...` that is the body of a stub.
+# Each pattern matches a whole line, so neither can be appended to a line as a comment.
+exclude_lines = ["^ *if TYPE_CHECKING:$", "^ *[.][.][.]$"]
+partial_branches = []
 
 [tool.ty.rules]
 # asyncio.get_event_loop_policy() is deprecated in 3.14+; still valid on 3.13.

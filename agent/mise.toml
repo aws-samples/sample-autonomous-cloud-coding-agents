@@ -112,24 +112,25 @@ run = [
 description = "Stop DynamoDB Local (all data is ephemeral)"
 run = "docker compose down"
 
+# The two scans switch the pager of AWS CLI v2 off with an empty AWS_PAGER, not with
+# --no-cli-pager: AWS CLI v1 rejects that flag, and the tasks then reported no events.
+
 [tasks."local:events"]
 description = "Query progress events from DynamoDB Local"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output table 2>/dev/null || echo "No events found (is DynamoDB Local running?)"
 """
 
 [tasks."local:events:json"]
 description = "Query progress events from DynamoDB Local (JSON)"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output json 2>/dev/null || echo "{}"
 """
