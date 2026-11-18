@@ -356,7 +356,7 @@ describe('MicroVM lifecycle store', () => {
 describe('readMicrovmSuspendCheckpoint', () => {
   test('finds this generation\'s checkpoint among the newest events, consistently read', async () => {
     mockSend.mockResolvedValueOnce({ Items: [{ event_type: 'agent_milestone' }] });
-    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(true);
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe('found');
     const [command] = mockSend.mock.calls[0];
     expect(command).toBeInstanceOf(QueryCommand);
     expect(command.input).toMatchObject({
@@ -370,16 +370,16 @@ describe('readMicrovmSuspendCheckpoint', () => {
   });
   test('pages back a bounded distance and reports a missing checkpoint as declined', async () => {
     mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { task_id: 'task', event_id: 'x' } });
-    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(false);
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe('missing');
     expect(mockSend).toHaveBeenCalledTimes(4);
   });
   test('stops at the start of the stream', async () => {
     mockSend.mockResolvedValueOnce({ Items: [] });
-    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe(false);
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe('missing');
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
   test('a failed read is unknown, not a decline', async () => {
     mockSend.mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ThrottlingException' }));
-    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBeUndefined();
+    expect(await readMicrovmSuspendCheckpoint('task', 'generation-one')).toBe('unavailable');
   });
 });

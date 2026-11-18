@@ -324,11 +324,13 @@ const CHECKPOINT_MAX_PAGES = 4;
  * checkpoint for its intent declined and must be woken. A frozen guest writes
  * nothing afterwards, so its checkpoint sits among the newest events.
  *
- * Returns undefined when the read fails: unknown is not evidence either way.
+ * `unavailable` means the read failed: that is not evidence either way.
  */
+export type SuspendCheckpointLookup = 'found' | 'missing' | 'unavailable';
+
 export async function readMicrovmSuspendCheckpoint(
   taskId: string, generation: string, options?: SessionControlOptions,
-): Promise<boolean | undefined> {
+): Promise<SuspendCheckpointLookup> {
   const abortSignal = options?.abortSignal
     ? AbortSignal.any([options.abortSignal, AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS)])
     : AbortSignal.timeout(MICROVM_LIFECYCLE_STORE_TIMEOUT_MS);
@@ -350,15 +352,15 @@ export async function readMicrovmSuspendCheckpoint(
         Limit: CHECKPOINT_PAGE_SIZE,
         ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
       }), { abortSignal });
-      if ((result.Items?.length ?? 0) > 0) return true;
+      if ((result.Items?.length ?? 0) > 0) return 'found';
       exclusiveStartKey = result.LastEvaluatedKey;
-      if (!exclusiveStartKey) return false;
+      if (!exclusiveStartKey) return 'missing';
     }
-    return false;
+    return 'missing';
   } catch (error) {
     logger.warn('MicroVM suspend checkpoint could not be read; leaving the worker as is this cycle', {
       task_id: taskId, generation, ...microvmErrorIdentity(error),
     });
-    return undefined;
+    return 'unavailable';
   }
 }

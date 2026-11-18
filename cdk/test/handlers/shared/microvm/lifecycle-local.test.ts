@@ -118,9 +118,9 @@ local('MicroVM lifecycle against DynamoDB Local', () => {
         Item: { task_id: taskId, event_id: `01KLATER00000000000000000${n}`, event_type: 'microvm_supervisor', metadata: {} },
       }));
     }
-    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-two')).toBe(true);
-    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-one')).toBe(false);
-    expect(await readMicrovmSuspendCheckpoint(`other-${randomUUID()}`, 'generation-two')).toBe(false);
+    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-two')).toBe('found');
+    expect(await readMicrovmSuspendCheckpoint(taskId, 'generation-one')).toBe('missing');
+    expect(await readMicrovmSuspendCheckpoint(`other-${randomUUID()}`, 'generation-two')).toBe('missing');
   });
   beforeEach(async () => {
     mockBeforeSend.mockReset();

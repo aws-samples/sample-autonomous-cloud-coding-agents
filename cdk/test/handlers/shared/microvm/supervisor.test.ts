@@ -112,7 +112,7 @@ function run(previous?: MicrovmSupervisorState, change: Partial<MicrovmSuperviso
 beforeEach(() => {
   jest.clearAllMocks();
   // A guest that accepted the suspend recorded its checkpoint.
-  mockCheckpoint.mockReset().mockResolvedValue(true);
+  mockCheckpoint.mockReset().mockResolvedValue('found');
   time = NOW;
   generation = 0;
   jest.spyOn(Date, 'now').mockImplementation(() => time);
@@ -397,7 +397,7 @@ test('a guest that declined the suspend is woken although the intent matches the
   // checkpoint, and the service froze the VM anyway (#904 review).
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
-  mockCheckpoint.mockResolvedValue(false);
+  mockCheckpoint.mockResolvedValue('missing');
   const suspended = row.intent!.generation;
   const result = await run();
   expect(mockCheckpoint).toHaveBeenCalledWith('task', suspended, expect.anything());
@@ -409,7 +409,7 @@ test('a guest that declined the suspend is woken although the intent matches the
 test('an unreadable checkpoint leaves an intended sleep alone this cycle', async () => {
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDED'));
-  mockCheckpoint.mockResolvedValue(undefined);
+  mockCheckpoint.mockResolvedValue('unavailable');
   expect((await run()).kind).toBe('continue');
   expect(strategy.resumeSession).not.toHaveBeenCalled();
 });
@@ -427,7 +427,7 @@ test('a confirmed checkpoint is read once per suspend intent', async () => {
 test('a worker still SUSPENDING is not judged before its hook answers', async () => {
   intent('suspend');
   strategy.pollSession.mockResolvedValue(observation('SUSPENDING'));
-  mockCheckpoint.mockResolvedValue(false);
+  mockCheckpoint.mockResolvedValue('missing');
   await run();
   expect(mockCheckpoint).not.toHaveBeenCalled();
   expect(strategy.resumeSession).not.toHaveBeenCalled();

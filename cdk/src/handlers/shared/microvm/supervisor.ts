@@ -308,9 +308,9 @@ export async function superviseMicrovm(input: MicrovmSupervisorInput): Promise<M
     if (observed !== 'SUSPENDED' || current.status !== TaskStatus.AWAITING_APPROVAL
       || intent?.action !== 'suspend' || !intentMatchesGate(current)) return undefined;
     if (state.checkpointedGeneration === intent.generation) return true;
-    const found = await readMicrovmSuspendCheckpoint(input.taskId, intent.generation, options);
-    if (found) state = { ...state, checkpointedGeneration: intent.generation };
-    return found;
+    const lookup = await readMicrovmSuspendCheckpoint(input.taskId, intent.generation, options);
+    if (lookup === 'found') state = { ...state, checkpointedGeneration: intent.generation };
+    return lookup === 'unavailable' ? undefined : lookup === 'found';
   };
 
   /** Phase 1: read the task and the worker. Returns a result when the cycle ends here. */
