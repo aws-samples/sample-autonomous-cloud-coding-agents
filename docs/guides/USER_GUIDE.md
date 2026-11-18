@@ -1145,6 +1145,7 @@ If a task fails with a `preflight_failed` event, the platform rejected the run b
 - `REPO_NOT_FOUND_OR_NO_ACCESS` - The GitHub PAT does not have access to the target repository, or the repo does not exist.
 - `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the workflow. For `coding/new-task-v1` and `coding/pr-iteration-v1`, you need Contents (read/write) and Pull requests (read/write). For `coding/pr-review-v1`, Triage or higher is enough.
 - `PR_NOT_FOUND_OR_CLOSED` - The specified PR does not exist or is already closed.
+- `PR_FROM_FORK` - The specified PR comes from a fork. The agent works on branches of the onboarded repository, and the branch of this PR is in the fork. Push the branch to the repository itself, open the PR from there, and submit the task for that PR.
 
 To fix permission issues, update the GitHub PAT in AWS Secrets Manager and submit a new task. See [Developer guide - Repository preparation](./DEVELOPER_GUIDE.md#repository-preparation) for the full permissions table.
 

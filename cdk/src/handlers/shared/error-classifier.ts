@@ -238,6 +238,17 @@ const PATTERNS: readonly ErrorPattern[] = [
     },
   },
   {
+    pattern: /PR_FROM_FORK/i,
+    classification: {
+      category: ErrorCategory.AUTH,
+      title: 'Pull request from a fork',
+      description: 'The pull request comes from a fork: its branch is in another repository, where the agent cannot check it out or push to it.',
+      remedy: 'Open the pull request from a branch of the repository itself (push the branch there first), then submit the task for that pull request.',
+      retryable: false,
+      errorClass: ErrorClass.USER,
+    },
+  },
+  {
     pattern: /Token cannot (push to|interact with pull requests on)/i,
     classification: {
       category: ErrorCategory.AUTH,

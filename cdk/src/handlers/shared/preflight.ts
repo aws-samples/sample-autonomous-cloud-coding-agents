@@ -34,6 +34,7 @@ export const PreflightFailureReason = {
   REPO_NOT_FOUND_OR_NO_ACCESS: 'REPO_NOT_FOUND_OR_NO_ACCESS',
   RUNTIME_UNAVAILABLE: 'RUNTIME_UNAVAILABLE',
   PR_NOT_FOUND_OR_CLOSED: 'PR_NOT_FOUND_OR_CLOSED',
+  PR_FROM_FORK: 'PR_FROM_FORK',
   // #251: token-secret blockers are misconfiguration, not GitHub being
   // unreachable — an accurate reason so tooling keyed on failureReason routes
   // operators to the secret/IAM fix rather than a network red herring.
@@ -252,6 +253,11 @@ async function checkRepoAccess(repo: string, token: string, readOnly: boolean): 
   }
 }
 
+/** `head` or `base` of a pull request as GitHub returns it. `repo` is null once the fork is deleted. */
+interface PullRequestSide {
+  readonly repo?: { readonly full_name?: unknown } | null;
+}
+
 async function checkPrAccessible(repo: string, prNumber: number, token: string): Promise<PreflightCheckResult> {
   const start = Date.now();
   try {
@@ -286,6 +292,22 @@ async function checkPrAccessible(repo: string, prNumber: number, token: string):
         durationMs,
       };
     }
+    // The agent fetches the branch of the pull request by its name from this
+    // repository, and an iteration pushes to it there. The branch of a pull
+    // request from a fork is in the fork: GitHub then names another head
+    // repository than the base, or none once the fork is deleted. A branch of
+    // the same name in this repository is another branch.
+    const headRepo = (pr.head as PullRequestSide | undefined)?.repo?.full_name;
+    const baseRepo = (pr.base as PullRequestSide | undefined)?.repo?.full_name;
+    if (typeof headRepo !== 'string' || headRepo !== baseRepo) {
+      return {
+        check: 'pr_accessible',
+        passed: false,
+        reason: PreflightFailureReason.PR_FROM_FORK,
+        detail: `PR #${prNumber} in ${repo} comes from another repository (a fork): its branch is not in ${repo}, so it cannot be checked out or pushed to`,
+        durationMs,
+      };
+    }
     return { check: 'pr_accessible', passed: true, durationMs };
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -315,6 +337,7 @@ const PREFLIGHT_FAILURE_PRIORITY: readonly PreflightFailureReasonType[] = [
   PreflightFailureReason.INSUFFICIENT_GITHUB_REPO_PERMISSIONS,
   PreflightFailureReason.REPO_NOT_FOUND_OR_NO_ACCESS,
   PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED,
+  PreflightFailureReason.PR_FROM_FORK,
   PreflightFailureReason.RUNTIME_UNAVAILABLE,
 ];
 

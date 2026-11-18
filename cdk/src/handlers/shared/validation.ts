@@ -703,3 +703,81 @@ export function validateAttachments(
 
   return { valid: true, parsed };
 }
+
+// ---------------------------------------------------------------------------
+// Private and reserved addresses (SSRF guard of the attachment downloads)
+// ---------------------------------------------------------------------------
+
+/** RFC 1918 172.16.0.0/12 — second-octet bounds (inclusive). */
+const RFC1918_172_SECOND_OCTET_MIN = 16;
+const RFC1918_172_SECOND_OCTET_MAX = 31;
+
+/** RFC 6598 100.64.0.0/10 (CGN) — second-octet bounds (inclusive). */
+const RFC6598_CGN_SECOND_OCTET_MIN = 64;
+const RFC6598_CGN_SECOND_OCTET_MAX = 127;
+
+/** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
+const PRIVATE_IP_RANGES = [
+  // IPv4
+  { prefix: '10.', mask: null },
+  {
+    prefix: '172.',
+    mask: (ip: string) => {
+      const second = parseInt(ip.split('.')[1], 10);
+      return second >= RFC1918_172_SECOND_OCTET_MIN && second <= RFC1918_172_SECOND_OCTET_MAX;
+    },
+  },
+  { prefix: '192.168.', mask: null },
+  { prefix: '169.254.', mask: null },
+  { prefix: '127.', mask: null },
+  { prefix: '0.', mask: null },
+  {
+    prefix: '100.',
+    mask: (ip: string) => {
+      const second = parseInt(ip.split('.')[1], 10);
+      return second >= RFC6598_CGN_SECOND_OCTET_MIN && second <= RFC6598_CGN_SECOND_OCTET_MAX; // 100.64.0.0/10 (RFC 6598)
+    },
+  },
+  // IPv6
+  { prefix: '::1', mask: null },
+  { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
+  { prefix: 'fc', mask: null },
+  { prefix: 'fd', mask: null },
+  // Link-local is the whole of fe80::/10: a first group from fe80 to febf.
+  { prefix: 'fe8', mask: null },
+  { prefix: 'fe9', mask: null },
+  { prefix: 'fea', mask: null },
+  { prefix: 'feb', mask: null },
+  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — prevents SSRF bypass
+  // by attackers returning mapped addresses from DNS that embed private IPv4.
+  { prefix: '::ffff:', mask: null },
+  { prefix: '0:0:0:0:0:ffff:', mask: null },
+] as const;
+
+/**
+ * Check if an IP address belongs to a private/internal range.
+ * Returns a reason string if private, undefined if public.
+ */
+export function isPrivateIp(ip: string): string | undefined {
+  const normalized = ip.toLowerCase();
+
+  // An IPv6 address written with an IPv4 address inside (::ffff:10.0.0.1,
+  // ::10.0.0.1, 64:ff9b::10.0.0.1) is refused whatever it embeds. A resolver
+  // writes only the mapped and the deprecated compatible form this way, and
+  // neither is the address of a public host.
+  if (normalized.includes(':') && normalized.includes('.')) {
+    return `IP ${ip} is in private/reserved range`;
+  }
+
+  for (const range of PRIVATE_IP_RANGES) {
+    if (typeof range.mask === 'function') {
+      if (normalized.startsWith(range.prefix) && range.mask(normalized)) {
+        return `IP ${ip} is in private range (${range.prefix}x)`;
+      }
+    } else if (normalized.startsWith(range.prefix) || normalized === range.prefix) {
+      return `IP ${ip} is in private/reserved range`;
+    }
+  }
+
+  return undefined;
+}

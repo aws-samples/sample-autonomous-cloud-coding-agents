@@ -38,6 +38,7 @@ jest.mock('../../../src/handlers/shared/memory', () => ({
 }));
 
 import { clearTokenCache } from '../../../src/handlers/shared/context-hydration';
+import { classifyError } from '../../../src/handlers/shared/error-classifier';
 import {
   PreflightFailureReason,
   runPreflightChecks,
@@ -60,6 +61,15 @@ function githubRepoOk(permissions: { push?: boolean; pull?: boolean } = { push: 
     ok: true,
     status: 200,
     json: async () => ({ permissions }),
+  };
+}
+
+/** Successful GET /repos/.../pulls/{n}: an open pull request from a branch of `owner/repo` itself. */
+function githubOpenPrOk() {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ state: 'open', head: { repo: { full_name: 'owner/repo' } }, base: { repo: { full_name: 'owner/repo' } } }),
   };
 }
 
@@ -354,7 +364,7 @@ describe('runPreflightChecks', () => {
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 }) // reachability
       .mockResolvedValueOnce(githubRepoOk()) // repo access
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) }); // PR
+      .mockResolvedValueOnce(githubOpenPrOk()); // PR
 
     const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
 
@@ -416,6 +426,50 @@ describe('runPreflightChecks', () => {
 
     expect(result.passed).toBe(false);
     expect(result.failureReason).toBe(PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED);
+  });
+
+  // The agent fetches the branch of the pull request by its name from the task's
+  // repository, and an iteration pushes to it there. The branch of a pull request
+  // from a fork is in the fork. GET /repos/{repo}/pulls/{n} says so: `head.repo`
+  // is another repository than `base.repo`, or null once the fork is deleted.
+  test.each([
+    ['comes from a fork', { repo: { full_name: 'contributor/repo' } }],
+    ['comes from a fork that was deleted since', { repo: null }],
+    ['has no head repository in the answer of GitHub', undefined],
+  ])('fails PR_FROM_FORK when the pull request %s', async (_what, head) => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'open', head, base: { repo: { full_name: 'owner/repo' } } }),
+      });
+
+    const result = await runPreflightChecks('owner/repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(false);
+    expect(result.failureReason).toBe(PreflightFailureReason.PR_FROM_FORK);
+    expect(result.failureDetail).toBe(
+      'PR #42 in owner/repo comes from another repository (a fork): its branch is not in owner/repo, so it cannot be checked out or pushed to',
+    );
+    // The error classifier finds the reason in the task's error message.
+    expect(classifyError(`Pre-flight check failed: ${result.failureReason} — ${result.failureDetail}`)?.title).toBe('Pull request from a fork');
+  });
+
+  test('passes a pull request of the repository itself when the task spells the repository in another letter case', async () => {
+    // GitHub answers to any spelling of a name and reports its own: the head is
+    // compared with the base of the answer, not with the spelling of the task.
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test123' });
+    mockFetch
+      .mockResolvedValueOnce({ ok: true, status: 200 })
+      .mockResolvedValueOnce(githubRepoOk())
+      .mockResolvedValueOnce(githubOpenPrOk());
+
+    const result = await runPreflightChecks('Owner/Repo', baseBlueprintConfig, 42);
+
+    expect(result.passed).toBe(true);
   });
 
   test('uses per-repo github_token_secret_arn from blueprint config', async () => {
@@ -504,7 +558,7 @@ describe('runPreflightChecks', () => {
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce(githubOpenPrOk())
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -521,7 +575,7 @@ describe('runPreflightChecks', () => {
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce(githubRepoOk({ push: false, pull: true }))
-      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ state: 'open' }) })
+      .mockResolvedValueOnce(githubOpenPrOk())
       .mockResolvedValueOnce({
         ok: true,
         status: 200,

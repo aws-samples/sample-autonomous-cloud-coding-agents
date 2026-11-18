@@ -781,7 +781,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * panel BODY edit is idempotent (same body = no-op), so it always runs; the
  * parent-STATE mirror is claimed once via ``claimRollup`` on the first
  * all-terminal caller, which gives the claim back when its edit of the panel
- * does not land, for one day after the epic ended.
+ * does not land, for one day after the epic ended or was re-opened last.
  */
 export async function refreshPanelAndSettle(
   orchestrationId: string,
@@ -791,6 +791,7 @@ export async function refreshPanelAndSettle(
     parent_issue_ref: string;
     status_comment_id?: string;
     retry_comment_id?: string;
+    updated_at?: string;
     release_context?: {
       channel_source?: string;
       trigger_label?: string;
@@ -889,8 +890,13 @@ export async function refreshPanelAndSettle(
   //
   // Only while the epic ended recently: an edit that can never land (the comment
   // or its issue is gone) would otherwise be tried again by every sweep run for
-  // as long as the rows exist.
-  const endedAt = Math.max(...children.map((c) => Date.parse(c.updated_at)));
+  // as long as the rows exist. The end is the last write of a child row or, when
+  // the epic was re-opened since, the re-open, which stamps the meta row: an
+  // iteration and the re-stack that follows it write no child row.
+  const endedAt = Math.max(
+    ...children.map((c) => Date.parse(c.updated_at)),
+    meta.updated_at === undefined ? -Infinity : Date.parse(meta.updated_at),
+  );
   if (allTerminal && won && meta.status_comment_id !== undefined && !panel.ok
     && Date.parse(now) - endedAt < GIVE_BACK_WINDOW_MS) {
     await releaseRollupClaim(orchestrationId, now);
@@ -907,7 +913,7 @@ export async function refreshPanelAndSettle(
   }
 }
 
-/** How long after its last sub-issue ended a finished epic still gets its claim back. */
+/** How long after its last sub-issue ended, or after its last re-open, a finished epic still gets its claim back. */
 const GIVE_BACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -1108,9 +1114,10 @@ async function cascadeRestack(evt: TerminalTaskEvent): Promise<void> {
       : `to include ${changedLabel}'s change`;
     const updating: Record<string, string> = {};
     for (const id of updatingIds) updating[id] = reason;
-    // Render from a FRESH read, not the pre-spawn snapshot: spawnRestackTask just
-    // flipped the restacked rows to `released` and stamped branches, so the
-    // snapshot is stale. The forward-gating path already re-loads after writes;
+    // Render from a FRESH read, not the snapshot taken at the start: when the task
+    // that just ended repaired a failed node, maybeRecoverFailedNode has un-failed
+    // it and re-released its dependents since, so the snapshot is stale (a re-stack
+    // task itself writes no row). The forward-gating path already re-loads after writes;
     // mirror that here so the panel reflects current child state (else a stale
     // row status shows for one event window). Fall back to the snapshot on a
     // read miss. (The `updating` overlay is driven by updatingIds, not statuses.)

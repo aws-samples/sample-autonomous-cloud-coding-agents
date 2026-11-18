@@ -2485,8 +2485,11 @@ describe('orchestration-reconciler handler — the once-only claim of the final 
     // its rows exist, repeats the parent's state and reaction calls each time and
     // never answers the retry comment.
     const ENDED = Date.parse('2026-06-08T12:00:00.000Z');
-    /** A settle of the finished epic, as the sweep makes one, this long after its last sub-issue ended. */
-    const settleAfter = (store: ReturnType<typeof orchestrationStore>, minutes: number) => {
+    /**
+     * A settle of the finished epic, as the sweep makes one, this long after its last sub-issue ended.
+     * `reopenedAt` is the stamp of the meta row of an epic that was re-opened since.
+     */
+    const settleAfter = (store: ReturnType<typeof orchestrationStore>, minutes: number, reopenedAt?: string) => {
       const now = new Date(ENDED + minutes * 60_000).toISOString();
       return refreshPanelAndSettle(
         'orch_1',
@@ -2507,6 +2510,7 @@ describe('orchestration-reconciler handler — the once-only claim of the final 
           parent_issue_ref: 'PARENT',
           status_comment_id: 'panel-1',
           ...(typeof store.meta.retry_comment_id === 'string' && { retry_comment_id: store.meta.retry_comment_id }),
+          ...(reopenedAt !== undefined && { updated_at: reopenedAt }),
         },
         now,
       ).then(() => now);
@@ -2549,6 +2553,25 @@ describe('orchestration-reconciler handler — the once-only claim of the final 
       await settleAfter(store, 24 * 60 + 20);
       expect(store.meta.rollup_posted_at).toBe(kept);
       expect(parentSettled()).toEqual([false, false]);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('an epic that was re-opened since gets its claim back for a day after the re-open', async () => {
+      // A comment on a sub-issue two days after the epic ended: its change is
+      // re-stacked onto the dependents, which writes no child row. When the
+      // re-stack ends the rows are two days old, and the epic ended a minute ago.
+      // Every re-open stamps the meta row.
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+      const reopened = new Date(ENDED + (48 * 60 - 10) * 60_000).toISOString();
+
+      await settleAfter(store, 48 * 60, reopened);
+      expect(store.meta.rollup_posted_at).toBeUndefined();
+      expect(swapCommentReactionMock).not.toHaveBeenCalled();
+
+      // A day after the re-open, an edit that still fails is given up as well.
+      const kept = await settleAfter(store, 72 * 60, reopened);
+      expect(store.meta.rollup_posted_at).toBe(kept);
       expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
     });
   });

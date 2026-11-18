@@ -19,8 +19,9 @@
 
 import { EventEmitter } from 'events';
 import { AttachmentResolutionError } from '../../../src/handlers/shared/context-hydration';
-import { isPrivateIp, resolveUrlAttachments } from '../../../src/handlers/shared/resolve-url-attachments';
+import { resolveUrlAttachments } from '../../../src/handlers/shared/resolve-url-attachments';
 import { createAttachmentRecord, type AttachmentRecord } from '../../../src/handlers/shared/types';
+import { isPrivateIp } from '../../../src/handlers/shared/validation';
 
 describe('isPrivateIp', () => {
   describe('IPv4 private ranges', () => {
@@ -102,6 +103,11 @@ describe('isPrivateIp', () => {
       expect(isPrivateIp('fe80::abcd:ef01')).toBeDefined();
     });
 
+    test('blocks the whole of fe80::/10 (link-local), not only the fe80: prefix', () => {
+      expect(isPrivateIp('fea9::1')).toBeDefined();
+      expect(isPrivateIp('febf::1')).toBeDefined();
+    });
+
     test('blocks IPv4-mapped IPv6 (::ffff:x.x.x.x)', () => {
       expect(isPrivateIp('::ffff:169.254.169.254')).toBeDefined();
       expect(isPrivateIp('::ffff:10.0.0.1')).toBeDefined();
@@ -110,6 +116,17 @@ describe('isPrivateIp', () => {
 
     test('blocks expanded IPv4-mapped IPv6 (0:0:0:0:0:ffff:x)', () => {
       expect(isPrivateIp('0:0:0:0:0:ffff:169.254.169.254')).toBeDefined();
+    });
+
+    test('blocks an IPv6 address written with an IPv4 address inside, whatever it embeds', () => {
+      // The download of Linear uploads checked the embedded address with a rule of
+      // its own before it shared this function: the compatible form (::x.x.x.x),
+      // and any spelling that ends in "::" or "::ffff:" and a private address.
+      expect(isPrivateIp('::169.254.169.254')).toBeDefined();
+      expect(isPrivateIp('::0.0.0.2')).toBeDefined();
+      expect(isPrivateIp('::8.8.8.8')).toBeDefined();
+      expect(isPrivateIp('0::ffff:169.254.169.254')).toBeDefined();
+      expect(isPrivateIp('64:ff9b::10.0.0.1')).toBeDefined();
     });
 
     test('allows public IPv6 addresses', () => {

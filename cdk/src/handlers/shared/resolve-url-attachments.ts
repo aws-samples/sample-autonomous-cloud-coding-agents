@@ -43,7 +43,7 @@ import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
 import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type AttachmentRecord } from './types';
-import { isAllowedMimeType, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateMagicBytes } from './validation';
+import { isAllowedMimeType, isPrivateIp, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateMagicBytes } from './validation';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -58,53 +58,11 @@ const URL_FETCH_TIMEOUT_MS = 10_000;
 const URL_RESOLUTION_BUDGET_MS = 30_000;
 const MAX_REDIRECTS = 2;
 
-/** RFC 1918 172.16.0.0/12 — second-octet bounds (inclusive). */
-const RFC1918_172_SECOND_OCTET_MIN = 16;
-const RFC1918_172_SECOND_OCTET_MAX = 31;
-
-/** RFC 6598 100.64.0.0/10 (CGN) — second-octet bounds (inclusive). */
-const RFC6598_CGN_SECOND_OCTET_MIN = 64;
-const RFC6598_CGN_SECOND_OCTET_MAX = 127;
-
 /** Inclusive lower bound for HTTP redirect status codes (3xx). */
 const HTTP_REDIRECT_STATUS_MIN = 300;
 
 /** Exclusive upper bound for HTTP redirect status codes (first non-3xx). */
 const HTTP_REDIRECT_STATUS_MAX = 400;
-
-/** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
-const PRIVATE_IP_RANGES = [
-  // IPv4
-  { prefix: '10.', mask: null },
-  {
-    prefix: '172.',
-    mask: (ip: string) => {
-      const second = parseInt(ip.split('.')[1], 10);
-      return second >= RFC1918_172_SECOND_OCTET_MIN && second <= RFC1918_172_SECOND_OCTET_MAX;
-    },
-  },
-  { prefix: '192.168.', mask: null },
-  { prefix: '169.254.', mask: null },
-  { prefix: '127.', mask: null },
-  { prefix: '0.', mask: null },
-  {
-    prefix: '100.',
-    mask: (ip: string) => {
-      const second = parseInt(ip.split('.')[1], 10);
-      return second >= RFC6598_CGN_SECOND_OCTET_MIN && second <= RFC6598_CGN_SECOND_OCTET_MAX; // 100.64.0.0/10 (RFC 6598)
-    },
-  },
-  // IPv6
-  { prefix: '::1', mask: null },
-  { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
-  { prefix: 'fc', mask: null },
-  { prefix: 'fd', mask: null },
-  { prefix: 'fe80:', mask: null },
-  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — prevents SSRF bypass
-  // by attackers returning mapped addresses from DNS that embed private IPv4.
-  { prefix: '::ffff:', mask: null },
-  { prefix: '0:0:0:0:0:ffff:', mask: null },
-] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -128,26 +86,6 @@ interface PinnedResponse {
 // ---------------------------------------------------------------------------
 // SSRF protection
 // ---------------------------------------------------------------------------
-
-/**
- * Check if an IP address belongs to a private/internal range.
- * Returns a reason string if private, undefined if public.
- */
-export function isPrivateIp(ip: string): string | undefined {
-  const normalized = ip.toLowerCase();
-
-  for (const range of PRIVATE_IP_RANGES) {
-    if (typeof range.mask === 'function') {
-      if (normalized.startsWith(range.prefix) && range.mask(normalized)) {
-        return `IP ${ip} is in private range (${range.prefix}x)`;
-      }
-    } else if (normalized.startsWith(range.prefix) || normalized === range.prefix) {
-      return `IP ${ip} is in private/reserved range`;
-    }
-  }
-
-  return undefined;
-}
 
 /**
  * Resolve DNS and validate the resolved IP is not in a private range.

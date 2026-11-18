@@ -66,6 +66,20 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
+    test('classifies a pull request from a fork', () => {
+      const result = classifyError(
+        'Pre-flight check failed: PR_FROM_FORK — PR #42 in owner/repo comes from another repository (a fork): '
+        + 'its branch is not in owner/repo, so it cannot be checked out or pushed to',
+      )!;
+      expect(result.category).toBe(ErrorCategory.AUTH);
+      expect(result.title).toBe('Pull request from a fork');
+      expect(result.retryable).toBe(false);
+      // The request is what has to change: neither a retry nor an admin makes
+      // the branch of a fork a branch of this repository.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(result.remedy).toContain('branch of the repository itself');
+    });
+
     test('classifies token push scope error (detailed message)', () => {
       const result = classifyError(
         'Pre-flight check failed: INSUFFICIENT_GITHUB_REPO_PERMISSIONS — Token cannot push to owner/repo. Required: push. For fine-grained PATs use Contents Read and write.',
