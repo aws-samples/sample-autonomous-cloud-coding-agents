@@ -1,8 +1,10 @@
 """Unit tests for registry.resolver.
 
 The parity corpus (``contracts/registry-resolution/resolution-cases.json``) holds
-the cases both resolvers run. These are cases it does not hold; their TypeScript
-twins are in ``cdk/test/handlers/shared/registry-resolver.test.ts``.
+the cases both resolvers run, among them three of the cases below: the exact pin
+beside its leading-zero twin, the two identifiers above JavaScript's largest safe
+integer, and the U+0662 candidate. The rest it does not hold; most have a
+TypeScript twin in ``cdk/test/handlers/shared/registry-resolver.test.ts``.
 """
 
 from __future__ import annotations

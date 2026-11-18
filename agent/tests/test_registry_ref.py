@@ -2,9 +2,11 @@
 
 ``parse_ref`` has to give the verdict of its TypeScript mirror
 (``cdk/src/handlers/shared/registry/ref.ts``) for every string. The parity corpus
-(``contracts/registry-resolution/cases.json``) holds the cases both parsers run;
-these are inputs it does not hold, on which the two regular-expression dialects or
-the two number types differ. The expected reasons are what ``parseRef`` answers.
+(``contracts/registry-resolution/cases.json``) holds the cases both parsers run,
+among them three of the inputs below: the U+0662 digit, a trailing CR and a
+trailing U+2028. The inputs here are ones on which the two regular-expression
+dialects or the two number types differ. The expected reasons are what
+``parseRef`` answers.
 """
 
 from __future__ import annotations

@@ -109,3 +109,42 @@ describe('registry-publish handler: what a refused publish tells the publisher',
     expect(error.message).toContain("not in compliance with schema version '2025-12-11'");
   });
 });
+
+describe('registry-publish handler: an mcp_server the agent could not load is refused', () => {
+  // The agent writes a pinned server into the session's MCP configuration, where a header
+  // value that is not a string, or arguments that are not a list of strings, make the CLI
+  // skip the server. The agent fails such a task; the publisher should hear it first.
+  test.each([
+    ['a header value is a number', { transport: 'http', url: 'https://x', headers: { 'X-Shard': 3 } }, /headers.*string values/],
+    ['a header value is null', { transport: 'http', url: 'https://x', headers: { 'X-Shard': null } }, /headers.*string values/],
+    ['one of two header values is a number', { transport: 'http', url: 'https://x', headers: { 'Authorization': 'Bearer t', 'X-Shard': 3 } }, /headers.*string values/],
+    // The agent reads headers for http and sse and args for stdio only; the endpoint refuses a
+    // wrong shape whatever the transport, as its contract type reads.
+    ['a header value is a number on a stdio server', { transport: 'stdio', command: 'npx', headers: { 'X-Shard': 3 } }, /headers.*string values/],
+    ['args is a string on an http server', { transport: 'http', url: 'https://x', args: 'x' }, /args.*array of strings/],
+    ['args is a string', { transport: 'stdio', command: 'npx', args: '-y pkg' }, /args.*array of strings/],
+    ['args holds a number', { transport: 'stdio', command: 'npx', args: [1, 'pkg'] }, /args.*array of strings/],
+    ['args is null', { transport: 'stdio', command: 'npx', args: null }, /args.*array of strings/],
+  ])('400 when %s, and nothing is published', async (_label, runtime, message) => {
+    mockPublish.mockResolvedValue(publishedRecord);
+    const res = await publish({ ...validBody, runtime });
+    expect(res.statusCode).toBe(400);
+    const { error } = JSON.parse(res.body);
+    expect(error.code).toBe('VALIDATION_ERROR');
+    expect(error.message).toMatch(message);
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['string headers', { transport: 'http', url: 'https://x', headers: { 'X-Shard': '3' } }],
+    ['no headers', { transport: 'sse', url: 'https://x' }],
+    ['an empty headers object', { transport: 'http', url: 'https://x', headers: {} }],
+    ['a list of strings as args', { transport: 'stdio', command: 'npx', args: ['-y', 'pkg'] }],
+    ['an empty list of args', { transport: 'stdio', command: 'npx', args: [] }],
+  ])('201 with %s', async (_label, runtime) => {
+    mockPublish.mockResolvedValue(publishedRecord);
+    const res = await publish({ ...validBody, runtime });
+    expect(res.statusCode).toBe(201);
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+});

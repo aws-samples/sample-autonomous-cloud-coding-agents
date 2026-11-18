@@ -204,8 +204,15 @@ function validateRuntime(kind: string, runtime: Record<string, unknown>): string
       } else if (typeof runtime.url !== 'string' || !runtime.url) {
         return `mcp_server runtime.url (non-empty string) is required for transport '${transport}'.`;
       }
-      if (runtime.headers !== undefined && !isPlainObject(runtime.headers)) {
-        return 'mcp_server runtime.headers, when present, must be a JSON object.';
+      // The agent refuses a pinned server whose header values or arguments are not
+      // strings (the CLI would skip it), so such a record must not be publishable.
+      if (runtime.headers !== undefined
+        && !(isPlainObject(runtime.headers) && Object.values(runtime.headers).every((v) => typeof v === 'string'))) {
+        return 'mcp_server runtime.headers, when present, must be a JSON object with string values.';
+      }
+      if (runtime.args !== undefined
+        && !(Array.isArray(runtime.args) && runtime.args.every((a) => typeof a === 'string'))) {
+        return 'mcp_server runtime.args, when present, must be an array of strings.';
       }
       return null;
     }

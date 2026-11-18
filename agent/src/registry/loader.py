@@ -47,6 +47,20 @@ def _server_key(asset: dict[str, Any]) -> str:
     return f"{namespace}__{name}"
 
 
+# The shapes the Claude Code CLI requires of the connection fields it reads.
+_STRING = "a string"
+_STRING_LIST = "a list of strings"
+_STRING_MAP = "an object with string values"
+
+
+def _has_shape(value: Any, shape: str) -> bool:
+    if shape == _STRING:
+        return isinstance(value, str)
+    if shape == _STRING_LIST:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    return isinstance(value, dict) and all(isinstance(item, str) for item in value.values())
+
+
 def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     """Normalize a registry mcp_server runtime payload into the ``.mcp.json``
     entry shape the Claude Agent SDK actually consumes.
@@ -59,11 +73,12 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     Map ``transport`` → ``type`` and pass the rest through untouched.
 
     Fail-closed: a structurally invalid payload (http/sse without ``url``, stdio
-    without ``command``, or an unknown transport) raises
-    :class:`RegistryAssetLoadError`. Writing a broken ``.mcp.json`` entry would
-    let the task run with the pinned tool surface silently missing while the
-    audit bundle claims the asset loaded — exactly the fail-open the resolve-side
-    validation also guards against (#246 review).
+    without ``command``, an unknown transport, or a field the transport uses in
+    another shape than the CLI accepts) raises :class:`RegistryAssetLoadError`.
+    Writing a broken ``.mcp.json`` entry would let the task run with the pinned
+    tool surface silently missing while the audit bundle claims the asset loaded
+    — exactly the fail-open the resolve-side validation also guards against
+    (#246 review).
     """
     transport = runtime.get("transport") or runtime.get("type")
     if transport in ("http", "sse"):
@@ -71,16 +86,27 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
             raise RegistryAssetLoadError(
                 f"{server_key}: {transport} mcp_server runtime is missing 'url'"
             )
+        shapes = {"url": _STRING, "headers": _STRING_MAP}
     elif transport == "stdio":
         if not runtime.get("command"):
             raise RegistryAssetLoadError(
                 f"{server_key}: stdio mcp_server runtime is missing 'command'"
             )
+        shapes = {"command": _STRING, "args": _STRING_LIST, "env": _STRING_MAP}
     else:
         raise RegistryAssetLoadError(
             f"{server_key}: unknown mcp_server transport {transport!r} "
             f"(expected http, sse, or stdio)"
         )
+    # The CLI validates these fields of an entry of this transport. When one has
+    # another shape it skips the entry, and the session starts without the server.
+    # It does not read a field of the other transport (``args`` of an http server),
+    # so that one is not checked.
+    for field, shape in shapes.items():
+        if field in runtime and not _has_shape(runtime[field], shape):
+            raise RegistryAssetLoadError(
+                f"{server_key}: {transport} mcp_server runtime '{field}' must be {shape}"
+            )
     if "transport" not in runtime:
         return runtime  # already in SDK shape
     mapped = {k: v for k, v in runtime.items() if k != "transport"}

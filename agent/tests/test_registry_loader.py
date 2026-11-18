@@ -32,6 +32,11 @@ def _mcp_asset(namespace: str, name: str, version: str, runtime: dict) -> dict:
     }
 
 
+# What the loader's error says a list field and an object field must be.
+_STRING_LIST = "a list of strings"
+_STRING_MAP = "an object with string values"
+
+
 class TestApplyMcpAssets:
     def test_writes_new_mcp_json(self, tmp_path):
         runtime = {"transport": "http", "url": "https://mcp.example.com/sse"}
@@ -192,6 +197,105 @@ class TestApplyMcpAssets:
             "type": "stdio",
             "command": "run-me",
         }
+
+    @pytest.mark.parametrize(
+        ("transport", "field", "value", "shape"),
+        [
+            pytest.param("http", "headers", {"X-Shard": 3}, _STRING_MAP, id="headers-number"),
+            pytest.param("sse", "headers", {"X-Shard": 3}, _STRING_MAP, id="sse-headers-number"),
+            pytest.param("http", "headers", ["X-Shard: 3"], _STRING_MAP, id="headers-list"),
+            pytest.param(
+                "http",
+                "headers",
+                {"Authorization": "Bearer t", "X-Shard": 3},
+                _STRING_MAP,
+                id="headers-one-of-two-a-number",
+            ),
+            pytest.param("http", "headers", None, _STRING_MAP, id="headers-null"),
+            pytest.param("stdio", "args", [1, "x"], _STRING_LIST, id="args-number"),
+            pytest.param("stdio", "args", "x", _STRING_LIST, id="args-string"),
+            pytest.param("stdio", "args", None, _STRING_LIST, id="args-null"),
+            pytest.param("stdio", "env", {"PORT": 8080}, _STRING_MAP, id="env-number"),
+            pytest.param("stdio", "env", ["PORT=8080"], _STRING_MAP, id="env-list"),
+            pytest.param("stdio", "command", ["node", "server.js"], "a string", id="command-list"),
+            pytest.param("http", "url", ["https://x"], "a string", id="url-list"),
+        ],
+    )
+    def test_field_of_a_shape_the_cli_refuses_raises(
+        self, tmp_path, transport, field, value, shape
+    ):
+        # The Claude Code CLI validates each .mcp.json entry: url and command are
+        # strings, args is a list of strings, headers and env are objects with string
+        # values. It skips an entry that differs and starts the session all the same,
+        # so the task would run without the pinned server.
+        base = {"command": "run-me"} if transport == "stdio" else {"url": "https://x"}
+        asset = _mcp_asset("acme", "x", "1.0.0", {"transport": transport, **base, field: value})
+        with pytest.raises(RegistryAssetLoadError) as raised:
+            apply_mcp_assets(str(tmp_path), [asset])
+        # The error names the asset, the field and what the field has to be.
+        assert str(raised.value) == (
+            f"acme__x: {transport} mcp_server runtime '{field}' must be {shape}"
+        )
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_string_headers_args_and_env_load(self, tmp_path):
+        http = {"transport": "http", "url": "https://x", "headers": {"Authorization": "Bearer t"}}
+        stdio = {
+            "transport": "stdio",
+            "command": "run-me",
+            "args": ["--port", "8080"],
+            "env": {"MODE": "fast"},
+        }
+        written = apply_mcp_assets(
+            str(tmp_path),
+            [_mcp_asset("acme", "web", "1.0.0", http), _mcp_asset("acme", "cli", "1.0.0", stdio)],
+        )
+        assert written == ["acme__web", "acme__cli"]
+        assert _read_mcp(tmp_path)["mcpServers"] == {
+            "acme__web": {
+                "type": "http",
+                "url": "https://x",
+                "headers": {"Authorization": "Bearer t"},
+            },
+            "acme__cli": {
+                "type": "stdio",
+                "command": "run-me",
+                "args": ["--port", "8080"],
+                "env": {"MODE": "fast"},
+            },
+        }
+
+    @pytest.mark.parametrize(
+        "runtime",
+        [
+            pytest.param({"transport": "http", "url": "https://x", "args": "x"}, id="http-args"),
+            pytest.param(
+                {"transport": "stdio", "command": "run-me", "headers": {"X-Shard": 3}},
+                id="stdio-headers",
+            ),
+        ],
+    )
+    def test_field_the_transport_does_not_use_is_not_checked(self, tmp_path, runtime):
+        # The CLI reads args and env only for stdio, headers only for http and sse,
+        # and drops the keys it does not read: this server is in the session.
+        written = apply_mcp_assets(str(tmp_path), [_mcp_asset("acme", "x", "1.0.0", runtime)])
+        assert written == ["acme__x"]
+
+    def test_empty_headers_args_and_env_load(self, tmp_path):
+        # The CLI accepts an empty list and an empty object, and an empty string in them.
+        http = {"transport": "http", "url": "https://x", "headers": {}}
+        stdio = {"transport": "stdio", "command": "run-me", "args": [""], "env": {"MODE": ""}}
+        bare = {"transport": "stdio", "command": "run-me", "args": [], "env": {}}
+        assets = [
+            _mcp_asset("acme", name, "1.0.0", runtime)
+            for name, runtime in (("web", http), ("cli", stdio), ("bare", bare))
+        ]
+        assert apply_mcp_assets(str(tmp_path), assets) == ["acme__web", "acme__cli", "acme__bare"]
+
+    def test_runtime_with_type_in_place_of_transport_is_checked_too(self, tmp_path):
+        runtime = {"type": "http", "url": "https://x", "headers": {"X-Shard": 3}}
+        with pytest.raises(RegistryAssetLoadError, match="'headers' must be"):
+            apply_mcp_assets(str(tmp_path), [_mcp_asset("acme", "x", "1.0.0", runtime)])
 
     def test_missing_repo_dir_raises(self):
         # Infrastructure failure (#246 Option C): the asset resolved but there's

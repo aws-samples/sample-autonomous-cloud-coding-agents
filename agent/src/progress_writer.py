@@ -929,7 +929,9 @@ class _ProgressWriter:
           ``matching_rule_ids``. Used by the publisher Lambda to emit
           ``TimedOutEffectiveTimeout`` with a ``rule_id`` dimension
           (normalized against an allowlist so unknown rules collapse
-          to ``other`` — cardinality cap, H4 adversarial finding).
+          to ``other`` — cardinality cap, H4 adversarial finding). The
+          publisher emits the value a second time without dimensions:
+          that is the metric the dashboard's percentiles read.
 
         ``timeout_s`` is retained for backward-compat — pre-Chunk-8a
         events and consumers that only want the raw timer value see

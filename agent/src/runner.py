@@ -553,8 +553,7 @@ async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must no
     # and ask a question instead of guessing on a vague request; the runner
     # captures the call below. Gated OFF for read-only workflows (pr-review) and
     # artifact planners — they have their own terminal shapes and
-    # shouldn't grow an ask-instead path. Best-effort: a null server (SDK missing)
-    # just means the tool isn't offered.
+    # shouldn't grow an ask-instead path.
     mcp_servers: dict[str, Any] = {}
     workflow_id = (config.resolved_workflow or {}).get("id", "")
     offer_clarification = not config.read_only and workflow_id not in _NO_CLARIFICATION_WORKFLOW_IDS
