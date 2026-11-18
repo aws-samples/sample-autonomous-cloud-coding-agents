@@ -22,6 +22,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({ DynamoDBClient: jest.fn(() => ({}
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
   DynamoDBDocumentClient: { from: jest.fn(() => ({ send: ddbSend })) },
   GetCommand: jest.fn((input: unknown) => ({ _type: 'Get', input })),
+  QueryCommand: jest.fn((input: unknown) => ({ _type: 'Query', input })),
   ScanCommand: jest.fn((input: unknown) => ({ _type: 'Scan', input })),
   UpdateCommand: jest.fn((input: unknown) => ({ _type: 'Update', input })),
 }));
@@ -83,6 +84,7 @@ jest.mock('../../src/handlers/shared/orchestration-channel-jira', () => ({
 
 const fetchRecentHumanCommentsMock = jest.fn();
 const downloadScreenAndStoreJiraAttachmentsMock = jest.fn();
+const cleanupPreScreenedAttachmentsMock = jest.fn();
 jest.mock('../../src/handlers/shared/jira-attachments', () => {
   const actual = jest.requireActual('../../src/handlers/shared/jira-attachments');
   return {
@@ -90,6 +92,7 @@ jest.mock('../../src/handlers/shared/jira-attachments', () => {
     fetchRecentHumanComments: (...args: unknown[]) => fetchRecentHumanCommentsMock(...args),
     downloadScreenAndStoreJiraAttachments: (...args: unknown[]) =>
       downloadScreenAndStoreJiraAttachmentsMock(...args),
+    cleanupPreScreenedAttachments: (...args: unknown[]) => cleanupPreScreenedAttachmentsMock(...args),
   };
 });
 
@@ -100,6 +103,11 @@ process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.ORCHESTRATION_TABLE_NAME = 'Orchestrations';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'Concurrency';
 process.env.MAX_CONCURRENT_TASKS_PER_USER = '10';
+// The processor screens and stores a parent's attachments only with these set
+// (read at module load); the clients it builds from them are never called here.
+process.env.ATTACHMENTS_BUCKET_NAME = 'attachments-bucket';
+process.env.GUARDRAIL_ID = 'gr-1';
+process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/jira-webhook-processor';
 import { LOOKUP_ABSENT, lookupFound } from '../../src/handlers/shared/lookup-result';
@@ -253,6 +261,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
     clearRollupClaimMock.mockReset().mockResolvedValue(undefined);
     fetchRecentHumanCommentsMock.mockReset().mockResolvedValue([]);
     downloadScreenAndStoreJiraAttachmentsMock.mockReset().mockResolvedValue([]);
+    cleanupPreScreenedAttachmentsMock.mockReset().mockResolvedValue(undefined);
   });
 
   test('seeds the shared graph, releases roots, and suppresses the parent coding task', async () => {
@@ -555,6 +564,43 @@ describe('jira-webhook-processor orchestration adapter', () => {
     expect(createTaskCoreMock).not.toHaveBeenCalled();
   });
 
+  test('deletes its own attachment copies when a concurrent delivery seeded the graph first', async () => {
+    // The label is added twice within seconds: both deliveries read no
+    // orchestration and both store the parent's attachment under their own
+    // task id. The one that loses the seed is handed an empty extend.
+    const stored = {
+      attachment_id: 'att-1',
+      type: 'file' as const,
+      content_type: 'text/plain',
+      filename: 'error.log',
+      s3_key: 'attachments/platform-user/T1/att-1/error.log',
+      s3_version_id: 'v1',
+      size_bytes: 42,
+      checksum_sha256: 'abc',
+      screening: { status: 'passed' as const, screened_at: '2026-08-05T00:00:00Z' },
+    };
+    downloadScreenAndStoreJiraAttachmentsMock.mockResolvedValueOnce([stored]);
+    discoverOrchestrationMock.mockResolvedValueOnce({
+      kind: 'extended',
+      orchestrationId: 'orch-ENG-1',
+      addedSubIssueIds: [],
+      releasableSubIssueIds: [],
+    });
+    const racingEvent = event();
+    const payload = JSON.parse(racingEvent.raw_body);
+    payload.issue.fields.attachment = [{ id: 'att-1' }];
+    racingEvent.raw_body = JSON.stringify(payload);
+
+    await handler(racingEvent);
+
+    expect(cleanupPreScreenedAttachmentsMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'attachments-bucket',
+      [stored],
+    );
+    expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+  });
+
   test('releases only a newly-added root and reopens the existing panel', async () => {
     const extendedSnapshot = {
       ...snapshot,
@@ -669,6 +715,56 @@ describe('jira-webhook-processor orchestration adapter', () => {
 
     expect(discoverOrchestrationMock).not.toHaveBeenCalled();
     expect(createTaskCoreMock).not.toHaveBeenCalled();
+  });
+
+  describe('a graph stored under the same issue key by another Jira site', () => {
+    // The orchestration id hashes the bare issue key, and the rows of a site
+    // that was onboarded earlier stay in the table.
+    const otherSiteSnapshot = {
+      ...snapshot,
+      meta: { ...snapshot.meta, credentials_ref: 'cloud-old' },
+      children: [{ ...snapshot.children[0], credentials_ref: 'cloud-old', child_status: 'failed' }],
+    };
+
+    test('does not stop a plain issue from running as a single task', async () => {
+      loadOrchestrationMock.mockReset().mockResolvedValue(otherSiteSnapshot);
+      jiraGraphSourceMock.mockReturnValueOnce(jest.fn().mockResolvedValue({ kind: 'no_children' }));
+
+      await handler(event());
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0]).toMatchObject({
+        repo: 'org/repo',
+        workflow_ref: 'coding/new-task-v1',
+      });
+    });
+
+    test('is not retried by a comment on this site', async () => {
+      ddbSend.mockReset().mockImplementation(async (command: {
+        _type?: string;
+        input?: { TableName?: string };
+      }) => {
+        if (command._type === 'Get' && command.input?.TableName === 'JiraProjects') {
+          return { Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' } };
+        }
+        if (command._type === 'Get' && command.input?.TableName === 'JiraUsers') {
+          return { Item: { status: 'active', platform_user_id: 'platform-user' } };
+        }
+        return {};
+      });
+      loadOrchestrationMock.mockReset().mockResolvedValue(otherSiteSnapshot);
+
+      await handler(retryEvent());
+
+      expect(claimCommentAckMock).not.toHaveBeenCalled();
+      expect(releaseReadyChildrenMock).not.toHaveBeenCalled();
+      // The comment is then handled like one on any issue without a graph.
+      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'ENG-1',
+        expect.stringContaining("couldn't find an ABCA pull request"),
+      );
+    });
   });
 
   test('surfaces shared DAG rejection and creates no task', async () => {

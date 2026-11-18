@@ -142,6 +142,15 @@ async function safeReportIssueFailure(
 }
 
 /**
+ * Feedback for a tenant whose OAuth token could not be resolved or refreshed.
+ * Posting it needs an outbound identity that still works: a site that writes
+ * as the Forge app gets the comment, an unregistered or inactive site none.
+ */
+const JIRA_TOKEN_UNAVAILABLE_MESSAGE =
+  "❌ ABCA couldn't get a Jira access token for this site, so nothing was started. "
+  + 'Try again in a few minutes; if it keeps failing, ask an ABCA admin to re-run `bgagent jira setup`.';
+
+/**
  * Subset of the Jira Cloud `jira:issue_*` webhook payload we depend on.
  * Undocumented fields are tolerated.
  */
@@ -418,6 +427,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
         jira_cloud_id: cloudId,
         issue_key: issue.key,
       });
+      await safeReportIssueFailure(issue.key, cloudId, JIRA_TOKEN_UNAVAILABLE_MESSAGE);
       return;
     }
     resolvedJira = resolved;
@@ -432,12 +442,14 @@ export async function handler(event: ProcessorEvent): Promise<void> {
     // subtasks can be appended. The flag also prevents parent attachments from
     // being uploaded again below: the meta row already pins the first seed's S3
     // versions, and replacing them would eventually expire those pinned objects.
+    // The id hashes the bare issue key, so rows that another Jira site left
+    // under the same key are not this issue's graph.
     const existing = await loadOrchestration(
       ddb,
       ORCHESTRATION_TABLE,
       deriveOrchestrationId(issue.key),
     );
-    existingOrchestration = existing !== null;
+    existingOrchestration = existing !== null && existing.meta.credentials_ref === cloudId;
 
     const graphResult = await jiraGraphSource(
       resolvedJira.accessToken,
@@ -586,16 +598,6 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
 
-    // A concurrent replay can win between the preflight read and the seed
-    // condition. The shared discovery path returns that race as an empty extend;
-    // any attachment objects uploaded by this invocation are duplicates.
-    if (discovery.kind === 'seeded' && discovery.alreadyExisted) {
-      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
-        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
-      }
-      return;
-    }
-
     if (discovery.kind === 'seeded') {
       const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, discovery.orchestrationId);
       if (snapshot) {
@@ -675,6 +677,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     if (discovery.kind === 'extended') {
+      // Attachments are stored only when the preflight read found no
+      // orchestration, so having some here means a concurrent replay seeded
+      // between that read and the seed condition. The shared discovery path
+      // returns that race as an extend; this invocation's objects are duplicates.
+      if (preScreenedAttachments.length > 0 && s3Client && ATTACHMENTS_BUCKET) {
+        await cleanupPreScreenedAttachments(s3Client, ATTACHMENTS_BUCKET, preScreenedAttachments);
+      }
       if (discovery.addedSubIssueIds.length === 0) {
         logger.info('Jira orchestration re-trigger added no new subtasks', {
           issue_key: issue.key,
@@ -893,7 +902,9 @@ async function handleCommentTrigger(
       await safeReportIssueFailure(
         issue.key,
         cloudId,
-        'I can only retry an orchestration for a linked ABCA user. '
+        // Starts with a marker parseCommentTrigger rejects: a site that writes
+        // with the OAuth token gets this comment back as a human's, mention and all.
+        '❌ ABCA can only retry an orchestration for a linked ABCA user. '
           + 'Link your Jira account first, then comment `@bgagent retry` again.',
       );
       return;
@@ -971,6 +982,7 @@ async function handleCommentTrigger(
       issue_key: issue.key,
       comment_id: comment.id,
     });
+    await safeReportIssueFailure(issue.key, cloudId, JIRA_TOKEN_UNAVAILABLE_MESSAGE);
     return;
   }
 
@@ -1086,7 +1098,11 @@ async function handleJiraEpicRetry(
   if (!ORCHESTRATION_TABLE) return false;
   const orchestrationId = deriveOrchestrationId(parentIssueKey);
   const snapshot = await loadOrchestration(ddb, ORCHESTRATION_TABLE, orchestrationId);
-  if (!snapshot || snapshot.meta.parent_issue_ref !== parentIssueKey) return false;
+  if (
+    !snapshot
+    || snapshot.meta.parent_issue_ref !== parentIssueKey
+    || snapshot.meta.credentials_ref !== cloudId
+  ) return false;
 
   const now = new Date().toISOString();
   const claimed = await claimCommentAck(

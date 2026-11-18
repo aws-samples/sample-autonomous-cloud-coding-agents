@@ -574,6 +574,26 @@ describe('jira-webhook-processor handler', () => {
       expect(createTaskCoreMock).not.toHaveBeenCalled();
     });
 
+    test('does not take its own refusal of an unlinked retry for an instruction', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValue(priorTask);
+      createTaskCoreMock.mockResolvedValue({ statusCode: 201, body: '{}' });
+      const retry = comment();
+      (retry.comment as Record<string, unknown>).body = '@bgagent retry';
+      await handler(eventWith(retry));
+      const refusal = reportIssueFailureMock.mock.calls[0][2] as string;
+      expect(refusal).toContain('`@bgagent retry`');
+
+      // A site that still writes with the OAuth token gets the refusal back as
+      // a new comment by the person who ran setup, not by an app.
+      const echo = comment();
+      (echo.comment as Record<string, unknown>).id = 'comment-2';
+      (echo.comment as Record<string, unknown>).body = refusal;
+      await handler(eventWith(echo));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    });
+
     test('posts clear feedback when no prior PR-producing task exists', async () => {
       await handler(eventWith(comment()));
 
@@ -644,6 +664,21 @@ describe('jira-webhook-processor handler', () => {
       expect(message).toContain('temporarily unavailable');
       expect(message).toContain('add a new `@bgagent` comment');
       expect(message).not.toContain('re-apply the trigger label');
+    });
+
+    test('says so on the issue when no Jira access token resolves for the iteration', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      resolveJiraOauthTokenMock.mockResolvedValueOnce(null);
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'ENG-42',
+        expect.stringContaining('bgagent jira setup'),
+      );
     });
   });
 
@@ -980,7 +1015,7 @@ describe('jira-webhook-processor handler', () => {
     expect(userGetCall[0].input.ConsistentRead).toBe(true);
   });
 
-  test('drops event when tenant resolves to null (registry miss / inactive / unreadable secret)', async () => {
+  test('drops the event and says so on the issue when no Jira access token resolves', async () => {
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
       .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
@@ -989,7 +1024,15 @@ describe('jira-webhook-processor handler', () => {
     await handler(eventWith(issue()));
 
     expect(createTaskCoreMock).not.toHaveBeenCalled();
-    expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    // A dead grant on a site that writes as the Forge app can still be told.
+    // An unregistered or inactive site, or one with an unreadable secret, gives
+    // reportIssueFailure no identity to write with, so nothing is posted there.
+    expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+    expect(reportIssueFailureMock).toHaveBeenCalledWith(
+      expect.anything(),
+      'ENG-42',
+      expect.stringContaining('bgagent jira setup'),
+    );
   });
 
   describe('user-visible feedback on silent-failure paths', () => {

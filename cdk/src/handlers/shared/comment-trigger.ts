@@ -65,8 +65,15 @@ export function isKnownAbcaComment(body: string): boolean {
     '❌ ABCA ',
     '⚠️ Shipped a PR but stopped early',
     '👀 ABCA ',
+    // The orchestration panel: its rows repeat sub-issue titles and its retry
+    // hint spells out the mention.
+    '🔄 ABCA orchestration',
+    '⚠️ ABCA orchestration',
+    '✅ ABCA orchestration',
   ];
-  const trimmed = body.trimStart();
+  // The panel heading is bold after its emoji. An ADF body loses that mark on
+  // the way here; a wiki-text body still has it as an asterisk.
+  const trimmed = body.trimStart().replace(/^(\S+ )\*/, '$1');
   return prefixes.some((prefix) => trimmed.startsWith(prefix));
 }
 
