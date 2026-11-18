@@ -48,8 +48,15 @@ const API_HANDLER_TIMEOUT_SECONDS = 15;
 
 /**
  * Confirm-uploads Lambda timeout (seconds). Downloads + screens up to
- * five attachments (Guardrail image scan, PDF text extraction) in one
+ * ten attachments (Guardrail image scan, PDF text extraction) in one
  * invocation, so it gets a much larger budget than the standard handlers.
+ *
+ * After a gateway timeout `bgagent submit` waits before it confirms again,
+ * and derives that wait from this value (`CONFIRM_MAX_POLLS` in
+ * `cli/src/commands/submit.ts`: this long, less the gateway's 29 s, plus room
+ * for a cold start). Change the two together: with a longer timeout here and
+ * the same wait there, the second confirmation can run beside the first and
+ * screen every upload again.
  */
 const CONFIRM_UPLOADS_TIMEOUT_SECONDS = 180;
 
@@ -336,8 +343,7 @@ export class TaskApi extends Construct {
     // Suppress Cognito rules not applicable for dev environment
     NagSuppressions.addResourceSuppressions(this.userPool, [
       { id: 'AwsSolutions-COG2', reason: 'MFA not required for dev environment — CLI-based auth flow' },
-      { id: 'AwsSolutions-COG3', reason: 'Advanced security mode (Plus tier) not required for dev environment' },
-      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment — same rationale as COG3 (advanced security)' },
+      { id: 'AwsSolutions-COG8', reason: 'Cognito Plus tier / feature plan not required for dev environment (advanced security)' },
     ]);
 
     // --- REST API ---

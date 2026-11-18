@@ -2242,13 +2242,6 @@ export class AgentStack extends Stack {
       },
     ], true);
 
-    NagSuppressions.addResourceSuppressions(bedrockLoggingRole, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'CloudWatch Logs grantWrite generates wildcards for log stream creation — required by Bedrock logging service',
-      },
-    ], true);
-
     new CfnOutput(this, 'ApiUrl', {
       value: taskApi.api.url,
       description: 'URL of the Task API',

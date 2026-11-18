@@ -462,10 +462,12 @@ export class TaskDashboard extends Construct {
       // effective_timeout_s that was actually in effect. Aggregated
       // p50/p90/p99 so operators can distinguish "timeout was 30s,
       // obviously the user couldn't respond" from "timeout was 600s
-      // and the user really was unavailable." ``rule_id`` dimension
-      // is emitted per normalized rule id (allowlist + ``other``
-      // bucket to cap cardinality); the three lines below roll up
-      // across all dimension values at dashboard-render time.
+      // and the user really was unavailable." The publisher writes each
+      // value twice: with a ``rule_id`` dimension (normalized rule id:
+      // allowlist + ``other`` bucket to cap cardinality) and without
+      // dimensions. The three lines below read the one without
+      // dimensions, because CloudWatch does not aggregate a custom
+      // metric across dimensions.
       new cloudwatch.GraphWidget({
         title: 'Approval Timeout Breakdown — effective timeout on timed-out approvals (s)',
         left: [

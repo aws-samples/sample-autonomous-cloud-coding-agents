@@ -652,7 +652,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
  *
  * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
  * try/catch anyway because a transient throw during the registry lookup must
- * never block the rejection path. Exported for unit testing.
+ * never block the admission step. Exported for unit testing.
  */
 export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'jira') return;

@@ -246,13 +246,6 @@ export class GitHubScreenshotIntegration extends Construct {
       bundling: commonBundling,
     });
 
-    NagSuppressions.addResourceSuppressions(processorDlq, [
-      {
-        id: 'AwsSolutions-SQS3',
-        reason: 'This queue IS the async-invoke DLQ for the processor Lambda — a DLQ for the DLQ would be infinite recursion',
-      },
-    ]);
-
     // Alarm on any record landing in the DLQ. The processor handler
     // swallows its own errors, so only init-time crashes reach this queue
     // — rare, but each one is a screenshot pipeline silently down. Same

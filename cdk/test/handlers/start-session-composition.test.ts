@@ -65,7 +65,6 @@ jest.mock('@aws-sdk/client-s3', () => ({
 
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: jest.fn(),
-  checkRepoOnboarded: jest.fn(),
 }));
 
 jest.mock('../../src/handlers/shared/memory', () => ({

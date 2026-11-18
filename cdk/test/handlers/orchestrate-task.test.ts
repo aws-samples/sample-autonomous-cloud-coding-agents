@@ -52,7 +52,6 @@ jest.mock('../../src/handlers/shared/prompt-version', () => ({
 const mockLoadRepoConfig = jest.fn();
 jest.mock('../../src/handlers/shared/repo-config', () => ({
   loadRepoConfig: mockLoadRepoConfig,
-  checkRepoOnboarded: jest.fn(),
 }));
 
 // Registry client (#246): the orchestrator resolves Blueprint registry:// refs

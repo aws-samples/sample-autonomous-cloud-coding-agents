@@ -254,6 +254,14 @@ describe('check-coverage-thresholds-sync', () => {
       }, `${PYPROJECT} [tool.coverage.run] omit: ["src/runner.py"]`);
     });
 
+    // The two lists replace defaults of coverage.py that honour `# pragma: no cover` and `# pragma: no branch`.
+    // Without its line a default is in force again, and a comment takes code out of what the floor measures.
+    test.each(['exclude_lines', 'partial_branches'])('a list that replaces a default of coverage.py removed: %s', (setting) => {
+      expectDrift((root) => {
+        edit(root, PYPROJECT, text => text.replace(new RegExp(`^${setting} = .*\\n`, 'm'), ''));
+      }, `${PYPROJECT} [tool.coverage.report] ${setting}: not set`);
+    });
+
     test('coverage switched off in the test task', () => {
       expectDrift((root) => {
         edit(root, AGENT_MISE, text => text.replace('run = "uv run pytest ', 'run = "uv run pytest --no-cov '));
