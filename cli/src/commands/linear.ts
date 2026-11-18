@@ -30,7 +30,8 @@ import {
 import { DynamoDBDocumentClient, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { loadConfig, loadCredentials } from '../config';
+import { cognitoSubFromSession } from '../auth';
+import { loadConfig } from '../config';
 import { CliError } from '../errors';
 import { requireDeployedFeature } from '../feature-guard';
 import { formatJson } from '../format';
@@ -394,6 +395,16 @@ export function renderLinearAppTemplate(opts: LinearAppTemplateOptions = {}): st
  * shape (Linear's `urlKey` matches `[a-zA-Z0-9_-]+`).
  */
 const SLUG_RE = /^[a-zA-Z0-9_-]{4,50}$/;
+
+/** Refuse a slug that {@link SLUG_RE} does not accept: the first check of every command that takes one. */
+function assertWorkspaceSlug(slug: string): void {
+  if (!SLUG_RE.test(slug)) {
+    throw new CliError(
+      `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
+      + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+    );
+  }
+}
 
 /**
  * Open `url` in the user's default browser. Returns true on best-effort
@@ -999,12 +1010,7 @@ export function makeLinearCommand(): Command {
       )
       // eslint-disable-next-line complexity -- predates the ceiling (115 when it landed); must not grow
       .action(async (slug: string, opts) => {
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -1032,19 +1038,7 @@ export function makeLinearCommand(): Command {
         }
 
         // ─── Resolve caller identity ──────────────────────────────────
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        let cognitoSub: string;
-        try {
-          cognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const cognitoSub = cognitoSubFromSession();
 
         // ─── Linear OAuth app credentials ──────────────────────────────
         // Prompted up-front so the wizard doesn't get halfway through the
@@ -1751,12 +1745,7 @@ export function makeLinearCommand(): Command {
       .option('--no-actor-app', 'Drop actor=app from the OAuth flow (diagnostic)')
       .option('--no-force-consent', 'Omit prompt=consent (diagnostic)')
       .action(async (slug: string, opts) => {
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -1785,19 +1774,7 @@ export function makeLinearCommand(): Command {
         }
 
         // ─── Resolve caller identity ──────────────────────────────────
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        let cognitoSub: string;
-        try {
-          cognitoSub = extractCognitoSub();
-        } catch (err) {
-          throw new CliError(
-            `Could not read Cognito sub from cached id_token: ${err instanceof Error ? err.message : String(err)}. `
-            + 'Run `bgagent login` to refresh credentials.',
-          );
-        }
+        const cognitoSub = cognitoSubFromSession();
 
         const sm = makeClient(SecretsManagerClient, { region });
         const ddb = makeDocClient({ region });
@@ -2089,12 +2066,7 @@ export function makeLinearCommand(): Command {
         // installed in the workspace (Linear returns access_denied),
         // so this command sidesteps it entirely — read the existing
         // OAuth bundle, swap the signing-secret field, write it back.
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
 
@@ -2244,12 +2216,7 @@ export function makeLinearCommand(): Command {
         // Project→repo mappings are NOT touched: mapping rows carry no
         // workspace id, so they can't be attributed to a workspace. Remove
         // a mapping by project id (see LINEAR_SETUP_GUIDE).
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
 
         const purge = Boolean(opts.purge);
 
@@ -2341,12 +2308,7 @@ export function makeLinearCommand(): Command {
         //
         // Self-linking the admin themselves is folded into `setup` /
         // `add-workspace` — no separate command for that case.
-        if (!SLUG_RE.test(slug)) {
-          throw new CliError(
-            `Invalid workspace slug '${slug}'. Must be 4-50 chars matching [a-zA-Z0-9_-]. `
-            + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
-          );
-        }
+        assertWorkspaceSlug(slug);
         const config = loadConfig();
         const region = opts.region || config.region;
         const stackName = opts.stackName;
@@ -2365,11 +2327,7 @@ export function makeLinearCommand(): Command {
           );
         }
 
-        const creds = loadCredentials();
-        if (!creds?.id_token) {
-          throw new CliError('Not authenticated — run `bgagent login` first.');
-        }
-        const callerCognitoSub = extractCognitoSub();
+        const callerCognitoSub = cognitoSubFromSession();
 
         // ─── Resolve workspace + OAuth secret arn ──────────────────────
         const sm = makeClient(SecretsManagerClient, { region });
@@ -2867,9 +2825,11 @@ function promptLine(label: string, defaultValue?: string): Promise<string> {
 
     if (!process.stdin.isTTY) {
       const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      // Resolve before closing: close() emits 'close' at once, and the handler below
+      // would reject the line that was just read.
       rl.once('line', (line) => {
-        rl.close();
         resolve(line.trim() || defaultValue || '');
+        rl.close();
       });
       rl.once('close', () => reject(new Error('No input provided.')));
       return;
@@ -3185,21 +3145,4 @@ async function queryLinearIdentity(
     console.log(`  ⚠ Could not query Linear identity: ${err instanceof Error ? err.message : String(err)}`);
     return null; // nosemgrep: ts-silent-success-masking -- auto-link is optional setup UX; null skips gracefully so admin can link manually
   }
-}
-
-function extractCognitoSub(): string {
-  const creds = loadCredentials();
-  if (!creds?.id_token) {
-    throw new Error('not authenticated — run `bgagent login`');
-  }
-  const JWT_SEGMENTS = 3; // header.payload.signature
-  const parts = creds.id_token.split('.');
-  if (parts.length !== JWT_SEGMENTS) {
-    throw new Error('malformed id_token in ~/.bgagent/credentials.json');
-  }
-  const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8')) as { sub?: string };
-  if (!payload.sub) {
-    throw new Error('id_token missing `sub` claim');
-  }
-  return payload.sub;
 }

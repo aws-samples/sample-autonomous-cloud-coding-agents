@@ -306,15 +306,12 @@ export async function changePassword(
 }
 
 /**
- * Read the signed-in user's Cognito username from the cached ID token.
- *
- * Requires a ``bgagent login`` session. The username lives in the ``email``
- * claim (the pool's sign-in alias); older tokens may only carry
- * ``cognito:username``. Never logs the token or its claims.
+ * Decode the claims of the cached ID token. Requires a ``bgagent login``
+ * session. Never logs the token or its claims.
  */
-function usernameFromSession(): string {
+function sessionClaims(): { 'sub'?: string; 'email'?: string; 'cognito:username'?: string } {
   const creds = loadCredentials();
-  if (!creds) {
+  if (!creds?.id_token) {
     throw new CliError('Not authenticated. Run `bgagent login` first.');
   }
   const JWT_SEGMENTS = 3; // header.payload.signature
@@ -322,17 +319,38 @@ function usernameFromSession(): string {
   if (parts.length !== JWT_SEGMENTS) {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }
-  let payload: { 'email'?: string; 'cognito:username'?: string };
   try {
-    payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
   } catch {
     throw new CliError('Credentials file is corrupt. Run `bgagent login` to re-authenticate.');
   }
-  const username = payload.email ?? payload['cognito:username'];
+}
+
+/**
+ * Read the signed-in user's Cognito username from the cached ID token.
+ *
+ * The username lives in the ``email`` claim (the pool's sign-in alias);
+ * older tokens may only carry ``cognito:username``.
+ */
+function usernameFromSession(): string {
+  const claims = sessionClaims();
+  const username = claims.email ?? claims['cognito:username'];
   if (!username) {
     throw new CliError('Could not read your account identity. Run `bgagent login` to re-authenticate.');
   }
   return username;
+}
+
+/**
+ * Read the signed-in user's Cognito ``sub``, the platform user id, from the
+ * cached ID token.
+ */
+export function cognitoSubFromSession(): string {
+  const { sub } = sessionClaims();
+  if (!sub) {
+    throw new CliError('Could not read your account identity. Run `bgagent login` to re-authenticate.');
+  }
+  return sub;
 }
 
 /**

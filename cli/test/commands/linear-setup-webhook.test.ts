@@ -112,8 +112,20 @@ jest.mock('@aws-sdk/client-dynamodb', () => {
   return { ...actual, DynamoDBClient: jest.fn(() => ({})) };
 });
 
+// The visible prompts read one line through readline when stdin is not a terminal. These are
+// the lines the operator types, in order; Enter once they run out.
+let typed: string[] = [];
+jest.mock('readline', () => ({
+  createInterface: () => ({
+    once: (event: string, cb: (line: string) => void) => {
+      if (event === 'line') cb(typed.shift() ?? '');
+    },
+    close: () => undefined,
+  }),
+}));
+
 // A syntactically-valid id_token whose payload carries a `sub` claim, so
-// extractCognitoSub() (JWT base64url decode) resolves without real creds.
+// cognitoSubFromSession() (JWT base64url decode) resolves without real creds.
 const FAKE_ID_TOKEN = `x.${Buffer.from(JSON.stringify({ sub: 'sub-abc' })).toString('base64url')}.y`;
 
 const WEBHOOK_ARN = 'arn:aws:secretsmanager:us-west-2:111122223333:secret:LinearWebhookSecret-abc';
@@ -393,6 +405,51 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
   describe('refuses before anything is written', () => {
     const DEMO_ROW = { linear_workspace_id: 'org-demo', workspace_slug: 'demo', status: 'active' };
     const throttled = () => Object.assign(new Error('Rate exceeded'), { name: 'ThrottlingException' });
+    // The visible prompts read through readline only when stdin is not a terminal, which it is
+    // when one file is run from a shell. Pinned, so that the tests do not wait for keys.
+    const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+    /** The CLI's configuration directory, where a consent that spans two runs is kept. */
+    let configDir: string;
+
+    beforeEach(() => {
+      Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+      typed = [];
+      configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-linear-setup-'));
+      process.env.BGAGENT_CONFIG_DIR = configDir;
+    });
+
+    afterEach(() => {
+      if (stdinIsTTY) Object.defineProperty(process.stdin, 'isTTY', stdinIsTTY);
+      else Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true });
+      delete process.env.BGAGENT_CONFIG_DIR;
+      fs.rmSync(configDir, { recursive: true, force: true });
+    });
+
+    /** The consent an earlier run of `setup demo` saved, to be finished with `--code`. */
+    function saveConsent(): void {
+      savePendingConsent({
+        slug: 'demo',
+        state: 'state-1',
+        codeVerifier: 'verifier-1',
+        clientId: 'cid',
+        redirectUri: 'https://consent.example.test/',
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    /** A stack deployed with the Identity vault: it publishes the hosted consent page. */
+    function deployConsentPage(): void {
+      cfnSend.mockResolvedValue({
+        Stacks: [{
+          Outputs: [
+            { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
+            { OutputKey: 'LinearUserMappingTableName', OutputValue: 'user-mapping-table' },
+            { OutputKey: 'LinearWebhookSecretArn', OutputValue: WEBHOOK_ARN },
+            { OutputKey: 'LinearVaultConsentUrl', OutputValue: 'https://consent.example.test/' },
+          ],
+        }],
+      });
+    }
 
     /** Secrets Manager as `setup` meets it: the bundle of `demo`, if it has one, and the stack-wide secret. */
     function stubSecrets(
@@ -429,8 +486,8 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       }));
     }
 
-    /** `setup demo`, with the config, the login and the console stubbed as the tests above do by hand. */
-    async function runSetup(webhookSecret: string, ...more: string[]): Promise<void> {
+    /** `bgagent linear <argv>`, with the config, the login and the console stubbed as the tests above do by hand. */
+    async function runLinear(...argv: string[]): Promise<void> {
       const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue(
         { region: 'us-west-2', api_url: 'https://api.example.test' } as ReturnType<typeof configMod.loadConfig>,
       );
@@ -443,16 +500,21 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
         if (m) capturedState = decodeURIComponent(m[1]);
       });
       try {
-        await makeLinearCommand().parseAsync([
-          'node', 'bgagent', 'setup', 'demo',
-          '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', webhookSecret, '--no-browser',
-          ...more,
-        ]);
+        await makeLinearCommand().parseAsync(['node', 'bgagent', ...argv]);
       } finally {
         cfgSpy.mockRestore();
         credSpy.mockRestore();
         logSpy.mockRestore();
       }
+    }
+
+    /** `setup demo`, with the app's credentials and the signing secret given as flags. */
+    function runSetup(webhookSecret: string, ...more: string[]): Promise<void> {
+      return runLinear(
+        'setup', 'demo',
+        '--client-id', 'cid', '--client-secret', 'csecret', '--webhook-secret', webhookSecret, '--no-browser',
+        ...more,
+      );
     }
 
     /** What the run sent that changes Secrets Manager or DynamoDB. */
@@ -475,27 +537,95 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
     test('a registry that cannot be read, before `--code` uses up the saved consent', async () => {
       // The consent a first run saved can be taken once. The registry is read before it is
       // taken, so the same command can be run again when the read has failed.
-      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abca-linear-setup-'));
-      process.env.BGAGENT_CONFIG_DIR = configDir;
-      try {
-        savePendingConsent({
-          slug: 'demo',
-          state: 'state-1',
-          codeVerifier: 'verifier-1',
-          clientId: 'cid',
-          redirectUri: 'https://consent.example.test/',
-          createdAt: new Date().toISOString(),
-        });
-        stubSecrets(undefined);
-        stubRegistry(() => Promise.reject(throttled()));
+      saveConsent();
+      stubSecrets(undefined);
+      stubRegistry(() => Promise.reject(throttled()));
 
-        await expect(runSetup('lin_wh_suppliedByOperator', '--code', 'code=abc&state=state-1'))
-          .rejects.toThrow('Rate exceeded');
-        expect(takePendingConsent('demo').codeVerifier).toBe('verifier-1');
-      } finally {
-        delete process.env.BGAGENT_CONFIG_DIR;
-        fs.rmSync(configDir, { recursive: true, force: true });
-      }
+      await expect(runSetup('lin_wh_suppliedByOperator', '--code', 'code=abc&state=state-1'))
+        .rejects.toThrow('Rate exceeded');
+      expect(takePendingConsent('demo').codeVerifier).toBe('verifier-1');
+    });
+
+    describe('an answer whose OAuth state is not the one this machine sent', () => {
+      // The state ties an answer to the authorization this machine started. One that carries
+      // another state was not asked for here, and its code must not be exchanged for a token.
+
+      test('to the loopback listener of `setup`', async () => {
+        // The listener answers a request on any path, so any page open in the browser can send one.
+        stubSecrets(undefined);
+        stubRegistry(() => Promise.resolve({ Items: [] }));
+        awaitOauthCallbackMock.mockResolvedValueOnce({ kind: 'direct-oauth', code: 'auth-code', state: 'not-the-state' });
+
+        await expect(runSetup('lin_wh_suppliedByOperator')).rejects.toThrow(/OAuth state mismatch/);
+        expect(exchangeAuthorizationCodeMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
+
+      test('to the loopback listener of `add-workspace`', async () => {
+        // `demo` is onboarded and its bundle holds the app's client id and secret: Enter reuses them.
+        stubSecrets(priorWorkspaceBundle());
+        stubRegistry(() => Promise.resolve({ Items: [{ ...DEMO_ROW, oauth_secret_arn: PER_WORKSPACE_NAME }] }));
+        awaitOauthCallbackMock.mockResolvedValueOnce({ kind: 'direct-oauth', code: 'auth-code', state: 'not-the-state' });
+
+        await expect(runLinear('add-workspace', 'beta', '--no-browser')).rejects.toThrow(/OAuth state mismatch/);
+        expect(exchangeAuthorizationCodeMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
+
+      test('pasted from the consent page', async () => {
+        // A stack with the consent page, in a region without AgentCore Identity: `setup` goes on
+        // with Secrets Manager, sends the browser to the page and asks for the value it shows.
+        deployConsentPage();
+        upsertLinearCredentialProviderMock.mockRejectedValue(new Error('getaddrinfo ENOTFOUND bedrock-agentcore-control'));
+        stubSecrets(undefined);
+        stubRegistry(() => Promise.resolve({ Items: [] }));
+        typed = ['code=abc&state=not-the-state'];
+
+        await expect(runSetup('lin_wh_suppliedByOperator')).rejects.toThrow(/OAuth state mismatch/);
+        expect(exchangeAuthorizationCodeMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
+
+      test('pasted to `--code`, for the consent an earlier run saved', async () => {
+        saveConsent();
+        stubSecrets(undefined);
+        stubRegistry(() => Promise.resolve({ Items: [] }));
+
+        await expect(runSetup('lin_wh_suppliedByOperator', '--code', 'code=abc&state=not-the-state'))
+          .rejects.toThrow(/OAuth state mismatch/);
+        expect(exchangeAuthorizationCodeMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
+    });
+
+    describe('a workspace that is on the Identity vault, when the run would not use the vault', () => {
+      // `setup` rewrites the registry row whole. A run on Secrets Manager would drop the vault
+      // binding of the row, put a stored long-lived token in the place of minted short-lived
+      // ones and leave the AgentCore provider behind, all under "Setup complete".
+      const VAULT_ROW = { ...DEMO_ROW, provider_name: 'bgagent-linear-oauth-demo' };
+
+      test('on a stack that was deployed again without the vault', async () => {
+        stubSecrets(priorWorkspaceBundle());
+        stubRegistry(() => Promise.resolve({ Items: [VAULT_ROW] }));
+
+        await expect(runSetup('')).rejects.toThrow(/already onboarded through the AgentCore Identity vault/);
+        expect(awaitOauthCallbackMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
+
+      test('with `--code`, which finishes a consent of the Secrets Manager path', async () => {
+        deployConsentPage();
+        saveConsent();
+        stubSecrets(priorWorkspaceBundle());
+        stubRegistry(() => Promise.resolve({ Items: [VAULT_ROW] }));
+
+        await expect(runSetup('', '--code', 'code=abc&state=state-1')).rejects.toThrow(
+          /already onboarded through the AgentCore Identity vault[\s\S]*re-run without `--code`/,
+        );
+        expect(upsertLinearCredentialProviderMock).not.toHaveBeenCalled();
+        expect(exchangeAuthorizationCodeMock).not.toHaveBeenCalled();
+        expect(writes()).toEqual([]);
+      });
     });
 
     test('a stored secret that is the stack-wide one, when the operator supplies none', async () => {
@@ -601,16 +731,7 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       // reuses a stored consent instead of asking again: once refused, `setup demo` would be
       // refused on every run, with no way to authorize the right workspace. Until it can ask
       // for a new consent, this path keeps the warning it had.
-      cfnSend.mockResolvedValue({
-        Stacks: [{
-          Outputs: [
-            { OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' },
-            { OutputKey: 'LinearUserMappingTableName', OutputValue: 'user-mapping-table' },
-            { OutputKey: 'LinearWebhookSecretArn', OutputValue: WEBHOOK_ARN },
-            { OutputKey: 'LinearVaultConsentUrl', OutputValue: 'https://consent.example.test/' },
-          ],
-        }],
-      });
+      deployConsentPage();
       upsertLinearCredentialProviderMock.mockResolvedValue({
         providerName: 'bgagent-linear-oauth-demo', callbackUrl: 'https://callback.example.test/', created: false,
       });

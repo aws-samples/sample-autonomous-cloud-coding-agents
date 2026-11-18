@@ -34,6 +34,7 @@ import {
 } from '../../src/commands/linear';
 import * as configMod from '../../src/config';
 import type { StoredLinearOauthToken } from '../../src/linear-oauth';
+import * as promptSecretMod from '../../src/prompt-secret';
 
 const execFileMock = jest.fn();
 jest.mock('child_process', () => ({ execFile: (...args: unknown[]) => execFileMock(...args) }));
@@ -215,6 +216,49 @@ describe('makeLinearCommand', () => {
       logSpy.mockRestore();
       rlSpy.mockRestore();
     }
+  });
+
+  test.each(['setup', 'add-workspace', 'update-webhook-secret', 'remove-workspace', 'invite-user'])(
+    '%s refuses a slug that cannot be a workspace URL key, before it reads anything',
+    async (command) => {
+      await expect(makeLinearCommand().parseAsync(['node', 'bgagent', command, 'a!'])).rejects.toThrow(
+        'Invalid workspace slug \'a!\'. Must be 4-50 chars matching [a-zA-Z0-9_-]. '
+        + 'This is the Linear urlKey, e.g. \'acme\' from linear.app/acme/...',
+      );
+
+      expect(cfnSend).not.toHaveBeenCalled();
+      expect(smSend).not.toHaveBeenCalled();
+      expect(ddbSend).not.toHaveBeenCalled();
+    },
+  );
+
+  describe.each(['setup', 'add-workspace', 'invite-user'])('%s, which records the platform user who ran it', (command) => {
+    // The three read that user from the cached ID token. `setup` and `add-workspace` used to
+    // wrap a token they could not read in a sentence of their own, and `invite-user` printed
+    // the bare reason, with no remedy.
+    test.each([
+      ['no login', null, 'Not authenticated. Run `bgagent login` first.'],
+      ['an ID token that cannot be read', { id_token: 'not-a-jwt' }, 'Credentials file is corrupt. Run `bgagent login` to re-authenticate.'],
+    ])('fails on %s with the error of every command that needs a login', async (_what, credentials, message) => {
+      cfnSend.mockReset().mockResolvedValue({
+        Stacks: [{
+          Outputs: ['LinearWorkspaceRegistryTableName', 'LinearUserMappingTableName', 'LinearWebhookSecretArn']
+            .map((OutputKey) => ({ OutputKey, OutputValue: `value-of-${OutputKey}` })),
+        }],
+      });
+      const cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
+      const credSpy = jest.spyOn(configMod, 'loadCredentials').mockReturnValue(credentials as ReturnType<typeof configMod.loadCredentials>);
+      try {
+        const failure = await makeLinearCommand().parseAsync(['node', 'bgagent', command, 'acme']).catch((err: Error) => err.message);
+
+        expect(failure).toBe(message);
+        expect(smSend).not.toHaveBeenCalled();
+        expect(ddbSend).not.toHaveBeenCalled();
+      } finally {
+        cfgSpy.mockRestore();
+        credSpy.mockRestore();
+      }
+    });
   });
 
   test('setup aborts with a clear error when stack outputs are missing (covers findStackOutput)', async () => {
@@ -503,20 +547,31 @@ describe('linear backfill-secret-provenance', () => {
     logSpy.mockRestore();
   });
 
-  /** Run the command on a registry of active workspaces; `update` answers the write for each. */
-  async function backfill(slugs: string[], update: (slug: string) => Promise<unknown>): Promise<void> {
+  /**
+   * Run the command on a registry of active workspaces; `update` answers the write for each.
+   * The rows of `recorded` already say that the workspace owns its secret.
+   */
+  async function backfill(
+    slugs: string[],
+    update: (slug: string) => Promise<unknown>,
+    { recorded = [], flags = [] }: { recorded?: string[]; flags?: string[] } = {},
+  ): Promise<void> {
     ddbSend.mockReset().mockImplementation(async (cmd: unknown) => {
       if (cmd instanceof ScanCommand) {
         return {
           Items: slugs.map((slug) => ({
-            workspace_slug: slug, linear_workspace_id: `org-${slug}`, oauth_secret_arn: `arn:${slug}`, status: 'active',
+            workspace_slug: slug,
+            linear_workspace_id: `org-${slug}`,
+            oauth_secret_arn: `arn:${slug}`,
+            status: 'active',
+            ...(recorded.includes(slug) && { webhook_secret_owned: true }),
           })),
         };
       }
       if (cmd instanceof UpdateCommand) return update(String(cmd.input.Key?.linear_workspace_id).slice('org-'.length));
       throw new Error('unexpected command');
     });
-    await makeLinearCommand().parseAsync(['node', 'bgagent', 'backfill-secret-provenance']);
+    await makeLinearCommand().parseAsync(['node', 'bgagent', 'backfill-secret-provenance', ...flags]);
   }
 
   test('reports a workspace whose row disappeared during the run as skipped, and does not count it', async () => {
@@ -540,5 +595,155 @@ describe('linear backfill-secret-provenance', () => {
     await expect(backfill(['alpha'], () => Promise.reject(throttled))).rejects.toThrow('Rate exceeded');
 
     expect(out.filter((line) => line.includes('recorded as owning'))).toEqual([]);
+  });
+
+  describe('on a registry where one workspace of four is known to own its secret', () => {
+    // alpha stores a secret of its own. beta stores a copy of the stack-wide one, from a release
+    // that copied it into the bundles. gamma stores none. delta was recorded by an earlier run.
+    // A workspace recorded as owning a secret it shares is accepted by the webhook receiver for
+    // deliveries that another workspace signed: the one outcome this command exists to prevent.
+    const SLUGS = ['alpha', 'beta', 'gamma', 'delta'];
+    const recorded = ['delta'];
+    const written = async () => ({});
+    /** The registry updates the run sent. */
+    const updates = () => ddbSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof UpdateCommand).map((cmd) => cmd.input);
+
+    beforeEach(() => {
+      smSend.mockImplementation(async (cmd: GetSecretValueCommand) => {
+        switch (cmd.input.SecretId) {
+          case STACK_WIDE_ARN: return { SecretString: 'lin_wh_stackWide' };
+          case 'arn:beta': return { SecretString: JSON.stringify({ webhook_signing_secret: 'lin_wh_stackWide' }) };
+          case 'arn:gamma': return { SecretString: JSON.stringify({ access_token: 'tok-gamma' }) };
+          default: return { SecretString: JSON.stringify({ webhook_signing_secret: `lin_wh_${cmd.input.SecretId}` }) };
+        }
+      });
+    });
+
+    test('records that one, and names the others that need a secret of their own', async () => {
+      await backfill(SLUGS, written, { recorded });
+
+      expect(updates()).toEqual([{
+        TableName: 'registry-table',
+        Key: { linear_workspace_id: 'org-alpha' },
+        UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+        ConditionExpression: 'attribute_exists(linear_workspace_id)',
+        ExpressionAttributeValues: { ':t': true, ':u': expect.any(String) },
+      }]);
+      expect(out.filter((line) => /alpha|beta|gamma|delta|workspace\(s\)/.test(line))).toEqual([
+        '4 active workspace(s). Stack-wide secret: set',
+        '  ✓ alpha: recorded as owning its secret',
+        '  ⚠ beta: holds the stack-wide secret, so ownership cannot be established',
+        '  ⚠ gamma: has no signing secret of its own',
+        '  · delta: already recorded as owning its secret',
+        '✓ Recorded 1 workspace(s).',
+        '⚠ 2 workspace(s) need a signing secret of their own.',
+        '    bgagent linear update-webhook-secret beta',
+        '    bgagent linear update-webhook-secret gamma',
+      ]);
+    });
+
+    test('writes nothing with --dry-run, and says what it would record', async () => {
+      await backfill(SLUGS, written, { recorded, flags: ['--dry-run'] });
+
+      expect(updates()).toEqual([]);
+      expect(out).toEqual(expect.arrayContaining([
+        '  would record alpha as owning its secret',
+        'Dry run: 1 workspace(s) would be recorded.',
+      ]));
+    });
+
+    test('records nothing when the stack-wide secret cannot be read', async () => {
+      // Every bundle holds a copy here. With nothing to compare it against, each copy would
+      // pass for a secret of the workspace's own.
+      smSend.mockImplementation(async (cmd: GetSecretValueCommand) => {
+        if (cmd.input.SecretId !== STACK_WIDE_ARN) return { SecretString: JSON.stringify({ webhook_signing_secret: 'lin_wh_stackWide' }) };
+        throw Object.assign(new Error('not authorized to perform secretsmanager:GetSecretValue'), { name: 'AccessDeniedException' });
+      });
+
+      await expect(backfill(SLUGS, written, { recorded })).rejects.toThrow(/Could not read the stack-wide webhook secret/);
+
+      expect(updates()).toEqual([]);
+    });
+  });
+});
+
+describe('linear update-webhook-secret', () => {
+  /** What the bundle of `acme` holds before the command runs. */
+  const stored = sampleToken({ webhook_signing_secret: 'lin_wh_old' });
+  let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+  let promptSpy: jest.SpiedFunction<typeof promptSecretMod.promptSecret>;
+
+  beforeEach(() => {
+    cfnSend.mockReset().mockResolvedValue({
+      Stacks: [{ Outputs: [{ OutputKey: 'LinearWorkspaceRegistryTableName', OutputValue: 'registry-table' }] }],
+    });
+    // The bundle exists, so it is written with PutSecretValue after CreateSecret is refused.
+    smSend.mockReset().mockImplementation(async (cmd: unknown) => {
+      if (cmd instanceof CreateSecretCommand) throw new ResourceExistsException({ message: 'exists', $metadata: {} });
+      if (cmd instanceof PutSecretValueCommand) return { ARN: 'arn:acme' };
+      return { SecretString: JSON.stringify(stored) };
+    });
+    ddbSend.mockReset().mockResolvedValue({});
+    cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation();
+    promptSpy = jest.spyOn(promptSecretMod, 'promptSecret').mockResolvedValue('lin_wh_new');
+  });
+
+  afterEach(() => {
+    cfgSpy.mockRestore();
+    logSpy.mockRestore();
+    promptSpy.mockRestore();
+  });
+
+  const run = (): Promise<unknown> => makeLinearCommand().parseAsync(['node', 'bgagent', 'update-webhook-secret', 'acme']);
+  /** The bundle writes the run sent. */
+  const bundleWrites = () => smSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof PutSecretValueCommand);
+  /** The registry updates the run sent. */
+  const registryUpdates = () => ddbSend.mock.calls.map(([cmd]) => cmd).filter((cmd) => cmd instanceof UpdateCommand).map((cmd) => cmd.input);
+
+  test('replaces the signing secret in the bundle, keeps the rest of it, and records that the workspace owns it', async () => {
+    // The repair takes both writes. The webhook receiver verifies a delivery against the bundle,
+    // and on a stack with two workspaces only for a workspace whose row says the secret is its own.
+    await run();
+
+    expect(bundleWrites().map((put) => put.input.SecretId)).toEqual(['bgagent-linear-oauth-acme']);
+    const written = JSON.parse(String(bundleWrites()[0].input.SecretString)) as typeof stored;
+    expect(written).toEqual({ ...stored, webhook_signing_secret: 'lin_wh_new', updated_at: expect.any(String) });
+    expect(Date.parse(written.updated_at)).toBeGreaterThan(Date.parse(stored.updated_at));
+    expect(registryUpdates()).toEqual([{
+      TableName: 'registry-table',
+      Key: { linear_workspace_id: stored.workspace_id },
+      UpdateExpression: 'SET webhook_secret_owned = :t, updated_at = :u',
+      ConditionExpression: 'attribute_exists(linear_workspace_id)',
+      ExpressionAttributeValues: { ':t': true, ':u': expect.any(String) },
+    }]);
+  });
+
+  test.each([
+    ['the workspace has no registry row', 'ConditionalCheckFailedException', /has no registry row/],
+    ['the registry cannot be written', 'ThrottlingException', /could not record its provenance/],
+  ])('fails when %s: the secret alone is half the repair', async (_why, name, failure) => {
+    ddbSend.mockRejectedValue(Object.assign(new Error('refused'), { name }));
+
+    await expect(run()).rejects.toThrow(failure);
+  });
+
+  test('fails when the stack publishes no registry table, instead of leaving the registry out', async () => {
+    cfnSend.mockResolvedValue({ Stacks: [{ Outputs: [] }] });
+
+    await expect(run()).rejects.toThrow(/could not find LinearWorkspaceRegistryTableName/);
+    expect(registryUpdates()).toEqual([]);
+  });
+
+  test.each([
+    ['is empty', '', /signing secret is required/],
+    ['is not a signing secret', 'not-a-signing-secret', /start with 'lin_wh_'/],
+  ])('stores nothing when what was pasted %s', async (_what, pasted, refusal) => {
+    promptSpy.mockResolvedValue(pasted);
+
+    await expect(run()).rejects.toThrow(refusal);
+    expect(bundleWrites()).toEqual([]);
+    expect(registryUpdates()).toEqual([]);
   });
 });
