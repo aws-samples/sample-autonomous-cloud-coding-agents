@@ -35,6 +35,8 @@ if (!TASK_APPROVALS_TABLE_NAME) {
 const USER_STATUS_INDEX_NAME = process.env.USER_STATUS_INDEX_NAME ?? 'user_id-status-index';
 const PENDING_RATE_LIMIT_PER_MINUTE = Number(process.env.PENDING_RATE_LIMIT_PER_MINUTE ?? '60');
 const PENDING_LIST_LIMIT = 100;
+/** Pages one request reads at most: 2,000 rows, whatever a user's expired rows number. */
+const PENDING_MAX_PAGES = 20;
 
 /**
  * GET /v1/pending — List pending approvals owned by the caller (§7.7).
@@ -50,6 +52,12 @@ const PENDING_LIST_LIMIT = 100;
  * polls this route every 10 s in each visible window and again on each
  * page change, window focus and decision: a limit near 10/min shows the
  * approvals inbox a rate-limit error as soon as a second window is open.
+ *
+ * A request whose window has passed is not listed. The agent writes
+ * `TIMED_OUT` when a window ends; when it cannot (its container or
+ * MicroVM is gone by then) the row stays `PENDING` until DynamoDB's TTL
+ * deletes it, which can take days. At most 20 pages are read for one
+ * request, so a live request behind 2,000 such rows is not listed.
  *
  * Response contains a `pending[]` of summaries, each with
  * `expires_at` derived from `created_at + timeout_s` so the CLI can
@@ -103,19 +111,40 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw err;
     }
 
-    const result = await ddb.send(new QueryCommand({
-      TableName: TASK_APPROVALS_TABLE_NAME,
-      IndexName: USER_STATUS_INDEX_NAME,
-      KeyConditionExpression: 'user_id = :user AND #status = :pending',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: {
-        ':user': userId,
-        ':pending': 'PENDING',
-      },
-      Limit: PENDING_LIST_LIMIT,
-    }));
+    // Read the caller's PENDING rows a page at a time and keep the requests whose
+    // window is still open. `Limit` bounds the rows DynamoDB reads, before any is
+    // left out here, so one page is not enough: a page of rows whose window has
+    // passed would hide the live requests behind it. The reading is bounded: a user
+    // can leave such rows faster than DynamoDB deletes them.
+    const live: Record<string, unknown>[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    let pages = 0;
+    do {
+      const page = await ddb.send(new QueryCommand({
+        TableName: TASK_APPROVALS_TABLE_NAME,
+        IndexName: USER_STATUS_INDEX_NAME,
+        KeyConditionExpression: 'user_id = :user AND #status = :pending',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+          ':user': userId,
+          ':pending': 'PENDING',
+        },
+        Limit: PENDING_LIST_LIMIT,
+        ExclusiveStartKey: startKey,
+      }));
+      live.push(...(page.Items ?? []).filter((row) => !windowHasPassed(row, nowEpoch)));
+      startKey = page.LastEvaluatedKey;
+      pages += 1;
+    } while (startKey && live.length < PENDING_LIST_LIMIT && pages < PENDING_MAX_PAGES);
+    if (startKey && live.length < PENDING_LIST_LIMIT) {
+      logger.warn('Pending list stopped at its page cap; requests behind the rows read are not listed', {
+        user_id: userId,
+        pages,
+        request_id: requestId,
+      });
+    }
 
-    const items = (result.Items ?? []) as ReadonlyArray<Record<string, unknown>>;
+    const items: ReadonlyArray<Record<string, unknown>> = live.slice(0, PENDING_LIST_LIMIT);
     const pending: PendingApprovalSummary[] = items.map((row) => {
       const created_at = String(row.created_at ?? '');
       const timeout_s = Number(row.timeout_s ?? 0);
@@ -161,6 +190,17 @@ function coerceSeverity(value: unknown): Severity {
 function coerceStringList(value: unknown): readonly string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((v): v is string => typeof v === 'string');
+}
+
+/**
+ * True when the row's approval window, `created_at + timeout_s`, has passed. The
+ * window is open while its end is later than the clock, in epoch seconds. A row
+ * without a window stays listed: one with no positive `timeout_s`, or with a
+ * `created_at` that is not a date (the sum is then NaN, and the comparison false).
+ */
+function windowHasPassed(row: Record<string, unknown>, nowEpoch: number): boolean {
+  const timeoutS = Number(row.timeout_s ?? 0);
+  return timeoutS > 0 && Date.parse(String(row.created_at ?? '')) / 1000 + timeoutS <= nowEpoch;
 }
 
 function computeExpiresAt(createdAt: string, timeoutS: number): string {

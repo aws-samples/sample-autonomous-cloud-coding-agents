@@ -1001,6 +1001,28 @@ describe('AgentStack', () => {
     expect(vars.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME).toBeDefined();
   });
 
+  test('every function that reads the per-user concurrency cap gets the one the orchestrator admits against', () => {
+    // The stack declares the cap once. A construct it does not pass the cap to falls
+    // back to a default of its own, and that shows only on the day the stack's value
+    // changes: the orchestrator then admits against one number while the admission-queue
+    // pickup and the task API count against another.
+    const caps = Object.entries(template.findResources('AWS::Lambda::Function'))
+      .map(([id, fn]) => [id, fn.Properties.Environment?.Variables?.MAX_CONCURRENT_TASKS_PER_USER] as const)
+      .filter(([, cap]) => cap !== undefined);
+    const admissionCap = caps.find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))?.[1];
+
+    expect(admissionCap).toBeDefined();
+    expect(caps.filter(([, cap]) => cap !== admissionCap)).toEqual([]);
+    // The functions this is here for. One that stops carrying the variable, or that
+    // moves into a nested stack (whose template then has to be read here as well),
+    // would otherwise drop out of the comparison above without being noticed.
+    expect(caps.map(([id]) => id)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^TaskApiGetTaskFn/),
+      expect.stringMatching(/^TaskApiConfirmUploadsFn/),
+      expect.stringMatching(/^AdmissionQueuePickupPickupFn/),
+    ]));
+  });
+
   test('creates a log group for model invocation logs', () => {
     template.hasResourceProperties('AWS::Logs::LogGroup', {
       LogGroupName: '/aws/bedrock/model-invocation-logs/TestAgentStack',

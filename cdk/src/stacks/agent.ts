@@ -522,6 +522,16 @@ export class AgentStack extends Stack {
         return ecsClusterArnHolder;
       },
     });
+
+    // Per-user concurrency cap. Declared once, here, for every function that reads
+    // MAX_CONCURRENT_TASKS_PER_USER: those of the task API, the orchestrator
+    // (admission control), the admission-queue pickup, the Linear and Jira
+    // integrations and the orchestration reconcilers (their release throttle).
+    // They must never drift: each has to count against the SAME ceiling admission
+    // enforces. A construct that is not passed the cap falls back to a default of
+    // its own.
+    const maxConcurrentTasksPerUser = 10;
+
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
@@ -540,6 +550,7 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
       budgetTable: budgetTable.table,
       // ADR-021: gives the cancel Lambda `lambda:TerminateMicrovm`, scoped to the
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
@@ -1319,11 +1330,6 @@ export class AgentStack extends Stack {
     }
 
     // --- Task Orchestrator (durable Lambda function) ---
-    // Per-user concurrency cap, shared by the orchestrator (admission control)
-    // and the orchestration reconcilers (their release throttle), so the two
-    // never drift — the reconciler must throttle to the SAME ceiling admission
-    // enforces.
-    const maxConcurrentTasksPerUser = 10;
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
@@ -1451,6 +1457,7 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
     });
 

@@ -34,6 +34,7 @@ import { DescribeTableCommand } from '@aws-sdk/client-dynamodb';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import type { APIGatewayProxyResult } from 'aws-lambda';
 import { RepoTable } from '../../src/constructs/repo-table';
+import { TaskApprovalsTable } from '../../src/constructs/task-approvals-table';
 import { TaskEventsTable } from '../../src/constructs/task-events-table';
 import { TaskTable } from '../../src/constructs/task-table';
 
@@ -43,11 +44,13 @@ const run = randomUUID().slice(0, 8);
 process.env.TASK_TABLE_NAME = `emu-${run}-tasks`;
 process.env.TASK_EVENTS_TABLE_NAME = `emu-${run}-events`;
 process.env.REPO_TABLE_NAME = `emu-${run}-repos`;
+process.env.TASK_APPROVALS_TABLE_NAME = `emu-${run}-approvals`;
 /** A task table as a stack has it before the deploy that adds UserCreatedAtIndex (#51). */
 const TASKS_BEFORE_51 = `emu-${run}-tasks-before-51`;
 
 import { handler as cancelTask } from '../../src/handlers/cancel-task';
 import { handler as createTask } from '../../src/handlers/create-task';
+import { handler as getPending } from '../../src/handlers/get-pending';
 import { handler as getTask } from '../../src/handlers/get-task';
 import { handler as getTaskEvents } from '../../src/handlers/get-task-events';
 import { handler as listTasks } from '../../src/handlers/list-tasks';
@@ -56,6 +59,8 @@ import { apiEvent, emulatorTables } from './harness';
 
 const REPO = 'acme/widgets';
 const CONCURRENT_CANCELS = 8;
+/** Approval window of the requests written here, in seconds. */
+const APPROVAL_TIMEOUT_S = 300;
 
 /** A user no other test has written for, so tests need no cleanup between them. */
 const newUser = (): string => `user-${randomUUID()}`;
@@ -85,6 +90,7 @@ describe('task API against the AWS Emulator', () => {
     new TaskTable(stack, 'TasksBefore51', { tableName: TASKS_BEFORE_51 });
     new TaskEventsTable(stack, 'Events', { tableName: process.env.TASK_EVENTS_TABLE_NAME });
     new RepoTable(stack, 'Repos', { tableName: process.env.REPO_TABLE_NAME });
+    new TaskApprovalsTable(stack, 'Approvals', { tableName: process.env.TASK_APPROVALS_TABLE_NAME });
   }, () => {
     // The row a Blueprint writes at deploy time; create-task gates on it.
     const now = new Date().toISOString();
@@ -246,4 +252,44 @@ describe('task API against the AWS Emulator', () => {
       while (await indexStatus() === 'CREATING') await pause(250);
     }
   }, 30_000);
+
+  // The agent closes an approval request itself. A row is left PENDING when it cannot: its
+  // container or MicroVM is gone by the end of the window. Nothing deletes
+  // such a row here (the harness leaves TTL off), and on AWS the deletion takes days.
+  test('#1043: pending lists the request that can still be decided, not the one whose window has passed', async () => {
+    const user = newUser();
+    const doc = makeDocClient();
+    /** A PENDING approval row shaped like the one the agent's gate writes, created `ageSeconds` ago. */
+    const request = (requestId: string, ageSeconds: number) => {
+      const created = Math.floor(Date.now() / 1000) - ageSeconds;
+      return doc.send(new PutCommand({
+        TableName: process.env.TASK_APPROVALS_TABLE_NAME,
+        Item: {
+          task_id: `task-${requestId}`,
+          request_id: requestId,
+          user_id: user,
+          repo: REPO,
+          status: 'PENDING',
+          tool_name: 'Bash',
+          tool_input_preview: 'git push --force',
+          reason: 'force_push_any',
+          severity: 'medium',
+          matching_rule_ids: ['force_push_any'],
+          created_at: new Date(created * 1000).toISOString().replace('.000Z', 'Z'),
+          timeout_s: APPROVAL_TIMEOUT_S,
+          // The window plus the agent's two minutes of margin: already past for the first row.
+          ttl: created + APPROVAL_TIMEOUT_S + 120,
+        },
+      }));
+    };
+    await request('passed', 3600);
+    await request('open', 10);
+
+    const listed = await getPending(apiEvent(user));
+
+    expect(listed.statusCode).toBe(200);
+    // The handler can tell the two apart only if created_at and timeout_s reach it
+    // through the projection of the index it reads.
+    expect(data(listed).pending).toMatchObject([{ request_id: 'open', timeout_s: APPROVAL_TIMEOUT_S }]);
+  });
 });

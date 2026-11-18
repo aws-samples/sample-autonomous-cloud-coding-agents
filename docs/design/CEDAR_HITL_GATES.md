@@ -1134,7 +1134,7 @@ Rate-limited 30/min/user; cached 5min per repo in-Lambda.
 
 ### 7.7 `GET /v1/pending` — list pending approvals across user's active tasks
 
-Returns all approvals with `status=PENDING` owned by the caller. Backing index: `user_id-status-index` GSI on `TaskApprovalsTable` (see §10.1).
+Returns the caller's approvals with `status=PENDING` whose window (`created_at + timeout_s`) has not passed, at most 100. A row can stay `PENDING` after its window when the agent could not close it; it is left out. Backing index: `user_id-status-index` GSI on `TaskApprovalsTable` (see §10.1).
 
 **Request**: `GET /v1/pending` with Cognito auth.
 
@@ -1158,7 +1158,7 @@ Returns all approvals with `status=PENDING` owned by the caller. Backing index: 
 }
 ```
 
-**Rate limit**: 60 requests per minute per user (one a second: the operator console polls this route every 10 s in each visible window). Backed by the GSI so the query is a single `Query` (not `Scan`) on `user_id = :caller AND status = :pending`. See §10.1 and finding #8 scenario below.
+**Rate limit**: 60 requests per minute per user (one a second: the operator console polls this route every 10 s in each visible window). Backed by the GSI so the read is a `Query` (not a `Scan`) on `user_id = :caller AND status = :pending`, repeated only while a page of 100 rows holds requests whose window has passed, for at most 20 pages. See §10.1 and finding #8 scenario below.
 
 **Scenario (finding #8):** A power user has `watch -n1 bgagent pending` running in a tmux pane so they see incoming approvals. They also have a second terminal open and a shell script that polls `bgagent pending --output json` every 2 seconds. Without a GSI, each `GET /v1/pending` call translates to a DDB `Scan` with `FilterExpression user_id = :caller AND status = :pending` — a full table scan that touches every approval row for every task in the account, not just the caller's. At 3 calls per 2 seconds across both terminals, plus the 1-per-second `watch`, the user generates 4-5 Scans per second. TaskApprovalsTable has a burst capacity of some hundreds of RCUs; sustained Scans can exhaust it, starving actual agent poll-loops of capacity. Now imagine 20 concurrent power users in a 50-user org — the table throttles, agent polls start timing out, unrelated tasks stall in AWAITING_APPROVAL waiting for reads that never come. With the GSI, each query targets the user's partition and scans at most the user's own pending rows (typically 0-3 items). The 60/min/user rate limit is an additional belt-and-suspenders but the GSI makes it mostly unnecessary. Cost: one additional GSI on the table — an acceptable DDB cost at these volumes.
 

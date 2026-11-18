@@ -70,9 +70,16 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   } as APIGatewayProxyEvent;
 }
 
+/**
+ * The clock of every test. A row created at 00:00:00 that day is half a minute
+ * into its approval window, so the handler lists it.
+ */
+const NOW = Date.parse('2026-05-07T00:00:30Z');
+
 beforeEach(() => {
   mockSend.mockReset();
   ulidCounter = 0;
+  jest.spyOn(Date, 'now').mockReturnValue(NOW);
 });
 
 /**
@@ -88,6 +95,17 @@ function setupPendingMocks(items: ReadonlyArray<Record<string, unknown>>): void 
   mockSend
     .mockResolvedValueOnce({}) // rate-limit
     .mockResolvedValueOnce({ Items: items });
+}
+
+/** A PENDING row as the index returns it, for the tests about its approval window. */
+function pendingRow(requestId: string, approvalWindow: { created_at?: string; timeout_s?: number }): Record<string, unknown> {
+  return { task_id: 'task-1', request_id: requestId, tool_name: 'Bash', tool_input_preview: '', severity: 'medium', reason: '', ...approvalWindow };
+}
+
+/** Call the handler and return the request_id of each request it lists, in order. */
+async function listedRequestIds(): Promise<string[]> {
+  const res = await handler(makeEvent());
+  return JSON.parse(res.body).data.pending.map((p: { request_id: string }) => p.request_id);
 }
 
 describe('get-pending', () => {
@@ -210,6 +228,90 @@ describe('get-pending', () => {
     const res = await handler(makeEvent());
     const body = JSON.parse(res.body);
     expect(body.data.pending[0].expires_at).toBe('2026-05-07T00:00:00Z');
+  });
+
+  test('leaves out a request whose approval window has passed', async () => {
+    // The agent writes TIMED_OUT when a window ends. When it cannot (its container or
+    // MicroVM is gone by then) the row stays PENDING until DynamoDB's TTL deletes it,
+    // which can take days.
+    setupPendingMocks([
+      pendingRow('stale', { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }),
+      pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 }),
+    ]);
+
+    expect(await listedRequestIds()).toEqual(['live']);
+  });
+
+  test('lists a request up to the last second of its window and not from its end on', async () => {
+    setupPendingMocks([
+      pendingRow('ends-now', { created_at: '2026-05-07T00:00:00Z', timeout_s: 30 }),
+      pendingRow('ends-in-a-second', { created_at: '2026-05-07T00:00:00Z', timeout_s: 31 }),
+    ]);
+
+    expect(await listedRequestIds()).toEqual(['ends-in-a-second']);
+  });
+
+  test('keeps a request that has no window to pass, however old it is', async () => {
+    // Only a window that is known to have passed takes a request off the list: a row
+    // with no positive timeout_s, or with a created_at that is not a date, has none.
+    setupPendingMocks([
+      pendingRow('no-timeout', { created_at: '2026-05-01T00:00:00Z', timeout_s: 0 }),
+      pendingRow('timeout-absent', { created_at: '2026-05-01T00:00:00Z' }),
+      pendingRow('not-a-date', { created_at: 'not-a-date', timeout_s: 300 }),
+      pendingRow('created-at-absent', { timeout_s: 300 }),
+    ]);
+
+    expect(await listedRequestIds()).toEqual(['no-timeout', 'timeout-absent', 'not-a-date', 'created-at-absent']);
+  });
+
+  test('reads past a page of requests whose window has passed to a live one behind it', async () => {
+    // Limit counts the rows DynamoDB reads, so the first page can hold nothing but
+    // requests whose window has passed while a live one waits on the next page.
+    const stale = Array.from({ length: 100 }, (_, i) =>
+      pendingRow(`stale-${i}`, { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }));
+    const lastKey = { user_id: 'user-alice', status: 'PENDING', task_id: 'task-1', request_id: 'stale-99' };
+    mockSend
+      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({ Items: stale, LastEvaluatedKey: lastKey })
+      .mockResolvedValueOnce({ Items: [pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 })] });
+
+    expect(await listedRequestIds()).toEqual(['live']);
+    const queries = mockSend.mock.calls.filter((c) => c[0]._type === 'Query').map((c) => c[0].input);
+    expect(queries.map((q) => q.ExclusiveStartKey)).toEqual([undefined, lastKey]);
+  });
+
+  test('lists at most 100 requests and stops reading once it has them', async () => {
+    const rows = (prefix: string, count: number, createdAt: string) => Array.from({ length: count }, (_, i) =>
+      pendingRow(`${prefix}-${i}`, { created_at: createdAt, timeout_s: 300 }));
+    mockSend
+      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({
+        Items: [...rows('first', 60, '2026-05-07T00:00:00Z'), ...rows('stale', 40, '2026-05-06T23:00:00Z')],
+        LastEvaluatedKey: { request_id: 'stale-39' },
+      })
+      // More rows follow this page too, and the list is already full.
+      .mockResolvedValueOnce({ Items: rows('second', 100, '2026-05-07T00:00:00Z'), LastEvaluatedKey: { request_id: 'second-99' } });
+
+    const listed = await listedRequestIds();
+
+    expect(listed).toHaveLength(100);
+    expect(listed.slice(58, 62)).toEqual(['first-58', 'first-59', 'second-0', 'second-1']);
+    expect(mockSend).toHaveBeenCalledTimes(3);
+  });
+
+  test('stops after 20 pages of requests whose window has passed', async () => {
+    // A user can pile up such rows faster than DynamoDB deletes them (a cancelled task on
+    // MicroVM compute leaves one). The list must not read them all on every call.
+    const stale = Array.from({ length: 100 }, (_, i) =>
+      pendingRow(`stale-${i}`, { created_at: '2026-05-06T23:00:00Z', timeout_s: 300 }));
+    mockSend.mockResolvedValueOnce({}); // rate-limit
+    for (let page = 0; page < 30; page += 1) {
+      mockSend.mockResolvedValueOnce({ Items: stale, LastEvaluatedKey: { request_id: `page-${page}` } });
+    }
+    mockSend.mockResolvedValueOnce({ Items: [pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 })] });
+
+    expect(await listedRequestIds()).toEqual([]);
+    expect(mockSend.mock.calls.filter((c) => c[0]._type === 'Query')).toHaveLength(20);
   });
 
   test('500 on DDB error after rate-limit passes', async () => {
