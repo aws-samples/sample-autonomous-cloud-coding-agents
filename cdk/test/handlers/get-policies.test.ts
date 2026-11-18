@@ -273,6 +273,24 @@ describe('get-policies', () => {
     expect(res.statusCode).toBe(503);
   });
 
+  test('logs an invalid policy set under its own message, with the text of the parser in `error`', async () => {
+    // A data key named `message` would replace the message of the line, and a
+    // search of the log group for 'Cedar parse failure' would find nothing.
+    mockSend.mockResolvedValue({});
+    mockLookupRepo.mockResolvedValue(onboardedWith(['this is not valid cedar at all ;']));
+    const stderr = jest.spyOn(process.stderr, 'write').mockReturnValue(true);
+    await handler(makeEvent('owner%2Frepo-bad'));
+    const lines = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
+    stderr.mockRestore();
+
+    expect(lines).toEqual([{
+      level: 'ERROR',
+      message: 'Cedar parse failure for repo policies',
+      repo_id: 'owner/repo-bad',
+      error: 'cedar-wasm rejected policy set',
+    }]);
+  });
+
   test('a failed read of the repository row fails that request and is not cached', async () => {
     // A listing built without the Blueprint's rules must not be answered as a
     // 200, and above all not be kept in the per-repository cache: every caller

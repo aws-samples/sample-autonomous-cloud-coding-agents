@@ -173,7 +173,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (err instanceof CedarPolicyParseError) {
         logger.error('Cedar parse failure for repo policies', {
           repo_id: repoId,
-          message: err.message,
+          error: err.message,
         });
         return errorResponse(
           503,
