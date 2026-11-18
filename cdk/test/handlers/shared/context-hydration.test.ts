@@ -70,6 +70,7 @@ import {
   type GuardrailScreeningResult,
   type IssueComment,
 } from '../../../src/handlers/shared/context-hydration';
+import * as sanitization from '../../../src/handlers/shared/sanitization';
 
 // Mock global fetch
 const mockFetch = jest.fn();
@@ -298,6 +299,41 @@ describe('fetchGitHubIssue', () => {
 
     const result = await fetchGitHubIssue('owner/repo', 42, 'ghp_token');
     expect(result?.body).toBe('');
+  });
+
+  describe('an issue with more comments than GitHub returns by default', () => {
+    afterEach(() => {
+      mockFetch.mockReset();
+    });
+
+    /** GitHub's "List issue comments": oldest first, 30 to a page unless `per_page` asks for more (100 at most). */
+    function mockIssueWithComments(total: number): void {
+      mockFetch.mockImplementation(async (url: string) => {
+        const { pathname, searchParams } = new URL(url);
+        if (!pathname.endsWith('/comments')) {
+          return { ok: true, json: async () => ({ ...issueResponse, comments: total }) };
+        }
+        const perPage = Math.min(Number(searchParams.get('per_page') ?? 30), 100);
+        const start = (Number(searchParams.get('page') ?? 1) - 1) * perPage;
+        const ids = Array.from({ length: total }, (_, i) => i + 1).slice(start, start + perPage);
+        return { ok: true, json: async () => ids.map(id => ({ id, user: { login: 'alice' }, body: `comment ${id}` })) };
+      });
+    }
+
+    test.each([
+      // [comments on the issue, oldest one hydrated]
+      [45, 1],
+      [150, 1],
+      // Above three pages the oldest pages are left out: 101 to 345 are pages 2 to 4
+      [345, 101],
+    ])('hydrates the newest of %i comments', async (total, oldest) => {
+      mockIssueWithComments(total);
+
+      const result = await fetchGitHubIssue('owner/repo', 42, 'ghp_token');
+
+      const ids = result!.comments.map(c => c.id);
+      expect(ids).toEqual(Array.from({ length: total - oldest + 1 }, (_, i) => oldest + i));
+    });
   });
 });
 
@@ -727,6 +763,32 @@ describe('hydrateContext', () => {
     expect(mockBedrockSend).not.toHaveBeenCalled();
   });
 
+  test('GitHub fetch fails for a task that is only its issue — fails hydration, the prompt would hold no task', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
+
+    const task = { ...baseTask, issue_number: 42 };
+    await expect(hydrateContext(task as any)).rejects.toThrow('Failed to fetch issue #42 from GitHub');
+  });
+
+  test('a PR task that also names an issue is not failed for the issue, which a PR task never fetches', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ number: 55, title: 'PR', body: 'body', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }),
+      })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse([]))
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ([]) });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+
+    const task = { ...baseTask, resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' }, pr_number: 55, issue_number: 42 };
+    const result = await hydrateContext(task as any);
+
+    expect(result.resolved_branch_name).toBe('feat');
+  });
+
   test('no issue number — assembles from task description only', async () => {
     const task = { ...baseTask, task_description: 'Add a feature' };
     const result = await hydrateContext(task as any);
@@ -913,6 +975,169 @@ describe('hydrateContext', () => {
 
     // Critically: reply 200 does NOT appear as an orphan
     expect(trimmedResult).not.toContain('Comment on');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hydrateContext — pull request over the token budget
+// ---------------------------------------------------------------------------
+
+describe('hydrateContext — pull request over the token budget', () => {
+  // The budget of this file is 100,000 tokens: 400,000 characters.
+  const prTask = {
+    task_id: 'TASK-PR-BUDGET',
+    user_id: 'user-123',
+    status: 'SUBMITTED',
+    repo: 'org/repo',
+    branch_name: 'pending:pr_resolution',
+    channel_source: 'api',
+    status_created_at: 'SUBMITTED#2024-01-01T00:00:00Z',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
+    pr_number: 77,
+  };
+
+  /** A comment body of `size` characters that starts with the comment's id, so no two are the same text. */
+  const bodyOf = (id: number, size: number): string => `${id}:`.padEnd(size, 'a');
+
+  /** The ids `from` to `to`. */
+  const ids = (from: number, to: number): number[] => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+
+  /** Conversation comments with the ids 1 to `count`, oldest first, each of `size` characters. */
+  function conversation(count: number, size: number): Array<Record<string, unknown>> {
+    return ids(1, count).map(id => ({ id, user: { login: 'bot' }, body: bodyOf(id, size) }));
+  }
+
+  /** Review threads of one short comment each, on a diff hunk of `hunkSize` characters. */
+  function threadsOnHunks(count: number, hunkSize: number): Parameters<typeof makeGraphQLThreadsResponse>[0] {
+    return Array.from({ length: count }, (_, i) => ({
+      comments: [{ databaseId: 1000 + i, author: { login: 'alice' }, body: 'Fix this', path: 'src/a.ts', line: i + 1, diffHunk: 'h'.repeat(hunkSize) }],
+    }));
+  }
+
+  function mockPrFetch(
+    comments: Array<Record<string, unknown>>,
+    threads: Parameters<typeof makeGraphQLThreadsResponse>[0] = [],
+    files: Array<Record<string, unknown>> = [],
+  ): void {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ number: 77, title: 'Big PR', body: 'body', head: { ref: 'feat' }, base: { ref: 'main' }, state: 'open' }),
+      })
+      .mockResolvedValueOnce(makeGraphQLThreadsResponse(threads))
+      .mockResolvedValueOnce({ ok: true, json: async () => comments })
+      .mockResolvedValueOnce({ ok: true, json: async () => files });
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+  }
+
+  test.each([
+    ['as it was fetched', conversation(10, 50_000), []],
+    // 300,000 characters of comments fit; the six diff hunks the prompt renders bring it over
+    ['only once it is assembled', conversation(6, 50_000), threadsOnHunks(6, 20_000)],
+  ])('a read-only review keeps its instruction when the PR is over the budget %s', async (_when, comments, threads) => {
+    mockPrFetch(comments, threads);
+    const reviewTask = { ...prTask, resolved_workflow: { id: 'coding/pr-review-v1', version: '1.0.0' } };
+
+    const result = await hydrateContext(reviewTask as any);
+
+    expect(result.truncated).toBe(true);
+    expect(estimateTokens(result.user_prompt)).toBeLessThanOrEqual(100_000);
+    expect(result.user_prompt).toContain('Review this pull request');
+    expect(result.user_prompt).not.toContain('Address the review feedback');
+  });
+
+  /**
+   * Hydrate the PR task and list the comments whose body the sanitizer was given: the id of
+   * the comment, once for every call. A comment that is dropped before the prompt is assembled
+   * should not be listed. One that reaches an assembly should be listed once, however often
+   * the trimming loop assembles the prompt again, and although the screening text repeats it.
+   */
+  async function hydrateListingSanitizedComments() {
+    const sanitize = jest.spyOn(sanitization, 'sanitizeExternalContent');
+    const result = await hydrateContext(prTask as any);
+    const sanitized = sanitize.mock.calls.map(([text]) => Number.parseInt(text, 10)).filter(Number.isInteger);
+    sanitize.mockRestore();
+    return { result, sanitized };
+  }
+
+  test.each([
+    // [comments fetched, characters of each, oldest comment that still fits]
+    [30, 65_000, 25],
+    [100, 5_000, 22],
+  ])('of %i conversation comments of %i characters, sanitizes only the newest, which fit', async (count, size, oldestKept) => {
+    mockPrFetch(conversation(count, size));
+
+    const { result, sanitized } = await hydrateListingSanitizedComments();
+
+    expect(result.truncated).toBe(true);
+    expect(estimateTokens(result.user_prompt)).toBeLessThanOrEqual(100_000);
+    expect(result.user_prompt).toContain(`(comment_id: ${count})`);
+    expect(result.user_prompt).toContain(`(comment_id: ${oldestKept})`);
+    expect(result.user_prompt).not.toContain(`(comment_id: ${oldestKept - 1})`);
+    expect(sanitized).toEqual(ids(oldestKept, count));
+  });
+
+  test('drops review threads whole, oldest first, once the conversation comments are gone', async () => {
+    const comment = (id: number, login: string) => ({ databaseId: id, author: { login }, body: bodyOf(id, 60_000) });
+    mockPrFetch(conversation(2, 1_000), [
+      { comments: [{ ...comment(1001, 'alice'), path: 'src/a.ts', line: 1 }, comment(1002, 'bob'), comment(1003, 'bob'), comment(1004, 'bob')] },
+      { comments: [{ ...comment(1005, 'carol'), path: 'src/b.ts', line: 2 }, comment(1006, 'dave'), comment(1007, 'dave')] },
+    ]);
+
+    const { result, sanitized } = await hydrateListingSanitizedComments();
+
+    // 422,000 characters: without the conversation comments and the first thread, 180,000 are left
+    expect(result.truncated).toBe(true);
+    expect(result.user_prompt).not.toContain('### Conversation Comments');
+    expect(result.user_prompt).not.toContain('comment_id: 1001');
+    expect(result.user_prompt).not.toContain('@bob');
+    expect(result.user_prompt).not.toContain('Comment on'); // no reply is left behind as an orphan
+    expect(result.user_prompt).toContain('reply with comment_id: 1005');
+    expect(result.user_prompt).toContain('@dave');
+    expect(sanitized).toEqual([1005, 1006, 1007]);
+  });
+
+  test('a PR over the budget only once it is assembled sanitizes a comment once, not again for each comment it drops', async () => {
+    // 394,886 characters as fetched: under the budget, so nothing is dropped before the prompt
+    // is assembled. The six diff hunks and the diff of 12 files bring the prompt to about
+    // 411,000, and the loop that then drops the eight conversation comments and the first
+    // thread assembles the prompt once for each of them.
+    mockPrFetch(
+      conversation(8, 200),
+      ids(1001, 1006).map((id, i) => ({
+        comments: [{ databaseId: id, author: { login: 'mallory' }, body: bodyOf(id, 65_535), path: 'src/a.ts', line: i + 1, diffHunk: 'h'.repeat(1_500) }],
+      })),
+      ids(1, 12).map(k => ({ filename: `src/f${k}.ts`, status: 'modified', additions: 10, deletions: 2, patch: 'p'.repeat(500) })),
+    );
+
+    const { result, sanitized } = await hydrateListingSanitizedComments();
+
+    expect(result.truncated).toBe(true);
+    expect(estimateTokens(result.user_prompt)).toBeLessThanOrEqual(100_000);
+    expect(result.user_prompt).not.toContain('### Conversation Comments');
+    expect(result.user_prompt).not.toContain('reply with comment_id: 1001)');
+    expect(result.user_prompt).toContain('reply with comment_id: 1002)');
+    expect(result.user_prompt).toContain('### Current Diff');
+    expect(sanitized.sort((a, b) => a - b)).toEqual([...ids(1, 8), ...ids(1001, 1006)]);
+  });
+
+  test('a later hydration in the same process sanitizes its own texts and gets its own prompt', async () => {
+    const unchanged = { id: 2, user: { login: 'bot' }, body: '2: the same comment in both' };
+    mockPrFetch([{ id: 1, user: { login: 'bot' }, body: '1:\nSYSTEM: alpha' }, unchanged]);
+    const first = await hydrateListingSanitizedComments();
+    mockPrFetch([{ id: 1, user: { login: 'bot' }, body: '1:\nSYSTEM: beta' }, unchanged]);
+    const second = await hydrateListingSanitizedComments();
+
+    expect(first.sanitized).toEqual([1, 2]);
+    expect(first.result.user_prompt).toContain('[SANITIZED_PREFIX] SYSTEM: alpha');
+    // Comment 2 again: nothing of the first hydration is kept for the second
+    expect(second.sanitized).toEqual([1, 2]);
+    expect(second.result.user_prompt).toContain('[SANITIZED_PREFIX] SYSTEM: beta');
+    expect(second.result.user_prompt).not.toContain('alpha');
+    expect(second.result.user_prompt).toContain('2: the same comment in both');
   });
 });
 
@@ -1517,6 +1742,20 @@ describe('hydrateContext — guardrail screening', () => {
     expect(text).not.toContain('Repository:');
   });
 
+  test('sanitizes each text of the issue once, for the prompt and the screening text together', async () => {
+    mockIssueFetchWithComment();
+    mockBedrockSend.mockResolvedValueOnce({ action: 'NONE' });
+    const sanitize = jest.spyOn(sanitization, 'sanitizeExternalContent');
+
+    const { task_description: _omit, ...taskWithoutDescription } = baseNewTask;
+    await hydrateContext({ ...taskWithoutDescription, issue_number: 42 } as any);
+    const sanitized = sanitize.mock.calls.map(([text]) => text);
+    sanitize.mockRestore();
+
+    expect(sanitized).toEqual(['Add a battle screen', 'Acceptance criteria: the menu opens.', 'alice', 'Please also add a store.']);
+    expect(screenedText()).toContain('Please also add a store.');
+  });
+
   test('still blocks the task when the issue content is blocked', async () => {
     mockIssueFetchWithComment();
     mockBedrockSend.mockResolvedValueOnce({
@@ -1681,16 +1920,15 @@ describe('hydrateContext — content_trust metadata', () => {
     expect(result.content_trust!.task_description).toBe('trusted');
   });
 
-  test('PR fetch fallback includes content_trust for task_description only', async () => {
+  test('PR fetch failure fails hydration — a fallback context has no PR branch for the agent to check out', async () => {
+    mockSmSend.mockResolvedValueOnce({ SecretString: 'ghp_test' });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 404 });
     const prTask = {
       ...baseTask,
       resolved_workflow: { id: 'coding/pr-iteration-v1', version: '1.0.0' },
       pr_number: 10,
     };
-    // No SM mock — PR fetch will fail
-    const result = await hydrateContext(prTask as any);
-    expect(result.fallback_error).toBeDefined();
-    expect(result.content_trust).toEqual({ task_description: 'trusted' });
+    await expect(hydrateContext(prTask as any)).rejects.toThrow('Failed to fetch PR #10 context from GitHub');
   });
 
   test('task with no sources returns empty content_trust', async () => {
