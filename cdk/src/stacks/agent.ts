@@ -677,7 +677,6 @@ export class AgentStack extends Stack {
         // Persistent mount (no flock):
         CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
         npm_config_cache: '/mnt/workspace/.npm-cache',
-        // ENABLE_CLI_TELEMETRY: '1',
         // Outbound SDK solution attribution (#319): botocore reads
         // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
         // Lambda-only Aspect can't reach this runtime, so set it explicitly.

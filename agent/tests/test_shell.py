@@ -1,5 +1,7 @@
 """Unit tests for shell.py — slugify, redact_secrets, truncate."""
 
+import json
+import os
 import subprocess
 import sys
 import time
@@ -646,3 +648,97 @@ class TestRunCmdUndecodableOutput:
         result = run_cmd(["sh", "-c", self.SCRIPT], "mise-install", check=False)
         assert result.returncode == 0
         assert result.stdout.splitlines() == ["ok", "\N{REPLACEMENT CHARACTER}", "after"]
+
+
+class TestRunCmdStreamedText:
+    """The streamed path reads the command's two pipes as text itself. What it
+    hands back is what ``subprocess`` text mode gives the buffered path: the same
+    decoding, with a replacement character for a byte that is no text, and every
+    kind of line ending read as the end of a line."""
+
+    @staticmethod
+    def _both_ways(script: str) -> tuple[subprocess.CompletedProcess, subprocess.CompletedProcess]:
+        argv = ["sh", "-c", script]
+        with patch("shell.log"):
+            return (
+                run_cmd(argv, "verify-build-pre", check=False, stream=True),
+                run_cmd(argv, "verify-build-pre", check=False),
+            )
+
+    def test_undecodable_byte_on_either_pipe_is_a_replacement_character(self):
+        streamed, _ = self._both_ways("printf 'out \\377\\n'; printf 'err \\377\\n' 1>&2")
+
+        assert streamed.stdout == "out \N{REPLACEMENT CHARACTER}"
+        assert streamed.stderr == "err \N{REPLACEMENT CHARACTER}"
+
+    def test_sequence_cut_off_at_the_end_of_the_output_is_replaced(self):
+        # The first byte of a two-byte character, then the end of the output:
+        # nothing follows that could complete it.
+        streamed, buffered = self._both_ways("printf 'caf\\303'")
+
+        assert streamed.stdout == "caf\N{REPLACEMENT CHARACTER}"
+        assert streamed.stdout == buffered.stdout
+
+    def test_text_that_is_not_ascii_is_decoded_as_on_the_buffered_path(self):
+        streamed, buffered = self._both_ways("printf 'caf\\303\\251 \\342\\234\\223\\n'")
+
+        assert streamed.stdout == "caf\N{LATIN SMALL LETTER E WITH ACUTE} \N{CHECK MARK}"
+        assert streamed.stdout == buffered.stdout.rstrip("\n")
+
+    def test_every_line_ending_ends_a_line(self):
+        # A Windows tool in the build prints CRLF, a progress bar a bare CR. The
+        # last line has no ending at all.
+        streamed, buffered = self._both_ways("printf 'one\\r\\ntwo\\rthree\\nfour'")
+
+        assert streamed.stdout.split("\n") == ["one", "two", "three", "four"]
+        assert streamed.stdout == buffered.stdout
+
+    def test_line_is_logged_while_the_command_still_runs(self):
+        # Live output is what the streamed path is for: a line reaches the log
+        # when the command prints it, not when the command ends.
+        logged: dict[str, float] = {}
+        argv = ["sh", "-c", "echo first; sleep 1; echo second"]
+        with patch(
+            "shell.log", side_effect=lambda _prefix, text: logged.update({text: time.monotonic()})
+        ):
+            run_cmd(argv, "verify-build-pre", stream=True)
+
+        assert logged["  second"] - logged["  first"] > 0.5
+
+
+# Prints, as JSON, the variables of its own environment that the tests below set.
+_PRINT_ENV = (
+    "import json, os; print(json.dumps({k: v for k, v in os.environ.items()"
+    " if k.startswith('OTEL_') or k in ('PYTHONPATH', 'KEPT_FOR_THE_COMMAND')}))"
+)
+_INSTRUMENTATION = "/opt/venv/lib/opentelemetry/instrumentation/auto_instrumentation"
+
+
+class TestCommandEnvironment:
+    """What a command inherits from the agent's own process. The agent runs under
+    the opentelemetry-instrument wrapper; a Python that a repository command starts
+    (its build, its tests) must not try to instrument itself with packages that
+    only the agent has."""
+
+    @staticmethod
+    def _seen_by_a_command(stream: bool) -> dict:
+        result = run_cmd([sys.executable, "-c", _PRINT_ENV], "env", stream=stream)
+        return json.loads(result.stdout)
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streamed"])
+    def test_instrumentation_of_the_agent_is_not_inherited(self, monkeypatch, stream):
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+        monkeypatch.setenv("OTEL_PYTHON_DISTRO", "aws_distro")
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join((_INSTRUMENTATION, "/repo/src")))
+        monkeypatch.setenv("KEPT_FOR_THE_COMMAND", "1")
+
+        # The entry the repository's own tooling may need stays.
+        assert self._seen_by_a_command(stream) == {
+            "PYTHONPATH": "/repo/src",
+            "KEPT_FOR_THE_COMMAND": "1",
+        }
+
+    def test_python_path_that_only_names_the_instrumentation_is_dropped(self, monkeypatch):
+        monkeypatch.setenv("PYTHONPATH", _INSTRUMENTATION)
+
+        assert self._seen_by_a_command(stream=False) == {}

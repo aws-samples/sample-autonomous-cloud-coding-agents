@@ -1517,7 +1517,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # (deterministic — a tool call, captured by the runner). Fallback:
             # the legacy first-line text sentinel (kept so a model that types the
             # marker instead of calling the tool still holds). Either → hold.
-            clarification_q = (agent_result.clarification_question or "").strip()
+            # Not stripped here: for a call whose question was empty the runner
+            # records " ", and that call holds the task like any other.
+            clarification_q = agent_result.clarification_question or ""
             needs_input = bool(
                 not artifact_workflow
                 and not config.is_pr_workflow
@@ -1794,7 +1796,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 code_changed = False
                 # Prefer the tool's ``question`` arg (clean, no marker); fall back
                 # to the final message with the legacy sentinel stripped.
-                answer_text = clarification_q or _strip_needs_input_marker(answer_text)
+                answer_text = clarification_q.strip() or _strip_needs_input_marker(answer_text)
 
             # Build TaskResult
             result = TaskResult(

@@ -2729,7 +2729,7 @@ def _run_pipeline(
 
     ``build`` is what the post-agent build returns (passed by default), ``pr_url``
     what ``ensure_pr`` returns, ``task_record`` what the cancel check reads. Returns
-    the result dict and the two mocks these tests assert on."""
+    the result dict and the three mocks these tests assert on."""
 
     async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
         return agent_result
@@ -2749,7 +2749,9 @@ def _run_pipeline(
         patch("pipeline.task_span", return_value=span),
         patch("pipeline.task_state") as task_state,
         patch("pipeline.ensure_committed", return_value=False),
-        patch("pipeline.verify_build", return_value=build or VerifyOutcome(passed=True)),
+        patch(
+            "pipeline.verify_build", return_value=build or VerifyOutcome(passed=True)
+        ) as verify_build,
         patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
         patch("pipeline.ensure_pr", return_value=pr_url) as ensure_pr,
         patch("pipeline.get_disk_usage", return_value=0),
@@ -2770,7 +2772,10 @@ def _run_pipeline(
             **task_kwargs,
         )
     return SimpleNamespace(
-        result=result, ensure_pr=ensure_pr, react_task_finished=react_task_finished
+        result=result,
+        verify_build=verify_build,
+        ensure_pr=ensure_pr,
+        react_task_finished=react_task_finished,
     )
 
 
@@ -2877,6 +2882,41 @@ class TestEpisodeRecordsHowTheTaskEnded:
         outcome = self._run(_agent_succeeded(clarification_question="Which page?"))
 
         assert outcome == ("success", "COMPLETED")
+
+
+class TestHoldForInput:
+    """Clarify-and-hold: the agent called ``request_clarification`` instead of doing
+    the work. The task ends COMPLETED with the question as its answer; nothing is
+    built and no pull request is opened."""
+
+    @pytest.mark.parametrize(
+        ("recorded_question", "answer"),
+        [
+            pytest.param("Which page is slow?", "Which page is slow?", id="question"),
+            # What the runner records for a call whose ``question`` was empty. The
+            # agent's last message is then the best text there is; without one the
+            # platform's comment falls back to a wording of its own.
+            pytest.param(" ", "Tell me which page you mean.", id="empty question"),
+        ],
+    )
+    def test_task_is_held_whatever_the_question_says(self, tmp_path, recorded_question, answer):
+        # No pull request and nothing pushed (tmp_path is not a repository): a run
+        # that is not held ends as "the change was not saved".
+        run = _run_pipeline(
+            _agent_succeeded(
+                clarification_question=recorded_question,
+                result_text="Tell me which page you mean.",
+            ),
+            setup=RepoSetup(repo_dir=str(tmp_path), branch="bgagent/test/branch"),
+            pr_url=None,
+        )
+
+        run.verify_build.assert_not_called()
+        run.ensure_pr.assert_not_called()
+        assert run.result["status"] == "success"
+        assert run.result["error"] is None
+        assert run.result["code_changed"] is False
+        assert run.result["answer_text"] == answer
 
 
 class TestStepMilestonesOfThePostHooks:

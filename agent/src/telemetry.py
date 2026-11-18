@@ -322,6 +322,23 @@ class _TrajectoryWriter:
             }
         )
 
+    def write_tool_result(self, turn: int, tool_name: str, is_error: bool, content: str) -> None:
+        """Write a TRAJECTORY_TOOL_RESULT event for the result of one tool call.
+
+        An event of its own: the result reaches the runner after the message of
+        the model that asked for it, which ``write_turn`` has recorded by then.
+        """
+        self._put_event(
+            {
+                "event": "TRAJECTORY_TOOL_RESULT",
+                "task_id": self._task_id,
+                "turn": turn,
+                "tool_name": tool_name,
+                "is_error": is_error,
+                "content": self._truncate_field(content, 2000),
+            }
+        )
+
     def write_result(
         self,
         subtype: str,

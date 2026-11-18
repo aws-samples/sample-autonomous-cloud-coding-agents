@@ -349,7 +349,6 @@ _AGENT_ENV_VARS = [
     "DRY_RUN",
     "LOG_GROUP_NAME",
     "MEMORY_ID",
-    "ENABLE_CLI_TELEMETRY",
     # Per-session IAM scoping (PR #209) — the scoped-session S3-hang guard.
     # See the ``_clean_env`` docstring below for the full rationale (why the
     # env strip AND the cache reset are both required).

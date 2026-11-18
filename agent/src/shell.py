@@ -2,6 +2,7 @@
 
 import collections
 import contextlib
+import io
 import os
 import re
 import signal
@@ -341,14 +342,11 @@ def _run_cmd_streaming(
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
+        # Pipes of bytes: the drain threads read them as text. Popen's own text
+        # mode would need its ``errors`` argument, which the SAST rule pack
+        # reports (python36-compatibility-Popen1).
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
-        # A byte that is not valid UTF-8 becomes U+FFFD. Strict decoding raises in
-        # the drain thread, which then closes its pipe: the rest of the output is
-        # lost and the command dies of SIGPIPE on its next write.
-        errors="replace",
-        bufsize=1,  # line-buffered so each line streams promptly
         env=_clean_env(),
         # A process group of its own, so that the timeout below can signal the
         # command together with what it started. Not a session of its own: mise
@@ -361,15 +359,22 @@ def _run_cmd_streaming(
     err_lines: collections.deque[str] = collections.deque(maxlen=_MAX_CAPTURED_LINES)
 
     def _drain(pipe, buf: collections.deque[str]) -> None:
+        # The text layer that Popen's own text mode puts on a pipe, with the
+        # defaults that mode uses: the same encoding, and every line ending read
+        # as "\n". A byte that is not valid in that encoding becomes U+FFFD.
+        # Strict decoding raises in this thread, which then closes its pipe: the
+        # rest of the output is lost and the command dies of SIGPIPE on its next
+        # write. Each line is handed over as it arrives.
+        lines = io.TextIOWrapper(pipe, errors="replace")
         # log() redacts each line; the buffer keeps the raw text for the caller
         # (the failure classifier redacts again before it re-emits anything).
         try:
-            for line in pipe:
+            for line in lines:
                 line = line.rstrip("\n")
                 buf.append(line)
                 log("CMD", f"  {line}")
         finally:
-            pipe.close()
+            lines.close()  # closes the pipe as well
 
     t_out = threading.Thread(target=_drain, args=(proc.stdout, out_lines), daemon=True)
     t_err = threading.Thread(target=_drain, args=(proc.stderr, err_lines), daemon=True)
