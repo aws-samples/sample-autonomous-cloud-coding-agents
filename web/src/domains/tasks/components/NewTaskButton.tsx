@@ -55,7 +55,7 @@ export function NewTaskButton({ prefill, variant = 'primary', label = 'New task'
       href={href}
       onFollow={(event) => {
         event.preventDefault();
-        navigate(href);
+        void navigate(href);
       }}
     >
       {label}

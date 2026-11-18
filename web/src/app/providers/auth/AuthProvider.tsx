@@ -104,7 +104,7 @@ export function AuthProvider({ adapter, children }: { adapter: AuthAdapter; chil
 
   const signOut = useCallback(() => {
     if (state.status !== 'signed-in') return;
-    state.session.signOut().finally(() => setState({ status: 'signed-out' }));
+    void state.session.signOut().finally(() => setState({ status: 'signed-out' }));
   }, [state]);
 
   const value = useMemo(() => ({ state, signIn, signOut }), [state, signIn, signOut]);

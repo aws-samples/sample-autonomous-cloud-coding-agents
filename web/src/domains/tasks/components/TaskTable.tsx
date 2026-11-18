@@ -148,7 +148,7 @@ export function TaskTable(props: TaskTableProps) {
       filter={props.filter}
       onRowClick={({ detail }) => {
         if (clickedControl.current) return;
-        navigate(taskHref(detail.item.task_id));
+        void navigate(taskHref(detail.item.task_id));
       }}
       empty={props.empty ?? <Box textAlign="center" color="inherit">No tasks yet.</Box>}
       footer={
