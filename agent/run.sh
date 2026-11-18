@@ -31,7 +31,8 @@ Environment variables (required):
 
 Environment variables (optional):
   ANTHROPIC_MODEL   Model to use (unset: defer to the agent runtime default)
-  DRY_RUN           Set to 1 to validate config and print prompt without running the agent
+  DRY_RUN           Set to 1 to validate config and print the length and hash of the
+                    prompts without running the agent
   MAX_TURNS         Max agent turns (default: 100)
 
 AWS credentials — pick one method:
@@ -48,7 +49,7 @@ Examples:
   # Local mode — issue + additional instructions
   ./agent/run.sh "myorg/myrepo" 42 "Focus on the backend validation only"
 
-  # Local mode — dry run (print prompt, don't invoke agent)
+  # Local mode — dry run (print the length and hash of the prompts, don't invoke agent)
   DRY_RUN=1 ./agent/run.sh "myorg/myrepo" 42
 
   # Local mode with progress events to DynamoDB Local

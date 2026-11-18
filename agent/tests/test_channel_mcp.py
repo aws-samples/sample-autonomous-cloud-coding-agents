@@ -366,9 +366,9 @@ class TestSessionEditStaysOutOfCommits:
 
     def test_file_the_repository_does_not_track_stays_untracked(self, tmp_path):
         # `git add -u` never stages an untracked file, so there is nothing to hide.
-        # An index entry for it (`git add --intent-to-add`, which the registry loader
-        # uses for its secret-bearing payload) makes `git stash`, `git rebase` and
-        # `git merge` fail for the agent.
+        # An index entry for it (`git add --intent-to-add`) makes `git stash`,
+        # `git rebase` and `git merge` fail for the agent; the registry loader, whose
+        # payload may hold secrets, lists the file in the clone's exclude file instead.
         self._repo(tmp_path, None)
         assert configure_channel_mcp(str(tmp_path), "jira") is True
         assert self._git(tmp_path, "ls-files", "--", ".mcp.json") == ""

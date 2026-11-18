@@ -68,7 +68,7 @@ export AWS_SESSION_TOKEN="..."   # if using temporary credentials
 export AWS_REGION="us-east-1"
 ```
 
-**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when the AWS CLI is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`.
+**Option B** — AWS CLI resolution (recommended for SSO): `run.sh` runs `aws configure export-credentials` when AWS CLI v2 is installed, so you can use `aws sso login` and optionally `AWS_PROFILE` without mounting `~/.aws`. AWS CLI v1 has no such command: with it, `run.sh` mounts `~/.aws` (Option C).
 
 **Option C** — Mount `~/.aws` read-only (static access keys in files; SSO often does not work inside the container):
 ```bash
@@ -122,7 +122,7 @@ The `run.sh` script overrides the container's default CMD to run `python /app/sr
 | `ANTHROPIC_MODEL` | No | `global.anthropic.claude-opus-5-5` | Bedrock **inference profile** ID for `InvokeModel` (see [inference profiles](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html)). Must be a geo-prefixed profile ID matching the deployment's `bedrockGeoRegion`, not a bare foundation-model ID — see [Model configuration](../docs/guides/DEVELOPER_GUIDE.md#model-configuration) |
 | `MAX_TURNS` | No | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | No | | **Local batch only** (shell env when running `entrypoint.py` directly). Range 0.01–100; agent stops when the budget is reached. For deployed AgentCore **server** mode and production tasks, set **`max_budget_usd`** on task creation (REST API, CLI `--max-budget`, or Blueprint default); the orchestrator sends it in the `/invocations` JSON body — server mode does not read `MAX_BUDGET_USD` from the environment. |
-| `DRY_RUN` | No | | Set to `1` to validate config and print the prompt without running the agent |
+| `DRY_RUN` | No | | Set to `1` to validate config and print the length and hash of the prompts without running the agent |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | No | `global.anthropic.claude-haiku-5-5` | Bedrock **inference profile** ID for the small/fast auxiliary model — the pre-flight safety check and WebFetch summarization (see below). Set by the CDK stack (`cdk/src/stacks/agent.ts` (the runtime environment block)), which derives the prefix from `bedrockGeoRegion` — a geo prefix is required |
 | `NUDGES_TABLE_NAME` | No | | **Phase 2.** DynamoDB table for mid-task user nudges (`<user_nudge>` XML blocks injected between turns). If unset, the agent runs without nudge support — `nudge_reader.read_pending()` returns `[]` and logs a WARN once. Set automatically by the CDK stack on every compute backend: in the AgentCore runtime environment, in the ECS task definitions, and for a Lambda MicroVM through `platform_config`. |
 | `JIRA_APP_ACTOR_PROXY_URL` | No | | Resolved per-task from the Jira tenant secret. Forge v2 web-trigger URL used for app-authored Jira comments and transitions. |
@@ -142,7 +142,7 @@ tenant's OAuth or Forge credential to the next task.
 ### Examples
 
 ```bash
-# Dry run — validate config, fetch issue, print assembled prompt, then exit
+# Dry run — validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 
 # Run with a specific model (overrides the global.anthropic.claude-opus-5-5 default).
@@ -420,8 +420,9 @@ These map to AgentCore Runtime constraints:
 ## Building Manually
 
 ```bash
-# Build for ARM64 (AgentCore Runtime target)
-docker buildx build --platform linux/arm64 -t bgagent-local --load ./agent
+# Build for ARM64 (AgentCore Runtime target). Run from the repository root:
+# the Dockerfile copies agent/ and contracts/ from there.
+docker buildx build --platform linux/arm64 -f agent/Dockerfile -t bgagent-local --load .
 
 # Check image size
 docker images bgagent-local --format "{{.Size}}"
@@ -473,7 +474,8 @@ agent/
 │   ├── test_hooks.py        PreToolUse hook and hook matcher tests
 │   ├── test_models.py       Pydantic model tests (construction, validation, frozen enforcement, model_dump)
 │   ├── test_policy.py       Cedar policy engine tests (fail-closed, deny-list)
-│   ├── test_pipeline.py     Pipeline tests (cedar_policies injection, _resolve_overall_task_status, _chain_prior_agent_error)
+│   ├── test_pipeline.py     Pipeline tests (run_task with the agent, the repository setup and the post-hooks stubbed)
+│   ├── test_pipeline_outcomes.py  Outcome tests (_resolve_overall_task_status, _chain_prior_agent_error, delivery gate)
 │   ├── test_shell.py        Shell utility tests (slugify, redact_secrets, truncate, format_bytes)
 │   └── ...
 ├── tests_emulator/      Emulator-backed tests: real agent code against a local AWS Emulator (`mise run test:integration`; not collected by the unit run)

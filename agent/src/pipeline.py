@@ -1386,7 +1386,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # fails rather than running with a pinned-but-absent asset while the
             # audit record claims it was loaded.
             if config.resolved_assets:
-                from registry.loader import apply_resolved_assets
+                from registry.loader import RegistryAssetLoadError, apply_resolved_assets
 
                 loaded_mcp_keys = apply_resolved_assets(setup.repo_dir, config.resolved_assets)
                 log("TASK", f"Registry: applied {len(loaded_mcp_keys)} mcp_server asset(s)")
@@ -1394,12 +1394,18 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 # merge writes servers into .mcp.json AFTER the strip above, so a
                 # registry-published Linear server would otherwise slip back in and
                 # run under bypassPermissions. Re-strip so the enforcement covers
-                # registry-sourced entries too, not just repo-committed ones.
-                if strip_linear_mcp_servers(setup.repo_dir):
-                    log(
-                        "WARN",
-                        "Registry: stripped a Linear MCP server introduced by a resolved "
-                        "asset (ADR-016 — the agent must have no Linear tools)",
+                # registry-sourced entries too, not just repo-committed ones. What
+                # it removes here is a pinned asset (the scrub matches the word, so
+                # acme/linear-regression as well as Linear's own server): fail the
+                # task, as for every other pinned asset that could not be loaded.
+                removed = strip_linear_mcp_servers(setup.repo_dir)
+                if removed:
+                    raise RegistryAssetLoadError(
+                        f"the Linear MCP scrub removed {removed} of the pinned mcp_server "
+                        "assets: it drops every server whose key or config contains 'linear' "
+                        "(ADR-016: the agent must have no Linear tools). Remove the pin, or "
+                        "publish the server without that word in its name and config. "
+                        f"Pinned: {', '.join(loaded_mcp_keys)}"
                     )
 
             # Download attachments from S3 (version-pinned, integrity-verified)

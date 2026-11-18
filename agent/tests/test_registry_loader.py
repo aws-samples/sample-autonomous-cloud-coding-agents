@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -394,7 +395,7 @@ class TestMcpJsonNotCommittable:
 class TestMcpJsonGuardKeepsGitUsable:
     """Keeping .mcp.json out of commits must not cost the agent its git commands.
 
-    Three kinds of repository, each with the registry server written into its
+    Five kinds of repository, each with the registry server written into its
     ``.mcp.json`` by ``apply_mcp_assets``:
 
     * ``untracked``: the repository has no ``.mcp.json`` (the usual case). The
@@ -408,6 +409,15 @@ class TestMcpJsonGuardKeepsGitUsable:
       existing entry, as before.
     * ``re-included``: the repository's own ``.gitignore`` re-includes the file,
       which outranks the exclude file, so the index entry stays there.
+    * ``unterminated-exclude``: as ``untracked``, but the last line of the clone's
+      exclude file has no final newline. The entry starts on a line of its own,
+      so that line and the entry both stay patterns.
+    * ``read-only-exclude``: as ``untracked``, but the exclude file cannot be
+      appended to. The file is not ignored then, so the index entry stays there
+      as well.
+
+    No test commits while that index entry is in place: where a kind has it, the
+    change is staged and the staged files are read.
     """
 
     @staticmethod
@@ -463,6 +473,11 @@ class TestMcpJsonGuardKeepsGitUsable:
         self._git(repo, "checkout", "-q", "main")
         self._commit(repo, "other.txt", "more\n")
         self._git(repo, "checkout", "-q", "task")
+        exclude = repo / ".git" / "info" / "exclude"
+        if kind == "unterminated-exclude":
+            exclude.write_text("*.swp")
+        if kind == "read-only-exclude":
+            exclude.chmod(0o444)
         runtime = {"transport": "http", "url": "https://mcp.example/sse?token=SUPERSECRET"}
         apply_mcp_assets(str(repo), [_mcp_asset("acme", "secretful", "1.0.0", runtime)])
         return repo
@@ -472,6 +487,33 @@ class TestMcpJsonGuardKeepsGitUsable:
         assert self._git(repo, "ls-files", "--", ".mcp.json").stdout == ""
         assert self._git(repo, "status", "--porcelain").stdout == ""
         assert "WARN" not in capfd.readouterr().out  # the guard reported no failure
+
+    def test_exclude_file_without_a_final_newline_keeps_its_last_pattern(self, tmp_path):
+        # Appended directly behind "*.swp", the entry would make that line
+        # "*.swp/.mcp.json": neither the clone's pattern nor the entry would match.
+        repo = self._clone(tmp_path, "unterminated-exclude")
+        assert self._git(repo, "ls-files", "--", ".mcp.json").stdout == ""
+        assert self._git(repo, "check-ignore", "-q", "x.swp", check=False).returncode == 0
+        assert self._git(repo, "check-ignore", "-q", ".mcp.json", check=False).returncode == 0
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root can append to a file of mode 0444")
+    def test_exclude_file_that_cannot_be_written_leaves_the_file_protected(self, tmp_path):
+        # Staged, not committed: this kind of clone ends on the index entry.
+        repo = self._clone(tmp_path, "read-only-exclude")
+        assert self._git(repo, "add", ".mcp.json", check=False).returncode != 0
+        (repo / "code.txt").write_text("the agent's change\n")
+        self._git(repo, "add", "-A")
+        # code.txt is the control: it is staged, so the command did its work.
+        assert self._staged(repo) == ["code.txt"]
+
+    def test_refused_add_of_the_file_comes_without_git_advice(self, tmp_path, monkeypatch):
+        # git refuses to add an ignored file that is named, and prints advice with
+        # the refusal. The refusal stays; the advice is off in the clone.
+        monkeypatch.setenv("LC_ALL", "C")  # git's own language: its advice lines begin "hint:"
+        repo = self._clone(tmp_path, "untracked")
+        refused = self._git(repo, "add", ".mcp.json", check=False)
+        assert refused.returncode != 0
+        assert "hint:" not in refused.stderr
 
     @pytest.mark.parametrize("kind", ["untracked", "tracked"])
     @pytest.mark.parametrize(
@@ -521,8 +563,8 @@ class TestMcpJsonGuardKeepsGitUsable:
         ],
     )
     def test_staging_leaves_the_file_out_where_gitignore_re_includes_it(self, tmp_path, command):
-        # Staged, not committed: this kind of clone keeps the index entry of the fallback, and a
-        # commit made in that state is what a pre-commit hook of the machine may object to.
+        # Staged, not committed: this kind of clone keeps the index entry of the fallback, and
+        # what is staged is what the guard decides.
         repo = self._clone(tmp_path, "re-included")
         (repo / "code.txt").write_text("the agent's change\n")
         self._git(repo, *command)

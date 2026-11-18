@@ -134,10 +134,10 @@ def _hide_edit_from_git(repo_dir: str) -> None:
     whole file deleted, or the Jira placeholder added. ``skip-worktree`` makes
     git treat the file as unchanged, also when the scrub removed it.
 
-    An untracked file is left alone. ``git add -u`` never stages it, and the
-    index entry it would need (the ``--intent-to-add`` of ``registry.loader``,
-    whose payload may hold secrets) makes ``git stash``, ``git rebase`` and
-    ``git merge`` fail for the agent.
+    An untracked file is left alone. ``git add -u`` never stages it, and an
+    index entry for it makes ``git stash``, ``git rebase`` and ``git merge``
+    fail for the agent (``registry.loader``, whose payload may hold secrets,
+    lists the file in the clone's exclude file instead).
 
     Best-effort: a git failure is logged and the task goes on.
     """

@@ -16,12 +16,11 @@ from pydantic import ValidationError
 from models import AgentResult, RepoSetup, TaskConfig, TokenUsage
 from pipeline import (
     _branch_has_new_commits,
-    _chain_prior_agent_error,
     _react_linear_task_finished,
-    _resolve_overall_task_status,
     _should_post_start_comment,
 )
 from post_hooks import VerifyOutcome
+from registry.loader import RegistryAssetLoadError
 
 # Minimal Linear channel metadata for the early-ACK ordering tests.
 _LINEAR_META = {"issue_id": "ABCA-1", "workspace_id": "ws-1"}
@@ -1055,121 +1054,6 @@ class TestRepoLessPipeline:
         assert result["status"] == "success"
         assert result["pr_url"] is None
         assert result["artifact_uri"] == "s3://artifacts-bkt/artifacts/artifact-1/result.md"
-
-
-class TestChainPriorAgentError:
-    def test_none_agent_result_returns_exception_only(self):
-        exc = RuntimeError("post-hook crash")
-        assert _chain_prior_agent_error(None, exc) == "RuntimeError: post-hook crash"
-
-    def test_agent_with_error_chains_both(self):
-        ar = AgentResult(status="error", error="SDK timeout")
-        exc = ValueError("PR creation failed")
-        result = _chain_prior_agent_error(ar, exc)
-        assert result == "SDK timeout; subsequent failure: ValueError: PR creation failed"
-
-    def test_agent_error_status_without_error_message(self):
-        ar = AgentResult(status="error")
-        exc = OSError("disk full")
-        result = _chain_prior_agent_error(ar, exc)
-        assert result == "Agent reported status=error; subsequent failure: OSError: disk full"
-
-    def test_agent_success_returns_exception_only(self):
-        ar = AgentResult(status="success")
-        exc = RuntimeError("unexpected")
-        assert _chain_prior_agent_error(ar, exc) == "RuntimeError: unexpected"
-
-    def test_agent_unknown_no_error_returns_exception_only(self):
-        ar = AgentResult(status="unknown")
-        exc = TypeError("bad arg")
-        assert _chain_prior_agent_error(ar, exc) == "TypeError: bad arg"
-
-
-class TestResolveOverallTaskStatus:
-    def test_success_with_build_ok(self):
-        ar = AgentResult(status="success")
-        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
-        assert status == "success"
-        assert err is None
-
-    def test_end_turn_with_build_ok(self):
-        ar = AgentResult(status="end_turn")
-        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
-        assert status == "success"
-        assert err is None
-
-    def test_success_with_build_failed(self):
-        ar = AgentResult(status="success")
-        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url="https://pr")
-        assert status == "error"
-        assert err is not None
-        assert "agent_status='success'" in err
-        assert "build_ok=False" in err
-
-    def test_success_with_build_TIMED_OUT_marks_timeout_distinctly(self):
-        # A build that exceeded the time limit must read as a
-        # TIMEOUT, not a generic build failure. The error_message carries
-        # ``build_ok=timeout`` so the platform's failure copy says "timed out".
-        ar = AgentResult(status="success")
-        status, err = _resolve_overall_task_status(
-            ar, build_ok=False, pr_url="https://pr", build_timed_out=True
-        )
-        assert status == "error"
-        assert err is not None
-        assert "build_ok=timeout" in err
-        assert "build_ok=False" not in err  # not the generic-failure marker
-
-    def test_build_failed_but_not_timeout_keeps_false_marker(self):
-        ar = AgentResult(status="success")
-        _, err = _resolve_overall_task_status(
-            ar, build_ok=False, pr_url="https://pr", build_timed_out=False
-        )
-        assert err is not None
-        assert "build_ok=False" in err
-        assert "timeout" not in err
-
-    def test_unknown_always_error_even_with_pr_and_build(self):
-        """agent_status=unknown must always fail — never infer success from PR/build."""
-        ar = AgentResult(status="unknown")
-        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url="https://pr")
-        assert status == "error"
-        assert err is not None
-        assert "ResultMessage" in err
-
-    def test_unknown_with_prior_error_chains(self):
-        ar = AgentResult(status="unknown", error="connection reset")
-        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
-        assert status == "error"
-        assert err is not None
-        assert "connection reset" in err
-        assert "ResultMessage" in err
-
-    def test_error_status_preserves_agent_error(self):
-        ar = AgentResult(status="error", error="OOM killed")
-        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
-        assert status == "error"
-        assert err == "OOM killed"
-
-    def test_error_status_without_agent_error_generates_message(self):
-        ar = AgentResult(status="error")
-        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
-        assert status == "error"
-        assert err is not None
-        assert "agent_status='error'" in err
-
-    def test_unknown_no_pr_no_build(self):
-        ar = AgentResult(status="unknown")
-        status, err = _resolve_overall_task_status(ar, build_ok=False, pr_url=None)
-        assert status == "error"
-        assert err is not None
-        assert "ResultMessage" in err
-
-    def test_success_preserves_existing_error(self):
-        """If agent reports success with a non-fatal error, it's preserved on success."""
-        ar = AgentResult(status="success", error="non-fatal warning")
-        status, err = _resolve_overall_task_status(ar, build_ok=True, pr_url=None)
-        assert status == "success"
-        assert err == "non-fatal warning"
 
 
 class TestCancelSkipsPostHooks:
@@ -3446,6 +3330,17 @@ class TestWhatTheAgentStepIsGiven:
             **task_kwargs,
         )
 
+    @staticmethod
+    def _mcp_server(name: str, url: str) -> dict:
+        """The resolved registry asset ``acme/<name>``, as the orchestrator sends it."""
+        return {
+            "kind": "mcp_server",
+            "namespace": "acme",
+            "name": name,
+            "version": "1.0.0",
+            "runtime": {"transport": "http", "url": url},
+        }
+
     def test_linear_server_committed_to_the_repository_is_removed(self, agent_step, tmp_path):
         # ADR-016: the agent must have no Linear tools. The CLI loads the
         # repository's .mcp.json, a Linear task has the Linear token in its
@@ -3466,27 +3361,43 @@ class TestWhatTheAgentStepIsGiven:
 
         assert agent_step.mcp_servers == ["docs"]
 
-    def test_linear_server_from_a_registry_asset_is_removed_after_the_merge(self, agent_step):
-        # The registry merge writes its servers into .mcp.json after that first
-        # scrub, so the pipeline scrubs once more behind the merge. The asset's
-        # name says nothing; its URL is Linear's.
-        def mcp_server(name: str, url: str) -> dict:
-            return {
-                "kind": "mcp_server",
-                "namespace": "acme",
-                "name": name,
-                "version": "1.0.0",
-                "runtime": {"transport": "http", "url": url},
-            }
-
-        self._run_task(
-            resolved_assets=[
-                mcp_server("tracker", "https://mcp.linear.app/sse"),
-                mcp_server("pdf", "https://pdf.example.com/mcp"),
-            ]
-        )
+    def test_registry_server_is_in_mcp_json_when_the_agent_starts(self, agent_step):
+        self._run_task(resolved_assets=[self._mcp_server("pdf", "https://pdf.example.com/mcp")])
 
         assert agent_step.mcp_servers == ["acme__pdf"]
+
+    @pytest.mark.parametrize(
+        ("name", "url"),
+        [
+            # A server that has nothing to do with Linear: its key contains the word.
+            pytest.param("linear-regression", "https://ml.example.com/mcp", id="linear-in-name"),
+            # The name says nothing; the URL is Linear's.
+            pytest.param("tracker", "https://mcp.linear.app/sse", id="linear-server"),
+        ],
+    )
+    def test_registry_server_that_the_linear_scrub_removes_fails_the_task(
+        self, agent_step, name, url
+    ):
+        # The registry merge writes its servers into .mcp.json after that first
+        # scrub, so the pipeline scrubs once more behind the merge. What this scrub
+        # removes is a server the Blueprint pins, and the task record already names
+        # it as loaded: the task fails, like for every other pinned asset that
+        # could not be loaded (#246), instead of running without the server.
+        with pytest.raises(RegistryAssetLoadError, match="Linear MCP scrub"):
+            self._run_task(
+                resolved_assets=[
+                    self._mcp_server(name, url),
+                    self._mcp_server("pdf", "https://pdf.example.com/mcp"),
+                ]
+            )
+
+        assert agent_step.ran is False
+        agent_step.task_state.write_terminal.assert_called_once()
+        _task_id, status, payload = agent_step.task_state.write_terminal.call_args.args
+        assert status == "FAILED"
+        # The error is what the operator reads: it names the rule and the pinned servers.
+        assert "Linear MCP scrub" in payload["error"]
+        assert f"acme__{name}" in payload["error"]
 
     def test_orchestrator_context_is_what_the_agent_runs_on(self, agent_step):
         # Every deployed task arrives with a hydrated context. Its prompt was

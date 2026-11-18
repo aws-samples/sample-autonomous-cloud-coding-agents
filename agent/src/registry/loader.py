@@ -16,6 +16,7 @@ project-scoped scan picks up both.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -92,7 +93,8 @@ class RegistryAssetLoadError(RuntimeError):
     rather than running with an audit record claiming an asset that was never
     actually loaded (#246 Option C). This covers every condition that would leave
     a pinned asset unloaded — missing repo dir, empty/invalid runtime, structurally
-    invalid connection config, or a write error (see :func:`apply_mcp_assets`). The
+    invalid connection config, or a write error (see :func:`apply_mcp_assets`), and
+    a server that the Linear scrub removes behind the merge (``pipeline.run_task``). The
     only warn-and-continue case is a pre-existing malformed ``.mcp.json`` on disk
     (:func:`channel_mcp.read_existing_mcp_config`), which is replaced, not fatal."""
 
@@ -112,11 +114,13 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     A file the repo does not track is listed in the clone's own exclude file
     instead (``.git/info/exclude``, never committed, as ``attachments`` does for
     its directory): ``git add -A``, ``git add .`` and ``git add .mcp.json`` leave
-    it alone. Giving it an index entry for the flag (``--intent-to-add``) is an
-    uncommitted change to git: ``git stash``, ``rebase``, ``cherry-pick``,
-    ``merge`` and ``reset --hard`` then fail for the agent. That entry is only
-    the fallback where the repo's own ``.gitignore`` re-includes the file, which
-    outranks the exclude file.
+    it alone, and the advice git prints when it refuses the last of them is
+    switched off in the clone. Giving the file an index entry for the flag
+    (``--intent-to-add``) is an uncommitted change to git: ``git stash``,
+    ``rebase``, ``cherry-pick``, ``merge`` and ``reset --hard`` then fail for the
+    agent. That entry is only the fallback where the file is not ignored
+    afterwards: the repo's own ``.gitignore`` re-includes it, which outranks the
+    exclude file, or the exclude file could not be written.
 
     Best-effort: git plumbing failures here are logged, not fatal. The SDK still
     reads the on-disk file (neither mechanism touches the working tree), so
@@ -135,14 +139,18 @@ def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
     try:
         tracked = _git("ls-files", "--error-unmatch", ".mcp.json").returncode == 0
         if not tracked:
-            info_dir = os.path.join(repo_dir, ".git", "info")
-            if os.path.isdir(info_dir):
-                with open(os.path.join(info_dir, "exclude"), "a", encoding="utf-8") as f:
-                    f.write("/.mcp.json\n")
+            exclude = os.path.join(repo_dir, ".git", "info", "exclude")
+            # The leading newline is for an exclude file whose last line has none.
+            with contextlib.suppress(OSError), open(exclude, "a", encoding="utf-8") as f:
+                f.write("\n/.mcp.json\n")
             if _git("check-ignore", "-q", ".mcp.json").returncode == 0:
+                # git refuses an add that names the ignored file. The refusal
+                # stays; the advice git prints with it is off for this clone.
+                _git("config", "advice.addIgnoredFile", "false")
                 return
-            # Not ignored after all (the repo's .gitignore re-includes it): give
-            # the untracked file an index entry so skip-worktree can attach.
+            # Not ignored after all (the repo's .gitignore re-includes it, or the
+            # exclude file could not be written): give the untracked file an
+            # index entry so skip-worktree can attach.
             _git("add", "--intent-to-add", ".mcp.json")
         result = _git("update-index", "--skip-worktree", ".mcp.json")
         if result.returncode != 0:
