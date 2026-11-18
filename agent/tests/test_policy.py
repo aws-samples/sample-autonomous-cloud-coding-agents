@@ -268,16 +268,6 @@ class TestDurationMetrics:
         assert result.duration_ms >= 0
 
 
-class TestTaskTypeProperty:
-    def test_task_type_property(self):
-        engine = PolicyEngine(task_type="new_task", repo="owner/repo")
-        assert engine.task_type == "new_task"
-
-    def test_task_type_pr_review(self):
-        engine = PolicyEngine(task_type="pr_review", repo="owner/repo")
-        assert engine.task_type == "pr_review"
-
-
 class TestConstantsSemanticValidation:
     """Verify _validate_constants rejects invariant violations."""
 

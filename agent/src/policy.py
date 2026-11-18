@@ -148,7 +148,6 @@ APPROVAL_RATE_WINDOW_S: float = 60.0  # sliding window paired with APPROVAL_RATE
 _SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2}
 _DEFAULT_SEVERITY = "medium"
 _VALID_SEVERITIES = frozenset(_SEVERITY_ORDER)
-_VALID_TIERS = frozenset({"hard", "soft"})
 
 # Tool group membership (§6.4 decision #21). Resolves tool_group:file_write
 # scope to {Write, Edit} at runtime.
@@ -507,9 +506,6 @@ class RecentDecisionCache:
             return rule_id, entry
         return None
 
-    def __len__(self) -> int:
-        return len(self._entries)
-
 
 # ---------------------------------------------------------------------------
 # Annotation handling (§5.2, §6.3, §12.4)
@@ -526,7 +522,6 @@ class _ParsedRule:
     effect: str | None  # "permit" or "forbid" — used to gate base_permit exemption
     approval_timeout_s: int | None
     severity: str | None
-    category: str | None
 
 
 def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_ParsedRule]:
@@ -559,7 +554,6 @@ def _parse_policy_annotations(cedarpy_module, policies_text: str) -> list[_Parse
                 effect=body.get("effect"),
                 approval_timeout_s=timeout,
                 severity=ann.get("severity"),
-                category=ann.get("category"),
             )
         )
     return rules
@@ -918,10 +912,6 @@ class PolicyEngine:
     # ---- Public properties -------------------------------------------------
 
     @property
-    def task_type(self) -> str:
-        return self._task_type
-
-    @property
     def repo(self) -> str:
         return self._repo
 
@@ -1269,7 +1259,7 @@ class PolicyEngine:
         tool_input: dict,
         base_context: dict,
         *,
-        tier_name: str = "",
+        tier_name: str,
     ) -> tuple[str, list[str]] | None:
         """Run the appropriate Cedar eval(s) for a given tool + input.
 
@@ -1293,7 +1283,7 @@ class PolicyEngine:
             if decision == "no_decision":
                 log(
                     "WARN",
-                    f"{tier_name or 'tier'}: Cedar no_decision for "
+                    f"{tier_name}: Cedar no_decision for "
                     f"action={action!r} tool={tool_name!r} — base_permit "
                     f"catch-all missing or malformed",
                 )
@@ -1339,7 +1329,7 @@ def _matching_rule_ids(
     rules: list[_ParsedRule],
     matching_policy_ids: list[str],
     *,
-    tier_name: str = "",
+    tier_name: str,
 ) -> list[str]:
     """Map positional Cedar policy IDs to their @rule_id annotations.
 
@@ -1354,7 +1344,7 @@ def _matching_rule_ids(
         if pid not in by_id:
             log(
                 "WARN",
-                f"{tier_name or 'tier'}: Cedar reported matching policy "
+                f"{tier_name}: Cedar reported matching policy "
                 f"{pid!r} but no parsed rule carries that ID; "
                 f"policy/rule lists may be out of sync",
             )

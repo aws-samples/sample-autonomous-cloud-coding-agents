@@ -26,7 +26,10 @@ permit (principal, action, resource);
 
 // Gate any git --force / -f push. 300s default approval window, medium severity.
 // Covers both long-form (--force) and short-form (-f) variants, including
-// the bare `git push -f` invocation with no branch argument.
+// the bare `git push -f` invocation with no branch argument, and the flag
+// after the remote and branch (`git push origin feature --force`). After
+// the branch, `-f` is matched only at the end of the command: followed by
+// more text it is also the flag of a later program (`&& gh api ... -f ...`).
 @tier("soft")
 @rule_id("force_push_any")
 @approval_timeout_s("300")
@@ -35,7 +38,9 @@ permit (principal, action, resource);
 forbid (principal, action == Agent::Action::"execute_bash", resource)
 when { context.command like "*git push --force*"
     || context.command like "*git push -f *"
-    || context.command like "*git push -f" };
+    || context.command like "*git push -f"
+    || context.command like "*git push * --force*"
+    || context.command like "*git push * -f" };
 
 // Force-push to main/prod specifically — longer window, higher severity.
 // Multi-match with force_push_any is expected: the engine's annotation
