@@ -13,8 +13,6 @@
     "markdown-lint": "node scripts/markdown-lint.mjs"
   },
   "devDependencies": {
-    "jest": "^30.5.2",
-    "jest-junit": "^17",
     "markdown-link-check": "^3.15.0",
     "markdownlint": "0.42.1",
     "retire": "^6.1.0",
@@ -34,40 +32,5 @@
   },
   "license": "MIT-0",
   "version": "0.0.0",
-  "jest": {
-    "coverageProvider": "v8",
-    "clearMocks": true,
-    "collectCoverage": true,
-    "coverageReporters": [
-      "json",
-      "lcov",
-      "clover",
-      "cobertura",
-      "text"
-    ],
-    "coverageDirectory": "coverage",
-    "coveragePathIgnorePatterns": [
-      "/node_modules/"
-    ],
-    "testPathIgnorePatterns": [
-      "/node_modules/"
-    ],
-    "watchPathIgnorePatterns": [
-      "/node_modules/"
-    ],
-    "testMatch": [
-      "**/__tests__/**/*.[jt]s?(x)",
-      "**/*(*.)@(spec|test).[jt]s?(x)"
-    ],
-    "reporters": [
-      "default",
-      [
-        "jest-junit",
-        {
-          "outputDirectory": "test-reports"
-        }
-      ]
-    ]
-  },
   "private": true
 }

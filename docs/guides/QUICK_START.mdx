@@ -253,14 +253,14 @@ cd cli
 
 REGION=us-east-1  # your deployment region (same as Step 4)
 
-# Creates the user, sets a permanent password, and writes credentials + configure bundle
+# Creates the user with a temporary password and writes credentials + configure bundle
 # to ~/.bgagent/invites/you@example.com.txt (mode 0600)
 node lib/bin/bgagent.js admin invite-user you@example.com \
   --region "$REGION" \
   --stack-name backgroundagent-dev
 ```
 
-The command wraps `AdminCreateUser` + `AdminSetUserPassword`: email is pre-verified, the welcome email is suppressed (avoids SES errors on new accounts), and the password is permanent (no forced change on first login). When stack outputs are available, the invite file also includes a configure bundle for Step 6.
+The command wraps `AdminCreateUser`: email is pre-verified, the welcome email is suppressed (avoids SES errors on new accounts), and the password is temporary: the first `bgagent login` asks you to set a permanent one. When stack outputs are available, the invite file also includes a configure bundle for Step 6.
 
 To manage users later:
 
@@ -358,7 +358,7 @@ node lib/bin/bgagent.js submit \
 
 <TabItem label="AWS CLI">
 
-Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). Requires `curl` and the AWS CLI.
+Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). A user created on the ABCA CLI tab has a temporary password: sign in once with `bgagent login` before using this tab. Requires `curl` and the AWS CLI.
 
 Onboard your fork first. It's a single ABCA CLI command, with no AWS CLI equivalent: `node lib/bin/bgagent.js repo onboard your-username/agent-plugins --region "$REGION"`, run from `cli/` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories).
 
@@ -384,6 +384,7 @@ curl -X POST "$API_URL/tasks" \
   -H "Content-Type: application/json" \
   -d '{
     "repo": "your-username/agent-plugins",
+    "workflow_ref": "coding/new-task-v1",
     "task_description": "Add a CODEOWNERS file to the repository root"
   }'
 ```
@@ -475,7 +476,7 @@ cd cli
 
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
-  --pre-approve write_path:tests/**
+  --pre-approve 'write_path:tests/**'
 ```
 
 Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-approve` only short-circuits soft-deny rules. For the full command reference see [User guide — Approval gates](./USER_GUIDE.md#approval-gates-cedar-hitl); for authoring your own rules see the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md).

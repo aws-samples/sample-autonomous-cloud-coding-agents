@@ -13,8 +13,10 @@ run = "node scripts/sync-starlight.mjs"
 
 [tasks.test]
 # The files are named, not globbed: a glob that matches nothing would pass.
+# One command per file: `node --test` reports a missing file only when it finds no file at
+# all, so with both names in one command a renamed or deleted test file would go unnoticed.
 description = "Tests for the mirror generator and for the Markdown structure lint (scripts/*.test.mjs)"
-run = "node --test scripts/sync-starlight.test.mjs scripts/markdown-lint.test.mjs"
+run = ["node --test scripts/sync-starlight.test.mjs", "node --test scripts/markdown-lint.test.mjs"]
 
 [tasks.build]
 # astro check (type errors in .astro components and config) runs first, in this task, so

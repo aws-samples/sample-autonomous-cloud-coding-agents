@@ -380,6 +380,7 @@ curl -X POST "$API_URL/tasks" \
   -H "Content-Type: application/json" \
   -d '{
     "repo": "owner/repo",
+    "workflow_ref": "coding/new-task-v1",
     "task_description": "Add input validation to the /users POST endpoint"
   }'
 ```
@@ -390,7 +391,7 @@ curl -X POST "$API_URL/tasks" \
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "awslabs/agent-plugins", "task_description": "add codeowners field to RFC issue template"}'
+  -d '{"repo": "awslabs/agent-plugins", "workflow_ref": "coding/new-task-v1", "task_description": "add codeowners field to RFC issue template"}'
 ```
 
 ```json
@@ -403,7 +404,7 @@ To create a task from a GitHub issue:
 curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repo": "owner/repo", "issue_number": 42}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "issue_number": 42}'
 ```
 
 To iterate on an existing pull request (address review feedback):
@@ -465,7 +466,7 @@ curl -X POST "$API_URL/tasks" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: my-unique-key-123" \
-  -d '{"repo": "owner/repo", "task_description": "Fix bug"}'
+  -d '{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix bug"}'
 ```
 
 ### List tasks
@@ -640,7 +641,7 @@ Created:     2026-04-01T00:39:51.271Z
 | `--trace` | Enable detailed tracing: raises progress preview cap to 4 KB and uploads full NDJSON trajectory to S3 on completion. Download with `bgagent trace download`. |
 | `--approval-timeout` | Cedar HITL per-task approval timeout in seconds (default 300). A matching rule with its own `@approval_timeout_s` annotation still takes the minimum. See [Approval gates](#approval-gates-cedar-hitl). |
 | `--microvm-sleep-after` | Seconds to wait for approval before putting a Lambda MicroVM to sleep (default 60; 0–3600 accepted). Use `off` to keep it awake. Requires the deployment's automatic-sleep feature to be enabled; does not change approval deadlines or affect other compute backends. |
-| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Same scope forms as `bgagent approve --scope`. Hard-deny rules are always enforced. |
+| `--pre-approve` | Cedar HITL scope to approve up-front (repeatable). Scope forms: `all_session`, `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>`, `rule:<rule_id>`. Hard-deny rules are always enforced. |
 | `--wait` | Poll until the task reaches a terminal status. |
 | `--output` | Output format: `text` (default) or `json`. |
 
@@ -886,7 +887,7 @@ The `--scope` flag controls how long the approval carries forward within the run
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
 | `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
-| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). For a tool that is in no group, `tool_group_session` covers that call only. |
 | `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
 | `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
@@ -929,7 +930,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are the same as the `approve --scope` table above. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
 
@@ -1021,7 +1022,7 @@ Use the webhook endpoint with HMAC-SHA256 authentication instead of a JWT:
 ```bash
 WEBHOOK_ID="01HYX..."
 WEBHOOK_SECRET="a1b2c3d4..."
-BODY='{"repo": "owner/repo", "task_description": "Fix the login bug"}'
+BODY='{"repo": "owner/repo", "workflow_ref": "coding/new-task-v1", "task_description": "Fix the login bug"}'
 
 # Compute HMAC-SHA256 signature
 SIGNATURE=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | cut -d' ' -f2)
