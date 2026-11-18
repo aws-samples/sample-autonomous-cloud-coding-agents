@@ -21,10 +21,11 @@
 #   Choose microvm_nested_stack=true for new/already-nested installations,
 #   or false for existing flat installations, in the commands below.
 #
-#   0. Use bootstrap policy bundle >= 1.9.0 for the nested layout.
+#   0. Install the bootstrap policy bundle named in cdk/bootstrap/BOOTSTRAP_VERSION
+#      (the version `mise //cdk:preflight` checks) for either layout.
 #      Before upgrading an existing flat deployment, set and retain
-#      microvm_nested_stack=false (bundle >= 1.8.0) on every deploy below until
-#      its resources are migrated; see docs/verification/645-p3-nested-stack.md.
+#      microvm_nested_stack=false on every deploy below until its resources are
+#      migrated; see docs/verification/645-p3-nested-stack.md.
 #
 #   1. Deploy the MicroVM substrate WITHOUT an image. Synth warns that no image
 #      is configured; that is expected — the artifact bucket must exist before
@@ -185,6 +186,7 @@ for tool in aws python3; do
 done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REQUIRED_BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/cdk/bootstrap/BOOTSTRAP_VERSION")"
 
 # --- Stack outputs ------------------------------------------------------------
 # One describe-stacks call, then pull each output by key. Failing loudly here
@@ -250,12 +252,12 @@ echo "    log group       : ${LOG_GROUP}"
 # after. It used to be a heredoc at the very end, so the one run that most needed
 # it — a create-microvm-image that failed validation — printed no banner at all.
 print_p1_reminder() {
-  cat <<'EOF'
+  cat <<EOF
 
 REMINDER (ADR-021): verify the deployed image and coordinator together before
    enabling automatic suspension. Managed images declare all six hooks;
    compatible coordinator, IAM and image configuration are required.
-   Nested deployments require bootstrap bundle 1.9.0 or later. Existing flat
+   Deployments require bootstrap bundle ${REQUIRED_BOOTSTRAP_VERSION}. Existing flat
    deployments need the staged migration in docs/verification/645-p3-nested-stack.md.
    Acceptance criteria and remaining PR checks: docs/verification/README.md.
    Preserve a compatible published coordinator and explicit image pin for rollback.
@@ -331,8 +333,8 @@ if [[ "${CREATE_IMAGE}" -eq 0 ]]; then
   CDK-managed (recommended) — redeploy with the base image and artifact pinned.
   Keep this digest with the deployment's context; it identifies these exact ZIP bytes.
 
-  The nested layout requires bootstrap policy bundle >= 1.9.0.
-  Flat P3 deployments require >= 1.8.0. Check the installed bundle:
+  Both layouts require bootstrap policy bundle ${REQUIRED_BOOTSTRAP_VERSION}, the version
+  \`mise //cdk:preflight\` checks. Check the installed bundle:
 
     aws cloudformation describe-stacks --stack-name CDKToolkit \\
       --query 'Stacks[0].Outputs[?OutputKey==\`BootstrapPolicyVersion\`].OutputValue' --output text

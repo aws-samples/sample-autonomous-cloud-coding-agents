@@ -121,6 +121,8 @@ describe('MicroVM artifact packaging and immutable publication', () => {
     for (const name of ['package-microvm-artifact.sh', 'build-microvm-artifact.py']) {
       write(`cdk/scripts/${name}`, fs.readFileSync(path.join(REPO, 'scripts', name), 'utf8'));
     }
+    // The script prints the bundle version deployments require from this file.
+    write('cdk/bootstrap/BOOTSTRAP_VERSION', fs.readFileSync(path.join(REPO, 'bootstrap', 'BOOTSTRAP_VERSION'), 'utf8'));
     write('agent/Dockerfile', 'FROM scratch\nCOPY agent/src/ /app/src/\n');
     for (const file of BUILD_INPUTS) write(file, `contents of ${file}\n`);
     write('bin/aws', AWS);
@@ -141,6 +143,10 @@ describe('MicroVM artifact packaging and immutable publication', () => {
     const hash = createHash('sha256').update(bytes).digest('hex');
     expect(firstKey).toBe(`microvm-images/agent-artifact-${hash}.zip`);
     expect(first.stdout).toContain(`--context microvm_artifact_sha256=${hash}`);
+    // The printed instructions name the bundle preflight requires, not a stale copy.
+    const required = fs.readFileSync(path.join(REPO, 'bootstrap', 'BOOTSTRAP_VERSION'), 'utf8').trim();
+    expect(first.stdout).toContain(`Both layouts require bootstrap policy bundle ${required}`);
+    expect(first.stdout).toContain(`Deployments require bootstrap bundle ${required}`);
 
     fs.utimesSync(path.join(fixture, 'agent/src/runner.py'), new Date(0), new Date(0));
     write('agent/src/__pycache__/runner.pyc', 'cache');
