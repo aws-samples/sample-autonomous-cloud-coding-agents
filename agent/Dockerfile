@@ -26,7 +26,7 @@ FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f16356
 ARG GH_VERSION
 RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
-FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f
+FROM --platform=$TARGETPLATFORM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 # Install mise (polyglot dev tool manager)
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
