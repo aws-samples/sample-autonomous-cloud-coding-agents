@@ -644,8 +644,8 @@ describe('resolveWebhookSecretAction — inherited vs owned', () => {
   });
 
   test('without the stack-wide value it cannot tell, and does not guess', () => {
-    // Reading the stack-wide secret is best-effort; an unreadable one must not turn
-    // a legitimate owned secret into a warning.
+    // `setup` passes the value it read, and stops when the read fails. A caller that
+    // has no value must not turn a legitimate owned secret into a warning.
     expect(resolveWebhookSecretAction(STACKWIDE, true, undefined))
       .toEqual({ kind: 'preserve', secret: STACKWIDE });
   });

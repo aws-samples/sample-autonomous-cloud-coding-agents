@@ -257,6 +257,40 @@ describe('findProjectOwnerWorkspace', () => {
       expect(result.errors.join(' ')).toContain('unknown-slug');
     }
   });
+
+  // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
+  // Read as "this workspace does not own the project", it left the operator with
+  // "Searched: rival", no reason, and the advice to record an owner unverified.
+  const refusing = (...refused: string[]) => jest.fn(async (url: string, init?: RequestInit) => {
+    const auth = (init?.headers as Record<string, string>).Authorization;
+    return refused.includes(auth.replace('Bearer ', ''))
+      ? { ok: true, status: 200, json: async () => ({ errors: [{ message: 'Authentication required' }] }) }
+      : fetchImpl(url, init);
+  }) as unknown as typeof fetch;
+
+  test('reports an `errors` answer as the error of that workspace', async () => {
+    const result = await findProjectOwnerWorkspace({
+      projectId: PROJECT_B,
+      slugs: ['rival'],
+      sm,
+      region: 'us-east-1',
+      vaultWorkloadName: 'wl',
+      fetchImpl: refusing('tok-rival'),
+    });
+    expect(result).toEqual({ kind: 'not-found', searched: ['rival'], errors: ['rival: Authentication required'] });
+  });
+
+  test('keeps searching the rest after an `errors` answer', async () => {
+    const result = await findProjectOwnerWorkspace({
+      projectId: PROJECT_A,
+      slugs: ['rival', 'acme'],
+      sm,
+      region: 'us-east-1',
+      vaultWorkloadName: 'wl',
+      fetchImpl: refusing('tok-rival'),
+    });
+    expect(result).toEqual({ kind: 'found', slug: 'acme', workspaceId: ORG_ACME });
+  });
 });
 
 // The asymmetry is the point: "differs from stack-wide" proves ownership because

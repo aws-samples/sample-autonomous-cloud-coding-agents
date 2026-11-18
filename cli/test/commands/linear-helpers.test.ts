@@ -237,3 +237,78 @@ describe('makeLinearCommand', () => {
     expect(flags).toContain('--app-name');
   });
 });
+
+describe('linear list-projects --slug', () => {
+  const originalFetch = global.fetch;
+  let out: string[];
+  let err: string[];
+  let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
+  let logSpy: jest.SpiedFunction<typeof console.log>;
+  let errSpy: jest.SpiedFunction<typeof console.error>;
+
+  beforeEach(() => {
+    // The bundle of `acme` holds a token; the stack publishes no registry, so no vault lookup.
+    smSend.mockReset().mockResolvedValue({ SecretString: JSON.stringify({ access_token: 'tok-acme' }) });
+    cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
+    out = [];
+    err = [];
+    cfgSpy = jest.spyOn(configMod, 'loadConfig').mockReturnValue({ region: 'us-west-2' } as ReturnType<typeof configMod.loadConfig>);
+    logSpy = jest.spyOn(console, 'log').mockImplementation((line?: unknown) => { out.push(String(line)); });
+    errSpy = jest.spyOn(console, 'error').mockImplementation((line?: unknown) => { err.push(String(line)); });
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    cfgSpy.mockRestore();
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  /** Run the command with Linear giving `response` to the projects query. */
+  async function listProjects(response: { ok: boolean; status: number; body?: unknown }): Promise<void> {
+    global.fetch = jest.fn(async () => ({
+      ok: response.ok,
+      status: response.status,
+      json: async () => response.body,
+    })) as unknown as typeof fetch;
+    await makeLinearCommand().parseAsync(['node', 'bgagent', 'list-projects', '--slug', 'acme']);
+  }
+
+  test('lists the projects Linear returns', async () => {
+    await listProjects({
+      ok: true,
+      status: 200,
+      body: { data: { projects: { nodes: [{ id: 'p-1', name: 'Roadmap', teams: { nodes: [{ name: 'Platform' }] } }] } } },
+    });
+    expect(out).toEqual(expect.arrayContaining([
+      'Found 1 Linear project(s):\n',
+      '  Roadmap',
+      '    id:        p-1',
+      '    workspace: acme',
+      '    team:      Platform',
+    ]));
+    expect(err).toEqual([]);
+  });
+
+  test.each([
+    ['an empty list', { data: { projects: { nodes: [] } } }],
+    ['a list without nodes', { data: { projects: {} } }],
+  ])('says that the workspace has no projects when Linear returns %s', async (_what, body) => {
+    await listProjects({ ok: true, status: 200, body });
+    expect(out).toContain('Workspace \'acme\' has no projects yet.');
+    expect(err).toEqual([]);
+  });
+
+  // Linear answers a token it refuses with HTTP 200 and an `errors` array, with no data.
+  // Read as an empty project list, the operator was told to create a project in Linear.
+  test.each([
+    ['an `errors` answer', { ok: true, status: 200, body: { errors: [{ message: 'Authentication required' }] } }, 'Authentication required'],
+    ['an HTTP error', { ok: false, status: 401 }, '401'],
+  ])('reports %s as the workspace failing, not as a workspace without projects', async (_what, response, reason) => {
+    await listProjects(response);
+    expect(err).toHaveLength(1);
+    expect(err[0]).toContain('acme');
+    expect(err[0]).toContain(reason);
+    expect(out.join('\n')).not.toMatch(/has no projects yet/);
+  });
+});
