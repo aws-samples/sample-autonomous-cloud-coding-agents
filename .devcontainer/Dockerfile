@@ -8,5 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=mise /usr/local/bin/mise /usr/local/bin/mise
 
 USER vscode
-ENV PATH="/home/vscode/.local/share/mise/shims:${PATH}" \
+# Match the OAuth callback listener to Node clients on IPv4-only Docker networks.
+ENV NODE_OPTIONS=--dns-result-order=ipv4first \
+    PATH="/home/vscode/.local/share/mise/shims:${PATH}" \
     COREPACK_ENABLE_AUTO_PIN=0
