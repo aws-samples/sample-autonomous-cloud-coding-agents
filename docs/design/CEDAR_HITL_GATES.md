@@ -278,7 +278,7 @@ Narrative walk-through of the happy path. Sequence diagrams in the round-trip Me
 24. Agent's poll reads the `APPROVED` row on next tick (within 2-5s).
 25. Hook executes decision in this order:
     - a. **Atomic resume transition**: `TransactWriteItems` — TaskTable `status = :running, REMOVE awaiting_approval_request_id WHERE status = :awaiting AND awaiting_approval_request_id = :rid`. If this fails (likely because user cancelled during the poll gap), hook skips allowlist mutation and returns DENY with reason `"task no longer awaiting approval"`.
-    - b. **Allowlist mutation** (only if `scope != "this_call"`): `PolicyEngine._allowlist.add(scope)`. Synchronously logged.
+    - b. **Allowlist mutation** (only if `scope != "this_call"`): `PolicyEngine._allowlist.add(...)`. `tool_type_session` and `tool_group_session` name no tool, so the hook translates them first: `tool_type_session` adds `tool_type:<tool of the approved call>` (here `tool_type:Bash`), and `tool_group_session` adds `tool_group:<group>` for each group that tool is in (`file_write` for `Write` and `Edit`). For a tool that is in no group, `tool_group_session` adds nothing and the approval covers that call only. Every other scope (`all_session`, `bash_pattern:...`, `rule:...`) is added as it is. Synchronously logged.
     - c. **Milestone emission** (best-effort): `approval_granted` to both writers.
     - d. **Return to SDK**: `{"permissionDecision": "allow"}`.
 26. SDK runs the tool. Stream shows:
@@ -319,7 +319,7 @@ sequenceDiagram
     Hook->>Approvals: poll with ConsistentRead
     Approvals-->>Hook: status APPROVED
     Hook->>Approvals: TransactWriteItems, TaskTable to RUNNING
-    Hook->>Engine: allowlist.add(scope) if scope is not this_call
+    Hook->>Engine: allowlist.add for the scope (step 25b) if it is not this_call
     Hook-->>Agent: permissionDecision allow
     Note over Stop: (not used on approval path)
 ```
@@ -886,8 +886,11 @@ async def pre_tool_use_hook(hook_input, tool_use_id, ctx, *,
         return _deny("task no longer awaiting approval")
 
     if outcome.status == "APPROVED":
-        if outcome.scope and outcome.scope != "this_call":
-            engine._allowlist.add(outcome.scope)
+        # this_call adds nothing. tool_type_session and tool_group_session
+        # become tool_type:<tool_name> and tool_group:<group of tool_name>
+        # (§4 step 25b); every other scope is added as it is.
+        for grant in _allowlist_scopes(outcome.scope or "this_call", tool_name):
+            engine._allowlist.add(grant)
         _emit("approval_granted", {"request_id": request_id,
                                    "scope": outcome.scope or "this_call",
                                    "decided_at": outcome.decided_at})
@@ -1027,7 +1030,7 @@ Identical shape with `decision: "deny"` and optional `reason`:
 
 `DenyTaskFn`:
 1. Auth check (Cognito JWT); extract `sub` verbatim as `caller_user_id`
-2. Run `output_scanner.scan(reason)` — redacts AWS keys, GitHub PATs, API tokens, etc. from the reason text before persisting
+2. Run `output_scanner.scan` on the first 20,000 characters of the reason (ten times the stored length, so that the time of the scan does not grow with the size of the request) — redacts AWS keys, GitHub PATs, API tokens, etc. from the reason text before persisting
 3. Truncate sanitized reason to 2000 chars (matches Phase 2 nudge limit for consistency)
 4. Atomic cross-table `TransactWriteItems` (same shape as approve — ApprovalsTable flip + TaskTable state guard)
 5. Write audit event to TaskEventsTable
@@ -1155,9 +1158,9 @@ Returns all approvals with `status=PENDING` owned by the caller. Backing index: 
 }
 ```
 
-**Rate limit**: 10 requests per minute per user. Backed by the GSI so the query is a single `Query` (not `Scan`) on `user_id = :caller AND status = :pending`. See §10.1 and finding #8 scenario below.
+**Rate limit**: 60 requests per minute per user (one a second: the operator console polls this route every 10 s in each visible window). Backed by the GSI so the query is a single `Query` (not `Scan`) on `user_id = :caller AND status = :pending`. See §10.1 and finding #8 scenario below.
 
-**Scenario (finding #8):** A power user has `watch -n1 bgagent pending` running in a tmux pane so they see incoming approvals. They also have a second terminal open and a shell script that polls `bgagent pending --output json` every 2 seconds. Without a GSI, each `GET /v1/pending` call translates to a DDB `Scan` with `FilterExpression user_id = :caller AND status = :pending` — a full table scan that touches every approval row for every task in the account, not just the caller's. At 3 calls per 2 seconds across both terminals, plus the 1-per-second `watch`, the user generates 4-5 Scans per second. TaskApprovalsTable has a burst capacity of some hundreds of RCUs; sustained Scans can exhaust it, starving actual agent poll-loops of capacity. Now imagine 20 concurrent power users in a 50-user org — the table throttles, agent polls start timing out, unrelated tasks stall in AWAITING_APPROVAL waiting for reads that never come. With the GSI, each query targets the user's partition and scans at most the user's own pending rows (typically 0-3 items). The 10/min/user rate limit is an additional belt-and-suspenders but the GSI makes it mostly unnecessary. Cost: one additional GSI on the table — an acceptable DDB cost at these volumes.
+**Scenario (finding #8):** A power user has `watch -n1 bgagent pending` running in a tmux pane so they see incoming approvals. They also have a second terminal open and a shell script that polls `bgagent pending --output json` every 2 seconds. Without a GSI, each `GET /v1/pending` call translates to a DDB `Scan` with `FilterExpression user_id = :caller AND status = :pending` — a full table scan that touches every approval row for every task in the account, not just the caller's. At 3 calls per 2 seconds across both terminals, plus the 1-per-second `watch`, the user generates 4-5 Scans per second. TaskApprovalsTable has a burst capacity of some hundreds of RCUs; sustained Scans can exhaust it, starving actual agent poll-loops of capacity. Now imagine 20 concurrent power users in a 50-user org — the table throttles, agent polls start timing out, unrelated tasks stall in AWAITING_APPROVAL waiting for reads that never come. With the GSI, each query targets the user's partition and scans at most the user's own pending rows (typically 0-3 items). The 60/min/user rate limit is an additional belt-and-suspenders but the GSI makes it mostly unnecessary. Cost: one additional GSI on the table — an acceptable DDB cost at these volumes.
 
 ---
 
@@ -1251,7 +1254,7 @@ Pending approvals (3):
   ...
 ```
 
-Picking one (`bgagent approve` or `bgagent deny` with the listed IDs) is straightforward. At ≥20 pending approvals the output becomes noisy and pagination or filtering is warranted — this is deferred to future work (§17) given that the per-task `approvalGateCap` (decision #13, default 50) and per-user 10-RPM rate-limit on the endpoint both bound expected volumes well below 20 simultaneous approvals per user in practice. See finding #16.
+Picking one (`bgagent approve` or `bgagent deny` with the listed IDs) is straightforward. At ≥20 pending approvals the output becomes noisy and pagination or filtering is warranted — this is deferred to future work (§17) given that the per-task `approvalGateCap` (decision #13, default 50) and per-user 60-RPM rate-limit on the endpoint both bound expected volumes well below 20 simultaneous approvals per user in practice. See finding #16.
 
 Shell completion (tab-complete task_id + request_id from `bgagent pending` output) is also future work.
 
@@ -1570,7 +1573,7 @@ Extend `TaskDashboard` (`cdk/src/constructs/task-dashboard.ts`). These are read-
 **New tuning metrics (Fix 6 / IMPL-28).** These exist so operators can distinguish between the four failure modes that all surface as "timeout" on naive dashboards (users slow vs default too tight vs ceiling clipping vs notifications broken). All metrics live in namespace `ABCA/Cedar-HITL` and are published by `ApprovalMetricsPublisherFn` — a dedicated Lambda that consumes `TaskEventsTable` streams as consumer #2 alongside the existing `FanOutConsumer` and emits CloudWatch EMF. This keeps `TaskEventsTable` the single source of truth; the metric schema is owned by the publisher Lambda so future dashboard iterations don't require agent redeploys.
 
 - **`ApprovalTimeoutClipRate`** (percentage, MathExpression over two counters): rate of approvals whose effective timeout was clipped below the requested value, bucketed by `reason` dimension (`rule_annotation`, `maxLifetime_ceiling`, `runtime_jwt_ceiling`, plus an `unknown` surface-bucket for any future reason value the publisher hasn't been taught about). Computed as `IF(requested > 0, 100 * clipped / requested, 0)` so a period with zero approvals renders as 0 rather than NaN (silent gap). Backing EMF counters: `ClippedApprovalCount` (dim: `reason`) on `approval_timeout_capped`, `ApprovalRequestCount` on `approval_requested`. A sustained non-zero `rule_annotation` rate means blueprints are clipping user-supplied timeouts; a sustained `maxLifetime_ceiling` rate means tasks are hitting gates too late in their life.
-- **`ApprovalTimeoutBreakdown`** (histogram, p50 / p90 / p99 of the raw `TimedOutEffectiveTimeout` metric, unit Seconds, dimension `rule_id`). On timed-out approvals only, the `effective_timeout_s` that was actually configured. Separates "the timeout was 30s, obviously the user couldn't respond" from "the timeout was 600s and the user really was unavailable". The `rule_id` dimension is normalized against an allowlist of well-known rules (e.g. `force_push_any`, `write_credentials`); unknown rules collapse to `other`, empty rule sets to `none` — bounding custom-metric cardinality cost. Sourced from `approval_timed_out` events (`created_at` + `effective_timeout_s` + `matching_rule_ids` all propagated onto the event in Chunk 8a so the publisher is stateless).
+- **`ApprovalTimeoutBreakdown`** (histogram, p50 / p90 / p99 of the raw `TimedOutEffectiveTimeout` metric, unit Seconds, dimension `rule_id`). On timed-out approvals only, the `effective_timeout_s` that was actually configured. Separates "the timeout was 30s, obviously the user couldn't respond" from "the timeout was 600s and the user really was unavailable". The `rule_id` dimension is normalized against an allowlist of well-known rules (e.g. `force_push_any`, `write_credentials`); unknown rules collapse to `other`, empty rule sets to `none` — bounding custom-metric cardinality cost. The publisher writes each value twice: once with the `rule_id` dimension and once without dimensions. The widget's p50 / p90 / p99 read the one without dimensions, because CloudWatch does not aggregate a custom metric across dimensions. Sourced from `approval_timed_out` events (`created_at` + `effective_timeout_s` + `matching_rule_ids` all propagated onto the event in Chunk 8a so the publisher is stateless).
 - **`ApprovalDecisionLatency`** (p50 / p90 / p99 of `ApprovalDecisionLatencyMs`, unit Milliseconds, dimension `outcome ∈ {approved, denied, timed_out}`): `decided_at − created_at`. Split by outcome so operators can see "users ARE responding, just slowly" vs "users aren't responding at all". When `created_at` is absent on an outcome event (legacy shape or a container predating Chunk 8a), the publisher skips the emit + counts a `MetricEmitSkipped{reason: missing_created_at}` rather than emitting `latency=0` (which would poison the percentile widgets).
 
 **Observability-of-observability.** The publisher Lambda emits two meta-metrics so a silent failure in the publisher path is itself observable:
@@ -1731,7 +1734,7 @@ See finding #3 scenario in §6.2 for the concrete failure pattern. If operator t
   - Cache memory bound = engine resource limit (how much memory can the cache consume). These were conflated in earlier revisions (cache was "bounded by the 50-gate cap"); the coupling was coincidental and fragile. Decoupling them means raising one knob does not silently scale the other.
 - Per-minute rate limit: 20 approval-row writes, **per-container best-effort** (counter resets on restart; see §13.6). Exceeded → fail-closed deny on the gate that tripped it.
 - Fan-out notification cap: 10 approval-related messages per user per minute. Exceeded → messages dropped (logged).
-- `GET /v1/pending`: 10 requests/min/user (§7.7, finding #8).
+- `GET /v1/pending`: 60 requests/min/user (§7.7, finding #8).
 
 These caps bound the worst-case behavior of a compromised account or prompt-injected agent. See finding #10 scenario (§13.6) for the per-minute rate limit's behavior under container restart.
 
@@ -2052,7 +2055,8 @@ t=300.5s   outcome rebuilt: Decided(status=APPROVED, scope=..., decided_at=...)
 t=300.5s   agent_milestone: approval_late_win {outcome: APPROVED,
                                reason: "user decision landed during TIMED_OUT write"}
 t=300.6s   _transact_resume: TaskTable AWAITING_APPROVAL → RUNNING (atomic)
-t=300.7s   allowlist.add("tool_type_session"); milestone approval_granted
+t=300.7s   allowlist.add("tool_type:Bash"), which is what tool_type_session
+           stands for after a Bash call; milestone approval_granted
 t=300.8s   return {"permissionDecision": "allow"} to SDK
 t=300.9s   SDK runs Bash: git push --force origin feature-x
 t=302.5s   ◀ Bash: remote: Force pushed. New SHA abc123.
@@ -2139,7 +2143,7 @@ See §17.18 for the off-hours escalation future-work primitive, and §13.14 for 
 | 12 | cdk | `src/handlers/approve-task.ts` (new) | POST /approve with cross-table `TransactWriteItems` (ownership + task-state) + audit event (finding #7). |
 | 13 | cdk | `src/handlers/deny-task.ts` (new) | POST /deny with output_scanner sanitization + cross-table `TransactWriteItems` + audit event. |
 | 14 | cdk | `src/handlers/get-policies.ts` (new) | GET /v1/repos/{repo}/policies. |
-| 15 | cdk | `src/handlers/get-pending.ts` (new) | GET /v1/pending with GSI-backed Query + 10 RPM rate limit. |
+| 15 | cdk | `src/handlers/get-pending.ts` (new) | GET /v1/pending with GSI-backed Query + 60 RPM rate limit. |
 | 16 | cdk | `src/handlers/shared/types.ts` | ApprovalRequest/Response/DenyRequest + Scope union + extended CreateTaskRequest. |
 | 17 | cdk | `src/handlers/shared/response.ts` | New error codes (REQUEST_NOT_FOUND, REQUEST_ALREADY_DECIDED, TASK_NOT_AWAITING_APPROVAL). |
 | 18 | cdk | `src/constructs/task-api.ts` | Wire /approve, /deny, /repos/{}/policies, /pending routes. Grants. |
@@ -2439,7 +2443,7 @@ Items from the design reviews not captured above as design changes — to be add
 
 **IMPL-20** (review 2026-05-06 finding #13): Milestone naming — avoid `approval_decided` as an umbrella event. Use the specific outcome names (`approval_granted` / `approval_denied` / `approval_timed_out` / `approval_stranded`). The authoritative audit event from Lambda is `approval_decision_recorded` (not "decided") and remains unique. `approval_decision_recorded` ≠ `approval_decided`; they are distinct events serving different purposes (Lambda audit vs agent milestone). Implementation should grep to confirm no stale `approval_decided` references exist in code or docs.
 
-**IMPL-21** (review 2026-05-06 finding #16): `bgagent pending` UX at ≥20 pending approvals (pagination, filtering, interactive selector) is future work. Current tree output with 10 RPM endpoint rate limit + `approvalGateCap` (decision #13, default 50) bounds expected pending count well below 20 per user in practice. Track in §17.
+**IMPL-21** (review 2026-05-06 finding #16): `bgagent pending` UX at ≥20 pending approvals (pagination, filtering, interactive selector) is future work. Current tree output with 60 RPM endpoint rate limit + `approvalGateCap` (decision #13, default 50) bounds expected pending count well below 20 per user in practice. Track in §17.
 
 **IMPL-22** (review 2026-05-07 gate-cap tightening): Emit telemetry to enable re-evaluation of the `approvalGateCap` default. Required signals:
 - CloudWatch metric: `ApprovalGateCount` (per-task histogram, dimension: blueprint_id).
@@ -2458,7 +2462,7 @@ The intent here is to make 50 a **measurable** default, not a frozen one.
 
 **IMPL-27** (review 2026-05-06 timeout adversarial review, Fix 5): The container's AWS API calls authenticate via IAM role (auto-refreshed by the SDK), not a separate user-presented JWT. No Runtime JWT expiry term is required in the ceiling computation for v1 (verified by `grep -rn -iE 'runtime.jwt|jwt.refresh|token_expiry' agent/src/` returning no results; AgentCore Runtime invocation uses sigv4 via `InvokeAgentRuntimeCommand`, also auto-refreshed). If the auth model changes (e.g. a future design introduces a container-held user JWT for end-to-end caller attribution), the ceiling MUST be extended to `min(1h, maxLifetime_remaining - 120s, runtime_jwt_expiry - 120s)`. Review this IMPL whenever the container's auth shape changes. See §13.13.
 
-**IMPL-28** (review 2026-05-06 timeout adversarial review, Fix 6; updated 2026-05-08 with Chunk 8 Option E architecture): Add three new CloudWatch metrics to `TaskDashboard` in namespace `ABCA/Cedar-HITL` to distinguish between the four failure modes that all surface as "timeout": `ApprovalTimeoutClipRate` (percentage, dimension: `reason`), `ApprovalTimeoutBreakdown` (histogram of `effective_timeout_s` on timed-out approvals, dimension: `rule_id`), and `ApprovalDecisionLatency` (p50/p90/p99, dimension: `outcome ∈ {approved, denied, timed_out}`). Metrics are published by `ApprovalMetricsPublisherFn` — a dedicated Lambda consumer of `TaskEventsTable` streams that emits CloudWatch EMF on every approval milestone. `TaskEventsTable` remains the single source of truth; the publisher owns the metric schema so future dashboard iterations do not require agent redeploys. Dashboard widget layout: ClipRate + Breakdown side-by-side above DecisionLatency (full row), so operators can tell at a glance whether "timeout" is a policy problem, a sizing problem, a UX problem, or a notification problem. See §11.3.
+**IMPL-28** (review 2026-05-06 timeout adversarial review, Fix 6; updated 2026-05-08 with Chunk 8 Option E architecture): Add three new CloudWatch metrics to `TaskDashboard` in namespace `ABCA/Cedar-HITL` to distinguish between the four failure modes that all surface as "timeout": `ApprovalTimeoutClipRate` (percentage, dimension: `reason`), `ApprovalTimeoutBreakdown` (histogram of `effective_timeout_s` on timed-out approvals, dimension: `rule_id`, and once more without dimensions for the widget), and `ApprovalDecisionLatency` (p50/p90/p99, dimension: `outcome ∈ {approved, denied, timed_out}`). Metrics are published by `ApprovalMetricsPublisherFn` — a dedicated Lambda consumer of `TaskEventsTable` streams that emits CloudWatch EMF on every approval milestone. `TaskEventsTable` remains the single source of truth; the publisher owns the metric schema so future dashboard iterations do not require agent redeploys. Dashboard widget layout: ClipRate + Breakdown side-by-side above DecisionLatency (full row), so operators can tell at a glance whether "timeout" is a policy problem, a sizing problem, a UX problem, or a notification problem. See §11.3.
 
 **IMPL-29** (Chunk 1 spike finding, 2026-05-07): The two Cedar engines expose matching policy IDs under asymmetrically-named fields: `cedarpy` uses `result.diagnostics.reasons` (plural list) while `cedar-wasm` uses `result.response.diagnostics.reason` (singular-named list). Both return the same data (a list of positional policy IDs). The shared policy-parsing library (Chunk 5, `cdk/src/handlers/shared/cedar-policy.ts`) and the agent engine (Chunk 2, `agent/src/policy.py`) must each normalize against their own engine's spelling; the parity fixtures under `contracts/cedar-parity/` are the authoritative test for whether the normalization stays correct across engine upgrades. Do not "fix" this asymmetry inside the engines — both names are stable upstream APIs and the normalization is cheap.
 
@@ -2590,7 +2594,7 @@ See §15.2. Net new files: ~15. Net modified files: ~15. Total LOC estimate: ~40
 - [ ] ANSI/control-char stripping in `tool_input_preview` (both layers)
 - [ ] `output_scanner.scan` runs in DenyTaskFn before persisting `reason`; truncated sanitized copy propagated as `permissionDecisionReason` (finding #2 guaranteed surface)
 - [ ] Recent-decision cache blocks 60s retries; session-scoped with documented restart caveat (finding #3)
-- [ ] Per-task `approvalGateCap` (default 50, blueprint-configurable, validated 1 ≤ N ≤ 500, persisted on TaskTable) + per-minute rate limit (20, per-container best-effort) + per-user notification cap (10/min) + `/v1/pending` rate limit (10 RPM/user) + recent-decision cache 50-entry LRU (decoupled from `approvalGateCap`)
+- [ ] Per-task `approvalGateCap` (default 50, blueprint-configurable, validated 1 ≤ N ≤ 500, persisted on TaskTable) + per-minute rate limit (20, per-container best-effort) + per-user notification cap (10/min) + `/v1/pending` rate limit (60 RPM/user) + recent-decision cache 50-entry LRU (decoupled from `approvalGateCap`)
 - [ ] `user_id-status-index` GSI on TaskApprovalsTable ships in v1 backing `GET /v1/pending` (finding #8)
 - [ ] Denial injection via Stop hook `between_turns_hooks` registered AFTER `_nudge_between_turns_hook` AFTER `_cancel_between_turns_hook` — preserves cancel-wins; denial injection is best-effort on cancelled tasks (finding #2); `permissionDecisionReason` carries guaranteed surface
 - [ ] Stranded-task reconciler transitions AWAITING_APPROVAL > 2×timeout_s to FAILED
@@ -2611,7 +2615,7 @@ See §15.2. Net new files: ~15. Net modified files: ~15. Total LOC estimate: ~40
 - [ ] **Sub-120s `@approval_timeout_s` emits WARN (IMPL-25)** at blueprint load; sub-30s still rejected. `bgagent lint-policies` (§17.14) surfaces the same WARN pre-submit.
 - [ ] **User-visible timeout milestones (IMPL-26)**: `approval_timeout_capped` (per-gate, on SSE stream), `approval_timeout_capped_at_submit` (on `POST /v1/tasks` response), `approval_ceiling_shrinking` (once per task at lifetime threshold). All carry `{requested_timeout_s, effective_timeout_s, reason}`.
 - [ ] **Runtime JWT ceiling (IMPL-27)**: no separate JWT expiry term required in v1 — container uses auto-refreshed IAM credentials (verified by grep of `agent/src/`). Ceiling stays `min(1h, maxLifetime_remaining - cleanup_margin)`. Review if container auth shape changes (see §13.13).
-- [ ] **Timeout-tuning metrics (IMPL-28)**: `ApprovalTimeoutClipRate` (dim: reason, with `unknown` surface-bucket), `ApprovalTimeoutBreakdown` (p50/p90/p99 on `TimedOutEffectiveTimeout`, dim: `rule_id` with allowlist + `other`/`none` collapse), `ApprovalDecisionLatency` (p50/p90/p99 on `ApprovalDecisionLatencyMs`, dim: outcome) wired into `TaskDashboard`. Native CloudWatch metrics in namespace `ABCA/Cedar-HITL`, published by `ApprovalMetricsPublisherFn` (consumer #2 of `TaskEventsTable` streams). Heartbeat + skip meta-metrics for observability-of-observability. See §11.3.
+- [ ] **Timeout-tuning metrics (IMPL-28)**: `ApprovalTimeoutClipRate` (dim: reason, with `unknown` surface-bucket), `ApprovalTimeoutBreakdown` (p50/p90/p99 on `TimedOutEffectiveTimeout`, dim: `rule_id` with allowlist + `other`/`none` collapse; also published without dimensions, which is what the widget reads), `ApprovalDecisionLatency` (p50/p90/p99 on `ApprovalDecisionLatencyMs`, dim: outcome) wired into `TaskDashboard`. Native CloudWatch metrics in namespace `ABCA/Cedar-HITL`, published by `ApprovalMetricsPublisherFn` (consumer #2 of `TaskEventsTable` streams). Heartbeat + skip meta-metrics for observability-of-observability. See §11.3.
 - [ ] **Off-hours trade-off documented (§14.8)**: overnight / unattended task failure modes called out explicitly; notification plane responsibility boundary stated; `--pre-approve all_session --yes` and tenant-side escalation hooks noted as the only workarounds.
 - [ ] **Notification delivery failure does NOT pause timer (§13.14)**: bypass-prevention rationale documented; `bgagent pending` GSI-backed path confirmed independent of notification plane.
 - [ ] Off-hours escalation noted in §17.18 as future-work primitive (not v1); `bgagent pending --output json` stability guarantee noted in §17.19.

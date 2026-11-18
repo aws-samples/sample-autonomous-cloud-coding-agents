@@ -332,7 +332,7 @@ export AWS_REGION="us-east-1"     # Region where Bedrock models are enabled
 The script resolves AWS credentials in priority order:
 
 1. **Environment variables** - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN` for temporary credentials.
-2. **AWS CLI** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile.
+2. **AWS CLI v2** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile. AWS CLI v1 has no such command, so with v1 the script goes on to the mount.
 3. **`~/.aws` mount** - Bind-mounts the directory read-only. Works for static credentials but not SSO tokens.
 
 If none succeeds, the container starts without AWS credentials and any AWS API call will fail at runtime.
@@ -349,7 +349,7 @@ If none succeeds, the container starts without AWS credentials and any AWS API c
 # Issue + additional instructions
 ./agent/run.sh "owner/repo" 42 "Focus on the backend validation only"
 
-# Dry run - validate config, fetch issue, print prompt, then exit
+# Dry run - validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 ```
 
@@ -409,7 +409,7 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 | `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
-| `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
+| `DRY_RUN` | | Set to `1` to validate and print the length and hash of the prompts without running the agent |
 
 For the full list, see `agent/README.md`. For how the model default is layered, overridden, and priced, see [Model configuration](./DEVELOPER_GUIDE.md#model-configuration).
 
