@@ -31,6 +31,8 @@ import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
+// On Delete a handler deletes registry records for up to 30 of these seconds
+// (RECORD_DELETION_BUDGET_MS in handlers/registry-provisioning/index.ts).
 const PROVISION_TIMEOUT_SECONDS = 60;
 const PROVISION_MEMORY_MB = 256;
 // Registry create observed at ~70s; poll generously and cap the total wait.
@@ -91,11 +93,16 @@ export class AgentRegistry extends Construct {
       actions: ['agent-registry:CreateRegistry'],
       resources: ['*'],
     });
+    // DeleteRegistry is refused while the registry holds a record, so Delete lists the
+    // records and deletes them first. `registry/*` also matches the ARN of a record,
+    // `registry/<registry id>/record/<record id>`: `*` matches `/` as well.
     const registryPolicy = new iam.PolicyStatement({
       actions: [
         'agent-registry:GetRegistry',
         'agent-registry:UpdateRegistry',
         'agent-registry:DeleteRegistry',
+        'agent-registry:ListRegistryRecords',
+        'agent-registry:DeleteRegistryRecord',
       ],
       resources: [
         Stack.of(this).formatArn({
@@ -211,8 +218,8 @@ export class AgentRegistry extends Construct {
             + '(no registry exists yet at create time). CreateServiceLinkedRole is '
             + 'restricted to agent-registry.amazonaws.com by iam:AWSServiceName. '
             + 'Workload identity lifecycle actions use workload-identity-directory/*, and '
-            + 'Get/Update/DeleteRegistry use '
-            + 'registry/* because the registry id is server-assigned and unknown at synth.',
+            + 'Get/Update/DeleteRegistry, ListRegistryRecords and DeleteRegistryRecord use '
+            + 'registry/* because the registry and record ids are server-assigned and unknown at synth.',
         },
       ],
       true,

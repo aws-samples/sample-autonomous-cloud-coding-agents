@@ -46,8 +46,9 @@ A green run says how the code behaves against the emulator, not against AWS. Not
 | S3 objects: put, get, head, delete, versions, presigned GET | Presigned POST policy enforcement (see the differences below) |
 | Secrets Manager: version stages, delete then restore, the error names and the one message text ABCA matches | Deployment correctness of the platform stack |
 | Cognito: admin user operations, password login, first-login password rotation, refresh, change password, token claims other than `iss` | The hosted UI, MFA |
-| STS: `AssumeRole` with session tags returning usable credentials | The AgentCore runtime, identity vault and registry; ECS and MicroVM task lifecycles |
+| STS: `AssumeRole` with session tags returning usable credentials | The AgentCore runtime and identity vault; ECS and MicroVM task lifecycles |
 | CloudWatch Logs: stream creation and writes | Anything that depends on eventual consistency, `TransactionConflict` or TTL timing |
+| Agent Registry: the custom resource creating a registry, and deleting it with the records it holds | Publishing more than one version of a registry asset (see the differences below) |
 
 The two columns are separate lists; rows do not pair.
 
@@ -56,7 +57,6 @@ The agent suite contains tests that expect a denial: cross-tenant calls refused 
 Some operations ABCA calls do not work on the emulator and stay on mocks:
 
 - Answered with 501 `NotImplemented`: `InvokeAgentRuntime`, `StopRuntimeSession`, `RetrieveMemoryRecords`, `GetResourceOauth2Token`, `CompleteResourceTokenAuth` and `UpdateRegistry`. ABCA catches the error from `StopRuntimeSession`, `RetrieveMemoryRecords` and `GetResourceOauth2Token` and continues, so a test of those paths is green while exercising only the fallback (rule 6).
-- In the agent registry two answers stop ABCA's code, and neither has been compared with AWS. A second record under a name the registry already holds is answered with `ConflictException`, whatever its `recordVersion` (the AWS SDK documents record names as unique within a registry); ABCA publishes each version of an asset under the same name, so only the first can be published. `DeleteRegistry` is answered with `ConflictException` while the registry holds a record (the AWS SDK documents that the records are removed with the registry); the registry custom resource retries it and deletes no record, so its Delete does not complete while a record exists.
 - `ApplyGuardrail` needs a test-side HTTP/1.1 request handler: the bedrock-runtime client negotiates HTTP/2 and the emulator offers only HTTP/1.1.
 
 ## Known differences from AWS
@@ -75,6 +75,7 @@ Recorded on emulator 1.0.481. Keep this table and the lists above current when t
 | A force-deleted secret keeps its name blocked for about 0.5 seconds | Remove-then-recreate in one test needs a retry |
 | `ListSecrets` returns more than 100 results in one page; ECS `RunTask` accepts overrides over 8,192 characters | Two historical ABCA defects would have passed |
 | The `iss` claim of a Cognito token names the emulator, `https://127.0.0.1:<port>/<pool id>` in the tier; AWS issues `https://cognito-idp.<region>.amazonaws.com/<pool id>` | A verifier that derives the issuer from the pool id, as the one in the API's authorizer does, refuses every token the emulator issues |
+| A second Agent Registry record under a name the registry already holds is refused with `ConflictException`, whatever its `recordVersion`; the AWS [user guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/registry-concepts.html#registry-concept-record) says the combination of name and `recordVersion` must be unique, so that a name can be reused across versions | ABCA publishes every version of an asset under the same record name, so a second version of an asset cannot be published here. That, and resolving across versions, stay on mocks |
 
 ## Keeping the tier away from real AWS
 

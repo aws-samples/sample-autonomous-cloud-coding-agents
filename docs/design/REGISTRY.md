@@ -64,7 +64,7 @@ Agent Registry has no namespace concept, so ABCA folds `kind/namespace/name` int
 
 ## 5. Provisioning
 
-The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. Standalone deletion removes the registry and its records, so the custom resource no longer drains records first. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
+The registry itself is provisioned by a CDK **Provider-framework custom resource** (`cdk/src/constructs/registry.ts`), because standalone `CreateRegistry` and `DeleteRegistry` are asynchronous and there is no CDK L1/L2 construct yet. `onEvent` starts the operation; `isComplete` polls `GetRegistry` until `READY` or until deletion returns not found. AWS refuses `DeleteRegistry` while the registry holds a record, so on deletion both handlers first delete the records, for a bounded time per invocation, and then the registry. The stack exposes `AgentRegistryId` / `AgentRegistryArn` outputs.
 
 The namespace migration is a **fresh-registry cutover** for ABCA. The custom-resource type changes from `Custom::AgentCoreRegistry` to `Custom::AgentRegistry`, forcing CloudFormation replacement because a registry id from the former namespace cannot be updated through the standalone API. Existing assets are not copied by this deployment: re-publish them into the new registry, or use AWS's migration tooling outside ABCA before switching workloads.
 
