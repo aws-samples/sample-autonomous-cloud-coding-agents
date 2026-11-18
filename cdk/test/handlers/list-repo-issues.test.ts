@@ -213,6 +213,19 @@ describe('list-repo-issues', () => {
     expect(body(res).error.message).toMatch(/GitHub did not answer/);
   });
 
+  test('explains it the same way when the time limit ends while a page is being read', async () => {
+    // fetch resolves when the headers are in. The time limit of all pages can end while
+    // the body is still arriving, and reading it then rejects with the signal's error.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); },
+    });
+    const res = await handler(makeEvent());
+    expect(res.statusCode).toBe(503);
+    expect(body(res).error.message).toMatch(/GitHub did not answer/);
+  });
+
   test('reports an unexpected failure without details', async () => {
     mockResolveGitHubToken.mockRejectedValue(new Error('AccessDenied for arn:...'));
     const res = await handler(makeEvent());

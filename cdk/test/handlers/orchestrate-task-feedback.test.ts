@@ -19,8 +19,8 @@
 
 // Mock the durable execution SDK before importing orchestrate-task — its
 // `withDurableExecution` wraps the handler at module import time. We only
-// care about `notifyLinearOnConcurrencyCap` here, which is a plain async
-// function exported alongside the durable handler.
+// care about `notifyLinearOnConcurrencyCap` and `notifyJiraOnConcurrencyCap`
+// here, which are plain async functions exported alongside the durable handler.
 jest.mock('@aws/durable-execution-sdk-js', () => ({
   withDurableExecution: (fn: unknown) => fn,
 }));
@@ -231,7 +231,7 @@ describe('notifyJiraOnConcurrencyCap', () => {
     }
   });
 
-  test('reportIssueFailure rejection is swallowed (never blocks the rejection path)', async () => {
+  test('reportIssueFailure rejection is swallowed (never blocks the admission step)', async () => {
     reportJiraIssueFailureMock.mockRejectedValue(new Error('boom'));
     await expect(
       notifyJiraOnConcurrencyCap(task({

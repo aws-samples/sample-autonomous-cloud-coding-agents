@@ -625,7 +625,7 @@ describe('classifyError', () => {
       expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);
-      // No build ran, so nothing may send the reader to a slow build.
+      // The command that timed out is not a build, so nothing may send the reader to a slow build.
       expect(`${result!.title} ${result!.description} ${result!.remedy}`).not.toMatch(/build|tests/i);
     });
   });

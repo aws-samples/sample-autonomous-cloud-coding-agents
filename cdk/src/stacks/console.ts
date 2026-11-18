@@ -94,7 +94,7 @@ export interface ConsoleLinearProps {
 }
 
 const HANDLERS_DIR = path.join(__dirname, '..', 'handlers');
-/** Covers one GitHub call (8 s client timeout) plus a cold start. */
+/** Covers the GitHub calls (8 s for all pages together) plus a cold start. */
 const ISSUES_HANDLER_TIMEOUT_SECONDS = 15;
 const LINEAR_HANDLER_TIMEOUT_SECONDS = 20;
 const LINEAR_HANDLER_MEMORY_MB = 512;
@@ -389,7 +389,6 @@ export class OperatorConsoleStack extends Stack {
       },
       { id: 'AwsSolutions-CFR3', reason: 'Distribution access logs are not enabled: static public bundle only; data access is logged by the API.' },
       { id: 'AwsSolutions-CFR4', reason: 'Uses the default *.cloudfront.net certificate; no custom domain, so no minimum-TLS-version override applies.' },
-      { id: 'AwsSolutions-CFR7', reason: 'OAC is in use (`S3BucketOrigin.withOriginAccessControl`); cdk-nag misclassifies the L2 helper as an OAI deployment.' },
     ], true);
 
     // Same CDK-managed singletons as LinearVaultConsentPage: found by id prefix so a

@@ -119,11 +119,15 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     for (let page = 1; page <= GITHUB_MAX_PAGES && issues.size < PAGE_SIZE; page++) {
       const url = `https://api.github.com/repos/${repo}/issues?state=open&sort=updated&direction=desc&per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
       let res: Response;
+      let items: GitHubIssue[] = [];
       try {
         res = await fetch(url, {
           headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
           signal,
         });
+        // The time limit can end while the body is still arriving: reading it then
+        // rejects like a call that got no answer.
+        if (res.ok) items = (await res.json()) as GitHubIssue[];
       } catch (err) {
         logger.warn('GitHub issue list did not answer', { repo, request_id: requestId, error: String(err) });
         return errorResponse(503, ErrorCode.SERVICE_UNAVAILABLE, 'GitHub did not answer. Try again in a moment.', requestId);
@@ -135,7 +139,6 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           : `GitHub returned HTTP ${res.status}. Try again in a moment.`;
         return errorResponse(503, ErrorCode.SERVICE_UNAVAILABLE, hint, requestId);
       }
-      const items = (await res.json()) as GitHubIssue[];
       for (const item of items) {
         if (item.pull_request === undefined) issues.set(item.number, item);
       }
