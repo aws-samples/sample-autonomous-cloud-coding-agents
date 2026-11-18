@@ -103,6 +103,33 @@ describe('Bootstrap policy synth coverage', () => {
     expect(missingByType).toEqual({});
   });
 
+  it.each([false, true])('covers managed MicroVM and nested resources (microvm_nested_stack=%s)', microvmNested => {
+    const app = new App({
+      context: {
+        compute_type: 'lambda-microvm',
+        microvm_nested_stack: microvmNested,
+        microvm_base_image_arn: 'arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1',
+        microvm_base_image_version: '1',
+        microvm_artifact_sha256: 'a'.repeat(64),
+      },
+    });
+    const stack = new AgentStack(app, 'backgroundagent-microvm-coverage', {
+      env: { account: '123456789012', region: 'us-east-1' },
+    });
+    const root = Template.fromStack(stack);
+    const children = stack.node.findAll().filter((node): node is NestedStack => node instanceof NestedStack);
+    expect(children.length).toBeGreaterThan(0);
+    const types = new Set([root, ...children.map(child => Template.fromStack(child))].flatMap(child =>
+      Object.values(child.toJSON().Resources as Record<string, { Type: string }>).map(resource => resource.Type)));
+    expect(types).toContain('AWS::SSM::Parameter');
+    expect(types).toContain('AWS::Lambda::MicrovmImage');
+    for (const type of types) {
+      if (CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(type)) continue;
+      expect({ type, mapped: type in RESOURCE_ACTION_MAP }).toEqual({ type, mapped: true });
+      expect({ type, missing: findMissingBootstrapActions(type, allowedActions) }).toEqual({ type, missing: [] });
+    }
+  });
+
   it('maps the context-gated tool-gateway CFN types (ADR-019, not in default synth)', () => {
     // The default synth above never instantiates the ToolGateway construct, so
     // its two CFN types would slip past the coverage loop. Synthesize the gated

@@ -549,6 +549,37 @@ describe('hydrateAndTransition — Cedar HITL payload threading', () => {
 });
 
 describe('pollTaskStatus', () => {
+  test.each(['agentcore', 'lambda-microvm'] as const)(
+    '%s stays healthy immediately after a long approval wait resumes',
+    async (computeType) => {
+      const beforeApproval = new Date(Date.now() - 600_000).toISOString();
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'AWAITING_APPROVAL',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: beforeApproval,
+        },
+      });
+      const waiting = await pollTaskStatus('TASK001', { attempts: 5 }, computeType);
+      expect(waiting.sessionUnhealthy).toBe(false);
+
+      // The agent's conditional resume transaction refreshes this timestamp with
+      // status RUNNING. Poll before the independent 45-second worker ticks.
+      mockDdbSend.mockResolvedValueOnce({
+        Item: {
+          status: 'RUNNING',
+          session_id: 'sess-1',
+          started_at: beforeApproval,
+          agent_heartbeat_at: new Date().toISOString(),
+        },
+      });
+      const resumed = await pollTaskStatus('TASK001', waiting, computeType);
+      expect(resumed.lastStatus).toBe('RUNNING');
+      expect(resumed.sessionUnhealthy).toBe(false);
+    },
+  );
+
   test('increments attempt count and reads status', async () => {
     mockDdbSend.mockResolvedValueOnce({ Item: { status: 'RUNNING' } });
     const result = await pollTaskStatus('TASK001', { attempts: 5 }, 'agentcore');
@@ -1193,6 +1224,113 @@ describe('hydrateAndTransition — registry asset resolution (#246)', () => {
 });
 
 describe('finalizeTask', () => {
+  const supervisor = {
+    version: 1 as const,
+    microvmId: 'vm',
+    firstObservedAtMs: 1,
+    sessionDeadlineMs: 28_800_001,
+    lifetimeVerified: true,
+    consecutivePollFailures: 3,
+    consecutiveResumeFailures: 0,
+    anomalyReported: false,
+    nextPollInMs: 5_000,
+  };
+  const vmTask = () => ({
+    ...baseTask,
+    status: 'AWAITING_APPROVAL',
+    compute_type: 'lambda-microvm',
+    session_id: 'vm',
+    compute_metadata: { microvmId: 'vm', endpoint: 'https://vm.example' },
+  });
+
+  const concurrencyDecrements = () => mockDdbSend.mock.calls.filter(([command]) =>
+    String(command.input?.UpdateExpression ?? '').includes('active_count = active_count - :one'));
+
+  test.each(['AWAITING_APPROVAL', 'RUNNING', 'HYDRATING'])('supervisor failure strongly reads %s and conditionally fails only its worker', async status => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123');
+    const read = mockDdbSend.mock.calls[0][0];
+    expect(read.input.ConsistentRead).toBe(true);
+    const write = mockDdbSend.mock.calls[1][0];
+    expect(write.input.ConditionExpression).toContain('compute_metadata.microvmId = :microvmId');
+    expect(write.input.ExpressionAttributeValues).toMatchObject({
+      ':fromStatus': status,
+      ':toStatus': 'FAILED',
+      ':microvmId': 'vm',
+      ':attr_error_message': 'MicroVM supervisor: substrate-read-failed',
+    });
+    expect(concurrencyDecrements()).toHaveLength(1);
+  });
+
+  test('supervisor finalization preserves a committed cancellation', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status: 'CANCELLED', memory_written: true } })
+      .mockResolvedValue({});
+    await finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'resume-request-failed-repeatedly',
+    }, 'user-123');
+    expect(mockDdbSend.mock.calls.some(([command]) => command.input.ExpressionAttributeValues?.[':toStatus'])).toBe(false);
+    expect(mockDdbSend.mock.calls.find(([command]) => command._type === 'Put')?.[0].input.Item.event_type).toBe('task_cancelled');
+  });
+
+  test('changed worker ownership skips both task mutation and reservation release', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), session_id: 'replacement' } });
+    await expect(finalizeTask('TASK001', {
+      attempts: 3, microvmSupervisor: supervisor, microvmFailureReason: 'substrate-read-failed',
+    }, 'user-123')).resolves.toBe(false);
+    expect(mockDdbSend).toHaveBeenCalledTimes(1);
+    expect(concurrencyDecrements()).toHaveLength(0);
+  });
+
+  test.each([['RUNNING', 'TIMED_OUT'], ['AWAITING_APPROVAL', 'FAILED'], ['HYDRATING', 'FAILED']])(
+    'absolute session expiry in %s uses the allowed %s task outcome', async (status, expected) => {
+      mockDdbSend.mockResolvedValueOnce({ Item: { ...vmTask(), status } }).mockResolvedValue({});
+      await finalizeTask('TASK001', {
+        attempts: 2000, microvmSupervisor: supervisor, microvmFailureReason: 'session-deadline',
+      }, 'user-123');
+      expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe(expected);
+    },
+  );
+
+  test('the legacy approval poll timeout also uses FAILED without changing the approval decision', async () => {
+    mockDdbSend.mockResolvedValueOnce({ Item: vmTask() }).mockResolvedValue({});
+    await finalizeTask('TASK001', { attempts: 1020 }, 'user-123');
+    expect(mockDdbSend.mock.calls[1][0].input.ExpressionAttributeValues[':toStatus']).toBe('FAILED');
+    expect(mockDdbSend.mock.calls[2][0].input.Item.event_type).toBe('task_failed');
+  });
+
+  test.each([
+    ['FAILED', 'HYDRATING'],
+    ['CANCELLED', 'RUNNING'],
+  ])('honors committed %s instead of stale %s during immediate finalization', async (committed, stale) => {
+    mockDdbSend.mockImplementation(async (command) => {
+      if (command._type === 'Get') {
+        return {
+          Item: {
+            ...baseTask,
+            status: command.input.ConsistentRead ? committed : stale,
+            memory_written: true,
+          },
+        };
+      }
+      // A stale transition loses to the terminal status already in DynamoDB.
+      if (command.input.ExpressionAttributeValues?.[':fromStatus']) {
+        throw Object.assign(new Error('terminal state already committed'), { name: 'ConditionalCheckFailedException' });
+      }
+      return {};
+    });
+    await finalizeTask('TASK001', { attempts: 0 }, 'user-123');
+    const events = mockDdbSend.mock.calls
+      .filter(([command]) => command._type === 'Put')
+      .map(([command]) => command.input.Item);
+    expect(events).toEqual([expect.objectContaining({
+      event_type: `task_${committed.toLowerCase()}`,
+      metadata: expect.objectContaining({ final_status: committed }),
+    })]);
+    expect(mockDdbSend.mock.calls.some(([command]) =>
+      command.input.ExpressionAttributeValues?.[':fromStatus'])).toBe(false);
+  });
   test('handles already-terminal task', async () => {
     mockDdbSend
       .mockResolvedValueOnce({ Item: { ...baseTask, status: 'COMPLETED' } }) // loadTask
@@ -1335,7 +1473,7 @@ describe('finalizeTask', () => {
       .mockResolvedValueOnce({}) // TTL stamp
       .mockResolvedValueOnce({}) // emitTaskEvent
       .mockRejectedValueOnce(condErr); // decrementConcurrency CCF
-    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBeUndefined();
+    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBe(true);
   });
 
   test('resolves without throwing when decrementConcurrency hits a non-CCF error', async () => {
@@ -1344,7 +1482,7 @@ describe('finalizeTask', () => {
       .mockResolvedValueOnce({}) // TTL stamp
       .mockResolvedValueOnce({}) // emitTaskEvent
       .mockRejectedValueOnce(new Error('DDB timeout')); // decrementConcurrency non-CCF
-    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBeUndefined();
+    await expect(finalizeTask('TASK001', { attempts: 10, lastStatus: 'COMPLETED' }, 'user-123')).resolves.toBe(true);
   });
 });
 

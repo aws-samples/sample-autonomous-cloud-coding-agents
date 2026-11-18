@@ -58,7 +58,9 @@ const CONSTANTS_JSON = path.join(REPO_ROOT, 'contracts/constants.json');
 const AGENT_SRC = path.join(REPO_ROOT, 'agent/src');
 const PARITY_TEST = 'agent/tests/test_constants_parity.py';
 const MICROVM_COMPUTE_TS = path.join(REPO_ROOT, 'cdk/src/constructs/lambda-microvm-compute.ts');
-const TS_CONSUMERS = [MICROVM_COMPUTE_TS];
+const MICROVM_IMAGE_CAPABILITY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/microvm/image-capability.ts');
+const MICROVM_STRATEGY_TS = path.join(REPO_ROOT, 'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts');
+const TS_CONSUMERS = [MICROVM_COMPUTE_TS, MICROVM_IMAGE_CAPABILITY_TS, MICROVM_STRATEGY_TS];
 
 /** Env var names must be UPPER_SNAKE — they are installed into a process env. */
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -96,6 +98,10 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
   // every resolve a cache miss that #812 now reports as consent-required.
   ['_LINEAR_VAULT_SCOPES', 'scopes'],
   ['_LINEAR_VAULT_CUSTOM_PARAMS', 'custom_parameters'],
+  // ADR-021 P3: the agent's pause/wake handler must answer inside the hook timeout
+  // the construct configures, so neither half may be re-declared as a literal.
+  ['LIFECYCLE_HANDLER_BUDGET_S', 'lifecycle_handler_budget_seconds'],
+  ['LIFECYCLE_HOOK_TIMEOUT_S', 'lifecycle_hook_timeout_seconds'],
 ]);
 
 /**
@@ -112,6 +118,13 @@ const OWNED_PYTHON_NAMES: ReadonlyMap<string, string> = new Map([
  */
 const OWNED_TS_NAMES: ReadonlyMap<string, string> = new Map([
   ['READY_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.ready_hook_timeout_seconds'],
+  // ADR-021 P3 lifecycle: the hook port, timeout, protocol marker and duration cap
+  // must match the agent image and the service limit, not a local copy.
+  ['LIFECYCLE_HOOK_TIMEOUT_SECONDS', 'microvm_hook_budgets.lifecycle_hook_timeout_seconds'],
+  ['AGENT_HOOK_PORT', 'microvm_lifecycle.hook_port'],
+  ['MICROVM_LIFECYCLE_PROTOCOL', 'microvm_lifecycle.protocol_version'],
+  ['MICROVM_IMAGE_PROTOCOL_ENV', 'microvm_lifecycle.image_protocol_env'],
+  ['MICROVM_MAX_DURATION_SECONDS', 'microvm_lifecycle.maximum_duration_seconds'],
 ]);
 
 /** `NAME = …`, `NAME: T = …`, `module.NAME = …`, `NAME += …` and `A, B = …`, at any indentation. */
@@ -121,8 +134,8 @@ const PY_CONTRACT_READ = /^(?:(?:int|float|str|bool|dict|list|tuple|set|frozense
 const PY_LAST_KEY = /\[["']([a-z_]+)["']\]$/;
 const PY_COMMENT = /(?:^|\s)#.*$/;
 const TS_DECLARATION = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]*)?=(?!=)(.*)$/;
-/** A plain contract read: `<import>.a.b`. */
-const TS_CONTRACT_READ = /^[A-Za-z_$][\w$]*\.([a-z_.]+);?$/;
+/** A plain contract read: `<import>.a.b`, optionally inside one conversion. */
+const TS_CONTRACT_READ = /^(?:(?:String|Number)\( ?)?[A-Za-z_$][\w$]*\.([a-z_.]+) ?\)?;?$/;
 
 interface Drift {
   readonly file: string;
@@ -226,6 +239,14 @@ function main(): number {
       ready_hook_timeout_seconds: number;
       warmup_total_budget_seconds: number;
       warmup_required_timeout_seconds: number;
+      lifecycle_hook_timeout_seconds: number;
+      lifecycle_handler_budget_seconds: number;
+    };
+    microvm_lifecycle?: {
+      protocol_version: number;
+      image_protocol_env: string;
+      hook_port: number;
+      maximum_duration_seconds: number;
     };
   };
   try {
@@ -329,12 +350,11 @@ function main(): number {
     invariantErrors.push('microvm_platform_config.required contains a duplicate');
   }
 
-  // ARN pinning (ADR-021 P2, review B5). `arn_keys` names the values the agent
-  // pins to its own partition/account before installing them into the env that
-  // resolves credentials and fetches secrets; `account_anchor_key` names the ARN
-  // that supplies the expected partition/account. Both are validated here as well
-  // as at agent import time, because a malformed entry would silently WIDEN what
-  // the agent accepts from a network payload.
+  // ARN consistency (ADR-021 P2, review B5). `arn_keys` names the values checked
+  // against the partition/account supplied by `account_anchor_key`. That anchor
+  // comes from the same payload; agreement does not establish deployment identity.
+  // Validate both here and at agent import time so a new ARN field cannot
+  // silently skip the existing consistency check.
   if (!Array.isArray(mpc.arn_keys) || mpc.arn_keys.length === 0) {
     invariantErrors.push('microvm_platform_config.arn_keys must be a non-empty array');
   } else {
@@ -347,6 +367,14 @@ function main(): number {
     }
     if (new Set(mpc.arn_keys).size !== mpc.arn_keys.length) {
       invariantErrors.push('microvm_platform_config.arn_keys contains a duplicate');
+    }
+    for (const [key, envName] of Object.entries(envByKey)) {
+      if ((key.endsWith('_arn') || (typeof envName === 'string' && envName.endsWith('_ARN')))
+        && !mpc.arn_keys.includes(key)) {
+        invariantErrors.push(
+          `microvm_platform_config: ARN-shaped key "${key}" is missing from arn_keys`,
+        );
+      }
     }
     if (!mpc.arn_keys.includes(mpc.account_anchor_key)) {
       invariantErrors.push(
@@ -369,10 +397,20 @@ function main(): number {
   // for a runtime failure becomes a build failure. Both halves live here precisely
   // so the relationship is checkable; this is the check.
   const mhb = json.microvm_hook_budgets;
+  const lifecycle = json.microvm_lifecycle;
+  if (!lifecycle || !Number.isSafeInteger(lifecycle.protocol_version) || lifecycle.protocol_version <= 0
+    || !Number.isInteger(lifecycle.hook_port) || lifecycle.hook_port < 1 || lifecycle.hook_port > 65535
+    || !Number.isInteger(lifecycle.maximum_duration_seconds)
+    || lifecycle.maximum_duration_seconds <= 0 || lifecycle.maximum_duration_seconds > 28_800
+    || typeof lifecycle.image_protocol_env !== 'string' || !/^ABCA_MICROVM_[A-Z0-9_]+$/.test(lifecycle.image_protocol_env)) {
+    invariantErrors.push('microvm_lifecycle requires a positive protocol version, valid hook port, duration within 1–28800 seconds and ABCA_MICROVM_ marker name');
+  }
   const BUDGET_FIELDS = [
     'ready_hook_timeout_seconds',
     'warmup_total_budget_seconds',
     'warmup_required_timeout_seconds',
+    'lifecycle_hook_timeout_seconds',
+    'lifecycle_handler_budget_seconds',
   ] as const;
   if (!mhb || BUDGET_FIELDS.some(field => !Number.isInteger(mhb[field]))) {
     console.error(
@@ -397,6 +435,13 @@ function main(): number {
       'best-effort ones something to share)',
     );
   }
+  if (mhb.lifecycle_handler_budget_seconds >= mhb.lifecycle_hook_timeout_seconds) {
+    invariantErrors.push(
+      'microvm_hook_budgets.lifecycle_handler_budget_seconds must be < '
+      + 'lifecycle_hook_timeout_seconds (pause/wake must leave time to answer)',
+    );
+  }
+
 
   if (invariantErrors.length > 0) {
     console.error(`Semantic invariant violations in ${CONSTANTS_JSON}:\n`);

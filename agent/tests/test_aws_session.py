@@ -56,6 +56,43 @@ class TestConfigureSession:
         assert "u-1" not in aws_session.os.environ.values()
 
 
+class TestSuccessiveTasks:
+    """A reused server keeps one identity per running task (#904 review)."""
+
+    def _start(self, task_id: str):
+        configure_session(user_id="u-1", repo="owner/repo", task_id=task_id)
+        with patch("boto3.Session", return_value=MagicMock(name=f"session-{task_id}")):
+            return get_session()
+
+    def test_the_next_task_starts_after_the_previous_one_is_released(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        first = self._start("t-1")
+        aws_session.release_session("t-1")
+
+        second = self._start("t-2")
+
+        assert second is not first
+        assert aws_session._tags["task_id"] == "t-2"
+
+    def test_a_running_task_still_cannot_change_identity(self, monkeypatch):
+        from aws_session import SessionScopingError
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        self._start("t-1")
+
+        with pytest.raises(SessionScopingError):
+            configure_session(user_id="u-1", repo="owner/repo", task_id="t-2")
+
+    def test_releasing_another_task_keeps_the_current_session(self, monkeypatch):
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        session = self._start("t-1")
+
+        aws_session.release_session("t-other")
+
+        assert aws_session._session is session
+        assert aws_session._tags["task_id"] == "t-1"
+
+
 # ---------------------------------------------------------------------------
 # Fail-safe: no SessionRole ARN → plain session, never scoped
 # ---------------------------------------------------------------------------
