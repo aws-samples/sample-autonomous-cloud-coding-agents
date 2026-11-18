@@ -368,6 +368,37 @@ def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> 
     return channel_source != "jira" or workflow_id != "coding/pr-iteration-v1"
 
 
+def _react_linear_task_finished(
+    config: TaskConfig,
+    *,
+    success: bool,
+    started_reaction_id: str | None,
+    transition_state: bool = False,
+) -> None:
+    """Replace the eyes on the Linear issue with the final mark; no-op for other channels.
+
+    The token is resolved again first. The one cached when the task started can
+    be near the end of its 24 hours: after a long run Linear refuses it, the
+    eyes stay and the issue never moves to In Review. The vault mints a current
+    token, the Secrets Manager path reads what a Lambda has stored in the
+    meantime; when neither yields one, the cached token is tried as before.
+    Advisory like the reaction itself: a lookup that raises must not fail a
+    task that has finished.
+    """
+    if config.channel_source == "linear":
+        try:
+            resolve_linear_api_token(config.channel_metadata, force=True)
+        except Exception as e:
+            log("WARN", f"Linear token was not resolved again: {type(e).__name__}: {e}")
+    react_task_finished(
+        config.channel_source,
+        config.channel_metadata,
+        success=success,
+        started_reaction_id=started_reaction_id,
+        transition_state=transition_state,
+    )
+
+
 def _run_repoless_task(
     *,
     config,
@@ -1434,11 +1465,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 # issue, and the platform's own comment for this run is
                 # "❌ Task cancelled". The same best-effort call as on the crash
                 # path below; no-op for non-Linear tasks.
-                react_task_finished(
-                    config.channel_source,
-                    config.channel_metadata,
-                    success=False,
-                    started_reaction_id=linear_eyes_reaction_id,
+                _react_linear_task_finished(
+                    config, success=False, started_reaction_id=linear_eyes_reaction_id
                 )
                 return cancelled
 
@@ -1744,9 +1772,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # status stands alone). No-op for non-Linear tasks. The issue moves
             # to In Review only when there is a pull request to review, like the
             # Jira card above: a clarify-and-hold run succeeds without one.
-            react_task_finished(
-                config.channel_source,
-                config.channel_metadata,
+            _react_linear_task_finished(
+                config,
                 success=(overall_status == "success"),
                 started_reaction_id=linear_eyes_reaction_id,
                 transition_state=linear_transition_state and bool(pr_url),
@@ -1909,11 +1936,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             # `linear_eyes_reaction_id` is initialized to None at the top of
             # this try block, so it's always bound here even if we crashed
             # before the start-reaction call assigned a real id.
-            react_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=False,
-                started_reaction_id=linear_eyes_reaction_id,
+            _react_linear_task_finished(
+                config, success=False, started_reaction_id=linear_eyes_reaction_id
             )
             # NOTE: no Jira failure comment here — the fan-out plane's
             # ``dispatchToJira`` (issue #573) owns the Jira terminal comment

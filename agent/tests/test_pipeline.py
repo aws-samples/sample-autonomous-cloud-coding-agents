@@ -8,7 +8,7 @@ import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from models import AgentResult, RepoSetup, TaskConfig, TokenUsage
 from pipeline import (
     _branch_has_new_commits,
     _chain_prior_agent_error,
+    _react_linear_task_finished,
     _resolve_overall_task_status,
     _should_post_start_comment,
 )
@@ -2680,7 +2681,7 @@ class TestEarlyAckOrdering:
         mock_task_span.return_value = self._mock_span()
 
         with (
-            patch("pipeline.resolve_linear_api_token"),
+            patch("pipeline.resolve_linear_api_token") as m_resolve,
             patch("pipeline.react_task_started", return_value="reaction-42"),
             patch("pipeline.comment_task_started"),
             patch("pipeline.transition_task_started"),
@@ -2709,6 +2710,9 @@ class TestEarlyAckOrdering:
         _args, kwargs = m_finished.call_args
         assert kwargs.get("success") is False
         assert kwargs.get("started_reaction_id") == "reaction-42"
+        # The token is resolved again for that swap: a crash can come hours after
+        # the start, when the token cached there has expired.
+        assert m_resolve.call_args_list == [call(_LINEAR_META), call(_LINEAR_META, force=True)]
 
 
 # ---------------------------------------------------------------------------
@@ -2729,7 +2733,8 @@ def _run_pipeline(
 
     ``build`` is what the post-agent build returns (passed by default), ``pr_url``
     what ``ensure_pr`` returns, ``task_record`` what the cancel check reads. Returns
-    the result dict and the three mocks these tests assert on."""
+    the result dict, the three mocks these tests assert on, and the calls to the
+    Linear token and reactions in the order they were made."""
 
     async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
         return agent_result
@@ -2756,10 +2761,15 @@ def _run_pipeline(
         patch("pipeline.ensure_pr", return_value=pr_url) as ensure_pr,
         patch("pipeline.get_disk_usage", return_value=0),
         patch("pipeline.print_metrics"),
-        patch("pipeline.resolve_linear_api_token"),
-        patch("pipeline.react_task_started", return_value="reaction-42"),
+        patch("pipeline.resolve_linear_api_token") as resolve_linear_api_token,
+        patch("pipeline.react_task_started", return_value="reaction-42") as react_task_started,
         patch("pipeline.react_task_finished") as react_task_finished,
     ):
+        # One parent for the three Linear calls, so that their order can be read.
+        linear = MagicMock()
+        linear.attach_mock(resolve_linear_api_token, "resolve_linear_api_token")
+        linear.attach_mock(react_task_started, "react_task_started")
+        linear.attach_mock(react_task_finished, "react_task_finished")
         task_state.get_task.return_value = task_record
         from pipeline import run_task
 
@@ -2776,6 +2786,7 @@ def _run_pipeline(
         verify_build=verify_build,
         ensure_pr=ensure_pr,
         react_task_finished=react_task_finished,
+        linear_calls=linear.mock_calls,
     )
 
 
@@ -3038,6 +3049,63 @@ class TestLinearIssueAtTerminal:
         finished = self._finished(run)
         assert finished["success"] is False
         assert finished["started_reaction_id"] == "reaction-42"
+
+    @pytest.mark.parametrize(
+        "task_record",
+        [pytest.param(None, id="finished"), pytest.param({"status": "CANCELLED"}, id="cancelled")],
+    )
+    def test_final_reaction_is_sent_with_a_token_resolved_at_the_end(self, task_record):
+        # A Linear access token lasts 24 hours and the one cached when the task
+        # started can be near its end. After a long run Linear refuses it, and the
+        # eyes stay on the issue, which never moves to In Review.
+        run = _run_pipeline(
+            _agent_succeeded(),
+            task_record=task_record,
+            channel_source="linear",
+            channel_metadata=_LINEAR_META,
+        )
+
+        assert [name for name, _args, _kwargs in run.linear_calls] == [
+            "resolve_linear_api_token",
+            "react_task_started",
+            "resolve_linear_api_token",
+            "react_task_finished",
+        ]
+        assert run.linear_calls[2] == call.resolve_linear_api_token(_LINEAR_META, force=True)
+
+    def test_task_of_another_channel_resolves_no_linear_token(self):
+        run = _run_pipeline(_agent_succeeded())
+
+        assert [name for name, _args, _kwargs in run.linear_calls] == [
+            "react_task_started",
+            "react_task_finished",
+        ]
+
+    def test_token_lookup_that_raises_does_not_stop_the_final_reaction(self):
+        # The lookup at the end runs inside the crash handler too, between the
+        # FAILED write and the metrics report: it must not raise out of there.
+        # A secret that holds a JSON list is one input the resolver raises on.
+        config = TaskConfig(
+            repo_url="o/r",
+            aws_region="us-east-1",
+            task_id="t-report",
+            channel_source="linear",
+            channel_metadata=_LINEAR_META,
+        )
+        lookup_error = AttributeError("'list' object has no attribute 'get'")
+        with (
+            patch("pipeline.resolve_linear_api_token", side_effect=lookup_error),
+            patch("pipeline.react_task_finished") as react_task_finished,
+        ):
+            _react_linear_task_finished(config, success=False, started_reaction_id="reaction-42")
+
+        react_task_finished.assert_called_once_with(
+            "linear",
+            _LINEAR_META,
+            success=False,
+            started_reaction_id="reaction-42",
+            transition_state=False,
+        )
 
 
 class TestDeliveryGateReadsThePushedBranch:
