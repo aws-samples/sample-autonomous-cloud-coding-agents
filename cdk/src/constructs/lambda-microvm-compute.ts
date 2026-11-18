@@ -1025,7 +1025,7 @@ export function createMicrovmExecutionRole(scope: Construct, id: string): iam.Ro
     // iam:UpdateRoleDescription, so any change fails the deploy and its rollback.
     description:
       'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
-      + 'lifecycle hooks; writes logs and reads deployment bootstrap manifests.',
+      + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
   });
   grantTagSession(role, principal);
   Tags.of(role).add(MICROVM_BACKEND_TAG_KEY, MICROVM_BACKEND_TAG_VALUE);

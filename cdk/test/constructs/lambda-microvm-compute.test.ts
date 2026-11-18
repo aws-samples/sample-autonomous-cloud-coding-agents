@@ -193,6 +193,15 @@ describe.each(['global', 'eu', 'us', undefined])('LambdaMicrovmCompute — bedro
   });
 });
 
+test('keeps main\'s execution role description byte-for-byte', () => {
+  // The least-privilege bootstrap has no iam:UpdateRoleDescription: changing this
+  // text updates the existing role, and both the deploy and its rollback fail.
+  build().template.hasResourceProperties('AWS::IAM::Role', {
+    Description: 'ABCA Lambda MicroVMs execution role: assumed by the running MicroVM and its runtime '
+      + 'lifecycle hooks; writes logs and reads out-of-band /run payloads.',
+  });
+});
+
 describe('LambdaMicrovmCompute — image provisioned from a managed base image', () => {
   let built: Built;
   let template: Template;
