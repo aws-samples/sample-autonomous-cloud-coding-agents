@@ -92,6 +92,7 @@ process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { LinearAttachmentError } from '../../src/handlers/shared/linear-attachments';
+import { renderIssueContextHint } from '../../src/handlers/shared/linear-issue-context-probe';
 import { logger } from '../../src/handlers/shared/logger';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
@@ -1026,6 +1027,48 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.task_description).not.toContain('references additional context');
       // Sanity: original task description still in place.
       expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
+    });
+
+    // The hint is advisory, like the document and comment sections: ABCA adds it,
+    // so it must never be what takes a description that fits over the limit. It
+    // was: an issue of 9,900 characters with one Figma paperclip was rejected with
+    // "task_description exceeds maximum length of 10000 characters", and making
+    // the issue a hundred characters shorter did not help.
+    describe('the hint and the size limit of the description', () => {
+      const probe = {
+        attachmentTitles: ['Checkout mockup'],
+        // A paperclip that is not a Linear upload: named in the hint, never fetched.
+        attachments: [{ title: 'Checkout mockup', url: 'https://www.figma.com/file/abc/checkout' }],
+        projectName: 'Onboarding',
+        projectHasDocuments: false,
+        projectDocuments: [],
+        ok: true,
+        projectDocumentCount: 0,
+      };
+      const title = 'ABC-42: Fix the login bug';
+      // Title, hint and description are set apart by blank lines: four line breaks.
+      const descriptionRoom = 10_000 - title.length - renderIssueContextHint(probe).length - 4;
+
+      async function taskDescriptionFor(description: string): Promise<string> {
+        probeLinearIssueContextMock.mockResolvedValueOnce(probe);
+        const payload = issue();
+        (payload.data as Record<string, unknown>).description = description;
+        await handler(eventWith(payload));
+        return String(createTaskCoreMock.mock.calls[0][0].task_description);
+      }
+
+      test('a hint that fits is kept, up to the last character of the limit', async () => {
+        const sent = await taskDescriptionFor('x'.repeat(descriptionRoom));
+        expect(sent).toContain('references additional context');
+        expect(sent).toHaveLength(10_000);
+      });
+
+      test('a hint that does not fit is left out, and the issue text is sent whole', async () => {
+        const description = 'x'.repeat(descriptionRoom + 1);
+        const sent = await taskDescriptionFor(description);
+        expect(sent.length).toBeLessThanOrEqual(10_000);
+        expect(sent).toBe(`${title}\n\n${description}`);
+      });
     });
 
     // ─── ADR-016 pre-hydration: recent comments folded into the description ────

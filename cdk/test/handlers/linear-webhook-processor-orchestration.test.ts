@@ -661,6 +661,22 @@ describe('linear-webhook-processor — orchestration routing', () => {
       expect(upsertStatusCommentMock).not.toHaveBeenCalled();
       expect(createTaskCoreMock).not.toHaveBeenCalled();
     });
+
+    test(':help on a project that is not onboarded gets the onboarding nudge, not silence', async () => {
+      // The first-time user the help label is for: the project has no mapping yet,
+      // so no explainer can be posted. The nudge for an ABCA label on an unmapped
+      // project recognises `bgagent:help`, but the help branch returned before it.
+      // (Default mock: no mapping row, and the claim-once write succeeds.)
+      await handler(eventWith(helpIssue()));
+
+      expect(upsertStatusCommentMock).not.toHaveBeenCalled(); // no explainer without a mapping
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(reportIssueFailureMock).toHaveBeenCalledTimes(1);
+      const [ctx, issueId, message] = reportIssueFailureMock.mock.calls[0];
+      expect(ctx).toMatchObject({ linearWorkspaceId: 'org-1' });
+      expect(issueId).toBe('issue-1');
+      expect(String(message)).toContain("This Linear project isn't onboarded to ABCA");
+    });
   });
 });
 
@@ -1530,8 +1546,9 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
   // there) routes to the sub-issue it names — instead of the old silent drop.
   describe('parent-epic @bgagent comment routing', () => {
     /** Mock so the COMMENTED issue id is itself the orchestration parent. The
-     *  fan-out epic has two started sub-issues (footer + newsletter). */
-    function mockParentEpic(parentIssueId: string): void {
+     *  fan-out epic has two started sub-issues (footer + newsletter), and the
+     *  rows of `moreChildren` after them. */
+    function mockParentEpic(parentIssueId: string, moreChildren: Array<Record<string, unknown>> = []): void {
       const meta = {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_x',
@@ -1580,7 +1597,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
           return {};
         }
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
-        if (cmd._type === 'Query') return { Items: [meta, footer, news] }; // loadOrchestration (parent's own)
+        if (cmd._type === 'Query') return { Items: [meta, footer, news, ...moreChildren] }; // loadOrchestration (parent's own)
         if (cmd._type === 'Get') {
           const key = cmd.input.Key as { task_id?: string; sub_issue_id?: string; linear_identity?: string };
           // Comment-trigger authorization: mapped commenter (auth gate passes).
@@ -1820,6 +1837,100 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(String(replyBody)).not.toMatch(/nothing to iterate/i);
       // 👀 → ❓, so the comment does not read as still-in-progress.
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-prfail', 'question');
+    });
+
+    // The reviewer NAMED a sub-issue and exactly one matched. When that one has no
+    // pull request to iterate, the answer is its state. It used to be the "which
+    // sub-issue?" question: "I couldn't tell which sub-issue that's about", then a
+    // "did you mean" that is scored on title words — so it offered the sub-issue
+    // the reviewer had just named, or a different one.
+    describe('a comment on the epic that names one sub-issue which has no pull request', () => {
+      /** The epic with a third sub-issue, ABCA-307, after the two started ones. */
+      function mockEpicWithUploads(row: Record<string, unknown>): void {
+        mockParentEpic('PARENT-EPIC', [{
+          orchestration_id: 'orch_x',
+          sub_issue_id: 'sub-uploads',
+          depends_on: ['sub-footer'],
+          repo: 'o/r',
+          parent_linear_issue_id: 'PARENT-EPIC',
+          linear_workspace_id: 'org-1',
+          linear_identifier: 'ABCA-307',
+          title: 'Add retries to uploads',
+          ...row,
+        }]);
+      }
+
+      /** One reply on the epic that names the sub-issue and asks nothing, a ❓, and no task. */
+      function expectStateOfNamedSubIssue(name = 'ABCA-307'): string {
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+        expect(upsertThreadedReplyMock).not.toHaveBeenCalled(); // no "On it": nothing is being worked on
+        expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+        const [, issueId, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+        expect(issueId).toBe('PARENT-EPIC');
+        expect(parentCommentId).toBe('pc-1');
+        expect(String(body)).toContain(`**${name}**`);
+        expect(String(body)).not.toMatch(/couldn't tell|Did you mean/);
+        // Linear delivers the reply back; it must not read as a request itself.
+        expect(isBotAuthoredComment(String(body))).toBe(true);
+        expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
+        return String(body);
+      }
+
+      test('a sub-issue the epic has not started: says so, and offers no other sub-issue', async () => {
+        mockEpicWithUploads({ child_status: 'blocked' }); // no task yet
+        // "footer" is a title word of ABCA-305, which is what the "did you mean" offered.
+        await handler(eventWith(parentComment('@bgagent ABCA-307: keep the retry notice out of the footer')));
+        const reply = expectStateOfNamedSubIssue();
+        expect(reply).toMatch(/hasn't started yet/);
+        expect(reply).not.toContain('ABCA-305');
+      });
+
+      test('a sub-issue that was skipped: says it did not run, and how to re-run', async () => {
+        mockEpicWithUploads({ child_status: 'skipped' }); // a sub-issue it depends on failed
+        await handler(eventWith(parentComment('@bgagent ABCA-307: use the new API client')));
+        const reply = expectStateOfNamedSubIssue();
+        expect(reply).toMatch(/did not run/);
+        expect(reply).toContain('`@bgagent retry`');
+      });
+
+      test('a started sub-issue without a pull request: says so, whether or not its run has ended', async () => {
+        mockEpicWithUploads({ child_status: 'released', child_task_id: 'task-uploads' }); // its task has no PR
+        await handler(eventWith(parentComment('@bgagent ABCA-307: use a darker blue')));
+        const reply = expectStateOfNamedSubIssue();
+        expect(reply).toMatch(/no pull request, so there's nothing to iterate on/);
+        // A run that ended without a pull request will never have one: no "yet".
+        expect(reply).not.toMatch(/\byet\b/);
+        expect(reply).toMatch(/If its run is still in progress, comment again once it has opened one/);
+      });
+
+      test.each([
+        ['with a task that opened no pull request', { child_task_id: 'task-uploads' }],
+        ['before it became a task', {}],
+      ])('a sub-issue that failed %s: points at the retry', async (_when, row) => {
+        mockEpicWithUploads({ child_status: 'failed', ...row });
+        await handler(eventWith(parentComment('@bgagent ABCA-307: use a darker blue')));
+        const reply = expectStateOfNamedSubIssue();
+        expect(reply).toMatch(/failed before opening a PR/);
+        expect(reply).toContain('`@bgagent retry`');
+      });
+
+      test('the combined result, before it has started: named by its title, never by its internal id', async () => {
+        // The integration node has no identifier; "integration" is the word that names it.
+        mockParentEpic('PARENT-EPIC', [{
+          orchestration_id: 'orch_x',
+          sub_issue_id: 'orch_x__integration',
+          depends_on: ['sub-footer', 'sub-news'],
+          child_status: 'blocked',
+          repo: 'o/r',
+          parent_linear_issue_id: 'PARENT-EPIC',
+          linear_workspace_id: 'org-1',
+          title: 'Integration — combine sub-issue results',
+        }]);
+        await handler(eventWith(parentComment('@bgagent integration: the dates come back empty')));
+        const reply = expectStateOfNamedSubIssue('Integration — combine sub-issue results');
+        expect(reply).toMatch(/hasn't started yet/);
+        expect(reply).not.toContain('__integration');
+      });
     });
 
     test('webhook REDELIVERY of the same parent comment posts EXACTLY ONE reply (no spam)', async () => {

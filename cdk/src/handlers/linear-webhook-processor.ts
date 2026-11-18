@@ -857,14 +857,15 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // ``<base>:help`` — post a one-time explainer of what the trigger labels do
   // and create NO task (customer-caught: a first-time user couldn't tell the
   // labels apart). Handled BEFORE the trigger gate because ``:help`` is
-  // deliberately not a trigger variant (it must never spawn work). Requires the
-  // project to be onboarded (we need a workspace token to post) + the
-  // orchestration table (for the redelivery claim); otherwise a true no-op.
+  // deliberately not a trigger variant (it must never spawn work). Only for an
+  // onboarded project: on any other the label goes on to the gate below, whose
+  // nudge recognises it and says what is missing.
   if (
-    hasHelpLabel((issue.labels ?? []).map((l) => l?.name), labelFilter)
+    mappingItem
+    && hasHelpLabel((issue.labels ?? []).map((l) => l?.name), labelFilter)
     && shouldTriggerHelp(payload, labelFilter)
   ) {
-    await handleHelpLabel({ issue, workspaceId: payload.organizationId ?? '', labelFilter, mappingItem });
+    await handleHelpLabel({ issue, workspaceId: payload.organizationId, labelFilter });
     return;
   }
 
@@ -2278,8 +2279,8 @@ async function handleParentEpicCommentTrigger(args: {
     (c) => c.child_status === 'failed' || c.child_status === 'skipped',
   );
 
-  if (!target || !target.child_task_id) {
-    // No confident single match (or matched a not-yet-started node) → ask.
+  if (!target) {
+    // No confident single match → ask.
     const reason = match.reason === 'ambiguous' ? 'ambiguous' : 'none';
     const suggestion = reason === 'none' ? suggestClosestNode(trigger.instruction, snapshot.children) : null;
     // If it reads like NEW work AND we found no close existing node,
@@ -2291,13 +2292,16 @@ async function handleParentEpicCommentTrigger(args: {
     // This is a QUESTION, not work-in-progress. Replace the 👀 we put on receipt
     // with ❓ so the comment doesn't look like it's still being worked.
     await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
-    logger.info('Comment trigger (parent epic): no single iterable sub-issue matched — asked', {
+    logger.info('Comment trigger (parent epic): no single sub-issue matched — asked', {
       orchestration_id: orchestrationId, reason, match_count: match.matches.length,
     });
     return;
   }
 
-  const prNumberResult = await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id);
+  // A named sub-issue that has not become a task has no PR either.
+  const prNumberResult = target.child_task_id
+    ? await readTaskPrNumber(ddb, process.env.TASK_TABLE_NAME!, target.child_task_id)
+    : LOOKUP_ABSENT;
   if (isLookupFailure(prNumberResult)) {
     // The read broke — don't tell the user "no PR yet" (a distinct, misleading
     // state), and don't iterate on a PR number we couldn't read.
@@ -2325,24 +2329,38 @@ async function handleParentEpicCommentTrigger(args: {
     return;
   }
   if (!prNumberResult.ok) {
-    // Matched a node but it has no PR to iterate. If that node FAILED, the user
-    // named it to fix it — there's nothing to iterate (no PR), so point them
-    // straight at retry instead of the generic disambiguation. Observed in
-    // practice: naming a failed child got "couldn't tell / no PR" with no way out.
-    const targetRow = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id);
-    const body = targetRow?.child_status === 'failed'
-      ? `👋 **${nodeDisplayId(target) ?? target.sub_issue_id}** failed before opening a PR, so there's `
+    // The comment named exactly one sub-issue and that one has no PR to iterate:
+    // say what state it is in. Not the "which sub-issue?" question — it asks for
+    // the name the reviewer just gave, and its "did you mean" is scored on title
+    // words, so for a sub-issue without a task it could offer a DIFFERENT one.
+    const status = snapshot.children.find((c) => c.sub_issue_id === target.sub_issue_id)?.child_status;
+    // The integration node has no identifier: its title, never its internal id.
+    const name = `**${nodeDisplayId(target) ?? target.title ?? target.sub_issue_id}**`;
+    // The default has to hold for a run that ENDED without a pull request too
+    // (see iterateOrchestrationChild): no "yet".
+    let body = `👋 ${name} has no pull request, so there's nothing to iterate on. `
+      + 'If its run is still in progress, comment again once it has opened one.';
+    if (status === 'failed') {
+      // The user named a failed node to fix it — point them straight at retry.
+      // Observed in practice: naming a failed child got "couldn't tell / no PR"
+      // with no way out.
+      body = `👋 ${name} failed before opening a PR, so there's `
         + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
-        + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.'
-      : renderParentDisambiguationReply('none', snapshot.children, target, false, epicHasFailures);
+        + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.';
+    } else if (status === 'skipped') {
+      body = `👋 ${name} did not run, because a sub-issue it depends on failed. `
+        + 'Reply `@bgagent retry` on this epic to re-run the failed work — then comment again once it has a PR.';
+    } else if (!target.child_task_id) {
+      body = `👋 ${name} hasn't started yet, so there's nothing to iterate on. `
+        + 'It starts on its own when its turn comes; comment again once it has a pull request.';
+    }
     await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
-    // Matched a node but it has no PR yet — also a "wait / clarify" state, not
-    // active work; 👀 → ❓.
+    // A "wait / retry" state, not active work; 👀 → ❓.
     await channel.replaceCommentReaction?.({ commentId }, parentRef, 'needs_input');
-    logger.info('Comment trigger (parent epic): matched sub-issue has no PR yet — asked', {
+    logger.info('Comment trigger (parent epic): named sub-issue has no PR to iterate — said so', {
       orchestration_id: orchestrationId,
       sub_issue_id: target.sub_issue_id,
-      child_status: targetRow?.child_status,
+      child_status: status,
     });
     return;
   }
@@ -3235,21 +3253,21 @@ function labelJustPresent(
 
 /**
  * Post the one-time ``<base>:help`` explainer (customer-caught label
- * discoverability). Best-effort and idempotent: gated on an onboarded project
- * (need a workspace token to post) + the orchestration table (for the
- * redelivery claim). Creates no task and does not touch issue state.
+ * discoverability), on an issue of an onboarded project (the caller checks the
+ * mapping). Best-effort and idempotent: needs the workspace registry (a token
+ * to post with) + the orchestration table (for the redelivery claim). Creates
+ * no task and does not touch issue state.
  */
 async function handleHelpLabel(args: {
   issue: LinearIssueEvent['data'];
-  workspaceId: string;
+  workspaceId: string | undefined;
   labelFilter: string;
-  mappingItem: Record<string, unknown> | undefined;
 }): Promise<void> {
-  const { issue, workspaceId, labelFilter, mappingItem } = args;
+  const { issue, workspaceId, labelFilter } = args;
   const base = (labelFilter || DEFAULT_LABEL_FILTER).trim().toLowerCase();
-  if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !mappingItem || !workspaceId) {
-    logger.info('Linear :help label — cannot post explainer (not onboarded / no token table)', {
-      issue_id: issue.id, has_mapping: Boolean(mappingItem),
+  if (!WORKSPACE_REGISTRY_TABLE || !ORCHESTRATION_TABLE || !workspaceId) {
+    logger.info('Linear :help label — cannot post explainer (a table is not configured, or no workspace id)', {
+      issue_id: issue.id,
     });
     return;
   }
@@ -3324,13 +3342,16 @@ function buildTaskDescription(
   } else if (issue.title) {
     parts.push(issue.title);
   }
-  if (contextHint) {
-    parts.push('');
-    parts.push(contextHint);
-  }
+  const hintIndex = parts.length;
   if (issue.description && issue.description.trim()) {
     parts.push('');
     parts.push(issue.description.trim());
+  }
+  // The hint goes between title and description, but it is ADVISORY like the
+  // sections below: only when the issue's own text leaves room for it and for
+  // the two line breaks that set it off.
+  if (contextHint && parts.join('\n').length + contextHint.length + 2 <= MAX_TASK_DESCRIPTION_LENGTH) {
+    parts.splice(hintIndex, 0, '', contextHint);
   }
   let out = parts.join('\n') || 'Linear issue';
 
