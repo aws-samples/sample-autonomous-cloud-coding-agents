@@ -330,7 +330,9 @@ _NO_CLARIFICATION_WORKFLOW_IDS = frozenset(
 # ``Task``/``Agent`` are the sub-agent spawners (name varies by CLI version, so
 # block both); ``Monitor`` streams a background command's output mid-turn;
 # ``SendMessage`` resumes/relaunches background agents; the ``Cron*`` tools
-# schedule deferred work. All are "return now, work continues off-session"
+# and ``ScheduleWakeup`` schedule deferred work (a wake-up tells the model to
+# end its turn, and the runner takes that first result as final, so nothing
+# waits for it). All are "return now, work continues off-session"
 # vectors a one-shot task cannot await. NOT blockable here: background ``Bash``
 # (a ``run_in_background`` PARAMETER of Bash, not a tool name) — but a detached
 # Bash child dies with the MicroVM on return, so it can't produce
@@ -346,6 +348,7 @@ _DISALLOWED_TOOLS = [
     "CronCreate",
     "CronDelete",
     "CronList",
+    "ScheduleWakeup",
 ]
 
 

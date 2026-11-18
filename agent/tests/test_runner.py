@@ -479,6 +479,7 @@ class TestToolSurfaceHardening:
             "CronCreate",
             "CronDelete",
             "CronList",
+            "ScheduleWakeup",
         }
 
     def test_repo_less_loads_no_setting_sources(self):
