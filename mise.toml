@@ -142,6 +142,10 @@ run = "node --experimental-strip-types scripts/check-constants-sync.ts"
 description = "Drift check: contracts/coverage-thresholds.json ↔ coverage settings, test scripts and mise test tasks of cdk, cli, web, agent and the Jira Forge app"
 run = "node --experimental-strip-types scripts/check-coverage-thresholds-sync.ts"
 
+[tasks."check:mise-version-sync"]
+description = "Check that GitHub Actions and the contributor image pin the same mise release"
+run = "node --experimental-strip-types cdk/scripts/check-mise-version-sync.ts"
+
 [tasks."test:jira-forge-app"]
 description = "Test the standalone Jira Forge app-actor proxy"
 run = "npm test --prefix integrations/jira-forge-app"
@@ -197,6 +201,7 @@ run = [
   { task = "check:constants-sync" },
   { task = "check:types-sync" },
   { task = "check:coverage-thresholds-sync" },
+  { task = "check:mise-version-sync" },
   { task = "check:transitive-pin-sync" },
   { task = "check:deadcode" },
   { task = "//docs:link-check" },
