@@ -595,6 +595,14 @@ describe('pollTaskStatus', () => {
     expect(result.lastStatus).toBeUndefined();
   });
 
+  test('counts a failed read as one missed poll and keeps the last known status', async () => {
+    // An error thrown from the poll would fail the durable execution: the task
+    // would stay RUNNING with nothing left to finalize it.
+    mockDdbSend.mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'));
+    const result = await pollTaskStatus('TASK001', { attempts: 360, lastStatus: 'RUNNING' }, 'agentcore');
+    expect(result).toEqual({ attempts: 361, lastStatus: 'RUNNING' });
+  });
+
   // The gate `finalizeTask`'s defensive FINALIZING arm depends on. That arm is
   // currently unreachable BECAUSE of this predicate, and its comment says so — so
   // this test is what keeps the comment true. If `pollTaskStatus` ever widens the

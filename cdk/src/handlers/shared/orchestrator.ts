@@ -919,22 +919,36 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
  * @param taskId - the task to poll.
  * @param state - current poll state.
  * @param computeType - the compute backend for this task (controls heartbeat checks).
- * @returns updated poll state with the latest task status.
+ * @returns updated poll state with the latest task status; when the read fails,
+ *   the state it was given with one more attempt.
  */
 export async function pollTaskStatus(
   taskId: string,
   state: PollState,
   computeType: ComputeType,
 ): Promise<PollState> {
-  const result = await ddb.send(new GetCommand({
-    TableName: TABLE_NAME,
-    Key: { task_id: taskId },
-    ProjectionExpression: '#st, session_id, started_at, agent_heartbeat_at',
-    ExpressionAttributeNames: { '#st': 'status' },
-  }));
+  let item: Record<string, unknown> | undefined;
+  try {
+    const result = await ddb.send(new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { task_id: taskId },
+      ProjectionExpression: '#st, session_id, started_at, agent_heartbeat_at',
+      ExpressionAttributeNames: { '#st': 'status' },
+    }));
+    item = result.Item;
+  } catch (err) {
+    // A failed read is one missed poll, not the end of the orchestration: an
+    // error thrown from the waitForCondition check fails the durable execution,
+    // and then nothing finalizes the task. The attempt counts, so the poll
+    // window still closes.
+    logger.warn('Task status read failed, counting it as a missed poll', {
+      task_id: taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ...state, attempts: state.attempts + 1 };
+  }
 
-  const currentStatus = result.Item?.status as TaskStatusType | undefined;
-  const item = result.Item as Record<string, unknown> | undefined;
+  const currentStatus = item?.status as TaskStatusType | undefined;
 
   let sessionUnhealthy = false;
   if (
