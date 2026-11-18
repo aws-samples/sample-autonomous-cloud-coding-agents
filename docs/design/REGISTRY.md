@@ -118,6 +118,7 @@ The registry API is a **separate API Gateway** from the main Task API (its own `
 
 - Auth: `RegistryPublisher`. `auto_approve` additionally requires `RegistryApprover`.
 - Validates kind ∈ MVP kinds (reserved kinds rejected), namespace/name shape, exact semver.
+- For `mcp_server` the runtime is validated as well: `transport` is `http`, `sse` or `stdio`; `url` (http, sse) or `command` (stdio) is a non-empty string; `headers`, when present, is an object with string values and `args` a list of strings; a field other than `transport`, `url`, `command`, `args`, `headers` and `tool_prefix` is refused. A runtime that fails one of these is answered `400`.
 - **Immutability:** an existing `(kind, namespace, name, version)` → `409 REGISTRY_VERSION_EXISTS`.
 - Response `201`: `{ kind, namespace, name, version, status, storage_mode }`.
 
@@ -187,7 +188,7 @@ The strict grammar is implemented by `parseRef` (TS) and `parse_ref` (Python), k
 
 **PR 1 (this work)** ships the resolver library, port, adapter, provisioning, API, and CLI — purely additive; nothing in the orchestrator/agent calls it yet.
 
-**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`).
+**PR 2** wired the resolve step in the orchestrator (not create-task — see note below): it collects `registry://` refs from the Blueprint, resolves them via the `RegistryClient` (fail-closed — an unresolved ref fails the task), stamps `resolved_assets: [{kind, id, version}]` on the `TaskRecord`, threads the bundle into the agent payload, and loads `mcp_server` assets (merge into `.mcp.json`). An `mcp_server` asset whose key (`<namespace>__<name>`) or connection config contains `linear`, in any letter case, cannot be loaded: the agent runtime removes every such server from `.mcp.json` ([ADR-016](../decisions/ADR-016-pluggable-identity-and-auth.md): the agent must have no Linear tools), and the task fails with `RegistryAssetLoadError` before the agent starts.
 
 **PR 3** added the `cedar_policy_module` and `skill` loaders: resolved Cedar text is concatenated into the **same** `cedar_policies` payload field as inline blueprint policies (byte-identical from the `PolicyEngine`'s view — cedar-parity holds by construction), and resolved skill `prompt_fragment`s are appended to the system prompt (`prompt_builder.py`, after channel guidance).
 

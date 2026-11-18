@@ -187,7 +187,7 @@ On acceptance, the concurrency slot is acquired and the orchestrator proceeds to
 
 ### Step 2: Pre-flight checks
 
-Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
+Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs and PRs that come from a fork, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
 
 ### Step 3: Context hydration
 

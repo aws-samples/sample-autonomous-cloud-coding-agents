@@ -595,6 +595,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |
+| `PR_FROM_FORK` | 422 | PR comes from a fork: its branch is not in the onboarded repository |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | 422 | GitHub token lacks required permissions for the task type |
 | `ATTACHMENT_BLOCKED` | 400 | Attachment content blocked by security screening |
 | `ATTACHMENT_TOO_LARGE` | 400 | Individual attachment exceeds 10 MB size limit |
@@ -616,6 +617,8 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `TASK_NOT_AWAITING_APPROVAL` | 409 | Task is not in `AWAITING_APPROVAL`, so the approval decision does not apply |
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (retry with backoff) |
+
+`REPO_NOT_FOUND_OR_NO_ACCESS`, `PR_NOT_FOUND_OR_CLOSED`, `PR_FROM_FORK`, `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` and `GITHUB_UNREACHABLE` are reasons of the pre-flight step, which runs after the task is created. No request is answered with them: the task goes to `FAILED`, the code is the `reason` of its `preflight_failed` event, and its `error_message` starts with `Pre-flight check failed: <code>`. The step has two more reasons, which this table does not list: `GITHUB_TOKEN_SECRET_MISSING` and `GITHUB_TOKEN_SECRET_UNREADABLE`, for a GitHub token secret that is missing or cannot be read.
 
 ## Pagination
 

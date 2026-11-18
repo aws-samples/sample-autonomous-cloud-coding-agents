@@ -319,7 +319,7 @@ Administrative overhead is one budget command per controlled scope. A single `Ev
 
 ## Workflows
 
-Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. If you specify nothing, the platform resolves a default (your repo's Blueprint default, or the conservative `default/agent-v1`). Workflows replace the old `task_type` field — see [Workflows](../design/WORKFLOWS.md) for the full design and how to author your own.
+Every task runs a **workflow** — a named, versioned recipe that decides whether to clone a repo, which tools the agent may use, and how the result is delivered. You select one with `workflow_ref` (REST/webhook) or `--workflow` (CLI); the `--pr`/`--review-pr` flags select the coding PR workflows for you. A REST or webhook request without `workflow_ref` falls back to the conservative `default/agent-v1`; `bgagent submit` with `--repo` and none of these flags sends `coding/new-task-v1`. Workflows replace the old `task_type` field — see [Workflows](../design/WORKFLOWS.md) for the full design and how to author your own.
 
 The shipped workflows that cover the full lifecycle of a code change:
 
@@ -443,7 +443,7 @@ curl -X POST "$API_URL/tasks" \
   -d '{"repo": "owner/repo", "workflow_ref": "coding/pr-review-v1", "pr_number": 55, "task_description": "Focus on security implications and error handling"}'
 ```
 
-> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](../design/WORKFLOWS.md)). Omit it and the platform resolves a default — the repo's Blueprint default if configured, otherwise the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
+> **Selecting a workflow.** `workflow_ref` chooses which workflow runs the task, in the form `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). It replaced the old `task_type` field (see [Workflows](../design/WORKFLOWS.md)). Omit it and the platform falls back to the conservative `default/agent-v1`. The one-to-one mapping from the retired `task_type` values is `new_task → coding/new-task-v1`, `pr_iteration → coding/pr-iteration-v1`, `pr_review → coding/pr-review-v1`.
 
 **Request body fields:**
 
@@ -453,7 +453,7 @@ curl -X POST "$API_URL/tasks" \
 | `issue_number` | number | One of these | GitHub issue number |
 | `task_description` | string | is required | Free-text task description |
 | `pr_number` | number | | PR number to iterate on or review (required for `coding/pr-iteration-v1` and `coding/pr-review-v1`) |
-| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ the platform resolves a default (`default/agent-v1`). |
+| `workflow_ref` | string | No | Workflow selector `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Replaces the retired `task_type`. Omitted ⇒ `default/agent-v1`, which requires `task_description` (an `issue_number` alone is answered `400`). For a task that changes the repository and opens a pull request, send `coding/new-task-v1`. |
 | `max_turns` | number | No | Maximum agent turns (1–500). Overrides the per-repo Blueprint default. Platform default: 100. |
 | `max_budget_usd` | number | No | Maximum cost budget in USD (0.01–100). When reached, the agent stops regardless of remaining turns. Overrides the per-repo Blueprint default. If omitted, no budget limit is applied. |
 
@@ -633,8 +633,8 @@ Created:     2026-04-01T00:39:51.271Z
 | `--task` | Task description text. |
 | `--pr` | PR number to iterate on. Selects the `coding/pr-iteration-v1` workflow. The agent checks out the PR's branch, reads review feedback, and pushes updates. |
 | `--review-pr` | PR number to review. Selects the `coding/pr-review-v1` workflow. The agent checks out the PR's branch, analyzes changes read-only, and posts structured review comments. |
-| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; omit to let the server resolve a default. |
-| `--attachment` | Attach a file or URL (repeatable). Local files ≤ 500 KB are sent inline; larger files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
+| `--workflow` | Workflow to run, as `<id>[@<constraint>]` (e.g. `coding/new-task-v1`). Overrides the workflow implied by `--pr`/`--review-pr`; without any of the three flags the CLI sends `coding/new-task-v1`. |
+| `--attachment` | Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; the other files use presigned upload. URLs are fetched during hydration. See [Attachments](#attachments) below. |
 | `--max-turns` | Maximum agent turns (1–500). Overrides per-repo Blueprint default. Platform default: 100. |
 | `--max-budget` | Maximum cost budget in USD (0.01–100). Overrides per-repo Blueprint default. No default limit. |
 | `--idempotency-key` | Idempotency key for deduplication. |
@@ -670,7 +670,7 @@ Attachments let you provide non-text context to the agent — screenshots of bug
 **Usage:**
 
 ```bash
-# Local file (auto-detects MIME type from content)
+# Local file (the MIME type comes from the file extension)
 node lib/bin/bgagent.js submit --repo owner/repo --task "Fix this layout" \
   --attachment screenshot.png
 
@@ -804,7 +804,7 @@ node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace
 node lib/bin/bgagent.js trace download <TASK_ID>
 
 # Pipe to jq for analysis
-node lib/bin/bgagent.js trace download <TASK_ID> | gunzip | jq -s .
+node lib/bin/bgagent.js trace download <TASK_ID> | jq -s .
 
 # Save raw gzip to a file
 node lib/bin/bgagent.js trace download <TASK_ID> -o trace.ndjson.gz
@@ -887,7 +887,7 @@ The `--scope` flag controls how long the approval carries forward within the run
 | `this_call` | Default. Approves only the exact tool call that is waiting. The next matching gate will ask again. |
 | `tool_type_session` | Approves every call to the same tool type (e.g. `Bash`) for the rest of this task. |
 | `tool_type:<name>` | Same as `tool_type_session`, but pinned to a specific tool (`tool_type:Bash`). |
-| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`Edit` + `Write` are grouped as file-write, etc.). For a tool that is in no group, `tool_group_session` covers that call only. |
+| `tool_group_session` / `tool_group:<name>` | Same pattern by tool group (`tool_group:file_write` covers `Edit` and `Write`). For a tool that is in no group, `tool_group_session` covers that call only. |
 | `bash_pattern:<glob>` | Approves Bash commands matching a glob (e.g. `bash_pattern:pytest*`). |
 | `write_path:<glob>` | Approves Write/Edit calls whose target path matches the glob (e.g. `write_path:tests/**`). |
 | `rule:<rule_id>` | Approves every future gate fired by a specific rule. |
@@ -924,13 +924,13 @@ If you trust a task to make a certain class of changes without interactive confi
 ```bash
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
-  --pre-approve write_path:tests/**
+  --pre-approve 'write_path:tests/**'
 
 # Per-task timeout override (platform default is 300s)
 node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --approval-timeout 600
 ```
 
-`--pre-approve` can be repeated up to the platform limit (see `bgagent submit --help` for the current cap). Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
+`--pre-approve` can be repeated up to 20 times. Valid scope forms are `all_session` and those of the `approve --scope` table above that name their target: `tool_type:<name>`, `tool_group:<name>`, `bash_pattern:<glob>`, `write_path:<glob>` and `rule:<rule_id>`. `this_call`, `tool_type_session` and `tool_group_session` stand for a call that is waiting for approval and are rejected. Hard-deny rules are still enforced — `--pre-approve` only short-circuits soft-deny rules.
 
 `--approval-timeout` sets the task-wide default; a rule with its own `@approval_timeout_s` annotation still takes the minimum of the two.
 

@@ -942,8 +942,8 @@ bgagent submit --repo org/app --task "Implement this design" \
 ```
 
 The CLI detects whether the argument is a local file path or URL:
-- **Local file <= 500 KB:** Read, base64-encode, detect MIME type from extension/magic bytes, send inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`
-- **Local file > 500 KB:** Send metadata only (with `expected_size_bytes`) in task creation, receive presigned POST policy (URL + form fields), upload directly to S3 via multipart form POST, call confirm-uploads.
+- **Local file <= 500 KB, while the inline files of the request stay within 3 MB in total:** Read, base64-encode, take the MIME type from the file extension, send inline as `{ type: 'image'|'file', data: '...', content_type: '...', filename: '...' }`
+- **Any other local file (> 500 KB, or one that would take the inline total over 3 MB):** Send metadata only (with `expected_size_bytes`) in task creation, receive presigned POST policy (URL + form fields), upload directly to S3 via multipart form POST, call confirm-uploads.
 - **URL:** Send as `{ type: 'url', url: '...' }`
 
 The CLI enforces size limits client-side (fail fast with a clear error rather than uploading 10 MB only to get a rejection). Progress bars show upload status for large files.
@@ -959,7 +959,7 @@ Same `attachments` array in the JSON body. For attachments > 500 KB, webhook cal
 When a user mentions `@Shoof` in a message that contains file uploads or image attachments:
 
 1. The `slack-events.ts` handler extracts `event.files[]` from the Slack event and passes the file references on with the mention.
-2. `slack-command-processor.ts` checks each file before it downloads anything: at most 10 files per message, the size Slack declares against the inline limits (500 KB per file, 3 MB for the files of one message), the MIME type against the allowed image and file types, and that the download URL is on a Slack domain.
+2. `slack-command-processor.ts` refuses a message with more than 10 files, then takes the files one by one and checks each before it downloads it: the size Slack declares against the inline limits (500 KB per file, 3 MB for the files of one message), the MIME type against the allowed image and file types, and that the download URL is on a Slack domain.
 3. It downloads each file that passed from its `url_private_download` with the workspace's bot token, and checks the downloaded size against the same two limits (the size Slack declares can differ from what arrives).
 4. The files are passed to `createTaskCore()` as inline attachments (`data` in base64), the shape a client sends on the [inline path](#convenience-path-inline-base64-small-attachments), and are validated there like any other inline attachment.
 
