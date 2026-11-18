@@ -63,21 +63,6 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _build_logs_url(task_id: str) -> str | None:
-    """Build a CloudWatch Logs console URL filtered to this task_id."""
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    log_group = os.environ.get("LOG_GROUP_NAME")
-    if not region or not log_group:
-        return None
-    # CloudWatch console uses $252F for / in the URL hash fragment
-    encoded_group = log_group.replace("/", "$252F")
-    return (
-        f"https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}"
-        f"#logsV2:log-groups/log-group/{encoded_group}/log-events"
-        f"?filterPattern=%22{task_id}%22"
-    )
-
-
 def write_submitted(
     task_id: str, repo_url: str = "", issue_number: str = "", task_description: str = ""
 ) -> None:
@@ -194,6 +179,10 @@ def write_running(task_id: str) -> None:
     queue-position lookup in ``get-task``) and the timestamp for when that
     status was entered (the stranded-task sweep in
     ``reconcile-stranded-tasks`` and ``bgagent ops stuck-tasks``).
+
+    ``updated_at`` moves with the status too, as in every status write of the
+    platform: the API returns it, and the console shows it, as the time of the
+    last change.
     """
     try:
         table = _get_table()
@@ -208,12 +197,7 @@ def write_running(task_id: str) -> None:
             ":submitted": "SUBMITTED",
             ":hydrating": "HYDRATING",
         }
-        update_parts = ["#s = :s", "started_at = :t", "status_created_at = :sca"]
-
-        logs_url = _build_logs_url(task_id)
-        if logs_url:
-            update_parts.append("logs_url = :logs")
-            expr_values[":logs"] = logs_url
+        update_parts = ["#s = :s", "started_at = :t", "status_created_at = :sca", "updated_at = :t"]
 
         table.update_item(
             Key={"task_id": task_id},
@@ -231,13 +215,13 @@ def write_running(task_id: str) -> None:
         ):
             log("INFO", "[task_state] write_running skipped: status precondition not met")
             return
-        log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}")
+        log("WARN", f"[task_state] write_running failed (best-effort): {type(e).__name__}: {e}")
 
 
 def write_terminal(task_id: str, status: str, result: dict | None = None) -> None:  # noqa: C901 -- 24 when the ceiling of 15 was set; must not grow
     """Transition a task to a terminal state (COMPLETED or FAILED).
 
-    Updates ``status_created_at`` alongside ``status`` — see
+    Updates ``status_created_at`` and ``updated_at`` alongside ``status`` — see
     :func:`write_running` for why.
     """
     try:
@@ -263,7 +247,12 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
             # transition straight to a terminal state.
             ":awaiting_approval": "AWAITING_APPROVAL",
         }
-        update_parts = ["#s = :s", "completed_at = :t", "status_created_at = :sca"]
+        update_parts = [
+            "#s = :s",
+            "completed_at = :t",
+            "status_created_at = :sca",
+            "updated_at = :t",
+        ]
 
         if result:
             if result.get("pr_url"):
@@ -402,7 +391,7 @@ def write_terminal(task_id: str, status: str, result: dict | None = None) -> Non
                         f"(terminal-state race).",
                     )
             return
-        log("WARN", f"[task_state] write_terminal failed (best-effort): {type(e).__name__}")
+        log("WARN", f"[task_state] write_terminal failed (best-effort): {type(e).__name__}: {e}")
 
 
 def write_trace_uri_conditional(task_id: str, uri: str) -> bool:
@@ -689,6 +678,7 @@ def transact_write_approval_request(
     approval_item.setdefault("task_id", {"S": task_id})
     approval_item.setdefault("request_id", {"S": request_id})
     approval_item.setdefault("status", {"S": "PENDING"})
+    now = _now_iso()
 
     try:
         ddb.transact_write_items(
@@ -706,7 +696,7 @@ def transact_write_approval_request(
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
                             "SET #s = :awaiting, awaiting_approval_request_id = :rid, "
-                            "status_created_at = :sca"
+                            "status_created_at = :sca, updated_at = :now"
                         ),
                         "ConditionExpression": "#s = :running",
                         "ExpressionAttributeNames": {"#s": "status"},
@@ -714,7 +704,8 @@ def transact_write_approval_request(
                             ":awaiting": {"S": _STATUS_AWAITING_APPROVAL},
                             ":running": {"S": _STATUS_RUNNING},
                             ":rid": {"S": request_id},
-                            ":sca": {"S": f"{_STATUS_AWAITING_APPROVAL}#{_now_iso()}"},
+                            ":sca": {"S": f"{_STATUS_AWAITING_APPROVAL}#{now}"},
+                            ":now": {"S": now},
                         },
                     }
                 },

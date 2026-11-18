@@ -57,6 +57,13 @@ def download_attachments(
 
     attachments_dir = Path(workspace) / ATTACHMENTS_DIR
     attachments_dir.mkdir(parents=True, exist_ok=True)
+    # The workspace is the repository clone. Its exclude file is local and never
+    # committed: listed there, the uploads stay out of `git status` and of a broad
+    # `git add`, so they cannot end up in the pull request.
+    git_info = Path(workspace) / ".git" / "info"
+    if git_info.is_dir():
+        with (git_info / "exclude").open("a") as exclude:
+            exclude.write(f"/{ATTACHMENTS_DIR}/\n")
 
     s3_client = tenant_client("s3")
     prepared: list[PreparedAttachment] = []

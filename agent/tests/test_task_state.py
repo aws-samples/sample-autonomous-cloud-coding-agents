@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import task_state
-from task_state import TaskFetchError, _build_logs_url, _now_iso
+from task_state import TaskFetchError, _now_iso
 
 
 class TestNowIso:
@@ -16,44 +16,6 @@ class TestNowIso:
         assert result[4] == "-"
         assert result[10] == "T"
         assert result.endswith("Z")
-
-
-class TestBuildLogsUrl:
-    def test_returns_none_without_region(self, monkeypatch):
-        monkeypatch.delenv("AWS_REGION", raising=False)
-        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-        monkeypatch.setenv("LOG_GROUP_NAME", "/aws/logs/test")
-        assert _build_logs_url("task-123") is None
-
-    def test_returns_none_without_log_group(self, monkeypatch):
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-        monkeypatch.delenv("LOG_GROUP_NAME", raising=False)
-        assert _build_logs_url("task-123") is None
-
-    def test_returns_url(self, monkeypatch):
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-        monkeypatch.setenv("LOG_GROUP_NAME", "/aws/logs/test")
-        url = _build_logs_url("task-123")
-        assert url is not None
-        assert "us-east-1" in url
-        assert "task-123" in url
-        assert "cloudwatch" in url
-
-    def test_encodes_slashes(self, monkeypatch):
-        monkeypatch.setenv("AWS_REGION", "us-east-1")
-        monkeypatch.setenv("LOG_GROUP_NAME", "/aws/vendedlogs/runtime/APP")
-        url = _build_logs_url("t1")
-        assert url is not None
-        # Slashes in log group are encoded as $252F
-        assert "$252F" in url
-
-    def test_uses_default_region(self, monkeypatch):
-        monkeypatch.delenv("AWS_REGION", raising=False)
-        monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
-        monkeypatch.setenv("LOG_GROUP_NAME", "/test")
-        url = _build_logs_url("t1")
-        assert url is not None
-        assert "eu-west-1" in url
 
 
 class TestGetTask:
@@ -201,6 +163,22 @@ class TestWriteRunningMaintainsStatusCreatedAt:
         assert ts.endswith("Z")
         assert len(ts) == 20
 
+    def test_stores_no_logs_url(self, monkeypatch):
+        """Nothing returns a ``logs_url`` (not the API, the CLI or the console), so
+        none is stored, whether or not a log group is configured."""
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("LOG_GROUP_NAME", "/aws/vendedlogs/runtime/APP")
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        task_state.write_running("t-run")
+
+        assert "logs_url" not in calls[0]["UpdateExpression"]
+
 
 class TestWriteTerminalMaintainsStatusCreatedAt:
     def test_completed_rewrites_sca_with_completed_prefix(self, monkeypatch):
@@ -280,6 +258,92 @@ class TestApprovalTransitionsMaintainStatusCreatedAt:
         upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
         assert "status_created_at = :sca" in upd["UpdateExpression"]
         assert upd["ExpressionAttributeValues"][":sca"] == {"S": "RUNNING#2026-11-15T03:35:00Z"}
+
+
+class TestStatusWritesStampUpdatedAt:
+    """``updated_at`` is when the status last changed. The API returns it, and the
+    console takes "Updated", a repository's last activity and its 24-hour counters
+    from it. Every status write of the platform sets it. The agent's must too, or
+    a task the agent finishes keeps the timestamp of the moment it started."""
+
+    @staticmethod
+    def _capture(monkeypatch):
+        calls: list[dict] = []
+
+        class _FakeTable:
+            def update_item(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-11-15T12:00:00Z")
+        return calls
+
+    def test_terminal_write_stamps_it_with_completed_at(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+
+        task_state.write_terminal("t-done", "COMPLETED")
+
+        assert "completed_at = :t" in calls[0]["UpdateExpression"]
+        assert "updated_at = :t" in calls[0]["UpdateExpression"]
+        assert calls[0]["ExpressionAttributeValues"][":t"] == "2026-11-15T12:00:00Z"
+
+    def test_running_write_stamps_it_with_started_at(self, monkeypatch):
+        calls = self._capture(monkeypatch)
+
+        task_state.write_running("t-run")
+
+        assert "started_at = :t" in calls[0]["UpdateExpression"]
+        assert "updated_at = :t" in calls[0]["UpdateExpression"]
+        assert calls[0]["ExpressionAttributeValues"][":t"] == "2026-11-15T12:00:00Z"
+
+    def test_approval_request_stamps_it(self, approval_tables_env, approval_row, monkeypatch):
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-11-15T03:30:00Z")
+        client = MagicMock()
+
+        task_state.transact_write_approval_request("01KTASK", "01KREQ", approval_row, client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][1]["Update"]
+        assert "updated_at = :now" in upd["UpdateExpression"]
+        assert upd["ExpressionAttributeValues"][":now"] == {"S": "2026-11-15T03:30:00Z"}
+
+
+class TestFailedStatusWriteNamesTheError:
+    """A status write is best-effort: when it fails, the log line is all that is
+    left. botocore raises ``ClientError`` for every service error, so the class
+    name alone cannot tell a denied write from a throttled or a malformed one."""
+
+    @staticmethod
+    def _refuse_writes(monkeypatch):
+        from botocore.exceptions import ClientError
+
+        class _FakeTable:
+            def update_item(self, **_kwargs):
+                raise ClientError(
+                    {"Error": {"Code": "ValidationException", "Message": "Item size exceeded"}},
+                    "UpdateItem",
+                )
+
+        monkeypatch.setattr(task_state, "_get_table", lambda: _FakeTable())
+
+    def test_write_terminal(self, monkeypatch, capfd):
+        self._refuse_writes(monkeypatch)
+
+        task_state.write_terminal("t-refused", "COMPLETED")
+
+        out = capfd.readouterr().out
+        assert "write_terminal failed" in out
+        assert "ValidationException" in out
+        assert "Item size exceeded" in out
+
+    def test_write_running(self, monkeypatch, capfd):
+        self._refuse_writes(monkeypatch)
+
+        task_state.write_running("t-refused")
+
+        out = capfd.readouterr().out
+        assert "write_running failed" in out
+        assert "ValidationException" in out
+        assert "Item size exceeded" in out
 
 
 class TestWriteTerminalTraceS3Uri:

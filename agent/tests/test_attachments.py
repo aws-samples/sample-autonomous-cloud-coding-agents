@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -159,6 +160,28 @@ class TestDownloadAttachments:
         local_path = Path(result[0].local_path)
         assert local_path.parent.name == config.attachment_id
         assert local_path.parent.parent.name == ATTACHMENTS_DIR
+
+    @patch("boto3.client")
+    def test_downloads_are_not_picked_up_by_git(self, mock_client, tmp_path):
+        """The workspace is the clone the pull request is made from: a broad
+        ``git add`` there must leave the user's uploads alone."""
+        config, content = _make_config()
+
+        mock_s3 = MagicMock()
+        mock_client.return_value = mock_s3
+        mock_s3.get_object.return_value = {"Body": MagicMock(read=lambda: content)}
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True)
+
+        download_attachments([config], str(tmp_path))
+
+        untracked = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert untracked == ""
 
     @patch("boto3.client")
     def test_multiple_attachments_all_verified(self, mock_client, tmp_path):
