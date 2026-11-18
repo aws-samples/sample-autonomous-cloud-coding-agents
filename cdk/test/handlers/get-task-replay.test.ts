@@ -233,9 +233,10 @@ describe('get-task-replay handler', () => {
 
     // Stopped on bytes, far short of the count cap.
     expect(data.events.length).toBeLessThan(MAX_REPLAY_EVENTS);
-    // The serialized response is right at the byte cap (± one 9 KB event; the
-    // handler measures raw events, the response omits stripped task_id/ttl, so
-    // it lands just under) and comfortably below Lambda's 6 MB limit.
+    // The serialized events are right at the byte cap (± one 9 KB event; the
+    // handler counts each raw event with its quotes escaped once more, as the
+    // Lambda response carries it, and the response omits stripped task_id/ttl,
+    // so they land just under) and comfortably below Lambda's 6 MB limit.
     const bytes = Buffer.byteLength(JSON.stringify(data.events), 'utf8');
     expect(bytes).toBeGreaterThan(MAX_REPLAY_EVENT_BYTES - 20000);
     expect(bytes).toBeLessThan(MAX_REPLAY_EVENT_BYTES + 20000);
@@ -244,6 +245,32 @@ describe('get-task-replay handler', () => {
     const warned = stdoutSpy.mock.calls.some(c => String(c[0]).includes('truncated'));
     stdoutSpy.mockRestore();
     expect(warned).toBe(true);
+  });
+
+  test('keeps the Lambda response under 6 MB when the previews are JSON (quotes escaped once more)', async () => {
+    // Lambda's limit applies to the proxy result as the runtime serializes it:
+    // `body` is a string in there, so each quote and backslash of the bundle is
+    // escaped a second time. A preview of JSON (`gh api`, a package.json, an MCP
+    // tool result) is full of them; the worst case is a preview of only quotes.
+    const stdoutSpy = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const jsonPreview = '"'.repeat(4000);
+    mockSend.mockImplementation((cmd: { _type: string; input?: { Limit?: number } }) => {
+      if (cmd._type === 'Get') return Promise.resolve({ Item: TASK_RECORD });
+      const items = Array.from({ length: cmd.input?.Limit ?? 0 }, (_, i) => ({
+        task_id: 'task-1',
+        event_id: `e${i}`,
+        event_type: 'agent_turn',
+        timestamp: 't',
+        metadata: { preview: jsonPreview },
+      }));
+      return Promise.resolve({ Items: items, LastEvaluatedKey: { k: 1 } });
+    });
+
+    const result = await handler(makeEvent());
+    stdoutSpy.mockRestore();
+
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(6 * 1024 * 1024);
+    expect(JSON.parse(result.body).data.events_truncation.reason).toBe('max_bytes');
   });
 
   test('returns 401 when unauthenticated', async () => {

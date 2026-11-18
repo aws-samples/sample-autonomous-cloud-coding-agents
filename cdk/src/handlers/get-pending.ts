@@ -33,7 +33,7 @@ if (!TASK_APPROVALS_TABLE_NAME) {
   throw new Error('get-pending handler requires TASK_APPROVALS_TABLE_NAME env var');
 }
 const USER_STATUS_INDEX_NAME = process.env.USER_STATUS_INDEX_NAME ?? 'user_id-status-index';
-const PENDING_RATE_LIMIT_PER_MINUTE = Number(process.env.PENDING_RATE_LIMIT_PER_MINUTE ?? '10');
+const PENDING_RATE_LIMIT_PER_MINUTE = Number(process.env.PENDING_RATE_LIMIT_PER_MINUTE ?? '60');
 const PENDING_LIST_LIMIT = 100;
 
 /**
@@ -44,9 +44,12 @@ const PENDING_LIST_LIMIT = 100;
  * `watch -n1 bgagent pending` call and exhaust DDB burst capacity for
  * the whole fleet (§10.1 finding #8).
  *
- * Rate-limited 10/min/user to belt-and-suspenders the GSI — runaway
+ * Rate-limited 60/min/user to belt-and-suspenders the GSI — runaway
  * polling from a single user is capped before it touches the GSI at
- * all.
+ * all. One call a second is sized for the operator console, which
+ * polls this route every 10 s in each visible window and again on each
+ * page change, window focus and decision: a limit near 10/min shows the
+ * approvals inbox a rate-limit error as soon as a second window is open.
  *
  * Response contains a `pending[]` of summaries, each with
  * `expires_at` derived from `created_at + timeout_s` so the CLI can

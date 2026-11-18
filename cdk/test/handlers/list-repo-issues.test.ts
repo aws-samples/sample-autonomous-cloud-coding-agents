@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import type { APIGatewayProxyEvent } from 'aws-lambda';
+import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 
 const mockLoadRepoConfig = jest.fn();
 const mockResolveGitHubToken = jest.fn();
@@ -30,7 +30,8 @@ jest.mock('../../src/handlers/shared/context-hydration', () => ({
 }));
 jest.mock('ulid', () => ({ ulid: jest.fn(() => 'REQ1') }));
 
-import { handler } from '../../src/handlers/list-repo-issues';
+/** Loaded anew for each test: the handler keeps its answers per repository for a minute. */
+let handler: (event: APIGatewayProxyEvent) => Promise<APIGatewayProxyResult>;
 
 const PLATFORM_SECRET = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:platform';
 const fetchMock = jest.fn();
@@ -46,16 +47,23 @@ function githubResponse(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   process.env.REPO_TABLE_NAME = 'RepoTable';
   process.env.GITHUB_TOKEN_SECRET_ARN = PLATFORM_SECRET;
   mockLoadRepoConfig.mockReset().mockResolvedValue({ repo: 'acme/game', status: 'active' });
   mockResolveGitHubToken.mockReset().mockResolvedValue('ghp_secret_token');
   fetchMock.mockReset();
   global.fetch = fetchMock as unknown as typeof fetch;
+  jest.resetModules();
+  ({ handler } = await import('../../src/handlers/list-repo-issues'));
 });
 
 const body = (res: { body: string }) => JSON.parse(res.body);
+const issueNumbers = (res: { body: string }) => body(res).data.issues.map((i: { number: number }) => i.number);
+
+/** Items as GitHub's "list repository issues" returns them: pull requests carry `pull_request`. */
+const issue = (number: number) => ({ number, title: `Issue ${number}`, html_url: `https://github.com/acme/game/issues/${number}`, updated_at: 'x' });
+const pullRequest = (number: number) => ({ ...issue(number), pull_request: { url: 'p' } });
 
 describe('list-repo-issues', () => {
   test('returns open issues (not pull requests) with titles and metadata only', async () => {
@@ -74,12 +82,88 @@ describe('list-repo-issues', () => {
     expect(res.body).not.toContain('secret plans');
   });
 
+  test('reads further pages when pull requests fill the first one', async () => {
+    // GitHub lists pull requests on this endpoint and has no parameter that leaves
+    // them out: 100 recently updated pull requests would hide every issue.
+    fetchMock
+      .mockResolvedValueOnce(githubResponse(Array.from({ length: 100 }, (_, i) => pullRequest(1000 + i))))
+      .mockResolvedValueOnce(githubResponse([issue(3), issue(2), issue(1)]));
+    const res = await handler(makeEvent());
+    expect(issueNumbers(res)).toEqual([3, 2, 1]);
+    expect(fetchMock.mock.calls.map(([url]) => new URL(url).searchParams.get('page'))).toEqual(['1', '2']);
+    // One deadline for all pages keeps the total inside the Lambda's timeout.
+    expect(fetchMock.mock.calls[1][1].signal).toBe(fetchMock.mock.calls[0][1].signal);
+  });
+
+  test('answers the 50 most recently updated issues and stops reading', async () => {
+    fetchMock.mockResolvedValue(githubResponse(Array.from({ length: 100 }, (_, i) => issue(100 - i))));
+    const res = await handler(makeEvent());
+    expect(issueNumbers(res)).toEqual(Array.from({ length: 50 }, (_, i) => 100 - i));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('reads at most three pages of a repository that shows only pull requests', async () => {
+    fetchMock.mockResolvedValue(githubResponse(Array.from({ length: 100 }, (_, i) => pullRequest(1000 + i))));
+    const res = await handler(makeEvent());
+    expect(res.statusCode).toBe(200);
+    expect(issueNumbers(res)).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  test('answers 503, not a short list, when a later page fails', async () => {
+    // What the first page gave is not the repository's list: answered alone it would
+    // hide the issues of the next page, the fault that reading further pages removes.
+    fetchMock
+      .mockResolvedValueOnce(githubResponse([...Array.from({ length: 99 }, (_, i) => pullRequest(1000 + i)), issue(7)]))
+      .mockRejectedValueOnce(new Error('timeout'));
+    const res = await handler(makeEvent());
+    expect(res.statusCode).toBe(503);
+    expect(body(res).error.message).toMatch(/GitHub did not answer/);
+  });
+
+  test('lists an issue once when an update moves it onto the next page between two reads', async () => {
+    fetchMock
+      .mockResolvedValueOnce(githubResponse([...Array.from({ length: 99 }, (_, i) => pullRequest(1000 + i)), issue(7)]))
+      .mockResolvedValueOnce(githubResponse([issue(7), issue(6)]));
+    const res = await handler(makeEvent());
+    expect(issueNumbers(res)).toEqual([7, 6]);
+  });
+
+  test('answers a repeated request from memory, without spending another GitHub call', async () => {
+    // Every call spends the repository token that the orchestrator and the agents
+    // share; a script or a reloading tab must not be able to use up its hourly budget.
+    fetchMock.mockResolvedValue(githubResponse([issue(2)]));
+    const first = await handler(makeEvent());
+    const second = await handler(makeEvent());
+    expect(second.statusCode).toBe(200);
+    expect(body(second)).toEqual(body(first));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('asks GitHub again once the kept answer is a minute old', async () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    fetchMock.mockResolvedValueOnce(githubResponse([issue(2)])).mockResolvedValueOnce(githubResponse([issue(3), issue(2)]));
+    await handler(makeEvent());
+    now.mockReturnValue(1_000_000 + 60_000);
+    const later = await handler(makeEvent());
+    now.mockRestore();
+    expect(issueNumbers(later)).toEqual([3, 2]);
+  });
+
+  test('keeps the answers of two repositories apart', async () => {
+    mockLoadRepoConfig.mockImplementation(async (repo: string) => ({ repo, status: 'active' }));
+    fetchMock.mockImplementation(async (url: string) => githubResponse([issue(url.includes('/acme/game/') ? 1 : 2)]));
+    await handler(makeEvent('acme%2Fgame'));
+    const other = await handler(makeEvent('acme%2Fengine'));
+    expect(body(other).data).toEqual({ repo: 'acme/engine', issues: [expect.objectContaining({ number: 2 })] });
+  });
+
   test('calls GitHub server-side with the token, which never reaches the response', async () => {
     fetchMock.mockResolvedValue(githubResponse([]));
     const res = await handler(makeEvent());
     expect(mockResolveGitHubToken).toHaveBeenCalledWith(PLATFORM_SECRET);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe('https://api.github.com/repos/acme/game/issues?state=open&sort=updated&direction=desc&per_page=50');
+    expect(url).toBe('https://api.github.com/repos/acme/game/issues?state=open&sort=updated&direction=desc&per_page=100&page=1');
     expect(init.headers.Authorization).toBe('token ghp_secret_token');
     expect(JSON.stringify(res)).not.toContain('ghp_secret_token');
   });

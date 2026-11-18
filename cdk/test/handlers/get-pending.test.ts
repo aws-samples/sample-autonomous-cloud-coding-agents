@@ -106,6 +106,26 @@ describe('get-pending', () => {
     expect(res.statusCode).toBe(429);
   });
 
+  test('the default limit is one call a second, enough for the console in several windows', async () => {
+    // No deployment sets PENDING_RATE_LIMIT_PER_MINUTE, so the default is the
+    // limit users meet. The console polls this route every 10 s in each visible
+    // window (6 calls a minute) and once more per page change, window focus and
+    // decision: two windows alone are 12 a minute.
+    jest.resetModules();
+    delete process.env.PENDING_RATE_LIMIT_PER_MINUTE;
+    const { handler: handlerWithDefaultLimit } = await import('../../src/handlers/get-pending');
+    process.env.PENDING_RATE_LIMIT_PER_MINUTE = '10';
+    mockSend
+      .mockResolvedValueOnce({}) // rate-limit
+      .mockResolvedValueOnce({ Items: [] });
+
+    const res = await handlerWithDefaultLimit(makeEvent());
+
+    expect(res.statusCode).toBe(200);
+    const rateLimitCall = mockSend.mock.calls.find((c) => c[0]._type === 'Update');
+    expect(rateLimitCall![0].input.ExpressionAttributeValues[':max']).toBe(60);
+  });
+
   test('returns empty pending[] when query returns no items', async () => {
     mockSend
       .mockResolvedValueOnce({}) // rate-limit
