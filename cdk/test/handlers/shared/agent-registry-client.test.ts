@@ -340,6 +340,7 @@ describe('AgentRegistryClient', () => {
       const fake = new FakeClient();
       fake.settleStatus = 'CREATING'; // never settles
       const client = makeClient(fake);
+      const startedAt = Date.now();
       const p = client.publish({
         kind: 'mcp_server',
         namespace: 'acme',
@@ -359,6 +360,11 @@ describe('AgentRegistryClient', () => {
       await assertion;
       await causeAssertion;
       expect(fake.sent).toEqual(['create']);
+      // The wait must be over while the publish function is still running: it has
+      // 28 s (registry-api.test.ts) for this wait and the calls around it. When the
+      // wait outlasts the function, none of the above reaches the caller, who gets
+      // a gateway error that names no record.
+      expect(Date.now() - startedAt).toBeLessThanOrEqual(25_000);
     } finally {
       jest.useRealTimers();
     }
@@ -723,6 +729,65 @@ describe('AgentRegistryClient', () => {
     await expect(client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0')).rejects.toBeInstanceOf(
       RegistryRecordMalformedError,
     );
+  });
+
+  // --- one asset is read without fetching the rest of its namespace -----------
+
+  // The list summary carries the record name, so only the records of the asset that
+  // was asked for need a GetRegistryRecord. Fetching every record of the kind and
+  // namespace made resolve and the publish pre-check slower with each asset published
+  // beside the one in question.
+  const seedNeighbours = (fake: FakeClient): void => {
+    for (const name of ['other-a', 'other-b', 'other-c']) {
+      fake.seed({
+        name: `mcp_server/acme/${name}`,
+        recordType: 'MCP',
+        descriptors: { mcpServer: { data: JSON.stringify({ name: `acme/${name}`, version: '1.0.0', _meta: { [RUNTIME_META_KEY]: { transport: 'http', url: 'https://x' } } }) } },
+        recordVersion: '1.0.0',
+        status: 'APPROVED',
+      });
+    }
+  };
+  const recordsFetched = (send: jest.SpyInstance): number =>
+    send.mock.calls.filter(([cmd]) => cmd instanceof GetRegistryRecordCommand).length;
+
+  test('resolve fetches the records of the asset it resolves, not those of its neighbours', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedNeighbours(fake);
+    seedHealthyMcp(fake, {});
+    const send = jest.spyOn(fake, 'send');
+
+    const parsed = parseRef('registry://mcp_server/acme/pdf-tools@1.0.0');
+    if (!parsed.ok) throw new Error('fixture ref should parse');
+    const asset = await client.resolve(parsed.ref);
+
+    expect(asset).toMatchObject({ name: 'pdf-tools', version: '1.0.0' });
+    expect(recordsFetched(send)).toBe(1);
+  });
+
+  test('getRecord (the publish pre-check) fetches no record of another asset', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedNeighbours(fake);
+    const send = jest.spyOn(fake, 'send');
+
+    expect(await client.getRecord('mcp_server', 'acme', 'pdf-tools', '1.0.0')).toBeNull();
+    expect(recordsFetched(send)).toBe(0);
+  });
+
+  test('listBrowseEntries filtered by name fetches and returns that asset only', async () => {
+    const fake = new FakeClient();
+    const client = makeClient(fake);
+    seedNeighbours(fake);
+    seedHealthyMcp(fake, {});
+    const send = jest.spyOn(fake, 'send');
+
+    const entries = await client.listBrowseEntries({ kind: 'mcp_server', namespace: 'acme', name: 'pdf-tools' });
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ malformed: false, record: { name: 'pdf-tools' } });
+    expect(recordsFetched(send)).toBe(1);
   });
 
   // --- wrong-shape descriptors (valid JSON, not an object) --------------------

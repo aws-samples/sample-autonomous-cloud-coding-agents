@@ -226,4 +226,6 @@ export interface PublishInput {
 export interface ListFilter {
   readonly kind?: string;
   readonly namespace?: string;
+  /** Asset name: with it, only the records of that asset are fetched. */
+  readonly name?: string;
 }

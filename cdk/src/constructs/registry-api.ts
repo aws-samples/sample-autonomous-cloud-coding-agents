@@ -45,6 +45,11 @@ import { Construct } from 'constructs';
 /** Standard API-handler Lambda timeout (seconds); mirrors TaskApi's handlers. */
 const REGISTRY_HANDLER_TIMEOUT_SECONDS = 15;
 
+/** Publish Lambda timeout (seconds). Publish waits up to 20 s for the new record to
+ *  leave CREATING (the poll budget in agent-registry-client.ts), between its other
+ *  calls, so it gets what API Gateway's 29 s integration limit allows. */
+const REGISTRY_PUBLISH_TIMEOUT_SECONDS = 28;
+
 export interface RegistryApiProps extends NestedStackProps {
   /** Agent Registry id the handlers target (via `AGENT_REGISTRY_ID`). */
   readonly agentRegistryId: string;
@@ -88,7 +93,11 @@ export class RegistryApi extends NestedStack {
     // bundle it (do not externalize) — mirrors the provisioning handler.
     const bundling: lambda.BundlingOptions = { externalModules: [] };
 
-    const registryFn = (fnId: string, entry: string): lambda.NodejsFunction =>
+    const registryFn = (
+      fnId: string,
+      entry: string,
+      timeoutSeconds = REGISTRY_HANDLER_TIMEOUT_SECONDS,
+    ): lambda.NodejsFunction =>
       new lambda.NodejsFunction(this, fnId, {
         // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- `entry` is always one of four hardcoded literals below (registry-{publish,resolve,list,show}.ts); never user input. handlersDir is a compile-time __dirname join.
         entry: path.join(handlersDir, entry),
@@ -97,10 +106,10 @@ export class RegistryApi extends NestedStack {
         architecture: Architecture.ARM_64,
         environment,
         bundling,
-        timeout: Duration.seconds(REGISTRY_HANDLER_TIMEOUT_SECONDS),
+        timeout: Duration.seconds(timeoutSeconds),
       });
 
-    const publishFn = registryFn('RegistryPublishFn', 'registry-publish.ts');
+    const publishFn = registryFn('RegistryPublishFn', 'registry-publish.ts', REGISTRY_PUBLISH_TIMEOUT_SECONDS);
     const resolveFn = registryFn('RegistryResolveFn', 'registry-resolve.ts');
     const listFn = registryFn('RegistryListFn', 'registry-list.ts');
     const showFn = registryFn('RegistryShowFn', 'registry-show.ts');

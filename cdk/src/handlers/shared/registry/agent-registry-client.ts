@@ -68,7 +68,11 @@ import {
 
 const NAME_SEP = '/';
 const RECORD_CREATE_POLL_MS = 2000;
-const RECORD_CREATE_MAX_POLLS = 30;
+// 20 s of waiting. The publish Lambda, the only caller, has 28 s for this wait and
+// the calls around it (REGISTRY_PUBLISH_TIMEOUT_SECONDS in constructs/registry-api.ts).
+// A wait the function cannot outlive ends in a gateway error that names no record,
+// instead of the RegistryPublishIncompleteError below.
+const RECORD_CREATE_MAX_POLLS = 10;
 
 /** True when a runtime payload is a non-empty object — the fail-closed gate that
  *  keeps `resolve` from returning a record whose runtime is missing/`{}` (which
@@ -438,7 +442,7 @@ export class AgentRegistryClient implements RegistryClient {
   ): Promise<RegistryRecord | null> {
     // Agent Registry keys records by opaque id, not our coordinates, and List is
     // eventually consistent — so scan the (small) record set and match.
-    const entries = await this.loadEntries({ kind, namespace });
+    const entries = await this.loadEntries({ kind, namespace, name });
     const match = entries.find(
       (e) => entryCoords(e).name === name && entryCoords(e).version === version,
     );
@@ -489,7 +493,9 @@ export class AgentRegistryClient implements RegistryClient {
 
   /** Load every record matching `filter` as an entry that is either a parsed
    *  record or a malformed marker. O(n): List + one GetRegistryRecord per
-   *  summary, and every read path (resolve/show/getRecord) funnels through here.
+   *  summary that passes the filter (the summary carries the record name, so a
+   *  record of another kind, namespace or asset costs no round trip), and every
+   *  read path (resolve/show/getRecord) funnels through here.
    *  Fine at MVP catalog sizes; revisit with a secondary coordinate index if
    *  large catalogs make the per-record round trips material. */
   private async loadEntries(filter?: ListFilter): Promise<RecordEntry[]> {
@@ -507,6 +513,7 @@ export class AgentRegistryClient implements RegistryClient {
         const decoded = this.decodeName(summary.name ?? '');
         if (filter?.kind && decoded.kind !== filter.kind) continue;
         if (filter?.namespace && decoded.namespace !== filter.namespace) continue;
+        if (filter?.name && decoded.name !== filter.name) continue;
         const recordId = summary.recordArn ? this.idFromArn(summary.recordArn) : summary.recordId;
         if (!recordId) continue;
         const entry = await this.loadRecordById(recordId);
@@ -524,7 +531,7 @@ export class AgentRegistryClient implements RegistryClient {
     // Consider malformed entries as candidates too: a malformed record still has
     // a readable version/status from its envelope, so if it is the winning
     // version we must reject it rather than silently downgrade to a lower one.
-    const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace });
+    const all = await this.loadEntries({ kind: ref.kind, namespace: ref.namespace, name: ref.name });
     const forName = all.filter((e) => entryCoords(e).name === ref.name);
 
     // Only APPROVED / DEPRECATED are resolution candidates.
