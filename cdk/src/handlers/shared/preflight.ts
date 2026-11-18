@@ -82,36 +82,38 @@ function splitRepo(repo: string): { owner: string; name: string } | undefined {
   return { owner: repo.slice(0, idx), name: repo.slice(idx + 1) };
 }
 
+/**
+ * The token's permission on the repository, or undefined when GitHub reports none.
+ * A lookup that fails (network error, timeout, 5xx, 429) throws: the caller reads
+ * undefined as "no permission", and a failed lookup says nothing about the token.
+ */
 async function fetchViewerPermission(repo: string, token: string): Promise<string | undefined> {
   const parts = splitRepo(repo);
   if (!parts) {
     return undefined;
   }
-  try {
-    const resp = await fetch('https://api.github.com/graphql', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-      body: JSON.stringify({
-        query: 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){viewerPermission}}',
-        variables: { owner: parts.owner, name: parts.name },
-      }),
-      signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
-    });
-    if (!resp.ok) {
-      return undefined;
-    }
-    const body = await resp.json() as { data?: { repository?: { viewerPermission?: string | null } } };
-    const perm = body.data?.repository?.viewerPermission;
-    return perm ?? undefined;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    logger.warn('GitHub GraphQL viewerPermission lookup failed', { repo, error: detail });
-    return undefined; // nosemgrep: ts-silent-success-masking -- permission preflight is fail-open; undefined skips the check without blocking task creation
+  const resp = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      query: 'query($owner:String!,$name:String!){repository(owner:$owner,name:$name){viewerPermission}}',
+      variables: { owner: parts.owner, name: parts.name },
+    }),
+    signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
+  });
+  if (resp.status >= 500 || resp.status === 429) {
+    throw new Error(`GitHub GraphQL API returned HTTP ${resp.status} for ${repo}`);
   }
+  if (!resp.ok) {
+    return undefined;
+  }
+  const body = await resp.json() as { data?: { repository?: { viewerPermission?: string | null } } };
+  const perm = body.data?.repository?.viewerPermission;
+  return perm ?? undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +167,12 @@ async function checkRepoAccess(repo: string, token: string, readOnly: boolean): 
     });
     const durationMs = Date.now() - start;
     if (!resp.ok) {
-      if (resp.status === 404 || resp.status === 403) {
+      // GitHub answers 403 to a rate-limited token too, with x-ratelimit-remaining: 0
+      // (primary limit) or a retry-after header (secondary limit), while /rate_limit
+      // keeps answering 200. That clears by itself and says nothing about access.
+      const rateLimited = resp.status === 403
+        && (resp.headers.get('x-ratelimit-remaining') === '0' || resp.headers.has('retry-after'));
+      if ((resp.status === 404 || resp.status === 403) && !rateLimited) {
         return {
           check: 'repo_access',
           passed: false,
@@ -179,7 +186,7 @@ async function checkRepoAccess(repo: string, token: string, readOnly: boolean): 
         check: 'repo_access',
         passed: false,
         reason: PreflightFailureReason.GITHUB_UNREACHABLE,
-        detail: `GitHub API returned HTTP ${resp.status} for ${repo}`,
+        detail: `GitHub API returned HTTP ${resp.status} for ${repo}${rateLimited ? ' (rate limited)' : ''}`,
         httpStatus: resp.status,
         durationMs,
       };
@@ -260,7 +267,10 @@ async function checkPrAccessible(repo: string, prNumber: number, token: string):
       return {
         check: 'pr_accessible',
         passed: false,
-        reason: PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED,
+        // Only a 404 or a 403 says something about the pull request.
+        reason: resp.status === 404 || resp.status === 403
+          ? PreflightFailureReason.PR_NOT_FOUND_OR_CLOSED
+          : PreflightFailureReason.GITHUB_UNREACHABLE,
         detail: `GitHub API returned HTTP ${resp.status} for PR #${prNumber} in ${repo}`,
         httpStatus: resp.status,
         durationMs,
