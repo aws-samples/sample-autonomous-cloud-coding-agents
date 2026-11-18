@@ -246,9 +246,11 @@ def _app_actor_request(
         )
         if not HTTPStatus.OK <= response.status_code < HTTPStatus.MULTIPLE_CHOICES:
             proxy_error = _proxy_error_code(response.text)
-            non_retryable = (
+            # The rule of jira-app-actor.ts: a 429 (Jira's rate limit, which the proxy
+            # passes through) and a 5xx are transient, the rest is refused for good.
+            non_retryable = proxy_error == "proxy_not_configured" or (
                 response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR
-                or proxy_error == "proxy_not_configured"
+                and response.status_code != HTTPStatus.TOO_MANY_REQUESTS
             )
             level = "ERROR" if non_retryable else "WARN"
             error_id = (

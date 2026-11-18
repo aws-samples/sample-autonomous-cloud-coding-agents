@@ -174,16 +174,14 @@ async def _call_gateway(url: str, region: str, tool_suffix: str, arguments: dict
         # The transport does not close a client it is handed, so this block does.
         httpx2.AsyncClient(auth=auth, timeout=timeout) as http_client,
         streamable_http_client(url, http_client=http_client) as (read, write),
-        ClientSession(read, write) as session,
+        # The session's timeout bounds each of its requests: the handshake and the
+        # listing as well as the call.
+        ClientSession(read, write, read_timeout_seconds=_GATEWAY_TIMEOUT_S) as session,
     ):
         await session.initialize()
         listed = await session.list_tools()
         remote_name = _match_remote_tool(listed.tools, tool_suffix)
-        return await session.call_tool(
-            remote_name,
-            arguments,
-            read_timeout_seconds=_GATEWAY_TIMEOUT_S,
-        )
+        return await session.call_tool(remote_name, arguments)
 
 
 #: The tool description shown to the model. Module-level so the wording is one
@@ -249,23 +247,23 @@ async def _repo_config_impl(gateway_url: str, region: str, args: dict[str, Any])
         }
     try:
         result = await _call_gateway(gateway_url, region, REMOTE_REPO_CONFIG_TOOL, {"repo": repo})
-    except _expected_gateway_errors() as exc:
-        # Routine federation hiccup (network / transport / gateway). The agent
-        # can proceed without the config; a failed call must not abort the task.
-        log("WARN", f"gateway repo_config failed for {repo!r}: {type(exc).__name__}: {exc}")
-        detail = f"{type(exc).__name__}: {exc}"
-        return {
-            "content": [{"type": "text", "text": f"Error calling repo_config: {detail}"}],
-            "isError": True,
-        }
-    except Exception as exc:
-        # Unexpected: a coding or deployment-contract bug (bad response shape,
-        # missing/ambiguous federated tool, …). Still don't abort the task, but
-        # surface it loudly so it is not buried in a WARN triage line.
-        log_error_cw(
-            f"gateway repo_config UNEXPECTED failure for {repo!r}: {type(exc).__name__}: {exc}"
-        )
-        detail = f"{type(exc).__name__}: {exc}"
+    except Exception as raised:
+        # The MCP client runs in anyio task groups, which raise every failure
+        # inside an ExceptionGroup, once per nested context manager. Classify and
+        # report the cause, not "unhandled errors in a TaskGroup".
+        cause = raised
+        while isinstance(cause, ExceptionGroup) and len(cause.exceptions) == 1:
+            cause = cause.exceptions[0]
+        detail = f"{type(cause).__name__}: {cause}"
+        if isinstance(cause, _expected_gateway_errors()):
+            # Routine federation hiccup (network / transport / gateway). The agent
+            # can proceed without the config; a failed call must not abort the task.
+            log("WARN", f"gateway repo_config failed for {repo!r}: {detail}")
+        else:
+            # Unexpected: a coding or deployment-contract bug (bad response shape,
+            # missing/ambiguous federated tool, …). Still don't abort the task, but
+            # surface it loudly so it is not buried in a WARN triage line.
+            log_error_cw(f"gateway repo_config UNEXPECTED failure for {repo!r}: {detail}")
         return {
             "content": [{"type": "text", "text": f"Error calling repo_config: {detail}"}],
             "isError": True,

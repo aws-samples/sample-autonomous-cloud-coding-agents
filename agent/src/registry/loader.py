@@ -21,6 +21,7 @@ import os
 import subprocess
 from typing import Any
 
+from channel_mcp import read_existing_mcp_config
 from shell import log
 
 # Seconds to allow each git plumbing call when protecting .mcp.json from commit.
@@ -86,25 +87,6 @@ def _to_mcp_config(runtime: dict[str, Any], server_key: str) -> dict[str, Any]:
     return mapped
 
 
-def _read_existing_mcp_config(path: str) -> dict[str, Any]:
-    """Return the parsed .mcp.json at ``path``, or {} if absent/invalid.
-
-    Mirrors ``channel_mcp._read_existing_mcp_config`` — a malformed file is
-    logged and treated as absent rather than crashing the agent.
-    """
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            parsed = json.load(f)
-        if isinstance(parsed, dict):
-            return parsed
-        log("WARN", f"Ignoring non-object .mcp.json at {path} (got {type(parsed).__name__})")
-    except (OSError, json.JSONDecodeError) as e:
-        log("WARN", f"Failed to read existing .mcp.json at {path}: {type(e).__name__}: {e}")
-    return {}
-
-
 class RegistryAssetLoadError(RuntimeError):
     """A resolved asset could not be applied. Raised so the task fails-closed
     rather than running with an audit record claiming an asset that was never
@@ -112,7 +94,7 @@ class RegistryAssetLoadError(RuntimeError):
     a pinned asset unloaded — missing repo dir, empty/invalid runtime, structurally
     invalid connection config, or a write error (see :func:`apply_mcp_assets`). The
     only warn-and-continue case is a pre-existing malformed ``.mcp.json`` on disk
-    (:func:`_read_existing_mcp_config`), which is replaced, not fatal."""
+    (:func:`channel_mcp.read_existing_mcp_config`), which is replaced, not fatal."""
 
 
 def _protect_mcp_json_from_commit(repo_dir: str, mcp_path: str) -> None:
@@ -188,7 +170,7 @@ def apply_mcp_assets(repo_dir: str, resolved_assets: list[dict[str, Any]]) -> li
         )
 
     mcp_path = os.path.join(repo_dir, ".mcp.json")
-    config = _read_existing_mcp_config(mcp_path)
+    config = read_existing_mcp_config(mcp_path)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
         servers = {}

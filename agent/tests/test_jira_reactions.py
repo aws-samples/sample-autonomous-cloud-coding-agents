@@ -156,6 +156,28 @@ class TestStartComment:
         assert "proxy_error=invalid_signature" in output
         assert "do-not-log" not in output
 
+    def test_rate_limit_from_the_proxy_is_logged_as_transient(self, monkeypatch, capfd):
+        # A 429 is Jira's rate limit, which the proxy passes through: not a request
+        # it refuses for good. The Lambda copy of this rule (jira-app-actor.ts)
+        # classifies it as transient, and the two must agree.
+        monkeypatch.setenv("JIRA_APP_ACTOR_CONFIGURED", "1")
+        monkeypatch.setenv(
+            "JIRA_APP_ACTOR_PROXY_URL",
+            "https://install.webtrigger.atlassian.app/public/trigger",
+        )
+        monkeypatch.setenv("JIRA_APP_ACTOR_SHARED_SECRET", "s" * 64)
+        with patch(
+            "jira_reactions.requests.post",
+            return_value=_resp(429, '{"error":"rate_limited"}'),
+        ):
+            comment_task_started("jira", JIRA_META)
+
+        proxy_line = next(
+            line for line in capfd.readouterr().out.splitlines() if "Forge app proxy" in line
+        )
+        assert "error_id=JIRA_APP_ACTOR_PROXY_TRANSIENT" in proxy_line
+        assert " WARN " in proxy_line
+
     def test_posts_adf_comment_to_correct_url(self, monkeypatch):
         monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
         with patch("jira_reactions.requests.post", return_value=_resp(201)) as post:

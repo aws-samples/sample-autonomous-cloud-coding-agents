@@ -150,6 +150,44 @@ class TestRepoConfigImpl:
         assert "UNEXPECTED" in loud[0]
         assert "unexpected shape" in result["content"][0]["text"]
 
+    def test_expected_error_inside_exception_groups_logs_warn_with_its_cause(
+        self, monkeypatch, capfd
+    ):
+        # The MCP client runs in anyio task groups, which raise every failure inside
+        # an ExceptionGroup, once per nested context manager. The cause decides.
+        loud = []
+        monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
+
+        async def _timeout(*a, **k):
+            group = "unhandled errors in a TaskGroup"
+            raise ExceptionGroup(group, [ExceptionGroup(group, [TimeoutError("slow gateway")])])
+
+        monkeypatch.setattr(gw, "_call_gateway", _timeout)
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == (
+            "Error calling repo_config: TimeoutError: slow gateway"
+        )
+        assert loud == []
+        assert "WARN" in capfd.readouterr().out
+
+    def test_unexpected_error_inside_an_exception_group_is_logged_with_its_cause(self, monkeypatch):
+        # The one message that names a deployment fault must survive the wrapping.
+        loud = []
+        monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
+        cause = "Gateway exposes no 'abca_repo_config' tool (available: other)"
+
+        async def _no_tool(*a, **k):
+            raise ExceptionGroup("unhandled errors in a TaskGroup", [RuntimeError(cause)])
+
+        monkeypatch.setattr(gw, "_call_gateway", _no_tool)
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "org/repo"}))
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == f"Error calling repo_config: RuntimeError: {cause}"
+        assert len(loud) == 1
+        assert "UNEXPECTED" in loud[0]
+        assert cause in loud[0]
+
     def test_propagates_remote_is_error_flag(self, monkeypatch):
         async def _err_result(*a, **k):
             return SimpleNamespace(
@@ -227,8 +265,9 @@ class TestCallGateway:
         calls = {}
 
         class _Session:
-            def __init__(self, read, write):
+            def __init__(self, read, write, read_timeout_seconds=None):
                 calls["session_args"] = (read, write)
+                calls["read_timeout_seconds"] = read_timeout_seconds
 
             async def __aenter__(self):
                 return self
@@ -244,9 +283,8 @@ class TestCallGateway:
                     tools=[SimpleNamespace(name="abca-repo-config___abca_repo_config")]
                 )
 
-            async def call_tool(self, name, arguments, read_timeout_seconds=None):
+            async def call_tool(self, name, arguments):
                 calls["call"] = (name, arguments)
-                calls["read_timeout_seconds"] = read_timeout_seconds
                 return SimpleNamespace(structured_content={"ok": True}, content=[], is_error=False)
 
         def _fake_transport(url, *, http_client):
@@ -274,7 +312,8 @@ class TestCallGateway:
         assert calls["initialized"] is True
         # Matched the target-prefixed federated tool name and forwarded args.
         assert calls["call"] == ("abca-repo-config___abca_repo_config", {"repo": "o/r"})
-        # One round-trip is still capped at 20 s, now passed as seconds.
+        # One round-trip is capped at 20 s, and the cap is the session's: it holds
+        # for the handshake and the listing as well as for the call.
         assert calls["read_timeout_seconds"] == 20.0
         assert result.structured_content == {"ok": True}
 
@@ -318,6 +357,21 @@ class TestRealMcpTypes:
     empty, successful result without failing.
     """
 
+    @staticmethod
+    def _serve(monkeypatch, handler) -> None:
+        """Answer the bridge's HTTP requests with ``handler`` and give it keys to sign with."""
+        import httpx2
+        from botocore.credentials import Credentials
+
+        real_client = httpx2.AsyncClient
+        monkeypatch.setattr(
+            "httpx2.AsyncClient",
+            lambda **kwargs: real_client(transport=httpx2.MockTransport(handler), **kwargs),
+        )
+        creds = Credentials("AKIDEXAMPLE", "secret", "sessiontoken")
+        fake_session = SimpleNamespace(get_credentials=lambda: creds)
+        monkeypatch.setattr("botocore.session.get_session", lambda: fake_session)
+
     def test_reads_structured_content_and_error_flag_of_a_real_result(self, monkeypatch):
         from mcp.types import CallToolResult, TextContent
 
@@ -359,7 +413,6 @@ class TestRealMcpTypes:
         wire spelling (camelCase). Nothing leaves the process.
         """
         import httpx2
-        from botocore.credentials import Credentials
         from mcp.types import CallToolResult
 
         remote_tool = "abca-repo-config___abca_repo_config"
@@ -394,14 +447,7 @@ class TestRealMcpTypes:
                 json={"jsonrpc": "2.0", "id": message["id"], "result": results[rpc_method]},
             )
 
-        real_client = httpx2.AsyncClient
-        monkeypatch.setattr(
-            "httpx2.AsyncClient",
-            lambda **kwargs: real_client(transport=httpx2.MockTransport(_gateway), **kwargs),
-        )
-        creds = Credentials("AKIDEXAMPLE", "secret", "sessiontoken")
-        fake_session = SimpleNamespace(get_credentials=lambda: creds)
-        monkeypatch.setattr("botocore.session.get_session", lambda: fake_session)
+        self._serve(monkeypatch, _gateway)
 
         result = _run(
             gw._call_gateway("https://gw/mcp", "us-east-1", "abca_repo_config", {"repo": "o/r"})
@@ -426,3 +472,41 @@ class TestRealMcpTypes:
         for _verb, _rpc, headers in seen:
             assert headers["authorization"].startswith("AWS4-HMAC-SHA256")
             assert headers["x-amz-security-token"] == "sessiontoken"
+
+    def test_refused_connection_is_an_expected_error_reported_with_its_cause(
+        self, monkeypatch, capfd
+    ):
+        """mcp hands a transport failure over inside an ExceptionGroup; the cause counts."""
+        import httpx2
+
+        def _refuse(request: httpx2.Request) -> httpx2.Response:
+            raise httpx2.ConnectError("connection refused", request=request)
+
+        self._serve(monkeypatch, _refuse)
+        loud = []
+        monkeypatch.setattr(gw, "log_error_cw", lambda msg: loud.append(msg))
+
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "o/r"}))
+
+        assert result["isError"] is True
+        assert result["content"][0]["text"] == (
+            "Error calling repo_config: ConnectError: connection refused"
+        )
+        assert loud == []
+        assert "WARN" in capfd.readouterr().out
+
+    def test_gateway_that_never_answers_the_handshake_is_given_up_on(self, monkeypatch):
+        """The round-trip deadline covers every request of the session, the first included."""
+        import httpx2
+
+        async def _stall(request: httpx2.Request) -> httpx2.Response:
+            await asyncio.sleep(2)  # cut short when the bridge gives up
+            return httpx2.Response(503)
+
+        self._serve(monkeypatch, _stall)
+        monkeypatch.setattr(gw, "_GATEWAY_TIMEOUT_S", 0.05)
+
+        result = _run(gw._repo_config_impl("https://gw/mcp", "us-east-1", {"repo": "o/r"}))
+
+        assert result["isError"] is True
+        assert "'initialize' timed out" in result["content"][0]["text"]

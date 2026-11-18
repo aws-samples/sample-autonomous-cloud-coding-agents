@@ -74,6 +74,17 @@ class TestApplyMcpAssets:
         assert merged["mcpServers"]["other"]["command"] == "/usr/bin/x"
         assert "acme__weather" in merged["mcpServers"]
 
+    def test_preserves_servers_of_a_file_with_a_byte_order_mark(self, tmp_path):
+        # "UTF-8 with BOM" is a file the Claude CLI reads, not a malformed one: the
+        # registry server joins the repository's servers instead of replacing them.
+        existing = {"mcpServers": {"other": {"command": "/usr/bin/x"}}}
+        (tmp_path / ".mcp.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(existing).encode())
+        apply_mcp_assets(
+            str(tmp_path),
+            [_mcp_asset("acme", "weather", "2.1.0", {"transport": "sse", "url": "https://w"})],
+        )
+        assert set(_read_mcp(tmp_path)["mcpServers"]) == {"other", "acme__weather"}
+
     def test_merges_multiple_servers(self, tmp_path):
         assets = [
             _mcp_asset("acme", "a", "1.0.0", {"transport": "http", "url": "https://a"}),

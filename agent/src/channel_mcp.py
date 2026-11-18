@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from typing import TYPE_CHECKING, Any
 
 from shell import log
@@ -94,17 +95,22 @@ CHANNEL_MCP_BUILDERS: dict[str, tuple[str, Callable[[], dict[str, Any]]]] = {
 }
 
 
-def _read_existing_mcp_config(path: str) -> dict[str, Any]:
+def read_existing_mcp_config(path: str) -> dict[str, Any]:
     """Return the parsed .mcp.json at ``path``, or an empty dict if absent/invalid.
 
     Malformed JSON is logged and treated as absent — we prefer to overlay a
     valid channel entry than to crash the agent because a user committed a
     broken .mcp.json to their repo.
+
+    The file is decoded the way the Claude CLI decodes it, so that the scrub and
+    the merges see every server the CLI will load: a UTF-8 byte-order mark is
+    dropped, and a byte that is not UTF-8 (a file saved as Windows-1252) becomes
+    U+FFFD instead of raising.
     """
     if not os.path.isfile(path):
         return {}
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
             parsed = json.load(f)
         if isinstance(parsed, dict):
             return parsed
@@ -112,6 +118,54 @@ def _read_existing_mcp_config(path: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as e:
         log("WARN", f"Failed to read existing .mcp.json at {path}: {type(e).__name__}: {e}")
     return {}
+
+
+#: Seconds allowed for each git call of ``_hide_edit_from_git``.
+_GIT_TIMEOUT_S = 15
+
+
+def _hide_edit_from_git(repo_dir: str) -> None:
+    """Make git ignore this session's edit of a ``.mcp.json`` the repository tracks.
+
+    What the two functions below write or remove is for this session only. The
+    post-hook safety net (``post_hooks.ensure_committed``) stages every changed
+    tracked file with ``git add -u`` and commits it, and the push that follows
+    puts the edit into the pull request: the team's Linear server removed, the
+    whole file deleted, or the Jira placeholder added. ``skip-worktree`` makes
+    git treat the file as unchanged, also when the scrub removed it.
+
+    An untracked file is left alone. ``git add -u`` never stages it, and the
+    index entry it would need (the ``--intent-to-add`` of ``registry.loader``,
+    whose payload may hold secrets) makes ``git stash``, ``git rebase`` and
+    ``git merge`` fail for the agent.
+
+    Best-effort: a git failure is logged and the task goes on.
+    """
+
+    def _git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", repo_dir, *args],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+            check=False,
+        )
+
+    try:
+        if _git("ls-files", "--error-unmatch", ".mcp.json").returncode != 0:
+            return  # not tracked: nothing the safety net could stage
+        result = _git("update-index", "--skip-worktree", ".mcp.json")
+        if result.returncode != 0:
+            log(
+                "WARN",
+                f"Could not hide the .mcp.json edit in {repo_dir} from git "
+                f"(exit {result.returncode}): {result.stderr.strip()}",
+            )
+    except (OSError, subprocess.SubprocessError) as e:
+        log(
+            "WARN",
+            f"Could not hide the .mcp.json edit in {repo_dir} from git: {type(e).__name__}: {e}",
+        )
 
 
 def configure_channel_mcp(
@@ -150,7 +204,7 @@ def configure_channel_mcp(
         return False
 
     mcp_path = os.path.join(repo_dir, ".mcp.json")
-    config = _read_existing_mcp_config(mcp_path)
+    config = read_existing_mcp_config(mcp_path)
 
     servers = config.get("mcpServers")
     if not isinstance(servers, dict):
@@ -165,6 +219,7 @@ def configure_channel_mcp(
     except OSError as e:
         log("ERROR", f"Failed to write {channel_source} MCP config to {mcp_path}: {e}")
         return False
+    _hide_edit_from_git(repo_dir)
 
     log(
         "TASK",
@@ -212,7 +267,7 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
     if not repo_dir or not os.path.isdir(repo_dir):
         return 0
     mcp_path = os.path.join(repo_dir, ".mcp.json")
-    config = _read_existing_mcp_config(mcp_path)
+    config = read_existing_mcp_config(mcp_path)
     servers = config.get("mcpServers")
     if not isinstance(servers, dict) or not servers:
         return 0
@@ -248,6 +303,7 @@ def strip_linear_mcp_servers(repo_dir: str) -> int:
     except OSError as e:
         log("ERROR", f"strip_linear_mcp_servers: failed to rewrite/remove {mcp_path}: {e}")
         return 0
+    _hide_edit_from_git(repo_dir)
     log(
         "WARN",
         f"Removed {len(offending)} Linear MCP server entr(ies) from {mcp_path} "
