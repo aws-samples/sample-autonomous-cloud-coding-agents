@@ -1,6 +1,6 @@
 # Developer guide
 
-This project is built in TypeScript with [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/), [mise](https://mise.jdx.dev/) for tasks and tool versions, and AWS CDK for infrastructure. There is project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
+ABCA uses [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/) for its TypeScript packages, [mise](https://mise.jdx.dev/) for tools and tasks, and AWS CDK for infrastructure. To build and test the project, [open the contributor dev container](#open-the-contributor-dev-container) or follow the [Quick Start](./QUICK_START.mdx) to set up your own machine.
 
 ![ABCA architecture](../imgs/abca-arch.png)
 
@@ -251,7 +251,16 @@ The model must be in the IAM grant list (layer 1) or the task fails at turn 0 wi
 
 Follow the [Quick Start](./QUICK_START.mdx) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
-This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
+### Open the contributor dev container
+
+- **Local VS Code.** Start Docker and install the **Dev Containers** extension. Open a fresh clone of ABCA in VS Code, then choose **Dev Containers: Reopen in Container** from the Command Palette.
+- **GitHub Codespaces.** On the repository page, select your branch, open **Code → Codespaces**, and create a codespace on that branch. GitHub opens the editor in your browser.
+
+The post-create hook installs the tools declared in the repo’s mise configs, enables Yarn Classic, and runs `mise run install` for the workspace dependencies, the agent’s Python environment, and Git hooks. Once setup finishes, run `mise run build` in the container terminal from the repository root. The build can run without AWS credentials.
+
+After changing `.devcontainer/`, choose **Dev Containers: Rebuild Container** in local VS Code or **Codespaces: Rebuild Container** in a codespace.
+
+The full `mise run security` suite builds and scans the agent’s worker image. The pre-push hook runs this suite when you use `git push`. Both the image scan and the optional `mise run test:integration` emulator suite need a running Docker engine. The default dev container has no Docker engine connection. You can push and run these checks from a host checkout with Docker and the repository tools installed. See the [emulator guide](../../scripts/aws-emulator/README.md).
 
 ### Troubleshooting mise
 
