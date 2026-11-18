@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, PaginatedResponse, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
@@ -485,6 +485,36 @@ export function formatApiKeyDetail(key: ApiKeyDetail): string {
     lines.push(`Revoked:     ${key.revoked_at}`);
   }
   return lines.join('\n');
+}
+
+/** Rows a `list` command returns when --limit is not given: the page size the API defaults to. */
+const DEFAULT_LIST_LIMIT = 20;
+
+/**
+ * The rows a `list` command prints: its first page and the pages that follow. The API reads a
+ * bounded number of rows per request, so a page can hold fewer rows than asked for, or none,
+ * while more exist: follow next_token until the rows asked for are there or the list ends.
+ * Each further request asks only for the rows still missing, so that the last token resumes
+ * right after the last row. `maxRequests` counts the first request too: a list that never
+ * ends cannot keep the command running.
+ *
+ * It stands here and not next to the client because the command tests replace the client's
+ * module whole, and this loop is what they check.
+ */
+export async function followPages<T>(
+  first: PaginatedResponse<T>,
+  limit: number | undefined,
+  fetchNext: (rows: number, nextToken: string) => Promise<PaginatedResponse<T>>,
+  maxRequests = 100,
+): Promise<PaginatedResponse<T>> {
+  // A --limit that is no positive number counts as none given.
+  const wanted = limit !== undefined && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
+  let result = first;
+  for (let request = 1; request < maxRequests && result.data.length < wanted && result.pagination.next_token; request += 1) {
+    const next = await fetchNext(wanted - result.data.length, result.pagination.next_token);
+    result = { data: [...result.data, ...next.data], pagination: next.pagination };
+  }
+  return result;
 }
 
 /** Format data as JSON. */

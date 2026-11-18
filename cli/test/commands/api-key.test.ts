@@ -176,6 +176,22 @@ describe('api-key command', () => {
       const calls = consoleSpy.mock.calls.map((c) => c[0] as string);
       expect(calls.some((c) => c.includes('More results available'))).toBe(true);
     });
+
+    test('gives every further request --include-revoked and the token of the page before it', async () => {
+      mockList
+        .mockResolvedValueOnce({ data: [apiKey('k-1')], pagination: { next_token: 'T1', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-2')], pagination: { next_token: 'T2', has_more: true } })
+        .mockResolvedValueOnce({ data: [apiKey('k-3')], pagination: { next_token: null, has_more: false } });
+
+      const cmd = makeApiKeyCommand();
+      await cmd.parseAsync(['node', 'test', 'list', '--include-revoked', '--limit', '3']);
+
+      expect(mockList.mock.calls).toEqual([
+        [{ includeRevoked: true, limit: 3 }],
+        [{ includeRevoked: true, limit: 2, nextToken: 'T1' }],
+        [{ includeRevoked: true, limit: 1, nextToken: 'T2' }],
+      ]);
+    });
   });
 
   describe('api-key revoke', () => {

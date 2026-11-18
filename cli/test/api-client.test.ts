@@ -99,6 +99,20 @@ describe('ApiClient', () => {
         expect.anything(),
       );
     });
+
+    test('sends the repo filter and the page token of a further page', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
+      });
+
+      await client.listTasks({ repo: 'owner/repo', nextToken: 'tok-1' });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/tasks?repo=owner%2Frepo&next_token=tok-1',
+        expect.anything(),
+      );
+    });
   });
 
   describe('getPersonalBudget', () => {
@@ -402,6 +416,10 @@ describe('ApiClient', () => {
       const url3 = mockFetch.mock.calls[2][0] as string;
       expect(url3).toContain('next_token=tok-2');
       expect(url3).not.toContain('after=');
+      // Every request asks for the largest page the server returns.
+      for (const [url] of mockFetch.mock.calls) {
+        expect(url).toContain('limit=100');
+      }
     });
 
     test('returns empty array when server reports no events after cursor', async () => {
@@ -448,7 +466,7 @@ describe('ApiClient', () => {
 
       const controller = new AbortController();
       await client.getTaskEvents('abc', { signal: controller.signal });
-      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', 100, { signal: controller.signal });
+      await client.catchUpEvents('abc', '01ARZ3NDEKTSV4RRFFQ69G5FAV', { signal: controller.signal });
 
       // Every fetch the client issued must carry the same signal.
       const calls = mockFetch.mock.calls;

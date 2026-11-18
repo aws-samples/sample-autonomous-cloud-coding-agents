@@ -359,7 +359,7 @@ async function pollTaskEvents(
     // pagination so we see all events — not just the first 100.
     const newEvents = await withTransientRetry(
       () => (lastSeenEventId
-        ? apiClient.catchUpEvents(taskId, lastSeenEventId, 100, { signal: options.signal })
+        ? apiClient.catchUpEvents(taskId, lastSeenEventId, { signal: options.signal })
         : apiClient.getTaskEvents(taskId, { limit: 100, signal: options.signal })
           .then(r => r.data)),
       options.signal,

@@ -380,7 +380,6 @@ describe('watch command — polling', () => {
     expect(mockCatchUpEvents).toHaveBeenCalledWith(
       'task-dedup',
       'evt-002',
-      100,
       expect.objectContaining({ signal: expect.anything() }),
     );
   });
@@ -438,7 +437,6 @@ describe('watch command — polling', () => {
     expect(mockCatchUpEvents).toHaveBeenCalledWith(
       'task-big',
       'evt-100',
-      100,
       expect.objectContaining({ signal: expect.anything() }),
     );
   });

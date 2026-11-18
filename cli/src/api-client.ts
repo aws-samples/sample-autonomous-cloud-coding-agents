@@ -412,24 +412,23 @@ export class ApiClient {
    * @param taskId - the task whose events to fetch.
    * @param afterEventId - the ULID cursor; events strictly greater than
    *   this id are returned.
-   * @param pageSize - page size passed to the server (default 100, max 100).
    * @returns all events after the cursor, in chronological order.
    */
   async catchUpEvents(
     taskId: string,
     afterEventId: string,
-    pageSize = 100,
     opts?: { signal?: AbortSignal },
   ): Promise<TaskEvent[]> {
     const collected: TaskEvent[] = [];
     const signal = opts?.signal;
     // First page uses ``after``; subsequent pages use the opaque ``next_token``.
-    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: pageSize, signal });
+    // 100 is the largest page the server returns.
+    let page = await this.getTaskEvents(taskId, { after: afterEventId, limit: 100, signal });
     collected.push(...page.data);
     while (page.pagination.has_more && page.pagination.next_token) {
       page = await this.getTaskEvents(taskId, {
         nextToken: page.pagination.next_token,
-        limit: pageSize,
+        limit: 100,
         signal,
       });
       collected.push(...page.data);
