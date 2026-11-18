@@ -1059,6 +1059,7 @@ class _ProgressWriter:
         cached_decision: str,
         cached_reason: str,
         original_decision_ts: str,
+        matched_rule_id: str | None = None,
     ) -> None:
         """Emit ``policy_decision`` for a recent-decision-cache hit (IMPL-23).
 
@@ -1068,6 +1069,10 @@ class _ProgressWriter:
         ``decision_source`` field distinguishes cache-driven denies from
         fresh policy evaluations so operators can correlate retry patterns
         with container restarts (§12.8, §13.6).
+
+        ``matched_rule_id`` is the rule a rule-level hit was denied for (a
+        retry that matches a rule the user has just denied). A hit on the
+        exact input has none, and the field is omitted from the metadata.
 
         Reuses ``_put_approval_milestone`` for the ``agent_milestone``
         event shape; the ``milestone`` key is ``policy_decision`` here
@@ -1080,6 +1085,7 @@ class _ProgressWriter:
                 "decision_source": "recent_decision_cache",
                 "tool_name": tool_name,
                 "tool_input_sha256": tool_input_sha256,
+                **({} if matched_rule_id is None else {"matched_rule_id": matched_rule_id}),
                 "cached_decision": cached_decision,
                 "cached_reason": self._preview(cached_reason),
                 "original_decision_ts": original_decision_ts,

@@ -8,19 +8,7 @@ import cedarpy  # noqa: F401
 import pytest
 
 import policy
-from policy import PolicyDecision, PolicyEngine, _validate_constants
-
-
-class TestPolicyDecision:
-    def test_allowed_decision(self):
-        d = PolicyDecision(allowed=True, reason="permitted", duration_ms=0.5)
-        assert d.allowed is True
-        assert d.reason == "permitted"
-        assert d.duration_ms >= 0
-
-    def test_denied_decision(self):
-        d = PolicyDecision(allowed=False, reason="denied", duration_ms=1.0)
-        assert d.allowed is False
+from policy import PolicyEngine, _validate_constants
 
 
 class TestNewTaskPermissions:

@@ -59,7 +59,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from fnmatch import fnmatch
@@ -179,6 +179,7 @@ class Outcome(StrEnum):
     REQUIRE_APPROVAL = "require_approval"
 
 
+@dataclass(frozen=True, kw_only=True)
 class PolicyDecision:
     """Result of a Cedar policy evaluation.
 
@@ -186,68 +187,32 @@ class PolicyDecision:
     only on ``REQUIRE_APPROVAL``. ``.allowed`` is the backward-compat shim
     for Phase 1a/1b/2 callers that predate the three-outcome engine and
     treat this as a simple allow/deny boolean.
-
-    Not a dataclass — a custom ``__init__`` supports BOTH the new
-    ``outcome=...``-keyed form and the legacy ``allowed=...``-keyed form
-    so Phase 1 tests keep working without caller changes. Instances are
-    immutable by convention (no mutator methods); callers should treat
-    them as read-only.
     """
 
-    __slots__ = (
-        "cache_hit_metadata",
-        "duration_ms",
-        "fail_closed",
-        "matching_rule_ids",
-        "outcome",
-        "reason",
-        "severity",
-        "timeout_s",
-    )
-
-    def __init__(
-        self,
-        *,
-        outcome: Outcome | None = None,
-        allowed: bool | None = None,  # Legacy Phase 1 kwarg
-        reason: str = "",
-        timeout_s: int | None = None,
-        severity: str | None = None,
-        matching_rule_ids: tuple[str, ...] = (),
-        duration_ms: float = 0.0,
-        cache_hit_metadata: dict | None = None,
-        fail_closed: bool = False,
-    ) -> None:
-        if outcome is None and allowed is None:
-            raise TypeError("PolicyDecision requires either outcome= or allowed=")
-        if outcome is not None and allowed is not None:
-            raise TypeError("PolicyDecision: pass either outcome= or allowed=, not both")
-        if outcome is None:
-            outcome = Outcome.ALLOW if allowed else Outcome.DENY
-        self.outcome = outcome
-        self.reason = reason
-        self.timeout_s = timeout_s
-        self.severity = severity
-        self.matching_rule_ids = matching_rule_ids
-        self.duration_ms = duration_ms
-        # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
-        # a cache-hit DENY. Contains the payload for the `policy_decision`
-        # milestone with `decision_source="recent_decision_cache"`; the hook
-        # forwards it to progress_writer.write_policy_decision_cached().
-        # Observability-only — NOT part of __eq__/__hash__: two cache-hit
-        # decisions with different original_decision_ts values still
-        # represent the same deny outcome.
-        self.cache_hit_metadata = cache_hit_metadata
-        # #251 (decision E): structured discriminator for environmental
-        # fail-closed denies (Cedar engine errored / unavailable) vs.
-        # intentional hard-denies and cache-driven denies. The hook branches
-        # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
-        # string match — to decide whether to emit a ``policy_fail_closed``
-        # blocker event. Set True ONLY at engine-error/unavailable deny sites;
-        # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
-        # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
-        # legacy equality-based tests predate the field).
-        self.fail_closed = fail_closed
+    outcome: Outcome
+    reason: str = ""
+    timeout_s: int | None = None
+    severity: str | None = None
+    matching_rule_ids: tuple[str, ...] = ()
+    duration_ms: float = 0.0
+    # IMPL-23: populated only when Step 2.5 of evaluate_tool_use returns
+    # a cache-hit DENY. Contains the payload for the `policy_decision`
+    # milestone with `decision_source="recent_decision_cache"`; the hook
+    # forwards it to progress_writer.write_policy_decision_cached().
+    # Observability-only — NOT part of __eq__/__hash__: two cache-hit
+    # decisions with different original_decision_ts values still
+    # represent the same deny outcome.
+    cache_hit_metadata: dict | None = field(default=None, compare=False)
+    # #251 (decision E): structured discriminator for environmental
+    # fail-closed denies (Cedar engine errored / unavailable) vs.
+    # intentional hard-denies and cache-driven denies. The hook branches
+    # on THIS flag — not a brittle ``reason.startswith("fail-closed:")``
+    # string match — to decide whether to emit a ``policy_fail_closed``
+    # blocker event. Set True ONLY at engine-error/unavailable deny sites;
+    # hard-deny and cache-deny leave it False. Like ``cache_hit_metadata``,
+    # NOT part of __eq__/__hash__ (it is derived from outcome+reason, and
+    # legacy equality-based tests predate the field).
+    fail_closed: bool = field(default=False, compare=False)
 
     @property
     def allowed(self) -> bool:
@@ -257,43 +222,6 @@ class PolicyDecision:
         PreToolUse hook is extended to the three-outcome path in Chunk 3).
         """
         return self.outcome == Outcome.ALLOW
-
-    def __repr__(self) -> str:
-        base = (
-            f"PolicyDecision(outcome={self.outcome.value!r}, "
-            f"reason={self.reason!r}, duration_ms={self.duration_ms}"
-        )
-        if self.outcome == Outcome.REQUIRE_APPROVAL:
-            return (
-                f"{base}, timeout_s={self.timeout_s}, "
-                f"severity={self.severity!r}, "
-                f"matching_rule_ids={self.matching_rule_ids!r})"
-            )
-        return base + ")"
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, PolicyDecision):
-            return NotImplemented
-        return (
-            self.outcome == other.outcome
-            and self.reason == other.reason
-            and self.timeout_s == other.timeout_s
-            and self.severity == other.severity
-            and self.matching_rule_ids == other.matching_rule_ids
-            and self.duration_ms == other.duration_ms
-        )
-
-    def __hash__(self) -> int:
-        return hash(
-            (
-                self.outcome,
-                self.reason,
-                self.timeout_s,
-                self.severity,
-                self.matching_rule_ids,
-                self.duration_ms,
-            )
-        )
 
     @classmethod
     def allow(cls, reason: str = "permitted", duration_ms: float = 0.0) -> PolicyDecision:
@@ -1077,33 +1005,30 @@ class PolicyEngine:
     # ---- Probes + low-level evaluation ------------------------------------
 
     def _probe_cedar(self, policies_text: str, tier_name: str) -> None:
-        """Run a synthetic is_authorized call so Cedar rejects bad syntax early."""
-        # _probe_cedar is only called from __init__ AFTER the ImportError
-        # early-return, so ``_cedarpy`` is guaranteed non-None here.
-        if self._cedarpy is None:  # pragma: no cover — invariant guard
-            raise RuntimeError("probe called on disabled engine")
+        """Evaluate one call of each kind of tool ``_eval_for_tool`` tells apart.
+
+        A rule Cedar cannot evaluate (bad syntax, or a ``when`` clause reading
+        a context attribute the request does not carry) makes ``_eval_tier``
+        raise, which at run time denies every call the rule is evaluated for.
+        Raised here, it fails the task at start instead. ``Read`` stands for
+        the tools that are neither a file write nor Bash: a rule that names
+        another one of those is evaluated when that tool is called, not here.
+        """
+        base_context = {
+            "task_type": self._task_type,
+            "repo": self._repo,
+            "read_only": self._read_only,
+        }
         try:
-            self._cedarpy.is_authorized(
-                {
-                    "principal": f'Agent::TaskAgent::"{self._task_type}"',
-                    "action": 'Agent::Action::"invoke_tool"',
-                    "resource": 'Agent::Tool::"Read"',
-                    "context": {
-                        "task_type": self._task_type,
-                        "repo": self._repo,
-                        "read_only": self._read_only,
-                    },
-                },
-                policies_text,
-                [
-                    {
-                        "uid": {"type": "Agent::TaskAgent", "id": self._task_type},
-                        "attrs": {},
-                        "parents": [],
-                    },
-                    {"uid": {"type": "Agent::Tool", "id": "Read"}, "attrs": {}, "parents": []},
-                ],
-            )
+            for tool_name, tool_input in (
+                ("Read", {}),
+                ("Write", {"file_path": "probe"}),
+                ("Edit", {"file_path": "probe"}),
+                ("Bash", {"command": "probe"}),
+            ):
+                self._eval_for_tool(
+                    policies_text, tool_name, tool_input, base_context, tier_name=tier_name
+                )
         except Exception as exc:
             raise ValueError(
                 f"{tier_name}-deny Cedar probe failed: {type(exc).__name__}: {exc}"
