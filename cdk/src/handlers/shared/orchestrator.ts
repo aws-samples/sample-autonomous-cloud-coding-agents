@@ -306,7 +306,7 @@ export function envelopeFor(
  * Emit a task event to the audit log.
  * @param taskId - the task ID.
  * @param eventType - the event type string.
- * @param metadata - optional event metadata.
+ * @param metadata - optional event metadata; an entry whose value is undefined is left out.
  * @param correlation - optional `{ user_id, repo }` stamped as top-level fields
  *   so the event stream joins to orchestrator logs by the correlation envelope.
  *   `repo` is omitted when null/absent (repo-less workflows).
@@ -329,7 +329,9 @@ export async function emitTaskEvent(
       ttl: computeTtlEpoch(TASK_RETENTION_DAYS),
       ...(correlation?.user_id && { user_id: correlation.user_id }),
       ...(correlation?.repo && { repo: correlation.repo }),
-      ...(metadata && { metadata }),
+      // The document client leaves out an undefined attribute of the item itself,
+      // but throws on one inside a map, and then the event is not written at all.
+      ...(metadata && { metadata: Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined)) }),
     },
   }), options);
 }
@@ -523,6 +525,29 @@ function resolveAttachmentPayloads(
 }
 
 /**
+ * Put the attachment records on the task once its URL attachments are fetched,
+ * screened and uploaded. Until then such a record is `pending` and has no size,
+ * object version or checksum, and without this write it would stay so for good.
+ * Best-effort: a failure is logged and hydration goes on, because the agent gets
+ * its attachments from the payload, not from the record.
+ */
+async function storeAttachmentRecords(taskId: string, attachments: AttachmentRecord[], log: Logger): Promise<void> {
+  try {
+    await ddb.send(new UpdateCommand({
+      TableName: TABLE_NAME,
+      Key: { task_id: taskId },
+      UpdateExpression: 'SET #at = :at, #ua = :now',
+      ExpressionAttributeNames: { '#at': 'attachments', '#ua': 'updated_at' },
+      ExpressionAttributeValues: { ':at': attachments, ':now': new Date().toISOString() },
+    }));
+  } catch (err) {
+    log.warn('Failed to store resolved URL attachments on task record', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Structural guard on the TaskRecord's persisted ``approval_gate_cap`` (the
  * human-in-the-loop approval limit) before we thread it into the agent payload.
  * The submit path bounds-checks the blueprint value before writing it
@@ -553,8 +578,12 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
   await transitionTask(task.task_id, TaskStatus.SUBMITTED, TaskStatus.HYDRATING);
   await emitTaskEvent(task.task_id, 'hydration_started', undefined, correlation);
 
+  // One GitHub token for all that hydration fetches, the URL attachments included:
+  // the repository's own where its blueprint sets one, else the platform's
+  // (loadBlueprintConfig has merged the two).
+  const githubTokenSecretArn = blueprintConfig?.github_token_secret_arn;
   const hydratedContext = await hydrateContext(task, {
-    githubTokenSecretArn: blueprintConfig?.github_token_secret_arn,
+    githubTokenSecretArn,
     memoryId: MEMORY_ID,
   });
 
@@ -677,7 +706,6 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
     }
 
     // Resolve the GitHub token for URL fetches that target GitHub domains
-    const githubTokenSecretArn = process.env.GITHUB_TOKEN_SECRET_ARN;
     let githubToken: string | undefined;
     if (githubTokenSecretArn) {
       try {
@@ -721,6 +749,7 @@ export async function hydrateAndTransition(task: TaskRecord, blueprintConfig?: B
         githubInstallationDomain: process.env.GITHUB_INSTALLATION_DOMAIN,
       },
     );
+    await storeAttachmentRecords(task.task_id, resolvedAttachments, log);
   }
 
   // Resolve attachment payloads for the agent (only passed-screening attachments).
