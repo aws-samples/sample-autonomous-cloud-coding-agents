@@ -303,6 +303,33 @@ describe('createTaskCore', () => {
     expect(JSON.parse(result.body).error.code).toBe('VALIDATION_ERROR');
   });
 
+  test.each(['this_call', 'tool_type_session', 'tool_group_session'])(
+    'rejects the pre-approval %s, which stands for a call that is waiting for approval',
+    async (scope) => {
+      // The agent cannot seed its allowlist from these: the task would be
+      // accepted and then fail when the agent starts.
+      const result = await createTaskCore(
+        { repo: 'org/repo', task_description: 'Fix the bug', initial_approvals: [scope] } as any,
+        makeContext(),
+        'req-1',
+      );
+      expect(result.statusCode).toBe(400);
+      const error = JSON.parse(result.body).error;
+      expect(error.code).toBe('VALIDATION_ERROR');
+      expect(error.message).toContain(`"${scope}"`);
+      expect(mockSend).not.toHaveBeenCalled();
+    },
+  );
+
+  test('accepts the pre-approval all_session, which needs no waiting call', async () => {
+    const result = await createTaskCore(
+      { repo: 'org/repo', task_description: 'Fix the bug', initial_approvals: ['all_session'] } as any,
+      makeContext(),
+      'req-1',
+    );
+    expect(result.statusCode).toBe(201);
+  });
+
   test('returns 400 for invalid repo', async () => {
     const result = await createTaskCore({ repo: 'invalid' } as any, makeContext(), 'req-1');
     expect(result.statusCode).toBe(400);

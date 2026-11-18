@@ -1,4 +1,4 @@
-"""PreToolUse, PostToolUse, and Stop hook callbacks.
+"""PreToolUse, PostToolUse, PostToolUseFailure, and Stop hook callbacks.
 
 - PreToolUse: three-outcome Cedar policy enforcement (ALLOW / DENY /
   REQUIRE_APPROVAL). The REQUIRE_APPROVAL path asks the trusted approval
@@ -7,6 +7,8 @@
   human decision, then resumes / denies per the user's input. See
   ``docs/design/CEDAR_HITL_GATES.md``.
 - PostToolUse: output scanner for secrets/PII.
+- PostToolUse and PostToolUseFailure: the egress-denial detector and the
+  stuck guard, which see every tool result, of a call that completed or failed.
 - Stop: between-turns hook dispatcher. Cancel → nudge → denial injection
   in that order (cancel-wins semantics). Each producer appends synthetic
   user-message strings that get reinjected via the SDK's
@@ -34,11 +36,11 @@ import nudge_reader
 import task_state
 from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
-from output_scanner import scan_tool_output
+from output_scanner import _PATTERNS, scan_tool_output
 from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome, approval_deadline_epoch
 from progress_writer import _generate_ulid
 from shared_constants import SHARED_CONSTANTS
-from shell import log, log_error_cw
+from shell import log, log_error_cw, redact_secrets
 from stuck_guard import StuckGuard
 
 if TYPE_CHECKING:
@@ -164,6 +166,11 @@ _EGRESS_DENIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# The machine itself, in the spellings a failed connection names it by: any
+# 127.x.x.x address, and the all-zero address that a dev server prints as the
+# one it listens on.
+_LOOPBACK_HOST_RE = re.compile(r"localhost|127(?:\.\d+){3}|0(?:\.0){3}", re.IGNORECASE)
+
 
 # The most recent agent-detected blocker, as a canonical ``BLOCKED[<kind>]: …``
 # reason string (see ``format_blocker_reason``). Blockers are detected mid-turn
@@ -205,8 +212,8 @@ def reset_blocker_reason() -> None:
 _reset_blocker_reason_for_tests = reset_blocker_reason
 
 
-# Latch of the stuck-guard's "why it's spinning" summary, refreshed by the
-# between-turns hook. Read by the pipeline's terminal path so a max_turns
+# Latch of the stuck-guard's "why it's spinning" summary, refreshed with every
+# tool result. Read by the pipeline's terminal path so a max_turns
 # failure can say WHY it capped ("Exceeded max turns — spinning on failing tool
 # calls: git push → invalid credentials") vs. a task that genuinely used its
 # turns. Process-lifetime (one task), last-writer-wins (the most recent window
@@ -215,9 +222,26 @@ _reset_blocker_reason_for_tests = reset_blocker_reason
 _LAST_STUCK_SUMMARY: str | None = None
 
 
+def _screened(text: str) -> str:
+    """Return *text* as it may be quoted outside the tool call it belongs to.
+
+    What the scanner of tool output hides is replaced, and what the redaction
+    of the log lines hides. Both know most credentials only whole: screen a
+    text before cutting it.
+    """
+    return redact_secrets(scan_tool_output(text).redacted_content)
+
+
 def last_stuck_summary() -> str | None:
-    """Return the latched stuck-guard summary for the max_turns terminal reason."""
-    return _LAST_STUCK_SUMMARY
+    """Return the latched stuck-guard summary for the max_turns terminal reason.
+
+    The summary quotes a command and a piece of its output and ends up in the
+    task's error message. Both were screened before the guard cut them (see
+    ``_observe_tool_result``); the summary is screened once more here.
+    """
+    if not _LAST_STUCK_SUMMARY:
+        return _LAST_STUCK_SUMMARY
+    return _screened(_LAST_STUCK_SUMMARY)
 
 
 def reset_stuck_summary() -> None:
@@ -389,9 +413,83 @@ def _is_self_reclone(command: str, repo_url: str) -> bool:
         # punctuation to the bare slug space so `.../owner/repo.git` and
         # `git@github.com:owner/repo` both reduce to text carrying `owner/repo`.
         haystack = segment[clone.start() :].lower().replace("git@github.com:", "github.com/")
-        if any(v in haystack for v in variants):
+        # The slug has to stand alone: `owner/repo-docs` and `bigowner/repo`
+        # are other repositories.
+        if any(re.search(rf"(?<![\w.-]){re.escape(v)}(?![\w.-])", haystack) for v in variants):
             return True
     return False
+
+
+# What the screening of tool output puts in place of what it hides from the
+# model: ``[REDACTED-<LABEL>]`` from the scanner, and the two fail-closed texts.
+_REDACTION_MARKER_RE = re.compile(
+    r"\[REDACTED-(?:" + "|".join(re.escape(label) for label, _ in _PATTERNS) + r")\]"
+    r"|\[Output redacted: [^\]\n]*\]"
+)
+
+# How much of a file is read to see which markers it holds already. The
+# screening looks at the first 5 MB of an output as well.
+_MARKER_FILE_LIMIT = 5_000_000
+
+
+def _introduced_marker(tool_name: Any, tool_input: dict, cwd: Any) -> str | None:
+    """Return a redaction marker that a Write or an Edit would add to a file.
+
+    The model is shown a marker where a file holds a value that the screening
+    hides. Written back, the marker would take the place of that value. A marker
+    that the file holds already (a test of the scanner, its documentation) may
+    stay: only one that the call adds is returned. A file that cannot be read
+    counts as empty.
+    """
+    if tool_name == "Write":
+        new = tool_input.get("content")
+    elif tool_name == "Edit":
+        new = tool_input.get("new_string")
+    else:
+        return None
+    if not isinstance(new, str):
+        return None
+    markers = _REDACTION_MARKER_RE.findall(new)
+    if not markers:
+        return None
+    old = tool_input.get("old_string")
+    if tool_name == "Write":
+        old = ""
+        path = os.path.join(str(cwd or ""), str(tool_input.get("file_path") or ""))
+        # A regular file only: a pipe or a device would not return.
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    old = fh.read(_MARKER_FILE_LIMIT)
+            except OSError as exc:
+                log("WARN", f"redaction-marker guard cannot read {path}: {type(exc).__name__}")
+    if not isinstance(old, str):
+        old = ""
+    # Counted per marker text, not aligned line by line: a call that drops one
+    # marker the file holds and adds one for a hidden value passes. Comparing
+    # with the screened text of the file, line by line, would close that.
+    return next((m for m in markers if new.count(m) > old.count(m)), None)
+
+
+def _redaction_marker_denial(
+    tool_name: Any, tool_input: dict, cwd: Any, trajectory: _TrajectoryWriter | None
+) -> dict | None:
+    """Return the DENY for a Write or an Edit that would add a redaction marker to a file."""
+    marker = _introduced_marker(tool_name, tool_input, cwd)
+    if marker is None:
+        return None
+    path = _truncate(str(tool_input.get("file_path") or ""), 160)
+    log("POLICY", f"DENIED {tool_name} of {path}: it would write the redaction marker {marker}")
+    if trajectory:
+        trajectory.write_policy_decision(tool_name, False, "redaction_marker_blocked", 0)
+    return _deny_response(
+        f"This {tool_name} would write the redaction marker '{marker}' into the file. "
+        "The marker is not content of the file: in the output you were shown it "
+        "stands for a value that is hidden from you, and the real value is still "
+        "in the file on disk. Do not write the marker and do not guess the value. "
+        "Leave that line as it is and change the file around it, with an Edit "
+        "whose old_string and new_string do not include the line."
+    )
 
 
 async def pre_tool_use_hook(
@@ -471,10 +569,18 @@ async def pre_tool_use_hook(
                 "Remove the clone command and work in place (edit, commit, and push "
                 "from where you already are)."
             )
-            log("POLICY", f"DENIED self-reclone of {repo_url}: {command[:160]}")
+            log("POLICY", f"DENIED self-reclone of {repo_url}: {_screened(command)[:160]}")
             if trajectory:
                 trajectory.write_policy_decision("Bash", False, "self_reclone_blocked", 0)
             return _deny_response(reason)
+
+    # A redaction marker that a Write or an Edit would add to a file takes the
+    # place of the value that the screening hid from the model, in the repository
+    # and in the pull request. Refused before the policy is asked, like the
+    # re-clone above, and under bypassPermissions as well.
+    denial = _redaction_marker_denial(tool_name, tool_input, hook_input.get("cwd"), trajectory)
+    if denial:
+        return denial
 
     decision = engine.evaluate_tool_use(tool_name, tool_input)
 
@@ -833,9 +939,9 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     status = outcome.get("status")
     if status == "APPROVED":
         scope = outcome.get("scope") or "this_call"
-        if scope != "this_call":
+        for grant in _allowlist_scopes(scope, tool_name):
             try:
-                engine.allowlist.add(scope)
+                engine.allowlist.add(grant)
             except ValueError as exc:
                 # Malformed scope from the API — log loudly but still
                 # allow this one call (the user did approve it).
@@ -943,6 +1049,27 @@ async def _handle_require_approval(  # noqa: C901 -- 35 when the ceiling of 15 w
     else:
         reason_text = raw_reason
     return _deny_response(reason_text)
+
+
+def _allowlist_scopes(scope: str, tool_name: str) -> list[str]:
+    """Return what an approval given with *scope* adds to the allowlist.
+
+    ``tool_type_session`` and ``tool_group_session`` name no tool: they stand
+    for the tool of the call that was approved and for the groups that tool is
+    in. A tool in no group gets nothing beyond the call itself.
+    """
+    from policy import TOOL_GROUPS
+
+    if scope == "this_call":
+        return []
+    if scope == "tool_type_session":
+        return [f"tool_type:{tool_name}"]
+    if scope == "tool_group_session":
+        groups = [group for group, tools in TOOL_GROUPS.items() if tool_name in tools]
+        if not groups:
+            log("WARN", f"tool_group_session approved for {tool_name}, which is in no tool group")
+        return [f"tool_group:{group}" for group in groups]
+    return [scope]
 
 
 def _reconcile_late_decision(
@@ -1169,12 +1296,14 @@ def _remaining_maxlifetime_s() -> int | None:
         if started_at.isdigit():
             started_epoch = int(started_at)
         else:
-            # The trailing Z means UTC; strptime returns a naive datetime whose
-            # .timestamp() would otherwise be interpreted in the container's
-            # local TZ, skewing remaining-lifetime math by the UTC offset.
-            started_epoch = int(
-                datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).timestamp()
-            )
+            # The orchestrator sends Date.toISOString(), which has milliseconds
+            # ("2026-11-16T10:00:00.123Z"). A stamp without a zone is UTC too:
+            # .timestamp() would otherwise read it in the container's local
+            # TZ, skewing remaining-lifetime math by the UTC offset.
+            started = datetime.fromisoformat(started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            started_epoch = int(started.timestamp())
     except (ValueError, AttributeError):
         return None
     elapsed = int(time.time()) - started_epoch
@@ -1272,27 +1401,23 @@ async def post_tool_use_hook(
     """PostToolUse hook: screen tool output for secrets/PII.
 
     Returns a dict with hookSpecificOutput.  When sensitive content is
-    detected the response includes ``updatedMCPToolOutput`` containing the
-    redacted version (steered enforcement — content is sanitized, not
-    blocked).
+    detected the response includes ``updatedToolOutput``: the tool response
+    in its own shape, with the secrets in its strings redacted (steered
+    enforcement — content is sanitized, not blocked). A response in which
+    the scanner fails on a string is blanked as a whole (fail-closed, see
+    ``_fail_closed_output``).
 
     ``progress`` is optional (preserves the older test call shape). When
     present, an egress-denial signature in the tool output emits an
     ``egress_denied`` blocker event — best-effort observability, never
     alters the screening decision.
 
-    When a ``stuck_guard`` is supplied, every tool result is recorded so a
-    between-turns hook can detect a repeating failing command (a spin
-    loop) and steer / bail. Recording is best-effort and never alters the
+    When a ``stuck_guard`` is supplied, every tool result is recorded, and
+    its one-time advisory about a repeating failing command (a spin loop) is
+    returned as ``additionalContext``. Best-effort; it never alters the
     screening outcome.
     """
     _PASS_THROUGH: dict = {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
-    _FAIL_CLOSED: dict = {
-        "hookSpecificOutput": {
-            "hookEventName": "PostToolUse",
-            "updatedMCPToolOutput": "[Output redacted: screening error — fail-closed]",
-        }
-    }
 
     if not isinstance(hook_input, dict):
         log("WARN", "PostToolUse hook received non-dict input — passing through")
@@ -1305,17 +1430,131 @@ async def post_tool_use_hook(
         return _PASS_THROUGH
 
     tool_response = hook_input["tool_response"]
+    output: dict = {"hookEventName": "PostToolUse"}
 
-    # Normalise non-string responses
-    if not isinstance(tool_response, str):
-        tool_response = str(tool_response)
+    steer = _observe_tool_result(
+        tool_name,
+        hook_input.get("tool_input"),
+        tool_response,
+        progress=progress,
+        stuck_guard=stuck_guard,
+        # A call that completed has not failed. Only a Bash command can hide
+        # a failure behind its exit status (``yarn build | tail``).
+        failed=None if tool_name == "Bash" else False,
+    )
+    if steer:
+        output["additionalContext"] = steer
+
+    findings: list[str] = []
+    marker = "[Output redacted: screening error — fail-closed]"
+
+    def _screen(text: str) -> str:
+        try:
+            result = scan_tool_output(text)
+        except Exception as exc:
+            finding = f"SCANNER_ERROR: {type(exc).__name__}"
+            if finding not in findings:
+                log("ERROR", f"Output scanner failed for {tool_name}: {type(exc).__name__}: {exc}")
+                findings.append(finding)
+            return marker
+        findings.extend(found for found in result.findings if found not in findings)
+        return result.redacted_content if result.has_sensitive_content else text
+
+    started = time.monotonic()
+    screened = _map_strings(tool_response, _screen)
+    redacted = True
+    if any(found.startswith("SCANNER_ERROR") for found in findings):
+        # Fail closed: a response that could not be screened in full is blanked
+        # in full. That the CLI takes the answer is known for an MCP tool and
+        # for the tools that _SCHEMA_FIXED names; for any other tool no
+        # redaction is claimed.
+        screened = _fail_closed_output(tool_name, tool_response, marker)
+        redacted = str(tool_name).startswith("mcp__") or str(tool_name) in _SCHEMA_FIXED
+    if findings:
+        if trajectory:
+            trajectory.write_output_screening_decision(
+                tool_name,
+                findings,
+                redacted=redacted,
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+        outcome = "OUTPUT REDACTED" if redacted else "OUTPUT NOT SCREENED"
+        log("POLICY", f"{outcome}: {tool_name} — {', '.join(findings)}")
+        output["updatedToolOutput"] = screened
+
+    return {"hookSpecificOutput": output}
+
+
+async def post_tool_use_failure_hook(
+    hook_input: Any,
+    _tool_use_id: str | None,
+    _hook_context: Any,
+    *,
+    stuck_guard: StuckGuard | None = None,
+    progress: Any = None,
+) -> dict:
+    """PostToolUseFailure hook: show a failed tool call to the observers.
+
+    The CLI fires this event, and no PostToolUse, for a tool call that fails —
+    for Bash, a command that exits non-zero, unless the CLI reads that status
+    as an answer (1 from ``grep`` without a match) — with the text of the
+    failure under ``error``. A blocked host and a repeating failing command
+    show up here. Returns the stuck guard's advisory as ``additionalContext``
+    when there is one, else an empty answer.
+    """
+    if not isinstance(hook_input, dict):
+        log("WARN", "PostToolUseFailure hook received non-dict input — ignoring")
+        return {}
+
+    steer = _observe_tool_result(
+        hook_input.get("tool_name", "unknown"),
+        hook_input.get("tool_input"),
+        str(hook_input.get("error", "")),
+        progress=progress,
+        stuck_guard=stuck_guard,
+    )
+    if not steer:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUseFailure",
+            "additionalContext": steer,
+        }
+    }
+
+
+def _observe_tool_result(
+    tool_name: str,
+    tool_input: Any,
+    response: Any,
+    *,
+    progress: Any,
+    stuck_guard: StuckGuard | None,
+    failed: bool | None = None,
+) -> str | None:
+    """Show one tool result to the egress detector and the stuck guard.
+
+    *response* is the response of a call that completed (PostToolUse) or the
+    error of a call that failed (PostToolUseFailure, which is what a failing
+    Bash command fires instead of PostToolUse). Best-effort observability.
+    *failed* tells the stuck guard how the call ended where the caller knows;
+    with ``None`` the guard reads the response for the signs of a failure.
+
+    Returns the stuck guard's advisory when this result completes a spin, for
+    the caller to hand to the model as ``additionalContext`` with the result:
+    an agent that keeps calling tools never reaches the Stop hook.
+    """
+    global _LAST_STUCK_SUMMARY
+
+    # The observers read the response as one text.
+    text = response if isinstance(response, str) else str(response)
 
     # Best-effort egress-denial detection. A blocked outbound connection
     # (non-allowlisted host hitting the DNS Firewall, refused connection, name
     # resolution failure) surfaces in the tool's stderr here. Emit an
     # ``egress_denied`` blocker naming the host to allowlist. Observability
-    # only — never changes the pass-through / redaction decision below.
-    egress_detected, host = detect_egress_denial(tool_response)
+    # only — never changes what the caller answers.
+    egress_detected, host = detect_egress_denial(text)
     if egress_detected:
         detail = (
             f"A connection to {host!r} was blocked"
@@ -1329,7 +1568,9 @@ async def post_tool_use_hook(
         # not an egress denial — must not masquerade as the terminal cause. The
         # observability event below still fires unconditionally (it never blocks
         # and is clearly a heuristic signal in the live stream).
-        if host:
+        # A loopback host is the same localhost race with a name on it (curl:
+        # "Failed to connect to localhost port 3000"): no latch either.
+        if host and not _LOOPBACK_HOST_RE.fullmatch(host):
             _record_blocker_reason("egress_denied", detail, host)
         if progress is not None:
             _try_progress(
@@ -1347,38 +1588,109 @@ async def post_tool_use_hook(
                 resource=host,
             )
 
-    # Feed the stuck-guard (best-effort — a tracking error must never block
-    # the screening path that follows).
-    if stuck_guard is not None:
-        try:
-            stuck_guard.record_tool_result(tool_name, hook_input.get("tool_input"), tool_response)
-        except Exception as exc:
-            log("WARN", f"stuck-guard record raised (ignored): {type(exc).__name__}: {exc}")
-
+    if stuck_guard is None:
+        return None
+    # Feed the stuck-guard and ask it at once (best-effort — a tracking error
+    # must never block the caller).
+    action = None
     try:
-        result = scan_tool_output(tool_response)
+        # The guard quotes the command and the output of a failing call, each
+        # cut to a preview: in its advisory, in the summary for a turn-limit
+        # error, and through them in the stuck_steer milestone and a log line.
+        # They are screened here, while a credential in them is still whole:
+        # each string by itself, before the response becomes one text. In that
+        # text a line break of the output is a backslash and an "n", which the
+        # scanner reads as part of the word or of the URL beside it.
+        # The guard never reads the output of a call that it is told completed.
+        stuck_guard.record_tool_result(
+            tool_name,
+            _map_strings(tool_input, _screened),
+            text if failed is False else str(_map_strings(response, _screened)),
+            failed,
+        )
+        action = stuck_guard.evaluate()
+        # Refresh the "why it's spinning" latch with every result. When the
+        # trailing window is failure-dominated this is a one-liner; otherwise
+        # None (which clears the latch — a task that recovered isn't "stuck").
+        # Read by the terminal path so a later max_turns cap explains itself.
+        _LAST_STUCK_SUMMARY = stuck_guard.recent_failure_summary()
     except Exception as exc:
-        log("ERROR", f"Output scanner failed for {tool_name}: {type(exc).__name__}: {exc}")
-        if trajectory:
-            trajectory.write_output_screening_decision(
-                tool_name, [f"SCANNER_ERROR: {type(exc).__name__}"], redacted=True, duration_ms=0.0
-            )
-        return _FAIL_CLOSED
+        log("WARN", f"stuck-guard raised (ignored): {type(exc).__name__}: {exc}")
+    if action is None or action.kind != "steer":
+        return None
+    _emit_nudge_milestone(
+        {"progress": progress}, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN]
+    )
+    log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
+    return action.message
 
-    if result.has_sensitive_content:
-        if trajectory:
-            trajectory.write_output_screening_decision(
-                tool_name, result.findings, redacted=True, duration_ms=result.duration_ms
-            )
-        log("POLICY", f"OUTPUT REDACTED: {tool_name} — {', '.join(result.findings)}")
+
+# Strings that the output schema of a built-in tool fixes to one of a few
+# values, by the key they stand under. A fail-closed answer leaves them alone:
+# the CLI checks a rewritten response against the schema of the tool and passes
+# the ORIGINAL output on when it does not fit. Each tool named here was checked
+# against the pinned CLI; for a tool that is not named the hook cannot tell
+# whether its answer is taken.
+_SCHEMA_FIXED: dict[str, tuple[str, ...]] = {
+    # "gitOperation", which the CLI adds to the result of a command it takes
+    # for a commit, a merge, a rebase or a pull request.
+    "Bash": ("kind", "action"),
+    "Edit": ("status",),
+    "Glob": (),
+    "Grep": ("mode",),
+    "Read": ("type",),
+    "WebFetch": (),
+    "Write": ("type", "status"),
+}
+
+
+def _fail_closed_output(tool_name: Any, tool_response: Any, marker: str) -> Any:
+    """Return what replaces a tool response that could not be screened.
+
+    Every string that carries content becomes *marker*, in a form the CLI takes
+    for the tool.
+    """
+    name = str(tool_name)
+    if name.startswith("mcp__"):
+        # The result of an MCP tool is a list of content blocks. A blanked
+        # "type" is no block type, and the Messages API refuses a request that
+        # holds one, for the rest of the task. The marker alone is taken.
+        return marker
+    if name == "Read" and isinstance(tool_response, dict) and tool_response.get("type") != "text":
+        # An image, a PDF or a notebook: their blocks do not take blanked data.
+        # The text form of a Read result instead.
         return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "updatedMCPToolOutput": result.redacted_content,
-            }
+            "type": "text",
+            "file": {
+                "filePath": marker,
+                "content": marker,
+                "numLines": 1,
+                "startLine": 1,
+                "totalLines": 1,
+            },
         }
+    return _map_strings(tool_response, lambda _text: marker, _SCHEMA_FIXED.get(name, ()))
 
-    return _PASS_THROUGH
+
+def _map_strings(value: Any, fn: Callable[[str], str], keep: tuple[str, ...] = ()) -> Any:
+    """Return *value* with *fn* applied to every string in it.
+
+    A tool response is a string, or dicts and lists around strings. The CLI
+    takes a rewritten response of a built-in tool only in the tool's own shape
+    (``{"stdout": ..., "stderr": ...}`` for Bash) and otherwise keeps the
+    original, so keys, nesting and non-string values stay as they are. What
+    stands under a key named in *keep* is left alone as well.
+    """
+    if isinstance(value, str):
+        return fn(value)
+    if isinstance(value, dict):
+        return {
+            key: item if key in keep else _map_strings(item, fn, keep)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_map_strings(item, fn, keep) for item in value]
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -1626,49 +1938,6 @@ def _cancel_between_turns_hook(ctx: dict) -> list[str]:
     return []
 
 
-def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
-    """Nudge the agent when it repeats the SAME failing command.
-
-    Reads the per-task :class:`StuckGuard` stamped on ``ctx`` (by
-    :func:`stop_hook`). When the same command has failed with identical output
-    enough times in a row, the guard returns a ``steer`` action — a ONE-TIME
-    advisory message telling the agent to stop retrying and either work around
-    the failure or finish with what it has. Returned as injected text, so the
-    SDK continues the turn with the steer as the next user message.
-
-    ADVISORY ONLY: the guard never kills the task (the bail path was removed —
-    distinguishing a true spin from a legitimately-iterating agent is too
-    fragile to justify an auto-kill; the ``max_turns`` cap is the real
-    backstop). A false positive here costs exactly one extra advisory comment.
-
-    Runs AFTER cancel (cancel wins — never steer a dying agent) but its own
-    no-op-when-cancelled guard makes ordering robust. Fail-open: any error is
-    swallowed so a guard bug can never wedge a healthy agent.
-    """
-    if ctx.get("_cancel_requested"):
-        return []
-    guard = ctx.get("stuck_guard")
-    if guard is None:
-        return []
-    try:
-        action = guard.evaluate()
-        # Refresh the "why it's spinning" latch every turn. When the trailing
-        # window is failure-dominated this returns a one-liner; otherwise None
-        # (which clears the latch — a task that recovered isn't "stuck"). Read by
-        # the terminal path so a later max_turns cap explains itself.
-        global _LAST_STUCK_SUMMARY
-        _LAST_STUCK_SUMMARY = guard.recent_failure_summary()
-    except Exception as exc:
-        log("WARN", f"stuck-guard evaluate raised (ignored): {type(exc).__name__}: {exc}")
-        return []  # nosemgrep: py-silent-success-masking -- stuck guard is ADVISORY ONLY (see docstring); a guard bug must never wedge a healthy agent, max_turns is the real backstop. [] means "no steer this turn", not a masked failure (#756 Category 3)  # noqa: E501
-
-    if action.kind == "steer":
-        _emit_nudge_milestone(ctx, "stuck_steer", action.message[:_NUDGE_PREVIEW_LEN])
-        log("NUDGE", f"stuck-guard STEER injected: {action.signature}")
-        return [action.message]
-    return []
-
-
 # Global list of between-turns hooks.  Cancel MUST run first so it can
 # short-circuit nudges on cancelled tasks (no point injecting nudges into a
 # dying agent — worse, the nudge reader mutates DDB state that the agent will
@@ -1680,10 +1949,6 @@ def _stuck_guard_between_turns_hook(ctx: dict) -> list[str]:
 # nudge reader to preserve cancel-wins semantics.
 between_turns_hooks: list[BetweenTurnsHook] = [
     _cancel_between_turns_hook,
-    # Stuck-guard (advisory): injects a one-time "stop retrying X" nudge when
-    # the same command keeps failing identically. Runs after cancel (never steer
-    # a dying agent); order vs nudge/denial is cosmetic since it never bails.
-    _stuck_guard_between_turns_hook,
     _nudge_between_turns_hook,
     # Denial injection runs LAST so both cancel and nudge short-circuits
     # pre-empt it. The hook explicitly re-checks ``_cancel_requested`` so
@@ -1701,7 +1966,6 @@ async def stop_hook(
     task_id: str,
     progress: Any = None,
     engine: Any = None,
-    stuck_guard: Any = None,
 ) -> dict:
     """Stop hook: run registered between-turns hooks; block if they produce text.
 
@@ -1725,7 +1989,6 @@ async def stop_hook(
         "task_id": task_id,
         "progress": progress,
         "engine": engine,
-        "stuck_guard": stuck_guard,
     }
 
     # Cancel-before-nudge short-circuit.
@@ -1836,8 +2099,8 @@ def build_hook_matchers(
     )
 
     # One stuck-guard per task (== per build_hook_matchers call). The
-    # PostToolUse closure feeds it every tool result; the Stop closure reads it
-    # between turns to steer / bail on a repeating failing command.
+    # PostToolUse and PostToolUseFailure closures feed it every tool result and
+    # hand its advisory about a repeating failing command to the model.
     _stuck_guard = StuckGuard()
     # Retain the controller even after registry removal. A late callback must
     # see its CLOSED barrier, not fall back to the non-MicroVM path.
@@ -1907,9 +2170,14 @@ def build_hook_matchers(
             return SyncHookJSONOutput(**result)
         except Exception as exc:
             log("ERROR", f"PostToolUse wrapper crashed: {type(exc).__name__}: {exc}")
+            marker = "[Output redacted: hook error — fail-closed]"
             fail_closed: PostToolUseHookSpecificOutput = {
                 "hookEventName": "PostToolUse",
-                "updatedMCPToolOutput": "[Output redacted: hook error — fail-closed]",
+                # The response with its content blanked, in a form the CLI
+                # takes for the tool (see ``_fail_closed_output``).
+                "updatedToolOutput": _fail_closed_output(
+                    hook_input.get("tool_name"), hook_input.get("tool_response", marker), marker
+                ),
             }
             return SyncHookJSONOutput(hookSpecificOutput=fail_closed)
         finally:
@@ -1922,6 +2190,22 @@ def build_hook_matchers(
         if lifecycle:
             lifecycle.tool_finished(tool_use_id)
         return SyncHookJSONOutput()
+
+    async def _post_failure(
+        hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
+    ) -> HookJSONOutput:
+        try:
+            result = await post_tool_use_failure_hook(
+                hook_input,
+                tool_use_id,
+                ctx,
+                progress=progress,
+                stuck_guard=_stuck_guard,
+            )
+            return SyncHookJSONOutput(**result)
+        except Exception as exc:
+            log("ERROR", f"PostToolUseFailure wrapper crashed: {type(exc).__name__}: {exc}")
+            return SyncHookJSONOutput()
 
     async def _stop(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
@@ -1937,7 +2221,6 @@ def build_hook_matchers(
                 task_id=stop_task_id,
                 progress=progress,
                 engine=engine,
-                stuck_guard=_stuck_guard,
             )
         except Exception as exc:
             log(
@@ -1961,6 +2244,7 @@ def build_hook_matchers(
             )
         ],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[_post])],
+        "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[_post_failure])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }
     if lifecycle:

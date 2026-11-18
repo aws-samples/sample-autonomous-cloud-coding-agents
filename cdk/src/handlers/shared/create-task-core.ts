@@ -381,6 +381,19 @@ export async function createTaskCore(
           requestId,
         );
       }
+      // These three stand for the call that is waiting for a decision. Before
+      // the task starts there is none: the agent cannot seed its allowlist
+      // from them, and the task would fail when the agent starts.
+      if (['this_call', 'tool_type_session', 'tool_group_session'].includes(parseResult.scope)) {
+        return errorResponse(
+          400,
+          ErrorCode.VALIDATION_ERROR,
+          `Invalid initial_approvals entry "${parseResult.scope}": it stands for a call that is `
+            + 'waiting for approval, so it cannot be granted in advance. '
+            + 'Name the tool or the group, for example "tool_type:Bash".',
+          requestId,
+        );
+      }
       // Degenerate-pattern guard for bash_pattern:/write_path: scopes
       // (§7.4). Rejecting at submit is kinder than silently letting a
       // degenerate pattern through and having it match every tool call.

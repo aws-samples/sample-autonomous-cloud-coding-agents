@@ -542,11 +542,30 @@ describe('submit command', () => {
         'node', 'test',
         '--repo', 'owner/repo',
         '--task', 'ok',
-        '--pre-approve', 'tool_type_session',
+        '--pre-approve', 'all_session',
       ]);
       const [body] = mockCreateTask.mock.calls[0];
-      expect(body.initial_approvals).toEqual(['tool_type_session']);
+      expect(body.initial_approvals).toEqual(['all_session']);
     });
+
+    test.each(['this_call', 'tool_type_session', 'tool_group_session'])(
+      '--pre-approve rejects %s, which stands for a call that is waiting for approval',
+      async (scope) => {
+        // The agent cannot start a task with one of these as a pre-approval.
+        mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });
+        const cmd = makeSubmitCommand();
+        cmd.exitOverride();
+        await expect(
+          cmd.parseAsync([
+            'node', 'test',
+            '--repo', 'owner/repo',
+            '--task', 'ok',
+            '--pre-approve', scope,
+          ]),
+        ).rejects.toThrow(/invalid scope/);
+        expect(mockCreateTask).not.toHaveBeenCalled();
+      },
+    );
 
     test('--pre-approve accepts prefixed scope and is repeatable', async () => {
       mockCreateTask.mockResolvedValue({ task_id: 't-pa', status: 'SUBMITTED' });

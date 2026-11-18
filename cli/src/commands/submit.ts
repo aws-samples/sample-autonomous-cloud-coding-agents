@@ -45,7 +45,9 @@ import {
 import { exitCodeForStatus, waitForTask } from '../wait';
 
 /** Scope prefixes the server accepts (see ``parseApprovalScope`` on the
- *  CDK side). Special short forms without ``:`` are also valid. */
+ *  CDK side). ``all_session`` is the one form without ``:`` that can be
+ *  granted before a task starts: ``this_call``, ``tool_type_session`` and
+ *  ``tool_group_session`` stand for a call that is waiting for approval. */
 const SCOPE_PREFIXES = [
   'tool_type:',
   'tool_group:',
@@ -53,12 +55,6 @@ const SCOPE_PREFIXES = [
   'write_path:',
   'rule:',
 ] as const;
-const SCOPE_SHORT_FORMS = new Set([
-  'this_call',
-  'tool_type_session',
-  'tool_group_session',
-  'all_session',
-]);
 
 function collect<T>(value: T, previous: readonly T[]): readonly T[] {
   return [...previous, value];
@@ -101,7 +97,7 @@ export function makeSubmitCommand(): Command {
     .option(
       '--pre-approve <scope>',
       'Cedar HITL pre-approval scope to seed at task start (repeatable). '
-        + 'Valid forms: this_call, tool_type_session, tool_group_session, all_session, '
+        + 'Valid forms: all_session, '
         + 'tool_type:<name>, tool_group:<name>, bash_pattern:<glob>, write_path:<glob>, rule:<id>.',
       collect<string>,
       [] as readonly string[],
@@ -186,12 +182,11 @@ export function makeSubmitCommand(): Command {
             );
           }
           if (
-            !SCOPE_SHORT_FORMS.has(scope)
+            scope !== 'all_session'
             && !SCOPE_PREFIXES.some((p) => scope.startsWith(p) && scope.length > p.length)
           ) {
             throw new CliError(
-              `--pre-approve "${scope}" has an invalid scope. Use one of: `
-                + 'this_call, tool_type_session, tool_group_session, all_session, '
+              `--pre-approve "${scope}" has an invalid scope. Use all_session `
                 + 'or a prefix: tool_type:, tool_group:, bash_pattern:, write_path:, rule:.',
             );
           }
