@@ -849,6 +849,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       ...(withConfig && {
         agentPlatformConfig: {
           taskApprovalsTableName: approvalsTable.tableName,
+          approvalRequestsApiUrl: 'https://api.example.com/v1/approval-requests',
           nudgesTableName: nudgesTable.tableName,
           logGroupName: '/aws/abca/application',
           artifactsBucketName: traceBucket.bucketName,
@@ -909,6 +910,7 @@ describe('TaskOrchestrator agentPlatformConfig (ADR-021 P2 platform_config trans
       githubTokenSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:github-token-abc123',
       agentPlatformConfig: {
         taskApprovalsTableName: 'approvals',
+        approvalRequestsApiUrl: 'https://api.example.com/v1/approval-requests',
         nudgesTableName: 'nudges',
         logGroupName: '/aws/abca/application',
         artifactsBucketName: 'artifacts',

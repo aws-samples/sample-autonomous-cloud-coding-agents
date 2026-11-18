@@ -131,6 +131,7 @@ export function errorResponse(
   code: string,
   message: string,
   requestId: string,
+  details?: Record<string, unknown>,
 ): APIGatewayProxyResult {
   return {
     statusCode,
@@ -140,6 +141,7 @@ export function errorResponse(
         code,
         message,
         request_id: requestId,
+        ...(details ? { details } : {}),
       },
     }),
   };

@@ -111,6 +111,7 @@ process.env.MICROVM_EGRESS_CONNECTOR_ARNS = 'arn:aws:lambda:us-east-1:1234567890
 process.env.MICROVM_PAYLOAD_BUCKET = 'test-microvm-payload-bucket';
 process.env.TASK_TABLE_NAME = 'Tasks';
 process.env.TASK_EVENTS_TABLE_NAME = 'TaskEvents';
+process.env.APPROVAL_REQUESTS_API_URL = 'https://fixture.execute-api.us-east-1.amazonaws.com/v1/';
 process.env.USER_CONCURRENCY_TABLE_NAME = 'UserConcurrency';
 process.env.TASK_RETENTION_DAYS = '90';
 
