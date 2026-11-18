@@ -50,13 +50,13 @@ function ensureConfigDir(): void {
   }
 }
 
-/** Load CLI configuration. Throws if not configured. */
+/** Load CLI configuration. Throws if not configured: no config file, or a corrupt one. */
 export function loadConfig(): CliConfig {
-  const p = configPath();
-  if (!fs.existsSync(p)) {
+  const config = tryLoadConfig();
+  if (!config) {
     throw new CliError('Not configured. Run `bgagent configure` first.');
   }
-  return JSON.parse(fs.readFileSync(p, 'utf-8')) as CliConfig;
+  return config;
 }
 
 /** Save CLI configuration. */

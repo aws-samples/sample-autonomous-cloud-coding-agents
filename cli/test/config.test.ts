@@ -50,6 +50,11 @@ describe('config', () => {
     test('throws when config does not exist', () => {
       expect(() => loadConfig()).toThrow('Not configured');
     });
+
+    test('throws a CliError pointing at `bgagent configure` on corrupt JSON', () => {
+      fs.writeFileSync(path.join(tmpDir, 'config.json'), '{ not valid json');
+      expect(() => loadConfig()).toThrow('bgagent configure');
+    });
   });
 
   describe('saveCredentials / loadCredentials', () => {
@@ -82,6 +87,22 @@ describe('config', () => {
       // 0o600 = owner read+write only (octal 600 = decimal 384)
       // eslint-disable-next-line no-bitwise
       expect(stat.mode & 0o777).toBe(0o600);
+    });
+
+    test('tightens a credentials file that already exists with loose permissions', () => {
+      // Restored from a backup, copied from another machine, or created by
+      // another tool: the file is there before the first save, world-readable.
+      const p = path.join(tmpDir, 'credentials.json');
+      fs.writeFileSync(p, '{}');
+      fs.chmodSync(p, 0o644);
+
+      saveCredentials({
+        id_token: 'tok',
+        refresh_token: 'ref',
+        token_expiry: '2026-01-01T00:00:00.000Z',
+      });
+
+      expect(fs.statSync(p).mode % 0o1000).toBe(0o600);
     });
   });
 });

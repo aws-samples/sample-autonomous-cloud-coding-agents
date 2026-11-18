@@ -60,6 +60,9 @@ import {
   WebhookDetail,
 } from './types';
 
+/** How many of the newest events ``getStatusSnapshot`` reads for ``bgagent status``. */
+const STATUS_SNAPSHOT_EVENT_LIMIT = 20;
+
 /** Options for constructing an {@link ApiClient}. */
 export interface ApiClientOptions {
   /**
@@ -384,20 +387,16 @@ export class ApiClient {
    *
    * Runs the ``GET /tasks/{id}`` and ``GET /tasks/{id}/events?desc=1&limit=N``
    * calls in parallel so the snapshot is a single round-trip in wall-clock
-   * terms. The event page is intentionally small (default 20) — the
+   * terms. The event page is intentionally small — the
    * formatter only needs the latest tool call, turn, milestone, and cost
    * update, which are always recent in a well-behaved event stream.
    *
    * @param taskId - the task to summarize.
-   * @param recentEventLimit - how many recent events to pull (default 20).
    */
-  async getStatusSnapshot(
-    taskId: string,
-    recentEventLimit = 20,
-  ): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
+  async getStatusSnapshot(taskId: string): Promise<{ task: TaskDetail; recentEvents: TaskEvent[] }> {
     const [task, eventsPage] = await Promise.all([
       this.getTask(taskId),
-      this.getTaskEvents(taskId, { limit: recentEventLimit, desc: true }),
+      this.getTaskEvents(taskId, { limit: STATUS_SNAPSHOT_EVENT_LIMIT, desc: true }),
     ]);
     return { task, recentEvents: eventsPage.data };
   }

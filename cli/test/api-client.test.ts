@@ -19,6 +19,7 @@
 
 import { ApiClient } from '../src/api-client';
 import { getAuthToken } from '../src/auth';
+import { setVerbose } from '../src/debug';
 import { ApiError } from '../src/errors';
 
 // Mock auth
@@ -224,6 +225,23 @@ describe('ApiClient', () => {
       await client.linearRemoveWorkspace('a b');
       expect(mockFetch.mock.calls[0][0]).toContain('/linear/workspaces/a%20b');
     });
+  });
+
+  describe('linearLink / jiraLink', () => {
+    test.each(['linearLink', 'jiraLink'] as const)(
+      '%s sends dry_run for the preview only, not for the confirming call',
+      async (method) => {
+        mockFetch.mockResolvedValue({ ok: true, json: async () => ({ data: {} }) });
+
+        await client[method]('link-abc', { dryRun: true });
+        await client[method]('link-abc');
+
+        // The handler stores the identity mapping and consumes the code unless
+        // the body says `dry_run: true` (the wire name, not the option's).
+        expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual({ code: 'link-abc', dry_run: true });
+        expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ code: 'link-abc' });
+      },
+    );
   });
 
   describe('getTaskEvents', () => {
@@ -500,20 +518,6 @@ describe('ApiClient', () => {
 
       await expect(client.getStatusSnapshot('abc')).rejects.toThrow('network down');
     });
-
-    test('honors a custom recentEventLimit', async () => {
-      mockFetch
-        .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { task_id: 'abc' } }) })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ data: [], pagination: { next_token: null, has_more: false } }),
-        });
-
-      await client.getStatusSnapshot('abc', 5);
-
-      const eventsUrl = mockFetch.mock.calls.map(c => c[0] as string).find(u => u.includes('/events'));
-      expect(eventsUrl).toContain('limit=5');
-    });
   });
 
   describe('createWebhook', () => {
@@ -635,6 +639,38 @@ describe('ApiClient', () => {
       const err: unknown = await client.getTask('abc').catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ApiError);
       expect((err as ApiError).statusCode).toBe(502);
+    });
+  });
+
+  describe('--verbose output', () => {
+    let errorSpy: jest.SpiedFunction<typeof console.error>;
+
+    beforeEach(() => {
+      setVerbose(true);
+      errorSpy = jest.spyOn(console, 'error').mockImplementation();
+    });
+
+    afterEach(() => {
+      setVerbose(false);
+      errorSpy.mockRestore();
+    });
+
+    test('masks the one-time API key in the logged response body', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 201,
+        statusText: 'Created',
+        json: async () => ({ data: { key_id: 'k-1', name: 'ci', key: 'bgak_live_secret' } }),
+      });
+
+      const created = await client.createApiKey({ name: 'ci' });
+
+      // The caller still gets the key; only what --verbose prints is masked.
+      expect(created.key).toBe('bgak_live_secret');
+      const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      expect(logged).toContain('Response body');
+      expect(logged).not.toContain('bgak_live_secret');
+      expect(logged).toContain('[REDACTED]');
     });
   });
 
