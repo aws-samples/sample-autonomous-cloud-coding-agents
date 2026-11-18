@@ -109,7 +109,9 @@ const mockReplyToComment: jest.Mock = jest.fn().mockResolvedValue('reply-id');
 // place) via upsertThreadedReply(ctx, issueId, parentCommentId, body, existingId?)
 // rather than posting a fresh replyToComment.
 const mockUpsertThreadedReply: jest.Mock = jest.fn().mockResolvedValue('reply-id');
+const mockPostIdentifiedComment: jest.Mock = jest.fn().mockResolvedValue({ ok: true });
 jest.mock('../../src/handlers/shared/linear-feedback', () => ({
+  postIdentifiedComment: (...args: unknown[]) => mockPostIdentifiedComment(...args),
   postIssueComment: (
     ctx: { linearWorkspaceId: string; registryTableName: string },
     issueId: string,
@@ -179,6 +181,7 @@ jest.mock('../../src/handlers/shared/jira-feedback', () => ({
 }));
 
 process.env.TASK_TABLE_NAME = 'Tasks';
+process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.GITHUB_TOKEN_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:0:secret:platform';
 process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME = 'LinearWorkspaceRegistry';
 process.env.JIRA_WORKSPACE_REGISTRY_TABLE_NAME = 'JiraWorkspaceRegistry';
@@ -400,6 +403,10 @@ describe('fanout-task-events: per-channel filter contract (design §6.2)', () =>
     // that times out still settles (matches Jira/Slack, which already had it).
     const f = CHANNEL_DEFAULTS.linear;
     expect([...f].sort()).toEqual([
+      'approval_decision_recorded',
+      'approval_requested',
+      'approval_stranded',
+      'approval_timed_out',
       'pr_created',
       'task_cancelled',
       'task_completed',
@@ -1498,6 +1505,97 @@ describe('fanout-task-events: Linear dispatcher', () => {
       return Promise.resolve({});
     });
   };
+
+  describe('approval notices (#1001)', () => {
+    const pendingRow = {
+      user_id: 'u-1',
+      status: 'PENDING',
+      tool_name: 'Bash',
+      severity: 'medium',
+      reason: 'Review this',
+      tool_input_preview: '{"command":"git push"}',
+      timeout_s: 1800,
+      created_at: '2026-09-16T12:00:00Z',
+    };
+    const awaiting = { ...TASK_RECORD_LINEAR, status: 'AWAITING_APPROVAL', awaiting_approval_request_id: 'g1' };
+    const answer = (approvalRow: unknown, task: unknown) => mockDdbSend.mockImplementation(async (command: any) => {
+      if (command._type !== 'Get') return {};
+      return { Item: command.input.TableName === 'Approvals' ? approvalRow : task };
+    });
+
+    test.each([false, true])('posts the request as a reply-able notice without settling the task (post failure=%s)', async fails => {
+      answer(pendingRow, awaiting);
+      if (fails) mockPostIdentifiedComment.mockResolvedValueOnce({ ok: false, retryable: true });
+      const outcome = await routeEvent({
+        task_id: 't-lin',
+        event_id: 'approval-event',
+        event_type: 'agent_milestone',
+        timestamp: '2026-09-16T12:00:00Z',
+        metadata: { milestone: 'approval_requested', request_id: 'g1' },
+      });
+      expect(mockPostIdentifiedComment).toHaveBeenCalledTimes(1);
+      const posted = mockPostIdentifiedComment.mock.calls[0][1];
+      expect(posted.issueId).toBe('issue-uuid-42');
+      expect(posted.body).toContain('Approval needed');
+      expect(posted.body).toContain('Reply approve, or deny with an optional reason');
+      expect(posted.body).toContain('bgagent approve t-lin g1 --scope this_call');
+      expect(mockPostIssueComment).not.toHaveBeenCalled();
+      expect(mockUpsertThreadedReply).not.toHaveBeenCalled();
+      const updates = mockDdbSend.mock.calls.filter(([c]: any[]) => c._type === 'Update');
+      // Thread mapping first (keyed on the comment id), then the delivery receipt.
+      expect(updates[0][0].input.Key.task_id).toMatch(/^LINEAR_COMMENT#org-uuid-acme#/);
+      if (fails) {
+        expect(outcome.infraRejections).toHaveLength(1);
+        expect(updates).toHaveLength(1);
+      } else {
+        expect(outcome.infraRejections).toHaveLength(0);
+        expect(updates).toHaveLength(2);
+        expect(updates[1][0].input.ExpressionAttributeNames).toEqual({ '#marker': 'notified_linear_approval_requested' });
+      }
+    });
+
+    test('an outcome notice closes the reply thread even when the post fails', async () => {
+      answer({ ...pendingRow, status: 'TIMED_OUT' }, { ...awaiting, status: 'RUNNING' });
+      mockPostIssueComment.mockResolvedValueOnce({ ok: false, retryable: false });
+      await routeEvent({
+        task_id: 't-lin',
+        event_id: 'timeout-event',
+        event_type: 'agent_milestone',
+        timestamp: '2026-09-16T12:30:00Z',
+        metadata: { milestone: 'approval_timed_out', request_id: 'g1' },
+      });
+      const updates = mockDdbSend.mock.calls.filter(([c]: any[]) => c._type === 'Update');
+      expect(updates[0][0].input.UpdateExpression).toBe('SET #ttl = if_not_exists(#ttl, :ttl)');
+      expect(mockPostIssueComment.mock.calls[0][2]).toContain('Approval request timed out');
+      expect(updates.some(([c]: any[]) => c.input.ExpressionAttributeNames?.['#marker'])).toBe(false);
+    });
+
+    test('a task that ends while waiting closes its reply thread before the terminal comment', async () => {
+      answer(pendingRow, { ...awaiting, status: 'CANCELLED' });
+      await routeEvent({
+        task_id: 't-lin',
+        event_id: 'cancel-event',
+        event_type: 'task_cancelled',
+        timestamp: '2026-09-16T12:10:00Z',
+        metadata: {},
+      });
+      const updates = mockDdbSend.mock.calls.filter(([c]: any[]) => c._type === 'Update');
+      expect(updates[0][0].input.Key.task_id).toMatch(/^LINEAR_COMMENT#org-uuid-acme#/);
+      expect(updates[0][0].input.UpdateExpression).toBe('SET #ttl = if_not_exists(#ttl, :ttl)');
+    });
+
+    test('a non-approval milestone is not treated as an approval', async () => {
+      answer(pendingRow, awaiting);
+      await routeEvent({
+        task_id: 't-lin',
+        event_id: 'other',
+        event_type: 'agent_milestone',
+        timestamp: '2026-09-16T12:00:00Z',
+        metadata: { milestone: 'approval_gate_cap_reached', request_id: 'g1' },
+      });
+      expect(mockPostIdentifiedComment).not.toHaveBeenCalled();
+    });
+  });
 
   test('task_completed posts ✅ comment with cost / turns / duration on linked Linear issue', async () => {
     mockGet(TASK_RECORD_LINEAR);

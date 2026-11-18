@@ -56,7 +56,7 @@ process.env.TASK_APPROVALS_TABLE_NAME = 'Approvals';
 process.env.TASK_EVENTS_TABLE_NAME = 'Events';
 process.env.APPROVE_RATE_LIMIT_PER_MINUTE = '30';
 
-import { handler } from '../../src/handlers/approve-task';
+import { handler, recordApprovalForUser } from '../../src/handlers/approve-task';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
   return {
@@ -233,5 +233,43 @@ describe('approve-task — error classification', () => {
       .mockRejectedValueOnce(new Error('ddb throttled on audit'));
     const res = await handler(makeEvent());
     expect(res.statusCode).toBe(202);
+  });
+});
+
+describe('approve-task — decision source (#1001)', () => {
+  test('API callers record no decision_source (behaviour unchanged)', async () => {
+    mockSend.mockResolvedValue({});
+    await handler(makeEvent({ body: JSON.stringify({ request_id: '01KREQ1', decision: 'approve' }) }));
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const update = tx.TransactItems[0].Update;
+    expect(update.UpdateExpression).not.toContain('decision_source');
+    expect(update.ExpressionAttributeValues[':source']).toBeUndefined();
+    const audit = mockSend.mock.calls.find((c) => c[0]._type === 'Put')?.[0].input;
+    expect(audit.Item.metadata.decision_source).toBeUndefined();
+  });
+
+  test('recordApprovalForUser records the given decision_source on the row and the audit event', async () => {
+    mockSend.mockResolvedValue({});
+    const res = await recordApprovalForUser({
+      userId: 'user-alice',
+      taskId: 'task-1',
+      body: JSON.stringify({ request_id: '01KREQ1', decision: 'approve' }),
+      decisionSource: 'linear',
+    });
+    expect(res.statusCode).toBe(202);
+    expect(JSON.parse(res.body).data.status).toBe('APPROVED');
+    const tx = mockSend.mock.calls.find((c) => c[0]._type === 'TransactWrite')?.[0].input;
+    const update = tx.TransactItems[0].Update;
+    expect(update.UpdateExpression).toContain('decision_source = :source');
+    expect(update.ExpressionAttributeValues[':source']).toBe('linear');
+    const audit = mockSend.mock.calls.find((c) => c[0]._type === 'Put')?.[0].input;
+    expect(audit.Item.metadata.decision_source).toBe('linear');
+    expect(audit.Item.metadata.caller_user_id).toBe('user-alice');
+  });
+
+  test('recordApprovalForUser rejects a missing user with 401', async () => {
+    const res = await recordApprovalForUser({ userId: null, taskId: 'task-1', body: '{}', decisionSource: 'linear' });
+    expect(res.statusCode).toBe(401);
+    expect(mockSend).not.toHaveBeenCalled();
   });
 });
