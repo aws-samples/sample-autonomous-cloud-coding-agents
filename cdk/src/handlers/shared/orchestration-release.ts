@@ -162,19 +162,6 @@ export interface ReleaseChildParams {
    * attributes its children to the right plane. Part of the trigger-agnostic seam.
    */
   readonly channelSource?: ChannelSource;
-  /**
-   * Epic RETRY: when true, the idempotency key is salted with the
-   * child's PRIOR ``child_task_id`` so a re-run creates a genuinely NEW task
-   * rather than idempotently replaying the failed one. The prior task id is
-   * distinct per retry round (each round's prior task differs) yet stable within
-   * a round (a webhook redelivery of the same retry sees the same prior id →
-   * one new task, not many). A first release (no prior task id) is unaffected —
-   * the key stays the back-compat ``orch_sub``. Without this, a retry flips the
-   * row to ``released`` but ``createTaskCore`` returns the OLD failed task (200
-   * idempotent replay) and nothing actually re-runs — observed in practice on a
-   * retried epic.
-   */
-  readonly retry?: boolean;
 }
 
 export type ReleaseChildResult =
@@ -217,8 +204,8 @@ const HTTP_SERVER_ERROR_MIN = 500;
  * Against the codes createTaskCore actually emits:
  *  - 400 (validation / guardrail block) and 422 (repo not onboarded) →
  *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
- *    and re-apply the trigger label, or onboard the repo and re-run via
- *    ``@bgagent retry``. Rolling back would loop the sweep forever.
+ *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
+ *    loop the sweep forever.
  *  - 429 (monthly budget exhausted) → DETERMINISTIC for this release attempt.
  *    An operator must adjust/disable the budget or wait for the next UTC month,
  *    then re-run via ``@bgagent retry``.
@@ -243,10 +230,10 @@ const HTTP_TOO_MANY_REQUESTS = 429; // BUDGET_EXCEEDED
  * changes the body prose; the body substring is only a refinement to name the
  * guardrail case specifically (a 400 is either a guardrail block or a plain
  * validation error, and the code alone doesn't tell them apart). Every reason
- * ends with the next step: fix the cause, then ``@bgagent retry``; or, when the
- * cause is the sub-issue's own text, change it and re-apply the trigger label.
- * A retry starts the child with the text stored on its row, and only a
- * re-applied label reads the sub-issue again (``extendOrchestration``).
+ * ends with the same next step — fix the cause, then ``@bgagent retry``. That
+ * holds when the cause is the sub-issue's own text too: the retry comment reads
+ * the sub-issue again before the child is started from its row, as a re-applied
+ * trigger label does (``refreshUnstartedText``).
  */
 function deterministicFailureReason(statusCode: number, body: string): string {
   const retry = 'then reply `@bgagent retry` on the epic to re-run.';
@@ -256,13 +243,11 @@ function deterministicFailureReason(statusCode: number, body: string): string {
   if (statusCode === HTTP_TOO_MANY_REQUESTS) {
     return `Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC month, ${retry}`;
   }
-  const relabel = 'then remove and re-apply the trigger label on the epic '
-    + '(that reads the new text; `@bgagent retry` alone re-sends the old one).';
   // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
   if (/content policy|guardrail/i.test(body || '')) {
-    return `Blocked by content policy — reword this sub-issue, ${relabel}`;
+    return `Blocked by content policy — reword this sub-issue, ${retry}`;
   }
-  return `Couldn't start (validation error) — edit this sub-issue, ${relabel}`;
+  return `Couldn't start (validation error) — edit this sub-issue, ${retry}`;
 }
 
 /**
@@ -429,13 +414,13 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   // inside the allowed charset.
   //
   // RETRY REPLAY FIX: salt the key with the prior
-  // child_task_id WHENEVER the row already carries one — NOT only when the
-  // caller passes retry=true. A child being (re-)released while it still has a
+  // child_task_id WHENEVER the row already carries one, whoever releases it. A
+  // child being (re-)released while it still has a
   // child_task_id inherently means that prior task is TERMINAL (a live child is
   // in 'released', never back in blocked/ready), so replaying it under the same
   // key would return the OLD failed task (200) and nothing runs. This bit a
-  // dependency chain A→B: the epic-retry salts A (layer 0, retry=true) but B is
-  // reset to blocked and later released by the reconciler with retry=false → the
+  // dependency chain A→B while only the epic retry salted: it releases A (layer
+  // 0), but B is reset to blocked and later released by the reconciler → the
   // unsalted key replayed B's dead task. Salting on the id's PRESENCE fixes both
   // the immediate layer and the downstream cascade. The prior id (a ULID, 26
   // alnum chars) keeps the key inside the charset; orch_<32> + _ + <uuid 36> +
@@ -711,13 +696,6 @@ export async function releaseReadyChildren(
    * A value ``<= 0`` releases nothing this pass.
    */
   maxToRelease?: number,
-  /**
-   * Epic RETRY: salt each child's idempotency key with its prior
-   * ``child_task_id`` so a re-run spawns a NEW task instead of replaying the
-   * failed one. Only the epic-retry path passes true; every other caller
-   * (seed, extend, forward cascade, recovery) omits it → back-compat key.
-   */
-  retry = false,
 ): Promise<readonly ReleaseChildReadyResult[]> {
   const all = allChildren ?? rows;
   const branchOf = new Map(
@@ -789,7 +767,6 @@ export async function releaseReadyChildren(
       ...(selection.merge_branches.length > 0 && { mergeBranches: selection.merge_branches }),
       createTaskCore,
       now,
-      retry,
     });
     // Correlate the result to its child so callers can patch their in-memory
     // view: a terminally-failed child must be reflected in the settle that

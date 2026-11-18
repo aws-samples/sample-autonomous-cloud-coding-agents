@@ -626,16 +626,22 @@ const UNSTARTED: readonly ChildStatus[] = ['blocked', 'ready', 'failed', 'skippe
  * A child is started with the text on its row, which the first seed wrote. A
  * sub-issue that was refused for its text (content policy, length) and then
  * reworded was therefore sent again as it was, on every retry. A child that is
- * running or has succeeded keeps the text its task was started with.
+ * running or has succeeded is not written.
+ *
+ * Called with a graph that was just read, by both gestures that start such a
+ * child again: a re-applied trigger label ({@link extendOrchestration}) and a
+ * retry comment (the webhook processors).
  *
  * Each write is conditional on the row still being in one of those statuses,
  * which the store checks at the moment of the write: a releaser that claimed
  * the row since it was read here starts the task with the text it read, and
- * the row keeps that text. ``updated_at`` is left alone: it is the stamp of the
- * row's last status change, which the sweep and the retry's once-only key
- * compare.
+ * the row keeps that text. A releaser that read the row before this write and
+ * claims it after starts the task with the text it read, while the row holds
+ * the new one; the next start uses the new one. ``updated_at`` is left alone:
+ * it is the stamp of the row's last status change, which the sweep and the
+ * retry's once-only key compare.
  */
-async function refreshUnstartedText(
+export async function refreshUnstartedText(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   existing: readonly OrchestrationChildRow[],
@@ -750,7 +756,8 @@ export async function extendOrchestration(params: {
 
   // A new node with NO declared dependency must NOT branch off bare
   // main — it inherits the epic's accumulated unmerged work by stacking on the
-  // epic TIP (the existing leaf frontier). We inject that as a synthetic
+  // epic TIP (the leaf frontier of the existing nodes that have not failed or
+  // been skipped; empty when there is no such node). We inject that as a synthetic
   // ``depends_on`` so the existing dependency gating + base-branch stacking treat
   // it like any other dependent; "fall back to main only when merged" is handled
   // downstream by the agent's base-fetch fallback. Nodes that DECLARED a
@@ -994,6 +1001,8 @@ export interface OrchestrationMeta {
    * settled, so a later settle can't re-swap a marker on an old comment.
    */
   readonly retry_comment_id?: string;
+  /** When the epic was seeded, extended or re-opened last (the meta row's own stamp). */
+  readonly updated_at?: string;
 }
 
 /**
@@ -1160,6 +1169,7 @@ export async function loadOrchestration(
     ...(metaItem.status_comment_id !== undefined && {
       status_comment_id: metaItem.status_comment_id as string,
     }),
+    ...(metaItem.updated_at !== undefined && { updated_at: metaItem.updated_at as string }),
   };
 
   return { meta, children };

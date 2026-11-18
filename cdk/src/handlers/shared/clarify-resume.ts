@@ -47,9 +47,10 @@ const EXCHANGE_HEADER = '---\nThis continues an earlier run that paused to ask a
 /**
  * Where the reviewer's later words start in a description: the first block that
  * a comment appended. A clarifying exchange (above), or the follow-up request of
- * buildFollowUpDescription in linear-webhook-processor.ts.
+ * buildFollowUpDescription in linear-webhook-processor.ts, which cuts in front
+ * of the first block in the same way.
  */
-const APPENDED_BLOCK = /(?:^|\n\n)---\n(?:This continues an earlier run that paused to ask a clarifying question\.|An earlier run on this issue ended without a pull request\.)/;
+export const APPENDED_BLOCK = /(?:^|\n\n)---\n(?:This continues an earlier run that paused to ask a clarifying question\.|An earlier run on this issue ended without a pull request\.)/;
 
 /** Half of a character at the end of a text: what a cut between the two code units of an emoji leaves. */
 const LONE_SURROGATE_AT_END = /\p{Surrogate}$/u;

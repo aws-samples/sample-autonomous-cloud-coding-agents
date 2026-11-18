@@ -839,6 +839,33 @@ describe("loadOrchestration — the project's trigger label is hydrated", () => 
   });
 });
 
+describe("loadOrchestration — the meta row's own time stamp", () => {
+  // The seed, an extend and every re-open stamp the meta row; no child row is
+  // written when a comment re-opens an epic. The reconciler measures how long
+  // ago the epic ended from the latest stamp, so this one has to be loaded.
+  const metaRow = {
+    orchestration_id: 'orch_1',
+    sub_issue_id: '#meta',
+    repo: 'o/r',
+    platform_user_id: 'u1',
+    child_count: 0,
+    parent_issue_ref: 'P',
+    credentials_ref: 'WS',
+  };
+
+  test('a meta row carries its updated_at', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Items: [{ ...metaRow, updated_at: NOW }] }) };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta.updated_at).toBe(NOW);
+  });
+
+  test('a meta row without the attribute has no such member', async () => {
+    const ddb = { send: jest.fn().mockResolvedValue({ Items: [metaRow] }) };
+    const snap = await loadOrchestration(ddb as never, TABLE, 'orch_1');
+    expect(snap!.meta).not.toHaveProperty('updated_at');
+  });
+});
+
 describe('loadOrchestration — dedup marker rows are not children', () => {
   test('excludes ack#<commentId> marker rows from children (only real sub-issues count)', async () => {
     const ddb = {
@@ -1239,6 +1266,30 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
     expect(result.releasableSubIssueIds).toEqual([]);
   });
 
+  test('new unconstrained node after a failure → stacks on the work that succeeded and starts', async () => {
+    // A failed, so the integration node over A and B was skipped. It is the only
+    // node nothing depends on, but a node stacked on it would be skipped too.
+    const INTEGRATION = `${ORCH}__integration`;
+    const ddb = makeDdb();
+    ddb.send
+      .mockResolvedValueOnce(existing([
+        { id: 'A', status: 'failed' },
+        { id: 'B', status: 'succeeded' },
+        { id: INTEGRATION, deps: ['A', 'B'], status: 'skipped' },
+      ]))
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({});
+    const result = await extendOrchestration({
+      ddb: ddb as never,
+      ...extendParams([child('A'), child('B'), child('C'), child(INTEGRATION, ['A', 'B', 'C'])]),
+    });
+    const bw = ddb.send.mock.calls.find((c) => c[0] instanceof BatchWriteCommand)![0];
+    const written = (bw.input.RequestItems[TABLE] as Array<{ PutRequest: { Item: { sub_issue_id: string; depends_on: string[]; child_status: string } } }>)
+      .map((request) => request.PutRequest.Item);
+    expect(written.map((row) => [row.sub_issue_id, row.depends_on, row.child_status])).toEqual([['C', ['B'], 'ready']]);
+    expect(result.releasableSubIssueIds).toEqual(['C']);
+  });
+
   test('new unconstrained node on a fan-out epic → diamond implicit deps (all leaves)', async () => {
     const ddb = makeDdb();
     ddb.send
@@ -1413,6 +1464,26 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
 
       expect(result).toEqual({ orchestrationId: ORCH, addedSubIssueIds: [], releasableSubIssueIds: [] });
       expect(ddb.send).toHaveBeenCalledTimes(1); // the load: no row, and the epic is not re-opened
+    });
+
+    test('a step added to a chain whose last step failed builds on the step in front of it, and is combined later', async () => {
+      // B failed, so C builds on A and starts. That makes it a second leaf beside
+      // B: the integration node over both is stored; the sweep skips it while B stays
+      // failed, and a retry of B makes it wait again.
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'failed' }]))
+        .mockResolvedValue({});
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A'), child('B', ['A']), child('C'), child(INTEGRATION, ['B', 'C'])]),
+      });
+
+      expect(result.releasableSubIssueIds).toEqual(['C']);
+      expect(written(ddb).map((row) => [row.sub_issue_id, row.depends_on, row.child_status])).toEqual([
+        ['C', ['A'], 'ready'],
+        [INTEGRATION, ['B', 'C'], 'blocked'],
+      ]);
     });
 
     test('a new node that declares its own edge and makes a second leaf gets the integration node', async () => {

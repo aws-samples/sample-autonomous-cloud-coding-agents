@@ -124,6 +124,7 @@ process.env.TASK_TABLE_NAME = 'TaskTable';
 process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
+import { buildClarifyResumeDescription } from '../../src/handlers/shared/clarify-resume';
 import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
 import { isBotAuthoredComment } from '../../src/handlers/shared/orchestration-comment-trigger';
 
@@ -723,7 +724,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     if (opts.childTaskId) child.child_task_id = opts.childTaskId;
     ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
       if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') {
-        return { Items: opts.standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...opts.standalone }] : [] }; // resolveTaskByLinearIssue
+        return { Items: opts.standalone ? [{ channel_metadata: { linear_workspace_id: 'org-1' }, ...opts.standalone }] : [] }; // lookupTaskByLinearIssue
       }
       if (cmd._type === 'Query') return { Items: [meta, child] }; // loadOrchestration
       // Comment-trigger authorization: lookupPlatformUser Gets the user-mapping
@@ -758,6 +759,9 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     resolveLinearOauthTokenMock.mockReset()
       .mockResolvedValue({ accessToken: 'tok', oauthSecretArn: 'arn:secret', workspaceSlug: 'acme' });
     fetchIssueParentIdMock.mockReset().mockResolvedValue(lookupFound('PARENT'));
+    // A retry comment reads the sub-issues of the epic again. The tests that are
+    // about that give it a graph.
+    fetchSubIssueGraphMock.mockReset().mockResolvedValue({ kind: 'no_children', parentIssueId: 'PARENT' });
     discoverOrchestrationMock.mockReset();
     reactToCommentMock.mockReset().mockResolvedValue(true);
     replyToCommentMock.mockReset().mockResolvedValue(true);
@@ -902,8 +906,23 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       }
       return {};
     });
+    // The failed sibling was reworded since the epic was first read.
+    fetchSubIssueGraphMock.mockResolvedValue({
+      kind: 'ok',
+      parentIssueId: 'PARENT',
+      children: [{ id: 'sub-issue-1', depends_on: [] }, { id: 'sub-bad', depends_on: [], title: 'Reworded' }],
+    });
 
     await handler(eventWith(comment({ data: { id: 'c-retry', body: '@bgagent retry', issueId: 'sub-issue-1' } })));
+
+    // The sub-issues of the EPIC, not of the commented one, are read again, and
+    // the title the failed sibling has now is stored for the retry to send.
+    expect(fetchSubIssueGraphMock).toHaveBeenCalledWith('tok', 'PARENT', undefined);
+    const textWrites = ddbSend.mock.calls
+      .map((c) => c[0] as { _type?: string; input: { Key?: { sub_issue_id?: string }; ExpressionAttributeValues?: Record<string, unknown>; ExpressionAttributeNames?: Record<string, string> } })
+      .filter((cmd) => cmd._type === 'Update' && cmd.input.ExpressionAttributeNames?.['#title'] === 'title');
+    expect(textWrites.map((cmd) => [cmd.input.Key?.sub_issue_id, cmd.input.ExpressionAttributeValues?.[':title']]))
+      .toEqual([['sub-bad', 'Reworded']]);
 
     // Re-ran the failed sibling (salted key), did NOT open a pr-iteration on the child.
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
@@ -1332,6 +1351,78 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         expect(description).toHaveLength(10_000); // cut to exactly what fits, no further
       });
 
+      test('a follow-up on a resumed task keeps the question and the answer', async () => {
+        // The description of a task that was resumed after a clarifying question
+        // ends with that exchange. Cut from its end, the follow-up took the place
+        // of the reviewer's answer: the issue text in front of the exchange gives way.
+        const resumed = buildClarifyResumeDescription(
+          `ABC-42: Fix the login bug\n\n${'x'.repeat(10_000 - 27)}`, 'Which environment?', 'staging',
+        );
+        mockFinishedTaskWithDescription(resumed);
+        await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent retry', issueId: 'sub-issue-1' } })));
+
+        const description = String(createTaskCoreMock.mock.calls[0][0].task_description);
+        expect(description.slice(0, 27)).toBe('ABC-42: Fix the login bug\n\n');
+        expect(description.slice(description.indexOf('\n\n---\n'))).toBe([
+          '',
+          '',
+          '---',
+          'This continues an earlier run that paused to ask a clarifying question.',
+          'You asked: Which environment?',
+          'The reviewer answered: staging',
+          'Proceed with the original request using this answer.',
+          '',
+          '---',
+          'An earlier run on this issue ended without a pull request.',
+          'The reviewer now asks: retry',
+        ].join('\n'));
+        expect(description).toHaveLength(10_000); // cut to exactly what fits, no further
+      });
+
+      test('a follow-up does not shorten exchanges that leave it no room', async () => {
+        // A row without a stored description, resumed twice with long answers:
+        // the description is exchanges only, and no issue text can give way.
+        // What the reviewer wrote stays whole; the description is then over the
+        // limit, createTaskCore refuses it and the commenter is told why.
+        const first = buildClarifyResumeDescription(undefined, 'q'.repeat(2_000), 'a'.repeat(2_900));
+        const resumed = buildClarifyResumeDescription(first, 'r'.repeat(2_000), 'b'.repeat(2_700));
+        expect(resumed).toHaveLength(9_930); // a description a task can have
+        mockFinishedTaskWithDescription(resumed);
+        await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent retry', issueId: 'sub-issue-1' } })));
+
+        const description = String(createTaskCoreMock.mock.calls[0][0].task_description);
+        expect(description.startsWith(`${resumed}\n\n---\n`)).toBe(true);
+        expect(description.slice(-28)).toBe('The reviewer now asks: retry');
+        expect(description).toHaveLength(10_023);
+      });
+
+      test('an answer to a question of the follow-up run keeps the follow-up request', async () => {
+        // The other direction, through both builders. Each keeps the blocks of
+        // the other by their first lines (APPENDED_BLOCK in clarify-resume.ts):
+        // a rewording of the follow-up block has to reach that expression.
+        mockFinishedTaskWithDescription(`ABC-42: Fix the login bug\n\n${'x'.repeat(10_000 - 27)}`);
+        await handler(eventWith(comment({
+          data: { id: 'comment-1', body: '@bgagent retry, but only the SAML part: skip OIDC', issueId: 'sub-issue-1' },
+        })));
+        const followUp = String(createTaskCoreMock.mock.calls[0][0].task_description);
+
+        const resumed = buildClarifyResumeDescription(followUp, 'Which IdP?', 'Okta');
+        expect(resumed.slice(resumed.indexOf('\n\n---\n'))).toBe([
+          '',
+          '',
+          '---',
+          'An earlier run on this issue ended without a pull request.',
+          'The reviewer now asks: retry, but only the SAML part: skip OIDC',
+          '',
+          '---',
+          'This continues an earlier run that paused to ask a clarifying question.',
+          'You asked: Which IdP?',
+          'The reviewer answered: Okta',
+          'Proceed with the original request using this answer.',
+        ].join('\n'));
+        expect(resumed).toHaveLength(10_000);
+      });
+
       test('a first-run row that cannot be read still starts the work, with the comment alone', async () => {
         mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'FAILED' });
         const indexOnly = ddbSend.getMockImplementation()!;
@@ -1547,8 +1638,12 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
   describe('parent-epic @bgagent comment routing', () => {
     /** Mock so the COMMENTED issue id is itself the orchestration parent. The
      *  fan-out epic has two started sub-issues (footer + newsletter), and the
-     *  rows of `moreChildren` after them. */
-    function mockParentEpic(parentIssueId: string, moreChildren: Array<Record<string, unknown>> = []): void {
+     *  rows of `moreChildren` after them; `moreMeta` is added to its meta row. */
+    function mockParentEpic(
+      parentIssueId: string,
+      moreChildren: Array<Record<string, unknown>> = [],
+      moreMeta: Record<string, unknown> = {},
+    ): void {
       const meta = {
         sub_issue_id: '#meta',
         orchestration_id: 'orch_x',
@@ -1557,6 +1652,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         repo: 'o/r',
         child_count: 2,
         platform_user_id: 'release-user',
+        ...moreMeta,
       };
       const footer = {
         orchestration_id: 'orch_x',
@@ -1807,6 +1903,17 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-1', 'question');
     });
 
+    test('new work asked for on the epic → the reply names the label this project triggers on', async () => {
+      // The label is set per project and stored on the epic when it is seeded. A
+      // reply that names another one sends the user to a label that starts nothing.
+      mockParentEpic('PARENT-EPIC', [], { trigger_label: 'ship-it' });
+      await handler(eventWith(parentComment('@bgagent add a changelog page')));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      const replyBody = String(replyToCommentMock.mock.calls[0][3]);
+      expect(replyBody).toContain('create a new sub-issue under this epic, then remove and re-apply the `ship-it` label on this epic');
+      expect(replyBody).not.toContain('abca');
+    });
+
     test('a FAILED sub-issue PR read ANSWERS the user and flips 👀 → ❓ (never a permanent 👀)', async () => {
       // The counterpart to the issue-parent site, which throws to earn a retry.
       // Here the one-time ack claim is already won and the 👀 already posted, and
@@ -1846,7 +1953,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     // the reviewer had just named, or a different one.
     describe('a comment on the epic that names one sub-issue which has no pull request', () => {
       /** The epic with a third sub-issue, ABCA-307, after the two started ones. */
-      function mockEpicWithUploads(row: Record<string, unknown>): void {
+      function mockEpicWithUploads(row: Record<string, unknown>, moreMeta: Record<string, unknown> = {}): void {
         mockParentEpic('PARENT-EPIC', [{
           orchestration_id: 'orch_x',
           sub_issue_id: 'sub-uploads',
@@ -1857,7 +1964,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
           linear_identifier: 'ABCA-307',
           title: 'Add retries to uploads',
           ...row,
-        }]);
+        }], moreMeta);
       }
 
       /** One reply on the epic that names the sub-issue and asks nothing, a ❓, and no task. */
@@ -1912,6 +2019,16 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
         const reply = expectStateOfNamedSubIssue();
         expect(reply).toMatch(/failed before opening a PR/);
         expect(reply).toContain('`@bgagent retry`');
+        // An epic seeded before the label was stored: the platform default.
+        expect(reply).toContain('remove and re-apply the `bgagent` label');
+      });
+
+      test('a sub-issue that failed: the label to re-apply is the one this project triggers on', async () => {
+        mockEpicWithUploads({ child_status: 'failed' }, { trigger_label: 'ship-it' });
+        await handler(eventWith(parentComment('@bgagent ABCA-307: use a darker blue')));
+        const reply = expectStateOfNamedSubIssue();
+        expect(reply).toContain('remove and re-apply the `ship-it` label');
+        expect(reply).not.toContain('abca');
       });
 
       test('the combined result, before it has started: named by its title, never by its internal id', async () => {
@@ -2005,6 +2122,12 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
             }
             claimedAcks.add(sk);
           }
+          // A title and description that are stored are there for the next read.
+          const row = [ok, bad].find((r) => r.sub_issue_id === sk);
+          if (row && (cmd.input.ExpressionAttributeNames as Record<string, string> | undefined)?.['#title']) {
+            const values = cmd.input.ExpressionAttributeValues as Record<string, unknown>;
+            Object.assign(row, { title: values[':title'], description: values[':description'] });
+          }
           return {};
         }
         if (cmd._type === 'Query' && cmd.input.IndexName === 'LinearIssueIndex') return { Items: [] };
@@ -2030,6 +2153,47 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
       const [, ctx] = createTaskCoreMock.mock.calls[0];
       expect(ctx.idempotencyKey).toContain('task-bad-1'); // salted with the dead task
+    });
+
+    // A sub-issue is started from the title and description stored on its row,
+    // which the first read of the epic wrote. One that was refused for its text
+    // and then reworded was sent again as it was, on every retry.
+    describe('"@bgagent retry" reads the sub-issues of the epic again first', () => {
+      const textWrites = (): Array<string | undefined> => ddbSend.mock.calls
+        .map((c) => c[0] as { _type?: string; input: { Key?: { sub_issue_id?: string }; ExpressionAttributeNames?: Record<string, string> } })
+        .filter((cmd) => cmd._type === 'Update' && cmd.input.ExpressionAttributeNames?.['#title'] === 'title')
+        .map((cmd) => cmd.input.Key?.sub_issue_id);
+
+      test('a failed sub-issue that was reworded is started with the text it has now', async () => {
+        mockFailedEpic('PARENT-EPIC');
+        fetchSubIssueGraphMock.mockResolvedValue({
+          kind: 'ok',
+          parentIssueId: 'PARENT-EPIC',
+          children: [
+            { id: 'sub-ok', depends_on: [], identifier: 'ABCA-1', title: 'Step A, reworded as well' },
+            { id: 'sub-bad', depends_on: [], identifier: 'ABCA-2', title: 'Step B, reworded', description: 'Without the phrase that was refused.' },
+          ],
+        });
+        await handler(eventWith(parentComment('@bgagent retry', 'pc-retry')));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock.mock.calls[0][0].task_description)
+          .toBe('ABCA-2: Step B, reworded\n\nWithout the phrase that was refused.');
+        expect(fetchSubIssueGraphMock).toHaveBeenCalledWith('tok', 'PARENT-EPIC', undefined);
+        // The row of the sub-issue that succeeded is not written.
+        expect(textWrites()).toEqual(['sub-bad']);
+      });
+
+      test('sub-issues that cannot be read do not hold the retry up: it sends the stored text', async () => {
+        mockFailedEpic('PARENT-EPIC');
+        fetchSubIssueGraphMock.mockResolvedValue({ kind: 'error', message: 'Could not reach the Linear API to read sub-issues.' });
+        await handler(eventWith(parentComment('@bgagent retry', 'pc-retry')));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock.mock.calls[0][0].task_description).toBe('ABCA-2: Step B');
+        expect(textWrites()).toEqual([]);
+        expect(replyToCommentMock).not.toHaveBeenCalled();
+      });
     });
 
     test('"@bgagent retry" on an all-succeeded epic replies "nothing to retry", no task', async () => {

@@ -24,7 +24,7 @@ import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { ulid } from 'ulid';
 import { TERMINAL_STATUSES, type TaskStatusType } from '../constructs/task-status';
 import type { ScreeningConfig } from './shared/attachment-screening';
-import { buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
+import { APPENDED_BLOCK, buildClarifyResumeDescription, isClarifyHold } from './shared/clarify-resume';
 import { createTaskCore } from './shared/create-task-core';
 import { renderMaturingReply } from './shared/iteration-reply';
 import { cleanupPreScreenedAttachments, downloadScreenAndStoreLinearAttachments, LinearAttachmentError } from './shared/linear-attachments';
@@ -76,7 +76,7 @@ import {
 import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
-import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
+import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, refreshUnstartedText, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
 import { readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
@@ -1799,13 +1799,6 @@ async function maybeRetryTerminalEpic(
       await releaseReadyChildren(
         ddb, ORCHESTRATION_TABLE, releasableRows, releaseCtx,
         createTaskCore, now, freshChildren, 'main', budget,
-        // Salt the idempotency key with each child's prior (failed)
-        // task id so the retry spawns a NEW task instead of idempotently
-        // replaying the failed one. releasableRows carry the old child_task_id
-        // (the reset only changed child_status) — exactly the salt releaseChild
-        // needs. Without this the row flips to 'released' but points at the dead
-        // task and nothing actually re-runs (observed on the first retry pass).
-        true,
       );
     }
   }
@@ -1867,6 +1860,8 @@ async function maybeRetryTerminalEpic(
  *
  * @param replyIssueId  the issue to post the "nothing to retry" reply on (the
  *                      epic for a parent comment; the commented child otherwise).
+ * @param children      the epic's rows as the caller read them.
+ * @param accessToken   the workspace token, to read the epic's sub-issues with.
  */
 async function handleEpicRetryIntent(args: {
   orchestrationId: string;
@@ -1876,8 +1871,18 @@ async function handleEpicRetryIntent(args: {
   replyIssueId: string;
   replyTargetId: string;
   channel: Channel;
+  children: readonly OrchestrationChildRow[];
+  accessToken: string;
 }): Promise<void> {
-  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel } = args;
+  const { orchestrationId, parentIssueId, workspaceId, commentId, replyIssueId, replyTargetId, channel, children, accessToken } = args;
+  // A retry starts a sub-issue from the title and description stored on its row.
+  // Read the sub-issues again first, as re-applying the trigger label does, so
+  // that one that was refused for its text and then reworded is sent as it is
+  // now. A read that fails does not hold the retry up: it sends the stored text.
+  const graph = await linearGraphSource(accessToken, parentIssueId)();
+  if (graph.kind === 'ok') {
+    await refreshUnstartedText(ddb, ORCHESTRATION_TABLE!, children, graph.children);
+  }
   const outcome = await maybeRetryTerminalEpic(
     orchestrationId, parentIssueId, workspaceId,
     // Dedup on the COMMENT id — reliable even for a failed child with no task_id,
@@ -2181,6 +2186,8 @@ async function handleCommentTrigger(payload: LinearCommentEvent): Promise<void> 
       replyIssueId: commentedIssueId, // reply on the child the user commented on
       replyTargetId,
       channel,
+      children: snapshot.children,
+      accessToken: resolved.accessToken,
     });
     return;
   }
@@ -2263,6 +2270,8 @@ async function handleParentEpicCommentTrigger(args: {
       replyIssueId: snapshot.meta.parent_issue_ref, // reply on the epic
       replyTargetId,
       channel,
+      children: snapshot.children,
+      accessToken: resolved.accessToken,
     });
     return;
   }
@@ -2278,6 +2287,10 @@ async function handleParentEpicCommentTrigger(args: {
   const epicHasFailures = snapshot.children.some(
     (c) => c.child_status === 'failed' || c.child_status === 'skipped',
   );
+  // The label this project triggers on, stored when the epic was seeded (the
+  // platform default for an epic seeded before it was stored). The replies name
+  // it: a label the webhook does not filter on starts nothing.
+  const triggerLabel = snapshot.meta.release_context.trigger_label || DEFAULT_LABEL_FILTER;
 
   if (!target) {
     // No confident single match → ask.
@@ -2287,7 +2300,7 @@ async function handleParentEpicCommentTrigger(args: {
     // lead with the create-a-sub-issue path rather than the generic "couldn't
     // tell". A close suggestion takes precedence (more likely a vague edit).
     const newWork = reason === 'none' && !suggestion && looksLikeNewWork(trigger.instruction);
-    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures);
+    const body = renderParentDisambiguationReply(reason, snapshot.children, suggestion, newWork, epicHasFailures, triggerLabel);
     await channel.postThreadedReply?.(parentRef, { commentId: replyTargetId }, body);
     // This is a QUESTION, not work-in-progress. Replace the 👀 we put on receipt
     // with ❓ so the comment doesn't look like it's still being worked.
@@ -2346,7 +2359,7 @@ async function handleParentEpicCommentTrigger(args: {
       // with no way out.
       body = `👋 ${name} failed before opening a PR, so there's `
         + 'nothing to iterate on yet. Reply `@bgagent retry` on this epic to re-run the failed work '
-        + '(or remove and re-apply the `abca` label) — then comment again once it has a PR.';
+        + `(or remove and re-apply the \`${triggerLabel}\` label) — then comment again once it has a PR.`;
     } else if (status === 'skipped') {
       body = `👋 ${name} did not run, because a sub-issue it depends on failed. `
         + 'Reply `@bgagent retry` on this epic to re-run the failed work — then comment again once it has a PR.';
@@ -3013,9 +3026,13 @@ async function maybeStartStandaloneNewWork(args: {
  * ("retry", "you missed the SAML case") is not a task.
  *
  * The follow-up always survives: a prior description that fills the size limit
- * gives way from its end, where the label path puts the advisory document and
- * comment sections. Falls back to the comment alone when the prior task has no
- * stored description or its row cannot be read.
+ * gives way at the end of the issue text, where the label path puts the advisory
+ * document and comment sections. What earlier comments appended after that text
+ * (the exchange of a clarifying question, an earlier follow-up) is the
+ * reviewer's word and stays whole: when those blocks alone leave no room, the
+ * description is over the limit and createTaskCore refuses it. Falls back to the
+ * comment alone when the prior task has no stored description or its row cannot
+ * be read.
  */
 async function buildFollowUpDescription(priorTaskId: string, instruction: string): Promise<string> {
   let prior: unknown;
@@ -3034,7 +3051,10 @@ async function buildFollowUpDescription(priorTaskId: string, instruction: string
   ].join('\n');
   const room = MAX_TASK_DESCRIPTION_LENGTH - followUp.length - 2;
   if (typeof prior !== 'string' || !prior.trim() || room <= 0) return instruction;
-  return `${prior.slice(0, room)}\n\n${followUp}`;
+  const appendedAt = prior.search(APPENDED_BLOCK);
+  const issueText = appendedAt === -1 ? prior : prior.slice(0, appendedAt);
+  const appended = prior.slice(issueText.length);
+  return `${issueText.slice(0, Math.max(0, room - appended.length))}${appended}\n\n${followUp}`;
 }
 
 /**

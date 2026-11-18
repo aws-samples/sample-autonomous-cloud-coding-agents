@@ -67,7 +67,8 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
     return { Items: items };
   }
   if (_type === 'Update') {
-    // Applies every ``SET attr = :value`` when the condition holds, as DynamoDB does.
+    // Applies the ``SET attr = :value`` and the ``REMOVE attr`` clause when the
+    // condition holds, as DynamoDB does.
     const k = input.Key as Row;
     const key = `${k.orchestration_id} ${k.sub_issue_id}`;
     const vals = input.ExpressionAttributeValues as Row;
@@ -75,10 +76,12 @@ const fakeSend = jest.fn(async (cmd: { _type: string; input: Record<string, unkn
     if (!conditionHolds(row, input.ConditionExpression, vals)) {
       const e = new Error('c'); e.name = 'ConditionalCheckFailedException'; throw e;
     }
-    for (const assignment of String(input.UpdateExpression).replace(/^SET /, '').split(', ')) {
+    const expression = String(input.UpdateExpression);
+    for (const assignment of /SET (.+?)(?= REMOVE |$)/.exec(expression)?.[1].split(', ') ?? []) {
       const [attr, value] = assignment.split(' = ');
       row[attr] = vals[value];
     }
+    for (const attr of /REMOVE (.+?)(?= SET |$)/.exec(expression)?.[1].split(', ') ?? []) delete row[attr];
     orch.set(key, row);
     return {};
   }
@@ -165,6 +168,18 @@ describe('stranded-orchestration backstop', () => {
     await handler();
     expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
     expect(statusOf('o1', 'B')).toBe('released');
+  });
+
+  test('a child the sweep starts is stamped, and loses the reason of an earlier start that was refused', async () => {
+    // A retry put the child back to ready and the sweep is the one to start it.
+    seed('o-reason', [{ sk: 'A', status: 'ready', updatedAt: minutesAgo(30) }]);
+    orch.get('o-reason A')!.failure_reason = 'Blocked by content policy — reword this sub-issue, then reply `@bgagent retry` on the epic to re-run.';
+    await handler();
+    const started = orch.get('o-reason A')!;
+    expect(started.child_status).toBe('released');
+    expect(started.child_task_id).toBe('new-task');
+    expect(started).not.toHaveProperty('failure_reason');
+    expect(Date.parse(String(started.updated_at))).toBeGreaterThan(Date.parse(minutesAgo(1)));
   });
 
   test('lost TERMINAL event: A released + its task COMPLETED but row stuck → sweep advances A and releases B', async () => {

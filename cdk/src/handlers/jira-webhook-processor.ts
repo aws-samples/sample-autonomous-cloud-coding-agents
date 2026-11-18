@@ -66,6 +66,7 @@ import {
   clearRollupClaim,
   deriveOrchestrationId,
   loadOrchestration,
+  refreshUnstartedText,
   setStatusCommentId,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
@@ -1104,6 +1105,21 @@ async function handleJiraEpicRetry(
     || snapshot.meta.credentials_ref !== cloudId
   ) return false;
 
+  // A subtask is started from the summary and description stored on its row.
+  // Read the subtasks again first, as re-applying the trigger label does, so
+  // that one that was refused for its text and then reworded is sent as it is
+  // now. A read that fails does not hold the retry up: it sends the stored text.
+  // In front of the claim, so that a delivery that fails here is tried again.
+  const resolved = WORKSPACE_REGISTRY_TABLE
+    ? await resolveJiraOauthToken(cloudId, WORKSPACE_REGISTRY_TABLE)
+    : null;
+  const graph = resolved
+    ? await jiraGraphSource(resolved.accessToken, cloudId, parentIssueKey)()
+    : undefined;
+  if (graph?.kind === 'ok') {
+    await refreshUnstartedText(ddb, ORCHESTRATION_TABLE, snapshot.children, graph.children);
+  }
+
   const now = new Date().toISOString();
   const claimed = await claimCommentAck(
     ddb,
@@ -1182,7 +1198,6 @@ async function handleJiraEpicRetry(
     reset.children,
     'main',
     budget,
-    true,
   );
   await applyTerminalCreateFailures(
     ddb,

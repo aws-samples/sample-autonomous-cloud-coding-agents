@@ -56,12 +56,14 @@ const loadOrchestrationMock = jest.fn();
 const setStatusCommentIdMock = jest.fn();
 const claimCommentAckMock = jest.fn();
 const clearRollupClaimMock = jest.fn();
+const refreshUnstartedTextMock = jest.fn();
 jest.mock('../../src/handlers/shared/orchestration-store', () => ({
   deriveOrchestrationId: (parent: string) => `orch-${parent}`,
   loadOrchestration: (...args: unknown[]) => loadOrchestrationMock(...args),
   setStatusCommentId: (...args: unknown[]) => setStatusCommentIdMock(...args),
   claimCommentAck: (...args: unknown[]) => claimCommentAckMock(...args),
   clearRollupClaim: (...args: unknown[]) => clearRollupClaimMock(...args),
+  refreshUnstartedText: (...args: unknown[]) => refreshUnstartedTextMock(...args),
 }));
 
 const releaseReadyChildrenMock = jest.fn();
@@ -259,6 +261,7 @@ describe('jira-webhook-processor orchestration adapter', () => {
     setStatusCommentIdMock.mockReset();
     claimCommentAckMock.mockReset().mockResolvedValue(true);
     clearRollupClaimMock.mockReset().mockResolvedValue(undefined);
+    refreshUnstartedTextMock.mockReset().mockResolvedValue(undefined);
     fetchRecentHumanCommentsMock.mockReset().mockResolvedValue([]);
     downloadScreenAndStoreJiraAttachmentsMock.mockReset().mockResolvedValue([]);
     cleanupPreScreenedAttachmentsMock.mockReset().mockResolvedValue(undefined);
@@ -382,7 +385,6 @@ describe('jira-webhook-processor orchestration adapter', () => {
       resetSnapshot.children,
       'main',
       7,
-      true,
     );
     expect(clearRollupClaimMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -474,8 +476,82 @@ describe('jira-webhook-processor orchestration adapter', () => {
       resetSnapshot.children,
       'main',
       10,
-      true,
     );
+  });
+
+  // A subtask is started from the summary and description stored on its row,
+  // which the first read of the parent wrote. One that was refused for its text
+  // and then reworded was sent again as it was, on every retry.
+  describe('parent retry reads the subtasks again first', () => {
+    const failedSnapshot = {
+      ...snapshot,
+      children: [{ ...snapshot.children[0], sub_issue_id: 'ENG-3', child_status: 'failed', title: 'Build ENG-3' }],
+    };
+    const resetSnapshot = {
+      ...failedSnapshot,
+      children: [{ ...failedSnapshot.children[0], child_status: 'ready' }],
+    };
+
+    beforeEach(() => {
+      ddbSend.mockReset().mockImplementation(async (command: { _type?: string; input?: { TableName?: string } }) => {
+        if (command._type === 'Get' && command.input?.TableName === 'JiraProjects') {
+          return { Item: { status: 'active', repo: 'org/repo', label_filter: 'bgagent' } };
+        }
+        if (command._type === 'Get' && command.input?.TableName === 'JiraUsers') {
+          return { Item: { status: 'active', platform_user_id: 'platform-user' } };
+        }
+        return {};
+      });
+      loadOrchestrationMock.mockReset()
+        .mockResolvedValueOnce(failedSnapshot)
+        .mockResolvedValueOnce(resetSnapshot)
+        .mockResolvedValueOnce(resetSnapshot);
+    });
+
+    test('a reworded subtask is stored as it is now before the retry releases it', async () => {
+      const reworded = { ...child('ENG-3'), title: 'Build ENG-3, reworded' };
+      jiraGraphSourceMock.mockReturnValue(jest.fn().mockResolvedValue({ kind: 'ok', children: [reworded] }));
+
+      await handler(retryEvent());
+
+      expect(jiraGraphSourceMock).toHaveBeenCalledWith('jira-token', 'cloud-1', 'ENG-1');
+      expect(refreshUnstartedTextMock).toHaveBeenCalledTimes(1);
+      expect(refreshUnstartedTextMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'Orchestrations',
+        failedSnapshot.children,
+        [reworded],
+      );
+      // Before the rows are read again for the release, which sends their text.
+      expect(refreshUnstartedTextMock.mock.invocationCallOrder[0])
+        .toBeLessThan(loadOrchestrationMock.mock.invocationCallOrder[1]);
+      expect(releaseReadyChildrenMock).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['the tenant has no usable token', () => resolveJiraOauthTokenMock.mockResolvedValue(null)],
+      ['Jira cannot be read', () => jiraGraphSourceMock.mockReturnValue(jest.fn().mockResolvedValue({
+        kind: 'error',
+        message: 'Jira returned status 503 while reading authored subtasks.',
+      }))],
+    ])('the retry is not held up when %s: it sends the stored text', async (_why, arrange) => {
+      arrange();
+
+      await handler(retryEvent());
+
+      expect(refreshUnstartedTextMock).not.toHaveBeenCalled();
+      expect(releaseReadyChildrenMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'Orchestrations',
+        [expect.objectContaining({ sub_issue_id: 'ENG-3', child_status: 'ready' })],
+        failedSnapshot.meta.release_context,
+        expect.any(Function),
+        expect.any(String),
+        resetSnapshot.children,
+        'main',
+        7,
+      );
+    });
   });
 
   test('falls through to the existing single-task path when Jira has no children', async () => {

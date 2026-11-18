@@ -360,7 +360,7 @@ describe('releaseChild — the shared context gives way to the description limit
 });
 
 describe('releaseChild — a retry salts the idempotency key with the prior task id', () => {
-  test('retry=true + a prior child_task_id → key salted so a NEW task is created', async () => {
+  test('a prior child_task_id → key salted so a NEW task is created', async () => {
     const createTaskCore = created('T-new');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -369,7 +369,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      retry: true,
     });
     const ctx = createTaskCore.mock.calls[0][1];
     // Salted with the prior task id → distinct from the original 'orch_abc_SUB-1'
@@ -378,27 +377,13 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
     expect(isValidIdempotencyKey(ctx.idempotencyKey)).toBe(true);
   });
 
-  test('retry=true but NO prior task id (never-run child) → back-compat key', async () => {
-    const createTaskCore = created('T-1');
-    await releaseChild({
-      ddb: { send: jest.fn().mockResolvedValue({}) } as never,
-      tableName: 'OrchestrationTable',
-      row: makeRow(), // no child_task_id
-      platformUserId: 'user-1',
-      createTaskCore: createTaskCore as never,
-      now: NOW,
-      retry: true,
-    });
-    expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1');
-  });
-
-  test('the key is salted whenever a prior child_task_id exists, even without retry=true', async () => {
+  test('the key is salted whenever a prior child_task_id exists, whoever releases the child', async () => {
     // A child re-released while it still carries a child_task_id inherently means
     // that prior task is TERMINAL (a live child is 'released', not back in
-    // ready/blocked). The salt must fire on the id's PRESENCE — NOT the retry
-    // flag — else a downstream chain child (reset to blocked, later released by
-    // the reconciler with retry=false) replays its dead task under the unsalted
-    // key. This is the fix; the OLD behavior (only salt on retry=true) was the bug.
+    // ready/blocked). The salt must fire on the id's PRESENCE, not on who
+    // releases — else a downstream chain child (reset to blocked, later released
+    // by the reconciler) replays its dead task under the unsalted key. This is
+    // the fix; the OLD behavior (only the epic retry salted) was the bug.
     const createTaskCore = created('T-1');
     await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
@@ -407,7 +392,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      // NOTE: retry intentionally omitted (defaults false) — the salt still fires.
     });
     expect(createTaskCore.mock.calls[0][1].idempotencyKey).toBe('orch_abc_SUB-1_OLD-TASK');
   });
@@ -438,7 +422,6 @@ describe('releaseChild — a retry salts the idempotency key with the prior task
       platformUserId: 'user-1',
       createTaskCore: createTaskCore as never,
       now: NOW,
-      retry: true,
     });
     const key = createTaskCore.mock.calls[0][1].idempotencyKey;
     expect(key.length).toBeLessThanOrEqual(128);
@@ -791,10 +774,10 @@ describe('releaseChild — idempotency + failure', () => {
   test.each([
     ['the content policy', 'Task description was blocked by content policy.', /^Blocked by content policy — reword this sub-issue, /],
     ['validation', 'task_description exceeds maximum length of 10000 characters.', /^Couldn't start \(validation error\) — edit this sub-issue, /],
-  ])('a text refused by %s is to be changed and read again by re-applying the label, not by a retry', async (_name, message, start) => {
-    // A retry starts the child with the text stored on its row; only a
-    // re-applied trigger label reads the sub-issue again. "Reword, then reply
-    // `@bgagent retry`" sent the same text again and was refused again.
+  ])('a text refused by %s is to be changed and then retried', async (_name, message, start) => {
+    // A child is started with the text stored on its row. The retry comment
+    // reads the sub-issue again before it releases the child, as a re-applied
+    // trigger label does, so the retry sends the new text.
     const result = await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
@@ -806,11 +789,10 @@ describe('releaseChild — idempotency + failure', () => {
     expect(result.kind).toBe('create_failed_terminal');
     const reason = result.kind === 'create_failed_terminal' ? result.failureReason : '';
     expect(reason).toMatch(start);
-    expect(reason).toContain('then remove and re-apply the trigger label on the epic');
-    expect(reason).not.toContain('then reply `@bgagent retry`');
+    expect(reason).toMatch(/, then reply `@bgagent retry` on the epic to re-run\.$/);
   });
 
-  test.each([422, 429])('a %i refusal has nothing to do with the text and still asks for a retry', async (statusCode) => {
+  test.each([422, 429])('a %i refusal has nothing to do with the text and asks for a retry as well', async (statusCode) => {
     const result = await releaseChild({
       ddb: { send: jest.fn().mockResolvedValue({}) } as never,
       tableName: 'OrchestrationTable',
