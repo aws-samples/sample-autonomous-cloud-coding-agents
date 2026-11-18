@@ -125,6 +125,7 @@ process.env.ORCHESTRATION_TABLE_NAME = 'OrchestrationTable';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { LOOKUP_ABSENT, lookupFailed, lookupFound } from '../../src/handlers/shared/lookup-result';
+import { isBotAuthoredComment } from '../../src/handlers/shared/orchestration-comment-trigger';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -681,6 +682,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
   function mockOrchWithChild(opts: {
     subIssueId: string;
     childTaskId?: string;
+    childStatus?: string;
     prUrl?: string;
     standalone?: { task_id: string; user_id?: string; repo?: string; pr_url?: string; pr_number?: number };
   }): void {
@@ -697,7 +699,7 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       orchestration_id: 'orch_x',
       sub_issue_id: opts.subIssueId,
       depends_on: [],
-      child_status: 'succeeded',
+      child_status: opts.childStatus ?? 'succeeded',
       repo: 'o/r',
       parent_linear_issue_id: 'PARENT',
       linear_workspace_id: 'org-1',
@@ -933,6 +935,115 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     expect(ctx.channelMetadata.trigger_comment_id).toBe('root-cmt-1');
   });
 
+  // A started sub-issue whose task has no pull request cannot be iterated. The
+  // reviewer addressed the bot there, so they have to be told: the same request
+  // left on the epic and naming this sub-issue is answered, while this one was
+  // logged and dropped with no reaction and no reply.
+  describe('@bgagent on a started sub-issue that has no pull request', () => {
+    const askForAFix = (): Record<string, unknown> => comment({
+      data: {
+        id: 'comment-1',
+        body: '@bgagent the fixture path is wrong, use fixtures/v2 and run the tests again please',
+        issueId: 'sub-issue-1',
+      },
+    });
+
+    /** One threaded reply under the comment on the sub-issue, a ❓, and nothing started. */
+    function expectAnsweredWithoutWork(): string {
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(upsertThreadedReplyMock).not.toHaveBeenCalled(); // no "On it": nothing is being worked on
+      expect(replyToCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, parentCommentId, body] = replyToCommentMock.mock.calls[0];
+      expect(issueId).toBe('sub-issue-1');
+      expect(parentCommentId).toBe('comment-1');
+      expect(reactToCommentMock.mock.calls).toEqual([[expect.anything(), 'comment-1', 'question']]);
+      // Linear delivers the reply back; it must not read as a request itself.
+      expect(isBotAuthoredComment(String(body))).toBe(true);
+      return String(body);
+    }
+
+    test('a sub-issue that failed before opening a PR: says so and how to re-run it', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', childStatus: 'failed' });
+      await handler(eventWith(askForAFix()));
+      const reply = expectAnsweredWithoutWork();
+      expect(reply).toMatch(/failed before opening a PR/);
+      expect(reply).toContain('`@bgagent retry`');
+    });
+
+    test('a sub-issue still at work: says there is no pull request to iterate on', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', childStatus: 'released' });
+      await handler(eventWith(askForAFix()));
+      const reply = expectAnsweredWithoutWork();
+      expect(reply).toMatch(/no pull request, so there's nothing to iterate on/);
+      expect(reply).not.toMatch(/failed/);
+    });
+
+    test('a sub-issue whose run ended without a pull request is not told that one is coming', async () => {
+      // A run that stopped to ask a clarifying question, or found nothing to change,
+      // ends COMPLETED without a pull request: the sub-issue is 'succeeded' for the
+      // epic and no pull request will follow. "No pull request yet, comment again
+      // once it has one" would have the reviewer wait for nothing.
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', childStatus: 'succeeded' });
+      await handler(eventWith(askForAFix()));
+      const reply = expectAnsweredWithoutWork();
+      expect(reply).toMatch(/no pull request, so there's nothing to iterate on/);
+      expect(reply).not.toMatch(/\byet\b/);
+      // Coming back is advised only for a run that is still going.
+      expect(reply).toMatch(/If its run is still in progress, comment again once it has opened one/);
+    });
+
+    test('a failed read of the task record: says so and asks to comment again', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1' });
+      const snapshot = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+        if (cmd._type === 'Get' && (cmd.input.Key as { task_id?: string } | undefined)?.task_id === 'task-sub-1') {
+          throw new Error('ProvisionedThroughputExceededException');
+        }
+        return snapshot(cmd);
+      });
+      await handler(eventWith(askForAFix()));
+      const reply = expectAnsweredWithoutWork();
+      expect(reply).toMatch(/couldn't read/);
+      expect(reply).toMatch(/comment again/);
+      // Must not report the different, misleading "no pull request" state.
+      expect(reply).not.toMatch(/no pull request, so/);
+    });
+  });
+
+  // A sub-issue the epic has not started has no task, so the lookup of a task
+  // for it misses. The answer for a plain issue in that state is "re-apply the
+  // trigger label for a fresh run" — here that advice starts a second, detached
+  // run of a sub-issue the epic is going to run anyway.
+  describe('@bgagent on a sub-issue its epic has not started', () => {
+    /** The single note posted on the sub-issue (and the ❓ on the comment). */
+    function expectOneNote(): string {
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expect(upsertStatusCommentMock).toHaveBeenCalledTimes(1);
+      const [, issueId, body] = upsertStatusCommentMock.mock.calls[0];
+      expect(issueId).toBe('sub-issue-1');
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'question');
+      expect(isBotAuthoredComment(String(body))).toBe(true);
+      return String(body);
+    }
+
+    test('a sub-issue waiting for its turn: says so, and does not say to re-apply the label', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childStatus: 'blocked' }); // no task yet
+      await handler(eventWith(comment()));
+      const note = expectOneNote();
+      expect(note).toMatch(/hasn't started yet/);
+      expect(note).not.toMatch(/trigger label/);
+    });
+
+    test('a sub-issue that did not run: points at the retry on the epic', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childStatus: 'skipped' }); // a dependency failed
+      await handler(eventWith(comment()));
+      const note = expectOneNote();
+      expect(note).toMatch(/did not run/);
+      expect(note).toContain('`@bgagent retry` on the epic');
+      expect(note).not.toMatch(/trigger label/);
+    });
+  });
+
   test('@bgagent that does NOT resolve to an actionable iteration → no premature 👀 ack', async () => {
     // No childTaskId ⇒ un-started sub-issue ⇒ we bail before acting; don't ack.
     mockOrchWithChild({ subIssueId: 'sub-issue-1' });
@@ -1063,6 +1174,29 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
     expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'question');
   });
 
+  test('the reply to an unmapped commenter is not itself a trigger when Linear delivers it back', async () => {
+    // Linear sends the app's own comments back as Comment webhooks, with the app
+    // as the actor, and no ABCA user is linked to the app. The reply names the
+    // handle, so if it read as a trigger it would be one from an unmapped
+    // commenter: the bot would answer its own reply, and that answer would come
+    // back the same way, without end.
+    fetchIssueParentIdMock.mockResolvedValue(LOOKUP_ABSENT);
+    ddbSend.mockResolvedValue({}); // nobody is linked: not the commenter, not the app
+    await handler(eventWith(comment()));
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    const reply = String(upsertThreadedReplyMock.mock.calls[0][3]);
+    expect(reply).toContain('`@bgagent`'); // it does tell the user which handle it means
+
+    await handler(eventWith(comment({
+      actor: { id: 'abca-app-user' },
+      data: { id: 'reply-1', parentId: 'comment-1', body: reply, issueId: 'sub-issue-1' },
+    })));
+
+    // No reply to the reply, and no second ❓.
+    expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+    expect(reactToCommentMock).toHaveBeenCalledTimes(1);
+  });
+
   test('bare @bgagent (no text) → falls back to a generic iteration instruction', async () => {
     mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/7' });
     await handler(eventWith(comment({ data: { id: 'c3', body: '@bgagent', issueId: 'sub-issue-1' } })));
@@ -1136,6 +1270,68 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(createTaskCoreMock.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
     });
 
+    // The agent cannot read Linear and is told the issue is in its task description.
+    // New work started from a follow-up therefore needs what the first run was
+    // given: on its own, "retry" or "you missed the SAML case" is not a task.
+    describe('new work from a follow-up is given the issue, not only the comment', () => {
+      /** The PR-less task found through the index, and its base row with the stored description. */
+      function mockFinishedTaskWithDescription(description: string): void {
+        mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'FAILED' });
+        const indexOnly = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => (
+          (cmd.input.Key as { task_id?: string } | undefined)?.task_id === 'task-solo'
+            ? { Item: { task_id: 'task-solo', workflow_ref: 'coding/new-task-v1', task_description: description } }
+            : indexOnly(cmd)));
+      }
+
+      test('"@bgagent retry" on a failed issue runs the issue again, not the word "retry"', async () => {
+        mockFinishedTaskWithDescription('ABC-42: Fix the login bug\n\nUsers cannot log in with SSO.');
+        await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent retry', issueId: 'sub-issue-1' } })));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        const [body] = createTaskCoreMock.mock.calls[0];
+        expect(body.workflow_ref).toBe('coding/new-task-v1');
+        // The issue first, as the first run received it; then the follow-up.
+        expect(body.task_description).toBe([
+          'ABC-42: Fix the login bug',
+          '',
+          'Users cannot log in with SSO.',
+          '',
+          '---',
+          'An earlier run on this issue ended without a pull request.',
+          'The reviewer now asks: retry',
+        ].join('\n'));
+      });
+
+      test('a first-run description at the size limit gives way to the follow-up', async () => {
+        // The label path fills the description up to the limit whenever project
+        // documents or comments overflow, so "issue + follow-up" must be cut to fit
+        // or createTaskCore rejects it. The follow-up is the part that must survive.
+        mockFinishedTaskWithDescription(`ABC-42: Fix the login bug\n\n${'x'.repeat(10_000 - 27)}`);
+        await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent you missed the SAML case', issueId: 'sub-issue-1' } })));
+
+        const description = String(createTaskCoreMock.mock.calls[0][0].task_description);
+        expect(description.slice(0, 27)).toBe('ABC-42: Fix the login bug\n\n');
+        expect(description.slice(-47)).toBe('The reviewer now asks: you missed the SAML case');
+        expect(description).toHaveLength(10_000); // cut to exactly what fits, no further
+      });
+
+      test('a first-run row that cannot be read still starts the work, with the comment alone', async () => {
+        mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'FAILED' });
+        const indexOnly = ddbSend.getMockImplementation()!;
+        ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => {
+          if ((cmd.input.Key as { task_id?: string } | undefined)?.task_id === 'task-solo') {
+            throw new Error('ProvisionedThroughputExceededException');
+          }
+          return indexOnly(cmd);
+        });
+        await handler(eventWith(comment())); // '@bgagent change the timeout to 30 min'
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        expect(createTaskCoreMock.mock.calls[0][0].task_description).toBe('change the timeout to 30 min');
+      });
+    });
+
     test('PR-less task + BARE @bgagent (no instruction) → no task, but a threaded reply (not silent)', async () => {
       mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }); // no pr
       await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent', issueId: 'sub-issue-1' } })));
@@ -1143,6 +1339,30 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       expect(createTaskCoreMock).not.toHaveBeenCalled(); // nothing to start
       expect(reactToCommentMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'eyes');
       expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1); // told the user what to do
+    });
+
+    test('the bare-mention reply is not itself a trigger when Linear delivers it back', async () => {
+      // The reply shows an example (`@bgagent add a note to the README`). Delivered
+      // back with the app as its author, it must not be read as a request from an
+      // unmapped commenter, which would be answered, and that answer delivered back.
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r' }); // no pr
+      await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent', issueId: 'sub-issue-1' } })));
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1);
+      const reply = String(upsertThreadedReplyMock.mock.calls[0][3]);
+      expect(reply).toContain('`@bgagent add a note to the README`');
+
+      // The app's own Linear user has no linked ABCA user.
+      const linked = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) =>
+        ((cmd.input.Key as { linear_identity?: string } | undefined)?.linear_identity === 'org-1#abca-app-user' ? {} : linked(cmd)));
+      await handler(eventWith(comment({
+        actor: { id: 'abca-app-user' },
+        data: { id: 'reply-1', parentId: 'comment-1', body: reply, issueId: 'sub-issue-1' },
+      })));
+
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1); // no reply to the reply
+      expect(reactToCommentMock).toHaveBeenCalledTimes(1); // only the 👀 of the first delivery
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
     });
 
     test('PR-less task with NO repo → genuinely unactionable → no task, no ack', async () => {
@@ -1163,6 +1383,146 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       mockStandaloneOnly({ task_id: 'task-solo', repo: 'o/r', pr_number: 5 }); // no user_id
       await handler(eventWith(comment()));
       expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+  });
+
+  // The 👀 and the "On it" reply are posted BEFORE createTaskCore. When that call
+  // refuses or throws there is no task, so nothing later would ever edit the reply:
+  // the thread would say "On it" for good and the commenter would never learn why
+  // nothing happened. The dispatch has to settle its own acknowledgement.
+  describe('a comment whose task could not be created', () => {
+    const BUDGET_REFUSAL = {
+      statusCode: 429,
+      body: JSON.stringify({
+        error: {
+          code: 'BUDGET_EXCEEDED',
+          message: 'Your monthly budget is exhausted ($10.00 of $10.00). New tasks are disabled until the next UTC month.',
+        },
+      }),
+    };
+
+    /** The "On it" reply was edited in place into the reason, and the comment's 👀 became ❌. */
+    function expectAckSettledAsFailed(reason: RegExp): void {
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(2);
+      expect(String(upsertThreadedReplyMock.mock.calls[0][3])).toContain('On it');
+      const [, issueId, parentCommentId, body, existingReplyId] = upsertThreadedReplyMock.mock.calls[1];
+      expect(issueId).toBe('sub-issue-1');
+      expect(parentCommentId).toBe('comment-1');
+      expect(existingReplyId).toBe('reply-1'); // the acknowledgement itself, not a second reply
+      expect(String(body)).toMatch(reason);
+      expect(replyToCommentMock).not.toHaveBeenCalled();
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'x');
+    }
+
+    test('an iteration refused for an exhausted budget says so, without the billed user\'s figures', async () => {
+      // The task is created as, and billed to, the user whose task the comment
+      // continues ('u-solo'), not as the commenter ('commenter-user'). createTaskCore
+      // words the refusal for the billed user and puts their spend and limit in it;
+      // passed on, it would tell the commenter "Your monthly budget" and show every
+      // reader of the issue another user's figures.
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      createTaskCoreMock.mockResolvedValueOnce(BUDGET_REFUSAL);
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock.mock.calls[0][1].userId).toBe('u-solo');
+      expectAckSettledAsFailed(/monthly budget is exhausted for the user or team/);
+      expect(String(upsertThreadedReplyMock.mock.calls[1][3])).not.toMatch(/\$10\.00|Your monthly budget/);
+    });
+
+    test('a refusal for a team budget does not name the team or its figures either', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 429,
+        body: JSON.stringify({
+          error: {
+            code: 'BUDGET_EXCEEDED',
+            message: "The monthly budget for team 'platform-eng' is exhausted ($250.00 of $250.00). New tasks are disabled until the next UTC month.",
+          },
+        }),
+      });
+      await handler(eventWith(comment()));
+      expectAckSettledAsFailed(/monthly budget is exhausted for the user or team/);
+      expect(String(upsertThreadedReplyMock.mock.calls[1][3])).not.toMatch(/platform-eng|\$/);
+    });
+
+    test('an iteration that createTaskCore threw on is settled too', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      createTaskCoreMock.mockRejectedValueOnce(new Error('ProvisionedThroughputExceededException'));
+      await handler(eventWith(comment()));
+      expectAckSettledAsFailed(/hit an error and couldn't start this/);
+    });
+
+    test('when the "On it" reply never landed, the reason is posted as a reply of its own', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      upsertThreadedReplyMock.mockResolvedValueOnce(null); // the acknowledgement failed to post
+      createTaskCoreMock.mockResolvedValueOnce(BUDGET_REFUSAL);
+      await handler(eventWith(comment()));
+
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(2);
+      const [, issueId, parentCommentId, body, existingReplyId] = upsertThreadedReplyMock.mock.calls[1];
+      expect(issueId).toBe('sub-issue-1');
+      expect(parentCommentId).toBe('comment-1');
+      expect(existingReplyId).toBeUndefined(); // nothing to edit
+      expect(String(body)).toMatch(/monthly budget is exhausted/);
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'comment-1', 'x');
+    });
+
+    test('an idempotent replay (200) is not a refusal: the first delivery\'s task owns the reply', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      await handler(eventWith(comment()));
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(1); // this delivery's acknowledgement only
+      expect(swapCommentReactionMock).not.toHaveBeenCalled();
+    });
+
+    test('a refused iteration of an orchestration sub-issue is settled as well', async () => {
+      mockOrchWithChild({ subIssueId: 'sub-issue-1', childTaskId: 'task-sub-1', prUrl: 'https://github.com/o/r/pull/42' });
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 400,
+        body: JSON.stringify({ error: { code: 'VALIDATION_ERROR', message: 'Task description was blocked by content policy.' } }),
+      });
+      await handler(eventWith(comment()));
+      expectAckSettledAsFailed(/blocked by content policy/);
+    });
+
+    test('refused new work on a PR-less issue says to comment again, not to re-apply the label', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'FAILED' }); // no pr
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 503,
+        body: JSON.stringify({ error: { code: 'INTERNAL_ERROR', message: 'Content screening is temporarily unavailable. Please try again later.' } }),
+      });
+      await handler(eventWith(comment()));
+      expect(createTaskCoreMock.mock.calls[0][0].workflow_ref).toBe('coding/new-task-v1');
+      expectAckSettledAsFailed(/temporarily unavailable \(status 503\)/);
+      const body = String(upsertThreadedReplyMock.mock.calls[1][3]);
+      expect(body).toMatch(/re-comment/);
+      // Re-applying the label is the wrong advice on a comment: it starts a new run.
+      expect(body).not.toMatch(/trigger label/);
+    });
+
+    test('a refused clarify-resume is settled as well', async () => {
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', status: 'COMPLETED' }); // no pr
+      // The base row of that task: a run that paused to ask a question.
+      const indexOnly = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation(async (cmd: { _type: string; input: Record<string, unknown> }) => (
+        (cmd.input.Key as { task_id?: string } | undefined)?.task_id === 'task-solo'
+          ? { Item: { workflow_ref: 'coding/new-task-v1', code_changed: false, answer_text: 'Which environment?', task_description: 'ABC-42: Deploy it' } }
+          : indexOnly(cmd)));
+      createTaskCoreMock.mockResolvedValueOnce(BUDGET_REFUSAL);
+      await handler(eventWith(comment({ data: { id: 'comment-1', body: '@bgagent staging', issueId: 'sub-issue-1' } })));
+      // It is the resume that was refused, not a context-free new task.
+      expect(createTaskCoreMock.mock.calls[0][0].task_description).toContain('The reviewer answered: staging');
+      expectAckSettledAsFailed(/monthly budget is exhausted/);
+    });
+
+    test('a file in the comment that cannot be screened turns the "On it" reply into the reason', async () => {
+      // Attachment screening is not configured in this file, so an uploaded file is
+      // refused (fail-closed) after the acknowledgement was posted.
+      mockStandaloneOnly({ task_id: 'task-solo', user_id: 'u-solo', repo: 'o/r', pr_number: 99 });
+      await handler(eventWith(comment({
+        data: { id: 'comment-1', body: '@bgagent still broken, see ![shot](https://uploads.linear.app/a/b/c)', issueId: 'sub-issue-1' },
+      })));
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      expectAckSettledAsFailed(/attachment screening is not configured/);
     });
   });
 
@@ -1569,6 +1929,25 @@ describe('linear-webhook-processor — @bgagent comment trigger', () => {
       const [, , , replyBody] = replyToCommentMock.mock.calls[0];
       expect(String(replyBody).toLowerCase()).toContain('nothing to retry');
       expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-retry-2', 'question');
+    });
+
+    test('a refused iteration routed from the epic is settled on the epic, where the comment lives', async () => {
+      // The "On it" reply and the 👀 were posted on the epic before createTaskCore
+      // refused; with no task, only this dispatch can turn them into the reason.
+      mockParentEpic('PARENT-EPIC');
+      createTaskCoreMock.mockResolvedValueOnce({
+        statusCode: 429,
+        body: JSON.stringify({ error: { code: 'BUDGET_EXCEEDED', message: 'Your monthly budget is exhausted ($10.00 of $10.00).' } }),
+      });
+      await handler(eventWith(parentComment('@bgagent for the footer change the tagline', 'pc-refused')));
+
+      expect(upsertThreadedReplyMock).toHaveBeenCalledTimes(2);
+      const [, issueId, parentCommentId, body, existingReplyId] = upsertThreadedReplyMock.mock.calls[1];
+      expect(issueId).toBe('PARENT-EPIC');
+      expect(parentCommentId).toBe('pc-refused');
+      expect(existingReplyId).toBe('reply-1');
+      expect(String(body)).toMatch(/monthly budget is exhausted/);
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'pc-refused', 'x');
     });
   });
 });

@@ -593,6 +593,28 @@ describe('linear-webhook-processor handler', () => {
       expect(message).toContain('re-apply the trigger label');
     });
 
+    test('an idempotent replay (createTaskCore 200) is not reported as a failure', async () => {
+      // A second run of the same delivery (Lambda retrying the async invoke after a
+      // timeout or a crash) reaches createTaskCore with the same idempotency key and
+      // gets the first run's task back with 200. That task is working on the issue,
+      // so a "couldn't create this task (status 200)" comment and a ❌ would be wrong.
+      // What this run uploaded is keyed on a task id that never became a task.
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      const uploaded = { attachment_id: 'a1', s3_key: 'attachments/u/t/a1/paste.png' };
+      downloadLinearAttachmentsMock.mockResolvedValueOnce([uploaded]);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      const payload = issue();
+      (payload.data as Record<string, unknown>).description = '![paste](https://uploads.linear.app/15d12f61/090e5ce6/938f90d7)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(cleanupPreScreenedAttachmentsMock).toHaveBeenCalledWith(expect.anything(), 'attachments-bucket', [uploaded]);
+    });
+
     test('does NOT post feedback on the happy 201 path', async () => {
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
