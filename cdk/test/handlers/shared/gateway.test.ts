@@ -25,6 +25,7 @@ import {
   extractUserId,
   extractWebhookContext,
   generateBranchName,
+  getHeader,
 } from '../../../src/handlers/shared/gateway';
 
 function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayProxyEvent {
@@ -130,6 +131,24 @@ describe('extractUserGroups', () => {
 
   test('returns an empty list when the claim is absent', () => {
     expect(extractUserGroups(makeEvent())).toEqual([]);
+  });
+});
+
+describe('getHeader', () => {
+  test('finds a header whatever the casing of its name', () => {
+    expect(getHeader({ 'X-API-Key': 'k' }, 'X-API-Key')).toBe('k');
+    expect(getHeader({ 'x-api-key': 'k' }, 'X-API-Key')).toBe('k');
+    expect(getHeader({ 'X-Api-Key': 'k' }, 'X-API-Key')).toBe('k');
+    expect(getHeader({ 'X-API-KEY': 'k' }, 'x-api-key')).toBe('k');
+  });
+
+  test('does not match a different header', () => {
+    expect(getHeader({ 'X-API-Key-Id': 'other', 'Accept': '*/*' }, 'X-API-Key')).toBeUndefined();
+  });
+
+  test('returns undefined when the event has no headers', () => {
+    expect(getHeader({}, 'X-API-Key')).toBeUndefined();
+    expect(getHeader(null, 'X-API-Key')).toBeUndefined();
   });
 });
 

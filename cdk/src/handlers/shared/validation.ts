@@ -196,10 +196,11 @@ export function isValidUlid(value: string): boolean {
 /**
  * Validate a webhook name (2-64 characters, alphanumeric, spaces, hyphens, underscores).
  * Must start and end with an alphanumeric character.
- * @param name - the webhook name to validate.
- * @returns true if the name is valid.
+ * @param name - the raw value from the request.
+ * @returns true if the name is a string and valid.
  */
-export function isValidWebhookName(name: string): boolean {
+export function isValidWebhookName(name: unknown): boolean {
+  if (typeof name !== 'string') return false;
   if (name.length === 1) return /^[a-zA-Z0-9]$/.test(name);
   return WEBHOOK_NAME_PATTERN.test(name);
 }

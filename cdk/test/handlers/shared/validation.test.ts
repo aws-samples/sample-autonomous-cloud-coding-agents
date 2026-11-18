@@ -242,6 +242,14 @@ describe('isValidWebhookName', () => {
     expect(isValidWebhookName('web/hook')).toBe(false);
     expect(isValidWebhookName('web.hook')).toBe(false);
   });
+
+  test('rejects a name that is not a string', () => {
+    // The name comes from a parsed JSON body. Each of these reads as a valid
+    // name once converted to a string, which the pattern test does on its own.
+    expect(isValidWebhookName(42)).toBe(false);
+    expect(isValidWebhookName(true)).toBe(false);
+    expect(isValidWebhookName(['a'])).toBe(false);
+  });
 });
 
 describe('isValidTaskDescriptionLength', () => {
