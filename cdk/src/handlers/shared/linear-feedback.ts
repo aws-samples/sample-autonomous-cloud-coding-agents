@@ -80,29 +80,10 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
-/** Delete a comment — used to clear a transient note once the thing it was about
- *  is settled, and to reposition the epic panel by delete-and-repost. */
+/** Delete a comment — used to reposition the epic panel by delete-and-repost. */
 const COMMENT_DELETE_MUTATION = `
 mutation DeleteComment($id: String!) {
   commentDelete(id: $id) { success }
-}
-`.trim();
-
-/**
- * List an issue's TOP-LEVEL comments (id + body). Used to tidy a thread once the
- * thing its notes were about is settled: we can't track every fire-and-forget
- * note id, so we fetch the thread once and delete the bot's own ``🗂️``/``👋``
- * notes by prefix, keeping any comment the caller names plus the
- * (differently-prefixed) live panel. ``first: 100`` comfortably covers the note
- * volume one issue accumulates; pagination is unnecessary for it.
- */
-const ISSUE_COMMENTS_QUERY = `
-query IssueComments($issueId: String!) {
-  issue(id: $issueId) {
-    comments(first: 100) {
-      nodes { id body }
-    }
-  }
 }
 `.trim();
 
@@ -116,7 +97,7 @@ query IssueComments($issueId: String!) {
  * for those app/integration comments — so @bgagent's own progress and ack
  * comments carry a ``botActor`` and no ``user``. ``createdAt`` orders the thread.
  *
- * We fetch the first 100 (matching {@link ISSUE_COMMENTS_QUERY}) and sort +
+ * We fetch the first 100 and sort +
  * slice to the most recent human comments CLIENT-SIDE, so the result is
  * independent of Linear's connection sort direction. 100 covers every realistic
  * issue thread; the rare over-100 issue simply may miss the oldest turns, which
@@ -439,11 +420,9 @@ export async function upsertStatusComment(
 }
 
 /**
- * Delete a comment — used for the transient "🗂️ On it — updating…" ack once the
- * revised plan it announced has been posted. Best-effort: returns true on
- * success, false on any failure (a lingering ack is a cosmetic nit, never a
- * breakage). Note Linear may already have fired a notification for the ack that
- * deletion can't un-send — acceptable.
+ * Delete a comment — used to remove the old epic panel when a retry posts it
+ * again below the retry note. Best-effort: returns true on success, false on any
+ * failure (a second panel left behind is a cosmetic nit, never a breakage).
  */
 export async function deleteComment(
   ctx: LinearFeedbackContext,
@@ -452,59 +431,6 @@ export async function deleteComment(
   const token = await resolveToken(ctx);
   if (!token) return false;
   return (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id: commentId })).ok;
-}
-
-/**
- * Bot-comment prefixes that mark a TRANSIENT note — an interim ack, an error note,
- * a nudge, a wrong-handle correction. These are the ``🗂️``/``👋`` comments a
- * thread cleanup sweeps once the thing they were about is settled.
- *
- * Deliberately does NOT include the live epic panel (``🔄``/``⚠️``/``✅``) or the
- * agent's own progress (``🤖``) — those aren't ours to delete here, and the panel
- * is the thing we're KEEPING. Mirrors the self-trigger guard's
- * ``BOT_COMMENT_PREFIXES`` but scoped to transient notes.
- */
-const TRANSIENT_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
-
-/**
- * Sweep the bot's transient notes off an issue once the thing they were about is
- * settled, leaving any frozen reference + the live epic panel. Fetches the thread
- * once, then deletes every top-level comment that (a) starts with a transient-note
- * prefix and (b) is NOT ``keepCommentId`` (a reference to keep). Best-effort and
- * total: a failed list returns 0 (nothing swept — a lingering note is a
- * cosmetic nit, never a breakage), and each delete is independent so one
- * failure doesn't abort the rest. Returns the count deleted (for logging/tests).
- *
- * Prefix-scoping is the robustness win: interim notes are posted fire-and-forget
- * from sites whose ids we don't track, and future note types are covered
- * automatically — while the panel (different prefix) and human comments (no bot
- * prefix) are provably untouched.
- */
-export async function sweepTransientNotes(
-  ctx: LinearFeedbackContext,
-  issueId: string,
-  keepCommentId?: string,
-): Promise<number> {
-  const token = await resolveToken(ctx);
-  if (!token) return 0;
-  const data = lookupValueOr(await graphqlData(token, ISSUE_COMMENTS_QUERY, { issueId }), null);
-  const issue = data?.issue as { comments?: { nodes?: Array<{ id?: string; body?: string }> } } | undefined;
-  const nodes = issue?.comments?.nodes ?? [];
-  let deleted = 0;
-  for (const node of nodes) {
-    const id = node?.id;
-    const body = (node?.body ?? '').trimStart();
-    if (!id || id === keepCommentId) continue;
-    if (!TRANSIENT_NOTE_PREFIXES.some((p) => body.startsWith(p))) continue;
-    const ok = (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id })).ok;
-    if (ok) deleted += 1;
-  }
-  if (deleted > 0) {
-    logger.info('Swept transient notes off the issue thread', {
-      issue_id: issueId, deleted, kept_reference: keepCommentId ?? null,
-    });
-  }
-  return deleted;
 }
 
 /** A rendered issue comment folded into the task context (mirrors the Jira

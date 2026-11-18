@@ -25,7 +25,6 @@ jest.mock('@aws-sdk/lib-dynamodb', () => ({
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
   jiraIssueIdentity,
-  prNumberFromTask,
   resolveTaskByJiraIssue,
 } from '../../../src/handlers/shared/jira-task-by-issue';
 
@@ -102,12 +101,4 @@ test('propagates query failures so the async processor can retry', async () => {
   send.mockRejectedValueOnce(new Error('DynamoDB unavailable'));
   await expect(resolveTaskByJiraIssue(ddb, 'Tasks', 'cloud-1', 'ENG-42'))
     .rejects.toThrow('DynamoDB unavailable');
-});
-
-test.each([
-  [{ pr_number: 12 }, 12],
-  [{ pr_url: 'https://github.com/o/r/pull/99/files' }, 99],
-  [{ pr_number: 0, pr_url: 'not-a-pr' }, null],
-])('prNumberFromTask(%o) returns %p', (task, expected) => {
-  expect(prNumberFromTask(task)).toBe(expected);
 });

@@ -110,17 +110,3 @@ export async function lookupTaskByLinearIssue(
     return { kind: 'error', message };
   }
 }
-
-/**
- * Extract a PR number from a task's ``pr_number`` (preferred) or by parsing
- * ``/pull/<n>`` out of ``pr_url``. Returns null when neither yields a number —
- * the task ran but never opened a PR, so there's nothing to iterate on.
- */
-export function prNumberFromTask(task: LinearIssueTask): number | null {
-  if (typeof task.pr_number === 'number') return task.pr_number;
-  if (typeof task.pr_url === 'string') {
-    const m = task.pr_url.match(/\/pull\/(\d+)\b/);
-    if (m) return Number(m[1]);
-  }
-  return null;
-}

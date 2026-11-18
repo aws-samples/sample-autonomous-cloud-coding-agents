@@ -41,7 +41,6 @@ import { reportIssueFailure } from './shared/jira-feedback';
 import { resolveJiraOauthToken } from './shared/jira-oauth-resolver';
 import type { JiraSubIssueNode } from './shared/jira-subissue-fetch';
 import {
-  prNumberFromTask,
   resolveTaskByJiraIssue,
   type JiraIssueTask,
 } from './shared/jira-task-by-issue';
@@ -70,6 +69,7 @@ import {
   setStatusCommentId,
   type OrchestrationReleaseContext,
 } from './shared/orchestration-store';
+import { prNumberFromTask } from './shared/task-pr-number';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';
 import { MAX_TASK_DESCRIPTION_LENGTH } from './shared/validation';

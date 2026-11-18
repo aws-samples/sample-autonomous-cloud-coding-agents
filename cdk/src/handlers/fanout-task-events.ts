@@ -69,6 +69,7 @@ import { logger } from './shared/logger';
 import { coerceNumericOrNull } from './shared/numeric';
 import { loadRepoConfig } from './shared/repo-config';
 import { encodeMarkdownUrl } from './shared/screenshot-url';
+import { prNumberFromTask } from './shared/task-pr-number';
 import type { ChannelConfig, TaskNotificationsConfig, TaskRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
 import { dispatchSlackEvent, SlackApiError } from './slack-notify';
@@ -1456,9 +1457,7 @@ async function replyToStandaloneTrigger(
   // (consistent with the reconciler's success gate).
   const completed = event.event_type === 'task_completed';
   const succeeded = completed && task.build_passed !== false;
-  const prNumber = typeof task.pr_number === 'number'
-    ? task.pr_number
-    : (typeof task.pr_url === 'string' ? Number(task.pr_url.match(/\/pull\/(\d+)\b/)?.[1]) || null : null);
+  const prNumber = prNumberFromTask(task);
 
   // Iteration-UX: cumulative cost across ALL iteration tasks on this PR/issue
   // (incl. this one), so the reply shows a running total over many rounds.

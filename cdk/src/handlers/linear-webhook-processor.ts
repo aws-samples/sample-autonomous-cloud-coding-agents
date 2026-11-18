@@ -50,7 +50,7 @@ import {
 } from './shared/linear-notes';
 import { resolveLinearOauthToken, resolveSoleActiveLinearWorkspace } from './shared/linear-oauth-resolver';
 import { fetchIssueParentId } from './shared/linear-subissue-fetch';
-import { lookupTaskByLinearIssue, prNumberFromTask } from './shared/linear-task-by-issue';
+import { lookupTaskByLinearIssue } from './shared/linear-task-by-issue';
 import { logger } from './shared/logger';
 import { type LookupResult, LOOKUP_ABSENT, isLookupFailure, lookupFailed, lookupFound, lookupValueOr } from './shared/lookup-result';
 import { type Channel, type IssueRef } from './shared/orchestration-channel';
@@ -77,7 +77,7 @@ import { computeEpicRetryPlan } from './shared/orchestration-reconcile';
 import { applyTerminalCreateFailures, readConcurrencyBudget, releaseReadyChildren } from './shared/orchestration-release';
 import { upsertEpicPanel } from './shared/orchestration-rollup';
 import { claimCommentAck, clearRollupClaim, deriveOrchestrationId, loadOrchestration, refreshUnstartedText, setChildOwnAttachments, setRetryCommentId, setStatusCommentId, type OrchestrationChildRow, type OrchestrationReleaseContext } from './shared/orchestration-store';
-import { readTaskPrNumber } from './shared/task-pr-number';
+import { prNumberFromTask, readTaskPrNumber } from './shared/task-pr-number';
 import { DEFAULT_LABEL_FILTER, hasHelpLabel, HELP_SUFFIX } from './shared/trigger-label';
 import type { Attachment, PassedAttachmentRecord } from './shared/types';
 import { makeClient, makeDocClient } from './shared/ua';

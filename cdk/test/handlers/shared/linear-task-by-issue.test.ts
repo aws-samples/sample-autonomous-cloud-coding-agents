@@ -17,10 +17,7 @@
  *  SOFTWARE.
  */
 
-import {
-  lookupTaskByLinearIssue,
-  prNumberFromTask,
-} from '../../../src/handlers/shared/linear-task-by-issue';
+import { lookupTaskByLinearIssue } from '../../../src/handlers/shared/linear-task-by-issue';
 
 jest.mock('../../../src/handlers/shared/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
@@ -67,20 +64,5 @@ describe('lookupTaskByLinearIssue', () => {
   test('omits absent optional fields', async () => {
     send.mockResolvedValueOnce({ Items: [{ task_id: 'T1' }] });
     expect(await lookupTaskByLinearIssue(ddb, 'TaskTable', 'x')).toEqual({ kind: 'found', task: { task_id: 'T1' } });
-  });
-});
-
-describe('prNumberFromTask', () => {
-  test('prefers numeric pr_number', () => {
-    expect(prNumberFromTask({ task_id: 'T', pr_number: 7, pr_url: 'https://github.com/o/r/pull/9' })).toBe(7);
-  });
-
-  test('falls back to parsing pr_url', () => {
-    expect(prNumberFromTask({ task_id: 'T', pr_url: 'https://github.com/o/r/pull/123' })).toBe(123);
-  });
-
-  test('null when neither yields a number', () => {
-    expect(prNumberFromTask({ task_id: 'T' })).toBeNull();
-    expect(prNumberFromTask({ task_id: 'T', pr_url: 'https://github.com/o/r/tree/main' })).toBeNull();
   });
 });

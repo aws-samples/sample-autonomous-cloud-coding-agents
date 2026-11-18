@@ -29,7 +29,6 @@ const linearTransitionIssueState = jest.fn();
 const linearRevertIssueToNotStarted = jest.fn();
 const linearReplyToComment = jest.fn();
 const linearUpsertThreadedReply = jest.fn();
-const linearSweepTransientNotes = jest.fn();
 jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   EMOJI_STARTED: 'eyes',
   EMOJI_SUCCESS: 'white_check_mark',
@@ -45,17 +44,6 @@ jest.mock('../../../src/handlers/shared/linear-feedback', () => ({
   revertIssueToNotStarted: (...a: unknown[]) => linearRevertIssueToNotStarted(...a),
   replyToComment: (...a: unknown[]) => linearReplyToComment(...a),
   upsertThreadedReply: (...a: unknown[]) => linearUpsertThreadedReply(...a),
-  sweepTransientNotes: (...a: unknown[]) => linearSweepTransientNotes(...a),
-}));
-
-const resolveLinearOauthToken = jest.fn();
-jest.mock('../../../src/handlers/shared/linear-oauth-resolver', () => ({
-  resolveLinearOauthToken: (...a: unknown[]) => resolveLinearOauthToken(...a),
-}));
-
-const fetchSubIssueGraph = jest.fn();
-jest.mock('../../../src/handlers/shared/linear-subissue-fetch', () => ({
-  fetchSubIssueGraph: (...a: unknown[]) => fetchSubIssueGraph(...a),
 }));
 
 const jiraPostIssueComment = jest.fn();
@@ -191,42 +179,6 @@ describe('Linear channel adapter', () => {
     expect(linearUpsertThreadedReply.mock.calls[0][5])
       .toEqual({ preservePreview: false, skipIfSettled: false, repairIfOverwritten: false });
   });
-
-  test('sweepNotes passes the comment to keep through and returns the deleted count', async () => {
-    linearSweepTransientNotes.mockResolvedValue(3);
-    expect(await ch.sweepNotes!(linearIssue, { commentId: 'keep-1' })).toBe(3);
-    expect(linearSweepTransientNotes.mock.calls[0][1]).toBe('lin-issue-1');
-    expect(linearSweepTransientNotes.mock.calls[0][2]).toBe('keep-1');
-  });
-
-  test('sweepNotes with nothing to keep passes no keep id', async () => {
-    linearSweepTransientNotes.mockResolvedValue(0);
-    expect(await ch.sweepNotes!(linearIssue)).toBe(0);
-    expect(linearSweepTransientNotes.mock.calls[0][2]).toBeUndefined();
-  });
-
-  test('fetchChildGraph maps blocks-derived depends_on to the neutral node shape', async () => {
-    resolveLinearOauthToken.mockResolvedValue({ accessToken: 'tok' });
-    fetchSubIssueGraph.mockResolvedValue({
-      kind: 'ok',
-      parentIssueId: 'lin-issue-1',
-      children: [
-        { id: 'a', identifier: 'ENG-2', title: 'A', depends_on: [] },
-        { id: 'b', identifier: 'ENG-3', title: 'B', depends_on: ['a'] },
-      ],
-    });
-    const nodes = await ch.fetchChildGraph!(linearIssue);
-    expect(nodes).toEqual([
-      { issueId: 'a', displayId: 'ENG-2', title: 'A', dependsOn: [] },
-      { issueId: 'b', displayId: 'ENG-3', title: 'B', dependsOn: ['a'] },
-    ]);
-  });
-
-  test('fetchChildGraph returns [] when the graph is unavailable (best-effort)', async () => {
-    resolveLinearOauthToken.mockResolvedValue({ accessToken: 'tok' });
-    fetchSubIssueGraph.mockResolvedValue({ kind: 'error', message: 'boom' });
-    expect(await ch.fetchChildGraph!(linearIssue)).toEqual([]);
-  });
 });
 
 describe('Jira channel adapter (capability-limited surface)', () => {
@@ -299,8 +251,6 @@ describe('Jira channel adapter (capability-limited surface)', () => {
       'revertState',
       'postThreadedReply',
       'upsertThreadedReply',
-      'sweepNotes',
-      'fetchChildGraph',
     ]) {
       expect(capability in ch).toBe(false);
     }
