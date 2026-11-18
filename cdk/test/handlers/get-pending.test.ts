@@ -310,8 +310,15 @@ describe('get-pending', () => {
     }
     mockSend.mockResolvedValueOnce({ Items: [pendingRow('live', { created_at: '2026-05-07T00:00:00Z', timeout_s: 300 })] });
 
-    expect(await listedRequestIds()).toEqual([]);
+    const stdout = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const listed = await listedRequestIds();
+    const logged = stdout.mock.calls.join('');
+    stdout.mockRestore();
+
+    expect(listed).toEqual([]);
     expect(mockSend.mock.calls.filter((c) => c[0]._type === 'Query')).toHaveLength(20);
+    // The warning is the only sign an operator gets that requests are not listed.
+    expect(logged).toContain('stopped at its page cap');
   });
 
   test('500 on DDB error after rate-limit passes', async () => {
