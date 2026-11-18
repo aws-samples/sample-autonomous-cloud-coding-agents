@@ -17,22 +17,37 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { ApiClient } from '../../src/api-client';
 import { makeSubmitCommand } from '../../src/commands/submit';
+import { ApiError } from '../../src/errors';
+import { abortableSleep } from '../../src/retry';
 
 jest.mock('../../src/api-client');
+// The pauses between two reads of a task whose uploads are being confirmed: over at once.
+jest.mock('../../src/retry', () => ({
+  ...jest.requireActual('../../src/retry'),
+  abortableSleep: jest.fn(() => Promise.resolve()),
+}));
 
 describe('submit command', () => {
   let consoleSpy: jest.SpiedFunction<typeof console.log>;
   const mockCreateTask = jest.fn();
+  const mockConfirmUploads = jest.fn();
+  const mockGetTask = jest.fn();
 
   beforeEach(() => {
     consoleSpy = jest.spyOn(console, 'log').mockImplementation();
     mockCreateTask.mockReset();
+    mockConfirmUploads.mockReset();
+    mockGetTask.mockReset();
     (ApiClient as jest.MockedClass<typeof ApiClient>).mockImplementation(() => ({
       createTask: mockCreateTask,
+      confirmUploads: mockConfirmUploads,
       listTasks: jest.fn(),
-      getTask: jest.fn(),
+      getTask: mockGetTask,
       cancelTask: jest.fn(),
       getTaskEvents: jest.fn(),
       createWebhook: jest.fn(),
@@ -615,6 +630,126 @@ describe('submit command', () => {
       }
       await expect(cmd.parseAsync(argv)).rejects.toThrow(/exceeds 20 entries/);
       expect(mockCreateTask).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('confirming presigned uploads', () => {
+    const originalFetch = global.fetch;
+    const submitted = { task_id: 'task-1', status: 'SUBMITTED' };
+    let stderrSpy: jest.SpiedFunction<typeof process.stderr.write>;
+    let cwdSpy: jest.SpiedFunction<typeof process.cwd>;
+    let dir: string;
+    let argv: string[];
+
+    beforeEach(() => {
+      // A file over the 500 KB inline limit, inside what the command takes for the working directory.
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bgagent-submit-'));
+      fs.writeFileSync(path.join(dir, 'diagram.png'), Buffer.alloc(600 * 1024));
+      cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(dir);
+      stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      global.fetch = jest.fn().mockResolvedValue(new Response(null, { status: 204 })) as typeof global.fetch;
+      mockCreateTask.mockResolvedValue({
+        task_id: 'task-1',
+        status: 'PENDING_UPLOADS',
+        upload_instructions: [{
+          attachment_id: 'att-1',
+          filename: 'diagram.png',
+          upload_url: 'https://attachments.example/',
+          upload_fields: { 'key': 'attachments/user-1/task-1/att-1/diagram.png', 'Content-Type': 'image/png' },
+          upload_expires_at: '2026-01-01T00:10:00Z',
+        }],
+      });
+      argv = [
+        'node', 'test',
+        '--repo', 'owner/repo',
+        '--task', 'implement the spec',
+        '--attachment', path.join(dir, 'diagram.png'),
+        '--output', 'json',
+      ];
+    });
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      cwdSpy.mockRestore();
+      stderrSpy.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    // API Gateway ends the request after 29 s; the confirmation runs on behind it.
+    const gatewayTimeout = () => new ApiError(504, 'HTTP_ERROR', 'HTTP 504: Gateway Timeout', '');
+    const stillPending = { task_id: 'task-1', status: 'PENDING_UPLOADS' };
+
+    test('after a gateway timeout, waits for the task to leave PENDING_UPLOADS and then confirms again', async () => {
+      mockConfirmUploads.mockRejectedValueOnce(gatewayTimeout()).mockResolvedValueOnce(submitted);
+      mockGetTask
+        .mockResolvedValueOnce(stillPending)
+        .mockResolvedValueOnce(stillPending)
+        .mockResolvedValueOnce(submitted);
+
+      await makeSubmitCommand().parseAsync(argv);
+
+      expect(mockGetTask).toHaveBeenCalledTimes(3);
+      expect(abortableSleep).toHaveBeenCalledTimes(3);
+      expect(abortableSleep).toHaveBeenCalledWith(5_000);
+      // Not a second confirmation beside the first one: it is sent once the task has moved on.
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(2);
+      expect(mockConfirmUploads.mock.invocationCallOrder[1]).toBeGreaterThan(mockGetTask.mock.invocationCallOrder[2]);
+      expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(submitted, null, 2));
+    });
+
+    test('confirms again when the first confirmation cannot be running any more', async () => {
+      mockConfirmUploads.mockRejectedValueOnce(gatewayTimeout()).mockResolvedValueOnce(submitted);
+      mockGetTask.mockResolvedValue(stillPending);
+
+      await makeSubmitCommand().parseAsync(argv);
+
+      // 33 reads 5 s apart are 165 s: a confirmation runs for 180 s at most, and 29 s had passed.
+      expect(mockGetTask).toHaveBeenCalledTimes(33);
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(2);
+      expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(submitted, null, 2));
+    });
+
+    // A read that fails for a moment says nothing about the confirmation, which runs on.
+    test.each([
+      ['is answered 502', new ApiError(502, 'HTTP_ERROR', 'HTTP 502: Bad Gateway', '')],
+      ['loses its connection', new TypeError('fetch failed')],
+    ])('keeps waiting when a read of the task %s', async (_how, readError) => {
+      mockConfirmUploads.mockRejectedValueOnce(gatewayTimeout()).mockResolvedValueOnce(submitted);
+      mockGetTask.mockRejectedValueOnce(readError).mockResolvedValueOnce(submitted);
+
+      await makeSubmitCommand().parseAsync(argv);
+
+      expect(mockGetTask).toHaveBeenCalledTimes(2);
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(2);
+      expect(consoleSpy).toHaveBeenCalledWith(JSON.stringify(submitted, null, 2));
+    });
+
+    test('ends with the error of a read of the task that no later read can change', async () => {
+      const notFound = new ApiError(404, 'TASK_NOT_FOUND', 'Task not found.', 'req-1');
+      mockConfirmUploads.mockRejectedValueOnce(gatewayTimeout());
+      mockGetTask.mockRejectedValue(notFound);
+
+      await expect(makeSubmitCommand().parseAsync(argv)).rejects.toBe(notFound);
+      expect(mockGetTask).toHaveBeenCalledTimes(1);
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(1);
+    });
+
+    test('reports the gateway timeout when the third confirmation times out too', async () => {
+      const timeout = gatewayTimeout();
+      mockConfirmUploads.mockRejectedValue(timeout);
+      mockGetTask.mockResolvedValue(stillPending);
+
+      await expect(makeSubmitCommand().parseAsync(argv)).rejects.toBe(timeout);
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(3);
+    });
+
+    test('does not wait or confirm again after an answer that is final', async () => {
+      const blocked = new ApiError(400, 'ATTACHMENT_BLOCKED', "Attachment 'diagram.png' was blocked by content policy.", 'req-1');
+      mockConfirmUploads.mockRejectedValue(blocked);
+
+      await expect(makeSubmitCommand().parseAsync(argv)).rejects.toBe(blocked);
+      expect(mockConfirmUploads).toHaveBeenCalledTimes(1);
+      expect(mockGetTask).not.toHaveBeenCalled();
     });
   });
 });

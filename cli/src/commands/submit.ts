@@ -21,8 +21,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { CliError } from '../errors';
+import { ApiError, CliError } from '../errors';
 import { formatJson, formatTaskDetail } from '../format';
+import { abortableSleep, isTransientError } from '../retry';
 import {
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
@@ -39,6 +40,7 @@ import {
   MICROVM_SLEEP_AFTER_S_DEFAULT,
   MICROVM_SLEEP_AFTER_S_MAX,
   MICROVM_SLEEP_AFTER_S_MIN,
+  TaskDetail,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
@@ -273,7 +275,7 @@ export function makeSubmitCommand(): Command {
 
         // Confirm uploads to trigger screening and transition to SUBMITTED
         process.stderr.write('Confirming uploads...\n');
-        task = await client.confirmUploads(createResponse.task_id);
+        task = await confirmUploadsWithRetry(client, createResponse.task_id);
       }
 
       if (opts.wait) {
@@ -449,5 +451,52 @@ async function uploadViaPresignedPost(
     throw new CliError(
       `Presigned upload failed for ${instruction.filename}: HTTP ${res.status}${text ? ` — ${text.slice(0, 200)}` : ''}`,
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload confirmation
+// ---------------------------------------------------------------------------
+
+/** Confirmations sent for one submission before a gateway timeout is reported as the error. */
+const CONFIRM_MAX_ATTEMPTS = 3;
+
+/** How often the task is read while its confirmation runs on behind a gateway timeout. */
+const CONFIRM_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * 165 s of reading the task. A confirmation runs for at most 180 s (its Lambda timeout)
+ * and the gateway gave up after 29 s of them; the rest is room for a cold start.
+ */
+const CONFIRM_MAX_POLLS = 33;
+
+/**
+ * Confirm the uploads, and do not take a gateway timeout for a failure.
+ *
+ * API Gateway ends a request after 29 s, but the confirmation runs on behind it and
+ * then submits or fails the task. So after a 504, wait until the task has left
+ * PENDING_UPLOADS, or until the confirmation cannot be running any more, and confirm
+ * again: that call answers with the outcome, or goes on from the progress a
+ * confirmation that ran out of time has saved. It is not sent while the first one may
+ * still be running, because a second confirmation beside it screens every upload again.
+ */
+async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promise<TaskDetail> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await client.confirmUploads(taskId);
+    } catch (err) {
+      const gatewayTimeout = err instanceof ApiError && err.statusCode === 504;
+      if (!gatewayTimeout || attempt === CONFIRM_MAX_ATTEMPTS) throw err;
+      process.stderr.write(`  Screening of task ${taskId} is still running; waiting for it to finish...\n`);
+      for (let poll = 0; poll < CONFIRM_MAX_POLLS; poll++) {
+        await abortableSleep(CONFIRM_POLL_INTERVAL_MS);
+        try {
+          if ((await client.getTask(taskId)).status !== 'PENDING_UPLOADS') break;
+        } catch (readErr) {
+          // A read that fails for a moment (5xx, network) is no answer: read again.
+          if (!isTransientError(readErr)) throw readErr;
+        }
+      }
+    }
   }
 }
