@@ -404,7 +404,6 @@ def _run_repoless_task(
         turns=turns_attempted,
         turns_attempted=turns_attempted,
         turns_completed=_compute_turns_completed(
-            agent_status=agent_result.status,
             turns_attempted=turns_attempted,
             max_turns=config.max_turns,
         ),
@@ -634,22 +633,24 @@ def _resolve_overall_task_status(
     return "error", err
 
 
-def _branch_has_new_commits(repo_dir: str, default_branch: str) -> bool:
-    """True if HEAD carries commits beyond ``origin/<default_branch>``.
+def _branch_has_new_commits(repo_dir: str, default_branch: str, branch: str) -> bool:
+    """True if the pushed ``branch`` carries commits beyond ``origin/<default_branch>``.
 
-    The same ``origin/<default_branch>..HEAD`` diff ``ensure_pr`` consults to
-    decide whether there is anything to open a PR from (see
-    ``post_hooks._ensure_pr``). Used by the delivery gate to tell
-    "a commit landed but the PR failed to open" (recoverable) from "no commit
-    ever reached the branch — the work was lost". For a stacked child of an
-    orchestrated issue graph (#247) ``default_branch`` IS its predecessor
-    branch (``config.base_branch``), so
-    this asks the right question: did this child add anything on top of its
-    base? Best-effort — a git failure returns ``False`` (assume nothing landed,
-    the conservative read for a gate whose job is to catch a lost deliverable)."""
+    Used by the delivery gate to tell "a commit landed but the PR failed to
+    open" (recoverable) from "no commit ever reached the branch — the work was
+    lost". It reads the remote-tracking ref ``origin/<branch>``, which a
+    successful ``git push`` updates, and not the local ``HEAD``: after a failed
+    push the commits exist only in this container, and reporting them as landed
+    would tell the user that the work is safe on a branch GitHub has never seen.
+    For a stacked child of an orchestrated issue graph (#247) ``default_branch``
+    IS its predecessor branch (``config.base_branch``), so this asks the right
+    question: did this child add anything on top of its base? Best-effort — a
+    git failure returns ``False`` (assume nothing landed, the conservative read
+    for a gate whose job is to catch a lost deliverable); a branch that was
+    never pushed is such a failure, an unknown ref."""
     try:
         res = subprocess.run(
-            ["git", "log", f"origin/{default_branch}..HEAD", "--oneline"],
+            ["git", "log", f"origin/{default_branch}..origin/{branch}", "--oneline"],
             cwd=repo_dir,
             check=False,
             capture_output=True,
@@ -728,11 +729,10 @@ def _apply_delivery_gate(
 
 
 def _compute_turns_completed(
-    agent_status: str,
     turns_attempted: int | None,
     max_turns: int,
 ) -> int | None:
-    """Clamp ``turns_completed`` to ``max_turns`` when the SDK hit the limit.
+    """Clamp ``turns_completed`` to ``max_turns``.
 
     The Claude Agent SDK reports ``num_turns = max_turns + 1``
     on ``error_max_turns`` because the aborted attempt is counted.  Clamping
@@ -740,14 +740,16 @@ def _compute_turns_completed(
     actually executed") while ``turns_attempted`` keeps the raw SDK value
     for debugging.
 
+    The agent status is not consulted: the CLI marks a max-turns result
+    ``is_error``, so the runner reports it as ``error``, not ``error_max_turns``,
+    and no status can complete more turns than the cap.
+
     Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
     round-trip a missing SDK count without inventing a fake zero.
     """
     if not turns_attempted:
         return turns_attempted
-    if agent_status == "error_max_turns":
-        return min(turns_attempted, max_turns)
-    return turns_attempted
+    return min(turns_attempted, max_turns)
 
 
 def _write_memory(
@@ -1309,6 +1311,17 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                             f"Cancel-path trace upload/persist failed "
                             f"(fail-open): {type(e).__name__}: {e}",
                         )
+                # ❌ on the Linear issue so the stale 👀 doesn't linger: nothing
+                # else removes that reaction before another task starts on the
+                # issue, and the platform's own comment for this run is
+                # "❌ Task cancelled". The same best-effort call as on the crash
+                # path below; no-op for non-Linear tasks.
+                react_task_finished(
+                    config.channel_source,
+                    config.channel_metadata,
+                    success=False,
+                    started_reaction_id=linear_eyes_reaction_id,
+                )
                 return {
                     "status": "cancelled",
                     "task_id": config.task_id,
@@ -1462,8 +1475,10 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
                     # the lint-inert path: do NOT gate on it (it's a config problem,
                     # not the agent's code), and treat build as passing for the gate
-                    # so we don't emit a false "build failed". The honest signal is
-                    # carried in error_message (build_ok=inert) for the platform copy.
+                    # so we don't emit a false "build failed". It is not REPORTED
+                    # as passed: the pull request body and the task record get None
+                    # ("did not run") in place of this True, see ensure_pr and
+                    # TaskResult below.
                     build_inert = build_outcome.inert
                     if build_inert:
                         log(
@@ -1491,7 +1506,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                     pr_url = ensure_pr(
                         config,
                         setup,
-                        build_passed,
+                        None if build_inert else build_passed,
                         lint_passed,
                         agent_result=agent_result,
                         strategy=ensure_pr_strategy,
@@ -1561,7 +1576,10 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 build_ok=build_ok,
                 pr_url=pr_url,
                 build_timed_out=build_timed_out,
-                build_infra_failed=build_infra_failed,
+                # A read-only workflow never gates (WORKFLOWS.md) and changes no
+                # code, so a build killed by the host leaves nothing unverified:
+                # a review that is already posted must not be reported FAILED.
+                build_infra_failed=build_infra_failed and not workflow_read_only,
             )
             # Delivery gate: a create-strategy new-work task that
             # reported success but opened no PR AND landed no commit shipped
@@ -1578,7 +1596,7 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 and ensure_pr_strategy == "create"
             )
             commit_landed = (
-                _branch_has_new_commits(setup.repo_dir, setup.default_branch)
+                _branch_has_new_commits(setup.repo_dir, setup.default_branch, setup.branch)
                 if gate_in_play
                 else False
             )
@@ -1603,13 +1621,15 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 result_error = None
 
             # ✅/❌ on the Linear issue (removes the 👀 first so the final
-            # status stands alone). No-op for non-Linear tasks.
+            # status stands alone). No-op for non-Linear tasks. The issue moves
+            # to In Review only when there is a pull request to review, like the
+            # Jira card above: a clarify-and-hold run succeeds without one.
             react_task_finished(
                 config.channel_source,
                 config.channel_metadata,
                 success=(overall_status == "success"),
                 started_reaction_id=linear_eyes_reaction_id,
-                transition_state=linear_transition_state,
+                transition_state=linear_transition_state and bool(pr_url),
             )
 
             # NOTE: the terminal status comment on the Jira issue is NOT posted
@@ -1670,7 +1690,6 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             usage = agent_result.usage
             turns_attempted = agent_result.num_turns or agent_result.turns
             turns_completed = _compute_turns_completed(
-                agent_status=agent_status,
                 turns_attempted=turns_attempted,
                 max_turns=config.max_turns,
             )
@@ -1678,7 +1697,9 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 status=overall_status,
                 agent_status=agent_status,
                 pr_url=pr_url,
-                build_passed=build_passed,
+                # None, not True, for a build whose command could not run: the
+                # gate did not run, and write_terminal then stores no verdict.
+                build_passed=None if build_inert else build_passed,
                 lint_passed=lint_passed,
                 cost_usd=agent_result.cost_usd,
                 # Legacy field (= turns_attempted) kept for back-compat.
@@ -1719,9 +1740,10 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            # On the repo path these are always real bools (computed by the post
-            # hooks above); coalesce for the span attribute since the field type
-            # is now tri-state (bool | None) for the repo-less/crash case.
+            # On the repo path these are real bools (computed by the post hooks
+            # above), except build_passed after a build that could not run;
+            # coalesce for the span attribute since the field type is tri-state
+            # (bool | None) for that and the repo-less/crash case.
             root_span.set_attribute("build.passed", bool(result.build_passed))
             root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
@@ -1921,10 +1943,10 @@ def main():
     config = get_config()
 
     print("Task configuration loaded.", flush=True)
-    print("Dry run mode detected.", flush=True)
     print()
 
     if config.dry_run:
+        print("Dry run mode detected.", flush=True)
         # Context hydration for dry run
         if config.issue_number:
             config.issue = fetch_github_issue(
@@ -1941,23 +1963,9 @@ def main():
         system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         print("\n--- SYSTEM PROMPT (REDACTED) ---")
-        print(
-            f"length={len(system_prompt)} chars sha256={system_prompt_hash} "
-            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
-            flush=True,
-        )
+        print(f"length={len(system_prompt)} chars sha256={system_prompt_hash}", flush=True)
         print("\n--- USER PROMPT (REDACTED) ---")
-        print(
-            f"length={len(prompt)} chars sha256={prompt_hash} "
-            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
-            flush=True,
-        )
-        if os.environ.get("DEBUG_DRY_RUN_PROMPTS") == "1":
-            print(
-                "\nDEBUG_DRY_RUN_PROMPTS=1 is set, but full prompt printing is disabled "
-                "for secure logging compliance.",
-                flush=True,
-            )
+        print(f"length={len(prompt)} chars sha256={prompt_hash}", flush=True)
         print("\n--- DRY RUN COMPLETE ---")
         return
 

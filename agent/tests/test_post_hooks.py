@@ -269,6 +269,39 @@ class TestEnsurePrCreate:
         assert "**PASS**" in body  # build passed
         assert "**FAIL**" in body  # lint failed
 
+    def test_build_that_could_not_run_is_not_reported_as_a_pass(self, monkeypatch):
+        # build_passed=None: the build command could not run (exit 127, no such
+        # task), so nothing was built. The body has to say that, not PASS.
+        def responder(cmd):
+            if "view" in cmd:
+                return _cp(returncode=1, stderr="no pr")
+            if "log" in cmd:
+                return _cp(returncode=0, stdout="feat: do the thing\n")
+            return _cp()
+
+        sub = _SubprocessRunRecorder(responder=responder)
+        run_cmd = _RunCmdRecorder(stdouts={"create-pr": "https://github.com/o/r/pull/42\n"})
+        monkeypatch.setattr(post_hooks, "ensure_pushed", lambda d, b: True)
+        monkeypatch.setattr(post_hooks.subprocess, "run", sub)
+        monkeypatch.setattr(post_hooks, "run_cmd", run_cmd)
+
+        post_hooks.ensure_pr(
+            _config(build_command="yarn install && yarn build"),
+            _setup(),
+            build_passed=None,
+            lint_passed=True,
+            strategy="create",
+        )
+
+        create_cmd = run_cmd.cmd_for("create-pr")
+        assert create_cmd is not None
+        body = create_cmd[create_cmd.index("--body") + 1]
+        assert (
+            "- `yarn install && yarn build` (post-agent): **NOT RUN (command could not run)**"
+            in body
+        )
+        assert "- `mise run lint` (post-agent): **PASS**" in body
+
     def test_returns_none_when_pr_creation_fails(self, monkeypatch):
         # No existing PR; commits present; gh pr create exits non-zero.
         def responder(cmd):

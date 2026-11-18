@@ -302,8 +302,16 @@ class TestRunTaskHonorsGate:
         span.__exit__ = MagicMock(return_value=False)
         return span
 
-    def _run(self, *, gate: str, build_passed: bool, build_before: bool) -> tuple[dict, MagicMock]:
-        wf = _wf_with_build_gate(gate)
+    def _run(
+        self,
+        *,
+        gate: str,
+        build_passed: bool,
+        build_before: bool,
+        infra_failed: bool = False,
+        read_only: bool = False,
+    ) -> tuple[dict, MagicMock]:
+        wf = _wf_with_build_gate(gate, read_only=read_only)
 
         async def fake_run_agent(_p, _s, _c, cwd=None, trajectory=None):
             return AgentResult(status="success", turns=2, cost_usd=0.01, num_turns=2)
@@ -325,7 +333,10 @@ class TestRunTaskHonorsGate:
             patch("pipeline.task_span", return_value=self._span()),
             patch("pipeline.task_state"),
             patch("pipeline.ensure_committed", return_value=False),
-            patch("pipeline.verify_build", return_value=VerifyOutcome(passed=build_passed)),
+            patch(
+                "pipeline.verify_build",
+                return_value=VerifyOutcome(passed=build_passed, infra_failed=infra_failed),
+            ),
             patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
             patch("pipeline.ensure_pr", mock_ensure_pr),
             patch("pipeline.get_disk_usage", return_value=0),
@@ -371,3 +382,32 @@ class TestRunTaskHonorsGate:
         )
         assert result["status"] == "success"
         mock_ensure_pr.assert_called_once()
+
+    def test_read_only_workflow_survives_a_build_killed_by_the_host(self, monkeypatch):
+        # A read-only workflow never gates (WORKFLOWS.md), and pr-review declares
+        # its build informational. On ECS that build runs on the 8 GB planning
+        # task; when it is killed for memory (exit 137 -> infra_failed) the review
+        # the agent has already posted must not be reported as a failed task.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        result, _ = self._run(
+            gate="informational",
+            read_only=True,
+            build_passed=False,
+            build_before=True,
+            infra_failed=True,
+        )
+        assert result["error"] is None
+        assert result["status"] == "success"
+
+    def test_writeable_workflow_still_fails_on_a_build_killed_by_the_host(self, monkeypatch):
+        # What the infra marker is for: code the agent changed and nobody could
+        # build must not read as a success, even where the regression-only gate
+        # would pass because the baseline was red.
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        result, _ = self._run(
+            gate="regression_only", build_passed=False, build_before=False, infra_failed=True
+        )
+        assert result["status"] == "error"
+        assert "build_ok=infra" in result["error"]

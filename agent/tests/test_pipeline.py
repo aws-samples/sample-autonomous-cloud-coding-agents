@@ -1,6 +1,9 @@
 """Unit tests for pipeline.py — cedar_policies injection and pure helpers."""
 
 import os
+import re
+import subprocess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -2340,3 +2343,265 @@ class TestEarlyAckOrdering:
         _args, kwargs = m_finished.call_args
         assert kwargs.get("success") is False
         assert kwargs.get("started_reaction_id") == "reaction-42"
+
+
+# ---------------------------------------------------------------------------
+# What a finished run reports: task record, pull request, Linear issue
+# ---------------------------------------------------------------------------
+
+
+def _run_pipeline(
+    agent_result: AgentResult,
+    *,
+    build: VerifyOutcome | None = None,
+    pr_url: str | None = "https://github.com/o/r/pull/1",
+    setup: RepoSetup | None = None,
+    task_record: dict | None = None,
+    **task_kwargs,
+) -> SimpleNamespace:
+    """Run ``run_task`` with the agent, the repository setup and the post-hooks stubbed.
+
+    ``build`` is what the post-agent build returns (passed by default), ``pr_url``
+    what ``ensure_pr`` returns, ``task_record`` what the cancel check reads. Returns
+    the result dict and the two mocks these tests assert on."""
+
+    async def fake_run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+        return agent_result
+
+    span = MagicMock()
+    span.__enter__ = MagicMock(return_value=span)
+    span.__exit__ = MagicMock(return_value=False)
+    with (
+        patch("runner.run_agent", side_effect=fake_run_agent),
+        patch("pipeline.build_system_prompt", return_value="sys"),
+        patch("pipeline.discover_project_config", return_value=None),
+        patch(
+            "repo.setup_repo",
+            return_value=setup
+            or RepoSetup(repo_dir="/workspace/repo", branch="bgagent/test/branch"),
+        ),
+        patch("pipeline.task_span", return_value=span),
+        patch("pipeline.task_state") as task_state,
+        patch("pipeline.ensure_committed", return_value=False),
+        patch("pipeline.verify_build", return_value=build or VerifyOutcome(passed=True)),
+        patch("pipeline.verify_lint", return_value=VerifyOutcome(passed=True)),
+        patch("pipeline.ensure_pr", return_value=pr_url) as ensure_pr,
+        patch("pipeline.get_disk_usage", return_value=0),
+        patch("pipeline.print_metrics"),
+        patch("pipeline.resolve_linear_api_token"),
+        patch("pipeline.react_task_started", return_value="reaction-42"),
+        patch("pipeline.react_task_finished") as react_task_finished,
+    ):
+        task_state.get_task.return_value = task_record
+        from pipeline import run_task
+
+        result = run_task(
+            repo_url="o/r",
+            task_description="x",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            task_id="t-report",
+            **task_kwargs,
+        )
+    return SimpleNamespace(
+        result=result, ensure_pr=ensure_pr, react_task_finished=react_task_finished
+    )
+
+
+def _agent_succeeded(**fields) -> AgentResult:
+    return AgentResult(status="success", turns=1, cost_usd=0.01, num_turns=1, **fields)
+
+
+class TestInertBuildIsNotReportedAsPassed:
+    """A post-agent build whose command could not run (exit 127, no such task) does
+    not gate the task, but nothing was built: neither the pull request nor the task
+    record may call that a pass."""
+
+    def test_task_succeeds_and_the_build_is_reported_as_not_run(self):
+        run = _run_pipeline(
+            _agent_succeeded(),
+            build=VerifyOutcome(passed=False, inert=True),
+            build_command="yarn install && yarn build",
+        )
+
+        # The gate stays inert: a command that cannot run is a configuration
+        # problem, not the agent's code.
+        assert run.result["status"] == "success"
+        # None is "the gate did not run" (models.TaskResult): write_terminal then
+        # stores no build_passed at all, instead of a true for a build that never
+        # started.
+        assert run.result["build_passed"] is None
+        # The pull request body is written from the same value (third argument).
+        assert run.ensure_pr.call_args.args[2] is None
+
+    def test_build_that_ran_and_passed_is_still_reported_as_passed(self):
+        run = _run_pipeline(_agent_succeeded())
+
+        assert run.result["build_passed"] is True
+        assert run.ensure_pr.call_args.args[2] is True
+
+
+class TestTurnsCompletedAtTheCap:
+    def test_max_turns_stop_is_clamped_to_the_cap(self):
+        # What the runner hands over when the cap fires: the CLI marks the
+        # max-turns result ``is_error``, so the runner reports status "error" (not
+        # "error_max_turns"), and num_turns counts the attempt that was aborted.
+        run = _run_pipeline(
+            AgentResult(
+                status="error",
+                error="Agent session error (subtype='error_max_turns')",
+                turns=11,
+                num_turns=11,
+            ),
+            max_turns=10,
+        )
+
+        assert run.result["turns_attempted"] == 11
+        assert run.result["turns_completed"] == 10
+
+
+class TestLinearIssueAtTerminal:
+    """What the pipeline tells the Linear issue when a run ends: the reaction that
+    replaces the eyes, and whether the issue moves to In Review."""
+
+    @staticmethod
+    def _finished(run: SimpleNamespace) -> dict:
+        run.react_task_finished.assert_called_once()
+        return run.react_task_finished.call_args.kwargs
+
+    def test_opened_pull_request_moves_the_issue_to_in_review(self):
+        run = _run_pipeline(
+            _agent_succeeded(), channel_source="linear", channel_metadata=_LINEAR_META
+        )
+
+        finished = self._finished(run)
+        assert finished["success"] is True
+        assert finished["transition_state"] is True
+
+    def test_hold_for_input_does_not_move_the_issue_to_in_review(self):
+        # Clarify-and-hold: the agent asked a question, there is no pull request.
+        # In Review means "work done, awaiting human merge"; the platform's own
+        # comment for this run says the task has not started.
+        run = _run_pipeline(
+            _agent_succeeded(clarification_question="Which page?"),
+            channel_source="linear",
+            channel_metadata=_LINEAR_META,
+        )
+
+        run.ensure_pr.assert_not_called()
+        assert run.result["status"] == "success"
+        finished = self._finished(run)
+        assert finished["success"] is True
+        assert finished["transition_state"] is False
+
+    def test_cancelled_task_swaps_the_eyes_reaction(self):
+        # The user cancelled during the run. No post-hook runs, but the eyes the
+        # agent posted at the start must not stay on the issue: nothing else
+        # removes that reaction until another task starts on the same issue.
+        run = _run_pipeline(
+            _agent_succeeded(),
+            task_record={"status": "CANCELLED"},
+            channel_source="linear",
+            channel_metadata=_LINEAR_META,
+        )
+
+        assert run.result["status"] == "cancelled"
+        run.ensure_pr.assert_not_called()
+        finished = self._finished(run)
+        assert finished["success"] is False
+        assert finished["started_reaction_id"] == "reaction-42"
+
+
+class TestDeliveryGateReadsThePushedBranch:
+    """Without a pull request the delivery gate reports either "the commit is on the
+    branch, only the pull request is missing" or "nothing was delivered". It must
+    decide that from what was PUSHED: after a failed push the commits exist only in
+    the container, and the platform would tell the user that the work is safe on a
+    branch GitHub has never seen.
+
+    Real git under ``tmp_path``, with a bare repository as origin."""
+
+    BRANCH = "bgagent/t-report/fix"
+
+    @staticmethod
+    def _git(cwd, *args):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+    def _clone_with_unpushed_commit(self, tmp_path) -> RepoSetup:
+        origin = tmp_path / "origin.git"
+        repo = tmp_path / "repo"
+        self._git(tmp_path, "init", "-q", "--bare", str(origin))
+        self._git(tmp_path, "clone", "-q", str(origin), str(repo))
+        self._git(repo, "config", "--local", "user.email", "abca-test@example.invalid")
+        self._git(repo, "config", "--local", "user.name", "ABCA Test")
+        (repo / "f.txt").write_text("base\n")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "base")
+        self._git(repo, "branch", "-M", "main")
+        self._git(repo, "push", "-q", "origin", "main")
+        # The task branch, with the agent's commit on it. Not pushed.
+        self._git(repo, "checkout", "-qb", self.BRANCH)
+        (repo / "f.txt").write_text("base\nagent change\n")
+        self._git(repo, "commit", "-qam", "agent work")
+        return RepoSetup(repo_dir=str(repo), branch=self.BRANCH, default_branch="main")
+
+    def test_commit_that_was_never_pushed_is_reported_as_lost(self, tmp_path):
+        setup = self._clone_with_unpushed_commit(tmp_path)
+
+        # ensure_pr returned None: the push failed, and so did `gh pr create`.
+        run = _run_pipeline(_agent_succeeded(), pr_url=None, setup=setup)
+
+        assert run.result["status"] == "error"
+        assert "deliverable=lost" in run.result["error"]
+
+    def test_pushed_commit_without_pull_request_is_reported_as_no_pr(self, tmp_path):
+        setup = self._clone_with_unpushed_commit(tmp_path)
+        self._git(setup.repo_dir, "push", "-q", "-u", "origin", self.BRANCH)
+
+        run = _run_pipeline(_agent_succeeded(), pr_url=None, setup=setup)
+
+        assert run.result["status"] == "error"
+        assert "deliverable=no_pr" in run.result["error"]
+
+
+class TestBatchEntryPoint:
+    """``main()``, the local batch entry point (``agent/run.sh``)."""
+
+    @staticmethod
+    def _main(capsys, **config_fields) -> tuple[str, MagicMock]:
+        config = TaskConfig(
+            repo_url="owner/repo",
+            task_description="fix bug",
+            github_token="ghp_test",
+            aws_region="us-east-1",
+            task_id="t-main",
+            **config_fields,
+        )
+        with (
+            patch("pipeline.get_config", return_value=config),
+            patch("pipeline.run_task", return_value={"status": "success"}) as run_task,
+        ):
+            from pipeline import main
+
+            main()
+        return capsys.readouterr().out, run_task
+
+    def test_real_run_does_not_announce_a_dry_run(self, capsys):
+        out, run_task = self._main(capsys)
+
+        run_task.assert_called_once()
+        assert "Dry run" not in out
+
+    def test_dry_run_prints_the_length_and_hash_of_each_prompt(self, capsys):
+        out, run_task = self._main(capsys, dry_run=True)
+
+        run_task.assert_not_called()
+        assert "Dry run mode detected." in out
+        # One line for the system prompt and one for the user prompt, each ending
+        # at the hash: no switch prints the text itself.
+        prompt_lines = [line for line in out.splitlines() if line.startswith("length=")]
+        assert len(prompt_lines) == 2
+        assert all(
+            re.fullmatch(r"length=\d+ chars sha256=[0-9a-f]{12}", line) for line in prompt_lines
+        ), prompt_lines
+        assert "--- DRY RUN COMPLETE ---" in out

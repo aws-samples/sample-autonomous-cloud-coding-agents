@@ -565,7 +565,7 @@ def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
-    build_passed: bool,
+    build_passed: bool | None,
     lint_passed: bool,
     agent_result: AgentResult | None = None,
     strategy: str = "create",
@@ -583,7 +583,8 @@ def ensure_pr(
 
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
-    the verification status shown in the PR body.
+    the verification status shown in the PR body; ``build_passed`` is None when
+    the build command could not run, and the body then says so instead of PASS.
     """
     repo_dir = setup.repo_dir
     branch = setup.branch
@@ -707,7 +708,9 @@ def ensure_pr(
     elif config.task_description:
         task_source = f"**Task:** {config.task_description}\n\n"
 
-    build_status = "PASS" if build_passed else "FAIL"
+    # None: the build command could not run (exit 127, no such task), so nothing was built.
+    build_statuses = {True: "PASS", False: "FAIL", None: "NOT RUN (command could not run)"}
+    build_status = build_statuses[build_passed]
     lint_status = "PASS" if lint_passed else "FAIL"
     # Show the actual commands run (default mise), not a hardcoded label.
     build_label = (config.build_command or DEFAULT_BUILD_COMMAND).strip()
@@ -718,8 +721,8 @@ def ensure_pr(
         cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
 
     # When build-regression gating is inert (no runnable build command, none
-    # configured), say so plainly — otherwise a green "build: PASS" misleads:
-    # nothing was actually verified.
+    # configured), say so plainly, with the way to enable it: a status line
+    # that says the build did not run explains neither.
     gate_warning = ""
     if getattr(setup, "build_gate_inert", False):
         gate_warning = (
