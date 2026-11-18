@@ -6,6 +6,7 @@ prompt registry (see WORKFLOWS.md). The lookup is keyed by workflow id;
 ``DEFAULT_WORKFLOW_ID`` is the fallback for an unknown/absent id.
 """
 
+from config import DEFAULT_WORKFLOW_ID, REPO_LESS_DEFAULT_WORKFLOW_ID
 from shell import log
 
 from .base import BASE_PROMPT
@@ -15,13 +16,6 @@ from .pr_iteration import PR_ITERATION_WORKFLOW
 from .pr_review import PR_REVIEW_WORKFLOW
 from .restack import RESTACK_WORKFLOW
 from .web_research import WEB_RESEARCH_PROMPT
-
-DEFAULT_WORKFLOW_ID = "coding/new-task-v1"
-# The fallback template for a repo-less workflow id that has no registered prompt
-# of its own. Falling back to the *coding* default would leak
-# {repo_url}/{branch_name} placeholders the repo-less prompt builder cannot
-# substitute, so repo-less ids fall back to a repo-less prompt instead.
-REPO_LESS_DEFAULT_WORKFLOW_ID = "default/agent-v1"
 
 _PROMPTS = {
     "coding/new-task-v1": BASE_PROMPT.replace("{workflow}", NEW_TASK_WORKFLOW),

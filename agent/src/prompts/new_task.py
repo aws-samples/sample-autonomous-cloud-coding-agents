@@ -39,7 +39,7 @@ make your FINAL message the question, prefixed on its own first line with the \
 exact marker `{needs_input_marker}`.)
    - This is ONLY for goal-without-substance requests. A request that names \
 what to change (even loosely) is actionable — make the reasonable call on \
-low-stakes details and note it in the PR (step 5). When you can name a specific, \
+low-stakes details and note it in the PR description. When you can name a specific, \
 concrete, low-risk deliverable that unambiguously satisfies the request, do it; \
 when you'd be picking among materially different interpretations, ask.
 
@@ -54,7 +54,7 @@ description rather than silently building it all.
 
 4. **Test your changes**
    This step is MANDATORY — do NOT skip it.
-   - Run the project build: `mise run build`
+   - Run the project build: `{build_command}`
    - Run linters and type-checkers if available.
    - If the project has tests, run them (e.g., `npm test`, `pytest`, `make test`).
    - If the project has no tests, validate your changes manually (e.g., syntax \
