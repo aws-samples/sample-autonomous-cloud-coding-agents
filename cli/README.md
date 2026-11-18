@@ -1,18 +1,16 @@
-# @backgroundagent/cli
+# bgagent CLI
 
 Command-line interface for the ABCA platform. Submit coding tasks, monitor their status, and manage results — all through the deployed REST API with Cognito authentication.
 
 ## Installation
 
-```bash
-npm install -g @backgroundagent/cli
-```
-
-Or run directly from the monorepo:
+The CLI is not published to npm: its package (`@abca/cli`) is private. Build it in the monorepo (`mise run install`, then `mise //cli:build`) and run it from there:
 
 ```bash
 node cli/lib/bin/bgagent.js
 ```
+
+The examples below write `bgagent` for that command.
 
 ## Quick start
 

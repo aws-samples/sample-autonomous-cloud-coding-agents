@@ -1111,7 +1111,7 @@ class TestCancelSkipsPostHooks:
         ):
             # Route get_task through the mock; keep TaskFetchError importable.
             mock_task_state_mod.get_task = mock_get_task
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
 
             from pipeline import run_task
 
@@ -1176,7 +1176,7 @@ class TestCancelSkipsPostHooks:
         ):
             # Task is RUNNING (not cancelled) — normal path must execute.
             mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
 
             from pipeline import run_task
 
@@ -1239,7 +1239,7 @@ class TestCancelSkipsPostHooks:
             patch("pipeline.task_state") as mock_task_state_mod,
         ):
             mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
             from pipeline import run_task
 
             run_task(
@@ -1299,7 +1299,7 @@ class TestCancelSkipsPostHooks:
             patch("pipeline.task_state") as mock_task_state_mod,
         ):
             mock_task_state_mod.get_task = MagicMock(return_value={"status": "RUNNING"})
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
             from pipeline import run_task
 
             run_task(
@@ -2017,7 +2017,7 @@ class TestTraceS3Upload:
             patch("pipeline.task_state") as mock_task_state_mod,
         ):
             mock_task_state_mod.get_task = mock_get_task
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
 
             from pipeline import run_task
 
@@ -2098,7 +2098,7 @@ class TestTraceS3Upload:
             patch("pipeline.task_state") as mock_task_state_mod,
         ):
             mock_task_state_mod.get_task = mock_get_task
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
             mock_task_state_mod.write_trace_uri_conditional = MagicMock(return_value=True)
 
             from pipeline import run_task
@@ -2185,7 +2185,7 @@ class TestTraceS3Upload:
             patch("pipeline.task_state") as mock_task_state_mod,
         ):
             mock_task_state_mod.get_task = mock_get_task
-            mock_task_state_mod.TaskFetchError = Exception  # type: ignore[attr-defined]
+            mock_task_state_mod.TaskFetchError = Exception
             # Self-heal raises — cancel path must swallow it.
             mock_task_state_mod.write_trace_uri_conditional = MagicMock(
                 side_effect=RuntimeError("ddb boom")
