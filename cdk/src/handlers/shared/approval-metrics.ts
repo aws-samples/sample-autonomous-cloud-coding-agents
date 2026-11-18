@@ -175,7 +175,9 @@ export function buildEmfLine(spec: MetricSpec, timestampMs: number): string {
       CloudWatchMetrics: [
         {
           Namespace: METRIC_NAMESPACE,
-          Dimensions: dimensionNames.length > 0 ? [dimensionNames] : [],
+          // Always one DimensionSet, the empty one for a metric without
+          // dimensions: `[]` would declare no metric.
+          Dimensions: [dimensionNames],
           Metrics: [{ Name: spec.name, Unit: spec.unit }],
         },
       ],
@@ -355,6 +357,15 @@ export function classifyApprovalEvent(ev: ParsedApprovalEvent): ClassificationRe
           unit: 'Seconds',
           value: effective,
           dimensions: { rule_id: normalizeRuleId(asStringArray(md.matching_rule_ids)) },
+        });
+        // The same value without dimensions, for the dashboard's percentiles
+        // over all rules: CloudWatch does not aggregate a custom metric across
+        // dimensions, so the roll-up is a metric of its own (one more, fixed).
+        specs.push({
+          name: 'TimedOutEffectiveTimeout',
+          unit: 'Seconds',
+          value: effective,
+          dimensions: {},
         });
       }
       break;

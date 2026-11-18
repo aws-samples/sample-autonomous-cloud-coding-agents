@@ -17,7 +17,11 @@
  *  SOFTWARE.
  */
 
+import { App, Stack } from 'aws-cdk-lib';
+import { Template } from 'aws-cdk-lib/assertions';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import { TaskDashboard } from '../../src/constructs/task-dashboard';
 import { handler, parseApprovalRecord } from '../../src/handlers/approval-metrics-publisher';
 import { METRIC_NAMESPACE } from '../../src/handlers/shared/approval-metrics';
 
@@ -213,6 +217,9 @@ describe('approval-metrics-publisher handler', () => {
     for (const line of capture.lines) {
       const ns = (line._aws as any).CloudWatchMetrics[0].Namespace;
       expect(ns).toBe(METRIC_NAMESPACE);
+      // Neither metric has dimensions: one empty DimensionSet each. With no
+      // set at all CloudWatch has no metric to create from the line.
+      expect((line._aws as any).CloudWatchMetrics[0].Dimensions).toEqual([[]]);
     }
   });
 
@@ -299,8 +306,10 @@ describe('approval-metrics-publisher handler', () => {
     }
     expect(byName.get('ApprovalDecisionLatencyMs')?.value).toBe(30_000);
     expect(byName.get('ApprovalDecisionLatencyMs')?.dimensions).toEqual({ outcome: 'timed_out' });
-    expect(byName.get('TimedOutEffectiveTimeout')?.value).toBe(30);
-    expect(byName.get('TimedOutEffectiveTimeout')?.dimensions).toEqual({ rule_id: 'force_push_any' });
+    // The breakdown is written twice: per rule, and without dimensions.
+    const breakdown = capture.lines.map(metricOf).filter((m) => m?.name === 'TimedOutEffectiveTimeout');
+    expect(breakdown.map((m) => m!.value)).toEqual([30, 30]);
+    expect(breakdown.map((m) => m!.dimensions)).toEqual([{ rule_id: 'force_push_any' }, {}]);
   });
 
   test('heartbeat fires even on a batch of all-non-approval records', async () => {
@@ -483,5 +492,63 @@ describe('approval-metrics-publisher handler', () => {
     expect(names).toContain('MetricEmitSkipped');
     const skipped = capture.lines.map(metricOf).find((m) => m?.name === 'MetricEmitSkipped');
     expect(skipped?.dimensions).toEqual({ reason: 'timestamp_parse_failed' });
+  });
+});
+
+// --- dashboard parity -------------------------------------------------------
+
+describe('the dashboard and the publisher agree on metric dimensions', () => {
+  const key = (name: string, dimensions: Record<string, string>): string =>
+    `${name} ${JSON.stringify(Object.entries(dimensions).sort())}`;
+
+  /** Every ABCA/Cedar-HITL metric a dashboard widget reads, with its dimensions. */
+  function dashboardMetrics(): string[] {
+    const stack = new Stack(new App(), 'TestStack');
+    new TaskDashboard(stack, 'TaskDashboard', {
+      applicationLogGroup: new logs.LogGroup(stack, 'AppLogGroup'),
+      runtimeArn: 'arn:aws:bedrock:us-east-1:123456789012:agent-runtime/test-runtime',
+    });
+    const [dashboard] = Object.values(Template.fromStack(stack).findResources('AWS::CloudWatch::Dashboard'));
+    const parts = dashboard.Properties.DashboardBody['Fn::Join'][1] as unknown[];
+    const body = JSON.parse(parts.map((p) => (typeof p === 'string' ? p : 'TOKEN')).join(''));
+    const read = new Set<string>();
+    for (const widget of body.widgets as { properties: { metrics?: unknown[][] } }[]) {
+      for (const row of widget.properties.metrics ?? []) {
+        // A row is [namespace, name, dimension, value, ..., options].
+        const [namespace, name, ...rest] = row.filter((cell): cell is string => typeof cell === 'string');
+        if (namespace !== METRIC_NAMESPACE) continue;
+        const dimensions: Record<string, string> = {};
+        for (let i = 0; i < rest.length; i += 2) dimensions[rest[i]] = rest[i + 1];
+        read.add(key(name, dimensions));
+      }
+    }
+    return [...read].sort();
+  }
+
+  test('every Cedar-HITL metric a widget reads is written with exactly those dimensions', async () => {
+    // CloudWatch does not aggregate a custom metric across dimensions: a widget
+    // gets data only for a combination of dimensions that was published.
+    const times = { created_at: '2026-05-08T12:00:00.000Z', decided_at: '2026-05-08T12:00:05.000Z' };
+    const capture = captureEmfLines();
+    try {
+      await handler(streamEvent([
+        streamRecord({ milestone: 'approval_requested' }),
+        ...['rule_annotation', 'maxLifetime_ceiling', 'runtime_jwt_ceiling', 'a_reason_added_later'].map((reason) =>
+          streamRecord({ milestone: 'approval_timeout_capped', metadata: { reason } })),
+        streamRecord({ milestone: 'approval_granted', metadata: times }),
+        streamRecord({ milestone: 'approval_denied', metadata: times }),
+        streamRecord({
+          milestone: 'approval_timed_out',
+          metadata: { ...times, effective_timeout_s: 300, matching_rule_ids: ['force_push_any'] },
+        }),
+      ]));
+    } finally {
+      capture.restore();
+    }
+    const written = new Set(capture.lines.map(metricOf).map((m) => key(m!.name, m!.dimensions)));
+
+    const read = dashboardMetrics();
+    expect(read).toContain(key('ApprovalRequestCount', {}));
+    expect(read.filter((metric) => !written.has(metric))).toEqual([]);
   });
 });
