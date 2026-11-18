@@ -17,8 +17,10 @@
  *  SOFTWARE.
  */
 
+import { EventEmitter } from 'events';
+import { AttachmentResolutionError } from '../../../src/handlers/shared/context-hydration';
 import { isPrivateIp, resolveUrlAttachments } from '../../../src/handlers/shared/resolve-url-attachments';
-import { createAttachmentRecord } from '../../../src/handlers/shared/types';
+import { createAttachmentRecord, type AttachmentRecord } from '../../../src/handlers/shared/types';
 
 describe('isPrivateIp', () => {
   describe('IPv4 private ranges', () => {
@@ -137,6 +139,9 @@ jest.mock('dns', () => ({
   },
 }));
 
+// Only the request is faked: no test opens a socket. The Agent stays the real one.
+jest.mock('https', () => ({ ...jest.requireActual('https'), request: jest.fn() }));
+
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn().mockImplementation(() => ({ send: jest.fn() })),
   PutObjectCommand: jest.fn(),
@@ -155,6 +160,7 @@ jest.mock('../../../src/handlers/shared/image-tokens', () => ({
 }));
 
 jest.mock('../../../src/handlers/shared/validation', () => ({
+  ...jest.requireActual('../../../src/handlers/shared/validation'),
   isAllowedMimeType: jest.fn().mockReturnValue(true),
   validateMagicBytes: jest.fn().mockReturnValue(true),
 }));
@@ -165,7 +171,8 @@ jest.mock('../../../src/handlers/shared/logger', () => ({
 
 describe('resolveUrlAttachments', () => {
   const dns = jest.requireMock('dns').promises;
-  const { screenImage } = jest.requireMock('../../../src/handlers/shared/attachment-screening');
+  const httpsRequest: jest.Mock = jest.requireMock('https').request;
+  const { screenImage, screenTextFile } = jest.requireMock('../../../src/handlers/shared/attachment-screening');
   const { isAllowedMimeType } = jest.requireMock('../../../src/handlers/shared/validation');
 
   const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -177,15 +184,74 @@ describe('resolveUrlAttachments', () => {
     bedrockClient: {},
   };
 
+  /** One answer of the remote server; `afterMs` is the time it takes to arrive. */
+  interface ServerAnswer {
+    readonly status: number;
+    readonly headers?: Record<string, string>;
+    readonly body?: Buffer;
+    readonly afterMs?: number;
+  }
+
+  /**
+   * Script the remote server: one answer per https.request call, in order. An answer
+   * arrives as Node delivers one: in a later turn of the event loop, the body in two
+   * chunks. Destroying the request cancels it.
+   */
+  function serverAnswers(...answers: ServerAnswer[]): void {
+    for (const { status, headers = {}, body, afterMs = 0 } of answers) {
+      httpsRequest.mockImplementationOnce((_options: unknown, onResponse: (res: EventEmitter) => void) => {
+        let arrival: ReturnType<typeof setTimeout>;
+        return Object.assign(new EventEmitter(), {
+          end: () => {
+            arrival = setTimeout(() => {
+              const res = Object.assign(new EventEmitter(), { statusCode: status, headers, destroy: jest.fn() });
+              onResponse(res);
+              if (body) {
+                const half = Math.ceil(body.length / 2);
+                res.emit('data', body.subarray(0, half));
+                res.emit('data', body.subarray(half));
+              }
+              res.emit('end');
+            }, afterMs);
+          },
+          destroy: () => clearTimeout(arrival),
+        });
+      });
+    }
+  }
+
+  /** A URL attachment as create-task stores it: not fetched yet, named after the last path segment. */
+  const pendingUrl = (sourceUrl: string, attachmentId = 'att-1') => createAttachmentRecord({
+    attachment_id: attachmentId,
+    type: 'url',
+    content_type: 'application/octet-stream',
+    filename: sourceUrl.slice(sourceUrl.lastIndexOf('/') + 1),
+    screening: { status: 'pending' },
+    source_url: sourceUrl,
+  });
+
+  const resolveAll = (attachments: AttachmentRecord[]) => resolveUrlAttachments(
+    attachments,
+    'task-1',
+    'user-1',
+    { s3Client: mockS3Client as any, bucketName: 'bucket', screeningConfig: mockScreeningConfig as any },
+  );
+
   beforeEach(() => {
     jest.clearAllMocks();
+    httpsRequest.mockReset();
     dns.resolve4.mockResolvedValue(['1.2.3.4']);
+    isAllowedMimeType.mockReturnValue(true); // one test below turns it to false
     screenImage.mockResolvedValue({
       content: PNG_MAGIC,
       contentType: 'image/png',
       checksum: 'abc123',
       screening: { status: 'passed' },
     });
+    // Like the real function, it hands back the content it was given.
+    screenTextFile.mockImplementation(async (content: Buffer, contentType: string) => (
+      { content, contentType, checksum: 'abc123', screening: { status: 'passed' } }
+    ));
   });
 
   test('skips attachments that are not pending URL type', async () => {
@@ -311,5 +377,158 @@ describe('resolveUrlAttachments', () => {
       'user-1',
       { s3Client: mockS3Client as any, bucketName: 'bucket', screeningConfig: mockScreeningConfig as any },
     )).rejects.toThrow('no source_url');
+  });
+
+  test('fetches from the validated address and stores what the server sent', async () => {
+    serverAnswers({ status: 200, headers: { 'content-type': 'image/png; charset=binary' }, body: PNG_MAGIC });
+
+    const result = await resolveAll([pendingUrl('https://img.example.com/shots/a.png')]);
+
+    expect(httpsRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ hostname: '1.2.3.4', path: '/shots/a.png', headers: expect.objectContaining({ Host: 'img.example.com' }) }),
+      expect.any(Function),
+    );
+    expect(screenImage).toHaveBeenCalledWith(PNG_MAGIC, 'image/png', 'a.png', mockScreeningConfig);
+    expect(result).toEqual([expect.objectContaining({
+      type: 'image',
+      content_type: 'image/png',
+      s3_key: 'attachments/user-1/task-1/att-1/a.png',
+      size_bytes: PNG_MAGIC.length,
+      screening: expect.objectContaining({ status: 'passed' }),
+    })]);
+  });
+
+  test('follows a redirect to the host it names, at the address validated for that host', async () => {
+    dns.resolve4.mockResolvedValueOnce(['1.2.3.4']).mockResolvedValueOnce(['5.6.7.8']);
+    serverAnswers(
+      { status: 302, headers: { location: 'https://cdn.example.net/a.png' } },
+      { status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC },
+    );
+
+    const result = await resolveAll([pendingUrl('https://img.example.com/a.png')]);
+
+    expect(httpsRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hostname: '5.6.7.8', path: '/a.png', headers: expect.objectContaining({ Host: 'cdn.example.net' }) }),
+      expect.any(Function),
+    );
+    expect(result[0].screening.status).toBe('passed');
+  });
+
+  test('refuses an answer larger than 10 MB', async () => {
+    serverAnswers({ status: 200, headers: { 'content-type': 'text/plain' }, body: Buffer.alloc(10 * 1024 * 1024 + 1, 0x61) });
+
+    await expect(resolveAll([pendingUrl('https://files.example.com/big.txt')]))
+      .rejects.toThrow('URL attachment fetch failed: Response exceeds 10485760 byte size limit');
+    expect(mockS3Client.send).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [204, 'URL attachment response has no body (status 204): https://ci.example.com/pixel'],
+    [205, 'URL attachment response has no body (status 205): https://ci.example.com/pixel'],
+    [304, 'URL attachment redirect (304) had no Location header.'],
+    [999, 'URL attachment fetch failed with status 999: https://ci.example.com/pixel'],
+  ])('fails with the reason when the server answers %i', async (status, reason) => {
+    serverAnswers({ status });
+
+    const outcome = resolveAll([pendingUrl('https://ci.example.com/pixel')]);
+
+    await expect(outcome).rejects.toBeInstanceOf(AttachmentResolutionError);
+    await expect(outcome).rejects.toThrow(reason);
+  });
+
+  test('stops at the URL attachment that takes the task over its 50 MB limit', async () => {
+    const pdf = Buffer.alloc(10 * 1024 * 1024, 0x61);
+    const links = Array.from({ length: 10 }, (_, i) => pendingUrl(`https://files.example.com/spec-${i}.pdf`, `att-${i}`));
+    serverAnswers(...links.map(() => ({ status: 200, headers: { 'content-type': 'application/pdf' }, body: pdf })));
+
+    const outcome = resolveAll(links);
+
+    await expect(outcome).rejects.toBeInstanceOf(AttachmentResolutionError);
+    await expect(outcome).rejects.toThrow('Combined attachment size exceeds the 52428800-byte task limit.');
+    // Five files of 10 MB are exactly the limit and are kept; the sixth is fetched, counted
+    // and refused; the other four are never asked for.
+    expect(httpsRequest).toHaveBeenCalledTimes(6);
+    expect(mockS3Client.send).toHaveBeenCalledTimes(5);
+  });
+
+  test('counts the attachments the task already holds toward the 50 MB limit', async () => {
+    const uploads = Array.from({ length: 5 }, (_, i) => createAttachmentRecord({
+      attachment_id: `up-${i}`,
+      type: 'file',
+      content_type: 'application/pdf',
+      filename: `up-${i}.pdf`,
+      s3_key: `attachments/user-1/task-1/up-${i}/up-${i}.pdf`,
+      s3_version_id: 'v1',
+      size_bytes: 10 * 1024 * 1024,
+      checksum_sha256: 'abc',
+      screening: { status: 'passed', screened_at: '2024-01-01T00:00:00Z' },
+    }));
+    serverAnswers({ status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC });
+
+    await expect(resolveAll([...uploads, pendingUrl('https://img.example.com/a.png')]))
+      .rejects.toThrow('Combined attachment size exceeds the 52428800-byte task limit.');
+    expect(mockS3Client.send).not.toHaveBeenCalled();
+  });
+
+  describe('time limits', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    /** Let `ms` of fake time pass while the resolver runs, and report how the call ended and when. */
+    async function outcomeAfter(ms: number, attachments: AttachmentRecord[]) {
+      const started = Date.now();
+      const outcome = resolveAll(attachments).then(
+        records => ({ resolved: records.length, afterMs: Date.now() - started }),
+        (error: unknown) => ({ error: String(error), afterMs: Date.now() - started }),
+      );
+      await jest.advanceTimersByTimeAsync(ms);
+      return outcome;
+    }
+
+    test('gives the URL attachments of a task 30 seconds together', async () => {
+      // A host that answers every request after 9 s, under the 10 s limit of one request:
+      // two redirects, then the image. That is 27 s for one image and 81 s for three.
+      const slowImage: ServerAnswer[] = [
+        { status: 302, headers: { location: '/moved' }, afterMs: 9_000 },
+        { status: 302, headers: { location: '/moved-again' }, afterMs: 9_000 },
+        { status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC, afterMs: 9_000 },
+      ];
+      serverAnswers(...slowImage, ...slowImage, ...slowImage);
+      const images = ['a', 'b', 'c'].map(name => pendingUrl(`https://img.example.com/${name}.png`, name));
+
+      expect(await outcomeAfter(81_000, images)).toEqual({
+        error: 'AttachmentResolutionError: URL attachments could not be fetched and screened within 30s (stopped at https://img.example.com/b.png).',
+        afterMs: 30_000,
+      });
+      // The first image arrived at 27 s and was stored; the second got the 3 s that were left.
+      expect(httpsRequest).toHaveBeenCalledTimes(4);
+      expect(mockS3Client.send).toHaveBeenCalledTimes(1);
+    });
+
+    test('starts no request once the 30 seconds are used up', async () => {
+      // The lookup of the host name alone takes 31 s; no timer covers a lookup.
+      dns.resolve4.mockImplementation(() => new Promise(resolve => setTimeout(() => resolve(['1.2.3.4']), 31_000)));
+      serverAnswers({ status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC });
+
+      expect(await outcomeAfter(32_000, [pendingUrl('https://slow-dns.example.com/a.png')])).toEqual({
+        error: 'AttachmentResolutionError: URL attachments could not be fetched and screened within 30s (stopped at https://slow-dns.example.com/a.png).',
+        afterMs: 31_000,
+      });
+      expect(httpsRequest).not.toHaveBeenCalled();
+    });
+
+    test('gives one request 10 seconds', async () => {
+      serverAnswers({ status: 200, headers: { 'content-type': 'image/png' }, body: PNG_MAGIC, afterMs: 11_000 });
+
+      expect(await outcomeAfter(11_000, [pendingUrl('https://img.example.com/a.png')])).toEqual({
+        error: 'AttachmentResolutionError: URL attachment fetch timed out after 10s: https://img.example.com/a.png',
+        afterMs: 10_000,
+      });
+    });
   });
 });
