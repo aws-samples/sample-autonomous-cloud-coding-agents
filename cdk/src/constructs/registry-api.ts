@@ -212,10 +212,6 @@ export class RegistryApi extends NestedStack {
         id: 'AwsSolutions-IAM4',
         reason: 'AmazonAPIGatewayPushToCloudWatchLogs is the AWS-recommended managed policy for API Gateway CloudWatch logging',
       },
-      {
-        id: 'AwsSolutions-COG4',
-        reason: 'All routes use the Cognito authorizer bound to the shared user pool (authOptions).',
-      },
     ], true);
   }
 }

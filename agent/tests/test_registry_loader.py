@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from post_hooks import ensure_committed
 from registry.loader import (
     RegistryAssetLoadError,
     apply_mcp_assets,
@@ -110,6 +111,36 @@ class TestApplyMcpAssets:
         assert set(merged["mcpServers"]) == {"acme__foo-bar", "acme__foo_bar"}
         assert merged["mcpServers"]["acme__foo-bar"]["url"] == "https://dash"
         assert merged["mcpServers"]["acme__foo_bar"]["url"] == "https://underscore"
+
+    def test_two_pins_of_one_asset_that_resolved_differently_raise(self, tmp_path):
+        # A Blueprint that pins acme/pdf at ^1.0.0 and at ^2.0.0 gets both versions
+        # resolved and stamped on the task. They share one .mcp.json key, so only
+        # one could be loaded: fail closed, like every other pinned-but-unloaded case.
+        assets = [
+            _mcp_asset("acme", "pdf", "1.9.0", {"transport": "http", "url": "https://v1"}),
+            _mcp_asset("acme", "pdf", "2.1.0", {"transport": "http", "url": "https://v2"}),
+        ]
+        with pytest.raises(RegistryAssetLoadError, match=r"acme__pdf: pinned more than once"):
+            apply_mcp_assets(str(tmp_path), assets)
+        assert not (tmp_path / ".mcp.json").exists()
+
+    def test_two_pins_of_one_asset_that_resolved_alike_load_once(self, tmp_path):
+        # ^1.0.0 and ~1.9.0 both resolve to 1.9.0: the same server, nothing is lost.
+        asset = _mcp_asset("acme", "pdf", "1.9.0", {"transport": "http", "url": "https://v1"})
+        written = apply_mcp_assets(str(tmp_path), [asset, dict(asset)])
+        assert set(written) == {"acme__pdf"}
+        assert _read_mcp(tmp_path)["mcpServers"] == {
+            "acme__pdf": {"type": "http", "url": "https://v1"}
+        }
+
+    def test_repository_server_under_the_same_key_is_still_replaced(self, tmp_path):
+        # Only pins of this bundle are compared with each other: an entry the
+        # repository's own .mcp.json holds under the key is overlaid, as before.
+        existing = {"mcpServers": {"acme__pdf": {"type": "http", "url": "https://old"}}}
+        (tmp_path / ".mcp.json").write_text(json.dumps(existing))
+        asset = _mcp_asset("acme", "pdf", "1.9.0", {"transport": "http", "url": "https://v1"})
+        apply_mcp_assets(str(tmp_path), [asset])
+        assert _read_mcp(tmp_path)["mcpServers"]["acme__pdf"]["url"] == "https://v1"
 
     def test_ignores_non_mcp_kinds(self, tmp_path):
         assets = [
@@ -302,7 +333,8 @@ class TestMcpJsonNotCommittable:
     """A written .mcp.json carries the resolved runtime, which may hold secrets
     (bearer headers, url tokens, --api-key args). It lives in the live git clone,
     so the post-hook `git add -u` → commit → push must NOT be able to exfiltrate
-    it to the PR. apply_mcp_assets marks it skip-worktree to block that (#246 B4)."""
+    it to the PR. apply_mcp_assets blocks that (#246 B4): skip-worktree when the
+    repository tracks the file, the clone's exclude file when it does not."""
 
     @staticmethod
     def _git(repo, *args) -> subprocess.CompletedProcess:
@@ -357,3 +389,164 @@ class TestMcpJsonNotCommittable:
         staged = self._git(tmp_path, "diff", "--cached")
         assert staged.stdout.strip() == ""
         assert "SUPERSECRET" not in staged.stdout
+
+
+class TestMcpJsonGuardKeepsGitUsable:
+    """Keeping .mcp.json out of commits must not cost the agent its git commands.
+
+    Three kinds of repository, each with the registry server written into its
+    ``.mcp.json`` by ``apply_mcp_assets``:
+
+    * ``untracked``: the repository has no ``.mcp.json`` (the usual case). The
+      guard was an intent-to-add index entry carrying the skip-worktree bit. To
+      git that entry is an uncommitted change: ``git stash``, ``git rebase``,
+      ``git cherry-pick``, a merge that is not a fast-forward and ``git reset
+      --hard`` refused to run in the clone. The file is now listed in the
+      clone's own exclude file, as the attachments directory is, and nothing is
+      put in the index.
+    * ``tracked``: the repository commits a ``.mcp.json``. Skip-worktree on the
+      existing entry, as before.
+    * ``re-included``: the repository's own ``.gitignore`` re-includes the file,
+      which outranks the exclude file, so the index entry stays there.
+    """
+
+    @staticmethod
+    def _git(repo, *args, check=True) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True, check=False
+        )
+        if check:  # a step that failed must not read as "nothing was staged"
+            assert result.returncode == 0, f"git {' '.join(args)}: {result.stderr.strip()}"
+        return result
+
+    def _commit(self, repo, name: str, content: str) -> None:
+        (repo / name).write_text(content)
+        self._git(repo, "add", "--", name)
+        self._git(repo, "commit", "-qm", f"add {name}")
+
+    def _staged(self, repo) -> list[str]:
+        return self._git(repo, "diff", "--cached", "--name-only").stdout.split()
+
+    def _committed(self, repo) -> list[str]:
+        """The files of the last commit; nothing of the session's server in any commit."""
+        assert "SUPERSECRET" not in self._git(repo, "log", "-p", "--all").stdout
+        return self._git(repo, "show", "--name-only", "--format=", "HEAD").stdout.split()
+
+    @pytest.fixture(autouse=True)
+    def _git_environment(self, tmp_path, monkeypatch):
+        # No ignore file of the host (it may list .mcp.json), and an identity for
+        # the commits, also for the one post_hooks makes.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        for role in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+            monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@t")
+
+    def _clone(self, tmp_path, kind: str):
+        """A clone of the given kind on a task branch one commit ahead of a ``main``
+        that has moved on, after the registry server was written into it."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        (repo / "code.txt").write_text("one\n")
+        files = ["code.txt"]
+        if kind == "tracked":
+            (repo / ".mcp.json").write_text('{"mcpServers": {"docs": {"command": "docs-mcp"}}}\n')
+            files.append(".mcp.json")
+        if kind == "re-included":
+            (repo / ".gitignore").write_text("!.mcp.json\n")
+            files.append(".gitignore")
+        self._git(repo, "add", "--", *files)
+        self._git(repo, "commit", "-qm", "init")
+        self._git(repo, "checkout", "-q", "-b", "task")
+        self._commit(repo, "feature.txt", "feature\n")
+        self._git(repo, "checkout", "-q", "main")
+        self._commit(repo, "other.txt", "more\n")
+        self._git(repo, "checkout", "-q", "task")
+        runtime = {"transport": "http", "url": "https://mcp.example/sse?token=SUPERSECRET"}
+        apply_mcp_assets(str(repo), [_mcp_asset("acme", "secretful", "1.0.0", runtime)])
+        return repo
+
+    def test_untracked_file_gets_no_index_entry(self, tmp_path, capfd):
+        repo = self._clone(tmp_path, "untracked")
+        assert self._git(repo, "ls-files", "--", ".mcp.json").stdout == ""
+        assert self._git(repo, "status", "--porcelain").stdout == ""
+        assert "WARN" not in capfd.readouterr().out  # the guard reported no failure
+
+    @pytest.mark.parametrize("kind", ["untracked", "tracked"])
+    @pytest.mark.parametrize(
+        ("dirty", "command"),
+        [
+            pytest.param(True, ["stash"], id="stash"),
+            pytest.param(True, ["stash", "-u"], id="stash-u"),
+            pytest.param(True, ["reset", "--hard"], id="reset-hard"),
+            pytest.param(False, ["rebase", "main"], id="rebase"),
+            pytest.param(False, ["pull", "--rebase", ".", "main"], id="pull-rebase"),
+            pytest.param(False, ["merge", "--no-edit", "main"], id="merge"),
+            pytest.param(False, ["cherry-pick", "main"], id="cherry-pick"),
+        ],
+    )
+    def test_git_command_works_in_the_clone(self, tmp_path, kind, dirty, command):
+        repo = self._clone(tmp_path, kind)
+        if dirty:
+            (repo / "code.txt").write_text("work in progress\n")
+        self._git(repo, *command)
+        # The command left the session's file alone.
+        assert "acme__secretful" in _read_mcp(repo)["mcpServers"]
+
+    @pytest.mark.parametrize("kind", ["untracked", "tracked"])
+    @pytest.mark.parametrize(
+        "commands",
+        [
+            pytest.param([["add", "-A"], ["commit", "-qm", "agent"]], id="add-A"),
+            pytest.param([["add", "."], ["commit", "-qm", "agent"]], id="add-dot"),
+            pytest.param([["add", "-u"], ["commit", "-qm", "agent"]], id="add-u"),
+            pytest.param([["commit", "-qam", "agent"]], id="commit-am"),
+        ],
+    )
+    def test_commit_of_the_agent_leaves_the_file_out(self, tmp_path, kind, commands):
+        repo = self._clone(tmp_path, kind)
+        (repo / "code.txt").write_text("the agent's change\n")
+        for command in commands:
+            self._git(repo, *command)
+        # code.txt is the control: it is committed, so the commands did their work.
+        assert self._committed(repo) == ["code.txt"]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(["add", "-A"], id="add-A"),
+            pytest.param(["add", "."], id="add-dot"),
+            pytest.param(["add", "-u"], id="add-u"),
+        ],
+    )
+    def test_staging_leaves_the_file_out_where_gitignore_re_includes_it(self, tmp_path, command):
+        # Staged, not committed: this kind of clone keeps the index entry of the fallback, and a
+        # commit made in that state is what a pre-commit hook of the machine may object to.
+        repo = self._clone(tmp_path, "re-included")
+        (repo / "code.txt").write_text("the agent's change\n")
+        self._git(repo, *command)
+        # code.txt is the control: it is staged, so the command did its work.
+        assert self._staged(repo) == ["code.txt"]
+
+    @pytest.mark.parametrize("kind", ["untracked", "tracked", "re-included"])
+    def test_naming_the_file_does_not_stage_it(self, tmp_path, kind):
+        repo = self._clone(tmp_path, kind)
+        assert self._git(repo, "add", ".mcp.json", check=False).returncode != 0
+        assert self._staged(repo) == []
+
+    @pytest.mark.parametrize("kind", ["untracked", "tracked"])
+    def test_unstaging_does_not_expose_the_file(self, tmp_path, kind):
+        repo = self._clone(tmp_path, kind)
+        (repo / "code.txt").write_text("the agent's change\n")
+        self._git(repo, "reset", "-q")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "agent")
+        assert self._committed(repo) == ["code.txt"]
+
+    @pytest.mark.parametrize("kind", ["untracked", "tracked"])
+    def test_safety_net_commit_leaves_the_file_out(self, tmp_path, kind):
+        repo = self._clone(tmp_path, kind)
+        (repo / "code.txt").write_text("work the agent did not commit\n")
+        assert ensure_committed(str(repo)) is True
+        assert self._committed(repo) == ["code.txt"]

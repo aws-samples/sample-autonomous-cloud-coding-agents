@@ -30,7 +30,7 @@ A **registry asset** is a versioned, immutable-per-version runtime artifact that
 
 | Kind | MVP status | Runtime payload | Applied by |
 |------|-----------|----------------|-----------|
-| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers/tool_prefix) | agent → merged into `.mcp.json` |
+| `mcp_server` | **implemented E2E** | `.mcp.json` connection config (transport/url/headers). `tool_prefix` is accepted but not applied: the server is keyed `<namespace>__<name>`, so the tools of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` | agent → merged into `.mcp.json` |
 | `cedar_policy_module` | **implemented E2E** | `cedar_text` (Cedar policy source) | orchestrator → merged into the `cedar_policies` payload (byte-identical to inline blueprint policies) → agent `PolicyEngine` |
 | `skill` | **implemented E2E** | `prompt_fragment` (+ `tool_hints`) | agent → appended to the system prompt |
 | `plugin`, `subagent`, `prompt_fragment`, `capability` | **reserved** | — | — (grammar accepts them; publish rejects until a loader ships) |
