@@ -705,7 +705,7 @@ export interface Credentials {
 }
 
 /** Terminal task statuses. */
-export const TERMINAL_STATUSES = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'] as const;
+export const TERMINAL_STATUSES: readonly TaskStatusType[] = ['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'];
 
 /**
  * Default coding workflow id. A bare ``bgagent submit --repo X --task Y``

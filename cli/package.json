@@ -50,7 +50,6 @@
     "commander": "^15.1.0"
   },
   "resolutions": {},
-  "main": "lib/index.js",
   "license": "MIT-0",
   "version": "0.0.0",
   "jest": {
@@ -127,6 +126,5 @@
       "/node_modules/(?!commander/)"
     ]
   },
-  "types": "lib/index.d.ts",
   "private": true
 }

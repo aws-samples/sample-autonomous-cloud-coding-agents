@@ -76,14 +76,19 @@ describe('auth', () => {
         },
       });
 
+      const before = Date.now();
       await login('user@example.com', 'password123');
+      const after = Date.now();
 
       const creds = JSON.parse(
         fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'),
       );
       expect(creds.id_token).toBe('id-token-123');
       expect(creds.refresh_token).toBe('refresh-token-123');
-      expect(creds.token_expiry).toBeDefined();
+      // ExpiresIn counts seconds: 3600 is one hour after the login.
+      const expiry = Date.parse(creds.token_expiry);
+      expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
+      expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
     });
 
     test('constructs the Cognito client with the ABCA solution User-Agent (#319)', async () => {
@@ -338,8 +343,31 @@ describe('auth', () => {
         },
       });
 
+      const before = Date.now();
       const token = await getAuthToken();
+      const after = Date.now();
       expect(token).toBe('new-id');
+
+      const creds = JSON.parse(fs.readFileSync(path.join(tmpDir, 'credentials.json'), 'utf-8'));
+      // The answer above carries no refresh token: the cached one is kept.
+      expect(creds.refresh_token).toBe('refresh-token');
+      // ExpiresIn counts seconds: 3600 is one hour after the refresh.
+      const expiry = Date.parse(creds.token_expiry);
+      expect(expiry).toBeGreaterThanOrEqual(before + 3_600_000);
+      expect(expiry).toBeLessThanOrEqual(after + 3_600_000);
+    });
+
+    test('rejects a refresh answer without an ID token, as login does', async () => {
+      const pastExpiry = new Date(Date.now() - 1000).toISOString();
+      saveCredentials({
+        id_token: 'old-id',
+        refresh_token: 'refresh-token',
+        token_expiry: pastExpiry,
+      });
+
+      mockSend.mockResolvedValue({ AuthenticationResult: { ExpiresIn: 3600 } });
+
+      await expect(getAuthToken()).rejects.toThrow('Unexpected authentication response from Cognito.');
     });
 
     test('treats an unparseable token_expiry as expired (refreshes, not 401s)', async () => {

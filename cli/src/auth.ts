@@ -244,18 +244,8 @@ async function refreshToken(creds: Credentials): Promise<void> {
         REFRESH_TOKEN: creds.refresh_token,
       },
     }));
-
-    const auth = result.AuthenticationResult;
-    if (!auth?.IdToken || !auth.ExpiresIn) {
-      throw new CliError('Unexpected refresh response from Cognito.');
-    }
-
-    const expiry = new Date(Date.now() + auth.ExpiresIn * 1000).toISOString();
-    saveCredentials({
-      id_token: auth.IdToken,
-      refresh_token: creds.refresh_token,
-      token_expiry: expiry,
-    });
+    // A refresh renews the ID token only: the cached refresh token stays.
+    persistAuthResult({ ...result.AuthenticationResult, RefreshToken: creds.refresh_token });
   } catch (err) {
     if (err instanceof CliError) throw err;
     // Distinguish a genuinely rejected/expired refresh token from a
