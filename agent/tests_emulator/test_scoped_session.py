@@ -41,6 +41,12 @@ from .conftest import EMULATOR_ACCOUNT_ID, approval_row
 _ASSUMABLE_BY_ACCOUNT = {"AWS": f"arn:aws:iam::{EMULATOR_ACCOUNT_ID}:root"}
 
 # AgentSessionRole.DDB_ITEM_ACTIONS (Scan is deliberately absent).
+_APPROVALS_READ_ACTIONS = [
+    "dynamodb:GetItem",
+    "dynamodb:BatchGetItem",
+    "dynamodb:Query",
+    "dynamodb:ConditionCheckItem",
+]
 _DDB_ITEM_ACTIONS = [
     "dynamodb:GetItem",
     "dynamodb:BatchGetItem",
@@ -72,12 +78,22 @@ def _session_role_policy(emulator) -> str:
                 }
             },
         }
-        for table in (
-            emulator.task_table,
-            emulator.task_events_table,
-            emulator.task_approvals_table,
-        )
+        for table in (emulator.task_table, emulator.task_events_table)
     ]
+    # Approvals are read-only for the session (#1000): workers observe decisions and
+    # use the rows in condition checks; requests go through the trusted writer.
+    statements.append(
+        {
+            "Effect": "Allow",
+            "Action": _APPROVALS_READ_ACTIONS,
+            "Resource": f"{table_arn}/{emulator.task_approvals_table}",
+            "Condition": {
+                "ForAllValues:StringEquals": {
+                    "dynamodb:LeadingKeys": ["${aws:PrincipalTag/task_id}"]
+                }
+            },
+        }
+    )
     statements += [
         {
             "Effect": "Allow",
@@ -160,18 +176,38 @@ class TestScopedCredentials:
         assert record is not None
         assert (record["status"], record["trace_s3_uri"]) == ("COMPLETED", uri)
 
-    def test_approval_gate_transaction_spans_both_of_the_tasks_tables(self, scoped, task_id):
+    def test_a_scoped_worker_cannot_open_a_gate_without_the_trusted_writer(self, scoped, task_id):
+        # Cloud workers request approvals through the trusted writer (#1000). Without
+        # its endpoint the request fails closed instead of writing the row itself.
         scoped.table(scoped.task_table).put_item(Item={"task_id": task_id, "status": "RUNNING"})
         request_id = _generate_ulid()
-        row = approval_row(task_id, request_id)
 
-        task_state.transact_write_approval_request(task_id, request_id, row)
-        task_state.transact_resume_from_approval(task_id, request_id)
+        with pytest.raises(RuntimeError, match="APPROVAL_REQUESTS_API_URL is required"):
+            task_state.transact_write_approval_request(
+                task_id, request_id, approval_row(task_id, request_id)
+            )
 
-        assert task_state.get_approval_row(task_id, request_id) == row
+        assert task_state.get_approval_row(task_id, request_id) is None
         record = task_state.get_task(task_id)
         assert record is not None
         assert record["status"] == "RUNNING"
+
+    def test_the_session_can_read_but_not_write_its_own_approval_rows(self, scoped, task_id):
+        request_id = _generate_ulid()
+        scoped.table(scoped.task_approvals_table).put_item(Item=approval_row(task_id, request_id))
+        approvals = tenant_client("dynamodb")
+        key = {"task_id": {"S": task_id}, "request_id": {"S": request_id}}
+
+        assert approvals.get_item(TableName=scoped.task_approvals_table, Key=key)["Item"]
+        with pytest.raises(ClientError) as denied:
+            approvals.update_item(
+                TableName=scoped.task_approvals_table,
+                Key=key,
+                UpdateExpression="SET #s = :s",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": {"S": "APPROVED"}},
+            )
+        assert denied.value.response["Error"]["Code"] == "AccessDeniedException"
 
 
 class TestOtherTenantsDataIsOutOfReach:
