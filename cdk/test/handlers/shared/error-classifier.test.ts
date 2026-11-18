@@ -93,6 +93,26 @@ describe('classifyError', () => {
       expect(result!.category).toBe(ErrorCategory.AUTH);
       expect(result!.title).toBe('Insufficient GitHub token scopes');
     });
+
+    test('classifies a 401 from GitHub as a rejected token, not as an unreachable API', () => {
+      // Pre-flight files every non-2xx answer of /rate_limit under
+      // GITHUB_UNREACHABLE (preflight.test.ts: "rate_limit 401 (revoked token)").
+      // GitHub was reached and refused the credential: no retry helps until an
+      // admin stores a valid token.
+      const result = classifyError(
+        'Pre-flight check failed: GITHUB_UNREACHABLE — GitHub API returned HTTP 401',
+      )!;
+      expect(result.category).toBe(ErrorCategory.AUTH);
+      expect(result.title).toBe('GitHub token rejected');
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      expect(result.remedy).toContain('bgagent github set-token');
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+      // Only the 401: a 5xx in the same message is still GitHub being down.
+      expect(isTransientError(classifyError(
+        'Pre-flight check failed: GITHUB_UNREACHABLE — GitHub API returned HTTP 503',
+      ))).toBe(true);
+    });
   });
 
   // --- Network errors ---
@@ -206,6 +226,30 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    // The stranded-task reconciler finds the same condition as the test above
+    // when the orchestrator is no longer there to notice it. These are the two
+    // messages of `failStrandedTask` in reconcile-stranded-tasks.ts.
+    const stranded = (status: string) =>
+      `Stranded: ${status} for 1260s — no pipeline attached before the stranded-task timeout. `
+      + 'This usually means the orchestrator Lambda crashed before invoking '
+      + 'the runtime, or the agent container crashed during startup.';
+    const approvalStranded = 'Approval stranded: task paused for approval for 7300s with '
+      + 'no resume transition. Typically caused by the agent container being '
+      + 'evicted mid-approval. Resubmit the task if the work is still needed.';
+
+    test.each([
+      { status: 'SUBMITTED', message: stranded('SUBMITTED') },
+      { status: 'HYDRATING', message: stranded('HYDRATING') },
+      { status: 'AWAITING_APPROVAL', message: approvalStranded },
+    ])('classifies a task found stranded in $status as a retryable platform fault', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.COMPUTE);
+      expect(result.title).toBe('The platform lost track of this task');
+      expect(result.retryable).toBe(true);
+      expect(result.errorClass).toBe(ErrorClass.TRANSIENT);
+      expect(retryGuidance(result)).toMatch(/reply here to try again/i);
+    });
+
     test('classifies agent heartbeat loss', () => {
       const result = classifyError(
         'Agent session lost: no recent heartbeat from the runtime (container may have crashed, been OOM-killed, or stopped)',
@@ -243,6 +287,34 @@ describe('classifyError', () => {
       expect(result!.category).toBe(ErrorCategory.AGENT);
       expect(result!.title).toBe('Agent task did not succeed');
       expect(result!.retryable).toBe(false);
+    });
+
+    // The agent finished; the post-agent build gate is what stopped the task
+    // (`_resolve_overall_task_status` in agent/src/pipeline.py). failure-reply.ts
+    // reads the same two messages as "the build/tests didn't pass" and "didn't
+    // finish in time", each followed by "reply with guidance and I'll try again".
+    test.each(['success', 'end_turn'])(
+      'a red build after agent_status=%s is a retryable build failure, not "the agent reported a non-success status"',
+      (agentStatus) => {
+        const result = classifyError(`Task did not succeed (agent_status='${agentStatus}', build_ok=False)`)!;
+        expect(result.category).toBe(ErrorCategory.AGENT);
+        expect(result.title).toBe('Build or tests did not pass');
+        expect(result.description).not.toMatch(/non-success status/i);
+        expect(result.retryable).toBe(true);
+        expect(result.errorClass).toBe(ErrorClass.USER);
+        expect(retryGuidance(result)).toMatch(/extra guidance/i);
+      },
+    );
+
+    test('a build gate that timed out reads as "didn\'t finish in time", not as a red build', () => {
+      const result = classifyError("Task did not succeed (agent_status='success', build_ok=timeout)")!;
+      expect(result.category).toBe(ErrorCategory.TIMEOUT);
+      expect(result.title).toMatch(/build\/tests didn't finish in time/i);
+      expect(result.title).not.toMatch(/did not pass/i);
+      expect(result.retryable).toBe(true);
+      // USER, not TRANSIENT: an unchanged slow build times out again.
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(retryGuidance(result)).toMatch(/extra guidance/i);
     });
 
     test('build_ok=infra is a retryable COMPUTE fault, not "did not succeed"/build-failed', () => {
@@ -434,6 +506,44 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(true);
     });
 
+    // A repository on a compute backend the stack does not deploy. The pin is
+    // refused when the blueprint loads (`resolveRepositoryBackend` in
+    // compute-backend.ts); a stack that selects the backend but cannot start a
+    // session on it yet fails in the strategy (for lambda-microvm: the documented
+    // state between the first deploy and the one that adds the image). The
+    // messages are the literal ones, as `failTask` persists them.
+    test.each([
+      {
+        where: 'the pin is refused when the blueprint loads',
+        message: "Blueprint config load failed: Error: Repository compute_type 'ecs' is not deployed; "
+          + "this stack deploys only 'agentcore'. Update the repository configuration before submitting tasks.",
+      },
+      {
+        where: 'the MicroVM strategy has no image to run',
+        message: 'Session start failed: Error: This repository is configured compute_type=lambda-microvm, but this stack was deployed without the '
+          + 'Lambda MicroVMs substrate (missing MICROVM_IMAGE_IDENTIFIER/MICROVM_EXECUTION_ROLE_ARN/'
+          + 'MICROVM_EGRESS_CONNECTOR_ARNS/MICROVM_PAYLOAD_BUCKET). Redeploy the stack with '
+          + '`--context compute_type=lambda-microvm` to provision the MicroVM substrate, or set this repo to '
+          + 'compute_type=agentcore (bgagent repo onboard <repo> --compute-type agentcore).',
+      },
+      {
+        where: 'the ECS strategy has no cluster to run on',
+        message: 'Session start failed: Error: This repository is configured compute_type=ecs, but this stack was deployed without the ECS '
+          + 'substrate (missing ECS_CLUSTER_ARN/ECS_TASK_DEFINITION_ARN/ECS_SUBNETS/ECS_SECURITY_GROUP). '
+          + 'Redeploy the stack with `--context compute_type=ecs` to provision the Fargate substrate, or '
+          + 'set this repo to compute_type=agentcore (bgagent repo onboard <repo> --compute-type agentcore).',
+      },
+    ])('classifies a backend the stack does not deploy as a non-retryable config fault ($where)', ({ message }) => {
+      const result = classifyError(message)!;
+      expect(result.category).toBe(ErrorCategory.CONFIG);
+      expect(result.title).toBe('The repository\'s compute backend is not deployed in this stack');
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.SERVICE);
+      // Neither wrapper's own copy: a retry cannot work, and the cluster is not unhealthy.
+      expect(result.remedy).not.toMatch(/AgentCore Runtime or ECS cluster health|RepoTable/);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+    });
+
     test('classifies hydration failure (non-guardrail)', () => {
       const result = classifyError(
         'Hydration failed: Error: Failed to fetch issue body',
@@ -459,21 +569,50 @@ describe('classifyError', () => {
       expect(result!.retryable).toBe(false);
     });
 
-    test('classifies a build/verify command TIMEOUT distinctly from a crash', () => {
-      // A repo's full `mise run build` exceeded the 600s cap → Python
+    test.each([
+      'Orchestrator poll timeout exceeded',
+      'Orchestrator poll timeout exceeded while awaiting approval',
+    ])('does not answer "%s" with "temporary infrastructure issue, reply to retry"', (message) => {
+      // The task used the whole polling window (about 8.5 hours), or its approval
+      // never came. The entry is not retryable and its remedy says the task may
+      // be too large, so the next-step line must not invite a plain retry.
+      const result = classifyError(message)!;
+      expect(result.retryable).toBe(false);
+      expect(result.errorClass).toBe(ErrorClass.USER);
+      expect(retryGuidance(result)).toMatch(/may not resolve this/i);
+      expect(retryGuidance(result)).not.toMatch(/temporary infrastructure/i);
+    });
+
+    test.each([
+      {
+        command: 'gh repo clone',
+        message: "TimeoutExpired: Command '['gh', 'repo', 'clone', '--no-upstream', 'acme/monorepo', '/workspace/01KX']' timed out after 600 seconds",
+      },
+      {
+        command: 'mise install',
+        message: "TimeoutExpired: Command '['mise', 'install']' timed out after 600 seconds",
+      },
+      {
+        command: 'git push',
+        message: "TimeoutExpired: Command '['git', 'push', '-u', 'origin', 'bgagent/01KX/fix']' timed out after 600 seconds",
+      },
+    ])('classifies an uncaught $command TIMEOUT distinctly from a crash, and not as a slow build', ({ message }) => {
+      // A command of the agent exceeded `run_cmd`'s 600s cap → Python
       // TimeoutExpired. Before this pattern it fell to "Unexpected error"; now it
-      // reads as a build-time-out (user-actionable: retry / raise the cap), not a
-      // mysterious crash.
-      const result = classifyError(
-        "TimeoutExpired: Command '['bash', '-lc', 'mise run install && MISE_EXPERIMENTAL=1 mise run build']' timed out after 600 seconds",
-      );
+      // reads as a time-out (user-actionable: retry), not a mysterious crash. The
+      // build and lint commands catch their own time-out (a timed-out build gate
+      // arrives as `build_ok=timeout`), so what reaches this entry is a command
+      // around the agent's work: clone, fetch, tool install, push.
+      const result = classifyError(message);
       expect(result!.category).toBe(ErrorCategory.TIMEOUT);
       expect(result!.title).toMatch(/didn't finish in time|timed out/i);
-      // A timeout is user-actionable (retry / raise the cap), not a hard failure.
+      // A timeout is user-actionable (retry), not a hard failure.
       expect(result!.retryable).toBe(true);
       expect(result!.errorClass).toBe(ErrorClass.USER);
       // Must NOT fall through to the generic Unexpected error.
       expect(result!.title).not.toMatch(/Unexpected error/i);
+      // No build ran, so nothing may send the reader to a slow build.
+      expect(`${result!.title} ${result!.description} ${result!.remedy}`).not.toMatch(/build|tests/i);
     });
   });
 
