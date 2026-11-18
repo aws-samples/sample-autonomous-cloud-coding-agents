@@ -1,4 +1,4 @@
-# Keep the mise release in sync with .github/workflows/build.yml.
+# On a mise release bump, update the image digest and the CI version pins together.
 FROM jdxcode/mise:2026.10.25@sha256:91417f41840316b7c5da6854bef393eccea4546ae70f8baf0803e0e94287b68d AS mise
 FROM mcr.microsoft.com/devcontainers/base:bookworm@sha256:85a349062e4ccc4755304f1264183e604391697608765e72765340b7cb7e2438
 
