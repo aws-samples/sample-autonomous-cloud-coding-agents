@@ -158,6 +158,23 @@ ENV PATH="/app/.venv/bin:/home/agent/.local/share/mise/shims:/home/agent/.local/
     PYTHONUNBUFFERED=1 \
     MISE_YES=1
 
+# The server starts under `opentelemetry-instrument` (CMD below), which loads every
+# installed OpenTelemetry instrumentation. Those of `requests` and `urllib3` copy
+# the trace context and the task's correlation baggage (session id, user id,
+# repository) into the headers of every request they send, also to hosts outside
+# the platform: the agent calls Linear and Atlassian with `requests`. The AWS
+# distro switches the two off only in its agent observability mode
+# (AGENT_OBSERVABILITY_ENABLED=true). No backend of this repository sets that flag,
+# so without this line the Lambda MicroVM backend and a local `run.sh --server` load
+# both, and AgentCore does unless the service sets the flag itself.
+#
+# An explicit value replaces the list the distro applies in that mode, so this is
+# that list, whole: a runtime that sets the flag loads what it loaded before.
+# boto3 and the tool gateway client are not in it and stay instrumented.
+# agent/tests/test_image_instrumentation.py fails when the list loses `requests`
+# or `urllib3`, or is no longer the list of the pinned aws-opentelemetry-distro.
+ENV OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="http,sqlalchemy,psycopg2,pymysql,sqlite3,aiopg,asyncpg,mysql_connector,urllib3,requests,system_metrics,google-genai,jinja2"
+
 WORKDIR /workspace
 
 EXPOSE 8080

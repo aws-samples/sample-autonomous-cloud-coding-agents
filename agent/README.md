@@ -483,6 +483,8 @@ agent/
 
 The container **CMD** runs the app under `opentelemetry-instrument` with **uvicorn** using the **asyncio** event loop (not uvloop), avoiding known subprocess issues with uvloop.
 
+The image sets `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS`, so the `requests` and `urllib3` instrumentation stays off: it would copy the trace context and the task's correlation baggage into the headers of the agent's requests to Linear and Atlassian. A value given at run time replaces the image's; keep both names in it.
+
 **Diagnostics:** `scripts/diagnostics/` holds optional smoke tests for local AgentCore debugging. They are not copied into the production Docker image.
 
 ### MicroVM optional service configuration
