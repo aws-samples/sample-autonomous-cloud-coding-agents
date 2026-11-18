@@ -622,6 +622,38 @@ class TestBaselineBuildTimeout:
         assert any("FAILED before agent changes" in n for n in setup.notes)
 
 
+class TestBaselineCommandThatCannotStart:
+    """A configured command without shell operators is exec'd directly. When its
+    program is not installed the exec itself raises, where the same command
+    inside ``bash -lc`` exits 127. Both are a baseline that could not run, and
+    neither may end the task before the agent starts."""
+
+    def test_missing_program_is_a_failed_baseline_not_a_task_crash(self, monkeypatch):
+        fake = _fake_run_cmd()
+
+        def run_cmd(cmd, label, **kwargs):
+            if label in ("verify-build-pre", "verify-lint-pre"):
+                raise FileNotFoundError(2, "No such file or directory", cmd[0])
+            return fake(cmd, label, **kwargs)
+
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "run_cmd", run_cmd)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(
+            _config(build_command="gradle build", lint_command="gradle check")
+        )  # must not raise
+
+        assert setup.build_before is False
+        assert setup.lint_before is False
+        assert "Initial build (gradle build) FAILED before agent changes" in setup.notes
+        assert "Initial lint (gradle check) FAILED before agent changes" in setup.notes
+        # A configured command that cannot run is the operator's to correct; only
+        # the unconfigured default switches the "gating is off" warning on.
+        assert setup.build_gate_inert is False
+        assert setup.lint_gate_inert is False
+
+
 class TestFindMiseConfigs:
     """`mise trust <repo_dir>` trusts only the ROOT config;
     a monorepo's per-package `mise.toml` roots must ALSO be trusted or

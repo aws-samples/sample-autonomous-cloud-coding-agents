@@ -621,6 +621,63 @@ class TestRepoLessPipeline:
         assert run.result["status"] == "success"
         run.s3.put_object.assert_called_once()
 
+    def test_agent_step_that_skips_the_remaining_steps_is_not_followed_by_the_delivery(
+        self, monkeypatch
+    ):
+        # A workflow may tell the runner to stop without failing when its agent
+        # step fails (on_failure: skip_remaining). The delivery is one of the
+        # steps that are skipped then: run in a second call, after the cancel
+        # check, it must not be started on top of the failed agent step.
+        from workflow import load_workflow
+
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        shipped = load_workflow("knowledge/web-research-v1")
+        workflow = shipped.model_copy(
+            update={
+                "steps": [
+                    step.model_copy(update={"on_failure": "skip_remaining"})
+                    if step.kind == "run_agent"
+                    else step
+                    for step in shipped.steps
+                ]
+            }
+        )
+
+        async def run_agent(_prompt, _system_prompt, _config, cwd=None, trajectory=None):
+            raise RuntimeError("model exploded")
+
+        progress = MagicMock()
+        with (
+            patch("workflow.load_workflow", return_value=workflow),
+            patch("runner.run_agent", side_effect=run_agent),
+            patch("pipeline.task_span", return_value=self._mock_span()),
+            patch("pipeline._ProgressWriter", return_value=progress),
+            patch("pipeline.task_state.get_task", return_value={"status": "RUNNING"}),
+            patch("pipeline.task_state.write_terminal"),
+            patch("pipeline.print_metrics"),
+            patch("pipeline._maybe_upload_trace", return_value=None),
+        ):
+            from pipeline import run_task
+
+            result = run_task(
+                task_description="Research approaches to rate limiting",
+                aws_region="us-east-1",
+                task_id="repoless-skip",
+                resolved_workflow={"id": "knowledge/web-research-v1", "version": "1.0.0"},
+            )
+
+        milestones = [call.args[0] for call in progress.write_agent_milestone.call_args_list]
+        assert milestones == [
+            "step:context:start",
+            "step:context:succeeded",
+            "step:research:start",
+            "step:research:failed",
+            "agent_execution_complete",
+        ]
+        assert result["status"] == "error"
+        assert result["error"] == "repo-less run_agent produced no result"
+
     @patch("runner.run_agent")
     @patch("repo.setup_repo")
     @patch("pipeline.task_span")
@@ -3017,6 +3074,81 @@ class TestDeliveryGateReadsThePushedBranch:
         self._git(setup.repo_dir, "push", "-q", "origin", f"{sha}:refs/heads/{self.BRANCH}")
 
         assert _branch_has_new_commits(setup.repo_dir, "main", self.BRANCH) is True
+
+
+class TestIterationHeadCheck:
+    """After an iteration on a pull request the pipeline compares HEAD with the
+    commit the task started from, so that the reply can say "updated" or
+    "answered, nothing changed". The comparison only words the reply: it must not
+    be able to fail a task whose pull request is already updated.
+
+    Real git under ``tmp_path``."""
+
+    @staticmethod
+    def _git(cwd, *args) -> str:
+        done = subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+        return done.stdout.strip()
+
+    def _checkout(self, tmp_path) -> RepoSetup:
+        """The branch of the pull request, checked out at its one commit."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self._git(repo, "init", "-q")
+        self._git(repo, "config", "--local", "user.email", "abca-test@example.invalid")
+        self._git(repo, "config", "--local", "user.name", "ABCA Test")
+        self._git(repo, "commit", "-q", "--allow-empty", "-m", "the pull request as it was")
+        self._git(repo, "branch", "-M", "feature/x")
+        return RepoSetup(
+            repo_dir=str(repo),
+            branch="feature/x",
+            head_sha_before=self._git(repo, "rev-parse", "HEAD"),
+        )
+
+    @staticmethod
+    def _iterate(setup: RepoSetup, answer: str = "") -> dict:
+        """What the task records after an iteration on pull request 7."""
+        run = _run_pipeline(
+            _agent_succeeded(result_text=answer),
+            setup=setup,
+            resolved_workflow={"id": "coding/pr-iteration-v1", "version": "1.0.0"},
+            pr_number="7",
+        )
+        return run.result
+
+    def test_iteration_that_committed_reports_a_change(self, tmp_path):
+        setup = self._checkout(tmp_path)
+        self._git(setup.repo_dir, "commit", "-q", "--allow-empty", "-m", "address the review")
+
+        result = self._iterate(setup, answer="Done.")
+
+        assert result["code_changed"] is True
+        assert result["head_sha"] == self._git(setup.repo_dir, "rev-parse", "HEAD")
+        assert result["answer_text"] == ""
+
+    def test_iteration_without_a_commit_reports_the_answer(self, tmp_path):
+        setup = self._checkout(tmp_path)
+
+        result = self._iterate(setup, answer="It is on purpose.")
+
+        assert result["code_changed"] is False
+        assert result["head_sha"] == setup.head_sha_before
+        assert result["answer_text"] == "It is on purpose."
+
+    @pytest.mark.parametrize(
+        "checkout", ["gone", "."], ids=["no such directory", "not a repository"]
+    )
+    def test_task_keeps_its_verdict_when_git_cannot_say(self, tmp_path, checkout):
+        # git cannot even be started in a directory that is gone, and it exits
+        # non-zero in one that is not a repository.
+        setup = RepoSetup(
+            repo_dir=str(tmp_path / checkout), branch="feature/x", head_sha_before="a" * 40
+        )
+
+        result = self._iterate(setup)
+
+        assert result["status"] == "success"
+        assert result["code_changed"] is None
+        assert result["head_sha"] == ""
 
 
 class TestCrashedTaskIsReported:

@@ -422,13 +422,19 @@ def _run_repoless_task(
     # In two runs, with the cancel check of the repo lane between them: the
     # delivery is this lane's side effect, and like a post-hook it must not
     # happen for a task the user cancelled while the agent ran. Every step but
-    # the delivery runs first; a failed step there stops the workflow, as it
-    # would in one run.
+    # the delivery runs first; a step that fails there stops the workflow as it
+    # would in one run, whether its on_failure is fail (the run fails) or
+    # skip_remaining (the run ends without failing, and skips the delivery).
     delivery = {"deliver_artifact"}
+    before_delivery = [s for s in wf.steps if s.kind not in delivery]
     with task_span("task.agent_execution"):
-        wf_result = run_workflow(wf, ctx, only_kinds={s.kind for s in wf.steps} - delivery)
+        wf_result = run_workflow(wf, ctx, only_kinds={s.kind for s in before_delivery})
         cancelled = _task_is_cancelled(config.task_id)
-        if wf_result.succeeded and not cancelled:
+        skipped = any(
+            outcome.failed and step.on_failure == "skip_remaining"
+            for step, outcome in zip(before_delivery, wf_result.outcomes, strict=False)
+        )
+        if wf_result.succeeded and not skipped and not cancelled:
             wf_result = run_workflow(wf, ctx, only_kinds=delivery)
 
     agent_result = ctx.agent_result
@@ -772,6 +778,30 @@ def _branch_has_new_commits(repo_dir: str, default_branch: str, branch: str) -> 
     except (OSError, subprocess.SubprocessError):
         return False
     return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def _head_sha(repo_dir: str) -> str:
+    """The commit ``HEAD`` of ``repo_dir`` points at, ``""`` when git cannot say.
+
+    Read after an iteration on a pull request, to tell "the branch moved" from
+    "answered, nothing committed". Best-effort: the answer only words the reply,
+    so a git that fails, times out or cannot be started leaves it unknown and
+    does not fail a task whose pull request is already updated."""
+    sha = ""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if res.returncode == 0:
+            sha = res.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"Could not read HEAD after the run ({type(exc).__name__}: {exc})")
+    return sha
 
 
 def _apply_delivery_gate(
@@ -1749,16 +1779,8 @@ def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
             code_changed: bool | None = None
             head_sha_after = ""
             if config.is_pr_workflow and setup.head_sha_before:
-                head_after_res = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=setup.repo_dir,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                if head_after_res.returncode == 0:
-                    head_sha_after = head_after_res.stdout.strip()
+                head_sha_after = _head_sha(setup.repo_dir)
+                if head_sha_after:
                     code_changed = head_sha_after != setup.head_sha_before
             # The agent's final text — surfaced as the answer on a no-change
             # iteration so a question gets an actual reply.

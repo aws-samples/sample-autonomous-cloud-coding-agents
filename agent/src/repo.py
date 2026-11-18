@@ -232,6 +232,33 @@ def _refuse_pr_from_fork(config: TaskConfig, repo_dir: str, progress: Any) -> No
         )
 
 
+def _run_baseline(argv: list[str], label: str, repo_dir: str) -> subprocess.CompletedProcess:
+    """Run a baseline build or lint command the way the post-agent gate runs it.
+
+    The exec of a command without shell operators fails when its program is not
+    installed or not executable. That comes back as exit 127 with the error as
+    the output, what a shell reports for it, so the baseline is one that could
+    not run, as for the same command inside ``bash -lc``, and the ``OSError``
+    does not end the task before the agent starts. A timeout still raises.
+    """
+    from post_hooks import BUILD_VERIFY_TIMEOUT_S, SHELL_COMMAND_NOT_FOUND
+
+    try:
+        return run_cmd(
+            argv,
+            label=label,
+            cwd=repo_dir,
+            check=False,
+            timeout=BUILD_VERIFY_TIMEOUT_S,
+            # Stream live → the full baseline log reaches CloudWatch verbatim
+            # (buffered capture would hide the failing sub-task).
+            stream=True,
+        )
+    except OSError as exc:
+        log("WARN", f"{label}: the command could not be started: {exc}")
+        return subprocess.CompletedProcess(argv, SHELL_COMMAND_NOT_FOUND, "", str(exc))
+
+
 def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: C901 -- 28 when the ceiling of 15 was set; must not grow
     """Clone repo, create branch, configure git auth, run mise install.
 
@@ -518,16 +545,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         # and let the run proceed. The post-agent gate re-runs the build with the
         # same ceiling and surfaces an honest "timed out" if it's genuinely too slow.
         try:
-            result = run_cmd(
-                build_argv,
-                label="verify-build-pre",
-                cwd=repo_dir,
-                check=False,
-                timeout=BUILD_VERIFY_TIMEOUT_S,
-                # Stream live → the full baseline-build log reaches CloudWatch
-                # verbatim (buffered capture would hide the failing sub-task).
-                stream=True,
-            )
+            result = _run_baseline(build_argv, "verify-build-pre", repo_dir)
         except subprocess.TimeoutExpired:
             log(
                 "WARN",
@@ -599,14 +617,7 @@ def setup_repo(config: TaskConfig, progress: Any = None) -> RepoSetup:  # noqa: 
         # slow lint must not crash the task before the agent runs). A timeout →
         # no usable lint baseline → treat as not-a-regression.
         try:
-            result = run_cmd(
-                lint_argv,
-                label="verify-lint-pre",
-                cwd=repo_dir,
-                check=False,
-                timeout=BUILD_VERIFY_TIMEOUT_S,
-                stream=True,  # full lint output → CloudWatch verbatim
-            )
+            result = _run_baseline(lint_argv, "verify-lint-pre", repo_dir)
         except subprocess.TimeoutExpired:
             log(
                 "WARN",
