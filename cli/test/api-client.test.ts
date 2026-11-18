@@ -33,6 +33,7 @@ const mockGetAuthToken = getAuthToken as jest.Mock;
 jest.mock('../src/config', () => ({
   loadConfig: jest.fn().mockReturnValue({
     api_url: 'https://api.example.com',
+    registry_api_url: 'https://registry.example.com',
     region: 'us-east-1',
     user_pool_id: 'pool-id',
     client_id: 'client-id',
@@ -671,6 +672,26 @@ describe('ApiClient', () => {
       expect(logged).toContain('Response body');
       expect(logged).not.toContain('bgak_live_secret');
       expect(logged).toContain('[REDACTED]');
+    });
+
+    test('masks a secret field in the logged request body', async () => {
+      mockFetch.mockResolvedValue({ ok: true, status: 201, statusText: 'Created', json: async () => ({ data: {} }) });
+
+      await client.registryPublish({
+        kind: 'mcp_server',
+        namespace: 'ns',
+        name: 'srv',
+        asset_version: '1.0.0',
+        discovery: {},
+        runtime: { headers: { Authorization: 'Bearer not-a-real-token' } },
+      });
+
+      // The server still gets the header; only what --verbose prints is masked.
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).runtime.headers.Authorization).toBe('Bearer not-a-real-token');
+      const logged = errorSpy.mock.calls.map(args => args.join(' ')).join('\n');
+      expect(logged).toContain('Request body');
+      expect(logged).toContain('"runtime":{"headers":{"Authorization":"[REDACTED]"}}');
+      expect(logged).not.toContain('not-a-real-token');
     });
   });
 

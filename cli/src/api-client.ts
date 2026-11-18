@@ -19,7 +19,7 @@
 
 import { getAuthToken } from './auth';
 import { loadConfig } from './config';
-import { debug, isVerbose, redactSensitive } from './debug';
+import { debug, isVerbose, redactedJson } from './debug';
 import { ApiError, CliError } from './errors';
 import {
   ApiKeyDetail,
@@ -128,10 +128,10 @@ export class ApiClient {
     const url = `${baseUrl ?? this.getBaseUrl()}${path}`;
 
     debug(`${method} ${url}`);
-    // Redaction + stringification are gated on isVerbose() so the deep copy
-    // doesn't run on every request when verbose is off (watch polls hot).
+    // Redaction + stringification are gated on isVerbose() so they don't
+    // run on every request when verbose is off (watch polls hot).
     if (body && isVerbose()) {
-      debug(`Request body: ${JSON.stringify(redactSensitive(body))}`);
+      debug(`Request body: ${redactedJson(body)}`);
     }
 
     const res = await fetch(url, {
@@ -158,7 +158,7 @@ export class ApiClient {
     if (jsonParseOk && isVerbose()) {
       // Redact secret-bearing fields (e.g. the one-time webhook `secret`) —
       // verbose output ends up in scrollback / CI logs.
-      debug(`Response body: ${JSON.stringify(redactSensitive(json))}`);
+      debug(`Response body: ${redactedJson(json)}`);
     }
 
     if (!res.ok) {
