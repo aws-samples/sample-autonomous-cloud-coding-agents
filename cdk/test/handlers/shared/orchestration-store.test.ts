@@ -19,6 +19,7 @@
 
 import { GetCommand, BatchWriteCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import type { SubIssueNode } from '../../../src/handlers/shared/linear-subissue-fetch';
+import { discoverOrchestration } from '../../../src/handlers/shared/orchestration-discovery';
 import {
   seedOrchestration,
   setRetryCommentId,
@@ -278,6 +279,140 @@ describe('seedOrchestration — first write', () => {
     const puts = ddb.send.mock.calls[1][0].input.RequestItems[TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>;
     const meta = puts.find((p) => p.PutRequest.Item.sub_issue_id === '#meta')!.PutRequest.Item;
     expect(meta.channel_source).toBeUndefined();
+  });
+});
+
+describe('rows that DynamoDB hands back unprocessed', () => {
+  // A BatchWriteItem that is throttled answers 200 and returns the puts it did
+  // not make in UnprocessedItems. Nothing resends them: left unread, the epic
+  // was short of child rows while its meta row and the log said "seeded".
+  type Put = { PutRequest: { Item: Record<string, unknown> } };
+  const puts = (ddb: MockDdb): Put[][] => ddb.send.mock.calls
+    .map((c) => c[0])
+    .filter((cmd) => cmd instanceof BatchWriteCommand)
+    .map((cmd) => cmd.input.RequestItems![TABLE] as Put[]);
+  const ids = (batch: Put[]) => batch.map((put) => put.PutRequest.Item.sub_issue_id);
+  /** Answers every BatchWrite by handing back the puts that ``keep`` selects. */
+  const throttled = (keep: (put: Put) => boolean) => async (cmd: unknown) => {
+    if (cmd instanceof GetCommand) return { Item: undefined };
+    if (cmd instanceof QueryCommand) {
+      return { Items: [{ orchestration_id: deriveOrchestrationId('PARENT'), sub_issue_id: '#meta', repo: 'o/r', platform_user_id: 'u1' }] };
+    }
+    if (!(cmd instanceof BatchWriteCommand)) return {};
+    const unprocessed = (cmd.input.RequestItems![TABLE] as Put[]).filter(keep);
+    return unprocessed.length > 0 ? { UnprocessedItems: { [TABLE]: unprocessed } } : {};
+  };
+  const seed = (ddb: MockDdb, children: SubIssueNode[]) => seedOrchestration({
+    ddb: ddb as never,
+    tableName: TABLE,
+    parentIssueRef: 'PARENT',
+    credentialsRef: 'WS',
+    repo: 'o/r',
+    children,
+    now: NOW,
+    releaseContext: RC,
+  });
+
+  beforeEach(() => { jest.useFakeTimers(); });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('the seed sends them again, after a pause, and only them', async () => {
+    const ddb = makeDdb();
+    let answers = 0;
+    // The first answer hands A back; the second takes it.
+    ddb.send.mockImplementation(throttled((put) => put.PutRequest.Item.sub_issue_id === 'A' && (answers += 1) === 1));
+
+    const seeding = seed(ddb, [child('A'), child('B', ['A'])]);
+    await jest.advanceTimersByTimeAsync(99);
+    expect(puts(ddb)).toHaveLength(1); // not resent at once: a throttled table needs the pause
+    await jest.advanceTimersByTimeAsync(1);
+
+    expect((await seeding).rowsWritten).toBe(3);
+    expect(puts(ddb).map(ids)).toEqual([['A', 'B', '#meta'], ['A']]);
+  });
+
+  test('an extend sends them again before it counts the new rows on the meta row', async () => {
+    const ddb = makeDdb();
+    let answers = 0;
+    ddb.send.mockImplementation(throttled((put) => put.PutRequest.Item.sub_issue_id === 'B' && (answers += 1) === 1));
+
+    const extending = extendOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      graph: [child('A'), child('B')],
+      now: NOW,
+    });
+    await jest.advanceTimersByTimeAsync(100);
+
+    expect((await extending).addedSubIssueIds).toEqual(['A', 'B']);
+    expect(puts(ddb).map(ids)).toEqual([['A', 'B'], ['B']]);
+    const sent = ddb.send.mock.calls.map((c) => c[0].constructor.name);
+    expect(sent).toEqual(['QueryCommand', 'BatchWriteCommand', 'BatchWriteCommand', 'UpdateCommand']);
+  });
+
+  test('rows that stay unprocessed fail the seed after five attempts, before any later row is sent', async () => {
+    const ddb = makeDdb();
+    // 30 children: two requests. A row of the first one is never taken.
+    ddb.send.mockImplementation(throttled((put) => put.PutRequest.Item.sub_issue_id === 'C7'));
+
+    const outcome = seed(ddb, Array.from({ length: 30 }, (_, i) => child(`C${i}`)))
+      .then(() => 'seeded', (err: Error) => err.message);
+    await jest.advanceTimersByTimeAsync(100 + 200 + 400 + 800);
+
+    // Five attempts at the first request, with growing pauses between them...
+    expect(puts(ddb).map((batch) => batch.length)).toEqual([25, 1, 1, 1, 1]);
+    // ...and no more, however long one waits.
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(puts(ddb)).toHaveLength(5);
+    // The second request holds the meta row: it was never sent, so a re-applied
+    // trigger finds no orchestration and seeds again.
+    expect(puts(ddb).flatMap(ids)).not.toContain('#meta');
+    expect(await outcome).toBe('1 orchestration row(s) were not written: DynamoDB left them unprocessed 5 times');
+  });
+
+  test.each([
+    ['a first trigger', undefined, 'Could not persist the orchestration graph. Please re-apply the trigger.'],
+    ['a re-trigger that adds a sub-issue', { sub_issue_id: '#meta' }, 'Could not extend the orchestration graph. Please re-apply the trigger.'],
+  ])('what the caller of %s is told when rows stay unprocessed', async (_name, existingMeta, message) => {
+    // Through discovery, as the webhook processors call it: they post this text
+    // on the issue and start nothing.
+    const ddb = makeDdb();
+    const answer = throttled(() => true);
+    ddb.send.mockImplementation(async (cmd: unknown) => (cmd instanceof GetCommand ? { Item: existingMeta } : answer(cmd)));
+
+    const discovering = discoverOrchestration({
+      ddb: ddb as never,
+      tableName: TABLE,
+      parentIssueRef: 'PARENT',
+      credentialsRef: 'WS',
+      repo: 'o/r',
+      now: NOW,
+      releaseContext: RC,
+      graphSource: async () => ({ kind: 'ok', parentIssueId: 'PARENT', children: [child('A')] }),
+    });
+    await jest.advanceTimersByTimeAsync(60_000);
+
+    expect(await discovering).toEqual({ kind: 'error', message });
+    expect(ddb.send.mock.calls.some((c) => c[0] instanceof UpdateCommand)).toBe(false); // no child_count for rows that are not there
+  });
+
+  test('the pause doubles: the third attempt comes 200 ms after the second', async () => {
+    const ddb = makeDdb();
+    ddb.send.mockImplementation(throttled((put) => put.PutRequest.Item.sub_issue_id === 'A'));
+    const outcome = seed(ddb, [child('A')]).then(() => 'seeded', (err: Error) => err.message);
+
+    await jest.advanceTimersByTimeAsync(100);
+    expect(puts(ddb)).toHaveLength(2);
+    await jest.advanceTimersByTimeAsync(199);
+    expect(puts(ddb)).toHaveLength(2);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(puts(ddb)).toHaveLength(3);
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(puts(ddb)).toHaveLength(5);
+    expect(await outcome).toMatch(/^1 orchestration row\(s\) were not written/);
   });
 });
 
@@ -957,7 +1092,7 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
   const ORCH = deriveOrchestrationId(PARENT);
 
   /** A loadOrchestration Query response: meta + existing child rows. */
-  function existing(children: Array<{ id: string; deps?: string[]; status: string }>) {
+  function existing(children: Array<{ id: string; deps?: string[]; status: string; title?: string; description?: string }>) {
     const meta = {
       orchestration_id: ORCH,
       sub_issue_id: '#meta',
@@ -977,6 +1112,8 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
       repo: 'o/r',
       depends_on: c.deps ?? [],
       child_status: c.status,
+      ...(c.title !== undefined && { title: c.title }),
+      ...(c.description !== undefined && { description: c.description }),
       created_at: NOW,
       updated_at: NOW,
     }));
@@ -1209,5 +1346,242 @@ describe('extendOrchestration — add nodes to an already-seeded epic', () => {
     // The meta update REMOVEs rollup_posted_at so the reconciler can re-claim
     // and re-settle the parent state when the added node finishes.
     expect(upd.input.UpdateExpression).toContain('REMOVE rollup_posted_at');
+  });
+
+  describe('the integration node of an extend follows the edges as they are stored', () => {
+    // Discovery computes the integration node from the edges the issues DECLARE.
+    // There a node that stacks on the epic tip (it declares no dependency) looks
+    // like one more leaf, next to the tip.
+    const INTEGRATION = `${ORCH}__integration`;
+    const written = (ddb: MockDdb) => ddb.send.mock.calls
+      .map((c) => c[0])
+      .filter((cmd) => cmd instanceof BatchWriteCommand)
+      .flatMap((cmd) => (cmd.input.RequestItems![TABLE] as Array<{ PutRequest: { Item: Record<string, unknown> } }>)
+        .map((request) => request.PutRequest.Item));
+
+    test('one step added to a finished chain adds one row: it IS the combined result', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'succeeded' }]))
+        .mockResolvedValue({});
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A'), child('B', ['A']), child('C'), child(INTEGRATION, ['B', 'C'])]),
+      });
+
+      // C is stacked on B, so the chain still has one leaf: nothing to combine.
+      expect(result.addedSubIssueIds).toEqual(['C']);
+      expect(result.releasableSubIssueIds).toEqual(['C']);
+      expect(written(ddb).map((row) => [row.sub_issue_id, row.depends_on])).toEqual([['C', ['B']]]);
+      const meta = ddb.send.mock.calls.find((c) => c[0] instanceof UpdateCommand)![0];
+      expect(meta.input.ExpressionAttributeValues[':n']).toBe(3);
+    });
+
+    test('two steps added side by side are combined, and the tip they stack on is not merged again', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'succeeded' }]))
+        .mockResolvedValue({});
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A'), child('B', ['A']), child('C'), child('D'), child(INTEGRATION, ['B', 'C', 'D'])]),
+      });
+
+      expect(result.addedSubIssueIds).toEqual(['C', 'D', INTEGRATION]);
+      expect(result.releasableSubIssueIds).toEqual(['C', 'D']);
+      expect(written(ddb).map((row) => [row.sub_issue_id, row.depends_on, row.child_status])).toEqual([
+        ['C', ['B'], 'ready'],
+        ['D', ['B'], 'ready'],
+        [INTEGRATION, ['C', 'D'], 'blocked'],
+      ]);
+    });
+
+    test('a later re-trigger of the extended chain adds nothing', async () => {
+      // C is stored with the edge to B that the first extend gave it. The issue
+      // itself still declares none, so discovery proposes the integration node
+      // again, on every re-trigger.
+      const ddb = makeDdb();
+      ddb.send.mockResolvedValueOnce(existing([
+        { id: 'A', status: 'succeeded' },
+        { id: 'B', deps: ['A'], status: 'succeeded' },
+        { id: 'C', deps: ['B'], status: 'released' },
+      ]));
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A'), child('B', ['A']), child('C'), child(INTEGRATION, ['B', 'C'])]),
+      });
+
+      expect(result).toEqual({ orchestrationId: ORCH, addedSubIssueIds: [], releasableSubIssueIds: [] });
+      expect(ddb.send).toHaveBeenCalledTimes(1); // the load: no row, and the epic is not re-opened
+    });
+
+    test('a new node that declares its own edge and makes a second leaf gets the integration node', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'succeeded' }, { id: 'B', deps: ['A'], status: 'succeeded' }]))
+        .mockResolvedValue({});
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A'), child('B', ['A']), child('C', ['A']), child(INTEGRATION, ['B', 'C'])]),
+      });
+
+      expect(result.addedSubIssueIds).toEqual(['C', INTEGRATION]);
+      expect(written(ddb).map((row) => [row.sub_issue_id, row.depends_on])).toEqual([
+        ['C', ['A']],
+        [INTEGRATION, ['B', 'C']],
+      ]);
+    });
+  });
+
+  describe('the text of a sub-issue that has not started is read again', () => {
+    // A child is started with the title and description stored on its row. They
+    // were written once, at the first seed, so a sub-issue that was reworded
+    // after a refusal (content policy, validation) was sent again as it was.
+    const textUpdates = (ddb: MockDdb) => ddb.send.mock.calls
+      .map((c) => c[0])
+      .filter((cmd): cmd is UpdateCommand => cmd instanceof UpdateCommand && cmd.input.Key?.sub_issue_id !== '#meta');
+
+    test('a reworded sub-issue that failed is stored with its new title and description', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([
+          { id: 'A', status: 'succeeded', title: 'First step', description: 'as it ran' },
+          { id: 'B', deps: ['A'], status: 'failed', title: 'old title', description: 'old text' },
+        ]))
+        .mockResolvedValueOnce({}); // the text update of B
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([
+          child('A', [], { title: 'First step, renamed', description: 'changed after it ran' }),
+          child('B', ['A'], { title: 'new title', description: 'new text' }),
+        ]),
+      });
+
+      // No node was added: the caller goes on to retry, and reads the rows again.
+      expect(result.addedSubIssueIds).toEqual([]);
+      const updates = textUpdates(ddb);
+      expect(updates).toHaveLength(1); // A succeeded: it keeps the text it ran with
+      expect(updates[0].input).toEqual({
+        TableName: TABLE,
+        Key: { orchestration_id: ORCH, sub_issue_id: 'B' },
+        // updated_at is not written: it is the stamp of the row's last status change.
+        UpdateExpression: 'SET #title = :title, #description = :description',
+        ConditionExpression: 'child_status IN (:blocked, :ready, :failed, :skipped)',
+        ExpressionAttributeNames: { '#title': 'title', '#description': 'description' },
+        ExpressionAttributeValues: {
+          ':title': 'new title',
+          ':description': 'new text',
+          ':blocked': 'blocked',
+          ':ready': 'ready',
+          ':failed': 'failed',
+          ':skipped': 'skipped',
+        },
+      });
+    });
+
+    test.each(['blocked', 'ready', 'skipped'])('a %s sub-issue is refreshed as well', async (status) => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status, title: 'old title' }]))
+        .mockResolvedValueOnce({});
+      await extendOrchestration({ ddb: ddb as never, ...extendParams([child('A', [], { title: 'new title' })]) });
+      expect(textUpdates(ddb).map((u) => u.input.ExpressionAttributeValues![':title'])).toEqual(['new title']);
+    });
+
+    test.each(['releasing', 'released', 'succeeded'])('a %s sub-issue keeps the text its task was started with', async (status) => {
+      const ddb = makeDdb();
+      ddb.send.mockResolvedValueOnce(existing([{ id: 'A', status, title: 'old title', description: 'old text' }]));
+      await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A', [], { title: 'new title', description: 'new text' })]),
+      });
+      expect(ddb.send).toHaveBeenCalledTimes(1); // the load, and no write
+    });
+
+    test('a description that was deleted is removed from the row', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'failed', title: 'Same title', description: 'old text' }]))
+        .mockResolvedValueOnce({});
+      // The graph sources report a missing description as absent or as ''.
+      await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A', [], { title: 'Same title', description: '' })]),
+      });
+      const [update] = textUpdates(ddb);
+      expect(update.input.UpdateExpression).toBe('SET #title = :title REMOVE #description');
+      expect(update.input.ExpressionAttributeValues).not.toHaveProperty(':description');
+    });
+
+    test('text that did not change is not written', async () => {
+      const ddb = makeDdb();
+      ddb.send.mockResolvedValueOnce(existing([
+        { id: 'A', status: 'failed', title: 'Same title', description: 'same text' },
+        { id: 'B', status: 'blocked', title: 'No description' },
+      ]));
+      await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([
+          child('A', [], { title: 'Same title', description: 'same text' }),
+          child('B', [], { title: 'No description', description: '' }),
+        ]),
+      });
+      expect(ddb.send).toHaveBeenCalledTimes(1);
+    });
+
+    test('a sub-issue that was started while the graph was read is left as it is', async () => {
+      // The other order of the two writers: a releaser claimed the row between
+      // this extend's read and its write. The store refuses the write, and the
+      // row keeps the text of the task that is starting.
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([
+          { id: 'A', status: 'ready', title: 'old title' },
+          { id: 'B', status: 'failed', title: 'old title' },
+        ]))
+        .mockRejectedValueOnce(Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' }))
+        .mockResolvedValueOnce({});
+      const result = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A', [], { title: 'new title' }), child('B', [], { title: 'new title' })]),
+      });
+      expect(result.addedSubIssueIds).toEqual([]);
+      // B is still refreshed: one refusal does not end the pass.
+      expect(textUpdates(ddb).map((u) => u.input.Key!.sub_issue_id)).toEqual(['A', 'B']);
+    });
+
+    test('a write that fails for another reason fails the extend, so the caller does not retry on old text', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'failed', title: 'old title' }]))
+        .mockRejectedValueOnce(new Error('throttled'));
+      await expect(extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A', [], { title: 'new title' })]),
+      })).rejects.toThrow('throttled');
+    });
+
+    test('an extend that adds a node refreshes the others too, and a rejected one writes nothing', async () => {
+      const ddb = makeDdb();
+      ddb.send
+        .mockResolvedValueOnce(existing([{ id: 'A', status: 'failed', title: 'old title' }]))
+        .mockResolvedValue({});
+      const added = await extendOrchestration({
+        ddb: ddb as never,
+        ...extendParams([child('A', [], { title: 'new title' }), child('B', ['A'])]),
+      });
+      expect(added.addedSubIssueIds).toEqual(['B']);
+      expect(textUpdates(ddb).map((u) => u.input.Key!.sub_issue_id)).toEqual(['A']);
+
+      // A new edge that closes a cycle: rejected before anything is written.
+      const rejecting = makeDdb();
+      rejecting.send.mockResolvedValueOnce(existing([{ id: 'A', status: 'failed', title: 'old title' }]));
+      const rejected = await extendOrchestration({
+        ddb: rejecting as never,
+        ...extendParams([child('A', ['B'], { title: 'new title' }), child('B', ['A'])]),
+      });
+      expect(rejected.rejected?.reason).toBe('cycle');
+      expect(rejecting.send).toHaveBeenCalledTimes(1);
+    });
   });
 });

@@ -2035,6 +2035,7 @@ function orchestrationStore(
     child_status: string;
     child_task_id?: string;
     child_branch_name?: string;
+    failure_reason?: string;
   }>,
   meta: StoreRow = {},
 ) {
@@ -2059,6 +2060,8 @@ function orchestrationStore(
       ...c,
     });
   }
+  /** TaskTable records, by task id: what the panel reads of a failed child's task. */
+  const tasks = new Map<string, StoreRow>();
   let pending: { when: (cmd: StoreCommand) => boolean; run: () => unknown } | undefined;
 
   ddbSend.mockImplementation(async (cmd: StoreCommand) => {
@@ -2068,7 +2071,11 @@ function orchestrationStore(
       await run();
     }
     const { _type, input } = cmd;
-    // The task table: no task record matters to these tests, so a read finds nothing.
+    if (_type === 'BatchGet') {
+      const [[table, { Keys }]] = Object.entries(input.RequestItems as Record<string, { Keys: Array<{ task_id: string }> }>);
+      return { Responses: { [table]: Keys.flatMap((k) => tasks.get(k.task_id) ?? []) } };
+    }
+    // Any other read of the task table finds nothing.
     if (input.TableName !== 'OrchestrationTable') return {};
     if (_type === 'Query') {
       const taskId = (input.ExpressionAttributeValues as StoreRow)[':tid'];
@@ -2094,6 +2101,7 @@ function orchestrationStore(
     row: (subIssueId: string) => rows.get(subIssueId)!,
     status: (subIssueId: string) => rows.get(subIssueId)?.child_status,
     meta: rows.get('#meta')!,
+    tasks,
     /** Run ``run`` once, just before the first command that ``when`` accepts. */
     before(when: (cmd: StoreCommand) => boolean, run: () => unknown): void {
       pending = { when, run };
@@ -2468,5 +2476,172 @@ describe('orchestration-reconciler handler — the once-only claim of the final 
     await handler(lastChildCompleted());
     expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'white_check_mark');
     expect(store.meta.retry_comment_id).toBeUndefined();
+  });
+
+  describe('for one day after the epic ended', () => {
+    // An edit that can never land: the panel comment was deleted (by a person, or
+    // by a retry whose new panel could not be posted), or its issue is gone.
+    // Giving the claim back for such an epic on every sweep run, for as long as
+    // its rows exist, repeats the parent's state and reaction calls each time and
+    // never answers the retry comment.
+    const ENDED = Date.parse('2026-06-08T12:00:00.000Z');
+    /** A settle of the finished epic, as the sweep makes one, this long after its last sub-issue ended. */
+    const settleAfter = (store: ReturnType<typeof orchestrationStore>, minutes: number) => {
+      const now = new Date(ENDED + minutes * 60_000).toISOString();
+      return refreshPanelAndSettle(
+        'orch_1',
+        [{
+          orchestration_id: 'orch_1',
+          sub_issue_id: 'A',
+          parent_issue_ref: 'PARENT',
+          credentials_ref: 'WS',
+          repo: 'o/r',
+          depends_on: [],
+          child_status: 'succeeded',
+          child_task_id: 'TA',
+          created_at: new Date(ENDED).toISOString(),
+          updated_at: new Date(ENDED).toISOString(),
+        }],
+        {
+          credentials_ref: 'WS',
+          parent_issue_ref: 'PARENT',
+          status_comment_id: 'panel-1',
+          ...(typeof store.meta.retry_comment_id === 'string' && { retry_comment_id: store.meta.retry_comment_id }),
+        },
+        now,
+      ).then(() => now);
+    };
+    const finished = () => orchestrationStore(
+      [{ sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' }],
+      { retry_comment_id: 'retry-cmt-1' },
+    );
+
+    test('a final edit that fails 25 hours after the end keeps the claim and answers the retry comment', async () => {
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+
+      const now = await settleAfter(store, 25 * 60);
+
+      expect(store.meta.rollup_posted_at).toBe(now);
+      expect(swapCommentReactionMock).toHaveBeenCalledWith(expect.anything(), 'retry-cmt-1', 'white_check_mark');
+      expect(store.meta.retry_comment_id).toBeUndefined();
+    });
+
+    test('the sweep stops trying an edit that never lands', async () => {
+      const store = finished();
+      upsertStatusCommentMock.mockResolvedValue(null);
+
+      // Inside the day every run claims, fails and gives the claim back.
+      for (const minutes of [10, 20, 23 * 60 + 50]) {
+        await settleAfter(store, minutes);
+        expect(store.meta.rollup_posted_at).toBeUndefined();
+      }
+      expect(swapCommentReactionMock).not.toHaveBeenCalled();
+
+      // The first run after it keeps the claim and answers the retry comment.
+      const kept = await settleAfter(store, 24 * 60 + 10);
+      expect(store.meta.rollup_posted_at).toBe(kept);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+
+      // The runs after that find the claim taken and leave the parent alone.
+      transitionIssueStateMock.mockClear();
+      swapIssueReactionMock.mockClear();
+      await settleAfter(store, 24 * 60 + 20);
+      expect(store.meta.rollup_posted_at).toBe(kept);
+      expect(parentSettled()).toEqual([false, false]);
+      expect(swapCommentReactionMock).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('orchestration-reconciler handler — the reason shown for a failed sub-issue', () => {
+  // A retry keeps the id of the task that failed before. When the retry itself
+  // is refused (budget used up, repository not onboarded), the row is failed
+  // again and carries the reason of the refusal, next to that old task id.
+  const REFUSED = "Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC "
+    + 'month, then reply `@bgagent retry` on the epic to re-run.';
+  beforeEach(() => {
+    ddbSend.mockReset();
+    createTaskCoreMock.mockReset().mockResolvedValue({
+      statusCode: 201, body: JSON.stringify({ data: { task_id: 'T2', branch_name: 'branch-2' } }),
+    });
+    upsertStatusCommentMock.mockReset().mockResolvedValue('panel-1');
+    transitionIssueStateMock.mockReset().mockResolvedValue(true);
+    swapIssueReactionMock.mockReset().mockResolvedValue(true);
+    revertIssueToNotStartedMock.mockReset().mockResolvedValue(true);
+  });
+
+  const event = (taskId: string, status: string) => ({
+    Records: [taskRecord({ task_id: taskId, status, orchestration_id: 'orch_1' })],
+  }) as never;
+  const lastPanel = () => upsertStatusCommentMock.mock.calls.at(-1)![2] as string;
+
+  test('after a retry that could not start, the panel says why, not how the earlier run failed', async () => {
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+
+    await handler(event('TA', 'COMPLETED')); // any settle of the finished epic: a late write, the sweep
+
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('a start that is refused in the pass that renders the panel is reported by that pass', async () => {
+    // A ends and B, which a retry reset and which still names its earlier task,
+    // is started by the same invocation. The budget is used up.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked', child_task_id: 'T1' },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+    createTaskCoreMock.mockResolvedValue({ statusCode: 429, body: '{"error":{"code":"BUDGET_EXCEEDED"}}' });
+
+    await handler(event('TA', 'COMPLETED'));
+
+    expect(store.row('B')).toMatchObject({ child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED });
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('a late event of the earlier task, processed while the retry is refused, shows the refusal', async () => {
+    // The two events interleaved: the event of T1 reads the rows while B is
+    // failed by T1; the retry then resets B, tries to start it and is refused;
+    // only then the event writes its (unchanged) verdict and renders the panel.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'succeeded', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'failed', child_task_id: 'T1' },
+    ]);
+    store.tasks.set('T1', { task_id: 'T1', build_passed: false });
+    store.before((cmd) => cmd._type === 'Update', () => { store.row('B').failure_reason = REFUSED; });
+
+    await handler(event('T1', 'FAILED'));
+
+    expect(store.row('B')).toMatchObject({ child_status: 'failed', child_task_id: 'T1', failure_reason: REFUSED });
+    expect(lastPanel()).toContain('a monthly budget is exhausted');
+    expect(lastPanel()).not.toContain('Build/tests failed');
+  });
+
+  test('after a later retry that did start and then failed, the panel says how that run failed', async () => {
+    // The other order. B is waiting again (a second retry reset it) and still
+    // carries the reason of the refused one. A ends, B starts as T2 and its
+    // build fails: the reason of the refusal must not be what the panel shows.
+    const store = orchestrationStore([
+      { sub_issue_id: 'A', child_status: 'released', child_task_id: 'TA' },
+      { sub_issue_id: 'B', depends_on: ['A'], child_status: 'blocked', child_task_id: 'T1', failure_reason: REFUSED },
+    ]);
+    store.tasks.set('T2', { task_id: 'T2', build_passed: false });
+
+    await handler(event('TA', 'COMPLETED'));
+    // The start took the reason of the refusal off the row.
+    expect(store.row('B')).toMatchObject({ child_status: 'released', child_task_id: 'T2' });
+    expect(store.row('B').failure_reason).toBeUndefined();
+    await handler(event('T2', 'FAILED'));
+
+    expect(store.status('B')).toBe('failed');
+    expect(lastPanel()).toContain('Build/tests failed — see the build log in CloudWatch for task `T2`');
+    expect(lastPanel()).not.toContain('a monthly budget is exhausted');
   });
 });

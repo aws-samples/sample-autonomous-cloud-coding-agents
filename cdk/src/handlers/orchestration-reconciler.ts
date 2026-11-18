@@ -387,7 +387,8 @@ async function resolveChildPrUrls(
  * TaskTable so the panel can render WHY it failed + WHERE to read it. Mirrors
  * {@link resolveChildPrUrls}: ``error_message`` / ``build_passed`` land on the
  * TaskRecord (not the orchestration row), and by the time the epic settles
- * they've been written. Only failed children with a task id are read. Composes
+ * they've been written. Only failed children with a task id and no reason of
+ * their own are read. Composes
  * the one-line reason via {@link renderPanelFailureReason}, tagging the
  * synthetic integration node so its copy names the combined merge build — the
  * exact failure that was previously surfaced as a bare "❌ … failed".
@@ -397,17 +398,17 @@ async function resolveChildPrUrls(
 async function resolveChildFailureReasons(
   children: readonly OrchestrationChildRow[],
 ): Promise<Record<string, string>> {
-  // A child that failed WITHOUT ever getting a task (deterministic create
-  // failure — guardrail/validation) carries its reason on the row's
-  // ``failure_reason`` instead of a task record. Seed the map with those first
-  // so the panel ❌ has a "why + how to fix" line even though there's no task.
+  // A child whose start was refused (deterministic create failure — guardrail,
+  // validation, budget) carries the reason on the row's ``failure_reason``: no
+  // task exists to read it from. Seed the map with those first so the panel ❌
+  // has a "why + how to fix" line. The row can still name a task, the one of an
+  // earlier run (a retry keeps the id): the row's reason is the newer of the
+  // two, because the release that starts a task removes it.
   const out: Record<string, string> = {};
   for (const c of children) {
-    if (c.child_status === 'failed' && !c.child_task_id && c.failure_reason) {
-      out[c.sub_issue_id] = c.failure_reason;
-    }
+    if (c.child_status === 'failed' && c.failure_reason) out[c.sub_issue_id] = c.failure_reason;
   }
-  const failed = children.filter((c) => c.child_status === 'failed' && c.child_task_id);
+  const failed = children.filter((c) => c.child_status === 'failed' && c.child_task_id && !c.failure_reason);
   if (failed.length === 0) return out;
   const taskToSub = new Map(failed.map((c) => [c.child_task_id!, c.sub_issue_id]));
   const isIntegration = new Map(failed.map((c) => [c.sub_issue_id, isIntegrationNode(c.sub_issue_id)]));
@@ -780,7 +781,7 @@ async function reconcileTerminalChild(evt: TerminalTaskEvent): Promise<void> {
  * panel BODY edit is idempotent (same body = no-op), so it always runs; the
  * parent-STATE mirror is claimed once via ``claimRollup`` on the first
  * all-terminal caller, which gives the claim back when its edit of the panel
- * does not land.
+ * does not land, for one day after the epic ended.
  */
 export async function refreshPanelAndSettle(
   orchestrationId: string,
@@ -885,7 +886,13 @@ export async function refreshPanelAndSettle(
   // that has a comment to edit: there a result without an id is a failed edit
   // (the adapter's null, or a throw). Without one it is also what a surface
   // that hands back no ids reports for a comment it did post.
-  if (allTerminal && won && meta.status_comment_id !== undefined && !panel.ok) {
+  //
+  // Only while the epic ended recently: an edit that can never land (the comment
+  // or its issue is gone) would otherwise be tried again by every sweep run for
+  // as long as the rows exist.
+  const endedAt = Math.max(...children.map((c) => Date.parse(c.updated_at)));
+  if (allTerminal && won && meta.status_comment_id !== undefined && !panel.ok
+    && Date.parse(now) - endedAt < GIVE_BACK_WINDOW_MS) {
     await releaseRollupClaim(orchestrationId, now);
     return;
   }
@@ -899,6 +906,9 @@ export async function refreshPanelAndSettle(
     await settleRetryComment(orchestrationId, meta.retry_comment_id, children, channel, meta);
   }
 }
+
+/** How long after its last sub-issue ended a finished epic still gets its claim back. */
+const GIVE_BACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Give back the once-only claim of a settle whose panel edit did not land, so

@@ -51,13 +51,14 @@ import { logger } from './logger';
 import { selectBaseBranch } from './orchestration-base-branch';
 import { isIntegrationNode } from './orchestration-integration-node';
 import { computeReconcilePlan } from './orchestration-reconcile';
-import type {
-  ChildStatus,
-  OrchestrationChildRow,
-  OrchestrationReleaseContext,
+import {
+  PARENT_CONTEXT_TRUNCATED,
+  type ChildStatus,
+  type OrchestrationChildRow,
+  type OrchestrationReleaseContext,
 } from './orchestration-store';
 import type { AttachmentRecord, ChannelSource } from './types';
-import { MAX_ATTACHMENTS_PER_TASK } from './validation';
+import { MAX_ATTACHMENTS_PER_TASK, MAX_TASK_DESCRIPTION_LENGTH } from './validation';
 import { CODING_WORKFLOW_ID } from './workflows';
 
 /**
@@ -216,8 +217,8 @@ const HTTP_SERVER_ERROR_MIN = 500;
  * Against the codes createTaskCore actually emits:
  *  - 400 (validation / guardrail block) and 422 (repo not onboarded) →
  *    DETERMINISTIC. Neither self-heals; the user must edit/reword the sub-issue
- *    or onboard the repo, THEN re-run via ``@bgagent retry``. Rolling back would
- *    loop the sweep forever.
+ *    and re-apply the trigger label, or onboard the repo and re-run via
+ *    ``@bgagent retry``. Rolling back would loop the sweep forever.
  *  - 429 (monthly budget exhausted) → DETERMINISTIC for this release attempt.
  *    An operator must adjust/disable the budget or wait for the next UTC month,
  *    then re-run via ``@bgagent retry``.
@@ -242,7 +243,10 @@ const HTTP_TOO_MANY_REQUESTS = 429; // BUDGET_EXCEEDED
  * changes the body prose; the body substring is only a refinement to name the
  * guardrail case specifically (a 400 is either a guardrail block or a plain
  * validation error, and the code alone doesn't tell them apart). Every reason
- * ends with the same next step — fix the cause, then ``@bgagent retry``.
+ * ends with the next step: fix the cause, then ``@bgagent retry``; or, when the
+ * cause is the sub-issue's own text, change it and re-apply the trigger label.
+ * A retry starts the child with the text stored on its row, and only a
+ * re-applied label reads the sub-issue again (``extendOrchestration``).
  */
 function deterministicFailureReason(statusCode: number, body: string): string {
   const retry = 'then reply `@bgagent retry` on the epic to re-run.';
@@ -252,14 +256,15 @@ function deterministicFailureReason(statusCode: number, body: string): string {
   if (statusCode === HTTP_TOO_MANY_REQUESTS) {
     return `Couldn't start — a monthly budget is exhausted. Adjust the budget or wait for the next UTC month, ${retry}`;
   }
+  const relabel = 'then remove and re-apply the trigger label on the epic '
+    + '(that reads the new text; `@bgagent retry` alone re-sends the old one).';
   // 400: distinguish a guardrail/content-policy block (rewordable) from other validation.
   if (/content policy|guardrail/i.test(body || '')) {
-    return `Blocked by content policy — reword this sub-issue, ${retry}`;
+    return `Blocked by content policy — reword this sub-issue, ${relabel}`;
   }
-  return `Couldn't start (validation error) — edit this sub-issue, ${retry}`;
+  return `Couldn't start (validation error) — edit this sub-issue, ${relabel}`;
 }
 
-/** Build the child task description from the sub-issue's identifier/title. */
 /**
  * The shared-context block prepended to every child's task description.
  *
@@ -271,13 +276,20 @@ function deterministicFailureReason(statusCode: number, body: string): string {
  *
  * Empty when the epic has no context (an older row, or a bare parent) so a child
  * prompt is never padded with an empty heading.
+ *
+ * ``room`` is what the task description has left for the block once the child's
+ * own text is in. The block is advisory, and a description over the limit is
+ * refused as a fault of the sub-issue, so the block is what gives way: the
+ * epic's body is cut to what fits, with the mark of a cut; without room for any
+ * of it the title stays; without room for that there is no block.
  */
 function parentContextBlock(
-  parentContext?: { readonly title?: string; readonly description?: string },
-): string[] {
-  const title = parentContext?.title?.trim();
-  const description = parentContext?.description?.trim();
-  if (!title && !description) return [];
+  parentContext: { readonly title?: string; readonly description?: string } | undefined,
+  room: number,
+): string {
+  const title = parentContext?.title?.trim() ?? '';
+  const description = parentContext?.description?.trim() ?? '';
+  if (!title && !description) return '';
   // DESCRIPTIVE, not imperative — deliberately, and verified against the live
   // guardrail. An instruction-shaped preamble ("use it exactly", "do not invent")
   // stacks with the epic's own imperatives and the whole task description trips the
@@ -286,30 +298,44 @@ function parentContextBlock(
   // wording passes, with the same epic text after it. So the constraint is conveyed
   // by stating what the siblings are already doing and what disagreeing with them
   // would mean — which the model acts on just as well and the screen accepts.
-  return [
+  const block = (body: string) => [
     '--- SHARED ORCHESTRATION CONTEXT (the parent epic) ---',
     'Several sub-issues of this epic are being built in parallel, and each was given',
     'the text below. The names, routes, fields and shapes it states are shared with',
     'those siblings; an alternative chosen here would not match theirs.',
     '',
     ...(title ? [`Epic: ${title}`, ''] : []),
-    ...(description ? [description, ''] : []),
+    ...(body ? [body, ''] : []),
     '--- END SHARED ORCHESTRATION CONTEXT ---',
-    '',
-  ];
+  ].join('\n');
+  const whole = block(description);
+  if (whole.length <= room) return whole;
+  const keep = description.length - (whole.length - room) - PARENT_CONTEXT_TRUNCATED.length;
+  // Cut, then freed of half a character and of white space at the cut.
+  const kept = keep > 0 ? description.slice(0, keep).replace(/\p{Surrogate}$/u, '').trimEnd() : '';
+  if (kept) return block(`${kept}${PARENT_CONTEXT_TRUNCATED}`);
+  return title && block('').length <= room ? block('') : '';
 }
 
+/** Build the child task description: the epic's shared context, then the child's own text. */
 function buildChildDescription(
   row: OrchestrationChildRow,
   parentContext?: { readonly title?: string; readonly description?: string },
 ): string {
+  const own = childOwnText(row);
+  // 2: the blank line between the block and the child's own text.
+  const shared = parentContextBlock(parentContext, MAX_TASK_DESCRIPTION_LENGTH - own.length - 2);
+  return [shared, own].filter(Boolean).join('\n\n') || `Orchestration child ${row.sub_issue_id}`;
+}
+
+/** What the child itself is asked to do, without the epic's shared context. */
+function childOwnText(row: OrchestrationChildRow): string {
   // The synthetic integration node has no real sub-issue / feature
   // work — its job is to merge all leaf branches (already merged into its
   // branch by repo.py's predecessor-merge) into one combined result. Give
   // the agent a merge-focused instruction rather than a feature prompt.
   if (isIntegrationNode(row.sub_issue_id)) {
     return [
-      ...parentContextBlock(parentContext),
       'Integrate the completed sub-issue branches into one combined result.',
       '',
       "All predecessor sub-issue branches have already been merged into this task's",
@@ -320,10 +346,7 @@ function buildChildDescription(
       '- Open a PR with the combined result so the epic has a single reviewable artifact.',
     ].join('\n');
   }
-  const block = parentContextBlock(parentContext);
-  // ONE part: the caller joins parts with a blank line, which would double-space
-  // every line inside the block and break the delimiters' visual grouping.
-  const parts: string[] = block.length > 0 ? [block.join('\n').trimEnd()] : [];
+  const parts: string[] = [];
   if (row.display_id && row.title) {
     parts.push(`${row.display_id}: ${row.title}`);
   } else if (row.title) {
@@ -339,7 +362,7 @@ function buildChildDescription(
   // echoes the title.
   const desc = (row.description ?? '').trim();
   if (desc && desc !== row.title) parts.push(desc);
-  return parts.join('\n\n') || `Orchestration child ${row.sub_issue_id}`;
+  return parts.join('\n\n');
 }
 
 /**
@@ -603,12 +626,17 @@ export async function releaseChild(params: ReleaseChildParams): Promise<ReleaseC
   //
   // Persist the child's branch_name so a DEPENDENT child's release can
   // stack on / merge it (selectBaseBranch reads predecessor branch names).
+  //
+  // Drop the reason of an earlier start that was refused: from here on the
+  // row's outcome is this task's, and the panel shows a row's own reason before
+  // its task's.
   try {
     await ddb.send(new UpdateCommand({
       TableName: tableName,
       Key: { orchestration_id: row.orchestration_id, sub_issue_id: row.sub_issue_id },
       UpdateExpression:
-        'SET child_status = :released, child_task_id = :tid, child_branch_name = :bn, updated_at = :now',
+        'SET child_status = :released, child_task_id = :tid, child_branch_name = :bn, updated_at = :now'
+        + ' REMOVE failure_reason',
       ConditionExpression: 'child_status = :releasing',
       ExpressionAttributeValues: {
         ':released': 'released',
