@@ -107,9 +107,18 @@ const PATTERNS: readonly SecretPattern[] = [
   {
     name: 'CONNECTION_STRING',
     // scheme://user:password@host. The user and the password hold no
-    // whitespace, "/" or quote, so a plain URL is not matched up to a
-    // ":" and an "@" that merely follow it in the text. The user may hold
-    // an "@" (an e-mail address as login), the password may not.
+    // whitespace and no quote, so a plain URL is not matched up to a ":"
+    // and an "@" that merely follow it in the text. The user holds no "/"
+    // and may hold an "@" (an e-mail address as login), the password may
+    // not. A password that holds no "/" has no length limit, and neither
+    // has one that holds no ":" (base64 text holds "/" and no ":"). One
+    // that holds both counts up to 256 characters: unlimited, a text that
+    // repeats "x://" is scanned from each one to the end of the run, which
+    // is quadratic. What begins with a port and a "/" is no password (1 to
+    // 5 digits, also behind the rest of an IPv6 address, "]:"): there the
+    // ":" stands between the host and the port of a URL without a
+    // password, and the "@" belongs to its path
+    // (https://host:8443/@scope/package).
     // Second form: the user ends in the marker that AWS_KEY has put there.
     // What follows up to the "@" (the rest of a password, or ":" and a
     // password or session token) may have any length while it holds no
@@ -117,8 +126,10 @@ const PATTERNS: readonly SecretPattern[] = [
     // Without this form the rest of such a URL, with any secret in it,
     // would stay readable. The limit, and the stop at "[" (where the next
     // marker would begin), keep the scan linear. The u flag makes the
-    // limit count characters, as the agent's scanner does.
-    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']+:${NOT_ONLY_A_PLACEHOLDER}[^\s@/"']+|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
+    // limits count characters, as the agent's scanner does.
+    // contracts/secret-scan-vectors.json holds the cases that the tests of
+    // this scanner and of the agent's run.
+    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']+:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@/"']+|(?!(?:[^\s@/"']*\]:)?[0-9]{1,5}/)(?:[^\s@:"']+|[^\s@"']{1,256}))|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
   },
   {
     name: 'GITHUB_APP_TOKEN',

@@ -17,7 +17,15 @@
  *  SOFTWARE.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { DENY_REASON_SECRET_NAMES, scanDenyReason } from '../../../src/handlers/shared/deny-reason-scanner';
+
+// Shared with agent/tests/test_output_scanner.py: the agent's scanner has to
+// give the same text for a URL with a user and a password.
+const scanVectors = JSON.parse(
+  fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'contracts', 'secret-scan-vectors.json'), 'utf-8'),
+) as { vectors: { input: string; expected: string; note: string }[] };
 
 // Test fixtures are assembled at runtime so the source file itself
 // never contains a contiguous secret literal — Code Defender's
@@ -52,6 +60,8 @@ const FIX_PASSWORD = 's3cret' + 'P4ss';
 // brackets of a placeholder.
 const FIX_LETTERS_AND_DIGITS = 'Passw0rd' + '123';
 const FIX_CONNECTION_STRING = 'postgres://app' + ':s3cretP4ss' + '@db.internal:5432/app';
+// Base64 text holds "/", and so does many a generated password.
+const FIX_CONNECTION_STRING_WITH_SLASH = 'postgres://admin' + ':abc/def+ghiJKL' + '@db.internal:5432/app';
 const FIX_SMTP_URL = 'smtp://alerts@example.com' + ':s3cretP4ss' + '@smtp.example.com:587';
 const FIX_AWS_KEY_PAIR_URL = `s3a://${FIX_AWS_KEY}:${FIX_AWS_SECRET_ENDING_IN_SLASH}@bucket/path`;
 // A key id, a colon and a secret access key that holds no slash.
@@ -116,6 +126,7 @@ describe('scanDenyReason', () => {
     ['an AWS secret key that ends in "/"', `aws_secret_access_key = ${FIX_AWS_SECRET_ENDING_IN_SLASH}`, '[REDACTED-AWS_SECRET]'],
     ['an AWS secret key in the JSON form', `"SecretAccessKey": "${FIX_AWS_SECRET}"`, '"[REDACTED-AWS_SECRET]"'],
     ['a connection string with a password', `${FIX_CONNECTION_STRING} is down`, '[REDACTED-CONNECTION_STRING] is down'],
+    ['a connection string whose password holds a slash', `${FIX_CONNECTION_STRING_WITH_SLASH} is down`, '[REDACTED-CONNECTION_STRING] is down'],
     ['a connection string whose user is an e-mail address', `EMAIL_URL=${FIX_SMTP_URL}`, 'EMAIL_URL=[REDACTED-CONNECTION_STRING]'],
     ['an AWS key pair in a URL, with slashes in the secret', FIX_AWS_KEY_PAIR_URL, '[REDACTED-CONNECTION_STRING]'],
     ['a token in a git remote URL', FIX_GIT_URL, 'https://[REDACTED-GITHUB_URL_TOKEN]github.com/o/r.git'],
@@ -254,6 +265,10 @@ describe('scanDenyReason', () => {
   test('leaves a URL followed by an e-mail address alone', () => {
     const input = 'use https://example.com/guide instead; questions: ops@example.com';
     expect(scanDenyReason(input)).toBe(input);
+  });
+
+  test.each(scanVectors.vectors)('gives the text of contracts/secret-scan-vectors.json for $note', ({ input, expected }) => {
+    expect(scanDenyReason(input)).toBe(expected);
   });
 
   // URL templates: a placeholder where the password would stand. Source code

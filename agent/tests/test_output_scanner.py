@@ -1,8 +1,19 @@
 """Unit tests for output_scanner.py — secret/PII detection and redaction."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from output_scanner import ScanResult, scan_tool_output
+
+# Shared with cdk/test/handlers/shared/deny-reason-scanner.test.ts: the scanner
+# of deny reasons has to give the same text for a URL with a user and a password.
+_VECTORS = json.loads(
+    (Path(__file__).resolve().parents[2] / "contracts" / "secret-scan-vectors.json").read_text(
+        encoding="utf-8"
+    )
+)["vectors"]
 
 # An AWS access key id, a colon and a secret access key that holds no slash.
 _KEY_PAIR = "AKIAIOSFODNN7EXAMPLE:" + "A1b2" * 10
@@ -69,8 +80,8 @@ class TestScanToolOutput:
 
     def test_detects_aws_key_pair_in_a_url(self):
         # s3a://<key id>:<secret>@bucket. Nearly half of all secret keys hold a
-        # "/", which the connection-string pattern does not accept in a password;
-        # a URL whose user is a key id is replaced as a whole all the same.
+        # "/". The pair is replaced first, and the URL that is left, with the
+        # marker of the pair for a user, is replaced as a whole.
         content = "s3a://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket/path"
         result = scan_tool_output(content)
         assert result.findings == ["AWS_KEY detected", "CONNECTION_STRING detected"]
@@ -412,6 +423,17 @@ class TestScanToolOutput:
         result = scan_tool_output(content)
         assert result.findings == ["CONNECTION_STRING detected"]
         assert result.redacted_content == "EMAIL_URL=[REDACTED-CONNECTION_STRING]"
+
+    def test_detects_connection_string_with_a_slash_in_the_password(self):
+        # Base64 text holds "/", and so does many a generated password.
+        content = "postgres://admin:abc/def+ghiJKL@db.internal:5432/app"
+        result = scan_tool_output(content)
+        assert result.findings == ["CONNECTION_STRING detected"]
+        assert result.redacted_content == "[REDACTED-CONNECTION_STRING]"
+
+    @pytest.mark.parametrize("vector", _VECTORS, ids=lambda vector: vector["note"])
+    def test_url_vectors_shared_with_the_scanner_of_deny_reasons(self, vector):
+        assert scan_tool_output(vector["input"]).redacted_content == vector["expected"]
 
     # ---- URL templates: a placeholder where the password would stand ----
 
