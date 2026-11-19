@@ -807,6 +807,39 @@ describe('linear setup — second-workspace re-run preserves the per-workspace w
       expect(writes()).toEqual([]);
     });
 
+    const REMOVED = { status: 'revoked', revoked_reason: 'admin_removed' };
+
+    test.each([
+      ['active', [DEMO_ROW]],
+      ['revoked when its grant died', [{ ...DEMO_ROW, status: 'revoked', revoked_reason: 'refresh_token_rejected' }]],
+      ['active, read after the row of one that `remove-workspace` ended', [{ ...DEMO_ROW, ...REMOVED, linear_workspace_id: 'org-gone' }, DEMO_ROW]],
+    ])('and a slug that is registered to another workspace, when the one authorized has it as URL key (registration %s)', async (_registration, rows) => {
+      // `demo` is registered to org-demo, and Linear now reports `demo` as the URL key of
+      // org-other: org-demo gave the key up, or was set up under a slug that is not its key.
+      // The bundle is named by the slug, so going on would put the token of org-other where
+      // the row of org-demo reads its own, next to the signing secret of org-demo kept here.
+      stubSecrets(priorWorkspaceBundle());
+      stubRegistry(() => Promise.resolve({ Items: rows }));
+      authorize({ id: 'org-other', urlKey: 'demo' });
+
+      await expect(runSetup('')).rejects.toThrow(
+        'Slug \'demo\' is registered to another Linear workspace (org-demo)',
+      );
+      expect(writes()).toEqual([]);
+    });
+
+    test('but not a slug whose registration `remove-workspace` ended', async () => {
+      // That command deletes the bundle and keeps the row as a record, which it does not take
+      // a second time: nothing is left to overwrite, and a refusal could not be lifted.
+      stubSecrets(undefined);
+      stubRegistry(() => Promise.resolve({ Items: [{ ...DEMO_ROW, ...REMOVED }] }));
+      authorize({ id: 'org-other', urlKey: 'demo' });
+
+      await runSetup('lin_wh_suppliedByOperator');
+
+      expect(writes()).toEqual(expect.arrayContaining(['PutSecretValueCommand', 'PutCommand']));
+    });
+
     test('and not on the Identity vault, where a refusal would repeat on every later run', async () => {
       // A known gap, pinned so that it is not closed by half. On the vault path AgentCore has
       // stored the consent under this slug before the workspace can be known, and `setup`

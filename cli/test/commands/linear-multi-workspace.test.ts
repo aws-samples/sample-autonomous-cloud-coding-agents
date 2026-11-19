@@ -17,9 +17,9 @@
  *  SOFTWARE.
  */
 
-// `add-workspace`, `invite-user` and `update-webhook-secret` on a stack whose registry already
-// holds a workspace, driven through `parseAsync` with the OAuth flow, Linear and AWS replaced
-// by doubles.
+// `add-workspace`, `invite-user`, `update-webhook-secret` and `list-projects` on a stack whose
+// registry already holds a workspace, driven through `parseAsync` with the OAuth flow, Linear
+// and AWS replaced by doubles.
 //
 // The commands find a workspace by scanning the registry. DynamoDB applies a Scan's `Limit`
 // to the rows it reads, before the filter, and the registry double below answers the same
@@ -27,6 +27,7 @@
 import {
   CreateSecretCommand,
   GetSecretValueCommand,
+  ListSecretsCommand,
   PutSecretValueCommand,
   ResourceExistsException,
   ResourceNotFoundException,
@@ -145,8 +146,8 @@ describe('linear commands on a registry that already holds a workspace', () => {
   let secrets: Record<string, string>;
   /** Every bundle the command stored, in order. */
   let bundleWrites: Array<Record<string, unknown>>;
-  /** What Linear answers for the workspace `beta`. */
-  let linear: { members: Row[]; teams: unknown };
+  /** What Linear answers for the workspace `beta`, and the projects it lists for any token. */
+  let linear: { members: Row[]; teams: unknown; projects: Row[] };
   let cfgSpy: jest.SpiedFunction<typeof configMod.loadConfig>;
   let credSpy: jest.SpiedFunction<typeof configMod.loadCredentials>;
   // The visible prompts take the readline branch only when stdin is not a terminal, which it
@@ -159,7 +160,7 @@ describe('linear commands on a registry that already holds a workspace', () => {
     registry = [workspaceRow('alpha')];
     secrets = { 'bgagent-linear-oauth-alpha': JSON.stringify({ access_token: 'tok-alpha', client_id: 'cid', client_secret: 'csecret' }) };
     bundleWrites = [];
-    linear = { members: [], teams: { data: { teams: { nodes: [{ key: 'bet' }] } } } };
+    linear = { members: [], teams: { data: { teams: { nodes: [{ key: 'bet' }] } } }, projects: [] };
     typed = [];
 
     cfnSend.mockReset().mockResolvedValue({
@@ -187,6 +188,7 @@ describe('linear commands on a registry that already holds a workspace', () => {
         return store(String(cmd.input.Name), String(cmd.input.SecretString));
       }
       if (cmd instanceof PutSecretValueCommand) return store(String(cmd.input.SecretId), String(cmd.input.SecretString));
+      if (cmd instanceof ListSecretsCommand) return { SecretList: Object.keys(secrets).map((Name) => ({ Name })) };
       return {};
     });
 
@@ -203,7 +205,10 @@ describe('linear commands on a registry that already holds a workspace', () => {
     global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
       const query = String(init?.body);
       let body: unknown = { data: { users: { nodes: linear.members } } };
-      if (query.includes('organization')) {
+      // First: the projects query asks for the teams of each project as well.
+      if (query.includes('projects')) {
+        body = { data: { projects: { nodes: linear.projects } } };
+      } else if (query.includes('organization')) {
         body = { data: { viewer: { id: 'bot' }, organization: { id: 'org-beta', name: 'Beta', urlKey: 'beta' } } };
       } else if (query.includes('teams')) {
         body = linear.teams;
@@ -329,6 +334,21 @@ describe('linear commands on a registry that already holds a workspace', () => {
       expect(puts('registry-table')).toEqual([]);
     });
 
+    test('refuses a slug that is registered to another workspace', async () => {
+      // Linear reports `beta` as the URL key of org-beta, and the registry has that slug for
+      // another workspace, which gave the key up or was set up under a slug that is not its
+      // key. The bundle is named by the slug: the write would replace the token its row reads.
+      registry = [workspaceRow('alpha'), workspaceRow('beta', { linear_workspace_id: 'org-before' })];
+      secrets['bgagent-linear-oauth-beta'] = JSON.stringify({ access_token: 'tok-before' });
+
+      await expect(run('add-workspace', 'beta', '--no-browser')).rejects.toThrow(
+        'Slug \'beta\' is registered to another Linear workspace (org-before)',
+      );
+
+      expect(bundleWrites).toEqual([]);
+      expect(puts('registry-table')).toEqual([]);
+    });
+
     test('ends by linking the admin to the member they pick, never to the app\'s own user', async () => {
       // The same picker that ends `setup`, called with this command's own workspace, user
       // and table. The bot comes first in Linear's answer: unfiltered, it would be choice 1.
@@ -418,6 +438,74 @@ describe('linear commands on a registry that already holds a workspace', () => {
         'Workspace \'beta\' is not installed (no Secrets Manager secret \'bgagent-linear-oauth-beta\'). '
         + 'Run `bgagent linear setup beta` first.',
       );
+    });
+  });
+
+  describe('list-projects', () => {
+    const ROADMAP = { slug: 'alpha', id: 'p-1', name: 'Roadmap', team: 'Platform' };
+    /** What the command wrote to stderr: why a workspace is missing from the list. */
+    let errors: string[];
+    let errSpy: jest.SpiedFunction<typeof console.error>;
+
+    beforeEach(() => {
+      // The command sets the exit code, and one left behind becomes the exit code of Jest.
+      process.exitCode = undefined;
+      linear.projects = [{ id: 'p-1', name: 'Roadmap', teams: { nodes: [{ name: 'Platform' }] } }];
+      errors = [];
+      errSpy = jest.spyOn(console, 'error').mockImplementation((line?: unknown) => { errors.push(String(line)); });
+    });
+
+    afterEach(() => {
+      process.exitCode = undefined;
+      errSpy.mockRestore();
+    });
+
+    /** `beta` is onboarded as well, and its bundle holds no token to ask Linear with. */
+    function onboardBetaWithoutToken(): void {
+      secrets['bgagent-linear-oauth-beta'] = JSON.stringify({ refresh_token: 'refresh-beta' });
+    }
+
+    test('--output json exits 1 when a workspace could not be queried, after the projects of the others', async () => {
+      // A script reads stdout and the exit code. The list is valid JSON and is not the whole
+      // answer: the reason is on stderr, and only the exit code tells the script.
+      onboardBetaWithoutToken();
+
+      const printed = await run('list-projects', '--output', 'json');
+
+      expect(JSON.parse(printed.join('\n'))).toEqual([ROADMAP]);
+      expect(errors).toEqual(['Skipping \'beta\': secret bgagent-linear-oauth-beta is missing access_token']);
+      expect(process.exitCode).toBe(1);
+    });
+
+    test('--output json prints [] and exits 1 when Linear refuses the only workspace asked', async () => {
+      // `[]` with exit code 0 is what a workspace without projects gives.
+      global.fetch = jest.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })) as unknown as typeof fetch;
+
+      const printed = await run('list-projects', '--slug', 'alpha', '--output', 'json');
+
+      expect(printed).toEqual(['[]']);
+      expect(errors).toEqual(['Failed to fetch projects for \'alpha\': Linear API returned 401']);
+      expect(process.exitCode).toBe(1);
+    });
+
+    test('the text output exits 1 as well, after the projects of the others', async () => {
+      onboardBetaWithoutToken();
+
+      const printed = await run('list-projects');
+
+      expect(printed).toEqual(expect.arrayContaining(['Found 1 Linear project(s):\n', '  Roadmap', '    workspace: alpha']));
+      expect(process.exitCode).toBe(1);
+    });
+
+    test.each([
+      ['--output json', ['--output', 'json']],
+      ['the text output', []],
+    ])('%s leaves the exit code alone when every workspace answered', async (_mode, flags) => {
+      const printed = await run('list-projects', ...flags);
+
+      expect(printed.join('\n')).toContain('Roadmap');
+      expect(errors).toEqual([]);
+      expect(process.exitCode).toBeUndefined();
     });
   });
 });

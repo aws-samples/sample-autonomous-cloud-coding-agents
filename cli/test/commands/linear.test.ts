@@ -451,6 +451,25 @@ describe('findWorkspaceRowBySlug', () => {
     });
     expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'maguireb')).toBeUndefined();
   });
+
+  // `remove-workspace` keeps the row of the registration it ends, and another workspace can be
+  // registered with the slug afterwards. Which of the two rows a Scan returns first is not
+  // the caller's to choose.
+  const removed = { workspace_slug: 'acme', linear_workspace_id: 'ws-gone', status: 'revoked', revoked_reason: 'admin_removed' };
+
+  test('finds the workspace that is registered with the slug now, behind the row of one that was removed', async () => {
+    ddbSend.mockResolvedValueOnce({
+      Items: [removed, { workspace_slug: 'acme', linear_workspace_id: 'ws-now', status: 'active' }],
+    });
+    const row = await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme');
+    expect(row?.linear_workspace_id).toBe('ws-now');
+  });
+
+  test('still returns the row of a removed workspace when no other carries the slug', async () => {
+    // `setup` reads from it the vault binding of a workspace that is set up again.
+    ddbSend.mockResolvedValueOnce({ Items: [removed] });
+    expect(await findWorkspaceRowBySlug(ddbClient(), 'TestRegistry', 'acme')).toEqual(removed);
+  });
 });
 
 describe('findReusableOauthAppCredentials', () => {

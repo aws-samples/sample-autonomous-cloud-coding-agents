@@ -298,6 +298,9 @@ describe('linear list-projects --slug', () => {
   let errSpy: jest.SpiedFunction<typeof console.error>;
 
   beforeEach(() => {
+    // The command sets the exit code for a workspace it could not query, and one left behind
+    // becomes the exit code of Jest.
+    process.exitCode = undefined;
     // The bundle of `acme` holds a token; the stack publishes no registry, so no vault lookup.
     smSend.mockReset().mockResolvedValue({ SecretString: JSON.stringify({ access_token: 'tok-acme' }) });
     cfnSend.mockReset().mockResolvedValue({ Stacks: [{ Outputs: [] }] });
@@ -309,6 +312,7 @@ describe('linear list-projects --slug', () => {
   });
 
   afterEach(() => {
+    process.exitCode = undefined;
     global.fetch = originalFetch;
     cfgSpy.mockRestore();
     logSpy.mockRestore();
@@ -361,6 +365,7 @@ describe('linear list-projects --slug', () => {
     expect(err[0]).toContain('acme');
     expect(err[0]).toContain(reason);
     expect(out.join('\n')).not.toMatch(/has no projects yet/);
+    expect(process.exitCode).toBe(1);
   });
 
   test('asks the Identity vault first for a workspace that is on it', async () => {
@@ -406,6 +411,7 @@ describe('linear list-projects --slug', () => {
     expect(err).toEqual(['Skipping \'acme\': secret bgagent-linear-oauth-acme is missing access_token']);
     expect(global.fetch).not.toHaveBeenCalled();
     expect(out).toContain('No projects listed: 1 of 1 workspace(s) could not be queried (see the errors above).');
+    expect(process.exitCode).toBe(1);
   });
 });
 
