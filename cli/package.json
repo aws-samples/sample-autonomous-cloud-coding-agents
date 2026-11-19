@@ -10,7 +10,7 @@
     "node": ">= 20.x <= 24.x"
   },
   "scripts": {
-    "compile": "tsc --build tsconfig.json",
+    "compile": "tsc --build tsconfig.json && node scripts/write-build-info.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.dev.json",
     "test": "jest --ci",
     "test:watch": "jest --watch",

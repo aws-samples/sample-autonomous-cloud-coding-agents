@@ -10,13 +10,13 @@ The `bgagent webhook` commands manage webhook integrations directly from the ter
 
 ```bash
 # Create a webhook — returns the secret (shown once)
-node lib/bin/bgagent.js webhook create --name "My CI Pipeline"
+bgagent webhook create --name "My CI Pipeline"
 
 # List active webhooks
-node lib/bin/bgagent.js webhook list
+bgagent webhook list
 
 # Revoke a webhook (soft delete — 7-day secret recovery window)
-node lib/bin/bgagent.js webhook revoke <WEBHOOK_ID>
+bgagent webhook revoke <WEBHOOK_ID>
 ```
 
 ### Managing webhooks (REST API)

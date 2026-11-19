@@ -52,7 +52,7 @@ mise run install
 mise run build
 ```
 
-`mise run install` installs all JavaScript and Python dependencies across the monorepo. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
+`mise run install` installs all JavaScript and Python dependencies across the monorepo and writes the `bgagent` command to `~/.local/bin`. `mise run build` compiles the CDK app, the CLI, the agent image, and the docs site. A successful build means you are ready to deploy.
 
 :::note[Expect noisy build output — trust the exit code]
 
@@ -62,13 +62,13 @@ mise run build
 
 :::note[ABCA CLI commands in this guide]
 
-This Quick Start does **not** assume a global `bgagent` install (`npm install -g …`). Step 1 compiles the CLI into `cli/lib/`. On every **ABCA CLI** tab below, run from the `cli/` directory:
+The ABCA CLI is not published to npm; it runs from your checkout. `mise run install` (Step 1) writes the `bgagent` command, which runs the CLI that `mise run build` compiled, so the **ABCA CLI** tabs below call `bgagent <command> …` from any directory.
 
-`cd cli` then `node lib/bin/bgagent.js <command> …`
+- If `bgagent` is not found, `~/.local/bin` is not on your `PATH`: `mise run install` printed the line to add to your shell profile. Or run `mise run cli:install` from the repo root, which compiles the CLI and writes the command again.
+- If it says the CLI is not built, run `mise //cli:compile` from the repo root.
+- Without the command, `node cli/lib/bin/bgagent.js <command> …` from the repo root does the same.
 
-If `lib/bin/bgagent.js` is missing, run `mise run build` from `cli/` (or repeat Step 1's full build from the repo root).
-
-Other guides write the short form `bgagent <command>`. If you prefer it, define an alias once from the repo root: `alias bgagent="node $PWD/cli/lib/bin/bgagent.js"`. `bgagent setup` (Step 3) prints its next steps in the same form you launched it with.
+See the [CLI README](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/cli/README.md#installation) for which checkout `bgagent` runs when you have several.
 
 :::
 
@@ -127,11 +127,9 @@ Fine-grained tokens only work for repos you own (or orgs that have opted in). If
 `bgagent setup` deploys the platform: API Gateway, Lambda functions (orchestrator, task CRUD, webhooks), DynamoDB tables, AgentCore Runtime, VPC with network isolation, Cognito user pool, and CloudWatch dashboards. Docker (or Finch) must be running, because the deploy builds the agent image locally.
 
 ```bash
-cd cli
-
 REGION=us-east-1  # your deployment region
 
-node lib/bin/bgagent.js setup --region "$REGION"
+bgagent setup --region "$REGION"
 ```
 
 The wizard:
@@ -201,20 +199,16 @@ The agent reads the GitHub PAT from **AWS Secrets Manager** at runtime. The CDK 
 <TabItem label="ABCA CLI">
 
 ```bash
-cd cli
-
 REGION=us-east-1  # your deployment region
 
 # Interactive prompt — stores in the platform GitHubTokenSecretArn output
-node lib/bin/bgagent.js github set-token --region "$REGION" --stack-name backgroundagent-dev
+bgagent github set-token --region "$REGION" --stack-name backgroundagent-dev
 ```
 
 For a repository with a per-blueprint token secret (`credentials.githubTokenSecretArn` on the Blueprint), target that repo instead:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js github set-token --region "$REGION" --repo your-org/your-repo
+bgagent github set-token --region "$REGION" --repo your-org/your-repo
 ```
 
 </TabItem>
@@ -249,13 +243,11 @@ The REST API uses Amazon Cognito for authentication. Self-signup is disabled, so
 <TabItem label="ABCA CLI">
 
 ```bash
-cd cli
-
 REGION=us-east-1  # your deployment region (same as Step 4)
 
 # Creates the user, sets a permanent password, and writes credentials + configure bundle
 # to ~/.bgagent/invites/you@example.com.txt (mode 0600)
-node lib/bin/bgagent.js admin invite-user you@example.com \
+bgagent admin invite-user you@example.com \
   --region "$REGION" \
   --stack-name backgroundagent-dev
 ```
@@ -265,18 +257,16 @@ The command wraps `AdminCreateUser` + `AdminSetUserPassword`: email is pre-verif
 To manage users later:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js admin list-users --region "$REGION" --stack-name backgroundagent-dev
-node lib/bin/bgagent.js admin reset-password you@example.com --region "$REGION"
-node lib/bin/bgagent.js admin delete-user someone@example.com --region "$REGION"
+bgagent admin list-users --region "$REGION" --stack-name backgroundagent-dev
+bgagent admin reset-password you@example.com --region "$REGION"
+bgagent admin delete-user someone@example.com --region "$REGION"
 ```
 
 </TabItem>
 
 <TabItem label="AWS CLI">
 
-Requires the AWS CLI with credentials that can call `cognito-idp:Admin*` on the deployment user pool. No ABCA CLI build or `node lib/bin/bgagent.js` invocation is needed on this path.
+Requires the AWS CLI with credentials that can call `cognito-idp:Admin*` on the deployment user pool. No ABCA CLI is needed on this path.
 
 ```bash
 REGION=us-east-1  # your deployment region (same as Step 4)
@@ -320,33 +310,29 @@ The ABCA CLI handles Cognito authentication, token caching, and output formattin
 `bgagent setup` already pointed the CLI at your stack, so go straight to `login`. If you deployed with `mise //cdk:deploy` instead, configure the CLI first, with either of these:
 
 ```bash
-cd cli
-
 REGION=us-east-1  # your deployment region (same as Step 4)
 
 # Paste the bundle from ~/.bgagent/invites/you@example.com.txt (written by Step 5)
-node lib/bin/bgagent.js configure --from-bundle "<paste bundle from invite file>"
+bgagent configure --from-bundle "<paste bundle from invite file>"
 
 # Or read ApiUrl / UserPoolId / AppClientId from CloudFormation
-node lib/bin/bgagent.js configure --region "$REGION" --stack-name backgroundagent-dev
+bgagent configure --region "$REGION" --stack-name backgroundagent-dev
 ```
 
 Then sign in, onboard your fork, and submit:
 
 ```bash
-cd cli
-
 REGION=us-east-1  # your deployment region (same as Step 4)
 
 # Log in (password from ~/.bgagent/invites/you@example.com.txt)
-node lib/bin/bgagent.js login --username you@example.com
+bgagent login --username you@example.com
 
 # Register your fork with the platform (no redeploy needed)
-node lib/bin/bgagent.js repo onboard your-username/agent-plugins \
+bgagent repo onboard your-username/agent-plugins \
   --region "$REGION" --stack-name backgroundagent-dev
 
 # Submit your first task and wait for it to complete
-node lib/bin/bgagent.js submit \
+bgagent submit \
   --repo your-username/agent-plugins \
   --task "Add a CODEOWNERS file to the repository root" \
   --wait
@@ -360,7 +346,7 @@ node lib/bin/bgagent.js submit \
 
 Uses the AWS CLI for Cognito authentication and `curl` for the task REST API. Use the password you set in Step 5 (`YourPerm@nent1Pass!` if you followed the AWS CLI tab there). Requires `curl` and the AWS CLI.
 
-Onboard your fork first. It's a single ABCA CLI command, with no AWS CLI equivalent: `node lib/bin/bgagent.js repo onboard your-username/agent-plugins --region "$REGION"`, run from `cli/` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories).
+Onboard your fork first. It's a single ABCA CLI command, with no AWS CLI equivalent: `bgagent repo onboard your-username/agent-plugins --region "$REGION"` (the ABCA CLI tab shows it in context). You can use a CDK Blueprint instead; see [Onboard your own repositories](#onboard-your-own-repositories).
 
 ```bash
 REGION=us-east-1  # your deployment region (same as Step 4)
@@ -403,66 +389,52 @@ See [User guide → Using the REST API](./USER_GUIDE.md#using-the-rest-api) for 
 ABCA CLI-only helpers after submit — use `watch` to stream progress events in real time:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js watch <TASK_ID>
+bgagent watch <TASK_ID>
 ```
 
 While a task is running, you can steer the agent with a nudge:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js nudge <TASK_ID> "Also add a test for the edge case"
+bgagent nudge <TASK_ID> "Also add a test for the edge case"
 ```
 
 ## Step 7 - See an approval gate in action
 
-If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end. Run the commands below from the `cli/` directory (`cd cli` from the repo root).
+If your blueprint defines any Cedar HITL policies tagged `@tier("soft")`, the agent pauses on matching tool calls and waits for your decision. This step walks through the flow end-to-end.
 
 First, check which rules apply to your repo:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js policies list --repo owner/repo
+bgagent policies list --repo owner/repo
 ```
 
 Submit a task that will plausibly trip a soft-deny rule — for example, one of the default blueprint rules guards force-pushes:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js submit --repo owner/repo \
+bgagent submit --repo owner/repo \
   --task "Force-push the feature branch so the history is linear"
 ```
 
 In a second terminal, watch the task:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js watch <TASK_ID>
+bgagent watch <TASK_ID>
 ```
 
 When the agent hits the guarded tool call, `watch` prints an `approval_requested` event and the task status flips to `AWAITING_APPROVAL`. List the pending approval:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js pending
+bgagent pending
 ```
 
 The output includes ready-to-run approve/deny lines. Pick one:
 
 ```bash
-cd cli
-
 # Approve just this call
-node lib/bin/bgagent.js approve <TASK_ID> <REQUEST_ID>
+bgagent approve <TASK_ID> <REQUEST_ID>
 
 # Or deny with a reason that nudges the agent toward a safer approach
-node lib/bin/bgagent.js deny <TASK_ID> <REQUEST_ID> \
+bgagent deny <TASK_ID> <REQUEST_ID> \
   --reason "Don't force-push shared branches; open a revert PR instead"
 ```
 
@@ -471,9 +443,7 @@ The task transitions back to `RUNNING` immediately on a decision. The denial rea
 If you want a task to run without interactive gates (e.g. an unattended overnight job), pre-approve the scopes you trust up-front:
 
 ```bash
-cd cli
-
-node lib/bin/bgagent.js submit --repo owner/repo --issue 42 \
+bgagent submit --repo owner/repo --issue 42 \
   --pre-approve tool_type:Bash \
   --pre-approve write_path:tests/**
 ```
@@ -482,7 +452,7 @@ Hard-deny rules (no `@tier("soft")` annotation) are always enforced — `--pre-a
 
 ## What happened behind the scenes
 
-Here is what the platform did after you ran `node lib/bin/bgagent.js submit`:
+Here is what the platform did after you ran `bgagent submit`:
 
 1. **Task creation** - The CLI authenticated via Cognito and sent a `POST /v1/tasks` request. The API validated the request, checked idempotency, and stored a task record in DynamoDB with status `SUBMITTED`.
 2. **Orchestration** - The durable orchestrator picked up the task and ran admission control (concurrency limits). It then ran **pre-flight checks** - calling the GitHub API to verify your token can access the repository with push permissions. If the token were read-only, the task would have failed here with a clear error instead of failing later inside the agent.
@@ -521,7 +491,7 @@ Once you have the basic flow working, here are the main ways to customize the pl
 
 There are two ways to register a repository. Both write the same configuration record to DynamoDB, which the orchestrator checks before it accepts a task.
 
-- **`repo onboard` (runtime, no redeploy).** `node lib/bin/bgagent.js repo onboard owner/repo` from `cli/`, as in Step 6. Use it when the repository works with the platform defaults: the platform GitHub token, a model the runtime already has access to, and the default egress allowlist.
+- **`repo onboard` (runtime, no redeploy).** `bgagent repo onboard owner/repo`, as in Step 6. Use it when the repository works with the platform defaults: the platform GitHub token, a model the runtime already has access to, and the default egress allowlist.
 - **A CDK `Blueprint` (checked in, redeploy).** Use it when the repository needs its own settings, such as a per-repo GitHub token, another model, extra egress domains, Cedar approval policies or system-prompt overrides, or when you want the registration in source control. Add a `Blueprint` construct in `cdk/src/stacks/agent.ts` and redeploy:
 
 ```typescript
@@ -559,14 +529,12 @@ Webhooks let external systems (GitHub Actions, CI pipelines) create tasks withou
 
 ## Next steps
 
-Run from the `cli/` directory (`cd cli` from the repo root):
-
-- **Try an issue-based task**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42`
-- **Iterate on a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --pr 1`
-- **Review a PR**: `node lib/bin/bgagent.js submit --repo owner/repo --review-pr 1`
-- **Pick a workflow explicitly**: `node lib/bin/bgagent.js submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](./USER_GUIDE.md#workflows)
-- **Watch a task live**: `node lib/bin/bgagent.js watch <TASK_ID>` — stream progress events
-- **Steer a running task**: `node lib/bin/bgagent.js nudge <TASK_ID> "focus on tests"` — mid-run guidance
-- **Enable tracing**: `node lib/bin/bgagent.js submit --repo owner/repo --issue 42 --trace` then `node lib/bin/bgagent.js trace download <TASK_ID>`
-- **Manage webhooks**: `node lib/bin/bgagent.js webhook create --name "My CI"` — automate task submission from external systems
+- **Try an issue-based task**: `bgagent submit --repo owner/repo --issue 42`
+- **Iterate on a PR**: `bgagent submit --repo owner/repo --pr 1`
+- **Review a PR**: `bgagent submit --repo owner/repo --review-pr 1`
+- **Pick a workflow explicitly**: `bgagent submit --repo owner/repo --task "..." --workflow coding/new-task-v1` — see [User guide - Workflows](./USER_GUIDE.md#workflows)
+- **Watch a task live**: `bgagent watch <TASK_ID>` — stream progress events
+- **Steer a running task**: `bgagent nudge <TASK_ID> "focus on tests"` — mid-run guidance
+- **Enable tracing**: `bgagent submit --repo owner/repo --issue 42 --trace` then `bgagent trace download <TASK_ID>`
+- **Manage webhooks**: `bgagent webhook create --name "My CI"` — automate task submission from external systems
 - **Run locally first**: Test with `./agent/run.sh` before deploying - see the [Developer guide](./DEVELOPER_GUIDE.md)

@@ -53,13 +53,14 @@ import { makeWebhookCommand } from '../commands/webhook';
 import { setVerbose } from '../debug';
 import { CliError } from '../errors';
 import { applyDefaultAppId } from '../ua';
+import { cliVersion } from '../version';
 
 const program = new Command();
 
 program
   .name('bgagent')
   .description('Background Agent CLI — submit and manage coding tasks')
-  .version('0.0.0')
+  .version(cliVersion())
   .option('--verbose', 'Enable debug output')
   .hook('preAction', (_thisCommand, actionCommand) => {
     // Resolve --verbose from the root program, not the subcommand
