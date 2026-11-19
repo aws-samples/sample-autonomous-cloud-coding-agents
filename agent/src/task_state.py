@@ -759,6 +759,7 @@ def transact_resume_from_approval(
                         "Key": {"task_id": {"S": task_id}},
                         "UpdateExpression": (
                             "SET #s = :running, agent_heartbeat_at = :heartbeat, "
+                            "updated_at = :heartbeat, "
                             "status_created_at = :sca REMOVE awaiting_approval_request_id"
                         ),
                         "ConditionExpression": (

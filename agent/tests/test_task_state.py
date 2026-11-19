@@ -306,6 +306,16 @@ class TestStatusWritesStampUpdatedAt:
         assert "updated_at = :now" in upd["UpdateExpression"]
         assert upd["ExpressionAttributeValues"][":now"] == {"S": "2026-11-15T03:30:00Z"}
 
+    def test_resume_from_approval_stamps_it(self, approval_tables_env, monkeypatch):
+        monkeypatch.setattr(task_state, "_now_iso", lambda: "2026-11-15T03:35:00Z")
+        client = MagicMock()
+
+        task_state.transact_resume_from_approval("01KTASK", "01KREQ", client=client)
+
+        upd = client.transact_write_items.call_args.kwargs["TransactItems"][0]["Update"]
+        assert "updated_at = :heartbeat" in upd["UpdateExpression"]
+        assert upd["ExpressionAttributeValues"][":heartbeat"] == {"S": "2026-11-15T03:35:00Z"}
+
 
 class TestFailedStatusWriteNamesTheError:
     """A status write is best-effort: when it fails, the log line is all that is

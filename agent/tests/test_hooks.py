@@ -3302,10 +3302,12 @@ class TestTimeoutCapping:
         assert fake_task_state.write_calls[0][2]["timeout_s"] == 30
 
     def test_the_hook_waits_no_longer_than_the_window_it_reports(
-        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
+        self, fake_task_state, progress, engine_with_soft_gate, monkeypatch, approval_clock
     ):
         # Nobody answers. With 200 s left the hook gives up after 80 s, not
         # after the 300 s that were asked for: the cleanup keeps its 120 s.
+        # The window starts at the request's stamp, a whole second, and
+        # approval_clock holds the wall clock there: the wait is 80 s exactly.
         _fast_poll(monkeypatch)
         monkeypatch.setattr(hooks, "_remaining_maxlifetime_s", lambda: 200)
         engine_with_soft_gate._task_default_timeout_s = 300
@@ -3324,9 +3326,7 @@ class TestTimeoutCapping:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        # The window runs from the second the request is stamped with, so the
-        # wait ends within the last second before 80 s, never after it.
-        assert 79 < hooks.time.monotonic() <= 80
+        assert hooks.time.monotonic() == 80
 
     def test_ceiling_shrinking_emits_once(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch
