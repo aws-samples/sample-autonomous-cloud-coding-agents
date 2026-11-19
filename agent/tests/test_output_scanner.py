@@ -557,6 +557,20 @@ class TestScanToolOutput:
         elapsed_ms = (time.monotonic() - start) * 1000
         assert elapsed_ms < 1000
 
+    @pytest.mark.parametrize("unit", ["x://", "x://y:1/"])
+    def test_connection_string_scan_time_grows_with_the_length_only(self, unit):
+        # Every "x://" is a start of the pattern, and behind "y:1/" the port
+        # rule looks ahead as well. The bound on a password with "/" and ":"
+        # and the stop of that look-ahead at a ":" keep the scan linear: under
+        # 0.1 s for these 100,000 characters, against 5 s and more without
+        # either.
+        import time
+
+        content = unit * (100_000 // len(unit))
+        start = time.monotonic()
+        scan_tool_output(content)
+        assert time.monotonic() - start < 2
+
     # ---- Multiple findings ----
 
     def test_detects_multiple_secrets(self):

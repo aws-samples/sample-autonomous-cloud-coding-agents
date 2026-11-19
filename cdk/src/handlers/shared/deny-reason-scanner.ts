@@ -108,17 +108,20 @@ const PATTERNS: readonly SecretPattern[] = [
     name: 'CONNECTION_STRING',
     // scheme://user:password@host. The user and the password hold no
     // whitespace and no quote, so a plain URL is not matched up to a ":"
-    // and an "@" that merely follow it in the text. The user holds no "/"
-    // and may hold an "@" (an e-mail address as login), the password may
-    // not. A password that holds no "/" has no length limit, and neither
-    // has one that holds no ":" (base64 text holds "/" and no ":"). One
-    // that holds both counts up to 256 characters: unlimited, a text that
-    // repeats "x://" is scanned from each one to the end of the run, which
-    // is quadratic. What begins with a port and a "/" is no password (1 to
-    // 5 digits, also behind the rest of an IPv6 address, "]:"): there the
-    // ":" stands between the host and the port of a URL without a
-    // password, and the "@" belongs to its path
-    // (https://host:8443/@scope/package).
+    // and an "@" that merely follow it in the text. The user holds no "/",
+    // may hold an "@" (an e-mail address as login) and may be empty
+    // (redis://:<password>@host); the password holds no "@". The password
+    // has three alternatives: text without "/", text without ":" (base64
+    // text holds "/" and no ":"), and any other text of up to 256
+    // characters: without that bound, a text that repeats "x://" is
+    // scanned from each one to the end of the run, which is quadratic. The
+    // look-ahead in front of the last two keeps a URL without a password
+    // as it is when its host has a port and the first "@" behind the port
+    // begins a path segment (https://host:8443/@scope/package): there the
+    // ":" stands between the host and the port (1 to 5 digits, also behind
+    // the rest of an IPv6 address, "]:"). It reads from the port to that
+    // segment only while no further ":" comes, which keeps the scan linear
+    // as well.
     // Second form: the user ends in the marker that AWS_KEY has put there.
     // What follows up to the "@" (the rest of a password, or ":" and a
     // password or session token) may have any length while it holds no
@@ -129,7 +132,7 @@ const PATTERNS: readonly SecretPattern[] = [
     // limits count characters, as the agent's scanner does.
     // contracts/secret-scan-vectors.json holds the cases that the tests of
     // this scanner and of the agent's run.
-    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']+:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@/"']+|(?!(?:[^\s@/"']*\]:)?[0-9]{1,5}/)(?:[^\s@:"']+|[^\s@"']{1,256}))|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
+    regex: new RegExp(String.raw`[a-zA-Z][a-zA-Z0-9+.-]{0,20}://(?:[^\s:/"']*:${NOT_ONLY_A_PLACEHOLDER}(?:[^\s@/"']+|(?!(?:[^\s@/"']*\]:)?[0-9]{1,5}/(?:[^\s@:"']*/)?@)(?:[^\s@:"']+|[^\s@"']{1,256}))|[^\s:/"']*\[REDACTED-AWS_KEY\](?::?[^\s@:"'[]*|[^\s@"']{0,256}))@[^\s"']+`, 'gu'),
   },
   {
     name: 'GITHUB_APP_TOKEN',

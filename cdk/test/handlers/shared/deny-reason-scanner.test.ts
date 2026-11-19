@@ -271,6 +271,16 @@ describe('scanDenyReason', () => {
     expect(scanDenyReason(input)).toBe(expected);
   });
 
+  test.each(['x://', 'x://y:1/'])('scans a text that repeats %s in a time that grows with its length only', (unit) => {
+    // Every "x://" is a start of the pattern, and behind "y:1/" the port rule
+    // looks ahead as well. The bound on a password with "/" and ":" and the
+    // stop of that look-ahead at a ":" keep the scan linear: about 30 ms for
+    // these 200,000 characters, against several seconds without either.
+    const started = Date.now();
+    scanDenyReason(unit.repeat(200_000 / unit.length));
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   // URL templates: a placeholder where the password would stand. Source code
   // and documentation, not a credential. The agent's scanner leaves them as
   // they are (the agent reads files through it), and so does this port.
