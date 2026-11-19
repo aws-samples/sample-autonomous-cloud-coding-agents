@@ -278,7 +278,7 @@ bgagent jira map <cloud-id> <PROJECT-KEY> \
 - `--status-on-start <name>` — Jira status to move the issue to when a task starts (overrides the heuristic; see [Board transitions](#board-transitions))
 - `--status-on-pr <name>` — Jira status to move the issue to when a PR is opened (overrides the `In Review` default)
 
-This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it writes DynamoDB directly).
+This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it reads and writes DynamoDB directly).
 
 ### 6. Link your Jira identity
 
@@ -401,14 +401,14 @@ As a Jira-triggered task progresses, the agent moves the originating issue acros
 - **Task start** → the issue moves to an **In Progress** status.
 - **PR opened** → the issue moves to a **review** status (default **In Review**, falling back to In Progress so a stock board isn't skipped).
 - **Task failed or no PR opened** → the status is **left unchanged**; the ❌ final-status comment is the signal, and bouncing a card back and forth is noisier than leaving it where a human sees the failure.
-- **Already at or past the target** → the transition is **skipped**, so a re-triggered task never drags a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration.
+- **Already at or past the target** → the transition is **skipped**, so a re-triggered task does not drag a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration. A per-project override changes this: see step 1 below.
 - **Already on one of the names of step 2 below** → the issue only moves to a name listed before it, and the category fallback (step 3) is not used for it. A card that is In Progress on a board that has none of the review names of step 2 therefore stays In Progress when the PR opens; if the board calls its review status something else, set `--status-on-pr`.
 
 Humans still move the card to **Done** after merging the PR — ABCA never closes issues.
 
 **How a target status is resolved** (evaluated per lifecycle point, first match wins — modeled on the Linear integration):
 
-1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback).
+1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback). One exception: when an `@bgagent` iteration starts, an issue that is already In Progress or later stays where it is, so a comment does not pull a card that the earlier task left In Review back to the `--status-on-start` status.
 2. **Name match** (no config needed for standard workflows):
    - On start, a transition whose destination is named **In Progress**.
    - On PR opened, a transition named **In Review**, then common synonyms (`Code Review`, `Review`, `Peer Review`, `Reviewing`), then **In Progress** as a last resort.

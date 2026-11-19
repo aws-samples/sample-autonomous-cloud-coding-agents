@@ -706,10 +706,17 @@ def transition_task_started(
 
     Resolution: ``jira_status_on_start`` override → a destination named
     ``In Progress`` → any ``indeterminate``-category destination. Skips if the
-    issue is already In Progress or later (won't move a card backward).
+    issue is already In Progress or later (won't move a card backward); an
+    override lifts that skip, except for an ``@bgagent`` iteration.
     Best-effort; no-op for non-Jira tasks.
     """
-    override = (channel_metadata or {}).get("jira_status_on_start")
+    metadata = channel_metadata or {}
+    override = metadata.get("jira_status_on_start")
+    # An override is a deliberate instruction, so honor it regardless of current
+    # status. Not for an ``@bgagent`` iteration (``jira_prior_task_id``): the
+    # earlier task has moved the card already, and every comment would pull an
+    # In Review card back to the override status.
+    from_any_status = bool(override) and not metadata.get("jira_prior_task_id")
     _transition(
         channel_source,
         channel_metadata,
@@ -717,9 +724,8 @@ def transition_task_started(
         override=override,
         prefer_names=() if override else (_START_STATUS_NAME,),
         fallback_category=None if override else _IN_PROGRESS_CATEGORY,
-        # Skip if already In Progress (indeterminate) or Done. An override is a
-        # deliberate instruction, so honor it regardless of current status.
-        max_source_rank=None if override else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
+        # Skip if already In Progress (indeterminate) or Done.
+        max_source_rank=None if from_any_status else _CATEGORY_RANK[_IN_PROGRESS_CATEGORY],
     )
 
 

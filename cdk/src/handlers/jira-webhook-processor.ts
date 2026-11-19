@@ -295,13 +295,13 @@ export async function handler(event: ProcessorEvent): Promise<void> {
       return;
     }
     const commentProjectKey = issue.fields?.project?.key;
-    if (
-      commentProjectKey
-      && !await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
-    ) {
+    const commentMapping = commentProjectKey
+      ? await getActiveProjectMapping(cloudId, commentProjectKey, issue.key)
+      : undefined;
+    if (commentMapping === null) {
       return;
     }
-    await handleCommentTrigger(payload, issue, cloudId, commentProjectKey);
+    await handleCommentTrigger(payload, issue, cloudId, commentMapping);
     return;
   }
 
@@ -859,7 +859,7 @@ async function handleCommentTrigger(
   payload: JiraIssueEvent,
   issue: NonNullable<JiraIssueEvent['issue']>,
   cloudId: string,
-  verifiedProjectKey?: string,
+  verifiedMapping?: ProjectMapping,
 ): Promise<void> {
   const comment = payload.comment;
   if (!comment?.id) {
@@ -921,7 +921,8 @@ async function handleCommentTrigger(
     cloudId,
     issue.key,
   );
-  if (!verifiedProjectKey) {
+  let mapping: ProjectMapping | null | undefined = verifiedMapping;
+  if (!mapping) {
     const priorProjectKey = priorTask?.channel_metadata?.jira_project_key;
     if (!priorProjectKey) {
       logger.info(
@@ -930,7 +931,8 @@ async function handleCommentTrigger(
       );
       return;
     }
-    if (!await getActiveProjectMapping(cloudId, priorProjectKey, issue.key)) {
+    mapping = await getActiveProjectMapping(cloudId, priorProjectKey, issue.key);
+    if (!mapping) {
       return;
     }
     logger.warn('Jira comment issue has no project.key — routing via active prior task project', {
@@ -994,6 +996,7 @@ async function handleCommentTrigger(
     comment.id,
     resolved.oauthSecretArn,
     resolved.siteUrl,
+    mapping,
   );
   const idempotencyKey = buildCommentIdempotencyKey(cloudId, issue.key, comment.id);
   const requestId = crypto.randomUUID();
@@ -1258,6 +1261,7 @@ function buildIterationChannelMetadata(
   commentId: string,
   oauthSecretArn: string,
   siteUrl: string,
+  mapping: ProjectMapping,
 ): Record<string, string> {
   const previous = priorTask.channel_metadata ?? {};
   const metadata: Record<string, string> = {
@@ -1267,6 +1271,8 @@ function buildIterationChannelMetadata(
     jira_oauth_secret_arn: oauthSecretArn,
     jira_site_url: siteUrl,
     jira_trigger_comment_id: commentId,
+    // The agent tells an iteration from a first run by this key
+    // (transition_task_started in agent/src/jira_reactions.py).
     jira_prior_task_id: priorTask.task_id,
     trigger_comment_id: commentId,
     trigger_comment_issue_id: issue.key,
@@ -1274,16 +1280,24 @@ function buildIterationChannelMetadata(
 
   const projectKey = issue.fields?.project?.key ?? previous.jira_project_key;
   if (projectKey) metadata.jira_project_key = projectKey;
-  if (previous.jira_status_on_start) {
-    metadata.jira_status_on_start = previous.jira_status_on_start;
-  }
-  if (previous.jira_status_on_pr) {
-    metadata.jira_status_on_pr = previous.jira_status_on_pr;
-  }
+  // The status names of the project mapping as it is now, as a task that the
+  // trigger label starts takes them: the earlier task may predate a change.
+  let statusOnStart = mapping.status_on_start;
+  let statusOnPr = mapping.status_on_pr;
   if (previous.orchestration_id && previous.orchestration_sub_issue_id) {
     metadata.orchestration_id = previous.orchestration_id;
     metadata.orchestration_sub_issue_id = previous.orchestration_sub_issue_id;
     metadata.orchestration_iteration = 'true';
+    // A subtask of an orchestration keeps the names recorded with it: the
+    // reconciler moves that issue by them after the iteration.
+    statusOnStart = previous.jira_status_on_start;
+    statusOnPr = previous.jira_status_on_pr;
+  }
+  if (typeof statusOnStart === 'string' && statusOnStart) {
+    metadata.jira_status_on_start = statusOnStart;
+  }
+  if (typeof statusOnPr === 'string' && statusOnPr) {
+    metadata.jira_status_on_pr = statusOnPr;
   }
   return metadata;
 }

@@ -246,6 +246,12 @@ describe('jira-webhook-processor handler', () => {
       mockCommentDdb({
         platform_user_id: 'linked-reviewer',
         status: 'active',
+      }, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'Doing',
+        status_on_pr: 'Code Review',
       });
       createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
 
@@ -522,6 +528,72 @@ describe('jira-webhook-processor handler', () => {
         'ENG-42',
         '👀 On it — reading the PR…',
       );
+    });
+
+    test('an iteration takes the status names the project mapping has now, not those of the earlier task', async () => {
+      // The earlier task was created while the mapping said Doing / Code Review.
+      // Since then the start status was renamed and the review override removed.
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'In Development',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      const metadata = createTaskCoreMock.mock.calls[0][1].channelMetadata;
+      expect(metadata.jira_status_on_start).toBe('In Development');
+      expect(metadata).not.toHaveProperty('jira_status_on_pr');
+    });
+
+    test('an iteration routed through the prior task project takes the status names of that mapping', async () => {
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce(priorTask);
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_pr: 'Peer Review',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+      const payload = comment();
+      delete (payload.issue as { fields: { project: Record<string, unknown> } }).fields.project.key;
+
+      await handler(eventWith(payload));
+
+      const metadata = createTaskCoreMock.mock.calls[0][1].channelMetadata;
+      expect(metadata.jira_status_on_pr).toBe('Peer Review');
+      expect(metadata).not.toHaveProperty('jira_status_on_start');
+    });
+
+    test('an orchestrated child iteration keeps the status names recorded with its orchestration', async () => {
+      // The reconciler moves the child's issue by the names on the orchestration
+      // row, which are the ones the child's earlier task carries.
+      resolveTaskByJiraIssueMock.mockResolvedValueOnce({
+        ...priorTask,
+        channel_metadata: {
+          ...priorTask.channel_metadata,
+          orchestration_id: 'orch-1',
+          orchestration_sub_issue_id: 'ENG-42',
+        },
+      });
+      mockCommentDdb(undefined, {
+        repo: 'org/repo',
+        status: 'active',
+        label_filter: 'bgagent',
+        status_on_start: 'In Development',
+      });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: '{}' });
+
+      await handler(eventWith(comment()));
+
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        orchestration_iteration: 'true',
+        jira_status_on_start: 'Doing',
+        jira_status_on_pr: 'Code Review',
+      });
     });
 
     test('keeps @bgagent comments without a project key or prior task silent', async () => {

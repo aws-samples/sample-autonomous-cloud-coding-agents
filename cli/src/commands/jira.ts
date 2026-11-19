@@ -1177,10 +1177,19 @@ export function makeJiraCommand(): Command {
 
         const now = new Date().toISOString();
         const ddb = makeDocClient({ region });
+        const key = { jira_project_identity: `${cloudId}#${projectKey}` };
+        // The put replaces the row, so read the date the project was first
+        // mapped and write it back. A read that fails stops the command:
+        // taking the row for new would date the mapping from today.
+        const existing = await ddb.send(new GetCommand({
+          TableName: tableName,
+          Key: key,
+          ConsistentRead: true,
+        }));
         await ddb.send(new PutCommand({
           TableName: tableName,
           Item: {
-            jira_project_identity: `${cloudId}#${projectKey}`,
+            ...key,
             cloud_id: cloudId,
             project_key: projectKey,
             repo: opts.repo,
@@ -1191,7 +1200,7 @@ export function makeJiraCommand(): Command {
             ...(statusOnStart && { status_on_start: statusOnStart }),
             ...(statusOnPr && { status_on_pr: statusOnPr }),
             status: 'active',
-            onboarded_at: now,
+            onboarded_at: existing.Item?.onboarded_at ?? now,
             updated_at: now,
           },
         }));

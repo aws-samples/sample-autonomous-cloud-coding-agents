@@ -214,7 +214,7 @@ describe('jira map action status overrides', () => {
       '--status-on-pr', 'Code Review',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd).toBeInstanceOf(PutCommand);
     expect(putCmd.input.Item).toMatchObject({
       jira_project_identity: 'cloud-1#ENG',
@@ -235,7 +235,7 @@ describe('jira map action status overrides', () => {
       'node', 'bgagent', 'map', 'cloud-1', 'ENG', '--repo', 'org/repo',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
@@ -248,7 +248,7 @@ describe('jira map action status overrides', () => {
       '--status-on-pr', '  Code Review  ',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).toMatchObject({ status_on_start: 'Doing', status_on_pr: 'Code Review' });
   });
 
@@ -262,7 +262,7 @@ describe('jira map action status overrides', () => {
       '--status-on-pr', '\t',
     ]);
 
-    const putCmd = ddbSend.mock.calls[0][0] as PutCommand;
+    const putCmd = ddbSend.mock.calls[1][0] as PutCommand;
     expect(putCmd.input.Item).not.toHaveProperty('status_on_start');
     expect(putCmd.input.Item).not.toHaveProperty('status_on_pr');
   });
@@ -1471,8 +1471,14 @@ describe('jira map action', () => {
 
   test('writes an active mapping row with the resolved label on the happy path', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--label', 'agentme']);
-    expect(ddbSend).toHaveBeenCalledTimes(1);
-    const putInput = ddbSend.mock.calls[0][0].input;
+    // One read of the row that the put replaces, then the put.
+    expect(ddbSend).toHaveBeenCalledTimes(2);
+    expect(ddbSend.mock.calls[0][0].input).toEqual({
+      TableName: 'ProjMapTable',
+      Key: { jira_project_identity: 'cloud-123#ENG' },
+      ConsistentRead: true,
+    });
+    const putInput = ddbSend.mock.calls[1][0].input;
     expect(putInput.TableName).toBe('ProjMapTable');
     expect(putInput.Item).toMatchObject({
       jira_project_identity: 'cloud-123#ENG',
@@ -1486,7 +1492,60 @@ describe('jira map action', () => {
 
   test('defaults the trigger label to bgagent when --label is omitted', async () => {
     await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
-    expect(ddbSend.mock.calls[0][0].input.Item.label_filter).toBe('bgagent');
+    expect(ddbSend.mock.calls[1][0].input.Item.label_filter).toBe('bgagent');
+  });
+
+  test('a second map keeps the first onboarded_at and moves updated_at', async () => {
+    // The mapping table, one row of it: a put stores the item, a get returns it.
+    let row: Record<string, unknown> | undefined;
+    ddbSend.mockImplementation(async (command: unknown) => {
+      if (command instanceof PutCommand) {
+        row = command.input.Item;
+        return {};
+      }
+      return { Item: row };
+    });
+    // Only the clock is faked, so that the two runs are a month apart.
+    jest.useFakeTimers({
+      now: new Date('2026-01-02T03:04:05.000Z'),
+      doNotFake: [
+        'nextTick', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+        'setInterval', 'clearInterval', 'hrtime', 'performance',
+      ],
+    });
+    try {
+      await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']);
+      expect(row).toMatchObject({
+        onboarded_at: '2026-01-02T03:04:05.000Z',
+        updated_at: '2026-01-02T03:04:05.000Z',
+      });
+
+      jest.setSystemTime(new Date('2026-02-03T04:05:06.000Z'));
+      await runMap(['cloud-123', 'ENG', '--repo', 'owner/repo', '--status-on-pr', 'Code Review']);
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(row).toMatchObject({
+      jira_project_identity: 'cloud-123#ENG',
+      status_on_pr: 'Code Review',
+      onboarded_at: '2026-01-02T03:04:05.000Z',
+      updated_at: '2026-02-03T04:05:06.000Z',
+    });
+  });
+
+  test('stops with the AWS error, before writing, when the mapping row cannot be read', async () => {
+    // Not a reason to take the row for new: the put would date the mapping from today.
+    ddbSend.mockRejectedValueOnce(Object.assign(
+      new Error('User is not authorized to perform: dynamodb:GetItem'),
+      { name: 'AccessDeniedException' },
+    ));
+
+    await expect(runMap(['cloud-123', 'ENG', '--repo', 'owner/repo']))
+      .rejects.toThrow('not authorized to perform: dynamodb:GetItem');
+
+    expect(ddbSend).toHaveBeenCalledTimes(1);
+    expect(ddbSend.mock.calls[0][0]).toBeInstanceOf(GetCommand);
   });
 
   test('rejects a repository that is not actively onboarded before writing', async () => {

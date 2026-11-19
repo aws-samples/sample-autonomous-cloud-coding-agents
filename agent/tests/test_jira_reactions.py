@@ -16,6 +16,15 @@ from jira_reactions import (
 
 JIRA_META = {"jira_cloud_id": "cloud-1", "jira_issue_key": "KAN-1"}
 
+#: What the Jira webhook processor (``buildIterationChannelMetadata``) adds to
+#: the metadata of a task that an ``@bgagent`` comment started.
+ITERATION_META = {
+    "jira_trigger_comment_id": "10042",
+    "jira_prior_task_id": "01JD0PRIORTASK",
+    "trigger_comment_id": "10042",
+    "trigger_comment_issue_id": "KAN-1",
+}
+
 
 def _resp(status_code: int = 201, text: str = "") -> MagicMock:
     r = MagicMock()
@@ -437,6 +446,41 @@ class TestStartTransitionSelection:
             _transition("41", "Doing", category="indeterminate"),
             current_name="In Progress",
             current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post", return_value=_resp(204)) as post,
+        ):
+            transition_task_started("jira", meta)
+        assert post.call_args[1]["json"] == {"transition": {"id": "41"}}
+
+    def test_iteration_with_override_leaves_an_in_review_issue_alone(self, monkeypatch):
+        """An ``@bgagent`` comment starts an iteration on an issue the earlier
+        task left In Review. The start override must not pull the card back on
+        every comment: an iteration whose build fails would leave it there."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        meta = {**JIRA_META, **ITERATION_META, "jira_status_on_start": "In Progress"}
+        issue = _issue_resp(
+            _transition("21", "In Progress", category="indeterminate"),
+            _transition("11", "Done", category="done"),
+            current_name="In Review",
+            current_category="indeterminate",
+        )
+        with (
+            patch("jira_reactions.requests.get", return_value=issue),
+            patch("jira_reactions.requests.post") as post,
+        ):
+            transition_task_started("jira", meta)
+        post.assert_not_called()
+
+    def test_iteration_with_override_moves_a_to_do_issue_to_it(self, monkeypatch):
+        """Only an issue that is In Progress or later stays put: an iteration on
+        an issue somebody moved back to To Do still goes to the override."""
+        monkeypatch.setenv("JIRA_API_TOKEN", "jira_at")
+        meta = {**JIRA_META, **ITERATION_META, "jira_status_on_start": "Doing"}
+        issue = _issue_resp(
+            _transition("21", "In Progress", category="indeterminate"),
+            _transition("41", "Doing", category="indeterminate"),
         )
         with (
             patch("jira_reactions.requests.get", return_value=issue),
