@@ -26,7 +26,8 @@ FROM --platform=$TARGETPLATFORM jdxcode/mise:2026.11.6@sha256:d4de1845114f6d73e9
 # Build gh with a patched Go toolchain; upstream packages can lag Go CVE fixes.
 FROM --platform=$TARGETPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS gh-builder
 ARG GH_VERSION
-RUN GOPROXY=direct GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
+# The Go module proxy retains pinned dependencies whose Git repositories become unavailable.
+RUN GOBIN=/out go install "github.com/cli/cli/v2/cmd/gh@v${GH_VERSION}"
 
 FROM --platform=$TARGETPLATFORM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
