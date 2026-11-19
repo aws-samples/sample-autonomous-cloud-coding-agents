@@ -7,7 +7,7 @@ Every task runs in an isolated cloud compute environment. Nothing runs on the us
 
 ## Compute options
 
-The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. For repos that exceed AgentCore's constraints (2 GB image limit, no GPU), the `ComputeStrategy` interface allows switching to alternative backends per repo.
+The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each session in a Firecracker MicroVM with per-session isolation, managed lifecycle, and built-in health monitoring. The `compute_types` CDK context selects one or more backends: `agentcore`, `ecs`, and `lambda-microvm`. Its first entry is the default for repositories; a repository can explicitly select any deployed backend. The `ComputeStrategy` interface dispatches each task to its resolved backend.
 
 | | AgentCore Runtime | ECS on Fargate | **Lambda MicroVMs** | ECS on EC2 | EKS | AWS Batch | Lambda (functions) | Custom EC2 + Firecracker |
 |---|---|---|---|---|---|---|---|---|
@@ -23,7 +23,45 @@ The default runtime is **Amazon Bedrock AgentCore Runtime**, which runs each ses
 
 > **Lambda MicroVMs are not Lambda functions.** They are a different compute primitive, so the functions column's 15-minute cap and poor-fit verdict do not apply. See [ADR-021](../decisions/ADR-021-lambda-microvms-compute-backend.md).
 
-The backend is selected per repo via `compute_type` in the Blueprint config. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the `ComputeStrategy` interface.
+Repositories without a `compute_type` override inherit the first entry in the deployed list. An explicit Blueprint or RepoTable override must name a deployed backend; mismatches fail before concurrency admission. Memory, Tool Gateway, Agent Registry and Linear Identity Vault are separate service choices, so selecting ECS or MicroVM does not disable them. The orchestrator resolves the strategy and delegates session start, polling, and termination to the strategy implementation. See [REPO_ONBOARDING.md](./REPO_ONBOARDING.md) for the `ComputeStrategy` interface.
+
+## Selecting and changing the backend
+
+Set `compute_types` in `cdk/cdk.json` as an array, or pass a comma-separated list to the deployment task:
+
+```bash
+# AgentCore and MicroVM, with AgentCore as the repository default.
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=agentcore,lambda-microvm
+
+# Only ECS; removing an existing backend requires the transition below.
+MISE_EXPERIMENTAL=1 mise //cdk:deploy -- -c compute_types=ecs
+```
+
+`compute_types` takes precedence over the legacy `compute_type` context. Empty lists, non-string entries and unsupported names fail synthesis. Duplicate names are collapsed while preserving order. Without `compute_types`, the previous deployment behavior is preserved:
+
+| Legacy context | Deployed backends | Repository default |
+|---|---|---|
+| Absent, or `compute_type=agentcore` | AgentCore | AgentCore |
+| `compute_type=ecs` | AgentCore and ECS | AgentCore |
+| `compute_type=lambda-microvm` | AgentCore and Lambda MicroVMs | AgentCore |
+
+An upgrade with the same legacy context keeps AgentCore, its role and its log delivery. Selecting a single optional backend explicitly, such as `compute_types=ecs`, opts into removing AgentCore. The bootstrap `ComputeTypes` CloudFormation parameter is a separate permission allowlist; enable every backend you plan to deploy there too.
+
+`ComputeTypes` and `ComputeSubstrate` both publish the complete ordered comma list. `ComputeDeploymentMode` is `exclusive` for one backend and `additive` for several. `RuntimeArn` exists whenever AgentCore is included. The orchestrator receives the same list in `DEPLOYED_COMPUTE_TYPE`. Stack-level `compute_type` tags join the deployed names with `+`, a tag-safe separator; backend-specific resources keep their own attribution.
+
+Use the updated CLI when the first backend is not AgentCore, or the list omits AgentCore. Older CLIs assume AgentCore is present and is the default on additive stacks. The updated CLI reads `ComputeTypes` for onboarding, `repo show`, and `runtime status`. Stacks without the new outputs retain the legacy interpretation.
+
+`bgagent repo show` and `bgagent runtime status` mark incompatible stored pins as **UNAVAILABLE** and explain how to reconcile them. JSON includes the ordered `compute_deployment.compute_types` array, `default_compute_type`, `compute_available`, and `configuration_error` (per repository in runtime status). Incompatible repositories are excluded from backend summaries and AgentCore probes. This checks deployment configuration; MicroVM image readiness and live backend health remain separate checks.
+
+Before deliberately removing a backend or changing the first entry:
+
+1. Record deployed context, templates, image identifiers, repository overrides and active sessions. Pause task submissions and let running or suspended work finish, or cancel it with the existing deployment.
+2. Reconcile stored overrides with the target list. Omitted `compute_type` inherits its first entry; explicit pins to other deployed backends remain valid. Remove obsolete `runtime_arn` overrides when leaving AgentCore.
+3. Prepare images and bootstrap permissions. MicroVM needs a compatible snapshot; rebuild it from this checkout before enabling Gateway or the vault because their optional settings travel through `platform_config`. Infrastructure without an image cannot run tasks.
+4. Review the full change set. Removing AgentCore removes its Runtime and delivery resources. The two named AgentCore log groups stay owned by the application across backend switches, with their existing destroy policies and retention periods. Shared data stores keep their existing lifecycle policies. A network ownership transfer is a separate, deferred migration.
+5. Rehearse deployment and rollback, then verify a task on each backend, repository-less work, cancellation, logs and enabled integrations before resuming submissions. Re-adding a backend cannot resume deleted sessions or recover runtime storage.
+
+The resource budget applies to the complete combination. The split topology fits the sampled combinations, including all three backends; wider inline combinations fail at the 490-resource ceiling. See [Network stack topology](../guides/DEPLOYMENT_GUIDE.md#network-stack-topology). Local synthesis verifies wiring and budget behavior; it does not establish a live migration guarantee or change MicroVM's experimental status.
 
 ## What runs in the session
 
@@ -77,11 +115,15 @@ See [ORCHESTRATOR.md](./ORCHESTRATOR.md) for how the orchestrator handles these 
 
 ## Lambda MicroVMs backend
 
-Lambda MicroVMs are an opt-in third backend, selected per repository with `compute_type: lambda-microvm`; AgentCore remains the default. Image configuration has three states: a managed base-image ARN and version creates the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither provisions only the roles, buckets, and connectors needed for the bootstrap deploy. `cdk/scripts/package-microvm-artifact.sh` packages the agent as zip + Dockerfile, uploads it to the artifact bucket, and can create the external image. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
+Lambda MicroVMs are an opt-in third backend. Include `lambda-microvm` in `compute_types`; repositories inherit the first listed backend or choose a deployed backend through an override. Legacy `compute_type=lambda-microvm` deploys AgentCore and MicroVM, with AgentCore as the default. Image configuration has three states: a managed base-image ARN and version creates the snapshot image in CDK; an external image identifier uses a snapshot built out of band; and supplying neither provisions only the roles, buckets, and connectors needed for the bootstrap deploy. `cdk/scripts/package-microvm-artifact.sh` packages the agent as zip + Dockerfile, uploads it to the artifact bucket, and can create the external image. Lambda MicroVMs are available in five launch regions (us-east-1, us-east-2, us-west-2, eu-west-1, ap-northeast-1) and will expand; the platform enforces regional availability in layers via a synth-time constant, onboarding live probes, and orchestration-time classification.
 
 Because a snapshot freezes its build-time environment, deployment-specific, non-secret identifiers travel in the `/run` hook's `platform_config` block instead. The strategy sends the canonical inline envelope or, when that envelope exceeds the verified 4,096-byte `runHookPayload` limit, an S3-pointer envelope with the configuration also merged into the uploaded payload. The agent accepts only allowlisted keys and installs them before pipeline initialization; [ADR-021 §3](../decisions/ADR-021-lambda-microvms-compute-backend.md#3-packaging-same-agent-image-source-new-build-path) defines the exact wire shapes and validation rules.
 
-Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. The P2 image declares and serves `/ready` and `/validate` at build time and `/run` and `/terminate` at runtime. `/suspend` and `/resume` remain disabled until their P3 implementation.
+Networking separates image build from execution: the build-only connector permits TCP 80 and 443 because the Dockerfile uses `apt-get`, while running MicroVMs retain 443-only egress through the platform VPC. Every launch explicitly passes the Lambda-managed `NO_INGRESS` connector; omission would select the service's public-ingress default. The P2 image declares and serves `/ready` and `/validate` at build time and `/run` and `/terminate` at runtime. The P3 image also serves `/suspend` and `/resume`.
+
+**Approval-wait sleep (P3).** While a task waits for a human decision, the orchestrator can suspend its MicroVM: compute billing stops and memory and disk are preserved. It suspends only when the deployment enables `microvm_approval_suspend_enabled`, the live Parameter Store switch is on, the launched image version declares the lifecycle protocol, and enough of the gate remains after the task's `microvm_sleep_after_s` delay (default 60 s). It resumes inline when the decision is recorded, with the orchestrator poll as a backstop, and always 60 s before the original deadline. Approval windows stay bounded (300 s default, 3,600 s ceiling), so a suspended worker never outlives its gate. The guest declines an unsafe suspend with HTTP 200 because any other answer makes the service terminate the VM. See [ADR-021 P3 as delivered](../decisions/ADR-021-lambda-microvms-compute-backend.md#p3-as-delivered).
+
+New MicroVM deployments place these resources in a nested stack (`--context microvm_nested_stack=true`, bootstrap 1.9.0 or later); existing flat installations keep `false` until migrated.
 
 ## ECS Fargate task sizing (build vs. planning)
 

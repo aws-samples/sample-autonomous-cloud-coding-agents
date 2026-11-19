@@ -109,6 +109,15 @@ class TestDeliver:
         with pytest.raises(ValueError, match="characters, exceeds the"):
             _artifact_body(ctx)
 
+    def test_oversize_artifact_rejected_before_the_deferral_scan(self, monkeypatch):
+        # The scan copies the text twice (code stripped, then lower-cased), so the
+        # cap fires before it, as it does before encoding: a text over the cap is
+        # reported as too large, whatever it says.
+        monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
+        big = "Use /workflows to watch live progress. " + "x" * MAX_ARTIFACT_BYTES
+        with pytest.raises(ValueError, match="characters, exceeds the"):
+            deliver("s3", _ctx(result_text=big))
+
     def test_deferral_message_rejected_not_uploaded(self, monkeypatch):
         # #515 exit-path guard: a final message that defers the work ("running…
         # watch /workflows") must fail the deliver step, not upload as the
@@ -127,7 +136,9 @@ class TestDeliver:
         # guarded as well — a deferral is never presented as a delivered comment.
         # (progress must be present, else _post_comment short-circuits before
         # building the body.)
-        ctx = _ctx(result_text="results will follow shortly.", progress=MagicMock())
+        ctx = _ctx(
+            result_text="The workflow is now running in the background.", progress=MagicMock()
+        )
         with pytest.raises(ValueError, match="defers the work"):
             deliver("comment", ctx)
 
@@ -140,34 +151,52 @@ class TestDeliver:
             "with auto-scaling suits steady load. Background compaction is handled by "
             "the service. Sources: docs.aws.amazon.com/..."
         )
-        with patch("workflow.deliverers._upload_to_s3", return_value="s3://b/k"):
+        with patch("aws_session.tenant_client", return_value=MagicMock()):
             result = deliver("s3", _ctx(result_text=answer))
-        assert result.artifact_uri == "s3://b/k"
+        assert result.artifact_uri == "s3://artifacts-bkt/artifacts/task-1/result.md"
 
     @pytest.mark.parametrize(
         "answer",
         [
             # PR #523 review: a cited CI URL matched the old "/workflows" marker.
-            "Our CI is defined in `.github/workflows/ci.yml`. See "
-            "https://github.com/o/r/actions/workflows/ci.yml for the runs.",
+            (
+                "Our CI is defined in `.github/workflows/ci.yml`. See "
+                "https://github.com/o/r/actions/workflows/ci.yml for the runs."
+            ),
             # "running in the background" as genuine topic prose.
             "Log compaction runs in the background, so writes are never blocked.",
             # "watch progress" / "check back" as legitimate instructions in an answer.
-            "To watch progress of a deployment, run `bgagent watch <id>`; check back "
-            "in the console once it reports COMPLETED.",
-            # A fenced code block quoting a deferral-looking string must not trip it.
-            "Here is the guard's marker list:\n```\nresults will follow\n```\nThat is "
-            "the full answer.",
+            (
+                "To watch progress of a deployment, run `bgagent watch <id>`; check back "
+                "in the console once it reports COMPLETED."
+            ),
+            # A fenced code block quoting a marker must not trip it.
+            (
+                "Here is the guard's marker list:\n```\nwatch live progress\n```\nThat is "
+                "the full answer."
+            ),
+            # A finished answer announces what comes next in the same message.
+            (
+                "I compared the three libraries. I'll share the results by criterion.\n\n"
+                "## Speed\nA is twice as fast as B.\n\n## Licence\nAll three are MIT."
+            ),
+            # The answer is itself a message or a notice: a promise in it is the
+            # deliverable, not the agent putting the work off.
+            "Dear Ms Lee, the analysis is still running. I will share the results on Friday.",
+            "We are down for maintenance tonight. Please check back later.",
+            "Service is restored. A full incident report will follow within five days.",
+            "The load test is done in two of three regions. Detailed results will follow shortly.",
+            "Thank you for the invitation. I will deliver the keynote on Thursday at 9:00.",
         ],
     )
     def test_genuine_answer_with_colliding_tokens_not_rejected(self, monkeypatch, answer):
-        # #523: the guard was pared to full first-person deferral phrases and now
-        # strips code/URLs before matching, so answers that merely quote a token
-        # in a link, code, or topic prose still deliver.
+        # #523: the guard matches full phrases and strips code/URLs first, so
+        # answers that merely quote a token in a link, code, or topic prose still
+        # deliver. Only the S3 client is a stub: the text meets the real guard.
         monkeypatch.setenv("ARTIFACTS_BUCKET_NAME", "artifacts-bkt")
-        with patch("workflow.deliverers._upload_to_s3", return_value="s3://b/k"):
+        with patch("aws_session.tenant_client", return_value=MagicMock()):
             result = deliver("s3", _ctx(result_text=answer))
-        assert result.artifact_uri == "s3://b/k"
+        assert result.artifact_uri == "s3://artifacts-bkt/artifacts/task-1/result.md"
 
     def test_comment_writes_milestone_no_s3(self):
         progress = MagicMock()

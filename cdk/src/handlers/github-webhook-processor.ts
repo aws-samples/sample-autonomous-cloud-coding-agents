@@ -35,6 +35,7 @@ import { renderPreviewBlock } from './shared/iteration-reply';
 import { deliverJiraDeploymentPreview } from './shared/jira-deployment-preview';
 import { appendOnceToComment, postIssueComment } from './shared/linear-feedback';
 import {
+  type LinearIssueLocation,
   extractLinearIdentifier,
   extractLinearIdentifierFromBranch,
   findLinearIssueByIdentifier,
@@ -62,9 +63,10 @@ const SCREENSHOT_BUCKET = process.env.SCREENSHOT_BUCKET_NAME!;
 const SCREENSHOT_PUBLIC_HOST = process.env.SCREENSHOT_PUBLIC_HOST!;
 const GITHUB_TOKEN_SECRET_ARN = process.env.GITHUB_TOKEN_SECRET_ARN!;
 // Optional — when set, the processor also tries to post the
-// screenshot comment onto a linked Linear issue. Resolved from the
-// GitHub PR title/body via a Linear-identifier regex (e.g. `ENG-42`),
-// then looked up across all active workspaces in the registry.
+// screenshot comment onto a linked Linear issue: the issue of the task
+// that opened the PR, else the one resolved from the GitHub PR
+// branch/title/body via a Linear-identifier regex (e.g. `ENG-42`) and
+// looked up across the active workspaces in the registry.
 const LINEAR_WORKSPACE_REGISTRY_TABLE = process.env.LINEAR_WORKSPACE_REGISTRY_TABLE_NAME;
 
 /**
@@ -120,6 +122,7 @@ const PR_LOOKUP_RETRY_DELAYS_MS = [
  * the receiver already 200'd, so retries by GitHub will dedup at the
  * receiver layer.
  */
+// eslint-disable-next-line complexity -- predates the ceiling (56, down from 59 when it landed); must not grow
 export async function handler(event: ProcessorEvent): Promise<void> {
   // One wall-clock deadline shared across PR lookup + screenshot capture
   // + S3 PUT + comment POST. Without this, findPullRequestForShaWithRetry
@@ -327,7 +330,8 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // node — whose screenshot belongs in the panel only, never as a standalone
   // Linear comment on the parent epic.
   const persisted = await persistScreenshotUrl(
-    pr.headRefName,
+    pr,
+    repo,
     publicUrl,
     previewUrl,
   );
@@ -380,7 +384,7 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // Best-effort Linear comment. The GitHub PR comment above is the
   // load-bearing artifact; the Linear comment is bonus surface for
   // reviewers who live in Linear. Only fires when the registry table
-  // is configured AND the PR carries a Linear identifier.
+  // is configured AND the task or the PR names a Linear issue.
   //
   // The synthetic integration node has no Linear sub-issue of its
   // own, so a Linear post here would resolve the parent-epic identifier from
@@ -389,74 +393,118 @@ export async function handler(event: ProcessorEvent): Promise<void> {
   // via the persisted screenshot_url). Skip the Linear post for the integration
   // node; the panel is the only Linear surface for the combined result.
   if (LINEAR_WORKSPACE_REGISTRY_TABLE && !isIntegrationDeploy && task?.channel_source !== 'jira') {
-    // Branch-name first — it deterministically encodes this PR's own
-    // issue (`bgagent/{taskId}/eng-151-...`). Title/body are ambiguous
-    // fallbacks: in a stacked orchestration the body often names a
-    // predecessor issue before the one the PR closes, and
-    // `extractLinearIdentifier` returns the first match in document
-    // order — which would misroute the screenshot to the predecessor.
-    const identifier =
-      extractLinearIdentifierFromBranch(pr.headRefName)
-      ?? extractLinearIdentifier(pr.title)
-      ?? extractLinearIdentifier(pr.body);
-    if (identifier) {
-      const linearIssue = await findLinearIssueByIdentifier(identifier, LINEAR_WORKSPACE_REGISTRY_TABLE);
-      if (linearIssue) {
-        const ctx = {
-          linearWorkspaceId: linearIssue.linearWorkspaceId,
-          registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
-        };
-        if (isIterationDeploy) {
-          // The preview belongs IN the iteration's maturing reply,
-          // not a standalone comment. The screenshot capture is async and usually
-          // lands AFTER the reply settled (✅ + cost), so we APPEND the preview
-          // link to that reply now (in place). Find the most-recent iteration
-          // reply id for this issue and edit it; idempotent via the [preview]
-          // marker so a webhook redelivery won't double-append.
-          const iter = lookupValueOr(await findIterationReplyId(linearIssue.issueId, sha), null);
-          if (iter) {
-            // (1) Durably persist the screenshot onto the ITERATION task so the
-            // terminal-settle renders the thumbnail from a strongly-consistent
-            // DDB read — race-free against this comment edit, which used to
-            // clobber the preview.
-            await persistScreenshotOnIterationTask(iter.taskId, publicUrl, previewUrl);
-            // (2) Also append to the reply now, for the case where the deploy is
-            // slow and the settle already ran (the append then wins). Embed the
-            // captured PNG as a clickable thumbnail linking to the live deploy —
-            // same shape as the first-task 🖼️ comment, NOT a bare text link.
-            // previewUrl is payload-derived → markdown-escape (publicUrl is ours).
-            const previewBlock = renderPreviewBlock(publicUrl, encodeMarkdownUrl(previewUrl));
-            const appended = await appendOnceToComment(ctx, iter.replyId, `\n\n${previewBlock}`, '[preview]');
-            logger.info('Appended preview thumbnail to iteration reply', {
-              linear_issue_id: linearIssue.issueId, reply_id: iter.replyId, task_id: iter.taskId, appended,
-            });
-          } else {
-            logger.info('Iteration deploy but no reply id found — skipping preview append', {
-              linear_issue_id: linearIssue.issueId,
-            });
-          }
+    const linearIssue = await linearIssueFor(task, repo, pr, LINEAR_WORKSPACE_REGISTRY_TABLE);
+    if (linearIssue) {
+      const ctx = {
+        linearWorkspaceId: linearIssue.linearWorkspaceId,
+        registryTableName: LINEAR_WORKSPACE_REGISTRY_TABLE,
+      };
+      if (isIterationDeploy) {
+        // The preview belongs IN the iteration's maturing reply,
+        // not a standalone comment. The screenshot capture is async and usually
+        // lands AFTER the reply settled (✅ + cost), so we APPEND the preview
+        // link to that reply now (in place). Find the most-recent iteration
+        // reply id for this issue and edit it; idempotent via the [preview]
+        // marker so a webhook redelivery won't double-append.
+        const iter = lookupValueOr(await findIterationReplyId(linearIssue.issueId, repo, sha), null);
+        if (iter) {
+          // (1) Durably persist the screenshot onto the ITERATION task so the
+          // terminal-settle renders the thumbnail from a strongly-consistent
+          // DDB read — race-free against this comment edit, which used to
+          // clobber the preview.
+          await persistScreenshotOnIterationTask(iter.taskId, publicUrl, previewUrl);
+          // (2) Also append to the reply now, for the case where the deploy is
+          // slow and the settle already ran (the append then wins). Embed the
+          // captured PNG as a clickable thumbnail linking to the live deploy —
+          // same shape as the first-task 🖼️ comment, NOT a bare text link.
+          // previewUrl is payload-derived → markdown-escape (publicUrl is ours).
+          const previewBlock = renderPreviewBlock(publicUrl, encodeMarkdownUrl(previewUrl));
+          const appended = await appendOnceToComment(ctx, iter.replyId, `\n\n${previewBlock}`, '[preview]');
+          logger.info('Appended preview thumbnail to iteration reply', {
+            linear_issue_id: linearIssue.issueId, reply_id: iter.replyId, task_id: iter.taskId, appended,
+          });
         } else {
-          // First deploy / non-iteration: post the headline 🖼️ standalone comment.
-          const postResult = await postIssueComment(ctx, linearIssue.issueId, renderLinearCommentBody(publicUrl, previewUrl));
-          if (postResult.ok) {
-            logger.info('Posted screenshot comment to Linear issue', {
-              identifier, linear_issue_id: linearIssue.issueId, workspace_slug: linearIssue.workspaceSlug,
-            });
-          } else {
-            logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
-              event: 'screenshot.linear_comment_post_failed', identifier, linear_issue_id: linearIssue.issueId,
-            });
-          }
+          logger.info('Iteration deploy but no reply id found — skipping preview append', {
+            linear_issue_id: linearIssue.issueId,
+          });
         }
       } else {
-        logger.info('Linear identifier did not resolve to an issue — skipping Linear post', {
-          identifier,
-          repo,
-          pr_number: pr.number,
-        });
+        // First deploy / non-iteration: post the headline 🖼️ standalone comment.
+        const postResult = await postIssueComment(ctx, linearIssue.issueId, renderLinearCommentBody(publicUrl, previewUrl));
+        if (postResult.ok) {
+          logger.info('Posted screenshot comment to Linear issue', {
+            linear_issue_id: linearIssue.issueId, workspace_slug: linearIssue.workspaceSlug,
+          });
+        } else {
+          logger.warn('Failed to post screenshot Linear comment (non-fatal)', {
+            event: 'screenshot.linear_comment_post_failed', linear_issue_id: linearIssue.issueId,
+          });
+        }
       }
     }
   }
+}
+
+/**
+ * The Linear issue a deployment's preview belongs on.
+ *
+ * The task that opened the pull request records its own issue and workspace, and
+ * that is the answer whenever it is there. It needs no identifier in the pull
+ * request: a task started from a comment is described by that comment alone. And
+ * an identifier such as `ENG-7` is unique inside one workspace only: on a stack
+ * with two workspaces that both have it, a lookup by identifier can return the
+ * other tenant's issue.
+ *
+ * `task` is a task of the deployment's repository, named by a branch of that
+ * repository: `persistScreenshotUrl` hands on no other, because the task id
+ * comes from the branch name, which whoever opens a pull request chooses.
+ *
+ * A pull request without such a task is searched for an identifier. Branch name
+ * first: it encodes this PR's own issue (`bgagent/{taskId}/eng-151-...`). Title
+ * and body are fallbacks: in a stacked orchestration the body often names a
+ * predecessor issue before the one the PR closes, and `extractLinearIdentifier`
+ * returns the first match in document order. A fallback is tried only when every
+ * workspace answered that it has no issue of the identifier before it: any word
+ * followed by a number reads as one (`feature/upgrade-node-22` gives `NODE-22`).
+ * After a lookup that could not be completed, or that found two issues, nothing
+ * is tried: the preview must not land on an issue the pull request only mentions.
+ */
+async function linearIssueFor(
+  task: TaskRecord | undefined,
+  repo: string,
+  pr: OpenPr,
+  registryTableName: string,
+): Promise<LinearIssueLocation | null> {
+  const meta = task?.channel_metadata;
+  if (meta?.linear_issue_id && meta.linear_workspace_id) {
+    return {
+      issueId: meta.linear_issue_id,
+      linearWorkspaceId: meta.linear_workspace_id,
+      // Labels a log line only.
+      workspaceSlug: meta.linear_workspace_slug ?? '',
+    };
+  }
+  const candidates = new Set([
+    extractLinearIdentifierFromBranch(pr.headRefName),
+    extractLinearIdentifier(pr.title),
+    extractLinearIdentifier(pr.body),
+  ]);
+  const tried: string[] = [];
+  for (const identifier of candidates) {
+    if (!identifier) continue;
+    tried.push(identifier);
+    const found = await findLinearIssueByIdentifier(identifier, registryTableName);
+    if (found.ok) return found.value;
+    if (isLookupFailure(found)) break;
+  }
+  if (tried.length > 0) {
+    logger.info('Linear identifier did not resolve to an issue — skipping Linear post', {
+      identifiers: tried,
+      repo,
+      pr_number: pr.number,
+    });
+  }
+  return null;
 }
 
 /**
@@ -478,13 +526,22 @@ export async function handler(event: ProcessorEvent): Promise<void> {
  * read). Falls back to the newest reply-bearing task when no head_sha matches
  * (pre-fix tasks that never stored it, or a non-PR deploy).
  *
+ * Only a task of the deployment's repository ``repo`` is a candidate, for the
+ * match by commit and for the fallback alike. The issue can come from an
+ * identifier in the pull request's branch, title or body, which whoever writes
+ * them chooses, and then be an issue of another repository: its iteration task
+ * and its reply must not get this deployment's screenshot. The index projects
+ * ``repo``, so this costs no read.
+ *
  * Returns a {@link LookupResult}: ``found`` with the reply + task ids, ``absent``
- * when the query ran and this issue has no reply-bearing iteration, and a failure
- * when the lookup could not run or broke (unconfigured table, Query error) — so a
- * caller is never told "no iteration reply" because the read failed.
+ * when the query ran and this issue has no reply-bearing iteration of this
+ * repository, and a failure when the lookup could not run or broke (unconfigured
+ * table, Query error) — so a caller is never told "no iteration reply" because
+ * the read failed.
  */
 async function findIterationReplyId(
   linearIssueId: string,
+  repo: string,
   deploySha?: string,
 ): Promise<LookupResult<{ replyId: string; taskId: string }>> {
   // Misconfiguration, not absence: the query never ran, so we cannot claim there
@@ -504,7 +561,9 @@ async function findIterationReplyId(
       ExpressionAttributeValues: { ':iid': linearIssueId },
       ScanIndexForward: false, // newest first (SK = created_at)
     }));
-    const candidates = ((res.Items ?? []) as Array<{ task_id?: string; channel_metadata?: { iteration_reply_comment_id?: string } }>)
+    const here = repo.toLowerCase();
+    const candidates = ((res.Items ?? []) as Array<{ task_id?: string; repo?: unknown; channel_metadata?: { iteration_reply_comment_id?: string } }>)
+      .filter((item) => typeof item.repo === 'string' && item.repo.toLowerCase() === here)
       .map((item) => ({ taskId: item.task_id, replyId: item.channel_metadata?.iteration_reply_comment_id }))
       .filter((c): c is { taskId: string; replyId: string } =>
         typeof c.taskId === 'string' && typeof c.replyId === 'string' && c.replyId.length > 0);
@@ -570,11 +629,18 @@ interface OpenPr {
   readonly title: string;
   readonly body: string;
   /**
-   * Head branch ref (e.g. `bgagent/{taskId}/eng-151-...`). The
-   * authoritative source for the linked Linear issue — see
-   * `extractLinearIdentifierFromBranch`.
+   * Head branch ref (e.g. `bgagent/{taskId}/eng-151-...`). Names the
+   * task, and is the first place searched for a Linear identifier when
+   * the task record names no issue — see `linearIssueFor`.
    */
   readonly headRefName: string;
+  /**
+   * The repository that holds the head branch (`head.repo.full_name`): the
+   * deployment's repository for a branch of the repository itself, the
+   * fork's for a pull request from a fork. Null when GitHub names none (it
+   * returns `null` for a fork that was deleted).
+   */
+  readonly headRepo: string | null;
 }
 
 type PrLookup =
@@ -634,8 +700,11 @@ async function findPullRequestForShaWithRetry(
  * Accept only that open PR with a matching head; body validation and permanent
  * HTTP failures are terminal. Transient request failures remain retryable.
  *
- * For deployment statuses, use GET /repos/{repo}/commits/{sha}/pulls. Prefer
- * the open PR whose head matches the SHA, falling back to the first open PR.
+ * For deployment statuses, use GET /repos/{repo}/commits/{sha}/pulls. Of the
+ * open PRs that live in this repository, prefer those whose head matches the
+ * SHA, falling back to all of them, and take the lowest number, whatever the
+ * order of the answer. (The PR fetched by number above lives in the repository
+ * by the endpoint's own scope.)
  * Missing PRs and request failures are retryable to cover the PR-creation race.
  */
 async function findPullRequestForSha(
@@ -709,7 +778,13 @@ async function findPullRequestForSha(
     return { ok: false, kind: 'retryable', reason: 'non_json_response' };
   }
   if (validatedPrNumber !== undefined) {
-    const pr = parsed as { number?: unknown; state?: unknown; title?: unknown; body?: unknown; head?: { sha?: unknown; ref?: unknown } } | null;
+    const pr = parsed as {
+      number?: unknown;
+      state?: unknown;
+      title?: unknown;
+      body?: unknown;
+      head?: { sha?: unknown; ref?: unknown; repo?: { full_name?: unknown } | null };
+    } | null;
     const reject = (reason: PrLookupRejectionReason): PrLookup => ({ ok: false, kind: 'pr_rejected', reason });
     if (!pr || typeof pr !== 'object' || Array.isArray(pr)) return reject('malformed_pr_response');
     if (pr.number !== validatedPrNumber) return reject('pr_number_mismatch');
@@ -723,6 +798,7 @@ async function findPullRequestForSha(
         title: typeof pr.title === 'string' ? pr.title : '',
         body: typeof pr.body === 'string' ? pr.body : '',
         headRefName: pr.head.ref,
+        headRepo: typeof pr.head.repo?.full_name === 'string' ? pr.head.repo.full_name : null,
       },
     };
   }
@@ -736,16 +812,40 @@ async function findPullRequestForSha(
     state?: string;
     title?: string;
     body?: string | null;
-    head?: { ref?: string; sha?: string } | null;
+    head?: { ref?: string; sha?: string; repo?: { full_name?: unknown } | null } | null;
+    base?: { repo?: { full_name?: unknown } | null } | null;
   }>;
-  const openPulls = pulls.filter((p) => p.state === 'open' && typeof p.number === 'number');
+  // GitHub lists the open pull requests of a commit by the repository of their
+  // HEAD branch, so the answer can hold one that somebody opened in another
+  // repository from a branch of this one. Its number is a number of that
+  // repository and its title and body are that author's: only a pull request
+  // that lives in this repository (`base.repo`) counts, and one that names no
+  // base does not.
+  const here = repo.toLowerCase();
+  const openPulls = pulls.filter((p) => {
+    const baseRepo = p.base?.repo?.full_name;
+    return p.state === 'open' && typeof p.number === 'number'
+      && typeof baseRepo === 'string' && baseRepo.toLowerCase() === here;
+  });
   if (openPulls.length === 0) return { ok: false, kind: 'retryable', reason: 'pr_not_linked' };
   // Prefer the PR whose own head is this SHA — the PR that introduced the
   // commit. For a stacked PR chain the commit-pulls API also lists every
   // PR stacked on top (their history contains the commit); routing reads
   // the selected PR's branch, so we must pick its true owner. Fall back to
-  // the first open PR for non-head SHAs (e.g. a merge/base commit).
-  const owner = openPulls.find((p) => p.head?.sha === sha) ?? openPulls[0];
+  // the open PRs of the repository for non-head SHAs (e.g. a merge/base commit).
+  //
+  // Of several, the lowest number, not the first listed: a second pull request
+  // from the same branch can be opened by anyone who can open one in the
+  // repository (in a public one, into another of its branches), with a title of
+  // its author's choice, and the order of GitHub's answer must not decide which
+  // of the two gets the screenshot and has its title searched for an issue. ABCA
+  // opens its pull request right after it pushes the branch, so its number is
+  // the lower one unless another was opened in between. The task record cannot
+  // say which is its own here: it holds the pull request only from the end of
+  // the run, and is not read yet.
+  const heads = openPulls.filter((p) => p.head?.sha === sha);
+  const owner = (heads.length > 0 ? heads : openPulls).reduce((a, b) => (b.number! < a.number! ? b : a));
+  const headRepo = owner.head?.repo?.full_name;
   return {
     ok: true,
     pr: {
@@ -753,6 +853,7 @@ async function findPullRequestForSha(
       title: owner.title ?? '',
       body: owner.body ?? '',
       headRefName: owner.head?.ref ?? '',
+      headRepo: typeof headRepo === 'string' ? headRepo : null,
     },
   };
 }
@@ -763,14 +864,16 @@ async function findPullRequestForSha(
  * TaskRecord, so the orchestration reconciler can embed the integration node's
  * combined preview in the parent epic panel. Keyed by the taskId encoded in
  * the deploy branch (``bgagent/{taskId}/…``). Best-effort and never throws —
- * a non-ABCA branch (no taskId), an unset table, or a vanished record (TTL)
- * skips persistence. Lookup failures skip both channel deliveries; the PR
- * comment still posts. The returned task is ALL_OLD: its screenshot is from
- * the previous deploy. Conditional on ``attribute_exists`` so we never resurrect a
+ * a non-ABCA branch (no taskId), an unset table, a vanished record (TTL), a
+ * branch of another repository (a fork) or a task of another repository skips
+ * persistence. Lookup failures skip both channel deliveries; the PR comment
+ * still posts. The returned task is ALL_OLD: its screenshot is from the
+ * previous deploy. Conditional on ``attribute_exists`` so we never resurrect a
  * TTL-reaped row.
  */
 async function persistScreenshotUrl(
-  branchName: string,
+  pr: OpenPr,
+  repo: string,
   publicUrl: string,
   previewUrl: string,
 ): Promise<LookupResult<{ isIntegrationNode: boolean; isIteration: boolean; task?: TaskRecord }>> {
@@ -779,9 +882,40 @@ async function persistScreenshotUrl(
     logger.warn('Screenshot task table is not configured; skipping channel delivery', { event: 'screenshot.persist_failed' });
     return lookupFailed(new Error('Screenshot task table is not configured'));
   }
-  const taskId = extractTaskIdFromBranch(branchName);
+  const taskId = extractTaskIdFromBranch(pr.headRefName);
   if (!taskId) return LOOKUP_ABSENT;
+  // Whoever opens a pull request chooses its branch name, so the task id in it
+  // can be that of any task, and a task id is in the branch name of every ABCA
+  // pull request. A branch names a task only when it is a branch of the
+  // deployment's repository (ABCA pushes there; a fork's branch is its author's)
+  // and the task is a task of that repository. Only such a task is written to
+  // and handed on for channel delivery. Letter case is not compared: GitHub
+  // answers to any spelling of a name and reports its own, the task has the
+  // blueprint's.
+  if (pr.headRepo === null) {
+    // Its own log line: should GitHub stop naming the head repository, every
+    // task would lose its screenshot, and this line is how that would be seen.
+    logger.warn('GitHub named no head repository for the pull request; its branch cannot name a task', {
+      event: 'screenshot.head_repo_missing',
+      task_id: taskId,
+      pr_number: pr.number,
+    });
+    return lookupFailed(new Error('GitHub named no head repository for the pull request'));
+  }
   try {
+    if (pr.headRepo.toLowerCase() !== repo.toLowerCase()) {
+      throw new Error('The branch of the pull request is in another repository');
+    }
+    const owner = await ddb.send(new GetCommand({
+      TableName: TASK_TABLE,
+      Key: { task_id: taskId },
+      ProjectionExpression: '#repo',
+      ExpressionAttributeNames: { '#repo': 'repo' },
+    }));
+    const taskRepo: unknown = owner.Item?.repo;
+    if (typeof taskRepo !== 'string' || taskRepo.toLowerCase() !== repo.toLowerCase()) {
+      throw new Error('The branch names no task of this repository');
+    }
     // Persist BOTH the captured image URL and the live preview-deploy URL so
     // the reconciler can render a clickable combined-preview deep-link in the
     // panel. Return-on-values so we learn whether this deploy task
@@ -820,8 +954,9 @@ async function persistScreenshotUrl(
       is_iteration: result.isIteration,
     });
   } catch (err) {
-    // ConditionalCheckFailed = the task row is gone (TTL); anything else is a
-    // transient DDB error. Preserve the PR comment, but skip channel routing.
+    // The branch is a fork's or names no task of this repository, the task row
+    // is gone (TTL, ConditionalCheckFailed), or a transient DDB error. Preserve
+    // the PR comment, but skip channel routing.
     logger.warn('Failed to persist screenshot_url (non-fatal)', {
       event: 'screenshot.persist_failed',
       task_id: taskId,

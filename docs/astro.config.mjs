@@ -2,6 +2,7 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { remarkMermaid } from './plugins/remark-mermaid.mjs';
 import remarkGfm from 'remark-gfm';
+import starlightLinksValidator from 'starlight-links-validator';
 
 export default defineConfig({
   site: 'https://aws-samples.github.io',
@@ -12,6 +13,9 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'ABCA Docs',
+      // Fails `astro build` on a broken internal link or anchor in any page. No options on
+      // purpose: there is no list of excluded links, and no report file is written into the tree.
+      plugins: [starlightLinksValidator()],
       social: [
         {
           icon: 'github',
@@ -34,7 +38,7 @@ export default defineConfig({
           tag: 'script',
           attrs: { type: 'module' },
           content:
-            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
+            "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.esm.min.mjs';mermaid.initialize({startOnLoad:true,theme:document.documentElement.dataset.theme==='light'?'default':'dark'});",
         },
       ],
       sidebar: [
@@ -50,6 +54,7 @@ export default defineConfig({
           label: 'Using the Platform',
           items: [
             { slug: 'using/overview' },
+            { slug: 'using/prerequisites' },
             { slug: 'using/workflows' },
             { slug: 'using/authentication' },
             { slug: 'using/using-the-rest-api' },

@@ -174,7 +174,7 @@ def _resolve_linear_token_via_vault(
             "WARN",
             "_resolve_linear_token_via_vault: consent required (no cached grant); SM fallback",
         )
-        # nosemgrep: py-silent-success-masking -- vault needs consent; SM fallback follows
+        # vault needs consent; SM fallback follows
         return ""
     except (ClientError, BotoCoreError) as e:
         log(
@@ -185,21 +185,37 @@ def _resolve_linear_token_via_vault(
         return ""
 
 
-def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_linear_api_token(  # noqa: C901 -- 34 when the ceiling of 15 was set; must not grow
+    channel_metadata: dict[str, str] | None = None, *, force: bool = False
+) -> str:
     """Resolve the Linear OAuth access token from Secrets Manager.
 
     Phase 2.0b-O2: the orchestrator stamps ``linear_oauth_secret_arn``
     into the task record's ``channel_metadata`` at task-creation time.
     Pass that dict in via ``channel_metadata`` (the pipeline does this
     automatically). We fetch the per-workspace secret, parse the token
-    JSON, refresh if expiring, and cache the access_token in
+    JSON, and cache the access_token in
     ``LINEAR_API_TOKEN`` so the one remaining consumer —
     ``linear_reactions.py``'s direct-GraphQL Authorization header (reactions +
     state transitions) — keeps working. (ADR-016: there is no Linear MCP; this
     token no longer feeds an ``.mcp.json`` placeholder.)
 
+    **The agent never refreshes the token**, for the reason given in
+    :func:`resolve_jira_oauth_token`: Linear rotates the refresh_token on every
+    use and the agent runtime has ``secretsmanager:GetSecretValue`` only, so it
+    could not store the replacement. Linear accepts a spent refresh_token again
+    for 30 minutes only (https://linear.app/developers/oauth-2-0-authentication);
+    a workspace on which no Lambda asked for a token in that time would need
+    re-onboarding. If the stored token is expiring we fail closed (empty
+    string) and leave the refresh to the Lambda path
+    (``linear-oauth-resolver.ts``, which has ``PutSecretValue``).
+
     For local development, a pre-set ``LINEAR_API_TOKEN`` env var
     short-circuits the lookup so the agent can run outside the runtime.
+    ``force`` skips that short-circuit and resolves again: the pipeline passes
+    it before the final reaction, because the token cached when the task
+    started may have expired since. When nothing can be resolved then, the
+    cached value stays in place.
 
     Returns an empty string when the credential is absent — ``linear_reactions``
     then skips its reactions/state calls (best-effort, logged). This function is
@@ -213,7 +229,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
     reproduces and that the flow forwards the ``actor=app`` agent install.
     """
     cached = os.environ.get("LINEAR_API_TOKEN", "")
-    if cached:
+    if cached and not force:
         return cached
 
     # RFC #249 Phase 1: when the vault is enabled AND this task carries a
@@ -246,7 +262,7 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
     try:
         import json
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         # boto3 is imported here (not just via platform_client, which imports it
         # lazily at call time) so a missing SDK still degrades gracefully — skip
@@ -285,175 +301,17 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
         except ValueError:
-            # Malformed timestamp: treat as expiring so the refresh path runs.
-            # Log so a bad write earlier in the chain doesn't silently trigger
-            # a refresh on every single task with no diagnostic trace.
+            # Malformed timestamp: treat as expiring, so the token is not used.
+            # Log so a bad write earlier in the chain doesn't silently switch
+            # the reactions off on every single task with no diagnostic trace.
             log(
                 "WARN",
                 f"_is_expiring: malformed expires_at '{expires_at_iso}'; treating as expiring",
             )
             return True
         return (expiry - datetime.now(UTC)).total_seconds() < threshold_seconds
-
-    def _try_refresh_once(current: dict) -> tuple[str, dict | None]:
-        """Single Linear /oauth/token POST.
-
-        Returns one of:
-          - ("success", new_token_dict)
-          - ("invalid_grant", None) — Linear rejected the refresh_token,
-            usually because another caller rotated it first
-          - ("failure", None) — any other error (network, 5xx, missing
-            fields). No retry; surface upward.
-        """
-        try:
-            import urllib.error
-            import urllib.parse
-            import urllib.request
-        except ImportError:
-            return ("failure", None)
-
-        body = urllib.parse.urlencode(
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": current["refresh_token"],
-                "client_id": current["client_id"],
-                "client_secret": current["client_secret"],
-            }
-        ).encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.linear.app/oauth/token",
-            data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- URL is hardcoded to https://api.linear.app/oauth/token above; no user-controlled input
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            # Body may carry `{"error": "invalid_grant", ...}` even on 400.
-            err_code = None
-            try:
-                err_payload = json.loads(e.read().decode("utf-8"))
-                err_code = err_payload.get("error")
-            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                # Body wasn't JSON or wasn't readable — caller will see
-                # status code only, no error code.
-                pass
-            log(
-                "WARN",
-                f"resolve_linear_api_token refresh rejected: status={e.code} error={err_code}",
-            )
-            if err_code == "invalid_grant":
-                return ("invalid_grant", None)
-            return ("failure", None)
-        except (urllib.error.URLError, OSError) as e:
-            # Genuine network failures (DNS, timeout, TCP reset). Other
-            # exceptions (KeyError on missing field, TypeError on bad
-            # JSON shape) are programmer errors and should propagate
-            # with a clear stack trace rather than being swallowed.
-            log("WARN", f"resolve_linear_api_token refresh failed: {type(e).__name__}: {e}")
-            return ("failure", None)
-
-        if "access_token" not in payload:
-            return ("failure", None)
-
-        now = datetime.now(UTC)
-        # Linear's `expires_in` is documented and reliably sent; if it's
-        # missing we assume the access token is already valid for as long
-        # as the refresh-token call took to round-trip — set expiry to now.
-        if "expires_in" in payload:
-            future = now + timedelta(seconds=int(payload["expires_in"]))
-            expires_at_iso = future.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        else:
-            expires_at_iso = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        next_token = {
-            **current,
-            "access_token": payload["access_token"],
-            "refresh_token": payload.get("refresh_token", current["refresh_token"]),
-            "expires_at": expires_at_iso,
-            "scope": payload.get("scope", current["scope"]),
-            "updated_at": now.isoformat().replace("+00:00", "Z"),
-        }
-
-        # Phase 2.0b-O2 review item S1: agent runtime no longer has
-        # `secretsmanager:PutSecretValue` on the OAuth secret prefix —
-        # the agent executes untrusted repo code, and writing tokens
-        # back means a compromised agent could overwrite any
-        # workspace's token. Lambdas (trusted code) handle persistence.
-        # The freshly-refreshed in-memory token still works for THIS
-        # task; the rotated refresh_token is lost when the agent exits,
-        # but Linear's grace window (~30 min on replays) absorbs that
-        # for the rare case where this agent refreshed strictly before
-        # any Lambda did.
-
-        # Positive-path log so operators diagnosing intermittent 401s have
-        # a breadcrumb showing which workspace refreshed and to what expiry.
-        ws_id = next_token.get("workspace_id", "?")
-        ws_slug = next_token.get("workspace_slug", "?")
-        log(
-            "INFO",
-            f"linear_oauth_refresh_ok workspace_id={ws_id} "
-            f"workspace_slug={ws_slug} new_expires_at={expires_at_iso}",
-        )
-        return ("success", next_token)
-
-    def _refresh(current: dict) -> dict | None:
-        """Refresh with one retry on invalid_grant after re-reading the secret.
-
-        Linear rotates refresh_tokens on every use. Concurrent callers
-        (Lambda + agent + CLI) racing the same secret will see one
-        succeed and the rest get `invalid_grant`. On invalid_grant,
-        re-read SM (bypassing the just-failed token) and retry once if
-        the refresh_token actually changed.
-        """
-        kind, refreshed = _try_refresh_once(current)
-        if kind == "success":
-            return refreshed
-        if kind == "failure":
-            return None
-
-        # invalid_grant: maybe a concurrent caller refreshed first.
-        log(
-            "WARN",
-            "resolve_linear_api_token: invalid_grant — re-reading secret to check "
-            "for concurrent refresh",
-        )
-        try:
-            fresh = _fetch_token()
-        except (ClientError, BotoCoreError) as e:
-            log("WARN", f"resolve_linear_api_token: re-read after invalid_grant failed: {e}")
-            # nosemgrep: py-silent-success-masking -- transient SM re-read after invalid_grant
-            return None
-        if fresh is None:
-            # Secret is unreadable (corrupted JSON). Already logged inside
-            # _fetch_token; no point retrying refresh against bad data.
-            return None
-
-        if fresh.get("refresh_token") == current.get("refresh_token"):
-            # No race — Linear truly rejected this refresh_token.
-            log(
-                "ERROR",
-                "resolve_linear_api_token: refresh_token permanently rejected; re-onboard required",
-            )
-            return None
-
-        # Concurrent caller rotated the token. If the freshly-read value
-        # is itself usable, just take it.
-        if not _is_expiring(fresh.get("expires_at", "")):
-            log(
-                "INFO",
-                "resolve_linear_api_token: concurrent refresh detected; using freshly-read token",
-            )
-            return fresh
-
-        # Concurrent refresh produced a token that's also already
-        # expiring (rare). Retry once with the new refresh_token.
-        kind2, refreshed2 = _try_refresh_once(fresh)
-        if kind2 == "success":
-            return refreshed2
-        return None
 
     try:
         token_obj = _fetch_token()
@@ -471,10 +329,17 @@ def resolve_linear_api_token(channel_metadata: dict[str, str] | None = None) -> 
         # Corrupted secret JSON → no token; linear_reactions skips (best-effort).
         return ""
 
+    # Fail closed if the stored token is expiring: the agent cannot refresh it
+    # without spending the refresh_token that Secrets Manager keeps (see
+    # docstring). The Lambda path owns refresh.
     if _is_expiring(token_obj.get("expires_at", "")):
-        refreshed = _refresh(token_obj)
-        if refreshed:
-            token_obj = refreshed
+        log(
+            "WARN",
+            "resolve_linear_api_token: stored token is expiring and the agent does not "
+            "refresh (Linear rotates refresh_tokens; agent lacks PutSecretValue). "
+            "Failing closed until a Lambda has stored a new token.",
+        )
+        return ""
 
     access = token_obj.get("access_token", "")
     if access:
@@ -496,7 +361,7 @@ def clear_jira_task_credentials() -> None:
         os.environ.pop(name, None)
 
 
-def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:
+def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> str:  # noqa: C901 -- 21 when the ceiling of 15 was set; must not grow
     """Resolve Jira outbound credentials from Secrets Manager.
 
     The orchestrator stamps ``jira_oauth_secret_arn`` into the task
@@ -506,7 +371,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
     ``jira_reactions`` always prefers the app actor and never falls back to
     OAuth when an app configuration is present but broken.
 
-    **The agent never refreshes the token.** Unlike Linear, Atlassian
+    **The agent never refreshes the token.** Atlassian
     *rotates the refresh_token on every use* — a successful refresh
     invalidates the stored refresh_token and returns a new one. The agent
     runtime has ``secretsmanager:GetSecretValue`` ONLY (no ``PutSecretValue``;
@@ -581,7 +446,7 @@ def resolve_jira_oauth_token(channel_metadata: dict[str, str] | None = None) -> 
 
     def _is_expiring(expires_at_iso: str, threshold_seconds: int = 60) -> bool:
         try:
-            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(expires_at_iso.replace("Z", "+00:00"))  # noqa: FURB162 -- the rewrite is not equivalent for malformed input
         except ValueError:
             log(
                 "WARN",
@@ -694,7 +559,7 @@ def build_config(
     resolved_github_token = github_token or resolve_github_token()
     resolved_aws_region = aws_region or os.environ.get("AWS_REGION", "")
     resolved_anthropic_model = anthropic_model or os.environ.get(
-        "ANTHROPIC_MODEL", "global.anthropic.claude-opus-5"
+        "ANTHROPIC_MODEL", "global.anthropic.claude-opus-5-5"
     )
     # Small/fast auxiliary model (WebFetch summarization etc.). Falls back to the
     # deployed ANTHROPIC_DEFAULT_HAIKU_MODEL env, then the platform default. Must
@@ -705,7 +570,7 @@ def build_config(
     # env set at all reaches this literal, so the two must be moved together or a
     # local run silently uses a different geography than a deployed one.
     resolved_haiku_model = haiku_model or os.environ.get(
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL", "global.anthropic.claude-haiku-5-5"
     )
 
     # Resolve the workflow id (the create-task boundary already pinned it; local

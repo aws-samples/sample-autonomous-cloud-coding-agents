@@ -64,8 +64,10 @@ jest.mock('../../src/handlers/shared/linear-attachments', () => {
 });
 
 const resolveLinearOauthTokenMock = jest.fn();
+const resolveSoleActiveLinearWorkspaceMock = jest.fn();
 jest.mock('../../src/handlers/shared/linear-oauth-resolver', () => ({
   resolveLinearOauthToken: (...args: unknown[]) => resolveLinearOauthTokenMock(...args),
+  resolveSoleActiveLinearWorkspace: (...args: unknown[]) => resolveSoleActiveLinearWorkspaceMock(...args),
 }));
 
 const probeLinearIssueContextMock = jest.fn();
@@ -90,6 +92,8 @@ process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { LinearAttachmentError } from '../../src/handlers/shared/linear-attachments';
+import { renderIssueContextHint } from '../../src/handlers/shared/linear-issue-context-probe';
+import { logger } from '../../src/handlers/shared/logger';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
   return { raw_body: JSON.stringify(payload) };
@@ -134,6 +138,7 @@ describe('linear-webhook-processor handler', () => {
     cleanupPreScreenedAttachmentsMock.mockReset();
     cleanupPreScreenedAttachmentsMock.mockResolvedValue(undefined);
     resolveLinearOauthTokenMock.mockReset();
+    resolveSoleActiveLinearWorkspaceMock.mockReset();
     // Default: workspace IS resolvable (active registry row + valid
     // OAuth bundle). The processor early-returns when this resolves to
     // null — see "Linear workspace not resolvable from registry —
@@ -311,6 +316,138 @@ describe('linear-webhook-processor handler', () => {
     });
   });
 
+  // The mapping table is keyed on the project id alone and `projectId` arrives in the
+  // request body, so the row's owning workspace is the only thing standing between a
+  // signed event and another tenant's repository.
+  describe('project → workspace binding', () => {
+    test('drops an event whose project is mapped to a different workspace', async () => {
+      ddbSend.mockResolvedValueOnce({
+        Item: { repo: 'victim/repo', status: 'active', linear_workspace_id: 'org-victim' },
+      });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+      // Silent on the wire: replying would confirm the project exists to whoever named
+      // it, and the reply would land in the sender's own workspace.
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+    });
+
+    test('proceeds when the mapping names the workspace the event came from', async () => {
+      ddbSend
+        .mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-1' },
+        })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][0].repo).toBe('org/repo');
+    });
+
+    test('still proceeds when the mapping predates the owning-workspace field', async () => {
+      // Back-compat: rejecting unbacked rows on deploy would break every install that
+      // has not run the backfill yet. Enforcement for these is a later, gated step.
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      try {
+        ddbSend
+          .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+          .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+        createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+        await handler(eventWith(issue()));
+
+        expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+        // The warning is the only signal that this install still has rows to backfill,
+        // so it is asserted rather than left to the source comment.
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('records no owning workspace'),
+          expect.objectContaining({ linear_project_id: 'project-1' }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // Asserted on the log rather than on `createTaskCore`, because an event with no
+    // workspace id never creates a task anyway — it fails later at attribution. Only
+    // the guard's own line proves the drop happened HERE, at the binding check.
+    test('drops at the binding check when the event carries no workspace id', async () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+      try {
+        ddbSend.mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-1' },
+        });
+
+        await handler(eventWith(issue({ organizationId: undefined })));
+
+        expect(createTaskCoreMock).not.toHaveBeenCalled();
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('mapped to a different workspace'),
+          expect.objectContaining({ mapped_workspace_id: 'org-1' }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
+  // On the stack-wide path the body's organizationId is claimed, not attested, so it is
+  // replaced with the only workspace it could mean.
+  describe('binding a stack-wide-verified delivery', () => {
+    test('ignores the claimed organizationId and binds to the sole active workspace', async () => {
+      resolveSoleActiveLinearWorkspaceMock.mockResolvedValue('org-real');
+      ddbSend
+        .mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-real' },
+        })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      await handler({
+        ...eventWith(issue({ organizationId: 'org-attacker-claimed' })),
+        verified_via_stack_wide: true,
+      });
+
+      // Bound, not claimed: the mapping is owned by org-real, so a processor that kept
+      // the claimed value would have dropped this at the project-binding check.
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        linear_workspace_id: 'org-real',
+      });
+    });
+
+    test('drops the delivery when the registry has no single active workspace', async () => {
+      // Two active workspaces means the resolver has no single answer to give.
+      resolveSoleActiveLinearWorkspaceMock.mockResolvedValue(undefined);
+
+      await handler({ ...eventWith(issue()), verified_via_stack_wide: true });
+
+      expect(createTaskCoreMock).not.toHaveBeenCalled();
+    });
+
+    test('leaves the organizationId alone when a per-workspace secret verified it', async () => {
+      // The attested value must survive. Rebinding here would silently repoint a
+      // correctly-verified delivery at whichever workspace happens to be the only
+      // active one.
+      ddbSend
+        .mockResolvedValueOnce({
+          Item: { repo: 'org/repo', status: 'active', linear_workspace_id: 'org-1' },
+        })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 201, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+
+      await handler(eventWith(issue()));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(createTaskCoreMock.mock.calls[0][1].channelMetadata).toMatchObject({
+        linear_workspace_id: 'org-1',
+      });
+    });
+  });
+
   test('fires on update when labelIds newly include the trigger label', async () => {
     ddbSend
       .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
@@ -455,6 +592,28 @@ describe('linear-webhook-processor handler', () => {
       const [, , message] = reportIssueFailureMock.mock.calls[0];
       expect(message).toContain('temporarily unavailable');
       expect(message).toContain('re-apply the trigger label');
+    });
+
+    test('an idempotent replay (createTaskCore 200) is not reported as a failure', async () => {
+      // A second run of the same delivery (Lambda retrying the async invoke after a
+      // timeout or a crash) reaches createTaskCore with the same idempotency key and
+      // gets the first run's task back with 200. That task is working on the issue,
+      // so a "couldn't create this task (status 200)" comment and a ❌ would be wrong.
+      // What this run uploaded is keyed on a task id that never became a task.
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      const uploaded = { attachment_id: 'a1', s3_key: 'attachments/u/t/a1/paste.png' };
+      downloadLinearAttachmentsMock.mockResolvedValueOnce([uploaded]);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      const payload = issue();
+      (payload.data as Record<string, unknown>).description = '![paste](https://uploads.linear.app/15d12f61/090e5ce6/938f90d7)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(cleanupPreScreenedAttachmentsMock).toHaveBeenCalledWith(expect.anything(), 'attachments-bucket', [uploaded]);
     });
 
     test('does NOT post feedback on the happy 201 path', async () => {
@@ -870,6 +1029,48 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
     });
 
+    // The hint is advisory, like the document and comment sections: ABCA adds it,
+    // so it must never be what takes a description that fits over the limit. It
+    // was: an issue of 9,900 characters with one Figma paperclip was rejected with
+    // "task_description exceeds maximum length of 10000 characters", and making
+    // the issue a hundred characters shorter did not help.
+    describe('the hint and the size limit of the description', () => {
+      const probe = {
+        attachmentTitles: ['Checkout mockup'],
+        // A paperclip that is not a Linear upload: named in the hint, never fetched.
+        attachments: [{ title: 'Checkout mockup', url: 'https://www.figma.com/file/abc/checkout' }],
+        projectName: 'Onboarding',
+        projectHasDocuments: false,
+        projectDocuments: [],
+        ok: true,
+        projectDocumentCount: 0,
+      };
+      const title = 'ABC-42: Fix the login bug';
+      // Title, hint and description are set apart by blank lines: four line breaks.
+      const descriptionRoom = 10_000 - title.length - renderIssueContextHint(probe).length - 4;
+
+      async function taskDescriptionFor(description: string): Promise<string> {
+        probeLinearIssueContextMock.mockResolvedValueOnce(probe);
+        const payload = issue();
+        (payload.data as Record<string, unknown>).description = description;
+        await handler(eventWith(payload));
+        return String(createTaskCoreMock.mock.calls[0][0].task_description);
+      }
+
+      test('a hint that fits is kept, up to the last character of the limit', async () => {
+        const sent = await taskDescriptionFor('x'.repeat(descriptionRoom));
+        expect(sent).toContain('references additional context');
+        expect(sent).toHaveLength(10_000);
+      });
+
+      test('a hint that does not fit is left out, and the issue text is sent whole', async () => {
+        const description = 'x'.repeat(descriptionRoom + 1);
+        const sent = await taskDescriptionFor(description);
+        expect(sent.length).toBeLessThanOrEqual(10_000);
+        expect(sent).toBe(`${title}\n\n${description}`);
+      });
+    });
+
     // ─── ADR-016 pre-hydration: recent comments folded into the description ────
 
     test('folds recent human comments into the task description under a heading', async () => {
@@ -1027,7 +1228,9 @@ describe('probeLinearIssueContext', () => {
     expect(body.query).toContain('content'); // ADR-016 — doc bodies pre-hydrated
     expect(body.query).toContain('documentsForCount'); // true-total count connection
     expect(result).toEqual({
-      attachmentTitles: ['spec.pdf'],
+      // The paperclip is an upload: the processor fetches and attaches it, so
+      // the hint does not list it.
+      attachmentTitles: [],
       attachments: [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }],
       projectName: 'P1',
       projectHasDocuments: true,
@@ -1085,6 +1288,14 @@ describe('every channel_metadata builder carries the vault fields', () => {
     'utf8',
   );
 
+  // Both guards below match CODE, never prose (#880 review). The handler's own rationale
+  // names `Object.assign` and `...vaultMetadata(resolved)`, and a comment mentioning the
+  // spread used to SATISFY the vaultMetadata guard — deleting the real merge and leaving
+  // the prose behind passed. Whole-line only, so a trailing `// …` still counts: a false
+  // positive, which is the safe direction.
+  const isCommentLine = (trimmed: string) =>
+    trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*');
+
   test('each builder that writes the workspace slug also spreads vaultMetadata', () => {
     // Scans to the end of the enclosing object literal rather than demanding the spread
     // on the very next line: adjacency made a harmless key reorder fail, which trains
@@ -1103,6 +1314,73 @@ describe('every channel_metadata builder carries the vault fields', () => {
       }
       offenders.push(i + 1);
     });
+    expect(offenders).toEqual([]);
+  });
+
+  test('assignment-form builders also carry the vault fields', () => {
+    // The check above cannot see the label-trigger builder at all: that one assigns onto
+    // an existing object, so there is no `linear_workspace_slug: resolved.workspaceSlug,`
+    // literal entry to key off, and the ONE path `vaultMetadata` was written for was the
+    // one path its own guard never covered (#879). Same question, other syntax — a
+    // builder that sets the slug by assignment must also pull the vault fields in before
+    // its enclosing block ends.
+    //
+    // End-of-scope is detected by DEDENT rather than a closing brace: an assignment form
+    // has no literal to terminate, so the first non-blank line indented less than the
+    // trigger is the end of the scope the trigger lives in.
+    //
+    // The accepting line must also merge into the SAME identifier the trigger wrote to
+    // (#880 review): that dedent window runs ~45 lines to the end of
+    // `if (WORKSPACE_REGISTRY_TABLE)`, so a spread in any later sibling block would
+    // otherwise satisfy a builder that merged nothing. Tightening the dedent to `<=` is
+    // NOT the fix — the real spread sits one level DEEPER, inside
+    // `if (resolved.providerName)`, because the merge is conditional and the slug write is
+    // not. Same-object, not same-scope.
+    const lines = src.split('\n');
+    const offenders: number[] = [];
+    lines.forEach((line, i) => {
+      const trigger = /^(\w+)\.linear_workspace_slug = resolved\.workspaceSlug;$/.exec(line.trim());
+      if (!trigger) return;
+      const target = trigger[1]!;
+      const indent = line.length - line.trimStart().length;
+      for (let j = i + 1; j < lines.length; j += 1) {
+        const cur = lines[j]!;
+        const trimmed = cur.trim();
+        if (trimmed === '' || isCommentLine(trimmed)) continue;
+        // Left the trigger's scope without finding the merge.
+        if (cur.length - cur.trimStart().length < indent) break;
+        if (trimmed.includes('...vaultMetadata(resolved)') && trimmed.includes(target)) return;
+      }
+      offenders.push(i + 1);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  test('no metadata builder merges via Object.assign', () => {
+    // `Object.assign` copies with [[Set]], which INVOKES the `__proto__` setter, so the
+    // pattern is one refactor away from a prototype-pollution sink; object spread defines
+    // own properties, where the same key lands inert. semgrep rates it Blocking.
+    //
+    // Asserted here as well as by `security:sast` because of how that runs. The required
+    // per-PR job (security-pr.yml) runs the registry rule packs only over what the pull
+    // request changes and fails on a finding it adds; the whole repository is scanned
+    // weekly (security.yml) and in the pre-push hook. When #879 happened there was no
+    // per-PR scan: the reintroduction passed PR CI and then rejected every contributor's
+    // `git push` once it was on main. The per-PR scan also depends on rule packs fetched
+    // at run time. This test does not: it reds the PR that causes it, in the unit tests.
+    //
+    // UNQUALIFIED over this file (#880 review). The first form required the first argument
+    // to be a bare identifier containing "metadata", so `Object.assign(md, …)` and
+    // `Object.assign(row.channelMetadata, …)` reintroduced the sink without redding the
+    // test — `\w*` cannot cross a `.`. Scope stays this ONE handler on purpose; the
+    // class-level net is the semgrep gate: per pull request for what it changes, weekly
+    // and at pre-push for the whole repository (#235).
+    const offenders = src
+      .split('\n')
+      .map((line, i) => ({ text: line.trim(), n: i + 1 }))
+      .filter(({ text }) => !isCommentLine(text))
+      .filter(({ text }) => /Object\.assign\s*\(/.test(text))
+      .map(({ n }) => n);
     expect(offenders).toEqual([]);
   });
 

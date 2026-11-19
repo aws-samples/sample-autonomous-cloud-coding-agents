@@ -1,14 +1,21 @@
-"""Unit tests for repo.py — hermetic git/gh setup (no network, no real git).
+"""Unit tests for repo.py — hermetic git/gh setup (no network).
 
-``setup_repo`` and ``detect_default_branch`` shell out heavily. We fake the two
-seams they use — ``shell.run_cmd`` (logged commands) and ``subprocess.run``
-(detect_default_branch) — recording argv and returning scripted results.
+``setup_repo`` and ``detect_default_branch`` shell out heavily. Most tests fake
+the two seams they use — ``shell.run_cmd`` (logged commands) and
+``subprocess.run`` (detect_default_branch) — recording argv and returning
+scripted results. Where the result depends on what git itself does with the
+branches, the git commands run for real against a bare repository under
+``tmp_path`` (``_setup_with_real_git``).
 """
 
+import functools
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 import repo
+import shell
 from tests.conftest import FakeRunCmd, make_task_config
 
 
@@ -39,6 +46,78 @@ def _patch_common(monkeypatch, fake: FakeRunCmd):
     # assertion on a non-existent/empty workspace path.
     monkeypatch.setattr(repo, "_prepare_clone_dir", lambda repo_dir, notes: None)
     monkeypatch.setattr(repo, "_assert_clone_root", lambda repo_dir: None)
+
+
+def _git(*args: str, cwd) -> str:
+    """Run git for real under ``tmp_path`` and return what it printed. No git
+    configuration reaches it from the host (tests/conftest.py), so the identity
+    of the commits is given here."""
+    identity = ("-c", "user.name=ABCA Test", "-c", "user.email=abca-test@example.invalid")
+    done = subprocess.run(
+        ["git", *identity, *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+    return done.stdout.strip()
+
+
+def _origin(tmp_path, default: str, *branches: str) -> str:
+    """A bare repository that stands in for GitHub: its default branch is
+    *default*, and each of *branches* is cut from it with one commit of its own."""
+    origin, seed = tmp_path / "origin.git", tmp_path / "seed"
+    _git("init", "-q", "--bare", str(origin), cwd=tmp_path)
+    _git("init", "-q", str(seed), cwd=tmp_path)
+    for repository in (origin, seed):
+        _git("symbolic-ref", "HEAD", f"refs/heads/{default}", cwd=repository)
+    _git("commit", "-q", "--allow-empty", "-m", "base", cwd=seed)
+    for name in branches:
+        _git("checkout", "-q", "-b", name, default, cwd=seed)
+        _git("commit", "-q", "--allow-empty", "-m", name, cwd=seed)
+    _git("push", "-q", str(origin), "--all", cwd=seed)
+    return str(origin)
+
+
+def _setup_with_real_git(
+    monkeypatch,
+    tmp_path,
+    config,
+    *,
+    default="main",
+    branches=(),
+    offline=False,
+    ran=None,
+    from_fork=False,
+):
+    """Run ``setup_repo`` with real git against an ``_origin`` under ``tmp_path``.
+
+    ``gh repo clone`` becomes ``git clone <origin>``. The other git commands run
+    as written, except the two that would leave ``tmp_path`` (the global
+    ``safe.directory`` entry and the remote URL on github.com). ``gh`` and
+    ``mise`` answer 0 without running; asked whether the pull request comes from
+    a fork, ``gh`` says *from_fork*. With *offline*, every ``git fetch`` fails
+    the way a dropped connection does. The label of each command is appended to
+    *ran*.
+    """
+    origin = _origin(tmp_path, default, *branches)
+
+    def run(cmd, label, cwd=None, check=True, **_kwargs):
+        if ran is not None:
+            ran.append(label)
+        if label == "clone":
+            cmd = ["git", "clone", "-q", origin, cmd[-1]]
+        elif label == "check-pr-fork":
+            answer = "true\n" if from_fork else "false\n"
+            return SimpleNamespace(returncode=0, stdout=answer, stderr="")
+        elif cmd[0] != "git" or label in ("safe-directory", "set-remote-url"):
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        elif offline and cmd[1] == "fetch":
+            return SimpleNamespace(returncode=1, stdout="", stderr="fatal: connection reset")
+        return shell.run_cmd(cmd, label, cwd=cwd, check=check)
+
+    monkeypatch.setattr(repo, "AGENT_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setattr(repo, "run_cmd", run)
+    monkeypatch.setattr(repo, "run_cmd_with_backoff", functools.partial(run, check=False))
+    monkeypatch.setattr(repo, "_install_commit_hook", lambda repo_dir: None)
+    monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: default)
+    return repo.setup_repo(config)
 
 
 class TestSetupRepoHappyPath:
@@ -75,6 +154,19 @@ class TestSetupRepoHappyPath:
         # Derived branch slug for a new task.
         assert setup.branch.startswith("bgagent/task-abc/")
         assert setup.default_branch == "main"
+
+    def test_clone_adds_no_upstream_remote_for_a_fork(self, monkeypatch):
+        # For a fork, `gh repo clone` adds the parent as the remote `upstream` and
+        # makes it the repository of every later `gh` command that has no `--repo`:
+        # the agent would read and write the parent's pull requests. With
+        # `--no-upstream` the task's repository stays the only remote.
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        repo.setup_repo(_config())
+
+        assert fake.cmd_for("clone")[:4] == ["gh", "repo", "clone", "--no-upstream"]
 
     def test_pr_branch_checkout_path(self, monkeypatch):
         fake = _fake_run_cmd()
@@ -124,6 +216,118 @@ class TestSetupRepoHappyPath:
         assert "head-sha-after-setup" not in fake.labels()
 
 
+class TestPullRequestBranch:
+    """Checking out the branch of an existing pull request."""
+
+    @staticmethod
+    def _pr_task(head: str):
+        return _config(is_pr_workflow=True, pr_number="40", branch_name=head, base_branch="main")
+
+    @pytest.mark.parametrize("head", ["develop", "feature/x"], ids=["default-branch", "other"])
+    def test_pr_branch_is_checked_out_with_real_git(self, tmp_path, monkeypatch, head):
+        # `develop`: a release pull request from the default branch into `main`.
+        # The clone has already created and checked out the branch the pull
+        # request names, which `git checkout -b` refuses to create again.
+        ran: list[str] = []
+        setup = _setup_with_real_git(
+            monkeypatch,
+            tmp_path,
+            self._pr_task(head),
+            default="develop",
+            branches=("main", "feature/x"),
+            ran=ran,
+        )
+
+        clone = setup.repo_dir
+        assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=clone) == head
+        assert _git("rev-parse", "HEAD", cwd=clone) == _git(
+            "rev-parse", f"origin/{head}", cwd=clone
+        )
+        assert setup.head_sha_before == _git("rev-parse", f"origin/{head}", cwd=clone)
+        assert (setup.branch, setup.default_branch) == (head, "main")
+        # GitHub is asked about every pull request whether it comes from a fork:
+        # this repository can have a branch of the fork's name whatever the name.
+        assert "check-pr-fork" in ran
+
+    def test_pr_from_a_fork_is_refused_before_its_branch_name_is_fetched(self, monkeypatch):
+        # The head ref of a pull request from a fork names a branch of the fork.
+        # Where the clone has a branch of the same name (a fork's `main`), setup
+        # would check out this repository's branch, and an iteration would push
+        # to it.
+        fake = _fake_run_cmd(stdouts={"check-pr-fork": "true\n"})
+        _patch_common(monkeypatch, fake)
+
+        with pytest.raises(RuntimeError, match="#40 of owner/repo comes from another repository"):
+            repo.setup_repo(self._pr_task("main"))
+
+        assert "fetch-pr-branch" not in fake.labels()
+
+    def test_pr_from_a_fork_is_refused_when_its_branch_name_is_another_branch_here(
+        self, tmp_path, monkeypatch
+    ):
+        # The fork's branch is `feature/x`, and this repository has a branch of
+        # that name as well. It is not the default branch, so the clone has no
+        # local branch of that name, and the fetch of `feature/x` from origin
+        # succeeds: with real git, setup would check out this repository's branch.
+        ran: list[str] = []
+
+        with pytest.raises(RuntimeError, match="#40 of owner/repo comes from another repository"):
+            _setup_with_real_git(
+                monkeypatch,
+                tmp_path,
+                self._pr_task("feature/x"),
+                branches=("feature/x",),
+                ran=ran,
+                from_fork=True,
+            )
+
+        assert "fetch-pr-branch" not in ran
+
+    def test_fork_check_without_an_answer_stops_setup_like_a_failed_fetch(self, monkeypatch):
+        # No answer is not "not a fork": setup stops. GitHub is reported as
+        # unreachable the way the clone and the fetch beside the check report it,
+        # after the same retries (run_cmd_with_backoff, faked here).
+        fake = _fake_run_cmd()
+        _patch_common(monkeypatch, fake)
+        bad_gateway = "HTTP 502: 502 Bad Gateway (https://api.github.com/graphql)"
+
+        def backoff(cmd, label, **kwargs):
+            failed = label == "check-pr-fork"
+            return SimpleNamespace(
+                returncode=int(failed), stdout="", stderr=bad_gateway if failed else ""
+            )
+
+        monkeypatch.setattr(repo, "run_cmd_with_backoff", backoff)
+
+        with pytest.raises(repo.DependencyUnreachableError) as excinfo:
+            repo.setup_repo(self._pr_task("main"))
+
+        assert str(excinfo.value).startswith("BLOCKED[dependency_unreachable]: check-pr-fork ")
+        assert "(resource: owner/repo)" in str(excinfo.value)
+        assert "checkout-pr-branch" not in fake.labels()
+
+    def test_pr_from_the_repository_itself_passes_the_fork_check(self, monkeypatch):
+        fake = _fake_run_cmd(stdouts={"check-pr-fork": "false\n"})
+        _patch_common(monkeypatch, fake)
+
+        repo.setup_repo(self._pr_task("main"))
+
+        # The answer must come from the task's repository, whatever the remotes are.
+        assert fake.cmd_for("check-pr-fork") == [
+            "gh",
+            "pr",
+            "view",
+            "40",
+            "--repo",
+            "owner/repo",
+            "--json",
+            "isCrossRepository",
+            "-q",
+            ".isCrossRepository",
+        ]
+        assert "checkout-pr-branch" in fake.labels()
+
+
 class TestDiamondBaseBranch:
     """A diamond child (base_branch + merge_branches)
     is handed the server's 'main' literal as its base, which is WRONG on a fork
@@ -145,9 +349,9 @@ class TestDiamondBaseBranch:
         )
 
         # Checkout base was rewritten to the detected default, not 'main'.
-        fetch_cmd = fake.cmd_for("fetch-base-branch")
-        assert fetch_cmd is not None
-        assert fetch_cmd[-1] == "linear-vercel"
+        find_cmd = fake.cmd_for("find-base-branch")
+        assert find_cmd is not None
+        assert find_cmd[-1] == "refs/remotes/origin/linear-vercel"
         create_cmd = fake.cmd_for("create-branch-from-base")
         assert create_cmd is not None
         assert create_cmd[-1] == "origin/linear-vercel"
@@ -168,7 +372,7 @@ class TestDiamondBaseBranch:
         setup = repo.setup_repo(
             _config(base_branch="main", merge_branches=["bgagent/task-x/feat-a"])
         )
-        assert fake.cmd_for("fetch-base-branch")[-1] == "main"
+        assert fake.cmd_for("find-base-branch")[-1] == "refs/remotes/origin/main"
         assert setup.default_branch == "main"
 
     def test_linear_child_base_branch_is_left_untouched(self, monkeypatch):
@@ -184,10 +388,73 @@ class TestDiamondBaseBranch:
         setup = repo.setup_repo(
             _config(base_branch="bgagent/task-pred/feat-pred", merge_branches=[])
         )
-        assert fake.cmd_for("fetch-base-branch")[-1] == "bgagent/task-pred/feat-pred"
+        base_ref = "refs/remotes/origin/bgagent/task-pred/feat-pred"
+        assert fake.cmd_for("find-base-branch")[-1] == base_ref
         assert fake.cmd_for("create-branch-from-base")[-1] == "origin/bgagent/task-pred/feat-pred"
         # PR base is the predecessor branch (the stack target), unchanged.
         assert setup.default_branch == "bgagent/task-pred/feat-pred"
+
+
+class TestStackedChildWithRealGit:
+    """A stacked child takes its base and its predecessors from the branches the
+    clone already holds: a plain ``git clone`` brings every branch of the remote.
+    Asking the network a second time can only add a way to fail."""
+
+    PRED = "bgagent/task-pred/feat-pred"
+
+    def test_child_branches_from_its_predecessor_when_the_connection_drops(
+        self, tmp_path, monkeypatch
+    ):
+        # The predecessor's branch is in the clone. A fetch that fails right after
+        # the clone must not make the child start from the default branch, without
+        # its predecessor's code and with a setup note as the only trace.
+        setup = _setup_with_real_git(
+            monkeypatch,
+            tmp_path,
+            _config(base_branch=self.PRED),
+            branches=(self.PRED,),
+            offline=True,
+        )
+
+        clone = setup.repo_dir
+        assert _git("rev-parse", "HEAD", cwd=clone) == _git(
+            "rev-parse", f"origin/{self.PRED}", cwd=clone
+        )
+        assert setup.default_branch == self.PRED
+        assert not [n for n in setup.notes if "branched off default" in n]
+
+    def test_predecessor_is_merged_when_the_connection_drops(self, tmp_path, monkeypatch):
+        # Same for the branches a diamond child merges (one is enough here: each
+        # goes through the same function).
+        setup = _setup_with_real_git(
+            monkeypatch,
+            tmp_path,
+            _config(base_branch="main", merge_branches=[self.PRED]),
+            branches=(self.PRED,),
+            offline=True,
+        )
+
+        clone = setup.repo_dir
+        assert f"merged predecessor branch '{self.PRED}'" in setup.notes
+        assert _git("rev-parse", "HEAD", cwd=clone) == _git(
+            "rev-parse", f"origin/{self.PRED}", cwd=clone
+        )
+
+    def test_child_whose_base_is_gone_targets_the_default_branch(self, tmp_path, monkeypatch):
+        # The predecessor's pull request was merged and its branch deleted before
+        # the child started. The child is cut from the default branch, so that is
+        # what its pull request has to target: nothing can be compared with, or
+        # merged into, a branch that origin no longer has.
+        setup = _setup_with_real_git(
+            monkeypatch, tmp_path, _config(base_branch=self.PRED), default="trunk"
+        )
+
+        clone = setup.repo_dir
+        assert _git("rev-parse", "HEAD", cwd=clone) == _git("rev-parse", "origin/trunk", cwd=clone)
+        assert f"base branch '{self.PRED}' not on origin; branched off default instead" in (
+            setup.notes
+        )
+        assert setup.default_branch == "trunk"
 
 
 class TestReadOnlyBaselineSkip:
@@ -383,6 +650,38 @@ class TestBaselineBuildTimeout:
         assert any("FAILED before agent changes" in n for n in setup.notes)
 
 
+class TestBaselineCommandThatCannotStart:
+    """A configured command without shell operators is exec'd directly. When its
+    program is not installed the exec itself raises, where the same command
+    inside ``bash -lc`` exits 127. Both are a baseline that could not run, and
+    neither may end the task before the agent starts."""
+
+    def test_missing_program_is_a_failed_baseline_not_a_task_crash(self, monkeypatch):
+        fake = _fake_run_cmd()
+
+        def run_cmd(cmd, label, **kwargs):
+            if label in ("verify-build-pre", "verify-lint-pre"):
+                raise FileNotFoundError(2, "No such file or directory", cmd[0])
+            return fake(cmd, label, **kwargs)
+
+        _patch_common(monkeypatch, fake)
+        monkeypatch.setattr(repo, "run_cmd", run_cmd)
+        monkeypatch.setattr(repo, "detect_default_branch", lambda url, d: "main")
+
+        setup = repo.setup_repo(
+            _config(build_command="gradle build", lint_command="gradle check")
+        )  # must not raise
+
+        assert setup.build_before is False
+        assert setup.lint_before is False
+        assert "Initial build (gradle build) FAILED before agent changes" in setup.notes
+        assert "Initial lint (gradle check) FAILED before agent changes" in setup.notes
+        # A configured command that cannot run is the operator's to correct; only
+        # the unconfigured default switches the "gating is off" warning on.
+        assert setup.build_gate_inert is False
+        assert setup.lint_gate_inert is False
+
+
 class TestFindMiseConfigs:
     """`mise trust <repo_dir>` trusts only the ROOT config;
     a monorepo's per-package `mise.toml` roots must ALSO be trusted or
@@ -476,15 +775,44 @@ class TestDetectDefaultBranch:
         monkeypatch.setattr(subprocess, "run", fake_run)
         assert repo.detect_default_branch("owner/repo", "/tmp/x") == "main"
 
+    @pytest.mark.parametrize(
+        "gh_failure",
+        [
+            subprocess.TimeoutExpired(cmd="gh", timeout=30),
+            FileNotFoundError("gh"),
+            SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502: Bad Gateway"),
+        ],
+        ids=["timeout", "gh-missing", "non-zero-exit"],
+    )
+    def test_gh_failure_falls_back_to_the_default_branch_of_the_clone(
+        self, tmp_path, monkeypatch, gh_failure
+    ):
+        # `git clone` records the remote's default branch as origin/HEAD. A GitHub
+        # API call that fails must not turn a `trunk` repository into a `main` one:
+        # the pull request would be opened against a branch that does not exist.
+        clone = tmp_path / "clone"
+        _git("clone", "-q", _origin(tmp_path, "trunk"), str(clone), cwd=tmp_path)
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] != "gh":
+                return real_run(cmd, **kwargs)
+            if isinstance(gh_failure, Exception):
+                raise gh_failure
+            return gh_failure
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert repo.detect_default_branch("owner/repo", str(clone)) == "trunk"
+
 
 class TestPlatformBranchNameVerbatim:
     """The agent MUST use the platform-provided ``config.branch_name`` verbatim
     when present, for EVERY workflow — never re-deriving its own slug. A
     re-derived slug diverges from the platform's (shell.py slugify strips
     dots / truncates at 40; gateway.ts uses dashes / truncates at 50), which
-    silently breaks stacked-PR chaining (#247): a stacked child fetches the
+    silently breaks stacked-PR chaining (#247): a stacked child looks for the
     predecessor's platform-named branch, the agent pushed a differently-named
-    one, the fetch 404s, and the child falls back to main (#14)."""
+    one, the branch is not found, and the child falls back to main (#14)."""
 
     def test_uses_platform_branch_name_verbatim_for_new_task(self, monkeypatch):
         # new_task (is_pr_workflow=False) with a platform branch_name carrying a

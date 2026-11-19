@@ -1,0 +1,8 @@
+# Advisories accepted temporarily for yarn.lock. osv-scanner reads this file for
+# lockfiles in this directory. Each entry expires so the scan fails again and the
+# finding is re-reviewed; remove an entry as soon as a fixed release is available.
+
+[[IgnoredVulns]]
+id = "GHSA-fc5q-39xc-vjpf"
+effectiveUntil = 2026-12-16
+reason = "picomatch regular-expression denial of service on a crafted glob pattern (every release through 4.0.7; reviewed by GitHub on 2026-11-17, and on 2026-11-18 no fixed release exists). Both locked copies, 2.3.2 and 4.0.7, belong to build and test tooling only (jest, vitest, vite, astro, knip, the ESLint stylistic plugin) and are never deployed. They match only patterns from this repository's own configuration, never a pattern from a request."

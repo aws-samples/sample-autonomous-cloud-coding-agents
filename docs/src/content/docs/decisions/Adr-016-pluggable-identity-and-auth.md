@@ -1,8 +1,6 @@
 ---
-title: Adr 016 pluggable identity and auth
+title: "ADR-016: Pluggable identity and authentication"
 ---
-
-# ADR-016: Pluggable identity and authentication
 
 > Number: candidate ADR-016 (next free on main; ADR-015 is claimed by open PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302), the Jira integration). Numbers are never reused. If a lower number frees before merge, renumber and coordinate with PR #302 and the [#277](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/277) ADR-014 governance discussion.
 
@@ -26,7 +24,7 @@ ABCA propagates *who* as data but not as an enforceable credential. Issue [#245]
 2. **Outbound auth is N hand-rolled resolvers.** Each integration re-implements credential fetch, refresh, and refresh-race handling against Secrets Manager.
 
    - `resolve_github_token()` (`agent/src/config.py`): one shared PAT for all repos and users. No per-user or per-repo scoping.
-   - `resolve_linear_api_token()` (`agent/src/config.py`) + `cdk/src/handlers/shared/linear-oauth-resolver.ts`: per-workspace OAuth token. Manual refresh inside 60s of expiry, one-shot rotation-race handling.
+   - `resolve_linear_api_token()` (`agent/src/config.py`) + `cdk/src/handlers/shared/linear-oauth-resolver.ts`: per-workspace OAuth token. The Lambda resolver refreshes it manually inside 60s of expiry, with one-shot rotation-race handling, and writes the new tokens back to the secret. The agent resolver does not refresh, because the agent's role holds `GetSecretValue` only and could not store the refresh token that Linear rotates on every use: it reads the stored token and returns no token when the stored one is inside 60s of expiry.
    - the Jira resolver added in PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) and extended by issue [#642](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/642): one per-tenant Secrets Manager bundle holds 3LO for reads/human lookup plus the signed Forge app-actor proxy for writes.
 
    A second provider arriving through the same `resolve_<integration>_token()` shape is live evidence the seam already exists; it just is not named or unified.
@@ -94,7 +92,7 @@ The abstraction is intentionally a contract, not a forklift of credential handli
 
 - **Backend-agnostic.** One `resolve_<integration>_token()` contract serves both the AgentCore Runtime backend (token arrives via the `WorkloadAccessToken` header) and the parked ECS backend (in-process boto3). The backend decides how the token arrives; the seam does not care.
 - **Incremental.** The rollout is phased and flag-gated, and the shared PAT fallback stays until the vault path is green. No big-bang cutover.
-- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
+- **Consistent with ADR-014.** This is the credential-plane analog of [ADR-014](/sample-autonomous-cloud-coding-agents/decisions/adr-014-workflow-driven-tasks)'s provider-neutral `VcsProvider` seam: that one named GitHub-specific control-plane operations as instances of generic concepts; this one names the per-integration credential resolvers as instances of one outbound contract.
 
 ## Credential types
 
@@ -164,7 +162,7 @@ Per-user `McpCredential` selection requires the Gateway to know *which task-user
 | P6 | **Trusted task-user identity propagation** (prerequisite for per-user MCP on the general plane, P5): specify + validate a user-scoped inbound identity the Gateway authorizer trusts, replacing the M2M JWT for per-user credential selection. | **Blocks per-user `McpCredential`.** Until done, MCP credentials are workspace-scoped at best. |
 | P7 | Jira + Slack `ChannelCredential` (same shape as P1); GitHub `GithubOauth2` behind a flag, retire the shared PAT; OBO `act`-claim delegation feeding #237. | Flag-gated; per-surface. |
 
-**Substrate exception — `lambda-microvm` (2026-09-02):** P1's vault cannot be enabled on the MicroVM substrate. The two together synthesize 505 resources against CloudFormation's hard 500-resource limit (MicroVM alone 496, the vault alone 488), so `AgentStack` refuses the combination at synth, naming both context flags. The MicroVM wiring itself is complete — `platform_config` carries the workload name and the guest execution role holds the mint grant — so this is a capacity limit, not a design gap, and it lifts as soon as a subsystem moves into a nested stack.
+**Substrate update — `lambda-microvm` (#852):** The optional split network provides headroom for MicroVM plus the vault, including additive deployments that retain AgentCore. Explicit `compute_types=lambda-microvm` also permits a MicroVM-only deployment. The production 490-resource guard validates the complete configuration. The guest execution role has the mint grant; the shared `platform_config` contract now forwards vault enablement and workload identity. A rebuilt compatible MicroVM image and live consent/mint rehearsal are required before using the combination. Lambda MicroVMs remains experimental.
 
 **Substrate independence (verified 2026-07-21, both proven live):** the vault path works on any compute. AgentCore Runtime injects the Workload Access Token as the `WorkloadAccessToken` header; ECS/Fargate/Lambda bootstrap it via `GetWorkloadAccessTokenForJWT(workloadName, userToken=<Cognito M2M JWT>)` against a **standalone** (non-service-linked) workload identity, then call `GetResourceOauth2Token`. Runtime-managed (service-linked) workload identities cannot self-vend, so the ECS path needs a manually-created workload identity. The runtime execution role today has `GetWorkloadAccessToken*` but **not** `GetResourceOauth2Token` — P1 adds it, plus `GetSecretValue` scoped to that surface's providers (`bedrock-agentcore-identity!default/oauth2/<prefix>*`; see the implementation notes below for why this is narrower than the wildcard first anticipated here).
 
@@ -246,7 +244,7 @@ revoking a grant — it changes who stores and refreshes the token, not whether 
 - Issue [#215](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/215) — Bedrock billing attribution
 - Issue [#237](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/237) — governance planes / `abca.audit.v1` correlation block
 - Issue [#288](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/288) / PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) — Jira integration (second provider through the resolver seam)
-- [ADR-014](/sample-autonomous-cloud-coding-agents/architecture/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
+- [ADR-014](/sample-autonomous-cloud-coding-agents/decisions/adr-014-workflow-driven-tasks) — workflow-driven tasks; introduced the provider-neutral `VcsProvider` seam this ADR is the credential-plane analog of
 - [IDENTITY_AND_AUTH.md](/sample-autonomous-cloud-coding-agents/architecture/identity-and-auth) — the worked use-cases, seams table, decision tree, and Linear before/after
 - [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) — current auth posture, the shared-PAT limitation this ADR resolves
 - GitHub issues — per-repo GitHub credentials, layered credential derivation, delegation chain propagation (priority labels `P0`, `P1`, etc.)

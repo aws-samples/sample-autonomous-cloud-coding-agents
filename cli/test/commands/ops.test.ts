@@ -180,6 +180,6 @@ describe('ops command', () => {
     const payload = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(payload.concurrency).toHaveLength(1);
     expect(payload.concurrency[0].user_email).toBe('you@example.com');
-    expect(payload.limit_per_user).toBe(3);
+    expect(payload.limit_per_user).toBe(10);
   });
 });

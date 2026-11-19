@@ -170,9 +170,11 @@ function usd(n: number | null | undefined): string {
 /** Compact "Ns"/"Nm Ns" duration, or "" when unknown. */
 function dur(s: number | null | undefined): string {
   if (typeof s !== 'number' || !Number.isFinite(s) || s < 0) return '';
-  if (s < 60) return `${Math.round(s)}s`;
-  const m = Math.floor(s / 60);
-  const rem = Math.round(s % 60);
+  // Round once, before the split: rounding the parts turns 119.6 into "1m 60s".
+  const total = Math.round(s);
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  const rem = total % 60;
   return rem ? `${m}m ${rem}s` : `${m}m`;
 }
 

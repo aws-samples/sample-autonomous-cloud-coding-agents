@@ -52,7 +52,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // is nulled because it lives in the erased payload, and created_at is nulled
     // by convention (the marker carries only the envelope's name/version/status,
     // not the envelope timestamp) so a flagged row reads uniformly.
-    const entries = (await client.listBrowseEntries({ kind, namespace })).filter(
+    const entries = (await client.listBrowseEntries({ kind, namespace, name })).filter(
       (e) => (e.malformed ? e.name : e.record.name) === name,
     );
     if (entries.length === 0) {

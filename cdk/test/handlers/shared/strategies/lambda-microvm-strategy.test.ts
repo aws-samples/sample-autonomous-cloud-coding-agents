@@ -32,11 +32,8 @@ const MICROVM_ID = 'mvm-0123456789abcdef';
 const ENDPOINT = 'https://mvm-0123456789abcdef.microvm.lambda.us-east-1.amazonaws.com';
 
 // --- platform_config (ADR-021 P2) ---
-// The FOUR required identifiers, and only those, are set for the main describes,
-// so the default `platform_config` block is small and its exact serialized size is
-// known — which the 4 KB boundary probes below depend on. The nine optional keys
-// get their own describe (and are deleted here so a leaked env var from another
-// suite cannot silently change the envelope's byte length).
+// Set only the required platform fields for the main cases. Optional fields
+// are tested separately so ambient environment cannot change payload size.
 const TASK_TABLE_NAME = 'abca-task-table';
 const TASK_EVENTS_TABLE_NAME = 'abca-task-events-table';
 const GITHUB_TOKEN_SECRET_ARN =
@@ -73,15 +70,28 @@ for (const optional of [
   'AWS_SDK_UA_APP_ID',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_MODEL',
+  'ABCA_TOOL_GATEWAY_URL',
+  'LINEAR_VAULT_ENABLED',
+  'LINEAR_WORKLOAD_IDENTITY_NAME',
 ]) {
   delete process.env[optional];
 }
 
 const mockSend = jest.fn();
+const mockClaimStart = jest.fn();
+const mockSaveHandle = jest.fn();
+const mockSaveCapability = jest.fn();
+jest.mock('../../../../src/handlers/shared/microvm/start', () => ({
+  ...jest.requireActual('../../../../src/handlers/shared/microvm/start'),
+  claimMicrovmStart: (...args: unknown[]) => mockClaimStart(...args),
+  saveMicrovmStartHandle: (...args: unknown[]) => mockSaveHandle(...args),
+  saveMicrovmImageCapability: (...args: unknown[]) => mockSaveCapability(...args),
+}));
 jest.mock('@aws-sdk/client-lambda-microvms', () => ({
   LambdaMicrovmsClient: jest.fn(() => ({ send: mockSend })),
   RunMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'RunMicrovm', input })),
   GetMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovm', input })),
+  GetMicrovmImageVersionCommand: jest.fn((input: unknown) => ({ _type: 'GetMicrovmImageVersion', input })),
   TerminateMicrovmCommand: jest.fn((input: unknown) => ({ _type: 'TerminateMicrovm', input })),
   // Mirrors the real SDK's const-object enum so the strategy's switch keys on
   // the same literals the service returns.
@@ -267,6 +277,92 @@ async function withEnvAsync(env: Record<string, string>, body: () => Promise<voi
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockSend.mockReset();
+  mockS3Send.mockReset().mockResolvedValue({});
+  mockClaimStart.mockReset().mockImplementation(async (taskId: string) => ({ clientToken: taskId, closed: false }));
+  mockSaveHandle.mockReset().mockResolvedValue(undefined);
+  mockSaveCapability.mockReset().mockResolvedValue(undefined);
+});
+
+describe('per-worker image capability', () => {
+  const input = {
+    taskId: 'CAP001',
+    userId: 'cognito-test',
+    payload: { task_id: 'CAP001' },
+    blueprintConfig: BLUEPRINT,
+  };
+  const identity = { imageArn: IMAGE_IDENTIFIER, imageVersion: 'actual-3.0' };
+  const version = () => ({
+    ...identity,
+    environmentVariables: {
+      [sharedConstants.microvm_lifecycle.image_protocol_env]: String(sharedConstants.microvm_lifecycle.protocol_version),
+    },
+    hooks: {
+      port: sharedConstants.microvm_lifecycle.hook_port,
+      microvmImageHooks: { ready: 'ENABLED', validate: 'ENABLED' },
+      microvmHooks: {
+        run: 'ENABLED',
+        terminate: 'ENABLED',
+        suspend: 'ENABLED',
+        resume: 'ENABLED',
+        suspendTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+        resumeTimeoutInSeconds: sharedConstants.microvm_hook_budgets.lifecycle_hook_timeout_seconds,
+      },
+    },
+  });
+
+  test('saves the known worker before querying its actual image and conditionally enriching it', async () => {
+    mockSend.mockResolvedValueOnce({ ...makeHandle(), ...identity })
+      .mockImplementationOnce(async (command, options) => {
+        expect(mockSaveHandle).toHaveBeenCalledWith(input.taskId, input.taskId, { ...makeHandle(), ...identity });
+        expect(command).toEqual({
+          _type: 'GetMicrovmImageVersion',
+          input: { imageIdentifier: IMAGE_IDENTIFIER, imageVersion: identity.imageVersion },
+        });
+        expect(options.abortSignal).toBeInstanceOf(AbortSignal);
+        return version();
+      });
+    const result = await new LambdaMicrovmComputeStrategy().startSession(input);
+    const expected = { ...makeHandle(), ...identity, lifecycleProtocol: '1' };
+    expect(result).toEqual(expected);
+    expect(mockSaveCapability).toHaveBeenCalledWith(input.taskId, input.taskId, expected);
+    expect(mockSaveHandle.mock.invocationCallOrder[0]).toBeLessThan(mockSaveCapability.mock.invocationCallOrder[0]);
+  });
+
+  test.each(['lookup', 'marker', 'persistence'])('failed %s keeps the saved worker usable without enabling sleep', async failure => {
+    mockSend.mockResolvedValueOnce({ ...makeHandle(), ...identity, lifecycleProtocol: '1' });
+    if (failure === 'lookup') {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('do-not-log-secret'), { name: 'AbortError' }));
+    } else {
+      const response = version();
+      if (failure === 'marker') response.environmentVariables = {};
+      mockSend.mockResolvedValueOnce(response);
+      if (failure === 'persistence') mockSaveCapability.mockRejectedValueOnce(new Error('do-not-log-secret'));
+    }
+    expect(await new LambdaMicrovmComputeStrategy().startSession(input)).toEqual({ ...makeHandle(), ...identity });
+    expect(mockSaveHandle.mock.calls[0][2]).not.toHaveProperty('lifecycleProtocol');
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'RunMicrovm')).toHaveLength(1);
+    expect(mockSend.mock.calls.filter(([command]) => command._type === 'TerminateMicrovm')).toHaveLength(0);
+    expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain('do-not-log-secret');
+  });
+
+  test.each([{}, { imageArn: IMAGE_IDENTIFIER }, { ...identity, imageArn: 'arn:other-image' }])(
+    'missing or mismatched returned identity cannot borrow deployment capability: %j', async returned => {
+      mockSend.mockResolvedValueOnce({ ...makeHandle(), ...returned });
+      const result = await new LambdaMicrovmComputeStrategy().startSession(input);
+      expect(result).not.toHaveProperty('lifecycleProtocol');
+      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(mockSaveCapability).not.toHaveBeenCalled();
+    },
+  );
+
+  test.each([undefined, '1'])('replay preserves saved capability %s without querying the current deployment', async lifecycleProtocol => {
+    const saved = lifecycleProtocol ? { ...makeHandle(), ...identity, lifecycleProtocol } : makeHandle();
+    mockClaimStart.mockResolvedValue({ clientToken: input.taskId, handle: saved, closed: false });
+    expect(await new LambdaMicrovmComputeStrategy().startSession(input)).toEqual(saved);
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockSaveCapability).not.toHaveBeenCalled();
+  });
 });
 
 describe('LambdaMicrovmComputeStrategy', () => {
@@ -285,7 +381,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
         blueprintConfig: BLUEPRINT,
       });
 
-      expect(mockSend).toHaveBeenCalledTimes(1);
+      expect(mockSend).toHaveBeenCalledTimes(2);
       const call = mockSend.mock.calls[0][0];
       expect(call._type).toBe('RunMicrovm');
       expect(call.input.imageIdentifier).toBe(IMAGE_IDENTIFIER);
@@ -298,6 +394,8 @@ describe('LambdaMicrovmComputeStrategy', () => {
         strategyType: 'lambda-microvm',
         microvmId: MICROVM_ID,
         endpoint: ENDPOINT,
+        imageArn: IMAGE_IDENTIFIER,
+        imageVersion: IMAGE_VERSION,
       });
     });
 
@@ -594,6 +692,59 @@ describe('LambdaMicrovmComputeStrategy', () => {
       );
     });
 
+    test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
+      // The regression this locks: measuring `{agent_payload}` alone and then
+      // sending `{agent_payload, platform_config}` would inline an envelope the
+      // service rejects outright. So the branch decision has to be made on the
+      // FULL envelope. This payload is exactly 4 096 bytes WITHOUT the platform
+      // block — i.e. the old code would have inlined it — and must now upload.
+      mockS3Send.mockResolvedValueOnce({});
+      runMicrovmOk();
+
+      const overheadWithoutConfig = Buffer.byteLength(JSON.stringify({ agent_payload: { p: '' } }), 'utf8');
+      const payload = { p: 'x'.repeat(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES - overheadWithoutConfig) };
+      expect(Buffer.byteLength(JSON.stringify({ agent_payload: payload }), 'utf8'))
+        .toBe(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+
+      await new LambdaMicrovmComputeStrategy().startSession({
+        taskId: 'TASK001',
+        userId: 'cognito-test',
+        payload,
+        blueprintConfig: BLUEPRINT,
+      });
+
+      expect(mockS3Send).toHaveBeenCalledTimes(1);
+      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
+      expect(JSON.parse(runHookPayload).agent_payload_s3_uri).toBeDefined();
+      expect(Buffer.byteLength(runHookPayload, 'utf8'))
+        .toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
+    });
+
+    test('fails BEFORE the upload when even the POINTER envelope cannot fit (no orphan object)', async () => {
+      // The one shape with no smaller fallback: the payload has already been moved
+      // to S3, so if `{pointer + platform_config}` still exceeds 4 096 bytes there
+      // is nothing left to shed. Only a pathological identifier length can cause it
+      // — hence the check, and hence its placement BEFORE the PutObject so a
+      // misconfiguration cannot leave objects behind for the lifecycle rule to reap.
+      await withEnvAsync({ LOG_GROUP_NAME: `/aws/${'x'.repeat(5_000)}` }, async () => {
+        const start = new LambdaMicrovmComputeStrategy().startSession({
+          taskId: 'TASK001',
+          userId: 'cognito-test',
+          payload: payloadWithEnvelopeBytes(20_000),
+          blueprintConfig: BLUEPRINT,
+        });
+
+        await expect(start).rejects.toThrow(/pointer envelope is \d+ bytes/);
+        await expect(start).rejects.toThrow(/shorten the stack name/);
+        expect(mockS3Send).not.toHaveBeenCalled();
+        expect(mockSend).not.toHaveBeenCalled();
+      });
+    });
+
+    test('microvmPayloadKey matches the ECS payload key shape', () => {
+      expect(microvmPayloadKey('TASK001')).toBe('TASK001/payload.json');
+    });
+
     test('REAPS the MicroVM when the response carries an id but no endpoint', async () => {
       // The one orphan window the orchestrator cannot cover: startSession never
       // returns a handle, so nothing downstream knows the id. A MicroVM is already
@@ -646,34 +797,6 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(mockSend.mock.calls.filter(c => c[0]._type === 'TerminateMicrovm')).toHaveLength(0);
     });
 
-    test('platform_config COUNTS toward the 4 KB boundary — an otherwise-inlineable payload goes to S3', async () => {
-      // The regression this locks: measuring `{agent_payload}` alone and then
-      // sending `{agent_payload, platform_config}` would inline an envelope the
-      // service rejects outright. So the branch decision has to be made on the
-      // FULL envelope. This payload is exactly 4 096 bytes WITHOUT the platform
-      // block — i.e. the old code would have inlined it — and must now upload.
-      mockS3Send.mockResolvedValueOnce({});
-      runMicrovmOk();
-
-      const overheadWithoutConfig = Buffer.byteLength(JSON.stringify({ agent_payload: { p: '' } }), 'utf8');
-      const payload = { p: 'x'.repeat(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES - overheadWithoutConfig) };
-      expect(Buffer.byteLength(JSON.stringify({ agent_payload: payload }), 'utf8'))
-        .toBe(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-
-      await new LambdaMicrovmComputeStrategy().startSession({
-        taskId: 'TASK001',
-        userId: 'cognito-test',
-        payload,
-        blueprintConfig: BLUEPRINT,
-      });
-
-      expect(mockS3Send).toHaveBeenCalledTimes(1);
-      const runHookPayload = mockSend.mock.calls[0][0].input.runHookPayload;
-      expect(JSON.parse(runHookPayload).agent_payload_s3_uri).toBeDefined();
-      expect(Buffer.byteLength(runHookPayload, 'utf8'))
-        .toBeLessThanOrEqual(MICROVM_RUN_HOOK_PAYLOAD_LIMIT_BYTES);
-    });
-
     test.each(MICROVM_PLATFORM_CONFIG_REQUIRED_KEYS.map(key => [key]))(
       'refuses to start — before any AWS call — when required platform config %s is missing',
       async (key) => {
@@ -685,7 +808,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
             userId: 'cognito-test',
             // Oversized on purpose: the guard must fire before the payload upload,
             // or a misconfiguration leaves orphan objects in the payload bucket.
-            payload: payloadWithEnvelopeBytes(20_000),
+            payload: { prompt: 'x'.repeat(20_000) },
             blueprintConfig: BLUEPRINT,
           });
 
@@ -714,40 +837,12 @@ describe('LambdaMicrovmComputeStrategy', () => {
       // ARN. Nothing resembling a value may appear on the log line.
       expect(JSON.stringify(started[1])).not.toContain(GITHUB_TOKEN_SECRET_ARN);
     });
-
-    test('fails BEFORE the upload when even the POINTER envelope cannot fit (no orphan object)', async () => {
-      // The one shape with no smaller fallback: the payload has already been moved
-      // to S3, so if `{pointer + platform_config}` still exceeds 4 096 bytes there
-      // is nothing left to shed. Only a pathological identifier length can cause it
-      // — hence the check, and hence its placement BEFORE the PutObject so a
-      // misconfiguration cannot leave objects behind for the lifecycle rule to reap.
-      await withEnvAsync({ LOG_GROUP_NAME: `/aws/${'x'.repeat(5_000)}` }, async () => {
-        const start = new LambdaMicrovmComputeStrategy().startSession({
-          taskId: 'TASK001',
-          userId: 'cognito-test',
-          payload: payloadWithEnvelopeBytes(20_000),
-          blueprintConfig: BLUEPRINT,
-        });
-
-        await expect(start).rejects.toThrow(/pointer envelope is \d+ bytes/);
-        await expect(start).rejects.toThrow(/shorten the stack name/);
-        expect(mockS3Send).not.toHaveBeenCalled();
-        expect(mockSend).not.toHaveBeenCalled();
-      });
-    });
-
-    test('microvmPayloadKey matches the ECS payload key shape', () => {
-      expect(microvmPayloadKey('TASK001')).toBe('TASK001/payload.json');
-    });
   });
 
   // --- finalize-time payload delete (review NB3 / ayushtr nit 2) ---
   //
-  // Not cosmetic parity with ECS. The execution role's payload-bucket grant is
-  // `grantRead` on the WHOLE bucket (the guest must read its object before any
-  // tenant identity exists) and keys are `<taskId>/payload.json`, so a TTL-only
-  // reaper left every finished task's HYDRATED PROMPT readable by any concurrently
-  // running MicroVM — which runs untrusted repo code — for up to ~24 h.
+  // Finalize revokes the single-object link and removes its private replay
+  // record; worker credentials already deny direct task-object reads.
   describe('deleteMicrovmPayload — closes the cross-task payload-read window', () => {
     test('deletes the task\'s own object from the payload bucket', async () => {
       await deleteMicrovmPayload('TASK001');
@@ -796,7 +891,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state });
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: expected });
+      expect(result).toEqual({ status: expected, microvmState: state });
     });
 
     test('sends GetMicrovm keyed on microvmIdentifier', async () => {
@@ -815,7 +910,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       // No task id, no DDB read — the strategy cannot see the task row at all,
       // which is exactly why the health rules live in the orchestrator.
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'suspended' });
+      expect(result).toEqual({ status: 'suspended', microvmState: 'SUSPENDED' });
     });
 
     test('treats ResourceNotFoundException as completed (a reaped MicroVM is gone, not broken)', async () => {
@@ -824,7 +919,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockRejectedValueOnce(err);
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'completed' });
+      expect(result).toEqual({ status: 'completed', microvmState: 'NOT_FOUND' });
     });
 
     test('rethrows non-NotFound errors so the caller can count poll failures', async () => {
@@ -838,7 +933,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       mockSend.mockResolvedValueOnce({ microvmId: MICROVM_ID, state: 'HIBERNATING_SOMEDAY' });
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
-      expect(result).toEqual({ status: 'running' });
+      expect(result).toEqual({ status: 'running', microvmState: 'UNKNOWN' });
     });
 
     test('throws when the handle is not a lambda-microvm handle', async () => {
@@ -865,7 +960,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'completed', reason });
+      expect(result).toEqual({ status: 'completed', microvmState: 'TERMINATED', reason });
     });
 
     test('logs a WARNING when a terminal MicroVM carries a reason', async () => {
@@ -889,7 +984,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'completed' });
+      expect(result).toEqual({ status: 'completed', microvmState: 'TERMINATED' });
       expect(mockLogger.warn).not.toHaveBeenCalled();
     });
 
@@ -901,7 +996,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: 'running' });
+      expect(result).toEqual({ status: 'running', microvmState: 'RUNNING' });
       expect('reason' in result).toBe(false);
     });
 
@@ -914,7 +1009,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
 
       const result = await new LambdaMicrovmComputeStrategy().pollSession(makeHandle());
 
-      expect(result).toEqual({ status: expected, reason: 'because' });
+      expect(result).toEqual({ status: expected, microvmState: state === 'HIBERNATING_SOMEDAY' ? 'UNKNOWN' : state, reason: 'because' });
     });
   });
 
@@ -930,9 +1025,24 @@ describe('LambdaMicrovmComputeStrategy', () => {
       expect(call.input).toEqual({ microvmIdentifier: MICROVM_ID });
     });
 
+    test.each(['TERMINATED', 'TERMINATING', 'RUNNING'])('confirms termination conflicts against %s', async state => {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConflictException' }))
+        .mockResolvedValueOnce({ state });
+      const result = await new LambdaMicrovmComputeStrategy().stopSession(makeHandle());
+      expect(result).toEqual(state === 'TERMINATED' ? { outcome: 'terminated' }
+        : { outcome: 'unconfirmed', error_type: 'ConflictException' });
+      expect(mockSend.mock.calls[1][0]._type).toBe('GetMicrovm');
+    });
+
+    test('confirms an absent worker after a termination conflict', async () => {
+      mockSend.mockRejectedValueOnce(Object.assign(new Error('conflict'), { name: 'ConflictException' }))
+        .mockRejectedValueOnce(Object.assign(new Error('gone'), { name: 'ResourceNotFoundException' }));
+      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toEqual({ outcome: 'not-found' });
+    });
+
     test.each([
       ['ResourceNotFoundException', 'info'],
-      ['ConflictException', 'info'],
+      ['ConflictException', 'warn'],
       ['ThrottlingException', 'error'],
       ['AccessDeniedException', 'error'],
       ['InternalServerException', 'warn'],
@@ -941,7 +1051,10 @@ describe('LambdaMicrovmComputeStrategy', () => {
       err.name = errName;
       mockSend.mockRejectedValueOnce(err);
 
-      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toBeUndefined();
+      await expect(new LambdaMicrovmComputeStrategy().stopSession(makeHandle())).resolves.toEqual(
+        errName === 'ResourceNotFoundException' ? { outcome: 'not-found' }
+          : { outcome: 'unconfirmed', error_type: errName },
+      );
 
       const byLevel: Record<string, jest.Mock> = {
         info: mockLogger.info,
@@ -995,7 +1108,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       await expect(start).rejects.toThrow('MicroVM RunMicrovm failed: ThrottlingException: Rate exceeded');
     });
 
-    test('preserves the original error as `cause` so err.name stays inspectable', async () => {
+    test('preserves the AWS error name in a sanitized cause', async () => {
       const err = new Error('quota');
       err.name = 'ServiceQuotaExceededException';
       mockSend.mockRejectedValueOnce(err);
@@ -1003,7 +1116,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       await new LambdaMicrovmComputeStrategy()
         .startSession({ taskId: 'TASK001', userId: 'u', payload: {}, blueprintConfig: BLUEPRINT })
         .catch((thrown: Error) => {
-          expect(thrown.cause).toBe(err);
+          expect(thrown.cause).not.toBe(err);
           expect((thrown.cause as Error).name).toBe('ServiceQuotaExceededException');
         });
       expect.assertions(2);
@@ -1026,7 +1139,7 @@ describe('LambdaMicrovmComputeStrategy', () => {
       const start = new LambdaMicrovmComputeStrategy().startSession({
         taskId: 'TASK001',
         userId: 'cognito-test',
-        payload: payloadWithEnvelopeBytes(20_000),
+        payload: { prompt: 'x'.repeat(20_000) },
         blueprintConfig: BLUEPRINT,
       });
 
@@ -1192,7 +1305,7 @@ describe('LambdaMicrovmComputeStrategy image-identifier validation', () => {
       userId: 'cognito-test',
       // Oversized on purpose: the guard must fire before the payload upload, or a
       // misconfiguration leaves orphan objects in the payload bucket.
-      payload: payloadWithEnvelopeBytes(20_000),
+      payload: { prompt: 'x'.repeat(20_000) },
       blueprintConfig: BLUEPRINT,
     });
 
@@ -1237,6 +1350,9 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     AWS_SDK_UA_APP_ID: 'uksb-wt64nei4u6#backgroundagent-dev',
     ANTHROPIC_DEFAULT_HAIKU_MODEL: 'us.anthropic.claude-haiku-4-5-20251001-v1:0',
     ANTHROPIC_MODEL: 'us.anthropic.claude-opus-5',
+    ABCA_TOOL_GATEWAY_URL: 'https://gateway.example/mcp',
+    LINEAR_VAULT_ENABLED: 'true',
+    LINEAR_WORKLOAD_IDENTITY_NAME: 'abca_linear_oauth_test',
   };
 
   test('sources the wire key allow-list from the cross-language contract', () => {
@@ -1276,8 +1392,11 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       // `agent/src/config.py` — wrong on any deployment whose geography is not
       // `global`, and wrong in a way that surfaces only as AccessDenied at turn 0.
       'anthropic_model',
+      'tool_gateway_url',
+      'linear_vault_enabled',
+      'linear_workload_identity_name',
     ]);
-    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(14);
+    expect(MICROVM_PLATFORM_CONFIG_KEYS).toHaveLength(17);
     // snake_case on the wire, matching every other key in the /run envelope.
     for (const key of MICROVM_PLATFORM_CONFIG_KEYS) {
       expect(key).toMatch(/^[a-z][a-z0-9_]*$/);
@@ -1298,7 +1417,7 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     }
   });
 
-  test('emits all fourteen keys, in declaration order, from a full environment', () => {
+  test('emits all seventeen keys, in declaration order, from a full environment', () => {
     const config = buildMicrovmPlatformConfig(FULL_ENV);
     expect(Object.keys(config)).toEqual([...MICROVM_PLATFORM_CONFIG_KEYS]);
     expect(config.task_table_name).toBe('tasks');
@@ -1310,6 +1429,9 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
     // a `us` deployment a missing value is not an error anywhere — it is a wrong
     // model that the IAM grant does not cover, surfacing as AccessDenied at turn 0.
     expect(config.anthropic_model).toBe('us.anthropic.claude-opus-5');
+    expect(config.tool_gateway_url).toBe('https://gateway.example/mcp');
+    expect(config.linear_vault_enabled).toBe('true');
+    expect(config.linear_workload_identity_name).toBe('abca_linear_oauth_test');
   });
 
   test('OMITS optional keys the orchestrator does not carry (no `undefined` placeholders)', () => {
@@ -1445,6 +1567,9 @@ describe('buildMicrovmPlatformConfig — the MicroVM substitute for a deploy-tim
       'ARTIFACTS_BUCKET_NAME', 'TRACE_ARTIFACTS_BUCKET_NAME', 'LINEAR_OAUTH_SECRET_ARN',
       'JIRA_OAUTH_SECRET_ARN', 'AWS_SDK_UA_APP_ID', 'ANTHROPIC_DEFAULT_HAIKU_MODEL',
       'ANTHROPIC_MODEL',
+      'ABCA_TOOL_GATEWAY_URL',
+      'LINEAR_VAULT_ENABLED',
+      'LINEAR_WORKLOAD_IDENTITY_NAME',
     ]) {
       delete env[optional];
     }

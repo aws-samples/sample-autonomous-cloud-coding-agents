@@ -52,8 +52,18 @@ describe('formatDuration', () => {
     expect(formatDuration(7320)).toBe('2h 2m');
   });
 
+  // The agent stores duration_s with one decimal. The last half second of a
+  // minute belongs to the next minute: "60s" and "1m 60s" are not durations.
+  test.each([
+    [59.6, '1m'],
+    ['119.7', '2m'],
+    [3599.6, '1h'],
+  ])('rounds %s once, before splitting off the minutes: %s', (seconds, expected) => {
+    expect(formatDuration(seconds)).toBe(expected);
+  });
+
   test('coerces DynamoDB numeric strings via Number()', () => {
-    // DynamoDB may round-trip numeric attributes as strings; Number() coerces them.
+    // The agent stores these as DynamoDB strings; Number() coerces them.
     expect(formatDuration('90' as unknown as number)).toBe('1m 30s');
     expect(formatDuration('3600' as unknown as number)).toBe('1h');
   });

@@ -18,7 +18,9 @@
  */
 
 import { PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { assertComputeSubstrateDeployed, defaultComputeType, type ComputeDeployment } from './compute-substrate';
 import { documentClient } from './dynamo-clients';
+import { CliError } from './errors';
 import {
   LambdaMicrovmProbeClientFactory,
   requireLambdaMicrovmAvailability,
@@ -35,6 +37,7 @@ import {
 export const REMOVED_REPO_TTL_DAYS = 30;
 
 export interface OnboardRepoOptions {
+  readonly deployment?: ComputeDeployment;
   readonly computeType?: 'agentcore' | 'ecs' | 'lambda-microvm';
   readonly runtimeArn?: string;
   readonly modelId?: string;
@@ -49,6 +52,7 @@ export interface OnboardRepoDependencies {
 }
 
 /** Register or re-activate a repository in RepoTable (operator path). */
+// eslint-disable-next-line complexity -- predates the ceiling (45 when it landed); must not grow
 export async function onboardRepo(
   region: string,
   tableName: string,
@@ -73,7 +77,14 @@ export async function onboardRepo(
     existing = undefined;
   }
 
-  const effectiveComputeType = options.computeType ?? existing?.compute_type ?? 'agentcore';
+  const effectiveComputeType = options.computeType ?? existing?.compute_type
+    ?? (options.deployment ? defaultComputeType(options.deployment) : 'agentcore');
+  if (options.deployment) {
+    assertComputeSubstrateDeployed({ ...options.deployment, computeType: effectiveComputeType });
+  }
+  if (options.runtimeArn && effectiveComputeType !== 'agentcore') {
+    throw new CliError('--runtime-arn applies only to the agentcore backend');
+  }
   if (effectiveComputeType === 'lambda-microvm') {
     await requireLambdaMicrovmAvailability(region, dependencies.lambdaMicrovmClientFactory);
   }

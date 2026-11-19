@@ -83,8 +83,13 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
 
     Heuristics (conservative — only the unambiguous "couldn't run" signals):
       - exit 127: shell "command not found" (e.g. ``gradle`` not installed).
-      - mise "no tasks defined" / "no task named" / "not found": the configured
-        (or default ``mise run build``) task does not exist in the repo.
+        mise exits with the status of the task that failed, so a tool missing
+        inside a task is a 127 as well.
+      - mise "no tasks defined" / "no task named", or "not found" on one of
+        mise's own error lines (``mise ERROR task not found: <name>``): the
+        configured (or default ``mise run build``) task does not exist in the
+        repo. The two words anywhere in the log are no signal: a build log
+        names mise, and a failed test is titled "... is not found".
     A repo that genuinely fails its build returns some other non-zero code with
     real compiler/test output, which this does NOT flag.
     """
@@ -94,8 +99,7 @@ def is_verify_command_inert(returncode: int, stderr: str) -> bool:
     return (
         "no tasks defined" in s
         or "no task named" in s
-        or ("mise" in s and "not found" in s)
-        or "command not found" in s
+        or any("mise error" in line and "not found" in line for line in s.splitlines())
     )
 
 
@@ -202,6 +206,15 @@ def _run_verify(repo_dir: str, command: str, default: str, label: str) -> Verify
             "— reporting as timed out (not a build failure)",
         )
         return VerifyOutcome(passed=False, timed_out=True)
+    except OSError as exc:
+        # A command without shell operators is exec'd directly, and the exec
+        # itself fails when its program is not installed or not executable.
+        # Classify that as what a shell reports for it, exit 127, with the error
+        # as the output: the gate is then inert like the same command inside
+        # ``bash -lc``, and an exec that failed for lack of memory is still an
+        # infrastructure fault.
+        log("WARN", f"Post-agent {label} could not be started: {exc}")
+        result = subprocess.CompletedProcess(argv, SHELL_COMMAND_NOT_FOUND, "", str(exc))
     if result.returncode != 0:
         stderr = getattr(result, "stderr", "") or ""
         # An ENVIRONMENT fault (out of disk / OOM) means the build couldn't
@@ -268,20 +281,15 @@ def ensure_committed(repo_dir: str) -> bool:
             text=True,
             timeout=60,
         )
-    except subprocess.TimeoutExpired:
-        log("WARN", "git status timed out in safety-net commit")
-        return False
+        if result.returncode != 0:
+            stderr = result.stderr.strip()[:200] if result.stderr else ""
+            log("WARN", f"git status failed (exit {result.returncode}): {stderr}")
+            return False
+        if not result.stdout.strip():
+            return False
 
-    if result.returncode != 0:
-        stderr = result.stderr.strip()[:200] if result.stderr else ""
-        log("WARN", f"git status failed (exit {result.returncode}): {stderr}")
-        return False
-    if not result.stdout.strip():
-        return False
-
-    log("POST", "Uncommitted changes detected — creating safety-net commit")
-    # Stage tracked-but-modified files only (not untracked files)
-    try:
+        log("POST", "Uncommitted changes detected — creating safety-net commit")
+        # Stage tracked-but-modified files only (not untracked files)
         add_result = subprocess.run(
             ["git", "add", "-u"],
             cwd=repo_dir,
@@ -289,34 +297,36 @@ def ensure_committed(repo_dir: str) -> bool:
             text=True,
             timeout=60,
         )
-    except subprocess.TimeoutExpired:
-        log("WARN", "git add -u timed out in safety-net commit")
-        return False
+        if add_result.returncode != 0:
+            stderr = add_result.stderr.strip()[:200] if add_result.stderr else ""
+            log("WARN", f"git add -u failed (exit {add_result.returncode}): {stderr}")
+            return False
 
-    if add_result.returncode != 0:
-        stderr = add_result.stderr.strip()[:200] if add_result.stderr else ""
-        log("WARN", f"git add -u failed (exit {add_result.returncode}): {stderr}")
-        return False
+        # Check if there's anything staged after add -u
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=repo_dir,
+            capture_output=True,
+            timeout=30,
+        )
+        if staged.returncode == 0:
+            # Nothing staged (changes were only untracked files) — skip
+            log("POST", "No tracked file changes to commit")
+            return False
 
-    # Check if there's anything staged after add -u
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
-        cwd=repo_dir,
-        capture_output=True,
-        timeout=30,
-    )
-    if staged.returncode == 0:
-        # Nothing staged (changes were only untracked files) — skip
-        log("POST", "No tracked file changes to commit")
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", "chore(agent): save uncommitted work from session end"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        # `git commit` runs the repository's commit hooks (lint, tests), which
+        # can outlast its timeout. The pipeline goes on with the commits that
+        # exist: what is not committed here is not in the pull request.
+        log("WARN", f"Safety-net commit not made ({type(exc).__name__}: {exc})")
         return False
-
-    commit_result = subprocess.run(
-        ["git", "commit", "-m", "chore(agent): save uncommitted work from session end"],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
     if commit_result.returncode == 0:
         log("POST", "Safety-net commit created")
         return True
@@ -336,12 +346,31 @@ def _current_branch(repo_dir: str) -> str | None:
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
+        # nosemgrep: py-silent-success-masking -- git failed: reconcile_agent_branch moves nothing
         return None
     if res.returncode != 0:
         return None
     name = res.stdout.strip()
     # "HEAD" is git's sentinel for a detached HEAD — not a branch name.
     return name or None if name != "HEAD" else None
+
+
+def _lists_a_commit(repo_dir: str, *revisions: str) -> bool:
+    """True when ``git rev-list <revisions>`` lists a commit, or cannot say.
+
+    ``--ignore-missing`` leaves a revision that does not exist (``origin/HEAD``
+    in a repository that was not cloned) out of the question. The closing
+    ``--`` is for a branch named like a file of the work tree (``docs``), which
+    git otherwise refuses as ambiguous."""
+    listed = subprocess.run(
+        ["git", "rev-list", "--ignore-missing", "-1", *revisions, "--"],
+        cwd=repo_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return listed.returncode != 0 or bool(listed.stdout.strip())
 
 
 def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
@@ -365,26 +394,63 @@ def reconcile_agent_branch(repo_dir: str, branch: str) -> bool:
     delivery runs against the branch the platform tracks. The agent's commits are
     preserved verbatim — we only re-point the platform branch label at them.
 
+    The label stays where it is when moving it would drop commits for nothing:
+    the platform branch has commits that HEAD lacks, and HEAD has no commit of
+    its own (one that is neither on the platform branch nor on origin's default
+    branch). That is an agent which committed on the platform branch and then
+    switched away (``git checkout main``): the platform branch is checked out
+    again, with its commits. When git refuses that checkout (uncommitted edits
+    it would overwrite), HEAD is adopted after all, as for any other HEAD.
+
     Returns True if it moved the platform branch, False otherwise (already on it,
-    detached HEAD with no branch to adopt, or a git failure — all handled by the
-    existing ensure_committed/ensure_pr/delivery-gate chain). Best-effort: never
-    raises, so a reconcile failure degrades to the pre-existing behavior."""
+    detached HEAD with no branch to adopt, a move that would only drop commits,
+    or a git failure — all handled by the existing ensure_committed/ensure_pr/
+    delivery-gate chain). Best-effort: never raises, so a reconcile failure
+    degrades to the pre-existing behavior."""
     head_branch = _current_branch(repo_dir)
     if head_branch is None or head_branch == branch:
         # On the platform branch already (the common, healthy case) or detached
         # with nothing to adopt — nothing to reconcile.
         return False
-    log(
-        "POST",
-        f"Agent left the platform branch: HEAD is on '{head_branch}', expected "
-        f"'{branch}'. Reconciling the platform branch to the agent's commits so "
-        "the work is delivered on the tracked branch.",
-    )
     try:
-        # Re-point the platform branch at the agent's HEAD (force: the platform
-        # branch was created empty at setup, so this only ever fast-forwards it
-        # to the work the agent actually did). Then check it out so ensure_committed
-        # / ensure_pr / ensure_pushed all operate on the tracked branch.
+        # Re-pointing the platform branch drops the commits on it that HEAD does
+        # not contain. HEAD is adopted all the same when it has a commit of its
+        # own, one that is neither on the platform branch nor on origin's default
+        # branch: an agent that rewrites its commits on its own branch (amend,
+        # rebase) leaves the two diverged, and HEAD is its latest state. A HEAD
+        # without one is not adopted: the agent committed on the platform branch
+        # and then switched away, say to the default branch to compare, and the
+        # move would drop its commits and gain nothing.
+        drops_commits = _lists_a_commit(repo_dir, branch, "--not", "HEAD")
+        own_commit = _lists_a_commit(repo_dir, "HEAD", "--not", branch, "origin/HEAD")
+        if drops_commits and not own_commit:
+            log(
+                "POST",
+                f"Agent left the platform branch: HEAD is on '{head_branch}', which has "
+                f"no commit of its own. Going back to '{branch}' as it is.",
+            )
+            back = run_cmd(
+                ["git", "checkout", branch],
+                label="reconcile-branch-checkout",
+                cwd=repo_dir,
+                check=False,
+            )
+            if back.returncode == 0:
+                return False
+            # git does not go back over uncommitted edits that the switch would
+            # overwrite. HEAD is adopted then, as before: left on the other
+            # branch, its edits would be committed and built there, and this
+            # branch pushed and described under their name.
+            log("WARN", f"reconcile: cannot go back to '{branch}' — adopting HEAD instead")
+        log(
+            "POST",
+            f"Agent left the platform branch: HEAD is on '{head_branch}', expected "
+            f"'{branch}'. Reconciling the platform branch to the agent's commits so "
+            "the work is delivered on the tracked branch.",
+        )
+        # Re-point the platform branch at the agent's HEAD (forced: see above),
+        # then check it out so ensure_committed / ensure_pr / ensure_pushed all
+        # operate on the tracked branch.
         force_res = run_cmd(
             ["git", "branch", "-f", branch, "HEAD"],
             label="reconcile-branch-force",
@@ -427,19 +493,26 @@ def ensure_pushed(repo_dir: str, branch: str) -> bool:
     # If the remote branch doesn't exist or there are unpushed commits
     if result.returncode != 0 or result.stdout.strip():
         log("POST", "Pushing unpushed commits...")
-        push_result = run_cmd(
-            ["git", "push", "-u", "origin", branch],
-            label="push",
-            cwd=repo_dir,
-            check=False,
-        )
+        try:
+            push_result = run_cmd(
+                ["git", "push", "-u", "origin", branch],
+                label="push",
+                cwd=repo_dir,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # `git push` runs the repository's pre-push hooks (its test suites),
+            # which can outlast the timeout, and run_cmd raises on a timeout
+            # whatever ``check`` says. Not pushed, like a push that was refused.
+            log("WARN", f"Push not completed ({exc})")
+            return False
         return push_result.returncode == 0
     return True
 
 
 _UNPUSHED_COMMITS_NOTE = (
     "⚠️ **bgagent could not push its follow-up commits to this branch.** "
-    "The `git push` during the `push_resolve` step failed, so the latest "
+    "The `git push` after the agent's run failed, so the latest "
     "agent changes are committed locally but are NOT reflected in this PR. "
     "A maintainer may need to re-run the task or push manually."
 )
@@ -448,7 +521,8 @@ _UNPUSHED_COMMITS_NOTE = (
 def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> None:
     """Post a PR comment warning that follow-up commits failed to push.
 
-    Best-effort surface for the ``push_resolve`` push-failure path: the PR URL
+    Best-effort surface for a failed push to a PR that already exists (the
+    ``push_resolve`` strategy, or a PR the agent opened itself): the PR URL
     is still returned (the PR exists) but it no longer reflects the agent's
     latest work, so the reviewer must be told. Failure to post the comment is
     logged but not fatal — the WARN log line emitted by the caller is the
@@ -489,6 +563,35 @@ def _note_unpushed_commits(repo_dir: str, branch: str, config: TaskConfig) -> No
         log("WARN", f"Failed to post un-pushed-commits note: {type(e).__name__}: {e}")
 
 
+def _gh_pr_field(repo_dir: str, branch: str, repo_url: str, field: str) -> str | None:
+    """Read one field of the pull request of ``branch`` with ``gh pr view``.
+
+    None when the branch has no pull request, the field is empty, or gh exits
+    non-zero, times out or cannot be started. No caller can do more with a pull
+    request it cannot read than with one that is not there, so a slow GitHub
+    does not fail a task whose work is already delivered.
+    """
+    value = None
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", branch, "--repo", repo_url, "--json", field, "-q", f".{field}"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            value = result.stdout.strip() or None
+        else:
+            # Most often "no pull requests found"; whether that is a problem is
+            # for the caller to say.
+            stderr_msg = result.stderr.strip()[:200] if result.stderr else "(no stderr)"
+            log("POST", f"gh pr view '{branch}' (rc={result.returncode}): {stderr_msg}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"gh pr view '{branch}' did not complete ({type(exc).__name__}: {exc})")
+    return value
+
+
 def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_base: str) -> None:
     """Deterministically retarget an existing PR onto ``expected_base``.
 
@@ -513,34 +616,10 @@ def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_
     Best-effort: any failure is logged, never fatal — a mis-based PR is a
     presentation/merge-target defect, not a reason to fail the whole task.
     """
-    try:
-        view = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                branch,
-                "--repo",
-                config.repo_url,
-                "--json",
-                "baseRefName",
-                "-q",
-                ".baseRefName",
-            ],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        log("WARN", f"Could not read PR base to reconcile ({type(exc).__name__}) — leaving as-is")
-        return
-    if view.returncode != 0 or not view.stdout.strip():
-        # No PR / unreadable base — nothing to reconcile (creation path handles
-        # the no-PR case; a transient read error just leaves the base as-is).
-        return
-    current_base = view.stdout.strip()
-    if current_base == expected_base:
+    current_base = _gh_pr_field(repo_dir, branch, config.repo_url, "baseRefName")
+    if current_base is None or current_base == expected_base:
+        # No PR / unreadable base (creation path handles the no-PR case; a
+        # transient read error just leaves the base as-is), or nothing to change.
         return
     log(
         "POST",
@@ -565,7 +644,7 @@ def _reconcile_pr_base(repo_dir: str, branch: str, config: TaskConfig, expected_
 def ensure_pr(
     config: TaskConfig,
     setup: RepoSetup,
-    build_passed: bool,
+    build_passed: bool | None,
     lint_passed: bool,
     agent_result: AgentResult | None = None,
     strategy: str = "create",
@@ -575,7 +654,8 @@ def ensure_pr(
     Strategy (provider-neutral, from the workflow step — replaces the former
     ``task_type`` self-inspection):
 
-    - ``create``: create a new PR if one doesn't exist (the new_task path).
+    - ``create``: create a new PR if one doesn't exist; if the agent has opened
+      it already, push the commits made since (the new_task path).
     - ``push_resolve``: push follow-up commits, then resolve the existing PR URL
       (the pr_iteration path).
     - ``resolve``: resolve the existing PR URL without pushing (read-only;
@@ -583,7 +663,8 @@ def ensure_pr(
 
     Returns the PR URL, or None if there are no commits beyond the default
     branch or PR creation failed. ``build_passed`` and ``lint_passed`` control
-    the verification status shown in the PR body.
+    the verification status shown in the PR body; ``build_passed`` is None when
+    the build command could not run, and the body then says so instead of PASS.
     """
     repo_dir = setup.repo_dir
     branch = setup.branch
@@ -604,57 +685,29 @@ def ensure_pr(
         else:
             log("POST", "resolve strategy — skipping push (read-only)")
         log("POST", f"ensure_pr strategy={strategy} — returning existing PR URL")
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                branch,
-                "--repo",
-                config.repo_url,
-                "--json",
-                "url",
-                "-q",
-                ".url",
-            ],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            pr_url = result.stdout.strip()
+        pr_url = _gh_pr_field(repo_dir, branch, config.repo_url, "url")
+        if pr_url:
             log("POST", f"Existing PR: {pr_url}")
             if push_failed:
                 _note_unpushed_commits(repo_dir, branch, config)
             return pr_url
-        stderr_msg = result.stderr.strip() if result.stderr else "(no stderr)"
-        log("WARN", f"Could not resolve existing PR URL (rc={result.returncode}): {stderr_msg}")
+        log("WARN", "Could not resolve existing PR URL")
         return None
 
     # Check if the agent already created a PR for this branch
     log("POST", "Checking for existing PR...")
-    result = subprocess.run(
-        [
-            "gh",
-            "pr",
-            "view",
-            branch,
-            "--repo",
-            config.repo_url,
-            "--json",
-            "url",
-            "-q",
-            ".url",
-        ],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        pr_url = result.stdout.strip()
+    pr_url = _gh_pr_field(repo_dir, branch, config.repo_url, "url")
+    if pr_url:
         log("POST", f"PR already exists: {pr_url}")
+        # The agent may have gone on working after it opened this PR: the commits
+        # it made after its last push, and the safety-net commit, are local only.
+        if not ensure_pushed(repo_dir, branch):
+            log("WARN", "Failed to push the commits made after the PR was opened")
+            # The reviewer is told only when a commit is missing: a branch that
+            # holds nothing origin lacks (the session ended on another branch of
+            # origin, and the branch was re-pointed at it) is refused as well.
+            if _lists_a_commit(repo_dir, branch, "--not", "--remotes=origin"):
+                _note_unpushed_commits(repo_dir, branch, config)
         # The agent opened this PR and picked its own --base; correct it to the
         # orchestrator-supplied / detected base if it disagrees (stacked-child
         # + root wrong-base fix).
@@ -707,7 +760,9 @@ def ensure_pr(
     elif config.task_description:
         task_source = f"**Task:** {config.task_description}\n\n"
 
-    build_status = "PASS" if build_passed else "FAIL"
+    # None: the build command could not run (exit 127, no such task), so nothing was built.
+    build_statuses = {True: "PASS", False: "FAIL", None: "NOT RUN (command could not run)"}
+    build_status = build_statuses[build_passed]
     lint_status = "PASS" if lint_passed else "FAIL"
     # Show the actual commands run (default mise), not a hardcoded label.
     build_label = (config.build_command or DEFAULT_BUILD_COMMAND).strip()
@@ -718,8 +773,8 @@ def ensure_pr(
         cost_line = f"- Agent cost: **${agent_result.cost_usd:.4f}**\n"
 
     # When build-regression gating is inert (no runnable build command, none
-    # configured), say so plainly — otherwise a green "build: PASS" misleads:
-    # nothing was actually verified.
+    # configured), say so plainly, with the way to enable it: a status line
+    # that says the build did not run explains neither.
     gate_warning = ""
     if getattr(setup, "build_gate_inert", False):
         gate_warning = (
@@ -741,7 +796,8 @@ def ensure_pr(
         f"{cost_line}\n"
         f"---\n\n"
         f"By submitting this pull request, I confirm that you can use, modify, copy, "
-        f"and redistribute this contribution, under the terms of the [project license](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/blob/main/LICENSE)."
+        f"and redistribute this contribution, under the terms of the "
+        f"[project license](https://github.com/{config.repo_url}/blob/{default_branch}/LICENSE)."
     )
 
     log("POST", f"Creating PR: {pr_title}")
@@ -769,9 +825,8 @@ def ensure_pr(
         pr_url = pr_result.stdout.strip()
         log("POST", f"PR created: {pr_url}")
         return pr_url
-    else:
-        log("POST", "Failed to create PR")
-        return None
+    log("POST", "Failed to create PR")
+    return None
 
 
 def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str | None:
@@ -780,40 +835,16 @@ def _extract_agent_notes(repo_dir: str, branch: str, config: TaskConfig) -> str 
     Checks the existing PR body via `gh pr view`. Returns the text content
     of the "## Agent notes" section, or None if not found.
     """
-    try:
-        result = subprocess.run(
-            [
-                "gh",
-                "pr",
-                "view",
-                branch,
-                "--repo",
-                config.repo_url,
-                "--json",
-                "body",
-                "-q",
-                ".body",
-            ],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            return None
-
-        body = result.stdout.strip()
-        # Find "## Agent notes" section
-        match = re.search(
-            r"##\s*Agent\s*notes\s*\n(.*?)(?=\n##\s|\Z)",
-            body,
-            re.DOTALL | re.IGNORECASE,
-        )
-        if match:
-            notes = match.group(1).strip()
-            return notes if notes else None
+    body = _gh_pr_field(repo_dir, branch, config.repo_url, "body")
+    if not body:
         return None
-    except Exception as e:
-        log("WARN", f"Failed to extract agent notes from PR body: {type(e).__name__}: {e}")
-        # nosemgrep: py-silent-success-masking -- PR body notes optional; extraction failure logged
-        return None
+    # Find "## Agent notes" section
+    match = re.search(
+        r"##\s*Agent\s*notes\s*\n(.*?)(?=\n##\s|\Z)",
+        body,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if match:
+        notes = match.group(1).strip()
+        return notes or None
+    return None

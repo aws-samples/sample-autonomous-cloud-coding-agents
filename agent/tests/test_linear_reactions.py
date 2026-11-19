@@ -244,6 +244,26 @@ class TestFailureIsSwallowed:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             post.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "body",
+        [b"<html><body>Sign in</body></html>", b"null", b"[]", b"42", b'"scalar"'],
+        ids=["html", "null", "list", "number", "string"],
+    )
+    def test_200_without_a_json_object_does_not_raise(self, monkeypatch, body):
+        """A 200 whose body is a proxy's HTML page, or JSON that is not an object,
+        is one more failure: raised out of the hook, it would turn a finished task
+        into FAILED. A real ``requests.Response``, so it fails the way requests does."""
+        import requests as rq
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        resp = rq.Response()
+        resp.status_code = 200
+        resp._content = body
+        with patch("linear_reactions.requests.post", return_value=resp):
+            # must not raise
+            react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
+            assert linear_reactions._graphql("query Q { x }", {}) is None
+
 
 class TestSweepStaleReactions:
     """react_task_started sweeps prior bgagent-owned 👀/✅/❌ before posting
@@ -583,6 +603,27 @@ class TestTransitionIssueState:
         with patch("linear_reactions._graphql", side_effect=fake_graphql):
             linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
         assert set_calls == []  # backward move (completed → started) skipped
+
+    def test_without_a_preferred_name_the_lowest_position_state_wins(self):
+        """No state of the type carries a preferred name: take the first one in
+        the team's own workflow order (lowest position; list order breaks a tie)."""
+        states = [
+            {"id": "s-backlog", "name": "Backlog", "type": "backlog", "position": 0},
+            {"id": "s-qa", "name": "QA", "type": "started", "position": 7},
+            {"id": "s-doing", "name": "Doing", "type": "started", "position": 3},
+            {"id": "s-pairing", "name": "Pairing", "type": "started", "position": 3},
+        ]
+        set_calls = []
+
+        def fake_graphql(query, variables):
+            if "IssueStates" in query:
+                return {"issue": {"state": states[0], "team": {"states": {"nodes": states}}}}
+            set_calls.append(variables)
+            return {"issueUpdate": {"success": True}}
+
+        with patch("linear_reactions._graphql", side_effect=fake_graphql):
+            linear_reactions._transition_issue_state("issue-1", "started", ["In Progress"])
+        assert [call["stateId"] for call in set_calls] == ["s-doing"]
 
     def test_no_op_when_already_in_target_state(self):
         set_calls = []

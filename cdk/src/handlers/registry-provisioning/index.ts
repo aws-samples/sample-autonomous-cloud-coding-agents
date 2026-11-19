@@ -27,8 +27,10 @@ import {
   ConflictException,
   CreateRegistryCommand,
   DeleteRegistryCommand,
+  DeleteRegistryRecordCommand,
   GetRegistryCommand,
   InternalServerException,
+  ListRegistryRecordsCommand,
   ResourceNotFoundException,
   ThrottlingException,
   UpdateRegistryCommand,
@@ -68,6 +70,11 @@ const client = makeClient(AgentRegistryControlClient);
 /** clientToken length cap — a 64-hex-char (256-bit) prefix of the SHA-256 digest
  *  is plenty of entropy for an idempotency token and stays within API limits. */
 const CLIENT_TOKEN_LENGTH = 64;
+
+/** How long one invocation deletes records before it leaves the rest to the Provider's
+ *  next poll (ms). Both handlers are stopped after 60 seconds (constructs/registry.ts),
+ *  and a stopped handler fails the delete at once. */
+const RECORD_DELETION_BUDGET_MS = 30_000;
 
 type DeleteAttempt = 'started' | 'absent' | 'retryable';
 
@@ -118,7 +125,33 @@ function isRetryableDeleteError(err: unknown): boolean {
 }
 
 /**
- * Start or re-drive asynchronous deletion.
+ * Delete the records a registry holds: AWS refuses DeleteRegistry with a
+ * ConflictException while one exists.
+ *
+ * One pass over the record list, for a bounded time. A record answers
+ * ConflictException while it is being created or updated, and a listed record may be
+ * gone already: both are skipped. Whatever is left keeps DeleteRegistry refused, so the
+ * Provider's next poll comes back here.
+ */
+async function deleteRegistryRecords(registryId: string): Promise<void> {
+  const deadline = Date.now() + RECORD_DELETION_BUDGET_MS;
+  let nextToken: string | undefined;
+  do {
+    const page = await client.send(new ListRegistryRecordsCommand({ registryId, nextToken }));
+    for (const { recordId } of page.registryRecords ?? []) {
+      if (Date.now() > deadline) return;
+      try {
+        await client.send(new DeleteRegistryRecordCommand({ registryId, recordId }));
+      } catch (err) {
+        if (!(err instanceof ConflictException) && !(err instanceof ResourceNotFoundException)) throw err;
+      }
+    }
+    nextToken = page.nextToken;
+  } while (nextToken);
+}
+
+/**
+ * Start or re-drive asynchronous deletion: first the records, then the registry.
  *
  * A retryable service error is ambiguous: the request may have reached the
  * service even though the response did not reach us. Returning `retryable`
@@ -127,6 +160,7 @@ function isRetryableDeleteError(err: unknown): boolean {
  */
 async function requestRegistryDeletion(registryId: string): Promise<DeleteAttempt> {
   try {
+    await deleteRegistryRecords(registryId);
     await client.send(new DeleteRegistryCommand({ registryId }));
     return 'started';
   } catch (err) {
@@ -299,8 +333,8 @@ export async function isComplete(event: IsCompleteRequest): Promise<IsCompleteRe
     }
     if (status === 'DELETING') return { IsComplete: false };
 
-    // The initial DeleteRegistry call may have been throttled or conflicted
-    // before deletion started. Re-drive it until the service reports DELETING.
+    // The initial DeleteRegistry call may have been throttled, or refused because
+    // records were left. Re-drive it until the service reports DELETING.
     const attempt = await requestRegistryDeletion(registryId);
     if (attempt === 'absent') return { IsComplete: true };
     return { IsComplete: false };

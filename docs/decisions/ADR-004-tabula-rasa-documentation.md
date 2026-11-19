@@ -2,6 +2,7 @@
 
 **Status:** accepted
 **Date:** 2026-05-19
+**Last-updated:** 2026-11-10
 
 ## Context
 
@@ -44,7 +45,7 @@ Never force a novice to read expert material to proceed. Never force an expert t
 ### Self-contained references
 
 When referencing another document:
-- State what the reader gets from it: "See [Deployment Guide](link) for AWS account setup (required before this step)"
+- State what the reader gets from it: `See [Deployment Guide](link) for AWS account setup (required before this step)`
 - Never assume the reader has read it
 - Never use "as mentioned above" — each section must stand alone after context compaction
 
@@ -87,3 +88,7 @@ When referencing another document:
 
 - Issue #135 — full RFC with application matrix and open questions
 - ADR-007 — knowledge acquisition protocol (complements this standard)
+
+## Changelog
+
+- 2026-11-10 — Wrote the example under "Self-contained references" as inline code. It was a Markdown link to the placeholder target `link`, which rendered as a dead link on the documentation site and needed an exception in the link check (decision unchanged).

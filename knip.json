@@ -1,30 +1,43 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignore": [
-    ".semgrep/**",
-    "scripts/**"
+    ".semgrep/**"
   ],
   "ignoreBinaries": [
-    "mise"
+    "mise",
+    "semgrep"
   ],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  },
   "workspaces": {
+    ".": {
+      "entry": ["scripts/*.{js,mjs,ts}", "scripts/aws-emulator/jest-global-setup.js", "scripts/aws-emulator/loopback-only.cjs"]
+    },
     "cdk": {
-      "entry": ["src/main.ts!", "src/handlers/*.ts!"],
-      "project": ["src/**/*.ts!"],
-      "ignoreDependencies": ["esbuild", "ts-node", "@aws-cdk/integ-runner", "@aws-cdk/integ-tests-alpha"]
+      "entry": [
+        "src/{main,handlers/*}.ts!", "scripts/*.ts", "test/integ/integ.*.ts",
+        "jest.emulator.config.js", "test/emulator/*.emulator.ts", "test/emulator/trace-api-shim.ts"
+      ],
+      "project": ["src/**/*.ts!", "scripts/**/*.ts", "test/**/*.ts"]
     },
     "cli": {
-      "entry": ["src/bin/bgagent.ts!", "src/index.ts!"],
-      "project": ["src/**/*.ts!"]
+      "entry": ["jest.emulator.config.js", "test/emulator/*.emulator.ts"],
+      "project": ["src/**/*.ts!", "test/**/*.ts"]
     },
     "docs": {
-      "entry": ["astro.config.mjs", "src/content.config.ts", "src/components/**/*.astro"],
-      "project": ["src/**/*.{astro,ts,tsx}"],
-      "ignoreDependencies": ["@astrojs/check", "markdown-link-check", "remark-gfm", "@pagefind/default-ui", "jest"]
+      "entry": ["src/components/**/*.astro", "scripts/*.mjs"],
+      "project": ["src/**/*.{astro,mdx,ts,tsx}", "scripts/**/*.mjs", "plugins/**/*.mjs"],
+      "ignoreDependencies": ["markdown-link-check", "@pagefind/default-ui"]
     },
     "integrations/jira-forge-app": {
       "entry": ["src/index.js!", "test/**/*.test.js"],
       "project": ["src/**/*.js!", "test/**/*.js"]
+    },
+    "web": {
+      "entry": ["test/**/*.test.{ts,tsx}", "scripts/*.mjs"],
+      "project": ["src/**/*.{ts,tsx}!", "test/**/*.{ts,tsx}", "scripts/**/*.mjs"]
     }
   }
 }

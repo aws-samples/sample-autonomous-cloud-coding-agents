@@ -1,15 +1,16 @@
 # Developer guide
 
-This project is built in TypeScript with [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/), [mise](https://mise.jdx.dev/) for tasks and tool versions, and AWS CDK for infrastructure. There is project-wide testing, code checks, and compilation. There is currently no dedicated development container, so you need to configure your local development environment by following the steps below.
+ABCA uses [Yarn workspaces](https://classic.yarnpkg.com/lang/en/docs/workspaces/) for its TypeScript packages, [mise](https://mise.jdx.dev/) for tools and tasks, and AWS CDK for infrastructure. To build and test the project, [open the contributor dev container](#open-the-contributor-dev-container) or follow the [Quick Start](./QUICK_START.mdx) to set up your own machine.
 
 ![ABCA architecture](../imgs/abca-arch.png)
 
-The repository is organized around four main pieces:
+The repository is organized around these main pieces:
 
 - **Agent runtime code** in Python under `agent/`  - runtime entrypoint, task execution loop, memory writes, observability hooks, and local container tooling.
 - **Infrastructure as code** in AWS CDK under `cdk/src/`  - stacks, constructs, and handlers that define and deploy the platform on AWS.
 - **Documentation site** under `docs/`  - source guides/design docs plus the generated Astro/Starlight documentation site.
 - **CLI package** under `cli/`  - the `bgagent` command-line client used to authenticate, submit tasks, and inspect task status/events.
+- **Operator console** under `web/`  - a single-page React app for the people running a deployment: what agents are working on, what is stuck, and what is waiting for a human. It talks only to the REST API.
 - **Claude Code plugin** under `docs/abca-plugin/`  - a [Claude Code plugin](https://docs.anthropic.com/en/docs/claude-code/plugins) with guided skills and agents for setup, deployment, task submission, and troubleshooting. See the [plugin README](../abca-plugin/README.md) for details.
 
 > **Tip:** If you use Claude Code, run `claude --plugin-dir docs/abca-plugin` from the repo root. The plugin's `/setup` skill walks you through the entire setup process interactively.
@@ -21,12 +22,12 @@ Before editing, decide which part of the monorepo owns the behavior. This keeps 
 | Area | Paths | Notes |
 |------|--------|--------|
 | API & Lambdas | `cdk/src/handlers/`, `cdk/src/stacks/`, `cdk/src/constructs/` | Extend `cdk/test/` for the same feature. |
-| API types | `cdk/src/handlers/shared/types.ts` and **`cli/src/types.ts`** | Update both when request/response shapes change. |
+| API types | `cdk/src/handlers/shared/types.ts`, **`cli/src/types.ts`** and `web/src/core/api/types.ts` | Update the CLI mirror when request/response shapes change, and the web mirror where the console mirrors the type. `mise run check:types-sync` fails on drift. |
 | CLI | `cli/src/`, `cli/test/` |  - |
 | Agent runtime | `agent/` | Bundled into the image CDK deploys; run `mise run quality` in `agent/` or root build. |
-| Docs (source) | `docs/guides/`, `docs/design/` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
+| Docs (source) | `docs/guides/`, `docs/design/`, `docs/decisions/`, `CONTRIBUTING.md` | After edits, run **`mise //docs:sync`** or **`mise //docs:build`**. Do not edit `docs/src/content/docs/` directly. |
 
-For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `agent/`, and `docs/`.
+For a concise duplicate of this table, common pitfalls, and a CDK test file map, see **[AGENTS.md](../../AGENTS.md)** at the repo root (oriented toward automation-assisted contributors). Package-specific detail lives in **`AGENTS.md`** under `cdk/`, `cli/`, `web/`, `agent/`, and `docs/`.
 
 ## Repository preparation
 
@@ -59,24 +60,24 @@ The default is `awslabs/agent-plugins`. For a quick end-to-end test, fork that r
 
 ### Multiple repositories
 
-To onboard additional repositories, add more `Blueprint` constructs in `cdk/src/stacks/agent.ts` and append them to the `blueprints` array (used to aggregate DNS egress allowlists):
+To onboard additional repositories, add entries to `resolveBlueprintDefinitions` in `cdk/src/blueprints/definitions.ts`. The app resolves these plain inputs before constructing either stack, so repository provisioning and DNS egress policy use the same configuration:
 
 ```typescript
-new Blueprint(this, 'MyServiceBlueprint', {
+definitions.push({
+  id: 'MyServiceBlueprint',
   repo: 'acme/my-service',
-  repoTable: repoTable.table,
 });
 ```
 
-Each Blueprint supports per-repo overrides grouped into nested props (`BlueprintProps` in `cdk/src/constructs/blueprint.ts`):
+Each entry supports the per-repo overrides from `BlueprintProps` in `cdk/src/constructs/blueprint.ts`, without a table reference. Keep its `id` stable across releases:
 
 ```typescript
-new Blueprint(this, 'MyServiceBlueprint', {
+definitions.push({
+  id: 'MyServiceBlueprint',
   repo: 'acme/my-service',
-  repoTable: repoTable.table,
   compute: { runtimeArn: '...' },                    // override the default runtime ARN
   agent: {
-    modelId: 'global.anthropic.claude-opus-5',       // foundation model override
+    modelId: 'global.anthropic.claude-opus-5-5',     // foundation model override
     maxTurns: 150,                                    // default turn limit for this repo
     systemPromptOverrides: 'Extra instructions...',   // appended to the platform prompt
   },
@@ -98,6 +99,24 @@ Before opening a PR, the agent runs a **build** and **lint** command in its clou
 The command defaults to **`mise run build`** / **`mise run lint`**. A repo that uses [mise](https://mise.jdx.dev/) with `build` / `lint` tasks gets gating for free. A repo that uses npm, gradle, cargo, make, etc. **must set `pipeline.buildCommand`** (and optionally `lintCommand`) to its real command — otherwise the default `mise run build` finds no task, **build-regression gating is silently OFF, and a change that breaks the build still reports success**. When that happens the agent surfaces a `⚠️ Build-regression gating is OFF` warning on the PR so the gap is visible, but the fix is to configure the command. For #247 orchestration this matters doubly: dependent sub-issues stack onto a predecessor's branch, so an unverified broken predecessor propagates downstream.
 
 Redeploy after changing Blueprints: `mise //cdk:deploy`.
+
+### Stack decomposition and synthesis budgets
+
+`networkTopology` defaults to `inline`, preserving existing network ownership. For a new installation, `split` puts AgentVpc and DnsFirewall in `${stackName}-network`; the application consumes VPC, subnet and security-group exports. The network has no application dependencies. Plain Blueprint definitions are resolved once in `cdk/src/blueprints/definitions.ts` so DNS and repository provisioning use the same domains without cross-stack coupling. Task API routes, authorizers, permissions, CORS and deployment remain together in `AgentStack`.
+
+The CDK build and offline census share 142 named profiles: the 40-cell single-backend/service/image product in both topologies, supplemental email/fork/consent cases, explicit three-AZ pins, expanded `bedrockModels` grants, every multi-backend set at default and widest settings, legacy additive selectors, and [deployment-profile](./DEPLOYMENT_GUIDE.md#deployment-profiles) cells (minimal, each optional feature alone, Linear+Jira, Linear+screenshots, all features). The feature cells also assert that disabled features leave no resources, outputs, routes or Lambda permissions, and that each feature's catalogued footprint stays within 15% of synthesis. The census ignores `abca.deployment.json` (`deploymentProfile=none`). Successful profiles check every parent and nested template against 490 resources, 800,000 bytes and 200 parameters/outputs. They also verify method-scoped API permissions, absence of console test-invoke grants and template-size warnings, backend membership, and two-zone auto-pin versus explicit pins. The model-expansion cases add eight synthetic IDs to the platform defaults and assert that the SessionRole's generated IAM overflow policies pass the audit; these fixtures test policy size, not model availability. Expected resource-budget failures must identify the application stack and the production ceiling; unrelated errors cannot satisfy the gate.
+
+```bash
+MISE_EXPERIMENTAL=1 mise //cdk:census -- --output /tmp/stack-census
+```
+
+Use `--list` to see the profiles and `--profile NAME` to select them. The census runs the production app with fixed account/AZ inputs, CDK metadata enabled and bundling/staging disabled. It records template inventories, counts, bytes, dependencies and source provenance. The production app sets CDK's `@aws-cdk/core:stackResourceLimit` before any stack is constructed, so actual operator configurations outside the census also fail above 490. Context overrides may tighten but cannot raise the limit. `--max-resources` can only tighten the census audit ceiling.
+
+`--check-stability` runs each selected profile twice in independent processes and fails on differences. It does not normalize away timestamps, logical IDs or asset hashes. The existing Blueprint callbacks embed synthesis-time timestamps, and the alpha Bedrock guardrail uses token-derived version IDs; unchanged source can therefore fail this optional diagnostic. Deterministic Blueprint provisioning, guardrail versioning and Docker build-context changes are deferred. Passing the budget gate is not a claim of repeatable synthesis or live resource preservation.
+
+Network tests compare the moved definitions, generated Name tags, endpoint security-group descriptions, exports, application service properties, shared API resources, solution attribution and provenance tags. Comparison tests fix the clock and account for existing immutable guardrail/orchestrator version IDs; the census reports those real differences. `networkReservedAzs` reserves unused address slots so removing a trailing AZ need not shift remaining subnet CIDRs. Follow the [staged AZ reduction procedure](./DEPLOYMENT_GUIDE.md#reducing-azs-in-an-existing-split-network) to release old imports before changing the network.
+
+Existing inline-to-split migration remains deferred under [#852](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/852). A populated `cdk refactor`/import and rollback rehearsal is still required before a supported migration procedure can be published. Retention and Blueprint ownership handoff must be separately reviewed and released; this change keeps existing removal policies and the existing Blueprint provider. The concrete follow-up requirements are recorded in [ADR-023](../decisions/ADR-023-cloudformation-stack-boundaries.md#deferred-migration-work). See [Network stack topology](./DEPLOYMENT_GUIDE.md#network-stack-topology) for fresh-install guidance and migration limits.
 
 ### Customizing the agent image
 
@@ -123,9 +142,9 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 | # | Layer | What it controls | Where | ID form |
 |---|---|---|---|---|
 | 1 | **IAM invoke allowlist** | Which models the agent's roles may invoke at all, and in which geography. The outer gate — everything below fails without it. | `DEFAULT_BEDROCK_MODEL_IDS` (`cdk/src/constructs/bedrock-models.ts`); override with CDK context `bedrockModels`. Geography via context `bedrockGeoRegion` (default `us`) | **Bare** (`anthropic.claude-…`) |
-| 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) — the value actually injected, so the one to change; then the no-env fallbacks `agent/src/config.py:563` and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
-| 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py:569` | Prefixed (`<geo>.anthropic.…`) |
-| 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts:37`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts:217`) | Prefixed (`<geo>.anthropic.…`) |
+| 2 | **Platform default model** | The model used when nothing narrower is set. Injected by the stack as `ANTHROPIC_MODEL`, derived from `bedrockGeoRegion`; the Python literal is the fallback a run with no env reaches. | `PLATFORM_DEFAULT_MODEL_ID` (`cdk/src/handlers/shared/bedrock-model-constants.ts`) — the value actually injected, so the one to change; then the no-env fallbacks `agent/src/config.py` and `agent/src/models.py:157` (`TaskConfig.anthropic_model`) | Prefixed (`<geo>.anthropic.…`) |
+| 3 | **Auxiliary / fast model** | The small model Claude Code uses for auxiliary work (WebFetch page summarization, the pre-flight safety check). | Stack env `ANTHROPIC_DEFAULT_HAIKU_MODEL` (`cdk/src/stacks/agent.ts` (the runtime environment block)); agent-side fallback at `agent/src/config.py` | Prefixed (`<geo>.anthropic.…`) |
+| 4 | **Per-repo override** | One repository's model, with no agent redeploy. | Blueprint `agent.modelId` (`cdk/src/constructs/blueprint.ts`, `BlueprintProps.agent.modelId`) → RepoTable `model_id` (`cdk/src/handlers/shared/repo-config.ts`) → ECS injects `ANTHROPIC_MODEL` (`cdk/src/handlers/shared/strategies/ecs-strategy.ts`) | Prefixed (`<geo>.anthropic.…`) |
 | 5 | **Per-task / local** | One task's model. Payload `model_id` is aliased to `anthropic_model` (`agent/src/pipeline.py`, `_PAYLOAD_KEY_ALIASES`); local batch runs read `ANTHROPIC_MODEL` from the shell via `agent/run.sh`. | Task payload `model_id`; shell `ANTHROPIC_MODEL` | Prefixed (`<geo>.anthropic.…`) |
 
 ### Environment variables
@@ -142,7 +161,7 @@ See the [Cedar policy guide](./CEDAR_POLICY_GUIDE.md) for the full authoring ref
 per-task payload model_id            (layer 5)
   > blueprint agent.modelId          (layer 4, arrives as stack env ANTHROPIC_MODEL)
   > stack env ANTHROPIC_MODEL        (layer 3-adjacent / local shell)
-  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5)
+  > agent/src/config.py fallback     (layer 2 — global.anthropic.claude-opus-5-5)
 ```
 
 Every one of those is gated by the **IAM invoke allowlist** (layer 1), which is itself gated by **account-level Bedrock model access**. Both gates are silent until invocation: a model that resolves fine through precedence still fails at turn 0 with `AccessDenied` if it is not in the grant list, and fails again if your account has not completed [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) for it.
@@ -160,7 +179,7 @@ throughput isn't supported. Retry your request with the ID or ARN of an inferenc
 profile that contains this model.
 ```
 
-So: `bedrockModels` context → `anthropic.claude-opus-5`. Everywhere else → `global.anthropic.claude-opus-5` (or whatever geo you have configured — see below).
+So: `bedrockModels` context → `anthropic.claude-opus-5-5`. Everywhere else → `global.anthropic.claude-opus-5-5` (or whatever geo you have configured — see below).
 
 ### Choosing the inference-profile geography
 
@@ -191,6 +210,7 @@ Changing the geography requires a **redeploy**, because the IAM grants are scope
 4. Update the **prefixed** ID in `agent/src/config.py` and `agent/src/models.py` too. These are the fallback a run with no env reaches (a local batch run), and the doc-drift test compares against them.
 5. **Verify the SDK price table recognizes the model.** The `max_budget_usd` guardrail is computed from a price table bundled into the Claude Agent SDK at build time, so an unrecognized model silently degrades budget enforcement. Run `agent/scripts/diagnostics/test_sdk_smoke.py` with `ANTHROPIC_MODEL` set to the new ID, divide the reported cost by the input-token count, and confirm the implied rate matches [published Bedrock pricing](https://aws.amazon.com/bedrock/pricing/). A `$0.00` or wildly-off result means the table does not know the model and budgets cannot be trusted.
 6. The doc-drift test (`cdk/test/contracts/model-default-docs-parity.test.ts`) fails until the documented defaults here and in `agent/README.md` match `config.py`. That failure is the reminder, not a nuisance — update both.
+7. **Tell operators who override `bedrockModels`.** The override REPLACES the default list, and synth fails ("omits the platform default model") if it lacks either new default. A deployment carrying `-c bedrockModels=[...]` or a `cdk.json` `context` entry must add the new bare IDs before pulling the bump — call this out in the release notes.
 
 ### Cost and model selection
 
@@ -209,7 +229,7 @@ Token ratio 1.169; cost ratio 1.169 — identical. **The per-token rate is uncha
 
 | Surface | How | Status |
 |---|---|---|
-| Per task, CLI | `bgagent submit --max-budget <dollars>` (`cli/src/commands/submit.ts:69`), range 0.01–100 | Works |
+| Per task, CLI | `bgagent submit --max-budget <dollars>` (`cli/src/commands/submit.ts`), range 0.01–100 | Works |
 | Per task, REST | `max_budget_usd` in the `POST /v1/tasks` body | Works |
 | Local batch only | `MAX_BUDGET_USD` shell env, when running `entrypoint.py` directly | Works locally; **ignored** by the deployed AgentCore **server** mode, which reads the budget from the `/invocations` JSON body |
 | Per repo, Blueprint | `agent.maxBudgetUsd` on the repo's `Blueprint` construct | Works — persisted to `RepoTable.max_budget_usd`; same `0.01`–`100` range as the CLI, validated at CDK synth so an out-of-range value cannot deploy. See [Per-repo overrides](./USER_GUIDE.md#per-repo-overrides). |
@@ -231,7 +251,31 @@ The model must be in the IAM grant list (layer 1) or the task fails at turn 0 wi
 
 Follow the [Quick Start](./QUICK_START.mdx) to clone, install, deploy, and submit your first task. It covers prerequisites, toolchain setup, deployment, PAT configuration, Cognito user creation, and a smoke test.
 
-This section covers what the Quick Start does not: troubleshooting, local testing, and the development workflow.
+### Open the contributor dev container
+
+- **Local VS Code.** Start Docker and install the **Dev Containers** extension. Open a fresh clone of ABCA in VS Code, then choose **Dev Containers: Reopen in Container** from the Command Palette.
+- **GitHub Codespaces.** On the repository page, select your branch, open **Code → Codespaces**, and create a codespace on that branch. GitHub opens the editor in your browser.
+
+If you already have a **linked issue worktree** on your machine, its `.git` file points outside the folder VS Code mounts. From that worktree, create a standalone copy of the issue branch for the container. Choose an unused sibling directory and open it in VS Code. The clone includes committed work only.
+
+```bash
+branch=$(git branch --show-current)
+git clone --no-local --branch "$branch" . ../abca-dev
+git -C ../abca-dev remote set-url origin "$(git remote get-url origin)"
+```
+
+The post-create hook installs the tools declared in the repo’s mise configs, enables Yarn Classic, and runs `mise run install` for the workspace dependencies, the agent’s Python environment, and Git hooks. Once setup finishes, run `mise run build` in the container terminal from the repository root. The build can run without AWS credentials.
+
+After changing `.devcontainer/`, choose **Dev Containers: Rebuild Container** in local VS Code or **Codespaces: Rebuild Container** in a codespace.
+
+#### Push commits from the dev container
+
+The default container has no Docker engine connection. The pre-push hook needs Docker to build and scan the worker image during `mise run security`. The optional `mise run test:integration` suite also needs Docker. Commit your changes in the container, then push from a **separate host worktree** with Docker running and the [Quick Start toolchain](./QUICK_START.mdx) installed. This keeps Linux `node_modules` and `agent/.venv` in the container checkout. See the [emulator guide](../../scripts/aws-emulator/README.md) for integration tests.
+
+- **Local VS Code.** From your host checkout, run `git fetch ../abca-dev <issue-branch>`, substituting your branch name and the path to the container checkout.
+- **Codespaces.** On the issue branch in the codespace, run `git bundle create abca-issue.bundle HEAD`. Right-click `abca-issue.bundle` in the browser editor’s Explorer, select **Download**, then delete the untracked bundle from the codespace. From your host checkout, run `git fetch ~/Downloads/abca-issue.bundle HEAD`, adjusting the path to the downloaded file.
+
+If you fetched from a host worktree already on the issue branch, run `git merge --ff-only FETCH_HEAD` there. If the issue branch exists only in the container, run `git worktree add -b <issue-branch> ../abca-host FETCH_HEAD` and `cd ../abca-host` to create its host worktree. Run `mise run install` in the host worktree to install native dependencies and Git hooks, then `git push -u origin HEAD` to run the pre-push checks and publish the commits.
 
 ### Troubleshooting mise
 
@@ -254,6 +298,8 @@ corepack enable && corepack prepare yarn@1.22.22 --activate
 export MISE_EXPERIMENTAL=1
 mise run install
 ```
+
+**When the `build` job fails in CI.** Start from the job summary: it names the mise task that failed and shows the last lines of that task's output. The JUnit reports of the cdk, cli and agent test suites are attached to the run as the `test-reports-agentcore` artifact. A lockfile that no longer matches its manifest fails early: `yarn.lock` right after the install, in the step `Fail on lockfile drift` (run `mise run install` locally and commit the rewritten file); `agent/uv.lock` in the install itself, which runs `uv sync --locked` (run `uv lock` in `agent/` and commit the file).
 
 ### Development workflow
 
@@ -286,7 +332,7 @@ export AWS_REGION="us-east-1"     # Region where Bedrock models are enabled
 The script resolves AWS credentials in priority order:
 
 1. **Environment variables** - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN` for temporary credentials.
-2. **AWS CLI** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile.
+2. **AWS CLI v2** - Runs `aws configure export-credentials` from your active profile or SSO session. Set `AWS_PROFILE` to target a specific profile. AWS CLI v1 has no such command, so with v1 the script goes on to the mount.
 3. **`~/.aws` mount** - Bind-mounts the directory read-only. Works for static credentials but not SSO tokens.
 
 If none succeeds, the container starts without AWS credentials and any AWS API call will fail at runtime.
@@ -303,7 +349,7 @@ If none succeeds, the container starts without AWS credentials and any AWS API c
 # Issue + additional instructions
 ./agent/run.sh "owner/repo" 42 "Focus on the backend validation only"
 
-# Dry run - validate config, fetch issue, print prompt, then exit
+# Dry run - validate config, fetch issue, print the length and hash of the prompts, then exit
 DRY_RUN=1 ./agent/run.sh "owner/repo" 42
 ```
 
@@ -341,17 +387,17 @@ By default, progress events and task state writes are silently skipped during lo
 
 ```bash
 # 1. Start DynamoDB Local and create tables
-cd agent && mise run local:up
+mise //agent:local:up
 
 # 2. Run the agent with --local-events
 ./agent/run.sh --local-events "owner/repo" 42
 
-# 4. In another terminal — query progress events
-mise run local:events          # table format
-mise run local:events:json     # JSON format
+# 3. In another terminal — query progress events
+mise //agent:local:events          # table format
+mise //agent:local:events:json     # JSON format
 
-# 5. When done — tear down DynamoDB Local
-mise run local:down
+# 4. When done — tear down DynamoDB Local
+mise //agent:local:down
 ```
 
 The `--local-events` flag connects the agent container to DynamoDB Local on the `agent-local` Docker network and sets the appropriate env vars. The agent code writes to DDB Local using the same code path as production — no mocks or alternate implementations.
@@ -360,10 +406,10 @@ The `--local-events` flag connects the agent container to DynamoDB Local on the 
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5` | Bedrock inference-profile ID for the main coding model |
+| `ANTHROPIC_MODEL` | `global.anthropic.claude-opus-5-5` | Bedrock inference-profile ID for the main coding model |
 | `MAX_TURNS` | `100` | Max agent turns before stopping |
 | `MAX_BUDGET_USD` | | Cost ceiling for local batch runs only (production uses the API field) |
-| `DRY_RUN` | | Set to `1` to validate and print prompt without running the agent |
+| `DRY_RUN` | | Set to `1` to validate and print the length and hash of the prompts without running the agent |
 
 For the full list, see `agent/README.md`. For how the model default is layered, overridden, and priced, see [Model configuration](./DEVELOPER_GUIDE.md#model-configuration).
 
@@ -375,7 +421,7 @@ For the full list, see `agent/README.md`. For how the model default is layered, 
 | `ERROR: GITHUB_TOKEN is not set` | Export `GITHUB_TOKEN` with the required scopes. |
 | `WARNING: No AWS credentials detected` | Configure one of the three credential methods above. |
 | `WARNING: Image exceeds AgentCore 2 GB limit!` | Reduce dependencies or use multi-stage Docker build. |
-| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required | Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region |
+| Bedrock / model errors in agent logs (e.g. model not available on your deployment, zero tokens) | IAM `grantInvoke` is not enough — account must meet [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html) and use a supported [inference profile](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-use.html) ID in `ANTHROPIC_MODEL` / task `model_id` where required. Complete Anthropic FTU and Marketplace prerequisites per the Bedrock User Guide; align `cdk/src/stacks/agent.ts` grants with the chosen profile and Region. |
 
 ### Deployment
 
@@ -416,19 +462,20 @@ Use the same AWS Region as your deployment. If `--region` is omitted, the CLI us
 
 ## Project structure
 
-The repository is a monorepo with four packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
+The repository is a monorepo with five packages. Each one owns a piece of the platform and has its own build, tests, and mise tasks.
 
 ```
 sample-autonomous-cloud-coding-agents/
 ├── cdk/          # Infrastructure and API (TypeScript, AWS CDK)
 ├── agent/        # Agent runtime (Python, Docker)
 ├── cli/          # CLI client (TypeScript, commander)
+├── web/          # Operator console (TypeScript, React)
 ├── docs/         # Documentation site (Astro/Starlight)
 ├── mise.toml     # Monorepo task runner config
 └── package.json  # Yarn workspace root
 ```
 
-A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **docs** package is independent and only affects the documentation site.
+A task flows through these packages in order: the **CLI** (or webhook) sends a request to the **CDK**-deployed API, the orchestrator Lambda prepares the task and launches an **agent** session in an isolated compute environment, and the agent works autonomously until it opens a PR or the task ends. The **web** console uses the same REST API and is deployed only with the opt-in console stack. The **docs** package is independent and only affects the documentation site.
 
 ```mermaid
 flowchart LR
@@ -437,7 +484,7 @@ flowchart LR
     Agent -->|opens PR| GH[GitHub]
 ```
 
-Below is a task-oriented guide for each package: "I want to change X - where do I look?"
+Below is a task-oriented guide for each package: "I want to change X - where do I look?" For the operator console, see [web/README.md](../../web/README.md).
 
 ### `cdk/` - Infrastructure and API (TypeScript)
 
@@ -454,9 +501,9 @@ Everything that runs on AWS: the CDK stack, Lambda handlers, and DynamoDB table 
 | Change webhook authentication | `cdk/src/handlers/webhook-authorizer.ts`, `cdk/src/handlers/webhook-create-task.ts` |
 | Add or update tests | `cdk/test/` mirrors `cdk/src/` - each handler and construct has a colocated test file |
 
-Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync.
+Key convention: API request/response types live in `cdk/src/handlers/shared/types.ts`. If you change them, also update `cli/src/types.ts` to keep the CLI in sync, and `web/src/core/api/types.ts` where the console mirrors the type.
 
-Build and test: `mise //cdk:build` (compile + lint + test + synth).
+Build and test: `mise //cdk:build` (compile + lint + type-check + test + synth).
 
 ### `agent/` - Agent runtime (Python)
 
@@ -469,9 +516,9 @@ The code that runs inside the compute environment (AgentCore MicroVM). This is t
 | Change agent configuration or environment | `agent/src/config.py` |
 | Add or modify hooks (pre/post execution) | `agent/src/hooks.py` |
 | Change the Docker image (add runtimes, tools) | `agent/Dockerfile` |
-| Run agent quality checks | `mise //agent:quality` (lint, type check, tests) |
+| Run agent quality checks | `mise //agent:quality` (lint, format, type check, dead code, tests). When the lint or the format step has changed a file, the task fails once and says so (the lint step lists its fixes): run the task again |
 
-Build and test: `mise //agent:quality`. The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
+Build and test: `mise //agent:quality`. The unit tests run with the AWS credential sources removed and refuse every request that botocore tries to send; a refused request fails the run and is listed in the `AWS send guard` section at the end of the output (details in [agent/AGENTS.md](../../agent/AGENTS.md)). The CDK build bundles the agent image, so agent changes are picked up by `mise run build`.
 
 ### `cli/` - CLI client (TypeScript)
 
@@ -482,13 +529,13 @@ The `bgagent` command-line tool. Authenticates via Cognito, calls the REST API, 
 | Add a new CLI command | `cli/src/commands/` (one file per command), `cli/src/bin/bgagent.ts` (program setup) |
 | Change how the CLI calls the API | `cli/src/api-client.ts` |
 | Modify authentication or token handling | `cli/src/auth.ts` |
-| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`) |
+| Update API types | `cli/src/types.ts` (must match `cdk/src/handlers/shared/types.ts`; the console's subset mirror is `web/src/core/api/types.ts`) |
 
 Build and test: `mise //cli:build`.
 
 ### `docs/` - Documentation site (Astro/Starlight)
 
-Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
+Source docs live in `docs/guides/`, `docs/design/` and `docs/decisions/`; the root `CONTRIBUTING.md` is mirrored as well. The Starlight site under `docs/src/content/docs/` is generated - do not edit it directly.
 
 | I want to... | Look at |
 |---|---|
@@ -499,4 +546,11 @@ Source docs live in `docs/guides/` and `docs/design/`. The Starlight site under 
 
 After editing source docs, run `mise //docs:sync` or `mise //docs:build` to regenerate the site.
 
-To validate that all cross-references are intact, run `mise //docs:link-check`. This checks all Markdown sources (`docs/guides/`, `docs/design/`, `docs/decisions/`, and root-level `.md` files) for broken internal (relative) links. The same check runs automatically in CI on every pull request, as part of the build's drift-prevention step. External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+Two checks keep cross-references intact. Both run in CI on every pull request, as part of the required build:
+
+- `mise //docs:link-check` checks the relative links of every Markdown file in the repository, tracked or new (a file that git ignores is not read): the sources in `docs/guides/`, `docs/design/` and `docs/decisions/`, and also package READMEs, `AGENTS.md` files, plugin skills and command files. It confirms that the target file exists and that an anchor within the same file exists; it does not check an anchor that points into another file.
+- `mise //docs:build` validates every internal link and anchor of the rendered site, anchors into other pages included, and fails with the page, line and link.
+
+External `http(s)` URLs are deliberately not checked, so that network or bot-block flakiness cannot fail an unrelated PR.
+
+A third check, also part of the required build, keeps the structure of the sources intact. `mise //docs:markdown-lint`, which `mise //docs:build` also runs, lints every tracked Markdown file with five rules: a table row whose cells do not match the header (renderers drop the extra cells), an image without alt text, a second top-level heading, a heading repeated under the same parent, and a skipped heading level. It reports the file, the line and the rule; [docs/AGENTS.md](../AGENTS.md) lists the fix for each. A `markdownlint-disable` comment does not silence it. With the git hooks installed, the same lint also runs at commit time when a Markdown file is staged, so a broken table fails the commit and not only the build.

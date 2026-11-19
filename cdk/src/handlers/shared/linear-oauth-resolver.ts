@@ -23,7 +23,7 @@ import {
   PutSecretValueCommand,
   SecretsManagerClient,
 } from '@aws-sdk/client-secrets-manager';
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { announceRevocation, revocationAlertTopicArn } from './linear-revocation-alert';
 import {
   LINEAR_VAULT_SCOPES,
@@ -63,6 +63,14 @@ const SECRET_CACHE_TTL_MS = 60_000;
 
 /** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
+
+/**
+ * Time limit of one refresh request; without it a Linear that does not answer
+ * holds the calling Lambda until its own timeout. Giving up is safe: within 30
+ * minutes Linear answers a retry with the same refresh token with the
+ * replacement credentials (https://linear.app/developers/oauth-2-0-authentication).
+ */
+const REFRESH_TIMEOUT_MS = 10_000;
 
 /**
  * Why a registry row was latched `revoked`.
@@ -142,6 +150,22 @@ export interface RegistryRow {
    * stored; those fall back to the derived form.
    */
   readonly vault_user_id?: string;
+  /**
+   * Whether this workspace's `webhook_signing_secret` is provably its OWN, rather than
+   * a copy of another workspace's.
+   *
+   * Recorded by provenance — which `bgagent linear setup` branch produced the value —
+   * and NOT inferred by comparing the stored secret against the stack-wide one. Value
+   * equality cannot tell the two apart: a healthy single-workspace install also holds a
+   * secret equal to the stack-wide copy, because the first install stamps the same real
+   * secret into both slots. Rejecting on equality would therefore 401 exactly the
+   * deployments that are safe.
+   *
+   * Absent on rows written before this was recorded, which is why the reader treats
+   * absence as "not proven" rather than as `false`, and only acts on it where sharing
+   * can actually cross a tenant boundary — a stack with two or more active workspaces.
+   */
+  readonly webhook_secret_owned?: boolean;
   /**
    * Why `status` was flipped to `revoked`, as written by {@link markWorkspaceRevoked}.
    *
@@ -246,6 +270,8 @@ interface CacheEntry<T> {
 
 const registryCache = new Map<string, CacheEntry<RegistryRow>>();
 const tokenCache = new Map<string, CacheEntry<StoredOauthToken>>();
+/** Access tokens the vault returned, by workspace id. */
+const vaultTokenCache = new Map<string, CacheEntry<string>>();
 
 /**
  * Drop cached values for a workspace. Used after a refresh so the next
@@ -253,7 +279,41 @@ const tokenCache = new Map<string, CacheEntry<StoredOauthToken>>();
  */
 export function invalidateLinearOauthCache(linearWorkspaceId: string, oauthSecretArn?: string): void {
   registryCache.delete(linearWorkspaceId);
+  vaultTokenCache.delete(linearWorkspaceId);
   if (oauthSecretArn) tokenCache.delete(oauthSecretArn);
+}
+
+/**
+ * The vault's answer for a workspace, reusing a token it returned within the last
+ * {@link SECRET_CACHE_TTL_MS}, as the Secrets-Manager path reuses its own.
+ *
+ * A vault resolution is two AgentCore requests, and one event resolves a token
+ * several times in a row (the reaction, the reply, the progress edit…). The vault's
+ * response carries no expiry, so a kept token can be used for up to that minute
+ * after Linear stopped accepting it.
+ *
+ * `reuseRecentToken` is false for the re-probe of a latched row: a token kept from
+ * before the latch says nothing about the grant now, and returning it would clear
+ * a latch the vault has not overturned.
+ */
+async function askVault(
+  viaVault: NonNullable<ResolverOptions['resolveViaVault']>,
+  input: VaultTokenInput,
+  workloadName: string,
+  reuseRecentToken: boolean,
+): Promise<VaultTokenResult> {
+  const kept = vaultTokenCache.get(input.linearWorkspaceId);
+  if (reuseRecentToken && kept && kept.expiresAt > Date.now()) {
+    return { kind: 'token', accessToken: kept.value };
+  }
+  const result = await viaVault(input, workloadName);
+  if (result.kind === 'token') {
+    vaultTokenCache.set(input.linearWorkspaceId, {
+      value: result.accessToken,
+      expiresAt: Date.now() + SECRET_CACHE_TTL_MS,
+    });
+  }
+  return result;
 }
 
 /** Returns true if `expires_at` is within the refresh threshold. */
@@ -380,6 +440,35 @@ function defaultRevocationRecorder(
 }
 
 /**
+ * The recorder to run when Linear rejects the stored refresh token, given what
+ * the vault answered about the row.
+ *
+ * On a vault-managed row the stored grant is only the fallback, and nothing
+ * renews it once the vault serves every token: Linear expires a refresh token 30
+ * days after issuance. Its rejection is where every such workspace ends up, and it
+ * says nothing about the vault grant.
+ *
+ * - Vault not asked: the stored grant is the only one, so Linear refusing it IS
+ *   the revocation — recorded as before.
+ * - `unavailable`: nothing is known about the vault grant, so nothing is recorded.
+ *   Recording would latch the row `refresh_token_rejected`, the reason that is
+ *   never re-probed: one throttled AgentCore call would take a working workspace
+ *   offline until a human re-consents. This event fails; the next asks the vault.
+ * - `consent-required`: no path yields a token. Recorded as the vault's verdict on
+ *   the row's installation, exactly as when the bundle holds no grant, so the
+ *   latch stays the one a later vault token clears.
+ */
+function refreshRejectionRecorder(
+  vaultAnswer: VaultTokenResult['kind'] | undefined,
+  rowInstalledAt: string | undefined,
+  recordRevocation: ResolverOptions['onAuthorizationRevoked'],
+): ResolverOptions['onAuthorizationRevoked'] {
+  if (vaultAnswer === undefined) return recordRevocation;
+  if (vaultAnswer !== 'consent-required' || !recordRevocation) return undefined;
+  return (detail) => recordRevocation({ ...detail, installedAt: rowInstalledAt, source: 'vault-consent-required' });
+}
+
+/**
  * Resolve a usable Linear OAuth access token for the given workspace. Refreshes
  * silently if the cached token is expiring. Returns null on any failure
  * (registry miss, secret missing, refresh-token revoked) so callers can
@@ -428,9 +517,10 @@ export async function resolveLinearOauthToken(
     return null;
   }
 
-  // Set when the vault says the grant needs a fresh consent. Consumed only if no
-  // path yields a token, so a vault-dead / SM-alive workspace keeps working.
-  let vaultConsentRequired = false;
+  // What the vault answered, when it was asked. Consumed only if no path yields a
+  // token, so a vault-dead / SM-alive workspace keeps working: `consent-required`
+  // is then reported as the revocation, `unavailable` is not a verdict at all.
+  let vaultAnswer: VaultTokenResult['kind'] | undefined;
 
   // ─── Step 1b: AgentCore Identity vault (RFC #249 Phase 1) ────────
   // When the vault is enabled AND this workspace was onboarded through it
@@ -443,7 +533,8 @@ export async function resolveLinearOauthToken(
   const workloadName = vaultWorkloadIdentityName();
   if (row.provider_name && workloadName && (isVaultEnabled() || options.resolveViaVault)) {
     const viaVault = options.resolveViaVault ?? resolveLinearTokenViaVault;
-    const vaultResult = await viaVault(
+    const vaultResult = await askVault(
+      viaVault,
       {
         linearWorkspaceId,
         providerName: row.provider_name,
@@ -451,13 +542,14 @@ export async function resolveLinearOauthToken(
         region,
       },
       workloadName,
+      !latchedOnVaultInference,
     );
     // A vault grant that needs consent is DEAD, not slow — remember it so the
     // no-token-anywhere path below can report it. Deliberately NOT latched here:
     // a workspace may still hold a working Secrets-Manager token, and marking the
     // row `revoked` while resolution still succeeds would take a functioning
     // workspace offline (the resolver refuses a non-active row).
-    vaultConsentRequired = vaultResult.kind === 'consent-required';
+    vaultAnswer = vaultResult.kind;
     // Gated on `recordRevocation` for the same reason the latch is — it is present
     // only where the role holds the registry write. The row therefore stays latched
     // until the webhook processor, the one role that can write, re-probes.
@@ -522,7 +614,7 @@ export async function resolveLinearOauthToken(
         error: err instanceof Error ? err.message : String(err),
       });
       // Resolution fails for THIS event; the next one retries. Nothing is latched.
-      return null;
+      return null; // nosemgrep: ts-silent-success-masking -- null IS this resolver's whole failure encoding ("Returns null on any failure … so callers can gracefully no-op", see the contract on the function); it can never be confused with an empty success because no success path returns null, and the cause is logged with full context immediately above
     }
     if (!fetched) {
       logger.error('Linear OAuth secret missing or unreadable', {
@@ -534,7 +626,7 @@ export async function resolveLinearOauthToken(
       // revocation. Report it here rather than letting the vault path fail
       // silently — the whole point of #812 is that the vault's "consent required"
       // is as terminal as Secrets Manager's `invalid_grant`, just quieter.
-      if (vaultConsentRequired && recordRevocation) {
+      if (vaultAnswer === 'consent-required' && recordRevocation) {
         try {
           await recordRevocation({
             linearWorkspaceId,
@@ -557,10 +649,11 @@ export async function resolveLinearOauthToken(
   // ─── Step 3: Refresh if expiring ─────────────────────────────────
   if (isTokenExpiring(token.expires_at)) {
     // Pass the RESOLVED recorder (caller-supplied or env-gated default) so the
-    // permanent-rejection branch inside the refresh can record + announce.
+    // permanent-rejection branch inside the refresh can record + announce — as far
+    // as the vault's answer lets that rejection count, see refreshRejectionRecorder.
     const refreshed = await refreshLinearToken(token, sm, row.oauth_secret_arn, {
       ...options,
-      ...(recordRevocation && { onAuthorizationRevoked: recordRevocation }),
+      onAuthorizationRevoked: refreshRejectionRecorder(vaultAnswer, row.installed_at, recordRevocation),
     });
     if (!refreshed) {
       // Refresh failed — return null so the caller can fall back to
@@ -813,7 +906,7 @@ export async function getRegistryRowStrict(
   return parseRegistryRow(result.Item, linearWorkspaceId);
 }
 
-export async function getRegistryRow(
+async function getRegistryRow(
   ddb: DynamoDBDocumentClient,
   tableName: string,
   linearWorkspaceId: string,
@@ -886,6 +979,10 @@ function parseRegistryRow(rawItem: unknown, linearWorkspaceId: string): Registry
     // Distinguishes a latch built on Linear's own refusal from one built on an
     // inference the vault path can re-test. See RegistryRow.revoked_reason.
     ...(typeof item.revoked_reason === 'string' && { revoked_reason: item.revoked_reason }),
+    // Only a literal `true` counts as proof of ownership. A missing field, or any
+    // other value, leaves it absent so the reader sees "not proven" — the safe
+    // reading for the rows this field was added for, which predate it entirely.
+    ...(item.webhook_secret_owned === true && { webhook_secret_owned: true }),
   };
   registryCache.set(linearWorkspaceId, { value: row, expiresAt: Date.now() + REGISTRY_CACHE_TTL_MS });
   return row;
@@ -977,7 +1074,7 @@ async function getOauthSecretForResolve(
   } catch (err) {
     // A deleted secret IS a definite absence; anything else is not a verdict.
     if ((err as { name?: string } | undefined)?.name === 'ResourceNotFoundException') {
-      return null; // nosemgrep: ts-silent-success-masking -- ResourceNotFound IS the empty success this function reports: the secret does not exist, so there is definitively no stored grant. Every other error rethrows on the next line, which is the whole point of the function.
+      return null; // ResourceNotFound IS the empty success this function reports: the secret does not exist, so there is definitively no stored grant. Every other error rethrows on the next line, which is the whole point of the function.
     }
     throw err;
   }
@@ -1254,6 +1351,7 @@ async function tryRefreshOnce(
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
   } catch (err) {
     logger.error('Linear token refresh fetch failed', {
@@ -1359,8 +1457,54 @@ async function tryRefreshOnce(
   return { kind: 'success', token: next };
 }
 
+/**
+ * The one active Linear workspace on this stack, or undefined when that is not a
+ * well-defined question.
+ *
+ * For binding a delivery that was verified by the stack-wide secret. That secret is
+ * bound to no workspace, so the body's `organizationId` is claimed rather than attested
+ * and must not select a tenant. When exactly one workspace is active there is only one
+ * tenant it could mean; with zero or several there is no answer, and returning undefined
+ * makes the caller drop the delivery rather than pick one.
+ *
+ * Mirrors `resolveSoleActiveJiraTenant`. Not cached: the callers reach it only on the
+ * back-compat path of a single-workspace install, which is rare enough that a Scan per
+ * delivery is cheaper than another cache to invalidate.
+ */
+export async function resolveSoleActiveLinearWorkspace(
+  ddbClient: DynamoDBDocumentClient,
+  registryTableName: string | undefined,
+): Promise<string | undefined> {
+  if (!registryTableName) return undefined;
+  const active: string[] = [];
+  let lastKey: Record<string, unknown> | undefined;
+  do {
+    const page = await ddbClient.send(new ScanCommand({
+      TableName: registryTableName,
+      ProjectionExpression: 'linear_workspace_id, #s',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExclusiveStartKey: lastKey,
+      ConsistentRead: true,
+    }));
+    for (const item of page.Items ?? []) {
+      if (item.status === 'active' && typeof item.linear_workspace_id === 'string') {
+        active.push(item.linear_workspace_id);
+      }
+    }
+    lastKey = page.LastEvaluatedKey;
+    if (active.length > 1) break;
+  } while (lastKey);
+
+  if (active.length === 1) return active[0];
+  logger.warn('Cannot bind a stack-wide-verified Linear delivery: registry does not have exactly one active workspace', {
+    active_workspace_count: active.length,
+  });
+  return undefined;
+}
+
 /** Test-only: clear all caches. */
 export function _resetCachesForTesting(): void {
   registryCache.clear();
   tokenCache.clear();
+  vaultTokenCache.clear();
 }

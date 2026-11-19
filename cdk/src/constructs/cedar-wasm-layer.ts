@@ -34,7 +34,7 @@ import { Construct } from 'constructs';
  * lets the tests assert we ship the right version without duplicating
  * the number across files.
  */
-export const CEDAR_WASM_VERSION = '4.8.2';
+export const CEDAR_WASM_VERSION = '4.12.0';
 
 /**
  * Minimum memory the Lambda attaching this layer should be configured

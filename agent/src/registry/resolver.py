@@ -16,8 +16,9 @@ if TYPE_CHECKING:
     from registry.ref import ParsedConstraint
 
 # ``\Z`` not ``$`` — see registry/ref.py: ``$`` matches before a trailing
-# newline in Python, diverging from the JS mirror (resolver.ts).
-_SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z")
+# newline in Python, diverging from the JS mirror (resolver.ts). ``re.ASCII`` for
+# the same reason as there: ``\d`` is 0-9 in JS and any Unicode digit in Python.
+_SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?\Z", re.ASCII)
 
 # JS ``Number.MAX_SAFE_INTEGER`` (2**53 - 1); mirrors registry/ref.py._MAX_SAFE_INT.
 # Kept local rather than imported to avoid a runtime import cycle with ref.py.
@@ -38,6 +39,10 @@ def parse_version(raw: str) -> SemVer | None:
     if not m:
         return None
     major, minor, patch, pre = m.groups()
+    # As in ref.parse_constraint: more digits than _MAX_SAFE_INT is above it, and
+    # int() raises ValueError for more than 4300 digits.
+    if max(len(major), len(minor), len(patch)) > len(str(_MAX_SAFE_INT)):
+        return None
     major_i, minor_i, patch_i = int(major), int(minor), int(patch)
     # Match ref.parse_constraint / resolver.ts: reject components the TS parser
     # would round past MAX_SAFE_INTEGER so a candidate version ranks identically.
@@ -64,7 +69,9 @@ def _compare_prerelease(a: tuple[str, ...], b: tuple[str, ...]) -> int:
             continue
         an, bn = ai.isdigit(), bi.isdigit()
         if an and bn:
-            return int(ai) - int(bi)
+            # As strings, like the TypeScript resolver: int() refuses more than 4300 digits.
+            x, y = ai.lstrip("0"), bi.lstrip("0")
+            return len(x) - len(y) or (x > y) - (x < y)
         if an:
             return -1
         if bn:
@@ -97,7 +104,8 @@ def satisfies(v: SemVer, c: ParsedConstraint) -> bool:
     )
 
     if c.op == "exact":
-        return compare_versions(v, constraint_core) == 0
+        # The version as written: 1.0.0-rc.01 compares equal to 1.0.0-rc.1 and is not it.
+        return v.raw == c.raw
 
     if compare_versions(v, constraint_core) < 0:
         return False

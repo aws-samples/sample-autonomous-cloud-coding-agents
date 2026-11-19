@@ -70,10 +70,6 @@ export async function listStackOutputs(region: string, stackName: string): Promi
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** CloudFormation output keys written by `bgagent configure`. */
-/** Stack outputs read into the CLI config. `RegistryApiUrl` is optional (only
- *  present once the registry #246 is deployed); the rest are required. */
-export const CONFIGURE_STACK_OUTPUT_KEYS = ['ApiUrl', 'RegistryApiUrl', 'UserPoolId', 'AppClientId'] as const;
 const REQUIRED_CONFIGURE_OUTPUT_KEYS = ['ApiUrl', 'UserPoolId', 'AppClientId'] as const;
 
 /**
@@ -130,4 +126,29 @@ export async function getStackOutput(
 ): Promise<string | null> {
   const stack = await describeStack(region, stackName);
   return stack.Outputs?.find((o) => o.OutputKey === outputKey)?.OutputValue ?? null;
+}
+
+/**
+ * Read a single stack output: null when the stack has no such output, or does not exist.
+ *
+ * Where {@link getStackOutput} fails on a missing stack, this takes it as an answer: the
+ * integration commands also run before the stack, or the part of it they ask about, is
+ * deployed. Any other failure (credentials, permissions, region) is rethrown as the SDK
+ * raised it, so that it cannot pass for "not deployed".
+ */
+export async function findStackOutput(region: string, stackName: string, outputKey: string): Promise<string | null> {
+  try {
+    const cfn = makeClient(CloudFormationClient, { region });
+    const result = await cfn.send(new DescribeStacksCommand({ StackName: stackName }));
+    const outputs = result.Stacks?.[0]?.Outputs ?? [];
+    const output = outputs.find((o) => o.OutputKey === outputKey);
+    return output?.OutputValue ?? null;
+  } catch (err) {
+    const name = (err as Error)?.name ?? '';
+    const message = (err as Error)?.message ?? '';
+    if (name === 'ValidationError' && /does not exist/i.test(message)) {
+      return null; // "stack does not exist" is the not-deployed-yet contract; auth/other errors rethrow below
+    }
+    throw err;
+  }
 }

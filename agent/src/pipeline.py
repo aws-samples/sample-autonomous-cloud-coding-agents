@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import os
@@ -18,7 +17,9 @@ import task_state
 from channel_mcp import configure_channel_mcp, strip_linear_mcp_servers
 from config import (
     AGENT_WORKSPACE,
+    DEFAULT_WORKFLOW_ID,
     NEEDS_INPUT_MARKER,
+    REPO_LESS_DEFAULT_WORKFLOW_ID,
     build_config,
     clear_jira_task_credentials,
     get_config,
@@ -100,6 +101,38 @@ def _inject_attachment_context(prompt: str, prepared_attachments: list) -> str:
     return prompt + "\n".join(lines)
 
 
+def _download_task_attachments(config: TaskConfig, workspace: str, progress) -> list:
+    """Download the task's attachments from S3 (version-pinned, integrity-verified).
+
+    The files land in ``<workspace>/.attachments/``, where ``workspace`` is the
+    task's own directory ``<AGENT_WORKSPACE>/<task_id>``: the clone of a task
+    with a repository, a directory below the one the agent runs in for a task
+    without. Returns them for
+    :func:`_inject_attachment_context`; an empty list when the task has none.
+    Raises when a file cannot be fetched or fails its check: the user attached
+    it, so the task does not run without it.
+    """
+    if not config.attachments:
+        return []
+    from attachments import download_attachments
+
+    try:
+        with task_span("task.attachment_download"):
+            prepared = download_attachments(config.attachments, workspace)
+        progress.write_agent_milestone("attachments_downloaded", f"count={len(prepared)}")
+    except RuntimeError as e:
+        log("ERROR", f"Attachment integrity check failed: {e}")
+        raise RuntimeError(
+            f"Attachment download/verification failed: {e}. "
+            "The task cannot proceed without valid attachments."
+        ) from e
+    except Exception as e:
+        err_type = type(e).__name__
+        log("ERROR", f"Attachment download failed: {err_type}: {e}")
+        raise RuntimeError(f"Failed to download task attachments from S3: {err_type}: {e}") from e
+    return prepared
+
+
 def _maybe_upload_trace(
     config: TaskConfig,
     trajectory,
@@ -162,6 +195,73 @@ def _maybe_upload_trace(
             "to terminal without trace_s3_uri.",
         )
     return trace_s3_uri
+
+
+def _task_is_cancelled(task_id: str) -> bool:
+    """True when the task record says CANCELLED: the user cancelled during the run.
+
+    Read once the agent has returned. The Stop hook signals a cancel by stopping
+    the SDK early, but that only stops the agent loop: what the pipeline does
+    next (commit, push and pull request on the repo lane, the delivery on the
+    repo-less lane) would still happen on a cancelled task. Fail-open: a record
+    that cannot be read counts as not cancelled, and the normal path proceeds.
+    """
+    try:
+        record = task_state.get_task(task_id)
+    except task_state.TaskFetchError:
+        return False
+    return bool(record and record.get("status") == "CANCELLED")
+
+
+def _acknowledge_cancel(
+    config: TaskConfig,
+    agent_result: AgentResult,
+    trajectory,
+    progress,
+    skipped: str,
+) -> dict:
+    """Close a cancelled task without its ``skipped`` steps; return its result.
+
+    The terminal state is already CANCELLED (written by cancel-task.ts), so
+    there is no write_terminal here: its ConditionExpression does not allow a
+    CANCELLED record, so the write would fail silently, and leaving the cancel
+    record intact makes the intent explicit.
+    """
+    log("TASK", f"Task {config.task_id} cancelled; skipping {skipped.lower()}")
+    progress.write_agent_milestone(
+        "task_cancelled_acknowledged",
+        f"{skipped} skipped; terminal state already CANCELLED.",
+    )
+    # L4 item 1c: best-effort trace upload + conditional self-heal on the
+    # cancel path. ``write_terminal``'s ConditionExpression rejects CANCELLED,
+    # so we cannot persist ``trace_s3_uri`` atomically with the terminal write —
+    # use ``write_trace_uri_conditional`` instead, which is scoped to
+    # ``attribute_not_exists(trace_s3_uri)`` AND a terminal status. Fully
+    # fail-open: any exception (upload, DDB, serialization) must not prevent the
+    # cancel fast-path from returning.
+    if config.trace:
+        log(
+            "TASK",
+            "Task cancelled mid-run; attempting best-effort "
+            "--trace upload + conditional persist so the "
+            "trajectory captured before cancel is still "
+            "recoverable.",
+        )
+        try:
+            trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
+            if trace_s3_uri:
+                task_state.write_trace_uri_conditional(config.task_id, trace_s3_uri)
+        except Exception as e:
+            log(
+                "WARN",
+                f"Cancel-path trace upload/persist failed (fail-open): {type(e).__name__}: {e}",
+            )
+    return {
+        "status": "cancelled",
+        "task_id": config.task_id,
+        "turns": agent_result.turns,
+        "turns_attempted": agent_result.num_turns or agent_result.turns,
+    }
 
 
 def _deliver_plan_artifact(
@@ -229,7 +329,7 @@ def _execute_agent_step(
     """
     from workflow import StepContext, load_workflow, run_workflow
 
-    workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+    workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
     wf = load_workflow(workflow_id)
     ctx = StepContext(
         workflow=wf,
@@ -271,6 +371,37 @@ def _should_post_start_comment(channel_source: str | None, workflow_id: str) -> 
     return channel_source != "jira" or workflow_id != "coding/pr-iteration-v1"
 
 
+def _react_linear_task_finished(
+    config: TaskConfig,
+    *,
+    success: bool,
+    started_reaction_id: str | None,
+    transition_state: bool = False,
+) -> None:
+    """Replace the eyes on the Linear issue with the final mark; no-op for other channels.
+
+    The token is resolved again first. The one cached when the task started can
+    be near the end of its 24 hours: after a long run Linear refuses it, the
+    eyes stay and the issue never moves to In Review. The vault mints a current
+    token, the Secrets Manager path reads what a Lambda has stored in the
+    meantime; when neither yields one, the cached token is tried as before.
+    Advisory like the reaction itself: a lookup that raises must not fail a
+    task that has finished.
+    """
+    if config.channel_source == "linear":
+        try:
+            resolve_linear_api_token(config.channel_metadata, force=True)
+        except Exception as e:
+            log("WARN", f"Linear token was not resolved again: {type(e).__name__}: {e}")
+    react_task_finished(
+        config.channel_source,
+        config.channel_metadata,
+        success=success,
+        started_reaction_id=started_reaction_id,
+        transition_state=transition_state,
+    )
+
+
 def _run_repoless_task(
     *,
     config,
@@ -296,9 +427,21 @@ def _run_repoless_task(
     from prompt_builder import build_repoless_system_prompt
     from workflow import StepContext, load_workflow, run_workflow
 
-    workflow_id = (config.resolved_workflow or {}).get("id", "default/agent-v1")
+    workflow_id = (config.resolved_workflow or {}).get("id", REPO_LESS_DEFAULT_WORKFLOW_ID)
     wf = load_workflow(workflow_id)
     system_prompt = build_repoless_system_prompt(config, hc, system_prompt_overrides)
+
+    # Attachments, as on the repo lane: downloaded into the task's own directory
+    # under the agent workspace and named in its prompt. Not into the workspace
+    # itself: that is one directory for every task without a repository a server
+    # runs, and a failed download removes its whole attachments directory. For a
+    # task without a repository the orchestrator leaves the attachments to the
+    # agent (its prompt is the description only).
+    prepared_attachments = _download_task_attachments(
+        config, f"{AGENT_WORKSPACE}/{config.task_id}", progress
+    )
+    if prepared_attachments:
+        prompt = _inject_attachment_context(prompt, prepared_attachments)
 
     ctx = StepContext(
         workflow=wf,
@@ -314,8 +457,24 @@ def _run_repoless_task(
     # deliver_artifact. The deliverer uploads the agent's result text to
     # artifacts/{task_id}/ (and/or surfaces it as a comment), so the declared
     # terminal outcome is actually produced (#248 Phase 3).
+    #
+    # In two runs, with the cancel check of the repo lane between them: the
+    # delivery is this lane's side effect, and like a post-hook it must not
+    # happen for a task the user cancelled while the agent ran. Every step but
+    # the delivery runs first; a step that fails there stops the workflow as it
+    # would in one run, whether its on_failure is fail (the run fails) or
+    # skip_remaining (the run ends without failing, and skips the delivery).
+    delivery = {"deliver_artifact"}
+    before_delivery = [s for s in wf.steps if s.kind not in delivery]
     with task_span("task.agent_execution"):
-        wf_result = run_workflow(wf, ctx)
+        wf_result = run_workflow(wf, ctx, only_kinds={s.kind for s in before_delivery})
+        cancelled = _task_is_cancelled(config.task_id)
+        skipped = any(
+            outcome.failed and step.on_failure == "skip_remaining"
+            for step, outcome in zip(before_delivery, wf_result.outcomes, strict=False)
+        )
+        if wf_result.succeeded and not skipped and not cancelled:
+            wf_result = run_workflow(wf, ctx, only_kinds=delivery)
 
     agent_result = ctx.agent_result
     if agent_result is None:
@@ -336,6 +495,10 @@ def _run_repoless_task(
         "agent_execution_complete",
         f"status={agent_result.status} turns={agent_result.turns}",
     )
+
+    if cancelled:
+        # Nothing was delivered, and nothing is remembered: no episode either.
+        return _acknowledge_cancel(config, agent_result, trajectory, progress, "Delivery")
 
     duration = time.time() - start_time
     # No build/PR for a repo-less task; build_ok is vacuously true.
@@ -382,8 +545,6 @@ def _run_repoless_task(
     memory_written = False
     effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
     if effective_memory_id and config.user_id:
-        import memory as agent_memory
-
         memory_written = agent_memory.write_task_episode(
             memory_id=effective_memory_id,
             actor=f"user:{config.user_id}",
@@ -393,30 +554,15 @@ def _run_repoless_task(
             duration_s=round(duration, 1),
         )
 
-    usage = agent_result.usage
-    turns_attempted = agent_result.num_turns or agent_result.turns
     result = TaskResult(
         status=overall_status,
-        agent_status=agent_result.status,
+        **_agent_result_fields(agent_result, config.max_turns),
         pr_url=None,
         artifact_uri=artifact_uri,
-        cost_usd=agent_result.cost_usd,
-        turns=turns_attempted,
-        turns_attempted=turns_attempted,
-        turns_completed=_compute_turns_completed(
-            agent_status=agent_result.status,
-            turns_attempted=turns_attempted,
-            max_turns=config.max_turns,
-        ),
         duration_s=round(duration, 1),
         task_id=config.task_id,
         memory_written=memory_written,
         error=result_error,
-        session_id=agent_result.session_id or None,
-        input_tokens=usage.input_tokens if usage else None,
-        output_tokens=usage.output_tokens if usage else None,
-        cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
-        cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
         trace_s3_uri=trace_s3_uri,
         otel_trace_id=current_otel_trace_id(),
     )
@@ -511,6 +657,22 @@ def _apply_post_hook_gates(
     return gates_ok
 
 
+def _step_milestone(workflow: Workflow | None, kind: str, phase: str, progress) -> None:
+    """Emit ``step:<name>:<phase>`` for the step of ``kind`` that ``workflow`` declares.
+
+    The workflow runner emits these around every step it runs, but on the repo
+    lane it runs the agent step only: the build and the pull request are inline
+    post-hooks. Without their milestones the events of a coding task go from the
+    agent straight to ``pr_created``, and a watcher cannot tell that the build is
+    running (the console's "Checking" stage). The name is the runner's: the
+    step's ``name``, else its ``kind``. Nothing is emitted for a step the
+    workflow does not declare, or when the workflow could not be reloaded.
+    """
+    step = next((s for s in workflow.steps if s.kind == kind), None) if workflow else None
+    if step is not None:
+        progress.write_agent_milestone(f"step:{step.name or step.kind}:{phase}")
+
+
 def _starts_with_needs_input_marker(result_text: str | None) -> bool:
     """True when the agent's final message opens with the clarify-and-hold marker.
 
@@ -520,22 +682,14 @@ def _starts_with_needs_input_marker(result_text: str | None) -> bool:
     marker buried mid-answer is not a hold signal — it prevents a stray mention
     of the token in prose from tripping the hold).
     """
-    if not result_text:
-        return False
-    for line in result_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        return stripped.startswith(NEEDS_INPUT_MARKER)
-    return False
+    return bool(result_text) and result_text.lstrip().startswith(NEEDS_INPUT_MARKER)
 
 
 def _strip_needs_input_marker(result_text: str) -> str:
     """Remove the leading NEEDS_INPUT_MARKER line/token so the reviewer sees only
     the clarifying question, never our internal sentinel."""
     text = result_text.strip()
-    if text.startswith(NEEDS_INPUT_MARKER):
-        text = text[len(NEEDS_INPUT_MARKER) :]
+    text = text.removeprefix(NEEDS_INPUT_MARKER)
     return text.strip()
 
 
@@ -635,31 +789,58 @@ def _resolve_overall_task_status(
     return "error", err
 
 
-def _branch_has_new_commits(repo_dir: str, default_branch: str) -> bool:
-    """True if HEAD carries commits beyond ``origin/<default_branch>``.
+def _branch_has_new_commits(repo_dir: str, default_branch: str, branch: str) -> bool:
+    """True if the pushed ``branch`` carries commits beyond ``origin/<default_branch>``.
 
-    The same ``origin/<default_branch>..HEAD`` diff ``ensure_pr`` consults to
-    decide whether there is anything to open a PR from (see
-    ``post_hooks._ensure_pr``). Used by the delivery gate to tell
-    "a commit landed but the PR failed to open" (recoverable) from "no commit
-    ever reached the branch — the work was lost". For a stacked child of an
-    orchestrated issue graph (#247) ``default_branch`` IS its predecessor
-    branch (``config.base_branch``), so
-    this asks the right question: did this child add anything on top of its
-    base? Best-effort — a git failure returns ``False`` (assume nothing landed,
-    the conservative read for a gate whose job is to catch a lost deliverable)."""
+    Used by the delivery gate to tell "a commit landed but the PR failed to
+    open" (recoverable) from "no commit ever reached the branch — the work was
+    lost". It reads the remote-tracking ref ``origin/<branch>``, which a
+    successful ``git push`` updates, and not the local ``HEAD``: after a failed
+    push the commits exist only in this container, and reporting them as landed
+    would tell the user that the work is safe on a branch GitHub has never seen.
+    For a stacked child of an orchestrated issue graph (#247) ``default_branch``
+    IS its predecessor branch (``config.base_branch``), so this asks the right
+    question: did this child add anything on top of its base? Best-effort — a
+    git failure returns ``False`` (assume nothing landed, the conservative read
+    for a gate whose job is to catch a lost deliverable); a branch that was
+    never pushed is such a failure, an unknown ref. The output stays bytes: it
+    is only tested for being empty, and decoding it would raise on a commit
+    subject that is not UTF-8."""
     try:
         res = subprocess.run(
-            ["git", "log", f"origin/{default_branch}..HEAD", "--oneline"],
+            ["git", "log", f"origin/{default_branch}..origin/{branch}", "--oneline"],
+            cwd=repo_dir,
+            check=False,
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def _head_sha(repo_dir: str) -> str:
+    """The commit ``HEAD`` of ``repo_dir`` points at, ``""`` when git cannot say.
+
+    Read after an iteration on a pull request, to tell "the branch moved" from
+    "answered, nothing committed". Best-effort: the answer only words the reply,
+    so a git that fails, times out or cannot be started leaves it unknown and
+    does not fail a task whose pull request is already updated."""
+    sha = ""
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
             cwd=repo_dir,
             check=False,
             capture_output=True,
             text=True,
             timeout=60,
         )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return res.returncode == 0 and bool(res.stdout.strip())
+        if res.returncode == 0:
+            sha = res.stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        log("WARN", f"Could not read HEAD after the run ({type(exc).__name__}: {exc})")
+    return sha
 
 
 def _apply_delivery_gate(
@@ -729,11 +910,10 @@ def _apply_delivery_gate(
 
 
 def _compute_turns_completed(
-    agent_status: str,
     turns_attempted: int | None,
     max_turns: int,
 ) -> int | None:
-    """Clamp ``turns_completed`` to ``max_turns`` when the SDK hit the limit.
+    """Clamp ``turns_completed`` to ``max_turns``.
 
     The Claude Agent SDK reports ``num_turns = max_turns + 1``
     on ``error_max_turns`` because the aborted attempt is counted.  Clamping
@@ -741,14 +921,47 @@ def _compute_turns_completed(
     actually executed") while ``turns_attempted`` keeps the raw SDK value
     for debugging.
 
+    The agent status is not consulted: the CLI marks a max-turns result
+    ``is_error``, so the runner reports it as ``error``, not ``error_max_turns``,
+    and no status can complete more turns than the cap.
+
+    A ``max_turns`` of 0 is no cap (the SDK hands the CLI a turn limit only for a
+    truthy value) and a negative one is not a count to clamp to, so for both the
+    count is returned as it is.
+
     Returns ``None`` if ``turns_attempted`` is ``None``/falsy so callers can
     round-trip a missing SDK count without inventing a fake zero.
     """
-    if not turns_attempted:
+    if not turns_attempted or max_turns <= 0:
         return turns_attempted
-    if agent_status == "error_max_turns":
-        return min(turns_attempted, max_turns)
-    return turns_attempted
+    return min(turns_attempted, max_turns)
+
+
+def _agent_result_fields(agent_result: AgentResult | None, max_turns: int) -> dict:
+    """The ``TaskResult`` fields that are taken from the agent's result.
+
+    One mapping for every terminal write (repo-less, repo-bound and crash), so
+    that a task which crashes after its agent ran records what the agent spent
+    like any other task. Empty when the agent never returned a result (a crash
+    during setup): the ``TaskResult`` defaults then apply.
+    """
+    if agent_result is None:
+        return {}
+    usage = agent_result.usage
+    turns_attempted = agent_result.num_turns or agent_result.turns
+    return {
+        "agent_status": agent_result.status,
+        "cost_usd": agent_result.cost_usd,
+        # Legacy field (= turns_attempted) kept for back-compat.
+        "turns": turns_attempted,
+        "turns_attempted": turns_attempted,
+        "turns_completed": _compute_turns_completed(turns_attempted, max_turns),
+        "session_id": agent_result.session_id or None,
+        "input_tokens": usage.input_tokens if usage else None,
+        "output_tokens": usage.output_tokens if usage else None,
+        "cache_read_input_tokens": usage.cache_read_input_tokens if usage else None,
+        "cache_creation_input_tokens": usage.cache_creation_input_tokens if usage else None,
+    }
 
 
 def _write_memory(
@@ -756,11 +969,14 @@ def _write_memory(
     setup: RepoSetup,
     agent_result: AgentResult,
     start_time: float,
-    build_passed: bool,
+    succeeded: bool,
     pr_url: str | None,
     memory_id: str,
 ) -> bool:
     """Write task episode and repo learnings to AgentCore Memory.
+
+    ``succeeded`` is the task's verdict (the one its record is written with), so
+    the episode says COMPLETED or FAILED like the record does.
 
     Returns True if any memory was successfully written.
     """
@@ -782,7 +998,7 @@ def _write_memory(
         memory_id=memory_id,
         actor=config.repo_url,
         task_id=config.task_id,
-        status="COMPLETED" if build_passed else "FAILED",
+        status="COMPLETED" if succeeded else "FAILED",
         pr_url=pr_url,
         cost_usd=episode_cost,
         duration_s=round(time.time() - start_time, 1),
@@ -802,7 +1018,7 @@ def _write_memory(
     return episode_ok or learnings_ok
 
 
-def run_task(
+def run_task(  # noqa: C901 -- 53 when the ceiling of 15 was set; must not grow
     repo_url: str = "",
     task_description: str = "",
     issue_number: str = "",
@@ -847,12 +1063,21 @@ def run_task(
     """
     from opentelemetry.trace import StatusCode
 
+    from aws_session import configure_session, is_scoped
     from repo import setup_repo
 
     # AgentCore can reuse this process for another task. Scrub every Jira
     # credential before config or repository code runs, including for non-Jira
     # tasks, so a prior tenant's long-lived Forge secret cannot cross tasks.
     clear_jira_task_credentials()
+
+    # Session tags first, from the arguments as they came. When the config below
+    # cannot be built, run_task raises before its own FAILED write, and the only
+    # record of the reason is the caller's backup write
+    # (server._run_task_background). That write assumes the per-task SessionRole,
+    # which reaches a task's row only under that task's task_id tag: without the
+    # tags it is denied, and the task ends minutes later as a lost session.
+    configure_session(user_id=user_id, repo=repo_url, task_id=task_id)
 
     # Build config
     config = build_config(
@@ -895,9 +1120,9 @@ def run_task(
 
     # Export session-tag values so tenant-data boto3 clients (DDB/S3) assume
     # the per-task SessionRole with {user_id, repo, task_id} tags. No-op when
-    # AGENT_SESSION_ROLE_ARN is unset (local/dev/tests).
-    from aws_session import configure_session, is_scoped
-
+    # AGENT_SESSION_ROLE_ARN is unset (local/dev/tests). The call above, repeated
+    # with the resolved values: for a deployed task they are the same, a local
+    # run gets its generated task id and the repository named in the environment.
     configure_session(
         user_id=config.user_id,
         repo=config.repo_url,
@@ -972,6 +1197,11 @@ def run_task(
         # — survives refactors and reads cleanly. Stays None until the Linear
         # `react_task_started` call assigns the actual reaction id.
         linear_eyes_reaction_id: str | None = None
+        # Declared up-front as well, for the duration the crash handler records:
+        # the time since the pipeline started, until the agent starts and this
+        # clock is reset (a finished run reports the time since the agent
+        # started). A task that fails during setup then shows how long it ran.
+        start_time = time.time()
         try:
             # Context hydration
             with task_span("task.context_hydration"):
@@ -1103,7 +1333,7 @@ def run_task(
             # "Starting" comment on the Jira issue through the Forge app actor
             # (or legacy OAuth fallback). No-op for non-Jira tasks.
             # Best-effort; failures are logged, never block.
-            workflow_id = (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+            workflow_id = (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
             if _should_post_start_comment(config.channel_source, workflow_id):
                 comment_task_started(
                     config.channel_source,
@@ -1162,7 +1392,7 @@ def run_task(
             # fails rather than running with a pinned-but-absent asset while the
             # audit record claims it was loaded.
             if config.resolved_assets:
-                from registry.loader import apply_resolved_assets
+                from registry.loader import RegistryAssetLoadError, apply_resolved_assets
 
                 loaded_mcp_keys = apply_resolved_assets(setup.repo_dir, config.resolved_assets)
                 log("TASK", f"Registry: applied {len(loaded_mcp_keys)} mcp_server asset(s)")
@@ -1170,40 +1400,22 @@ def run_task(
                 # merge writes servers into .mcp.json AFTER the strip above, so a
                 # registry-published Linear server would otherwise slip back in and
                 # run under bypassPermissions. Re-strip so the enforcement covers
-                # registry-sourced entries too, not just repo-committed ones.
-                if strip_linear_mcp_servers(setup.repo_dir):
-                    log(
-                        "WARN",
-                        "Registry: stripped a Linear MCP server introduced by a resolved "
-                        "asset (ADR-016 — the agent must have no Linear tools)",
+                # registry-sourced entries too, not just repo-committed ones. What
+                # it removes here is a pinned asset (the scrub matches the word, so
+                # acme/linear-regression as well as Linear's own server): fail the
+                # task, as for every other pinned asset that could not be loaded.
+                removed = strip_linear_mcp_servers(setup.repo_dir)
+                if removed:
+                    raise RegistryAssetLoadError(
+                        f"the Linear MCP scrub removed {removed} of the pinned mcp_server "
+                        "assets: it drops every server whose key or config contains 'linear' "
+                        "(ADR-016: the agent must have no Linear tools). Remove the pin, or "
+                        "publish the server without that word in its name and config. "
+                        f"Pinned: {', '.join(loaded_mcp_keys)}"
                     )
 
             # Download attachments from S3 (version-pinned, integrity-verified)
-            prepared_attachments: list = []
-            if config.attachments:
-                from attachments import download_attachments
-
-                try:
-                    with task_span("task.attachment_download"):
-                        prepared_attachments = download_attachments(
-                            config.attachments, setup.repo_dir
-                        )
-                    progress.write_agent_milestone(
-                        "attachments_downloaded",
-                        f"count={len(prepared_attachments)}",
-                    )
-                except RuntimeError as e:
-                    log("ERROR", f"Attachment integrity check failed: {e}")
-                    raise RuntimeError(
-                        f"Attachment download/verification failed: {e}. "
-                        "The task cannot proceed without valid attachments."
-                    ) from e
-                except Exception as e:
-                    err_type = type(e).__name__
-                    log("ERROR", f"Attachment download failed: {err_type}: {e}")
-                    raise RuntimeError(
-                        f"Failed to download task attachments from S3: {err_type}: {e}"
-                    ) from e
+            prepared_attachments = _download_task_attachments(config, setup.repo_dir, progress)
 
             # Log discovered repo-level project configuration
             # (all files loaded by setting_sources=["project"])
@@ -1228,15 +1440,6 @@ def run_task(
             log("TASK", "Starting agent...")
             if config.max_budget_usd:
                 log("TASK", f"Budget limit: ${config.max_budget_usd:.2f}")
-            # Warn if uvloop is the active policy — subprocess SIGCHLD conflicts.
-            policy = asyncio.get_event_loop_policy()
-            policy_name = type(policy).__name__
-            if "uvloop" in policy_name.lower():
-                log(
-                    "WARN",
-                    f"uvloop detected ({policy_name}) — this may cause subprocess "
-                    f"SIGCHLD conflicts with the Claude Agent SDK",
-                )
             with task_span("task.agent_execution") as agent_span:
                 try:
                     agent_result = _execute_agent_step(
@@ -1264,58 +1467,22 @@ def run_task(
                 f"status={agent_result.status} turns={agent_result.turns}",
             )
 
-            # Cancel short-circuit: the Stop hook signalled cancel by stopping
-            # the SDK early, but that only stops the agent loop — post-hooks
-            # (ensure_committed, ensure_pr) would still run and push/open a PR
-            # on a cancelled task.  Re-check the task status here and exit the
-            # pipeline before any side-effect-producing post-hook runs.  The
-            # terminal state is already CANCELLED (written by cancel-task.ts),
-            # so we do NOT call write_terminal — its ConditionExpression only
-            # allows RUNNING/HYDRATING/FINALIZING, which would fail silently,
-            # but leaving the cancel record intact makes the intent explicit.
-            try:
-                _current_record = task_state.get_task(config.task_id)
-            except task_state.TaskFetchError:
-                _current_record = None  # fail-open: let normal path proceed
-            if _current_record and _current_record.get("status") == "CANCELLED":
-                log("TASK", f"Task {config.task_id} cancelled; skipping post-hooks")
-                progress.write_agent_milestone(
-                    "task_cancelled_acknowledged",
-                    "Post-hooks skipped; terminal state already CANCELLED.",
+            # Cancel short-circuit: re-check the task status here and exit the
+            # pipeline before any side-effect-producing post-hook
+            # (ensure_committed, ensure_pr) runs.
+            if _task_is_cancelled(config.task_id):
+                cancelled = _acknowledge_cancel(
+                    config, agent_result, trajectory, progress, "Post-hooks"
                 )
-                # L4 item 1c: best-effort trace upload + conditional
-                # self-heal on the cancel path. ``write_terminal``'s
-                # ConditionExpression rejects CANCELLED, so we cannot
-                # persist ``trace_s3_uri`` atomically with the terminal
-                # write — use ``write_trace_uri_conditional`` instead,
-                # which is scoped to ``attribute_not_exists(trace_s3_uri)``
-                # AND a terminal status. Fully fail-open: any exception
-                # (upload, DDB, serialization) must not prevent the
-                # cancel fast-path from returning.
-                if config.trace:
-                    log(
-                        "TASK",
-                        "Task cancelled mid-run; attempting best-effort "
-                        "--trace upload + conditional persist so the "
-                        "trajectory captured before cancel is still "
-                        "recoverable.",
-                    )
-                    try:
-                        trace_s3_uri = _maybe_upload_trace(config, trajectory, progress)
-                        if trace_s3_uri:
-                            task_state.write_trace_uri_conditional(config.task_id, trace_s3_uri)
-                    except Exception as e:
-                        log(
-                            "WARN",
-                            f"Cancel-path trace upload/persist failed "
-                            f"(fail-open): {type(e).__name__}: {e}",
-                        )
-                return {
-                    "status": "cancelled",
-                    "task_id": config.task_id,
-                    "turns": agent_result.turns,
-                    "turns_attempted": agent_result.num_turns or agent_result.turns,
-                }
+                # ❌ on the Linear issue so the stale 👀 doesn't linger: nothing
+                # else removes that reaction before another task starts on the
+                # issue, and the platform's own comment for this run is
+                # "❌ Task cancelled". The same best-effort call as on the crash
+                # path below; no-op for non-Linear tasks.
+                _react_linear_task_finished(
+                    config, success=False, started_reaction_id=linear_eyes_reaction_id
+                )
+                return cancelled
 
             # Resolve the post-hook gating inputs: read_only, the ensure_pr
             # strategy (create / push_resolve / resolve), and the verify steps'
@@ -1338,7 +1505,7 @@ def run_task(
             _workflow = None
             try:
                 _workflow = load_workflow(
-                    (config.resolved_workflow or {}).get("id", "coding/new-task-v1")
+                    (config.resolved_workflow or {}).get("id", DEFAULT_WORKFLOW_ID)
                 )
                 ensure_pr_strategy = next(
                     (s.strategy for s in _workflow.steps if s.kind == "ensure_pr" and s.strategy),
@@ -1368,11 +1535,13 @@ def run_task(
             # branch, but default/agent-v1 is repo-OPTIONAL — run WITH a repo it
             # takes THIS path yet still expects a PR (primary: artifact but
             # requires_repo: false). So gate on requires_repo too, or a
-            # repo-optional default-agent run would wrongly skip its PR.
+            # repo-optional default-agent run would wrongly skip its PR. The
+            # resolved value, as in build_config: a coding workflow may leave the
+            # line out, and the raw field is then None.
             artifact_workflow = bool(
                 _workflow
-                and getattr(_workflow.terminal_outcomes, "primary", None) == "artifact"
-                and getattr(_workflow, "requires_repo", False)
+                and _workflow.terminal_outcomes.primary == "artifact"
+                and _workflow.resolved_requires_repo
             )
             artifact_uri: str | None = None  # set by the artifact branch below
 
@@ -1390,7 +1559,9 @@ def run_task(
             # (deterministic — a tool call, captured by the runner). Fallback:
             # the legacy first-line text sentinel (kept so a model that types the
             # marker instead of calling the tool still holds). Either → hold.
-            clarification_q = (agent_result.clarification_question or "").strip()
+            # Not stripped here: for a call whose question was empty the runner
+            # records " ", and that call holds the task like any other.
+            clarification_q = agent_result.clarification_question or ""
             needs_input = bool(
                 not artifact_workflow
                 and not config.is_pr_workflow
@@ -1442,6 +1613,7 @@ def run_task(
                     )
                     post_span.set_attribute("safety_net.committed", safety_committed)
 
+                    _step_milestone(_workflow, "verify_build", "start", progress)
                     build_outcome = verify_build(setup.repo_dir, config.build_command)
                     build_passed = build_outcome.passed
                     # Distinct diagnosis: a build that exceeded BUILD_VERIFY_TIMEOUT_S
@@ -1463,8 +1635,10 @@ def run_task(
                     # couldn't run, e.g. yarn missing) verified NOTHING. Treat it like
                     # the lint-inert path: do NOT gate on it (it's a config problem,
                     # not the agent's code), and treat build as passing for the gate
-                    # so we don't emit a false "build failed". The honest signal is
-                    # carried in error_message (build_ok=inert) for the platform copy.
+                    # so we don't emit a false "build failed". It is not REPORTED
+                    # as passed: the pull request body and the task record get None
+                    # ("did not run") in place of this True, see ensure_pr and
+                    # TaskResult below.
                     build_inert = build_outcome.inert
                     if build_inert:
                         log(
@@ -1473,6 +1647,15 @@ def run_task(
                             "— not gating on it; surfacing as inert, not a failure",
                         )
                         build_passed = True
+                    else:
+                        # The result of a build that ran, whether or not it gates
+                        # the task. An inert build gets no verdict here either.
+                        _step_milestone(
+                            _workflow,
+                            "verify_build",
+                            "succeeded" if build_passed else "failed",
+                            progress,
+                        )
                     # #72: when lint is INERT for this repo (no runnable lint task and
                     # no configured lint_command — see repo.py setup), running the
                     # default `mise run lint` would just fail "no such task" and
@@ -1489,10 +1672,11 @@ def run_task(
                         lint_passed = True
                     else:
                         lint_passed = verify_lint(setup.repo_dir, config.lint_command).passed
+                    _step_milestone(_workflow, "ensure_pr", "start", progress)
                     pr_url = ensure_pr(
                         config,
                         setup,
-                        build_passed,
+                        None if build_inert else build_passed,
                         lint_passed,
                         agent_result=agent_result,
                         strategy=ensure_pr_strategy,
@@ -1524,29 +1708,10 @@ def run_task(
                         "(build_ok=False); leaving it In Progress with the failure comment (#9a).",
                     )
 
-            # Memory write — capture task episode and repo learnings
-            memory_written = False
-            effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
-            if effective_memory_id:
-                memory_written = _write_memory(
-                    config,
-                    setup,
-                    agent_result,
-                    start_time,
-                    build_passed,
-                    pr_url,
-                    effective_memory_id,
-                )
-
-            # Metrics
-            duration = time.time() - start_time
-            disk_after = get_disk_usage(AGENT_WORKSPACE)
-
             # Overall status: do not infer success from PR/build when the SDK never
             # emitted ResultMessage (agent_status=unknown) — that masks protocol gaps.
             # Gating honors each verify step's declared ``gate`` via the runner's
             # gate_status (#301); an undeclared verify_lint never gates (legacy).
-            agent_status = agent_result.status
             build_ok = _apply_post_hook_gates(
                 _workflow,
                 read_only=workflow_read_only,
@@ -1562,26 +1727,20 @@ def run_task(
                 build_ok=build_ok,
                 pr_url=pr_url,
                 build_timed_out=build_timed_out,
-                build_infra_failed=build_infra_failed,
+                # A read-only workflow never gates (WORKFLOWS.md) and changes no
+                # code, so a build killed by the host leaves nothing unverified:
+                # a review that is already posted must not be reported FAILED.
+                build_infra_failed=build_infra_failed and not workflow_read_only,
             )
             # Delivery gate: a create-strategy new-work task that
             # reported success but opened no PR AND landed no commit shipped
             # nothing — fail it loudly (retryable) instead of a false COMPLETED
-            # that would poison a stacked orchestration DAG (#247). The branch-diff is only run
-            # when the gate is actually in play (success + no pr_url) so a normal
-            # PR-producing run pays nothing. See :func:`_apply_delivery_gate`.
-            gate_in_play = (
-                overall_status == "success"
-                and not pr_url
-                and not workflow_read_only
-                and not artifact_workflow
-                and not needs_input
-                and ensure_pr_strategy == "create"
-            )
-            commit_landed = (
-                _branch_has_new_commits(setup.repo_dir, setup.default_branch)
-                if gate_in_play
-                else False
+            # that would poison a stacked orchestration DAG (#247). Which runs the
+            # gate applies to is decided in :func:`_apply_delivery_gate` alone; the
+            # branch-diff it may read is skipped only when there is a PR, so a
+            # normal PR-producing run pays nothing.
+            commit_landed = not pr_url and _branch_has_new_commits(
+                setup.repo_dir, setup.default_branch, setup.branch
             )
             overall_status, result_error = _apply_delivery_gate(
                 overall_status,
@@ -1603,14 +1762,35 @@ def run_task(
                 overall_status = "success"
                 result_error = None
 
+            # Memory write — capture task episode and repo learnings. After the
+            # verdict, because the episode records it: later tasks on this
+            # repository are given the episode as what happened here before.
+            memory_written = False
+            effective_memory_id = memory_id or os.environ.get("MEMORY_ID", "")
+            if effective_memory_id:
+                memory_written = _write_memory(
+                    config,
+                    setup,
+                    agent_result,
+                    start_time,
+                    overall_status == "success",
+                    pr_url,
+                    effective_memory_id,
+                )
+
+            # Metrics
+            duration = time.time() - start_time
+            disk_after = get_disk_usage(AGENT_WORKSPACE)
+
             # ✅/❌ on the Linear issue (removes the 👀 first so the final
-            # status stands alone). No-op for non-Linear tasks.
-            react_task_finished(
-                config.channel_source,
-                config.channel_metadata,
+            # status stands alone). No-op for non-Linear tasks. The issue moves
+            # to In Review only when there is a pull request to review, like the
+            # Jira card above: a clarify-and-hold run succeeds without one.
+            _react_linear_task_finished(
+                config,
                 success=(overall_status == "success"),
                 started_reaction_id=linear_eyes_reaction_id,
-                transition_state=linear_transition_state,
+                transition_state=linear_transition_state and bool(pr_url),
             )
 
             # NOTE: the terminal status comment on the Jira issue is NOT posted
@@ -1642,16 +1822,8 @@ def run_task(
             code_changed: bool | None = None
             head_sha_after = ""
             if config.is_pr_workflow and setup.head_sha_before:
-                head_after_res = subprocess.run(
-                    ["git", "rev-parse", "HEAD"],
-                    cwd=setup.repo_dir,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                if head_after_res.returncode == 0:
-                    head_sha_after = head_after_res.stdout.strip()
+                head_sha_after = _head_sha(setup.repo_dir)
+                if head_sha_after:
                     code_changed = head_sha_after != setup.head_sha_before
             # The agent's final text — surfaced as the answer on a no-change
             # iteration so a question gets an actual reply.
@@ -1665,27 +1837,17 @@ def run_task(
                 code_changed = False
                 # Prefer the tool's ``question`` arg (clean, no marker); fall back
                 # to the final message with the legacy sentinel stripped.
-                answer_text = clarification_q or _strip_needs_input_marker(answer_text)
+                answer_text = clarification_q.strip() or _strip_needs_input_marker(answer_text)
 
             # Build TaskResult
-            usage = agent_result.usage
-            turns_attempted = agent_result.num_turns or agent_result.turns
-            turns_completed = _compute_turns_completed(
-                agent_status=agent_status,
-                turns_attempted=turns_attempted,
-                max_turns=config.max_turns,
-            )
             result = TaskResult(
                 status=overall_status,
-                agent_status=agent_status,
+                **_agent_result_fields(agent_result, config.max_turns),
                 pr_url=pr_url,
-                build_passed=build_passed,
+                # None, not True, for a build whose command could not run: the
+                # gate did not run, and write_terminal then stores no verdict.
+                build_passed=None if build_inert else build_passed,
                 lint_passed=lint_passed,
-                cost_usd=agent_result.cost_usd,
-                # Legacy field (= turns_attempted) kept for back-compat.
-                turns=turns_attempted,
-                turns_attempted=turns_attempted,
-                turns_completed=turns_completed,
                 duration_s=round(duration, 1),
                 task_id=config.task_id,
                 disk_before=format_bytes(disk_before),
@@ -1694,11 +1856,6 @@ def run_task(
                 prompt_version=prompt_version or None,
                 memory_written=memory_written,
                 error=result_error,
-                session_id=agent_result.session_id or None,
-                input_tokens=usage.input_tokens if usage else None,
-                output_tokens=usage.output_tokens if usage else None,
-                cache_read_input_tokens=usage.cache_read_input_tokens if usage else None,
-                cache_creation_input_tokens=usage.cache_creation_input_tokens if usage else None,
                 trace_s3_uri=trace_s3_uri,
                 # An artifact workflow carries its artifact
                 # URI here so the platform can read the plan and seed sub-issues;
@@ -1720,13 +1877,15 @@ def run_task(
                 root_span.set_attribute("agent.cost_usd", float(result.cost_usd))
             if result.turns:
                 root_span.set_attribute("agent.turns", int(result.turns))
-            # On the repo path these are always real bools (computed by the post
-            # hooks above); coalesce for the span attribute since the field type
-            # is now tri-state (bool | None) for the repo-less/crash case.
+            # On the repo path these are real bools (computed by the post hooks
+            # above), except build_passed after a build that could not run;
+            # coalesce for the span attribute since the field type is tri-state
+            # (bool | None) for that and the repo-less/crash case.
             root_span.set_attribute("build.passed", bool(result.build_passed))
             root_span.set_attribute("lint.passed", bool(result.lint_passed))
             root_span.set_attribute("pr.url", result.pr_url or "")
             root_span.set_attribute("task.duration_s", result.duration_s)
+            usage = agent_result.usage
             if usage:
                 root_span.set_attribute("agent.input_tokens", usage.input_tokens)
                 root_span.set_attribute("agent.output_tokens", usage.output_tokens)
@@ -1776,30 +1935,34 @@ def run_task(
                 status="error",
                 error=combined,
                 task_id=config.task_id,
-                agent_status=agent_for_chain.status if agent_for_chain else "unknown",
+                **_agent_result_fields(agent_for_chain, config.max_turns),
+                duration_s=round(time.time() - start_time, 1),
                 trace_s3_uri=crash_trace_s3_uri,
                 # Still inside `with task_span()`, so the id is live — capture it
                 # here too or FAILED tasks (the primary post-mortem case for the
                 # replay bundle, #515) persist otel_trace_id: null.
                 otel_trace_id=current_otel_trace_id(),
             )
-            task_state.write_terminal(config.task_id, "FAILED", crash_result.model_dump())
+            crash_dict = crash_result.model_dump()
+            task_state.write_terminal(config.task_id, "FAILED", crash_dict)
             # Best-effort ❌ on the Linear issue so the stale 👀 doesn't linger.
             # No-op for non-Linear tasks; network/GraphQL failures are swallowed.
             # `linear_eyes_reaction_id` is initialized to None at the top of
             # this try block, so it's always bound here even if we crashed
             # before the start-reaction call assigned a real id.
-            react_task_finished(
-                config.channel_source,
-                config.channel_metadata,
-                success=False,
-                started_reaction_id=linear_eyes_reaction_id,
+            _react_linear_task_finished(
+                config, success=False, started_reaction_id=linear_eyes_reaction_id
             )
             # NOTE: no Jira failure comment here — the fan-out plane's
             # ``dispatchToJira`` (issue #573) owns the Jira terminal comment
             # and fires on the platform side even when this crash path runs,
             # so posting here would double-comment. (Contrast the Linear ❌
             # reaction above, which the fan-out plane does not replicate.)
+            #
+            # METRICS_REPORT, as on every other terminal path: the dashboard
+            # counts tasks and failures from this event alone. Last, so that
+            # neither the FAILED write nor the reaction above waits for it.
+            print_metrics(crash_dict)
             raise
 
 
@@ -1922,10 +2085,10 @@ def main():
     config = get_config()
 
     print("Task configuration loaded.", flush=True)
-    print("Dry run mode detected.", flush=True)
     print()
 
     if config.dry_run:
+        print("Dry run mode detected.", flush=True)
         # Context hydration for dry run
         if config.issue_number:
             config.issue = fetch_github_issue(
@@ -1942,23 +2105,9 @@ def main():
         system_prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:12]
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
         print("\n--- SYSTEM PROMPT (REDACTED) ---")
-        print(
-            f"length={len(system_prompt)} chars sha256={system_prompt_hash} "
-            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
-            flush=True,
-        )
+        print(f"length={len(system_prompt)} chars sha256={system_prompt_hash}", flush=True)
         print("\n--- USER PROMPT (REDACTED) ---")
-        print(
-            f"length={len(prompt)} chars sha256={prompt_hash} "
-            "(set DEBUG_DRY_RUN_PROMPTS=1 to print full text)",
-            flush=True,
-        )
-        if os.environ.get("DEBUG_DRY_RUN_PROMPTS") == "1":
-            print(
-                "\nDEBUG_DRY_RUN_PROMPTS=1 is set, but full prompt printing is disabled "
-                "for secure logging compliance.",
-                flush=True,
-            )
+        print(f"length={len(prompt)} chars sha256={prompt_hash}", flush=True)
         print("\n--- DRY RUN COMPLETE ---")
         return
 

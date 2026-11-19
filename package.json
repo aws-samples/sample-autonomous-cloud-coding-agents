@@ -5,12 +5,13 @@
   "private": true,
   "license": "MIT-0",
   "engines": {
-    "node": ">= 20.x <= 24.x"
+    "node": "^22.23.4 || ^24.15.0"
   },
   "workspaces": [
     "cdk",
     "cli",
-    "docs"
+    "docs",
+    "web"
   ],
   "scripts": {
     "install:all": "MISE_EXPERIMENTAL=1 mise run install",
@@ -18,22 +19,19 @@
     "knip": "knip"
   },
   "devDependencies": {
-    "knip": "6.23.0"
+    "knip": "6.45.0"
   },
   "resolutions": {
-    "@astrojs/markdown-remark": "7.2.0",
-    "@astrojs/mdx": "6.0.3",
-    "basic-ftp": "^6.2.1",
-    "brace-expansion": "^5.0.12",
-    "devalue": "^5.9.3",
-    "fast-uri": "^3.1.8",
-    "fast-xml-parser": "^5.7.0",
-    "ip-address": "^10.5.1",
-    "js-yaml": "^4.3.2",
-    "sharp": "^0.35.4",
-    "svgo": "^4.1.0",
-    "nanoid": "^3.3.17",
-    "undici": "^7.29.0",
-    "yaml": "^2.8.3"
+    "basic-ftp": "^6.2.6",
+    "katex": "0.18.4",
+    "**/@cdklabs/eslint-plugin/typescript": "^6.0.3",
+    "**/@jest/reporters/glob": "^14.0.2",
+    "**/jest-config/glob": "^14.0.2",
+    "**/jest-runtime/glob": "^14.0.2",
+    "**/test-exclude/glob": "^14.0.2",
+    "**/eslint/minimatch": "^11.0.1",
+    "**/@eslint/config-array/minimatch": "^11.0.1",
+    "**/@typescript-eslint/typescript-estree/minimatch": "^11.0.1",
+    "**/test-exclude/minimatch": "^11.0.1"
   }
 }

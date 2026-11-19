@@ -56,7 +56,7 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const body = parseBody<LinkRequest>(event.body ?? null);
-    if (!body?.code) {
+    if (typeof body?.code !== 'string' || !body.code) {
       return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Request body must include a "code" field.', requestId);
     }
 
@@ -71,7 +71,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       Key: { linear_identity: `pending#${code}` },
     }));
 
-    if (!pending.Item || pending.Item.status !== 'pending') {
+    // DynamoDB TTL deletes lazily, so an expired code can still be in the table.
+    if (!pending.Item || pending.Item.status !== 'pending'
+      || typeof pending.Item.ttl !== 'number' || pending.Item.ttl < Math.floor(Date.now() / 1000)) {
       return errorResponse(404, ErrorCode.VALIDATION_ERROR, 'Invalid or expired link code.', requestId);
     }
 

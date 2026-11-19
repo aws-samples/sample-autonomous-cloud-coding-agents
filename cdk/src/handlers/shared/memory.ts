@@ -23,10 +23,10 @@ import {
   CreateEventCommand,
   RetrieveMemoryRecordsCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
+import type { TaskStatusType } from '../../constructs/task-status';
 import { logger } from './logger';
 import { sanitizeExternalContent } from './sanitization';
 import { makeClient } from './ua';
-import type { TaskStatusType } from '../../constructs/task-status';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,7 +36,7 @@ import type { TaskStatusType } from '../../constructs/task-status';
  * Provenance tag indicating who wrote a memory record.
  * Must stay in sync with Python-side MEMORY_SOURCE_TYPES in agent/src/memory.py.
  */
-export type MemorySourceType =
+type MemorySourceType =
   | 'agent_episode'
   | 'agent_learning'
   | 'orchestrator_fallback';
@@ -176,8 +176,9 @@ function getClient(): BedrockAgentCoreClient {
  *   - Semantic: `/{actorId}/knowledge/`  (actorId = repo)
  *   - Episodic: `/{actorId}/episodes/`   (covers all sessions and reflections)
  *
- * Both calls pass a `namespace` prefix for hierarchical retrieval — episodic
- * per-task records live at `/{actorId}/episodes/{sessionId}/`, below the read path.
+ * Both calls use `namespacePath` for hierarchical retrieval — episodic per-task
+ * records live at `/{actorId}/episodes/{sessionId}/`, which is below the read path.
+ * (`namespace` is an exact match: it would return none of them.)
  *
  * Results are trimmed to a 2000-token budget (knowledge is prioritized before episodes;
  * entries beyond the budget are dropped).
@@ -211,7 +212,7 @@ export async function loadMemoryContext(
       taskDescription
         ? client.send(new RetrieveMemoryRecordsCommand({
           memoryId,
-          namespace: semanticNamespacePath,
+          namespacePath: semanticNamespacePath,
           searchCriteria: {
             searchQuery: taskDescription,
             topK: 5,
@@ -224,7 +225,7 @@ export async function loadMemoryContext(
       // Episodic search — recent task episodes (prefix matches all sessions)
       client.send(new RetrieveMemoryRecordsCommand({
         memoryId,
-        namespace: episodicNamespacePath,
+        namespacePath: episodicNamespacePath,
         searchCriteria: {
           searchQuery: 'recent task episodes',
           topK: 3,

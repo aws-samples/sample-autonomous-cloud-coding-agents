@@ -13,7 +13,7 @@ The orchestrator sits between the API layer and the agent runtime. Changes to ta
 
 | Concern | Location | Notes |
 |---------|----------|-------|
-| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts` |
+| REST request/response types | `cdk/src/handlers/shared/types.ts` | Mirror in `cli/src/types.ts`; the console mirrors a subset in `web/src/core/api/types.ts` |
 | HTTP handlers and orchestration | `cdk/src/handlers/` | Tests under `cdk/test/handlers/` |
 | Agent runtime | `agent/src/` (`pipeline.py`, `runner.py`, `config.py`, `hooks.py`, `prompts/`) | See `agent/README.md` for env vars and local run |
 
@@ -187,7 +187,7 @@ On acceptance, the concurrency slot is acquired and the orchestrator proceeds to
 
 ### Step 2: Pre-flight checks
 
-Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
+Runs as a distinct top-level step (`pre-flight` in `orchestrate-task.ts`, via `runPreflightChecks`) **after** admission and **before** hydration, so external-dependency failures are caught before any prompt assembly or Bedrock screening consumes work. It verifies the GitHub token has sufficient permissions for the task type, catches inaccessible or closed PRs and PRs that come from a fork, and confirms GitHub API reachability. On failure it drives the task to `FAILED` and emits a `preflight_failed` event, surfacing clear errors like `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` before a compute session is consumed.
 
 ### Step 3: Context hydration
 
@@ -197,7 +197,7 @@ Assembles the agent's user prompt and transitions the task to `HYDRATING`. The i
 
 **PR workflows (`coding/pr-iteration-v1` / `coding/pr-review-v1`):** Fetches PR metadata, conversation comments, changed files (REST), and inline review comments (GraphQL, resolved threads filtered out) in four parallel calls. Extracts `head_ref` and `base_ref` for branch resolution.
 
-Regardless of workflow, the assembled prompt is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
+Regardless of workflow, the external GitHub content (issue or PR title, body, comment authors and bodies, plus PR branch names, rendered review paths and diff) is screened through Amazon Bedrock Guardrails for prompt injection (fail-closed: unscreened content never reaches the agent). A token budget (default 100K tokens, ~4 chars/token heuristic) trims oldest comments first when exceeded.
 
 ### Step 4: Session start
 
@@ -282,13 +282,23 @@ When the session is unhealthy, the task transitions to `FAILED` with "Agent sess
 
 **ECS task status polling (ECS only).** The orchestrator calls `computeStrategy.pollSession` (ECS `DescribeTasks`) on each poll cycle. Three failure modes are detected: container failure (immediate `FAILED`), container exit without DynamoDB terminal write (fail after 5 consecutive completed polls), and repeated API failures (fail after 3 consecutive errors). ECS does not have heartbeat-based hung-process detection; a hung but alive container polls for the full `MAX_POLL_ATTEMPTS` window (~8.5h) before timing out.
 
+**Task status reads that fail (AgentCore and ECS).** Each poll reads the task row. A read that is refused (`AccessDeniedException`, `ValidationException`, `UnrecognizedClientException`, `InvalidSignatureException`) ends the orchestration at that poll with the error. Finalization would have to read the same row, so the task row is left as it is: the agent's own terminal write, or a cancel, still ends the task. Any other failed read (a throttle, a 5xx, a timeout) is one missed poll: the wait goes on with the last known status, however many reads fail in a row, and the missed polls count toward the poll window. Lambda MicroVM tasks do not go through this poll. Their supervisor ends the wait at the first refused read of the task row or of `GetMicrovm`, or at the third failed read in a row; finalization then stops the MicroVM and, when it can read the task row, fails the task with `MicroVM supervisor: <stage>-failed`.
+
 **Lambda MicroVM state polling.** Liveness is a dual signal. The strategy maps `GetMicrovm` mechanically: `PENDING`/`RUNNING` report `running`, `SUSPENDING`/`SUSPENDED` report `suspended`, and `TERMINATING`/`TERMINATED` report terminal completion. The orchestrator supplies the health interpretation:
 
-- `suspended` is healthy only while the task is `AWAITING_APPROVAL`; in any other task state it emits an anomaly and keeps polling rather than failing recoverable work.
+- `suspended` is healthy only while the task is `AWAITING_APPROVAL` and the supervisor recorded a suspend intent for that exact gate; any other suspension is woken.
 - A terminal substrate report paired with a non-terminal task is a failure, but the orchestrator first re-reads the task row to confirm the agent did not write a terminal result between the original read and VM termination.
 - Substrate state detects a dead VM; heartbeat staleness detects a hung, deadlocked, or OOM-killed pipeline inside a VM that still reports `RUNNING`.
 
 `TERMINATED` is the normal terminal signal and remains observable for at least 10 minutes. `ResourceNotFoundException` maps to completion only as a late fallback after the control-plane record is eventually reaped; polling does not wait for `NotFound`.
+
+**Lambda MicroVM approval-wait supervision (ADR-021 P3).** For MicroVM tasks the durable poll runs a supervisor instead of the generic loop. It persists its state (worker ID, first observation, session deadline, failure counters) across durable replays, so later polls never extend the original service deadline. While the task is `AWAITING_APPROVAL` it decides, from the task row, the approval row and `GetMicrovm`, whether to keep waiting, suspend or resume:
+
+- **Suspend** after the task's `microvm_sleep_after_s` grace (default 60 s), only when the live suspend switch is on, the launched image version declares the lifecycle protocol, and at least 30 s of sleep remain before the wake time. It records a suspend intent for the gate before calling `SuspendMicrovm` and re-checks the gate immediately before the call.
+- **Resume** when the decision is recorded (inline from `ApproveTaskFn`/`DenyTaskFn`, with the supervisor as backstop), when the gate's original deadline is 60 s away, when a suspension does not match a recorded intent, or when the gate cannot be read. A failed inline wake records `microvm_resume_orphan`; the supervisor retries.
+- **Fail** the task, conditionally on its own worker ID, when the substrate is terminal before the agent wrote a result, the session deadline passes, or wake requests keep failing.
+
+At finalization the supervisor's worker is always asked to stop, even if the database update fails. A stop that is not acknowledged is logged and recorded as a `microvm_cleanup_unconfirmed` event.
 
 **`/ping` health endpoint (AgentCore only).** The agent's FastAPI server responds to AgentCore's `/ping` calls while the coding task runs in a separate thread. AgentCore sees `HealthyBusy` and keeps the session alive.
 
@@ -338,7 +348,7 @@ Each task runs in its own isolated compute session with no shared mutable state 
 |---|---|---|
 | `invoke_agent_runtime` TPS | 25 per agent/account | AgentCore quota (adjustable) |
 | Concurrent sessions | Account-level limit | AgentCore quota |
-| Per-user concurrency | Configurable (default 3-5) | Platform config |
+| Per-user concurrency | Configurable (default 10) | Platform config |
 | System-wide max tasks | Configurable | Bounded by selected-backend quotas |
 
 ### Counter management
@@ -425,14 +435,14 @@ Three DynamoDB tables back the orchestrator: one for task state, one for the aud
 | `model_id` | String? | Foundation model ID |
 | `prompt_version` | String | System prompt hash for evaluation correlation |
 | `blueprint_config` | Map? | Snapshot of `RepoConfig` at task creation |
-| `cost_usd` | Number? | Agent cost from SDK |
-| `duration_s` | Number? | Total duration |
+| `cost_usd` | String? | Agent cost from SDK, written by the agent as a string |
+| `duration_s` | String? | Total duration in seconds, written by the agent as a string |
 | `ttl` | Number? | DynamoDB TTL (default: created_at + 90 days) |
 | `created_at` / `updated_at` | String | ISO 8601 timestamps |
 
-> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
+> **Derived field:** `error_classification` is not stored in DynamoDB. It is computed at API response time by passing `error_message` through the runtime error classifier (`error-classifier.ts`). This returns a structured object with `category` (auth/network/concurrency/compute/agent/guardrail/config/timeout/blocked/unknown), `title`, `description`, `remedy`, and `retryable` flag. The derived-field pattern means classifier updates take effect immediately for all existing tasks without data migration.
 
-**GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse).
+**GSIs:** `UserStatusIndex` (PK: `user_id`, SK: `status#created_at`), `UserCreatedAtIndex` (PK: `user_id`, SK: `created_at`; the task list, newest first), `StatusIndex` (PK: `status`, SK: `created_at`), `IdempotencyIndex` (PK: `idempotency_key`, sparse), `LinearIssueIndex` (PK: `linear_issue_id`, SK: `created_at`, sparse), `JiraIssueIndex` (PK: `jira_issue_identity`, SK: `created_at`, sparse).
 
 ### TaskEvents table
 

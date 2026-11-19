@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { App, Aspects, CfnResource, Stack } from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { buildAppId, ComponentUaAspect, SolutionUaAspect } from '../../src/constructs/solution-ua-aspect';
@@ -98,6 +98,32 @@ describe('SolutionUaAspect', () => {
   test('sets AWS_SDK_UA_APP_ID on every Lambda', () => {
     const vars = envVarsOfFirstFunction((s) => Aspects.of(s).add(new SolutionUaAspect('uksb-wt64nei4u6#dev')));
     expect(vars.AWS_SDK_UA_APP_ID).toBe('uksb-wt64nei4u6#dev');
+  });
+
+  test.each(['uksb-wt64nei4u6#dev', undefined])('handles raw provider functions and opt-out (%p)', appId => {
+    const stack = new Stack(new App(), 'RawProvider');
+    new lambda.CfnFunction(stack, 'Handler', {
+      code: { zipFile: 'exports.handler = async () => {};' },
+      handler: 'index.handler',
+      runtime: 'nodejs22.x',
+      role: 'arn:aws:iam::123456789012:role/provider',
+      environment: { variables: { EXISTING: 'preserved' } },
+    });
+    new CfnResource(stack, 'CoreProvider', {
+      type: 'AWS::Lambda::Function',
+      properties: {
+        Code: { ZipFile: 'exports.handler = async () => {};' },
+        Handler: 'index.handler',
+        Runtime: 'nodejs22.x',
+        Role: 'arn:aws:iam::123456789012:role/provider',
+        Environment: { Variables: { EXISTING: 'preserved' } },
+      },
+    });
+    Aspects.of(stack).add(new SolutionUaAspect(appId));
+    const template = Template.fromStack(stack);
+    template.resourcePropertiesCountIs('AWS::Lambda::Function', {
+      Environment: { Variables: { EXISTING: 'preserved', ...(appId ? { AWS_SDK_UA_APP_ID: appId } : {}) } },
+    }, 2);
   });
 
   test('undefined appId (opt-out) sets nothing', () => {

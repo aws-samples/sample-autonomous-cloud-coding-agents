@@ -110,7 +110,7 @@ export function makeOpsCommand(): Command {
       .description('Show per-user active task counts vs admission limit (UserConcurrencyTable)')
       .option('--region <region>', 'AWS region (defaults to configured region or AWS_REGION)')
       .option('--stack-name <name>', 'CloudFormation stack name', DEFAULT_STACK_NAME)
-      .option('--limit <n>', 'Per-user concurrency limit (default: 3)', parseInt)
+      .option('--limit <n>', 'Per-user concurrency limit (default: 10)', parseInt)
       .option('--output <format>', 'Output format: text or json', 'text')
       .action(async (opts) => {
         const { region, stackName } = resolveOperatorContext(opts);

@@ -98,6 +98,24 @@ describe('webhook-authorizer handler', () => {
     expect(result.context?.webhookId).toBe('wh-123');
   });
 
+  test.each([
+    ['x-webhook-id', 'x-webhook-signature'],
+    ['X-WEBHOOK-ID', 'X-WEBHOOK-SIGNATURE'],
+  ])('reads the headers case-insensitively (%s)', async (idName, signatureName) => {
+    const event = makeEvent({ headers: { [idName]: 'wh-123', [signatureName]: 'sha256=abcdef' } });
+    const result = await handler(event);
+    expect(result.policyDocument.Statement[0].Effect).toBe('Allow');
+    expect(result.context?.webhookId).toBe('wh-123');
+  });
+
+  test('does a strongly-consistent GetItem by webhook_id', async () => {
+    // A revocation that has returned must be seen by the very next request.
+    await handler(makeEvent());
+    const sent = mockDdbSend.mock.calls[0][0];
+    expect(sent.input.Key).toEqual({ webhook_id: 'wh-123' });
+    expect(sent.input.ConsistentRead).toBe(true);
+  });
+
   test('returns Deny when headers are missing', async () => {
     const event = makeEvent({ headers: {} });
     const result = await handler(event);

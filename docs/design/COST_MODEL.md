@@ -105,7 +105,7 @@ For **AWS-native** chargeback of Bedrock spend (Cost Explorer / CUR 2.0 by `user
 | Monthly user/team warning | Estimated terminal-task cost rollup | CloudWatch/SNS at 80% and 100% |
 | Monthly user/team hard stop | Admission check at 100% | Disabled per scope unless `--hard-stop` is set |
 | Session timeout | Orchestrator timeout | 9 hours |
-| Concurrency limit | Per-user atomic counter | 3 concurrent tasks |
+| Concurrency limit | Per-user atomic counter | 10 concurrent tasks |
 | System concurrency | System-wide counter | Account-level AgentCore quota |
 
 Monthly budgets use UTC calendar months and the same estimated `cost_usd` stored on terminal tasks. The TaskTable stream consumer transactionally increments the user and captured Cognito-team rollups and writes a task marker so duplicate stream delivery cannot double count. Admission checks every configured applicable scope; any scope at 100% with hard stop enabled rejects a new task. In-flight tasks continue and can overshoot because their final cost is unknown until termination.

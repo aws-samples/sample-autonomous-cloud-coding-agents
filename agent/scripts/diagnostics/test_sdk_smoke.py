@@ -39,7 +39,7 @@ async def smoke_test():
     if not model:
         print(
             "ERROR: ANTHROPIC_MODEL not set. Pass the geo-prefixed inference-profile "
-            "id the deployment uses, e.g. ANTHROPIC_MODEL=global.anthropic.claude-opus-5",
+            "id the deployment uses, e.g. ANTHROPIC_MODEL=global.anthropic.claude-opus-5-5",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -59,6 +59,7 @@ async def smoke_test():
 
     counts = {"system": 0, "assistant": 0, "result": 0, "other": 0}
     errors: list[str] = []
+    failure = ""
 
     def on_stderr(line: str):
         line = line.rstrip()
@@ -104,6 +105,8 @@ async def smoke_test():
                         break
             elif isinstance(message, ResultMessage):
                 counts["result"] += 1
+                if message.is_error:
+                    failure = f"{message.result} (HTTP status: {message.api_error_status})"
                 print(
                     f"  [{elapsed:.1f}s] ResultMessage: status={message.subtype} "
                     f"turns={message.num_turns} cost=${message.total_cost_usd or 0:.4f}"
@@ -119,13 +122,27 @@ async def smoke_test():
     print()
     print(f"Duration: {elapsed:.1f}s")
     print(f"Counts:   {counts}")
+    return _verdict(counts, errors, failure)
 
-    ok = counts["assistant"] > 0 and counts["result"] > 0
+
+def _verdict(counts: dict[str, int], errors: list[str], failure: str) -> bool:
+    """Print the verdict on one run. True for PASS only."""
+    ok = counts["assistant"] > 0 and counts["result"] > 0 and not failure
     if ok:
         print("\nPASS — SDK yields messages for this model in this Region.")
         print("       Rules OUT the SDK/CLI/Bedrock path. It does not identify the")
         print("       cause of any other failure — threading is one candidate, not a")
         print("       conclusion this test can reach.")
+    elif failure:
+        # When Bedrock refuses the call (no access to the model, a profile the
+        # credentials may not invoke) the CLI does not raise. It yields the error as an
+        # AssistantMessage and ends with a ResultMessage of subtype "success" that is
+        # marked is_error. Counted as messages, that run printed PASS; src/runner.py
+        # fails a task on the same flag.
+        print("\nFAIL — The run ended in an error (ResultMessage.is_error):")
+        print(f"       {failure}")
+        print("       Check Bedrock model access for this model in this Region, and")
+        print("       that these credentials may invoke it.")
     elif counts["system"] > 0 and counts["assistant"] == 0:
         print("\nFAIL — Got init but zero AssistantMessages.")
         print("       Same symptom as production. Issue is SDK/CLI level,")

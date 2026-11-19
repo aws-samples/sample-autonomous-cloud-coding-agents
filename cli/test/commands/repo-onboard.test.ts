@@ -132,6 +132,45 @@ describe('repo onboard/offboard', () => {
     expect(ddbSend).not.toHaveBeenCalled();
   });
 
+  test.each(['lambda-microvm', 'lambda-microvm,ecs'])('inherits %s and probes availability without persisting a default pin', async computeTypes => {
+    const send = jest.fn().mockResolvedValue({ images: [] });
+    const config = await onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: {
+        stackName: 'test',
+        computeTypes,
+        computeSubstrate: computeTypes,
+        computeDeploymentMode: computeTypes.includes(',') ? 'additive' : 'exclusive',
+      },
+    }, { lambdaMicrovmClientFactory: () => ({ send }) });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(config.compute_type).toBeUndefined();
+  });
+
+  test('rejects an AgentCore pin when the additive deployment omits AgentCore', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'active', compute_type: 'agentcore' });
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: {
+        stackName: 'test',
+        computeTypes: 'ecs,lambda-microvm',
+        computeSubstrate: 'ecs,lambda-microvm',
+        computeDeploymentMode: 'additive',
+      },
+    })).rejects.toThrow(/deploys only 'ecs, lambda-microvm'/);
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
+  test('rejects stale stored overrides before a probe or write', async () => {
+    const { loadRepoConfig } = jest.requireMock('../../src/repo-lookup') as { loadRepoConfig: jest.Mock };
+    loadRepoConfig.mockResolvedValueOnce({ repo: 'acme/a', status: 'active', compute_type: 'lambda-microvm' });
+    const send = jest.fn();
+    await expect(onboardRepo('us-east-1', 'RepoTable', 'acme/a', {
+      deployment: { stackName: 'test', computeSubstrate: 'ecs', computeDeploymentMode: 'exclusive' },
+    }, { lambdaMicrovmClientFactory: () => ({ send }) })).rejects.toThrow(/deploys only 'ecs'/);
+    expect(send).not.toHaveBeenCalled();
+    expect(ddbSend).not.toHaveBeenCalled();
+  });
+
   test('offboardRepo sets removed status and TTL', async () => {
     await offboardRepo('us-east-1', 'RepoTable', 'acme/a');
 

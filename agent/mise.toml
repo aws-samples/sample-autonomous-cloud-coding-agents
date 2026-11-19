@@ -2,15 +2,15 @@ min_version = "2026.7.11"
 
 [tools]
 python = "3.13"
-uv = "latest"
-"aqua:aquasecurity/trivy" = "v0.70.0"
+uv = "0.13.7"
+"aqua:aquasecurity/trivy" = "v0.76.2"
 
 [env]
 _.python.venv = { path = ".venv", create = true }
 PROJECT_NAME = "{{ config_root | basename }}"
 
 [tasks]
-install = "uv sync --all-groups"
+install = "uv sync --locked --all-groups"
 
 [tasks.upgrade]
 description = "Refresh uv.lock within the pins declared in pyproject.toml (exact pins, incl. cedarpy, are not rewritten)"
@@ -23,40 +23,56 @@ echo "Project: $PROJECT_NAME"
 '''
 
 # QUALITY
+# The ruff tasks name their configuration (--config): ruff then applies
+# agent/pyproject.toml to every file. Left to discover configuration per directory,
+# it would let a ruff.toml or [tool.ruff] added below agent/ replace the rules,
+# the ignores and the banned-api table for that directory, with the gate still green.
+# They also run without ruff's cache (--no-cache). A plain `ruff check` or
+# `ruff format` by hand does discover such a file, and the cache then hands the
+# results it stored for the files beside it to the tasks: they stayed green until
+# the cache was removed. Uncached, the whole tree takes a fraction of a second.
+#
+# The four tasks that only check (lint, format:check, typecheck, lint:deadcode)
+# run `uv run --locked`. A plain `uv run` re-locks when pyproject.toml is ahead of
+# uv.lock: the check would rewrite the lockfile and still pass. With --locked it
+# fails instead and says that the lockfile needs to be updated.
 
 [tasks.lint]
 description = "Lint with ruff"
-run = "uvx ruff check"
+run = "uv run --locked ruff check --config pyproject.toml --no-cache"
 
 [tasks."lint:fix"]
-description = "Lint and auto-fix"
-run = "uvx ruff check --fix"
+description = "Lint and auto-fix. Fails when it changed a file (the fixes are listed): look at the change, keep it, run again."
+run = "uv run ruff check --config pyproject.toml --no-cache --fix --show-fixes --exit-non-zero-on-fix"
 
 [tasks.format]
-description = "Format with ruff"
-run = "uvx ruff format"
+description = "Format with ruff. Fails when it rewrote a file: look at the change, keep it, run again."
+run = "uv run ruff format --config pyproject.toml --no-cache --exit-non-zero-on-format"
 
 [tasks."format:check"]
 description = "Check formatting"
-run = "uvx ruff format --check"
+run = "uv run --locked ruff format --config pyproject.toml --no-cache --check"
 
 [tasks.typecheck]
 description = "Type check with ty"
-run = "uv run ty check"
+run = "uv run --locked ty check"
 
 [tasks."lint:deadcode"]
-description = "Dead-code detection with vulture (#282, cairn MVG gate #6): unused functions/classes/methods ruff F cannot see. Config + allowlist in pyproject.toml / .vulture_allowlist.py."
-run = "uv run vulture"
+description = "Dead code with vulture at min_confidence 80 (#282, cairn MVG gate #6): unreachable code, and imports and function arguments it is sure are unused. Unused functions, classes, methods and variables are rated 60 and are NOT reported. Settings in pyproject.toml, intentional keeps in .vulture_allowlist.py."
+run = "uv run --locked vulture"
 
+# --cov-config names the file that holds the coverage settings. Without it coverage.py
+# reads the file a COVERAGE_RCFILE variable names, when one is set, and that file's
+# source and omit lists would decide what the floor measures.
 [tasks.test]
 description = "Run tests with pytest (coverage floor enforced; use `uv run pytest --no-cov` for focused runs)"
-run = "uv run pytest --cov=src --cov-branch --cov-fail-under=72 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
+run = "uv run pytest --junit-xml=test-reports/junit.xml --cov=src --cov-config=pyproject.toml --cov-branch --cov-fail-under=89 --cov-report=term-missing:skip-covered --cov-report=lcov:coverage/lcov.info --cov-report=json:coverage/coverage.json"
 
 # SECURITY
 
 [tasks."security:bandit"]
 description = "Run Bandit"
-run = "uvx bandit[toml] -c pyproject.toml -r . --severity-level=high"
+run = "uv run bandit -c pyproject.toml -r . --severity-level=high"
 
 [tasks."security:image"]
 description = "Scan container image with trivy"
@@ -75,6 +91,7 @@ run = [
     { task = "lint:fix" },
     { task = "format" },
     { task = "typecheck" },
+    { task = "lint:deadcode" },
     { task = "test" },
 ]
 
@@ -98,24 +115,25 @@ run = [
 description = "Stop DynamoDB Local (all data is ephemeral)"
 run = "docker compose down"
 
+# The two scans switch the pager of AWS CLI v2 off with an empty AWS_PAGER, not with
+# --no-cli-pager: AWS CLI v1 rejects that flag, and the tasks then reported no events.
+
 [tasks."local:events"]
 description = "Query progress events from DynamoDB Local"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output table 2>/dev/null || echo "No events found (is DynamoDB Local running?)"
 """
 
 [tasks."local:events:json"]
 description = "Query progress events from DynamoDB Local (JSON)"
 run = """
-aws dynamodb scan \
+AWS_PAGER='' aws dynamodb scan \
   --table-name TaskEventsTable \
   --endpoint-url http://localhost:8000 \
   --region us-east-1 \
-  --no-cli-pager \
   --output json 2>/dev/null || echo "{}"
 """

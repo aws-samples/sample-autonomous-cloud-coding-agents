@@ -24,6 +24,7 @@ jest.mock('../../../src/handlers/shared/jira-oauth-resolver', () => ({
 
 import {
   buildAdfDocument,
+  parseMarkdownBlocks,
   parseMarkdownRuns,
   postIssueComment,
   postIssueCommentAdf,
@@ -285,6 +286,69 @@ describe('jira-feedback: transitionIssueState', () => {
       { allowRegression: true },
     )).resolves.toBe(true);
   });
+
+  /** The issue read: a status of the in-progress band and the statuses it can move to. */
+  function snapshotResponse(current: string, destinations: Record<string, string>): Response {
+    return {
+      ...mockResponse(200),
+      text: async () => JSON.stringify({
+        fields: { status: { name: current, statusCategory: { key: 'indeterminate' } } },
+        transitions: Object.entries(destinations).map(([id, name]) => ({
+          id,
+          hasScreen: false,
+          to: { name, statusCategory: { key: name === 'Done' ? 'done' : 'indeterminate' } },
+        })),
+      }),
+    } as Response;
+  }
+
+  test('leaves an issue that is already In Review there instead of taking the rework transition', async () => {
+    // From In Review the workflow offers In Progress (rework) and Done. The
+    // last rung of the review ladder is 'in progress': taking it moves the card back.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Review', { 11: 'In Progress', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // the read, no transition
+  });
+
+  test('leaves an epic that is already In Progress there when it is re-opened', async () => {
+    // 'in progress' is not offered from In Progress, and the category fallback
+    // would take the first other status of the band: In Review.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 21: 'In Review', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-1', 'started', {}, { allowRegression: true }))
+      .resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('moves an In Progress issue up the ladder to In Review', async () => {
+    // On Hold is offered first; the review status is taken by its name.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 11: 'On Hold', 21: 'In Review', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(true);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string))
+      .toEqual({ transition: { id: '21' } });
+  });
+
+  test('leaves an In Progress issue there when the board has no review status', async () => {
+    // Without a review status the category fallback would take On Hold.
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(snapshotResponse('In Progress', { 31: 'On Hold', 41: 'Done' }))
+      .mockResolvedValue(mockResponse(204));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(transitionIssueState(CTX, 'ENG-7', 'in_review')).resolves.toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('jira-feedback: 401 → forced refresh → retry (issue #370)', () => {
@@ -401,6 +465,76 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     ]);
   });
 
+  test('renders a whole-line italic as emphasis instead of literal underscores', () => {
+    // The liveness line of the iteration heartbeat and the footer of the epic panel.
+    expect(parseMarkdownRuns('_3m elapsed · running build_')).toEqual([
+      { text: '3m elapsed · running build', em: true },
+    ]);
+    expect(parseMarkdownRuns(
+      '_One live panel — updates in place as the epic progresses; no comment stream._',
+    )).toEqual([
+      { text: 'One live panel — updates in place as the epic progresses; no comment stream.', em: true },
+    ]);
+  });
+
+  test('keeps a code run inside an italic line free of emphasis (ADF allows code only with a link)', () => {
+    expect(parseMarkdownRuns('_3m elapsed · running `mise run build`_')).toEqual([
+      { text: '3m elapsed · running ', em: true },
+      { text: 'mise run build', code: true },
+    ]);
+  });
+
+  test('keeps a code run inside a bold run free of the strong mark (ADF allows code only with a link)', () => {
+    // A text node that is both code and bold is not valid ADF, and one such
+    // node makes the whole comment invalid. The agent's own text writes this.
+    expect(parseMarkdownRuns('**Run `npm test` first**')).toEqual([
+      { text: 'Run ', strong: true },
+      { text: 'npm test', code: true },
+      { text: ' first', strong: true },
+    ]);
+    expect(parseMarkdownRuns('_**`npm test`** fails_')).toEqual([
+      { text: 'npm test', code: true },
+      { text: ' fails', em: true },
+    ]);
+  });
+
+  test.each([
+    // The agent quotes code outside backticks: an operator, not emphasis.
+    'x ** 2 + y ** 2 is the squared distance.',
+    'Pass **kwargs and **options through to the constructor.',
+    'Call f(**a) and then g(**b).',
+    'The delay is 2**(attempt-1) seconds, at most 2**(max-1).',
+    // A pair with white space behind it, beside one that has none.
+    'Use ** as the power operator, as in 2**n.',
+    // A run of asterisks is a masked value, not an empty bold span.
+    'Set DB_PASSWORD=******** in .env and restart.',
+    'NPM_TOKEN=*** and GH_TOKEN=*** are masked in the log.',
+  ])('leaves as typed the asterisk pairs that Markdown does not read as bold: %s', (line) => {
+    expect(parseMarkdownRuns(line)).toEqual([{ text: line }]);
+  });
+
+  test('keeps bold at both ends of a line, beside punctuation, inside a word and beside another script', () => {
+    expect(parseMarkdownRuns('**Note:** the queue (**already**) retries **twice**')).toEqual([
+      { text: 'Note:', strong: true },
+      { text: ' the queue (' },
+      { text: 'already', strong: true },
+      { text: ') retries ' },
+      { text: 'twice', strong: true },
+    ]);
+    // Three pairs: the first two are bold, the third has nothing to close it.
+    expect(parseMarkdownRuns('**a**b and **c')).toEqual([{ text: 'a', strong: true }, { text: 'b and **c' }]);
+    // Inside a word: a word on the outer side of a pair does not make it an operator.
+    expect(parseMarkdownRuns('a**b**c')).toEqual([{ text: 'a' }, { text: 'b', strong: true }, { text: 'c' }]);
+    // A letter that is not ASCII is not punctuation: a word may follow the pair.
+    expect(parseMarkdownRuns('**変更**3件')).toEqual([{ text: '変更', strong: true }, { text: '3件' }]);
+  });
+
+  test('leaves underscores that do not wrap the whole line alone', () => {
+    expect(parseMarkdownRuns('fix user_id and task_id')).toEqual([{ text: 'fix user_id and task_id' }]);
+    expect(parseMarkdownRuns('_private stays as typed')).toEqual([{ text: '_private stays as typed' }]);
+    expect(parseMarkdownRuns('__')).toEqual([{ text: '__' }]);
+  });
+
   test('maps each paragraph to an ADF paragraph node, preserving order', () => {
     const doc = buildAdfDocument([
       [{ text: 'header', strong: true }],
@@ -460,6 +594,64 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
       text: 'link',
       marks: [{ type: 'strong' }, { type: 'link', attrs: { href: 'https://x.example/pull/1' } }],
     });
+  });
+
+  test('a code block becomes one codeBlock node: its text keeps the line breaks and carries no marks', () => {
+    const doc = buildAdfDocument([[{ text: 'Run:' }], { code: 'npm ci\n  npm test' }]);
+    expect(doc.content).toEqual([
+      { type: 'paragraph', content: [{ type: 'text', text: 'Run:' }] },
+      { type: 'codeBlock', content: [{ type: 'text', text: 'npm ci\n  npm test' }] },
+    ]);
+  });
+});
+
+describe('jira-feedback: parseMarkdownBlocks (Markdown the agent wrote)', () => {
+  test('turns the lines between two fences into one code block and every other line into a paragraph', () => {
+    expect(parseMarkdownBlocks(
+      'Run **this**:\r\n```bash\r\nnpm ci\r\n\r\n  npm test\r\n```\r\n\r\nThen `push`.',
+    )).toEqual([
+      [{ text: 'Run ' }, { text: 'this', strong: true }, { text: ':' }],
+      // Inside the block nothing is Markdown, and a blank line stays a line.
+      { code: 'npm ci\n\n  npm test' },
+      [],
+      [{ text: 'Then ' }, { text: 'push', code: true }, { text: '.' }],
+    ]);
+  });
+
+  test('a fence that never closes runs to the end of the text', () => {
+    // The agent's text is cut at a length limit, which can fall inside a block.
+    expect(parseMarkdownBlocks('See:\n```\nconst a = 1;\n**not bold**')).toEqual([
+      [{ text: 'See:' }],
+      { code: 'const a = 1;\n**not bold**' },
+    ]);
+  });
+
+  test('leaves out a block without text: an ADF text node cannot be empty', () => {
+    expect(parseMarkdownBlocks('before\n```\n```\nafter\n```')).toEqual([
+      [{ text: 'before' }],
+      [{ text: 'after' }],
+    ]);
+  });
+
+  test('reads a line with more backticks after its fence as inline code, not as a fence', () => {
+    // As a fence it would open a block and swallow the rest of the answer.
+    expect(parseMarkdownBlocks('```npm test```\nand more')).toEqual([
+      [{ text: 'npm test', code: true }],
+      [{ text: 'and more' }],
+    ]);
+  });
+
+  test('leaves a link or an image as typed, also inside bold and in an italic line', () => {
+    // parseMarkdownRuns makes Jira links of these: that is for ABCA's own text.
+    expect(parseMarkdownBlocks([
+      'See [the runbook](https://example.com/runbook) and ![shot](https://example.com/s.png).',
+      '**[docs](https://example.com/a)**',
+      '_see [docs](https://example.com/a)_',
+    ].join('\n'))).toEqual([
+      [{ text: 'See [the runbook](https://example.com/runbook) and ![shot](https://example.com/s.png).' }],
+      [{ text: '[docs](https://example.com/a)', strong: true }],
+      [{ text: 'see [docs](https://example.com/a)', em: true }],
+    ]);
   });
 });
 
@@ -627,6 +819,38 @@ describe('jira-feedback: updateIssueComment', () => {
     expect((fetchMock.mock.calls[1][1].headers as Record<string, string>).Authorization)
       .toBe('Bearer fresh');
     expect(resolveJiraOauthTokenMock.mock.calls[1][2]).toEqual({ forceRefresh: true });
+  });
+
+  test('the retry after a forced refresh is still an update of the same comment', async () => {
+    resolveJiraOauthTokenMock
+      .mockReset()
+      .mockResolvedValueOnce({ accessToken: 'stale', scope: '', siteUrl: '', oauthSecretArn: 'x' })
+      .mockResolvedValueOnce({ accessToken: 'fresh', scope: '', siteUrl: '', oauthSecretArn: 'x' });
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(mockResponse(401))
+      .mockResolvedValueOnce(mockResponse(200));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueCommentAdf(CTX, 'ENG-42', '10001', buildAdfDocument([])))
+      .resolves.toEqual({ ok: true });
+
+    const commentUrl = 'https://api.atlassian.com/ex/jira/cloud-uuid-1/rest/api/3/issue/ENG-42/comment/10001';
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, (init as RequestInit).method])).toEqual([
+      [commentUrl, 'PUT'],
+      [commentUrl, 'PUT'],
+    ]);
+  });
+
+  test('an update whose forced refresh returns the same token gives up after one PUT', async () => {
+    // The default resolver mock hands back the same token for the forced refresh.
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(401));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(updateIssueCommentAdf(CTX, 'ENG-42', '10001', buildAdfDocument([])))
+      .resolves.toEqual({ ok: false, retryable: false });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(resolveJiraOauthTokenMock).toHaveBeenCalledTimes(2);
   });
 
   test('returns false for a missing comment and never throws on a resolver failure', async () => {

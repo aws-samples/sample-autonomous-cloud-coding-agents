@@ -34,71 +34,35 @@
  */
 
 import { promises as dns } from 'dns';
+import type { IncomingHttpHeaders } from 'http';
 import * as https from 'https';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { screenImage, screenTextFile, AttachmentScreeningError, type ScreeningConfig } from './attachment-screening';
 import { AttachmentResolutionError } from './context-hydration';
 import { estimateImageTokensFromBuffer } from './image-tokens';
 import { logger } from './logger';
+import { ATTACHMENT_OBJECT_KEY_PREFIX } from './storage-names';
 import { createAttachmentRecord, type AttachmentRecord } from './types';
-import { isAllowedMimeType, validateMagicBytes } from './validation';
-import { ATTACHMENT_OBJECT_KEY_PREFIX } from '../../constructs/attachments-bucket';
+import { isAllowedMimeType, isPrivateIp, MAX_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_ATTACHMENT_SIZE_BYTES, validateMagicBytes } from './validation';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const URL_FETCH_TIMEOUT_MS = 10_000;
-const MAX_FETCH_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+/**
+ * Time for all URL attachments of one task together. The hosts behind the URLs
+ * decide how long each request takes, and the orchestrator function that waits
+ * for them has 60 s for its whole invocation (ORCHESTRATOR_TIMEOUT_SECONDS).
+ */
+const URL_RESOLUTION_BUDGET_MS = 30_000;
 const MAX_REDIRECTS = 2;
-
-/** RFC 1918 172.16.0.0/12 — second-octet bounds (inclusive). */
-const RFC1918_172_SECOND_OCTET_MIN = 16;
-const RFC1918_172_SECOND_OCTET_MAX = 31;
-
-/** RFC 6598 100.64.0.0/10 (CGN) — second-octet bounds (inclusive). */
-const RFC6598_CGN_SECOND_OCTET_MIN = 64;
-const RFC6598_CGN_SECOND_OCTET_MAX = 127;
 
 /** Inclusive lower bound for HTTP redirect status codes (3xx). */
 const HTTP_REDIRECT_STATUS_MIN = 300;
 
 /** Exclusive upper bound for HTTP redirect status codes (first non-3xx). */
 const HTTP_REDIRECT_STATUS_MAX = 400;
-
-/** RFC 1918 + link-local + loopback + CGN + IPv6 equivalents + IPv4-mapped IPv6. */
-const PRIVATE_IP_RANGES = [
-  // IPv4
-  { prefix: '10.', mask: null },
-  {
-    prefix: '172.',
-    mask: (ip: string) => {
-      const second = parseInt(ip.split('.')[1], 10);
-      return second >= RFC1918_172_SECOND_OCTET_MIN && second <= RFC1918_172_SECOND_OCTET_MAX;
-    },
-  },
-  { prefix: '192.168.', mask: null },
-  { prefix: '169.254.', mask: null },
-  { prefix: '127.', mask: null },
-  { prefix: '0.', mask: null },
-  {
-    prefix: '100.',
-    mask: (ip: string) => {
-      const second = parseInt(ip.split('.')[1], 10);
-      return second >= RFC6598_CGN_SECOND_OCTET_MIN && second <= RFC6598_CGN_SECOND_OCTET_MAX; // 100.64.0.0/10 (RFC 6598)
-    },
-  },
-  // IPv6
-  { prefix: '::1', mask: null },
-  { prefix: '::', mask: (ip: string) => ip === '::' }, // Unspecified address (could route to localhost)
-  { prefix: 'fc', mask: null },
-  { prefix: 'fd', mask: null },
-  { prefix: 'fe80:', mask: null },
-  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — prevents SSRF bypass
-  // by attackers returning mapped addresses from DNS that embed private IPv4.
-  { prefix: '::ffff:', mask: null },
-  { prefix: '0:0:0:0:0:ffff:', mask: null },
-] as const;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -112,29 +76,16 @@ export interface ResolveUrlAttachmentsOptions {
   readonly githubInstallationDomain?: string;
 }
 
+/** What ssrfSafeFetch reads of one HTTP answer. */
+interface PinnedResponse {
+  readonly status: number;
+  readonly headers: IncomingHttpHeaders;
+  readonly body: Buffer;
+}
+
 // ---------------------------------------------------------------------------
 // SSRF protection
 // ---------------------------------------------------------------------------
-
-/**
- * Check if an IP address belongs to a private/internal range.
- * Returns a reason string if private, undefined if public.
- */
-export function isPrivateIp(ip: string): string | undefined {
-  const normalized = ip.toLowerCase();
-
-  for (const range of PRIVATE_IP_RANGES) {
-    if (typeof range.mask === 'function') {
-      if (normalized.startsWith(range.prefix) && range.mask(normalized)) {
-        return `IP ${ip} is in private range (${range.prefix}x)`;
-      }
-    } else if (normalized.startsWith(range.prefix) || normalized === range.prefix) {
-      return `IP ${ip} is in private/reserved range`;
-    }
-  }
-
-  return undefined;
-}
 
 /**
  * Resolve DNS and validate the resolved IP is not in a private range.
@@ -216,14 +167,16 @@ function buildPinnedUrl(originalUrl: URL, resolvedIp: string): URL {
  * uses the URL hostname for SNI — when connecting to a resolved IP, the
  * certificate check fails unless servername is overridden.
  *
- * Returns a standard Response object for compatibility with the existing code.
+ * Returns the status, headers and body as received, not a fetch Response: that
+ * constructor throws for 204, 205, 304 and any status outside 200-599, and a
+ * throw inside the 'end' listener is an uncaught exception, not a rejection.
  */
 async function pinnedHttpsRequest(
   pinnedUrl: URL,
   originalHostname: string,
   options: { headers: Record<string, string>; signal: AbortSignal },
-): Promise<Response> {
-  return new Promise<Response>((resolve, reject) => {
+): Promise<PinnedResponse> {
+  return new Promise<PinnedResponse>((resolve, reject) => {
     const hostname = pinnedUrl.hostname.replace(/^\[|\]$/g, ''); // strip IPv6 brackets
     const port = Number(pinnedUrl.port || '443');
 
@@ -245,25 +198,16 @@ async function pinnedHttpsRequest(
         let totalBytes = 0;
         res.on('data', (chunk: Buffer) => {
           totalBytes += chunk.length;
-          if (totalBytes > MAX_FETCH_SIZE_BYTES) {
+          if (totalBytes > MAX_ATTACHMENT_SIZE_BYTES) {
             res.destroy();
             agent.destroy();
-            reject(new Error(`Response exceeds ${MAX_FETCH_SIZE_BYTES} byte size limit`));
+            reject(new Error(`Response exceeds ${MAX_ATTACHMENT_SIZE_BYTES} byte size limit`));
             return;
           }
           chunks.push(chunk);
         });
         res.on('end', () => {
-          const body = Buffer.concat(chunks);
-          const responseHeaders = new Headers();
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (value) responseHeaders.set(key, Array.isArray(value) ? value[0] : value);
-          }
-          resolve(new Response(body, {
-            status: res.statusCode ?? 500,
-            statusText: res.statusMessage,
-            headers: responseHeaders,
-          }));
+          resolve({ status: res.statusCode ?? 500, headers: res.headers, body: Buffer.concat(chunks) });
           agent.destroy();
         });
         res.on('error', (err) => {
@@ -297,9 +241,13 @@ async function pinnedHttpsRequest(
  * DNS pinning: we resolve the hostname, validate the IP is public, then
  * rewrite the fetch URL to connect directly to that IP (with the original
  * Host header for TLS SNI). This closes the DNS rebinding TOCTOU window.
+ *
+ * `deadline` (epoch ms) ends the time for all URL attachments of the task:
+ * no request starts after it and none runs past it.
  */
 async function ssrfSafeFetch(
   url: string,
+  deadline: number,
   options?: { githubToken?: string; githubInstallationDomain?: string },
 ): Promise<{ content: Buffer; finalContentType: string }> {
   const parsedUrl = new URL(url);
@@ -329,12 +277,18 @@ async function ssrfSafeFetch(
   let currentUrl = url;
   let currentHostname = parsedUrl.hostname;
   let redirectCount = 0;
-  let response: Response;
+  let response: PinnedResponse;
+  const outOfTime = `URL attachments could not be fetched and screened within ${URL_RESOLUTION_BUDGET_MS / 1000}s (stopped at ${url}).`;
 
   // Fetch with redirect following (re-validate each redirect target)
   while (true) {
+    // A request gets the time left until the deadline, at most URL_FETCH_TIMEOUT_MS.
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new AttachmentResolutionError(outOfTime);
+    }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), Math.min(URL_FETCH_TIMEOUT_MS, remainingMs));
 
     try {
       // Use pinnedHttpsRequest with proper TLS servername for DNS pinning.
@@ -346,7 +300,9 @@ async function ssrfSafeFetch(
     } catch (err: any) {
       if (err.name === 'AbortError') {
         throw new AttachmentResolutionError(
-          `URL attachment fetch timed out after ${URL_FETCH_TIMEOUT_MS / 1000}s: ${url}`,
+          remainingMs < URL_FETCH_TIMEOUT_MS
+            ? outOfTime
+            : `URL attachment fetch timed out after ${URL_FETCH_TIMEOUT_MS / 1000}s: ${url}`,
         );
       }
       throw new AttachmentResolutionError(
@@ -359,7 +315,7 @@ async function ssrfSafeFetch(
 
     // Handle redirects
     if (response.status >= HTTP_REDIRECT_STATUS_MIN && response.status < HTTP_REDIRECT_STATUS_MAX) {
-      const location = response.headers.get('location');
+      const location = response.headers.location;
       if (!location) {
         throw new AttachmentResolutionError(
           `URL attachment redirect (${response.status}) had no Location header.`,
@@ -398,40 +354,24 @@ async function ssrfSafeFetch(
     break;
   }
 
-  if (!response!.ok) {
+  // 3xx was handled in the loop: any other status outside 2xx is a failed fetch.
+  if (response.status < 200 || response.status >= HTTP_REDIRECT_STATUS_MIN) {
     throw new AttachmentResolutionError(
-      `URL attachment fetch failed with status ${response!.status}: ${url}`,
+      `URL attachment fetch failed with status ${response.status}: ${url}`,
     );
   }
 
-  // Stream response with size limit enforcement
-  const contentType = response!.headers.get('content-type') ?? 'application/octet-stream';
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-
-  const reader = response!.body?.getReader();
-  if (!reader) {
+  if (response.body.length === 0) {
     throw new AttachmentResolutionError(
-      `URL attachment response has no body: ${url}`,
+      `URL attachment response has no body (status ${response.status}): ${url}`,
     );
   }
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    totalBytes += value.length;
-    if (totalBytes > MAX_FETCH_SIZE_BYTES) {
-      await reader.cancel();
-      throw new AttachmentResolutionError(
-        `URL attachment exceeds ${MAX_FETCH_SIZE_BYTES / (1024 * 1024)} MB size limit: ${url}`,
-      );
-    }
-    chunks.push(Buffer.from(value));
-  }
+  // The size limit was enforced while the body was read (pinnedHttpsRequest).
+  const contentType = response.headers['content-type'] || 'application/octet-stream';
 
   return {
-    content: Buffer.concat(chunks),
+    content: response.body,
     finalContentType: contentType.split(';')[0].trim(),
   };
 }
@@ -477,6 +417,11 @@ export async function resolveUrlAttachments(
   });
 
   const resolved = new Map<string, AttachmentRecord>();
+  const deadline = Date.now() + URL_RESOLUTION_BUDGET_MS;
+
+  // The task-wide size limit counts what the task already holds (inline, uploaded,
+  // pre-screened) and every URL attachment as it is fetched: a link has no size before.
+  let totalBytes = attachments.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);
 
   for (const att of pendingUrls) {
     if (!att.source_url) {
@@ -486,7 +431,7 @@ export async function resolveUrlAttachments(
     }
 
     // Fetch with SSRF protection
-    const { content, finalContentType } = await ssrfSafeFetch(att.source_url, {
+    const { content, finalContentType } = await ssrfSafeFetch(att.source_url, deadline, {
       githubToken: options.githubToken,
     });
 
@@ -496,6 +441,13 @@ export async function resolveUrlAttachments(
       size_bytes: content.length,
       content_type: finalContentType,
     });
+
+    totalBytes += content.length;
+    if (totalBytes > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+      throw new AttachmentResolutionError(
+        `Combined attachment size exceeds the ${MAX_TOTAL_ATTACHMENT_SIZE_BYTES}-byte task limit.`,
+      );
+    }
 
     // Determine actual content type from the HTTP response (preferred over any placeholder
     // set during validation). If the user explicitly declared a content_type on the URL

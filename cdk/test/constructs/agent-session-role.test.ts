@@ -18,11 +18,12 @@
  */
 
 import * as bedrock from '@aws-cdk/aws-bedrock-alpha';
-import { App, Stack } from 'aws-cdk-lib';
-import { Template, Match } from 'aws-cdk-lib/assertions';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Template, Match } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import { AwsSolutionsChecks } from 'cdk-nag';
 import { AgentSessionRole } from '../../src/constructs/agent-session-role';
 
 function createStack() {
@@ -278,5 +279,114 @@ describe('AgentSessionRole construct', () => {
       return actions.includes('sts:AssumeRole') && actions.includes('sts:TagSession');
     });
     expect(stsGrant).toBeDefined();
+  });
+});
+
+describe('deferred compute-role binding', () => {
+  function fixture() {
+    const app = new App();
+    const stack = new Stack(app, 'Deferred');
+    const session = new AgentSessionRole(stack, 'Session', {
+      deferComputeRoleBinding: true,
+      taskScopedTables: [],
+      traceArtifactsBucket: new s3.Bucket(stack, 'Traces'),
+      attachmentsBucket: new s3.Bucket(stack, 'Attachments'),
+    });
+    return { app, stack, session };
+  }
+  test('rejects an unbound role before synthesis', () => {
+    const { app } = fixture();
+    expect(() => app.synth()).toThrow(/admitted compute role/);
+  });
+  test('uses the admitted role for initial trust and grants AssumeRole with tags', () => {
+    const { stack, session } = fixture();
+    const role = new iam.Role(stack, 'Selected', { assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com') });
+    session.admitComputeRole(role);
+    session.admitComputeRole(role);
+    const template = Template.fromStack(stack);
+    const trust = Object.entries(template.findResources('AWS::IAM::Role')).find(([id]) => id.startsWith('SessionRole'))![1];
+    expect(JSON.stringify(trust.Properties.AssumeRolePolicyDocument)).toContain('Selected');
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({ Action: ['sts:AssumeRole', 'sts:TagSession'] }),
+        ]),
+      },
+    });
+  });
+});
+
+describe.each([false, true])('session-role IAM audit with concrete environment %p', concreteEnvironment => {
+  function fixture(addUnrelatedWildcards: boolean) {
+    const stack = new Stack(new App(), 'SessionAudit', {
+      ...(concreteEnvironment ? { env: { account: '123456789012', region: 'us-east-1' } } : {}),
+    });
+    Aspects.of(stack).add(new AwsSolutionsChecks());
+    const computeRole = new iam.Role(stack, 'Compute', {
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+    });
+    // Let CDK split the actual model grants during synthesis. Do not create an
+    // overflow policy in the fixture: the late creation caused the regression.
+    const invokableModels = Array.from({ length: 16 }, (_, index) => {
+      const model = new bedrock.BedrockFoundationModel(`anthropic.session-audit-${index}-v1:0`, {
+        supportsCrossRegion: true,
+      });
+      return [model, bedrock.CrossRegionInferenceProfile.fromConfig({
+        geoRegion: bedrock.CrossRegionInferenceProfileRegion.GLOBAL, model,
+      })];
+    }).flat();
+    const session = new AgentSessionRole(stack, 'Session', {
+      assumingRoles: [computeRole],
+      taskScopedTables: [],
+      traceArtifactsBucket: new s3.Bucket(stack, 'Traces'),
+      attachmentsBucket: s3.Bucket.fromBucketArn(stack, 'Attachments', 'arn:aws:s3:::session-audit-attachments'),
+      invokableModels,
+    });
+    if (addUnrelatedWildcards) {
+      session.role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['s3:*'], resources: ['*'],
+      }));
+      session.role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          'arn:aws:bedrock:*::foundation-model/unrelated-*',
+          'arn:*:bedrock:*::foundation-model/unrelated-literal',
+        ],
+      }));
+      session.role.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['s3:GetObject'], resources: ['arn:aws:s3:::session-audit-attachments/attachments/*'],
+      }));
+    }
+    const template = Template.fromStack(stack);
+    const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-IAM5'))
+      .filter(finding => finding.id.includes('/Session/'))
+      .map(finding => String(finding.entry.data));
+    return { template, errors };
+  }
+
+  let clean: ReturnType<typeof fixture>;
+  let unrelated: ReturnType<typeof fixture>;
+  beforeAll(() => {
+    clean = fixture(false);
+    unrelated = fixture(true);
+  });
+
+  test('audits tenant prefixes and explicit model grants through lazy policy overflow', () => {
+    const policies = clean.template.findResources('AWS::IAM::ManagedPolicy');
+    expect(Object.keys(policies).some(id => id.includes('SessionRoleOverflowPolicy'))).toBe(true);
+    expect(clean.errors).toEqual([]);
+  });
+
+  test('still reports wildcard actions, all-resource grants, model patterns and unscoped S3 prefixes', () => {
+    expect(unrelated.errors).toHaveLength(5);
+    for (const finding of [
+      '[Action::s3:*]',
+      '[Resource::*]',
+      '[Resource::arn:aws:bedrock:*::foundation-model/unrelated-*]',
+      '[Resource::arn:*:bedrock:*::foundation-model/unrelated-literal]',
+      '[Resource::arn:aws:s3:::session-audit-attachments/attachments/*]',
+    ]) {
+      expect(unrelated.errors.some(error => error.includes(finding))).toBe(true);
+    }
   });
 });

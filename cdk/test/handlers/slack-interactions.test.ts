@@ -137,6 +137,11 @@ describe('slack-interactions handler', () => {
     const updateCall = ddbSend.mock.calls.find(([cmd]) => cmd._type === 'Update');
     expect(updateCall).toBeTruthy();
     expect(updateCall![0].input.ExpressionAttributeValues[':cancelled']).toBe('CANCELLED');
+    // The row is terminal: it carries completed_at and a status_created_at that matches its status.
+    const { UpdateExpression, ExpressionAttributeValues: values } = updateCall![0].input;
+    expect(UpdateExpression).toContain('completed_at = :now');
+    expect(UpdateExpression).toContain('status_created_at = :sca');
+    expect(values[':sca']).toBe(`CANCELLED#${values[':now']}`);
   });
 
   test('cancel_task rejects when caller is not task owner', async () => {

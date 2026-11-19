@@ -18,6 +18,7 @@
  */
 
 import { GetCommand, QueryCommand, UpdateCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 import { postIssueCommentAdf, updateIssueCommentAdf } from './jira-feedback';
 import { jiraPreviewDocument, updateJiraIterationComment } from './jira-preview';
 import { JiraPreviewBudget } from './jira-preview-budget';
@@ -25,13 +26,23 @@ import { jiraIssueIdentity } from './jira-task-by-issue';
 import { logger } from './logger';
 import { isIntegrationNode } from './orchestration-integration-node';
 import type { TaskRecord } from './types';
-import { JIRA_ISSUE_INDEX_NAME } from '../../constructs/task-table-indexes';
 
 const MAX_LOOKUP_PAGES = 10;
 const LOOKUP_PAGE_SIZE = 25;
 const MAX_CANDIDATE_READS = 25;
 
+/**
+ * Whether a task belongs to the repository of the deployment. Letter case is
+ * not compared, as in the screenshot processor that calls this module: GitHub
+ * answers to any spelling of a name and reports its own, a task has the
+ * spelling of its blueprint.
+ */
+function isTaskOfRepo(task: TaskRecord, repo: string): boolean {
+  return task.repo?.toLowerCase() === repo.toLowerCase();
+}
+
 /** Best-effort Jira delivery, routed exclusively by the authoritative task. */
+// eslint-disable-next-line complexity -- predates the ceiling (52 when it landed); must not grow
 export async function deliverJiraDeploymentPreview(
   ddb: DynamoDBDocumentClient,
   tableName: string,
@@ -48,7 +59,7 @@ export async function deliverJiraDeploymentPreview(
   try {
     const document = jiraPreviewDocument(screenshotUrl, previewUrl);
     if (!document) throw new Error('Jira screenshot URL is not allowed');
-    if (original.repo !== repo) throw new Error('Deployment repository does not match the task');
+    if (!isTaskOfRepo(original, repo)) throw new Error('Deployment repository does not match the task');
     const metadata = original.channel_metadata;
     const cloudId = metadata?.jira_cloud_id;
     const issueKey = metadata?.jira_issue_key;
@@ -88,7 +99,7 @@ export async function deliverJiraDeploymentPreview(
           }), { abortSignal: budget.signal }));
           const current = result.Item as TaskRecord | undefined;
           if (current?.head_sha !== sha || current.code_changed === false || current.channel_source !== 'jira'
-            || current.repo !== repo || current.channel_metadata?.jira_cloud_id !== cloudId
+            || !isTaskOfRepo(current, repo) || current.channel_metadata?.jira_cloud_id !== cloudId
             || current.channel_metadata?.jira_issue_key !== issueKey) continue;
           task = current;
           matched = true;
@@ -139,7 +150,7 @@ export async function deliverJiraDeploymentPreview(
       const commentId = existing.Item?.jira_preview_comment_id;
       if (typeof commentId === 'string') {
         const result = await budget.run(() => updateIssueCommentAdf(ctx, issueKey, commentId, document));
-        if (!result.ok) throw new Error('Jira preview comment update failed');
+        if (!result.ok) throw new Error('Jira preview comment update failed', { cause: error });
       } else {
         logger.warn('Jira preview POST already claimed without a saved comment id', {
           event: 'screenshot.jira_delivery_claimed', task_id: task.task_id,

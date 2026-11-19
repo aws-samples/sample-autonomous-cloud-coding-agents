@@ -106,7 +106,7 @@ export function assertModelIdUsable(args: {
   if (!bare) {
     throw new CliError(
       `--model '${modelId}' is a geography prefix with no model after it. Use `
-      + `'${geo}.<model-id>', e.g. '${geo}.anthropic.claude-opus-5'.`,
+      + `'${geo}.<model-id>', e.g. '${geo}.anthropic.claude-opus-5-5'.`,
     );
   }
   // A second geo prefix on the bare half means the operator prefixed twice; the

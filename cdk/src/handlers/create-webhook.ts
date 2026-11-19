@@ -117,7 +117,13 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
       throw ddbErr;
     }
 
-    logger.info('Webhook created', { webhook_id: webhookId, user_id: userId, request_id: requestId });
+    logger.info('Webhook created', {
+      webhook_id: webhookId,
+      user_id: userId,
+      // Set by the unified authorizer when an API key made the request; absent for a Cognito token.
+      key_id: event.requestContext.authorizer?.keyId,
+      request_id: requestId,
+    });
 
     const response: CreateWebhookResponse = {
       webhook_id: webhookId,

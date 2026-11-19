@@ -214,6 +214,17 @@ describe('startSessionWithRetry — Lambda MicroVM start failures (ADR-021)', ()
     await expect(startSessionWithRetry({ startSession }, {} as never, d)).rejects.toBe(notFound);
     expect(startSession).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['AccessDeniedException', 'UnauthorizedException', 'ValidationException', 'InvalidParameterValueException'])(
+    'does NOT retry a MicroVM %s', async (name) => {
+      const error = new Error(`MicroVM RunMicrovm failed: ${name}: request rejected`);
+      const startSession = jest.fn().mockRejectedValueOnce(error);
+      const { d, emitReasons } = deps();
+      await expect(startSessionWithRetry({ startSession }, {} as never, d)).rejects.toBe(error);
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(emitReasons).toEqual([]);
+    },
+  );
 });
 
 describe('startSessionWithRetry — other backends keep their pre-ADR-021 retry behaviour', () => {

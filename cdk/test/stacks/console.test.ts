@@ -1,0 +1,386 @@
+/**
+ *  MIT No Attribution
+ *
+ *  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy of
+ *  the Software without restriction, including without limitation the rights to
+ *  use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ *  the Software, and to permit persons to whom the Software is furnished to do so.
+ *
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ *  SOFTWARE.
+ */
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { App, Aspects, Stack } from 'aws-cdk-lib';
+import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import { AwsSolutionsChecks } from 'cdk-nag';
+import {
+  CFN_TYPES_WITHOUT_EXEC_ROLE_IAM,
+  collectBootstrapAllowActions,
+  findMissingBootstrapActions,
+  RESOURCE_ACTION_MAP,
+} from '../../src/bootstrap/resource-action-map';
+import { buildApp } from '../../src/main';
+import { OperatorConsoleStack } from '../../src/stacks/console';
+import { FIXTURE, STRUCTURAL_CONTEXT } from '../../src/synthesis/profiles';
+
+const ENV = { account: '123456789012', region: 'us-east-1' };
+const API_URL = 'https://abc123.execute-api.us-east-1.amazonaws.com/v1/';
+
+describe('OperatorConsoleStack', () => {
+  let bundle: string;
+  let stack: OperatorConsoleStack;
+  let template: Template;
+
+  beforeAll(() => {
+    bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html><title>console</title>');
+    mkdirSync(path.join(bundle, 'assets'));
+    writeFileSync(path.join(bundle, 'assets', 'index-abc123.js'), 'console.log(1)');
+
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    const userPool = new cognito.UserPool(platform, 'UserPool');
+    const repoTable = new dynamodb.Table(platform, 'RepoTable', { partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING } });
+    const githubTokenSecret = new secretsmanager.Secret(platform, 'GitHubToken');
+    stack = new OperatorConsoleStack(app, 'backgroundagent-dev-console', {
+      env: ENV,
+      userPool,
+      apiUrl: API_URL,
+      assetDirectory: bundle,
+      additionalOrigins: ['http://localhost:5173'],
+      repoTable,
+      githubTokenSecret,
+      linear: {
+        projectMappingTable: new dynamodb.Table(platform, 'LinearProjects', { partitionKey: { name: 'linear_project_id', type: dynamodb.AttributeType.STRING } }),
+        workspaceRegistryTable: new dynamodb.Table(platform, 'LinearRegistry', { partitionKey: { name: 'linear_workspace_id', type: dynamodb.AttributeType.STRING } }),
+        webhookDedupTable: new dynamodb.Table(platform, 'LinearDedup', { partitionKey: { name: 'dedup_key', type: dynamodb.AttributeType.STRING } }),
+        taskTable: new dynamodb.Table(platform, 'Tasks', { partitionKey: { name: 'task_id', type: dynamodb.AttributeType.STRING } }),
+      },
+    });
+    Aspects.of(stack).add(new AwsSolutionsChecks({ verbose: true }));
+    template = Template.fromStack(stack);
+  });
+
+  afterAll(() => rmSync(bundle, { recursive: true, force: true }));
+
+  test('the bucket is private, encrypted and TLS-only', () => {
+    template.hasResourceProperties('AWS::S3::Bucket', {
+      PublicAccessBlockConfiguration: {
+        BlockPublicAcls: true,
+        BlockPublicPolicy: true,
+        IgnorePublicAcls: true,
+        RestrictPublicBuckets: true,
+      },
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }],
+      },
+    });
+    template.hasResourceProperties('AWS::S3::BucketPolicy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([Match.objectLike({
+          Effect: 'Deny',
+          Condition: { Bool: { 'aws:SecureTransport': 'false' } },
+        })]),
+      },
+    });
+  });
+
+  test('only CloudFront (via OAC) may read the bucket', () => {
+    template.resourceCountIs('AWS::CloudFront::OriginAccessControl', 1);
+    const policies = template.findResources('AWS::S3::BucketPolicy');
+    const allows = Object.values(policies).flatMap((p) =>
+      (p.Properties.PolicyDocument.Statement as Array<{ Effect: string; Principal?: unknown }>)
+        .filter((s) => s.Effect === 'Allow'));
+    for (const statement of allows) {
+      expect(statement.Principal).not.toEqual('*');
+      expect(statement.Principal).not.toEqual({ AWS: '*' });
+    }
+    expect(allows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ Principal: { Service: 'cloudfront.amazonaws.com' } }),
+    ]));
+  });
+
+  test('the distribution forces HTTPS and serves index.html for client-side routes', () => {
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        DefaultRootObject: 'index.html',
+        DefaultCacheBehavior: Match.objectLike({ ViewerProtocolPolicy: 'redirect-to-https' }),
+        CustomErrorResponses: [403, 404].map((code) => ({
+          ErrorCode: code,
+          ResponseCode: 200,
+          ResponsePagePath: '/index.html',
+          ErrorCachingMinTTL: 0,
+        })),
+      }),
+    });
+  });
+
+  test('the app client is public and uses the authorization code flow only', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      GenerateSecret: false,
+      AllowedOAuthFlows: ['code'],
+      AllowedOAuthFlowsUserPoolClient: true,
+      AllowedOAuthScopes: ['openid', 'email', 'profile'],
+      SupportedIdentityProviders: ['COGNITO'],
+      PreventUserExistenceErrors: 'ENABLED',
+      EnableTokenRevocation: true,
+      CallbackURLs: [
+        { 'Fn::Join': ['', ['https://', { 'Fn::GetAtt': [Match.anyValue(), 'DomainName'] }, '/auth/callback']] },
+        'http://localhost:5173/auth/callback',
+      ],
+      LogoutURLs: [
+        { 'Fn::Join': ['', ['https://', { 'Fn::GetAtt': [Match.anyValue(), 'DomainName'] }, '/']] },
+        'http://localhost:5173/',
+      ],
+    });
+    const [client] = Object.values(template.findResources('AWS::Cognito::UserPoolClient'));
+    expect(client.Properties.ExplicitAuthFlows).toBeUndefined();
+    expect(client.Properties.AllowedOAuthFlows).not.toContain('implicit');
+  });
+
+  test('a managed-login domain is created on the platform user pool', () => {
+    template.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
+      Domain: { 'Fn::Join': ['-', ['abca', { Ref: 'AWS::AccountId' }, 'backgroundagent-dev-console']] },
+    });
+  });
+
+  test('ships the bundle in two deployments: immutable assets, then index.html + config.json', () => {
+    const deployments = template.findResources('Custom::CDKBucketDeployment');
+    expect(Object.keys(deployments)).toHaveLength(2);
+    const [assetsId, entryId] = Object.keys(deployments).sort();
+    expect(deployments[assetsId].Properties.SystemMetadata).toEqual({ 'cache-control': 'public, max-age=31536000, immutable' });
+    expect(deployments[entryId].Properties.SystemMetadata).toEqual({ 'cache-control': 'no-cache' });
+    expect(deployments[entryId].Properties.DistributionPaths).toEqual(['/*']);
+    expect(deployments[entryId].DependsOn).toEqual(expect.arrayContaining([expect.stringMatching(/^Assets/)]));
+  });
+
+  test('adds a console API whose issue route requires a Cognito token', () => {
+    template.resourceCountIs('AWS::ApiGateway::RestApi', 1);
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'GET',
+      AuthorizationType: 'COGNITO_USER_POOLS',
+      AuthorizerId: Match.anyValue(),
+      RequestParameters: { 'method.request.path.repo_id': true },
+    });
+    template.hasResourceProperties('AWS::ApiGateway::Authorizer', { Type: 'COGNITO_USER_POOLS' });
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method'));
+    for (const method of methods) {
+      if (method.Properties.HttpMethod !== 'OPTIONS') expect(method.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
+    }
+  });
+
+  test('the console API allows only the console\'s own origins, not "*"', () => {
+    const preflights = Object.values(template.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } }));
+    expect(preflights.length).toBeGreaterThan(0);
+    const rendered = JSON.stringify(preflights);
+    expect(rendered).toContain('http://localhost:5173');
+    expect(rendered).not.toContain("'*'");
+  });
+
+  test('the issue function reads the repo table and the token secret, nothing broader', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: { REPO_TABLE_NAME: Match.anyValue(), GITHUB_TOKEN_SECRET_ARN: Match.anyValue() } },
+    });
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ListRepoIssuesFn'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[] }>)
+      .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    expect(statements.length).toBeGreaterThan(0);
+    expect(statements.filter((a) => /^dynamodb:(Put|Update|Delete|BatchWrite)/.test(a))).toEqual([]);
+    expect(statements).toContain('secretsmanager:GetSecretValue');
+  });
+
+  test('tells the bundle where the console API is', () => {
+    const entry = Object.values(template.findResources('Custom::CDKBucketDeployment'))
+      .find((d) => (d.Properties.SystemMetadata as Record<string, string>)['cache-control'] === 'no-cache');
+    // config.json's keys live in the asset; its token values (here the console API URL) are markers.
+    expect(JSON.stringify(entry?.Properties.SourceMarkers)).toMatch(/"Ref":"ConsoleApi[0-9A-F]+"/);
+  });
+
+  test('adds the Linear routes behind the same Cognito authorizer', () => {
+    const resources = Object.values(template.findResources('AWS::ApiGateway::Resource')).map((r) => r.Properties.PathPart);
+    expect(resources).toEqual(expect.arrayContaining(['linear-issues', 'start', '{issue_id}']));
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).filter((m) => m.Properties.HttpMethod !== 'OPTIONS');
+    expect(methods.map((m) => m.Properties.HttpMethod).sort()).toEqual(['GET', 'GET', 'POST']);
+    for (const m of methods) expect(m.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
+  });
+
+  test('the Linear function has enough memory to start', () => {
+    // At the 128 MB default it ran out of memory during init in a live deploy.
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ LINEAR_WEBHOOK_DEDUP_TABLE_NAME: Match.anyValue() }) },
+      MemorySize: 512,
+    });
+  });
+
+  test('the Linear function gets only what it uses', () => {
+    const statements = Object.values(template.findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ConsoleLinearFn'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>);
+    const actions = statements.flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]));
+    // Task table: Query on the Linear-issue index only; no reads of task rows themselves.
+    const query = statements.find((st) => st.Action === 'dynamodb:Query');
+    expect(JSON.stringify(query?.Resource)).toContain('/index/LinearIssueIndex');
+    // Start claims: put and delete, no general writes.
+    expect(actions).toEqual(expect.arrayContaining(['dynamodb:PutItem', 'dynamodb:DeleteItem', 'secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue']));
+    expect(actions.filter((a) => /UpdateItem|BatchWriteItem/.test(a))).toEqual([]);
+    expect(JSON.stringify(statements)).toContain('bgagent-linear-oauth-*');
+  });
+
+  test('the console API allows POST for Start', () => {
+    const preflights = JSON.stringify(Object.values(template.findResources('AWS::ApiGateway::Method', { Properties: { HttpMethod: 'OPTIONS' } })));
+    expect(preflights).toContain('GET,POST,OPTIONS');
+  });
+
+  test('outputs the console URL', () => {
+    template.hasOutput('ConsoleUrl', {
+      Value: { 'Fn::Join': ['', ['https://', { 'Fn::GetAtt': [Match.anyValue(), 'DomainName'] }, '/']] },
+    });
+  });
+
+  test('has no unsuppressed cdk-nag errors', () => {
+    const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-.*'));
+    expect(errors).toEqual([]);
+  });
+
+  test('every resource type is mapped and granted by the bootstrap bundle', () => {
+    const types = new Set(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).map((r) => r.Type));
+    const allowed = collectBootstrapAllowActions();
+    for (const type of types) {
+      if (CFN_TYPES_WITHOUT_EXEC_ROLE_IAM.has(type)) continue;
+      expect({ type, mapped: type in RESOURCE_ACTION_MAP }).toEqual({ type, mapped: true });
+      expect({ type, missing: findMissingBootstrapActions(type, allowed) }).toEqual({ type, missing: [] });
+    }
+  });
+
+  test('fails with guidance when the bundle has not been built', () => {
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    expect(() => new OperatorConsoleStack(app, 'missing', {
+      env: ENV,
+      userPool: new cognito.UserPool(platform, 'UserPool'),
+      apiUrl: API_URL,
+      assetDirectory: path.join(bundle, 'does-not-exist'),
+    })).toThrow(/mise \/\/web:bundle.*operatorConsole=true/s);
+  });
+});
+
+describe('OperatorConsoleStack per-repository GitHub tokens', () => {
+  test('the issue function may read each repository\'s own token secret, once each', () => {
+    const bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html>');
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    const repoToken = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:acme-service-token-AbCdEf';
+    const stack = new OperatorConsoleStack(app, 'repo-token-console', {
+      env: ENV,
+      userPool: new cognito.UserPool(platform, 'UserPool'),
+      apiUrl: API_URL,
+      assetDirectory: bundle,
+      repoTable: new dynamodb.Table(platform, 'Repos', { partitionKey: { name: 'repo', type: dynamodb.AttributeType.STRING } }),
+      githubTokenSecret: new secretsmanager.Secret(platform, 'GitHubToken'),
+      repoGithubTokenSecretArns: [repoToken, repoToken],
+    });
+    const resources = Object.values(Template.fromStack(stack).findResources('AWS::IAM::Policy'))
+      .filter((p) => JSON.stringify(p.Properties.Roles).includes('ListRepoIssuesFn'))
+      .flatMap((p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string | string[]; Resource: unknown }>)
+      .filter((st) => [st.Action].flat().includes('secretsmanager:GetSecretValue'))
+      .flatMap((st) => [st.Resource].flat());
+    expect(resources.filter((r) => r === repoToken)).toHaveLength(1);
+    rmSync(bundle, { recursive: true, force: true });
+  });
+});
+
+describe('OperatorConsoleStack Linear identity vault wiring', () => {
+  test('mints Linear tokens through the identity vault when the platform has one', () => {
+    const bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html>');
+    const app = new App();
+    const platform = new Stack(app, 'platform', { env: ENV });
+    const table = (id: string, key: string) => new dynamodb.Table(platform, id, { partitionKey: { name: key, type: dynamodb.AttributeType.STRING } });
+    const granted: unknown[] = [];
+    const identityVault = { workloadName: 'abca-linear', grantMintToken: (grantee: unknown) => granted.push(grantee) } as never;
+    const stack = new OperatorConsoleStack(app, 'vault-console', {
+      env: ENV,
+      userPool: new cognito.UserPool(platform, 'UserPool'),
+      apiUrl: API_URL,
+      assetDirectory: bundle,
+      repoTable: table('Repos', 'repo'),
+      githubTokenSecret: new secretsmanager.Secret(platform, 'GitHubToken'),
+      linear: {
+        projectMappingTable: table('LinearProjects', 'linear_project_id'),
+        workspaceRegistryTable: table('LinearRegistry', 'linear_workspace_id'),
+        webhookDedupTable: table('LinearDedup', 'dedup_key'),
+        taskTable: table('Tasks', 'task_id'),
+        identityVault,
+      },
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ LINEAR_VAULT_ENABLED: 'true', LINEAR_WORKLOAD_IDENTITY_NAME: 'abca-linear' }) },
+    });
+    expect(granted).toHaveLength(1);
+    rmSync(bundle, { recursive: true, force: true });
+  });
+});
+
+describe('buildApp operator console wiring', () => {
+  let bundle: string;
+  const outdirs: string[] = [];
+
+  beforeAll(() => {
+    bundle = mkdtempSync(path.join(tmpdir(), 'console-bundle-'));
+    writeFileSync(path.join(bundle, 'index.html'), '<!doctype html>');
+  });
+
+  afterAll(() => {
+    for (const dir of [bundle, ...outdirs]) rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function synthesize(context: Record<string, unknown>): Promise<App> {
+    const outdir = mkdtempSync(path.join(tmpdir(), 'console-app-'));
+    outdirs.push(outdir);
+    return buildApp({
+      account: FIXTURE.account,
+      region: FIXTURE.region,
+      describeAzs: async () => [...FIXTURE.zones],
+      resolveCallerAccount: async () => FIXTURE.account,
+      operatorConsoleAssetDirectory: bundle,
+      appProps: {
+        outdir,
+        autoSynth: false,
+        context: { stackName: 'backgroundagent-dev', ...context },
+        postCliContext: STRUCTURAL_CONTEXT,
+      },
+    });
+  }
+
+  test('is off by default, so a bare `cdk deploy` still sees a single stack', async () => {
+    const app = await synthesize({});
+    expect(app.node.tryFindChild('backgroundagent-dev-console')).toBeUndefined();
+  });
+
+  test('-c operatorConsole=true adds the console stack, wired to the platform user pool and API', async () => {
+    const app = await synthesize({ operatorConsole: 'true', operatorConsoleDevOrigins: 'http://localhost:5173' });
+    const consoleStack = app.node.tryFindChild('backgroundagent-dev-console');
+    expect(consoleStack).toBeInstanceOf(OperatorConsoleStack);
+    const template = Template.fromStack(consoleStack as OperatorConsoleStack);
+    template.hasResourceProperties('AWS::Cognito::UserPoolDomain', { UserPoolId: { 'Fn::ImportValue': Match.anyValue() } });
+    template.hasResourceProperties('AWS::Cognito::UserPoolClient', {
+      CallbackURLs: Match.arrayWith(['http://localhost:5173/auth/callback']),
+    });
+    expect((consoleStack as OperatorConsoleStack).dependencies.map((s) => s.stackName)).toContain('backgroundagent-dev');
+  });
+});

@@ -17,6 +17,7 @@
  *  SOFTWARE.
  */
 
+import { isLinearUploadsUrl } from './linear-attachments';
 import { logger } from './logger';
 
 /**
@@ -98,7 +99,11 @@ export interface LinearProbeDocument {
 }
 
 export interface LinearIssueContextProbe {
-  /** Paperclip attachment titles surfaced on the issue, if any (for the hint). */
+  /**
+   * Titles of the paperclip attachments the task does NOT carry (external links
+   * such as Figma or GitHub), for the hint. The `uploads.linear.app` ones are
+   * not listed: the path that renders the hint attaches them or rejects the task.
+   */
   readonly attachmentTitles: readonly string[];
   /**
    * Native paperclip attachments with their URLs — the webhook processor
@@ -204,7 +209,12 @@ export async function probeLinearIssueContext(
     // not visible) is a genuine "nothing here", not a transport failure → ok:true.
     if (!issue) return EMPTY;
     const attachmentNodes = issue.attachments?.nodes ?? [];
+    // The titles are for the hint, which names what the task does NOT carry. On
+    // the label path, the only one that renders the hint, an uploads.linear.app
+    // paperclip is fetched, screened and attached (or the task is rejected), so
+    // it is left out.
     const attachmentTitles = attachmentNodes
+      .filter((a) => !isLinearUploadsUrl(a?.url ?? ''))
       .map((a) => (typeof a?.title === 'string' ? a.title.trim() : ''))
       .filter((t): t is string => t.length > 0);
     const attachments = attachmentNodes

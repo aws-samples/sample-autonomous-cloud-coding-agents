@@ -19,8 +19,8 @@
 
 import { resolveEpicTip, type TipCandidate } from '../../../src/handlers/shared/orchestration-epic-tip';
 
-const node = (id: string, depends_on: string[] = [], created_at = '2026-01-01'): TipCandidate =>
-  ({ sub_issue_id: id, depends_on, created_at });
+const node = (id: string, depends_on: string[] = [], child_status = 'succeeded'): TipCandidate =>
+  ({ sub_issue_id: id, depends_on, child_status });
 
 describe('resolveEpicTip — where a new node with no declared dependency stacks', () => {
   test('empty epic → no tip (degrade to a root node off the default branch)', () => {
@@ -53,6 +53,13 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
     expect(resolveEpicTip(epic)).toEqual(['orch_x__integration']);
   });
 
+  test('a leaf beside the integration node → both, so the new node builds on all of the work', () => {
+    // C was added with its own blocker after the integration node was made, so
+    // the integration node does not contain it.
+    const epic = [node('A'), node('B'), node('orch_x__integration', ['A', 'B']), node('C', ['B'])];
+    expect(resolveEpicTip(epic)).toEqual(['C', 'orch_x__integration']);
+  });
+
   test('multiple roots, one chain → only the genuine leaf is the tip', () => {
     // A→B (B is a leaf); D is a standalone leaf. Two leaves → diamond.
     const epic = [node('A'), node('B', ['A']), node('D')];
@@ -62,5 +69,53 @@ describe('resolveEpicTip — where a new node with no declared dependency stacks
   test('deterministic ordering regardless of input order', () => {
     const epic = [node('C', ['R']), node('R'), node('B', ['R'])];
     expect(resolveEpicTip(epic)).toEqual(['B', 'C']);
+  });
+
+  // A node that depends on a failed or skipped one never runs: it is skipped in
+  // turn. So new work stacks on what is left.
+  describe('a failed or skipped node is no tip', () => {
+    test('one of two leaves failed, the integration node was skipped → tip is the leaf that succeeded', () => {
+      const epic = [
+        node('A', [], 'failed'),
+        node('B', [], 'succeeded'),
+        node('orch_x__integration', ['A', 'B'], 'skipped'),
+      ];
+      expect(resolveEpicTip(epic)).toEqual(['B']);
+    });
+
+    test('chain broken in the middle → tip is the last step in front of the failure', () => {
+      const epic = [node('A', [], 'succeeded'), node('B', ['A'], 'failed'), node('C', ['B'], 'skipped')];
+      expect(resolveEpicTip(epic)).toEqual(['A']);
+    });
+
+    test('integration node itself failed → tip is the leaves it could not combine', () => {
+      const epic = [node('A'), node('B'), node('orch_x__integration', ['A', 'B'], 'failed')];
+      expect(resolveEpicTip(epic)).toEqual(['A', 'B']);
+    });
+
+    test('nothing but failed and skipped nodes → no tip (a root node off the default branch)', () => {
+      expect(resolveEpicTip([node('A', [], 'failed'), node('B', ['A'], 'skipped')])).toEqual([]);
+    });
+
+    test('a node that waits or runs is still the tip', () => {
+      const epic = [node('A', [], 'released'), node('B', ['A'], 'blocked')];
+      expect(resolveEpicTip(epic)).toEqual(['B']);
+    });
+
+    // The sweep skips a node that waits behind a failed or skipped one. Until it
+    // has, the row still says blocked or ready: such a node is no tip either.
+    test('a node that waits behind a failed one is no tip: A failed, B blocked on A, no tip', () => {
+      expect(resolveEpicTip([node('A', [], 'failed'), node('B', ['A'], 'blocked')])).toEqual([]);
+    });
+
+    test('an integration node that waits behind a failed leaf is no tip: the leaves that succeeded are', () => {
+      const epic = [
+        node('A'),
+        node('B'),
+        node('X', [], 'failed'),
+        node('orch_x__integration', ['A', 'B', 'X'], 'blocked'),
+      ];
+      expect(resolveEpicTip(epic)).toEqual(['A', 'B']);
+    });
   });
 });

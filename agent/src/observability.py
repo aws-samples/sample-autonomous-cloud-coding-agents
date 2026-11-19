@@ -13,7 +13,8 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry import baggage, context, trace
-from opentelemetry.trace import StatusCode
+
+from shell import log
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -38,7 +39,8 @@ def task_span(
 ) -> Generator[Span]:
     """Context manager that wraps a pipeline phase in an OTEL span.
 
-    * Records exceptions and sets span status to ERROR on failure.
+    * On failure the tracer records the exception on the span and sets its
+      status to ERROR (the defaults of ``start_as_current_span``).
     * Accepts optional *attributes* dict merged onto the span at creation.
 
     Usage::
@@ -49,12 +51,7 @@ def task_span(
     """
     tracer = get_tracer()
     with tracer.start_as_current_span(name, attributes=attributes or {}) as span:
-        try:
-            yield span
-        except Exception as exc:
-            span.set_status(StatusCode.ERROR, str(exc))
-            span.record_exception(exc)
-            raise
+        yield span
 
 
 def current_otel_trace_id() -> str | None:
@@ -69,6 +66,12 @@ def current_otel_trace_id() -> str | None:
     propagating. Callers read this inside DDB-write try-blocks (progress_writer),
     where a raised trace error would otherwise be misclassified as a DDB failure
     and trip the shared progress circuit breaker.
+
+    The degrade is *logged*, not silent (#756): a tracer fault and "no recording
+    span" both yield ``None``, and a caller cannot tell them apart, so the WARN
+    line is the only place that difference survives. It is deliberately emitted
+    per occurrence rather than once — this runs per progress event, so repetition
+    is the signal that the tracer is broken for the whole task, not one event.
     """
     try:
         span = trace.get_current_span()
@@ -80,8 +83,13 @@ def current_otel_trace_id() -> str | None:
         # the X-Ray console renders trace ids as ``1-{8hex}-{24hex}``; to look this
         # up there, transform to that form (the timestamp is the first 8 hex chars).
         return trace.format_trace_id(ctx.trace_id)
-    except Exception:
-        # nosemgrep: py-silent-success-masking -- tracer fault must not fail the write path
+    except Exception as exc:
+        log(
+            "WARN",
+            f"current_otel_trace_id: tracer fault ({type(exc).__name__}: {exc}); "
+            "persisting the record without a correlation id",
+        )
+        # nosemgrep: py-silent-success-masking -- graceful-missing correlation field, logged above; raising would surface inside the caller's DDB-write try-block and trip the progress circuit breaker (see docstring)  # noqa: E501
         return None
 
 

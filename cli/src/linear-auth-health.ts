@@ -158,7 +158,7 @@ export type LinearRefreshVerifier = (workspace: {
 export type LinearProbe = (accessToken: string) => Promise<ProbeResult>;
 
 /** Default probe: a minimal authenticated GraphQL query. */
-export const probeLinearAccessToken: LinearProbe = async (accessToken) => {
+const probeLinearAccessToken: LinearProbe = async (accessToken) => {
   try {
     const response = await fetch(LINEAR_GRAPHQL_ENDPOINT, {
       method: 'POST',
@@ -269,6 +269,19 @@ export async function checkLinearWorkspaceAuth(
     const workspaceId = row.linear_workspace_id ?? '(unknown)';
     const slug = row.workspace_slug ?? workspaceId;
 
+    // `bgagent linear remove-workspace` revokes the row with this reason. That is an
+    // admin choice, not a dead grant: reporting it as REVOKED fails doctor and tells the
+    // operator to re-authorize a workspace they deliberately removed.
+    if (row.status === 'revoked' && row.revoked_reason === 'admin_removed') {
+      out.push({
+        workspaceId,
+        workspaceSlug: slug,
+        state: 'disabled',
+        detail: `Removed by an admin at ${row.revoked_at ?? 'an unknown time'} (\`bgagent linear remove-workspace\`) `
+          + '— events for this workspace are dropped by design.',
+      });
+      continue;
+    }
     if (row.status === 'revoked') {
       // The platform itself recorded this when a refresh was rejected, which is
       // the authoritative signal — more reliable than anything this check can
@@ -467,8 +480,7 @@ function describeState(state: LinearAuthState, expiresAt?: string, revokedAt?: s
         + 'the platform would, and persists the rotated token).';
     case 'revoked':
       return `Authorization was REVOKED${revokedAt ? ` at ${revokedAt}` : ''} — the platform cannot post `
-        + 'to this workspace and is dropping its events. Re-authorize with `bgagent linear setup` '
-        + '(or `bgagent linear add-workspace` for an additional workspace).';
+        + 'to this workspace and is dropping its events. Re-authorize with `bgagent linear setup`.';
     case 'disabled':
       return 'Workspace is disabled in the registry.';
     case 'unknown':

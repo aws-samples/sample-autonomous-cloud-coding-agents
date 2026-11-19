@@ -1,13 +1,11 @@
 ---
-title: Repo onboarding
+title: "Repository onboarding"
 ---
-
-# Repository onboarding
 
 Before users can submit tasks for a repository, that repository must be onboarded to the platform. Onboarding registers the repo and produces a per-repo configuration that the orchestrator uses at task time: compute strategy, model, credentials, networking, and pipeline customizations. If a user submits a task for a non-onboarded repo, the API returns `422 REPO_NOT_ONBOARDED`.
 
 - **Use this doc for:** the Blueprint construct interface, RepoConfig schema, override precedence, compute strategy interface, and pipeline customization model.
-- **For practical usage:** see [Quick Start](../guides/QUICK_START.mdx) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
+- **For practical usage:** see [Quick Start](/sample-autonomous-cloud-coding-agents/getting-started/quick-start) for onboarding your first repo and [User Guide](/sample-autonomous-cloud-coding-agents/using/overview) for per-repo overrides.
 - **Related docs:** [ORCHESTRATOR.md](/sample-autonomous-cloud-coding-agents/architecture/orchestrator) for how the orchestrator consumes blueprint config, [COMPUTE.md](/sample-autonomous-cloud-coding-agents/architecture/compute) for compute backends, [SECURITY.md](/sample-autonomous-cloud-coding-agents/architecture/security) for custom step trust boundaries.
 
 ## Why onboarding?
@@ -36,11 +34,11 @@ For operators with IAM access to the deployed stack, `bgagent repo onboard` and 
 | **Soft-delete** | `status=removed` + 30-day TTL on stack removal | Same semantics on `offboard` |
 | **Custom runtime / token IAM** | `additionalRuntimeArns` / `additionalSecretArns` in CDK | Stored in the row, but orchestrator IAM still requires a CDK deploy |
 | **Cedar, egress, pipeline steps** | Supported via construct props | Not exposed — use CDK |
-| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding)) |
+| **Audit trail** | CloudFormation change set + deploy logs | CLI stdout only today (see [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding)) |
 
 Use the CLI path for quick day-2 registration with platform defaults (runtime ARN, GitHub token secret). Use CDK when the repo needs durable infrastructure, custom IAM, Cedar policies, egress rules, or pipeline customization. The onboard command prints notes explaining which platform defaults apply and when a redeploy is still required.
 
-See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/overview#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/architecture/adr-017-operator-cli-repo-onboarding).
+See also: [Using the CLI — operator commands](/sample-autonomous-cloud-coding-agents/using/using-the-cli#operator-commands-stack-admin) and [ADR-017](/sample-autonomous-cloud-coding-agents/decisions/adr-017-operator-cli-repo-onboarding).
 
 ### Blueprint construct
 
@@ -49,7 +47,7 @@ interface BlueprintProps {
   repo: string;                        // "owner/repo"
   repoTable: dynamodb.ITable;
   compute?: {
-    type?: 'agentcore' | 'ecs';        // default: 'agentcore'
+    type?: 'agentcore' | 'ecs' | 'lambda-microvm'; // inherits first deployed backend
     runtimeArn?: string;
     config?: Record<string, unknown>;
   };
@@ -122,9 +120,9 @@ From lowest to highest priority:
 
 | Field | Default | Source |
 |---|---|---|
-| `compute_type` | `agentcore` | Platform constant |
+| `compute_type` | First deployed backend (`agentcore` with legacy context) | Ordered `DEPLOYED_COMPUTE_TYPE` list on the orchestrator; `ComputeTypes`, `ComputeSubstrate` and `ComputeDeploymentMode` outputs for CLI discovery |
 | `runtime_arn` | Stack-level env var | CDK stack props |
-| `model_id` | `global.anthropic.claude-opus-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
+| `model_id` | `global.anthropic.claude-opus-5-5` | injected by the stack as `ANTHROPIC_MODEL` from `bedrockGeoRegion`; `agent/src/config.py` holds the no-env fallback — see [Model configuration](/sample-autonomous-cloud-coding-agents/developer-guide/model-configuration) |
 | `max_turns` | 100 | Platform constant |
 | `max_budget_usd` | None (unlimited) | No platform default by design — a global ceiling would kill long tasks mid-change. Set a per-repo default with Blueprint `agent.maxBudgetUsd` (`0.01`–`100`, validated at synth) or per task with `--max-budget` / `max_budget_usd`. See [Per-repo overrides](/sample-autonomous-cloud-coding-agents/customizing/per-repo-overrides) for the complete list of surfaces a budget can come from |
 | `memory_token_budget` | 2000 | Platform constant |
@@ -243,7 +241,7 @@ interface ComputeStrategy {
 }
 ```
 
-The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The backend is selected per repo via `compute_type` in the Blueprint.
+The `agentcore` strategy implements `startSession` via `invoke_agent_runtime`, `pollSession` via re-invocation with sticky routing, and `stopSession` via `stop_runtime_session`. Alternative strategies (e.g. `ecs`) implement the same interface. The deployment selects one or more backends with `compute_types`. A Blueprint `compute_type` override must name one of them; omit the override to inherit the first backend in the list. Legacy `compute_type` deployment contexts continue to include AgentCore as the default. See [Compute](/sample-autonomous-cloud-coding-agents/architecture/compute#selecting-and-changing-the-backend) before changing an existing deployment.
 
 ## Re-onboarding
 

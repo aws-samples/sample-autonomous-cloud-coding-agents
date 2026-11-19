@@ -22,7 +22,7 @@ jobs:
       run_id: ${{ github.event.workflow_run.id }}
     steps:
       - name: Download deploy intent
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: deploy-intent
           run-id: ${{ github.event.workflow_run.id }}
@@ -145,7 +145,7 @@ jobs:
           persist-credentials: false
 
       - name: Download CDK artifact (${{ matrix.compute_type }})
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cdk-${{ matrix.compute_type }}-out
           path: cdk/
@@ -153,13 +153,13 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 
@@ -189,13 +189,57 @@ jobs:
             echo "No security-relevant changes detected." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Log-delivery migration state, surfaced BEFORE the approval gate.
+      #
+      # `mise //cdk:deploy` runs this preflight automatically, but this pipeline calls
+      # `npx cdk deploy` directly (see the Deploy job) and so inherits none of that task's
+      # steps. Without this, a pipeline stack still on the pre-#339 library's delivery
+      # logical ids would roll back mid-update with `AlreadyExists` and nothing anywhere
+      # would have said why — and the approver would have had no way to know.
+      #
+      # --check-only NEVER deletes; it reports and exits 2 when a migration is needed.
+      # continue-on-error because this is information for the approver, not a gate: the
+      # job holds the read-only diff role, and a missing `cloudformation:ListStackResources`
+      # on it must not block the diff that the approval decision depends on.
+      - name: Log-delivery migration check (read-only)
+        continue-on-error: true
+        env:
+          COMPUTE_TYPE: ${{ matrix.compute_type }}
+        run: |
+          echo "## Log-delivery migration (\`$COMPUTE_TYPE\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          node --experimental-strip-types cdk/scripts/preflight-log-delivery.ts \
+            --check-only 2>&1 | tee preflight-log-delivery.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat preflight-log-delivery.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" = "2" ]; then
+            {
+              echo ""
+              echo "> [!WARNING]"
+              echo "> This stack needs the one-time log-delivery migration. Deploying without"
+              echo "> it fails mid-update with \`AlreadyExists\` and rolls back. This pipeline"
+              echo "> does **not** migrate automatically — run the documented step first:"
+              echo "> \`STACK_NAME=<stack> mise //cdk:deploy\`, or the manual sequence in"
+              echo "> docs/design/OBSERVABILITY.md (\"AgentCore log delivery\")."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$status" != "0" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "_Could not determine migration state (exit $status) — see the step log._" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload diff artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cdk-diff-${{ matrix.compute_type }}
           path: |
             cdk-diff-full.txt
             cdk-diff-security.txt
+            preflight-log-delivery.txt
 
   deploy:
     needs: [resolve-targets, diff]
@@ -220,7 +264,7 @@ jobs:
           persist-credentials: false
 
       - name: Download CDK artifact (${{ matrix.compute_type }})
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cdk-${{ matrix.compute_type }}-out
           path: cdk/
@@ -228,18 +272,19 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Install mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
+          version: 2026.10.25 # exact mise release for every workflow (#890); bump by PR
           cache: true
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
 

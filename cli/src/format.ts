@@ -17,18 +17,18 @@
  *  SOFTWARE.
  */
 
-import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
+import { ApiKeyDetail, CreateApiKeyResponse, CreateWebhookResponse, DEFAULT_CODING_WORKFLOW_ID, PaginatedResponse, ReplayBundle, TaskDetail, TaskEvent, TaskSummary, TERMINAL_STATUSES, WebhookDetail } from './types';
 
 /** Decimal places when rendering USD cost figures (tenth of a cent matters for LLM spend). */
 export const COST_USD_DECIMALS = 4;
 
 /** Render a USD cost as ``$0.0000`` (shared by the detail view and replay bundle). */
-export function formatCostUsd(cost: number | string): string {
+function formatCostUsd(cost: number | string): string {
   return `$${Number(cost).toFixed(COST_USD_DECIMALS)}`;
 }
 
 /** Render a pass/fail gate verdict; ``dash`` for a null (gate did not run). */
-export function formatVerdict(passed: boolean | null, dash = '—'): string {
+function formatVerdict(passed: boolean | null, dash = '—'): string {
   return passed === null ? dash : passed ? 'PASSED' : 'FAILED';
 }
 
@@ -103,7 +103,7 @@ export function formatTaskDetail(task: TaskDetail, now: number = Date.now()): st
   // detector reads the same field. On a terminal task the last beat is just noise
   // next to Completed/Duration. The relative age is what an operator actually
   // needs, so it is rendered alongside the timestamp rather than instead of it.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+  if (task.agent_heartbeat_at && !TERMINAL_STATUSES.includes(task.status)) {
     lines.push(`Heartbeat:   ${task.agent_heartbeat_at} (${heartbeatAge(task.agent_heartbeat_at, now)})`);
   }
   if (task.duration_s !== null) {
@@ -157,7 +157,7 @@ export function formatTaskList(tasks: TaskSummary[], now: number = Date.now()): 
       // unnoticed. Suppressed on a terminal task (the last beat is noise beside a
       // final status) and where the agent has not beaten — same rule as the detail
       // view, so the two never disagree.
-      t.agent_heartbeat_at && !isTerminalStatus(t.status)
+      t.agent_heartbeat_at && !TERMINAL_STATUSES.includes(t.status)
         ? `${heartbeatAge(t.agent_heartbeat_at, now)} ago`
         : PLACEHOLDER,
       truncate(desc, DESCRIPTION_COLUMN_WIDTH),
@@ -287,7 +287,7 @@ export function formatStatusSnapshot(
   // field the orchestrator's hang detector reads, on a fixed 45 s cadence, so its
   // AGE is the diagnostic. Suppressed on a terminal task (the last beat is noise
   // beside a final status) and when the agent has not beaten yet.
-  if (task.agent_heartbeat_at && !isTerminalStatus(task.status)) {
+  if (task.agent_heartbeat_at && !TERMINAL_STATUSES.includes(task.status)) {
     const age = relativeTime(task.agent_heartbeat_at, now) ?? PLACEHOLDER;
     lines.push(`  Heartbeat:     ${age} ago`);
   }
@@ -351,7 +351,7 @@ function formatDescriptionLines(description: string): string[] {
  *  only useful diagnostic. */
 function describeReason(task: TaskDetail): string | null {
   if (task.status === 'COMPLETED') return null;
-  if (!(TERMINAL_STATUSES as readonly string[]).includes(task.status)) return null;
+  if (!TERMINAL_STATUSES.includes(task.status)) return null;
   const cls = task.error_classification;
   const msg = task.error_message?.trim();
   if (cls && cls.category !== 'unknown') {
@@ -487,6 +487,36 @@ export function formatApiKeyDetail(key: ApiKeyDetail): string {
   return lines.join('\n');
 }
 
+/** Rows a `list` command returns when --limit is not given: the page size the API defaults to. */
+const DEFAULT_LIST_LIMIT = 20;
+
+/**
+ * The rows a `list` command prints: its first page and the pages that follow. The API reads a
+ * bounded number of rows per request, so a page can hold fewer rows than asked for, or none,
+ * while more exist: follow next_token until the rows asked for are there or the list ends.
+ * Each further request asks only for the rows still missing, so that the last token resumes
+ * right after the last row. `maxRequests` counts the first request too: a list that never
+ * ends cannot keep the command running.
+ *
+ * It stands here and not next to the client because the command tests replace the client's
+ * module whole, and this loop is what they check.
+ */
+export async function followPages<T>(
+  first: PaginatedResponse<T>,
+  limit: number | undefined,
+  fetchNext: (rows: number, nextToken: string) => Promise<PaginatedResponse<T>>,
+  maxRequests = 100,
+): Promise<PaginatedResponse<T>> {
+  // A --limit that is no positive number counts as none given.
+  const wanted = limit !== undefined && limit > 0 ? limit : DEFAULT_LIST_LIMIT;
+  let result = first;
+  for (let request = 1; request < maxRequests && result.data.length < wanted && result.pagination.next_token; request += 1) {
+    const next = await fetchNext(wanted - result.data.length, result.pagination.next_token);
+    result = { data: [...result.data, ...next.data], pagination: next.pagination };
+  }
+  return result;
+}
+
 /** Format data as JSON. */
 export function formatJson(data: unknown): string {
   return JSON.stringify(data, null, 2);
@@ -576,10 +606,6 @@ function truncate(text: string, maxLen: number): string {
 
 const PLACEHOLDER = '—';
 
-function isTerminalStatus(status: string): boolean {
-  return (TERMINAL_STATUSES as readonly string[]).includes(status);
-}
-
 function elapsedDescription(task: TaskDetail, now: number): string {
   // Use ``started_at`` → ``completed_at`` (or ``now``) as the primary
   // elapsed-time source. This matches what the user observed during the
@@ -591,7 +617,7 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const start = task.started_at ?? task.created_at;
   const startMs = Date.parse(start);
   if (Number.isNaN(startMs)) {
-    if (isTerminalStatus(task.status) && task.duration_s != null) {
+    if (TERMINAL_STATUSES.includes(task.status) && task.duration_s != null) {
       return `${humanizeSeconds(task.duration_s)} total`;
     }
     return PLACEHOLDER;
@@ -599,7 +625,7 @@ function elapsedDescription(task: TaskDetail, now: number): string {
   const endMs = task.completed_at ? Date.parse(task.completed_at) : now;
   if (Number.isNaN(endMs)) return PLACEHOLDER;
   const diffS = Math.max(0, Math.round((endMs - startMs) / 1000));
-  const suffix = isTerminalStatus(task.status) ? 'total' : 'elapsed';
+  const suffix = TERMINAL_STATUSES.includes(task.status) ? 'total' : 'elapsed';
   return `${humanizeSeconds(diffS)} ${suffix}`;
 }
 
@@ -639,7 +665,7 @@ function describeBlocker(blockerEvent: TaskEvent | null, now: number): string | 
 }
 
 function describeCurrent(task: TaskDetail, activity: TaskEvent | null): string {
-  if (isTerminalStatus(task.status)) {
+  if (TERMINAL_STATUSES.includes(task.status)) {
     return `task ${task.status.toLowerCase()}`;
   }
   if (!activity) return PLACEHOLDER;

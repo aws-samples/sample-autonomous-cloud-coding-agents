@@ -79,6 +79,17 @@ function makeEvent(overrides: Partial<APIGatewayProxyEvent> = {}): APIGatewayPro
   };
 }
 
+function makeRecord(n: number) {
+  return {
+    webhook_id: `wh-${n}`,
+    user_id: 'user-123',
+    name: `ci-${n}`,
+    status: 'active',
+    created_at: `2026-01-01T00:00:${String(n).padStart(2, '0')}Z`,
+    updated_at: '2026-01-01T00:00:00Z',
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: undefined });
@@ -109,18 +120,6 @@ describe('list-webhooks handler', () => {
     expect(body.data[0].name).toBe('CI');
   });
 
-  test('supports pagination', async () => {
-    mockSend.mockResolvedValueOnce({
-      Items: [{ webhook_id: 'wh-1', user_id: 'user-123', name: 'CI', status: 'active', created_at: '2025-01-01', updated_at: '2025-01-01' }],
-      LastEvaluatedKey: { webhook_id: 'wh-1', user_id: 'user-123', created_at: '2025-01-01' },
-    });
-
-    const result = await handler(makeEvent());
-    const body = JSON.parse(result.body);
-    expect(body.pagination.has_more).toBe(true);
-    expect(body.pagination.next_token).toBeDefined();
-  });
-
   test('returns 401 when not authenticated', async () => {
     const event = makeEvent();
     event.requestContext.authorizer = null;
@@ -132,5 +131,90 @@ describe('list-webhooks handler', () => {
     mockSend.mockRejectedValueOnce(new Error('DynamoDB error'));
     const result = await handler(makeEvent());
     expect(result.statusCode).toBe(500);
+  });
+
+  describe('pagination (Limit is applied before the revoked filter)', () => {
+    test('over-fetches limit+1 so a full page can prove another webhook exists', async () => {
+      await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const q = mockSend.mock.calls[0][0].input;
+      expect(q.Limit).toBe(21);
+    });
+
+    test('passes next_token as ExclusiveStartKey', async () => {
+      const key = { webhook_id: 'wh-1' };
+      const token = Buffer.from(JSON.stringify(key)).toString('base64');
+
+      await handler(makeEvent({ queryStringParameters: { next_token: token } }));
+
+      expect(mockSend.mock.calls[0][0].input.ExclusiveStartKey).toEqual(key);
+    });
+
+    test('returns 400 for a next_token that cannot be decoded', async () => {
+      // Taken for no token, it restarted the list at the first page with status 200.
+      const cut = Buffer.from('{"webhook_id":"w').toString('base64');
+      const result = await handler(makeEvent({ queryStringParameters: { next_token: cut } }));
+
+      expect(result.statusCode).toBe(400);
+      expect(JSON.parse(result.body).error).toMatchObject({ code: 'VALIDATION_ERROR', message: 'Invalid next_token.' });
+      expect(mockSend).not.toHaveBeenCalled();
+    });
+
+    test('a single page short of the limit reports has_more=false with no token', async () => {
+      // Fewer active webhooks than requested, index exhausted (no LastEvaluatedKey).
+      mockSend.mockResolvedValueOnce({ Items: [makeRecord(2), makeRecord(1)] });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const body = JSON.parse(result.body);
+      expect(body.data).toHaveLength(2);
+      expect(body.pagination.has_more).toBe(false);
+      expect(body.pagination.next_token).toBeNull();
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+
+    test('keeps querying past filtered-out pages until the page is full', async () => {
+      // Page 1: Limit applied before the filter yields no active webhook, but a cursor remains.
+      mockSend.mockResolvedValueOnce({ Items: [], LastEvaluatedKey: { webhook_id: 'wh-0' } });
+      // Page 2: enough active webhooks to fill limit=2 plus one extra.
+      mockSend.mockResolvedValue({
+        Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
+        LastEvaluatedKey: { webhook_id: 'wh-1' },
+      });
+
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '2' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockSend).toHaveBeenCalledTimes(2);
+      expect(mockSend.mock.calls[1][0].input.ExclusiveStartKey).toEqual({ webhook_id: 'wh-0' });
+      expect(body.data.map((w: { webhook_id: string }) => w.webhook_id)).toEqual(['wh-3', 'wh-2']);
+      expect(body.pagination.has_more).toBe(true);
+      expect(body.pagination.next_token).not.toBeNull();
+    });
+
+    test('next_token resumes from the last returned webhook, not the scan boundary', async () => {
+      mockSend.mockResolvedValueOnce({
+        Items: [makeRecord(3), makeRecord(2), makeRecord(1)],
+        LastEvaluatedKey: { webhook_id: 'wh-scanned-past' },
+      });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '2' } }));
+      const body = JSON.parse(result.body);
+
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      // Boundary is the last webhook actually returned (wh-2), so wh-1 is not skipped.
+      expect(decoded).toEqual({ webhook_id: 'wh-2', user_id: 'user-123', created_at: makeRecord(2).created_at });
+    });
+
+    test('stops after the page cap and still advances the raw cursor', async () => {
+      // Every page filters to nothing but keeps returning a cursor.
+      mockSend.mockResolvedValue({ Items: [], LastEvaluatedKey: { webhook_id: 'wh-x' } });
+      const result = await handler(makeEvent({ queryStringParameters: { limit: '20' } }));
+      const body = JSON.parse(result.body);
+
+      expect(mockSend).toHaveBeenCalledTimes(10); // MAX_QUERY_PAGES
+      expect(body.data).toHaveLength(0);
+      // The cap stopped the read with a cursor still pending, so hand it back
+      // rather than report the list as complete.
+      expect(body.pagination.has_more).toBe(true);
+      const decoded = JSON.parse(Buffer.from(body.pagination.next_token, 'base64').toString('utf-8'));
+      expect(decoded).toEqual({ webhook_id: 'wh-x' });
+    });
   });
 });

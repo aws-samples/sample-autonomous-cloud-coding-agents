@@ -43,7 +43,8 @@
  * the script's own consumer list — if the script gains a consumer and that list is
  * not updated, the copy is incomplete and the script dies on `ENOENT` rather than
  * passing vacuously. Loud, but the message will point at a missing file rather
- * than at drift.
+ * than at drift. The Python side needs no list: the script scans every file under
+ * `agent/src`, so that directory is copied whole.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -53,16 +54,16 @@ import * as path from 'node:path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const SCRIPT_REL = 'scripts/check-constants-sync.ts';
+const PARITY_TEST_REL = 'agent/tests/test_constants_parity.py';
 
-/** Every file the script reads, relative to the repo root. */
+/** Every file the script reads besides `agent/src`, relative to the repo root. */
 const FIXTURE_FILES = [
   SCRIPT_REL,
   'contracts/constants.json',
-  'agent/src/policy.py',
-  'agent/src/jira_reactions.py',
-  'agent/src/server.py',
-  'agent/src/config.py',
   'cdk/src/constructs/lambda-microvm-compute.ts',
+  'cdk/src/handlers/shared/microvm/image-capability.ts',
+  'cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts',
+  PARITY_TEST_REL,
 ];
 
 interface RunResult {
@@ -86,6 +87,10 @@ function runInMutatedRepo(mutate: (root: string) => void): RunResult {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(path.join(REPO_ROOT, rel), dest);
     }
+    fs.cpSync(path.join(REPO_ROOT, 'agent/src'), path.join(root, 'agent/src'), {
+      recursive: true,
+      filter: (source) => path.basename(source) !== '__pycache__',
+    });
     mutate(root);
 
     try {
@@ -126,6 +131,37 @@ describe('check-constants-sync', () => {
   // subprocess spawns, so give it room on a cold cache.
   jest.setTimeout(60_000);
 
+  describe('MicroVM lifecycle image contract', () => {
+    test.each([
+      ['protocol_version', 0], ['protocol_version', 1.5], ['protocol_version', '1'],
+      ['hook_port', 0], ['hook_port', 65536], ['hook_port', 8080.5],
+      ['maximum_duration_seconds', 0], ['maximum_duration_seconds', 28801],
+      ['maximum_duration_seconds', 28800.5], ['maximum_duration_seconds', '28800'],
+      ['image_protocol_env', 'AWS_ACCESS_KEY_ID'], ['image_protocol_env', 'ABCA_MICROVM_bad'],
+    ])('rejects invalid %s=%s', (key, value) => {
+      const result = runInMutatedRepo(root => patchContract(root, json => {
+        json.microvm_lifecycle[key] = value;
+      }));
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('microvm_lifecycle');
+    });
+    test.each([
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'AGENT_HOOK_PORT', '8080'],
+      ['cdk/src/handlers/shared/strategies/lambda-microvm-strategy.ts', 'MICROVM_MAX_DURATION_SECONDS', '28_800'],
+      ['cdk/src/constructs/lambda-microvm-compute.ts', 'LIFECYCLE_HOOK_TIMEOUT_SECONDS', '30'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', '"1"'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_LIFECYCLE_PROTOCOL', 'String(1)'],
+      ['cdk/src/handlers/shared/microvm/image-capability.ts', 'MICROVM_IMAGE_PROTOCOL_ENV', '"ABCA_MICROVM_LIFECYCLE_PROTOCOL"'],
+    ])('rejects a literal %s/%s', (file, name, value) => {
+      const result = runInMutatedRepo(root => {
+        write(root, file, `${read(root, file)}\nexport const ${name} = ${value};\n`);
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(name);
+      expect(result.stderr).toContain('Cross-language constants drift detected');
+    });
+  });
+
   describe('the real repository', () => {
     test('passes, and says what it actually checked', () => {
       const result = runInMutatedRepo(() => {});
@@ -134,7 +170,7 @@ describe('check-constants-sync', () => {
       expect(result.stdout).toContain('Constants sync OK');
       // The counts are the anti-vacuity assertion: a script that checked NOTHING
       // would also exit 0.
-      expect(result.stdout).toMatch(/\d+ Python names checked across \d+ consumers/);
+      expect(result.stdout).toMatch(/[1-9]\d* Python names checked across [1-9]\d* files under agent\/src/);
       expect(result.stdout).toMatch(/\d+ TypeScript name\(s\) across \d+ consumer\(s\)/);
     });
   });
@@ -291,6 +327,165 @@ describe('check-constants-sync', () => {
       expect(result.stderr).toContain('READY_HOOK_TIMEOUT_SECONDS');
     });
 
+    // The cases below all passed the gate while it matched literal re-declarations
+    // in four listed files: none of them is a literal assignment in one of those.
+    test('catches arithmetic on a value read from the contract', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'agent/src/policy.py',
+          `${read(root, 'agent/src/policy.py')}\nDEFAULT_APPROVAL_GATE_CAP: int = int(_AGC["default"]) + 49\n`,
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/policy\.py:\d+: "DEFAULT_APPROVAL_GATE_CAP" is not a plain read/);
+    });
+
+    test('catches a literal hidden inside a conversion', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'agent/src/policy.py',
+          `${read(root, 'agent/src/policy.py')}\nAPPROVAL_GATE_CAP_MAX: int = int("9999")\n`,
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('APPROVAL_GATE_CAP_MAX');
+    });
+
+    test('catches a read of the wrong contract key', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'agent/src/policy.py',
+          `${read(root, 'agent/src/policy.py')}\nAPPROVAL_GATE_CAP_MAX: int = int(_AGC["min"])\n`,
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('APPROVAL_GATE_CAP_MAX = <contract section>["max"]');
+    });
+
+    test('catches a re-declaration in a file that is not a known consumer, at any depth', () => {
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nFLOOR_TIMEOUT_S = 1\n`);
+        write(root, 'agent/src/workflow/gate_fixture.py', 'import policy\n\npolicy.DEFAULT_TASK_TIMEOUT_S = 1\n');
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S"/);
+      expect(result.stderr).toContain('agent/src/workflow/gate_fixture.py:3: "DEFAULT_TASK_TIMEOUT_S"');
+    });
+
+    test('catches an owned name among the targets of a tuple assignment', () => {
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nretries, FLOOR_TIMEOUT_S = 3, 1\n`);
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
+    });
+
+    test('catches an owned name among tuple targets even when the value is a contract read', () => {
+      // Unpacking: the name ends up holding one element of the value, not the value.
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nretries, FLOOR_TIMEOUT_S = _ATS["min"]\n`);
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
+    });
+
+    test('catches an augmented assignment to an owned name', () => {
+      const result = runInMutatedRepo((root) => {
+        write(root, 'agent/src/hooks.py', `${read(root, 'agent/src/hooks.py')}\nFLOOR_TIMEOUT_S += 1\n`);
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/agent\/src\/hooks\.py:\d+: "FLOOR_TIMEOUT_S" is not a plain read/);
+    });
+
+    test('catches a TypeScript literal on the line after the `=`', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'cdk/src/constructs/lambda-microvm-compute.ts',
+          `${read(root, 'cdk/src/constructs/lambda-microvm-compute.ts')}\n`
+          + 'const READY_HOOK_TIMEOUT_SECONDS =\n  300;\n',
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toMatch(/cdk\/src\/constructs\/lambda-microvm-compute\.ts:\d+: "READY_HOOK_TIMEOUT_SECONDS" is not a plain read/);
+    });
+
+    test('catches a conversion in the TypeScript consumer', () => {
+      const result = runInMutatedRepo((root) => {
+        write(
+          root,
+          'cdk/src/constructs/lambda-microvm-compute.ts',
+          `${read(root, 'cdk/src/constructs/lambda-microvm-compute.ts')}\n`
+          + 'export const READY_HOOK_TIMEOUT_SECONDS = Number("300");\n',
+        );
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('READY_HOOK_TIMEOUT_SECONDS');
+    });
+
+    test('fails when an owned constant is no longer assigned anywhere', () => {
+      // A renamed constant would otherwise leave the gate reporting OK for a name
+      // nothing uses any more.
+      const result = runInMutatedRepo((root) => {
+        const policy = read(root, 'agent/src/policy.py');
+        expect(policy).toContain('\nFLOOR_TIMEOUT_S: int = ');
+        write(root, 'agent/src/policy.py', policy.replace('\nFLOOR_TIMEOUT_S: int = ', '\nMIN_TIMEOUT_S: int = '));
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('"FLOOR_TIMEOUT_S" is owned by contracts/constants.json but assigned nowhere under agent/src');
+    });
+
+    test('fails when an owned TypeScript constant is no longer declared in its consumer', () => {
+      // The same hole on the TypeScript side: renamed, or deleted with the number
+      // written where it was used, the constant would simply stop being checked.
+      const consumer = 'cdk/src/constructs/lambda-microvm-compute.ts';
+      const result = runInMutatedRepo((root) => {
+        const source = read(root, consumer);
+        expect(source).toContain('\nconst READY_HOOK_TIMEOUT_SECONDS = ');
+        write(root, consumer, source.replace('\nconst READY_HOOK_TIMEOUT_SECONDS = ', '\nconst READY_TIMEOUT_SECONDS = '));
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('"READY_HOOK_TIMEOUT_SECONDS" is owned by contracts/constants.json but declared in none of its TypeScript consumers (');
+      expect(result.stderr).toContain(consumer);
+      expect(result.stderr).toContain('update OWNED_TS_NAMES in scripts/check-constants-sync.ts');
+    });
+
+    test('fails when the value-parity test does not cover an owned constant', () => {
+      // The script checks how a constant is written, the pytest what it holds:
+      // a name only one of the two lists knows is half-checked.
+      const result = runInMutatedRepo((root) => {
+        const parity = read(root, PARITY_TEST_REL);
+        expect(parity).toContain('"FLOOR_TIMEOUT_S"');
+        write(root, PARITY_TEST_REL, parity.replace('"FLOOR_TIMEOUT_S"', '"MIN_TIMEOUT_S"'));
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`"FLOOR_TIMEOUT_S" is owned by contracts/constants.json but ${PARITY_TEST_REL} does not compare its value`);
+    });
+
+    test('fails closed when agent/src is missing', () => {
+      const result = runInMutatedRepo((root) => {
+        fs.rmSync(path.join(root, 'agent/src'), { recursive: true });
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('check-constants-sync:');
+    });
+
     test('does NOT flag a contract-sourced assignment', () => {
       // The false-positive side. If this fired, every correct consumer would fail
       // and the gate would be turned off rather than fixed.
@@ -367,6 +562,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('ARN-pinning contract (review B5)', () => {
+    test.each([
+      ['new_resource_arn', 'NEW_RESOURCE'],
+      ['new_resource', 'NEW_RESOURCE_ARN'],
+    ])('rejects an unvalidated ARN field %s → %s', (key, envName) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key[key] = envName;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`ARN-shaped key "${key}" is missing from arn_keys`);
+    });
+
+    test('accepts a new ARN field when its validation is also declared', () => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_platform_config.env_by_key.new_resource_arn = 'NEW_RESOURCE_ARN';
+          json.microvm_platform_config.arn_keys.push('new_resource_arn');
+        });
+      });
+      expect(result.status).toBe(0);
+    });
+
     test('rejects an arn_keys entry that is not a wire key', () => {
       const result = runInMutatedRepo((root) => {
         patchContract(root, (json) => {
@@ -417,6 +635,29 @@ describe('check-constants-sync', () => {
   });
 
   describe('hook-budget invariant', () => {
+    test.each(['LIFECYCLE_HANDLER_BUDGET_S', 'LIFECYCLE_HOOK_TIMEOUT_S'])(
+      'rejects a hardcoded lifecycle budget %s',
+      (name) => {
+        const result = runInMutatedRepo((root) => {
+          write(root, 'agent/src/microvm_http.py',
+            `${read(root, 'agent/src/microvm_http.py')}\n${name}: float = 20\n`);
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(name);
+      },
+    );
+
+    test.each([0, 1])('rejects a lifecycle handler budget %s seconds beyond the service timeout', (offset) => {
+      const result = runInMutatedRepo((root) => {
+        patchContract(root, (json) => {
+          json.microvm_hook_budgets.lifecycle_handler_budget_seconds =
+            json.microvm_hook_budgets.lifecycle_hook_timeout_seconds + offset;
+        });
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('lifecycle_handler_budget_seconds must be <');
+    });
+
     test('rejects a warm-up budget that does not fit inside the hook timeout', () => {
       // The relationship the two-sided contract exists for: a warm-up that cannot
       // answer inside the service's hook budget turns a runtime fix into a build

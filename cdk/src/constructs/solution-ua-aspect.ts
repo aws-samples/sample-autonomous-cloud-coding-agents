@@ -17,13 +17,13 @@
  *  SOFTWARE.
  */
 
-import { IAspect } from 'aws-cdk-lib';
+import { CfnResource, IAspect } from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { IConstruct } from 'constructs';
 
 /** ABCA solution-attribution id (#319). Mirrors the deploy-time token in
  *  `main.ts` and the per-surface `ua` helpers. */
-export const SOLUTION_ID = 'uksb-wt64nei4u6';
+const SOLUTION_ID = 'uksb-wt64nei4u6';
 
 /** Documented app-id value cap. Over-limit only warns (never truncates), but
  *  we clip defensively so a long stack name can't produce a noisy log. */
@@ -101,6 +101,11 @@ export class SolutionUaAspect implements IAspect {
     }
     if (node instanceof lambda.Function) {
       node.addEnvironment('AWS_SDK_UA_APP_ID', this.appId);
+    } else if (CfnResource.isCfnResource(node) && node.cfnResourceType === 'AWS::Lambda::Function'
+      && !(node.node.scope instanceof lambda.Function)) {
+      // Core CDK providers (e.g. default-SG restriction and S3 auto-delete) use
+      // generic CfnResource directly, bypassing the L2 environment API above.
+      node.addPropertyOverride('Environment.Variables.AWS_SDK_UA_APP_ID', this.appId);
     }
   }
 }
