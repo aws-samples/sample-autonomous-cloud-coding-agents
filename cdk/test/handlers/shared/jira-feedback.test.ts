@@ -504,6 +504,11 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     'Pass **kwargs and **options through to the constructor.',
     'Call f(**a) and then g(**b).',
     'The delay is 2**(attempt-1) seconds, at most 2**(max-1).',
+    // A pair with white space behind it, beside one that has none.
+    'Use ** as the power operator, as in 2**n.',
+    // A run of asterisks is a masked value, not an empty bold span.
+    'Set DB_PASSWORD=******** in .env and restart.',
+    'NPM_TOKEN=*** and GH_TOKEN=*** are masked in the log.',
   ])('leaves as typed the asterisk pairs that Markdown does not read as bold: %s', (line) => {
     expect(parseMarkdownRuns(line)).toEqual([{ text: line }]);
   });
@@ -518,6 +523,8 @@ describe('jira-feedback: buildAdfDocument (multi-paragraph ADF, #573)', () => {
     ]);
     // Three pairs: the first two are bold, the third has nothing to close it.
     expect(parseMarkdownRuns('**a**b and **c')).toEqual([{ text: 'a', strong: true }, { text: 'b and **c' }]);
+    // Inside a word: a word on the outer side of a pair does not make it an operator.
+    expect(parseMarkdownRuns('a**b**c')).toEqual([{ text: 'a' }, { text: 'b', strong: true }, { text: 'c' }]);
     // A letter that is not ASCII is not punctuation: a word may follow the pair.
     expect(parseMarkdownRuns('**変更**3件')).toEqual([{ text: '変更', strong: true }, { text: '3件' }]);
   });

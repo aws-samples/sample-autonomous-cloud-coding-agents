@@ -166,11 +166,13 @@ function parseRuns(line: string, links: boolean): AdfParagraph {
     if (line.startsWith('**', cursor)) {
       const end = line.indexOf('**', cursor + 2);
       // Bold as Markdown has it: text right after the opening pair and right
-      // before the closing one. A pair with a word on its outer side and
-      // punctuation on its inner side is an operator: `2**(n-1) + 2**(m-1)`
-      // and `f(**a) + g(**b)` stay as typed, like `a ** b ** c`.
+      // before the closing one. An asterisk is not text, so a run of them
+      // (a masked value, `****`) stays as typed. A pair with a word on its
+      // outer side and punctuation on its inner side is an operator:
+      // `2**(n-1) + 2**(m-1)` and `f(**a) + g(**b)` stay as typed, like
+      // `a ** b ** c`.
       if (
-        end !== -1 && /\S/.test(line.charAt(cursor + 2)) && /\S/.test(line.charAt(end - 1))
+        end !== -1 && /[^\s*]/.test(line.charAt(cursor + 2)) && /\S/.test(line.charAt(end - 1))
         && !(/\w/.test(line.charAt(cursor - 1)) && PUNCTUATION.test(line.charAt(cursor + 2)))
         && !(PUNCTUATION.test(line.charAt(end - 1)) && /\w/.test(line.charAt(end + 2)))
       ) {
