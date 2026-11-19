@@ -278,6 +278,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     const linearWorkspaceId = row.linear_workspace_id as string;
+    // Names the installation that was read: `setup` and `add-workspace` write it
+    // anew each time. Absent only on a row that the CLI did not write.
+    const installedAt = row.installed_at as string | undefined;
     const oauthSecretArn = row.oauth_secret_arn as string | undefined;
     // Present only on rows onboarded through the AgentCore Identity vault. Read
     // (and reported) but never deleted here — see the header note.
@@ -308,12 +311,20 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // "the row was one to remove when we decided to remove it" a property of
     // the write, not of a read that happened earlier. Two concurrent DELETEs
     // now resolve to one revoke and one 404 instead of both proceeding.
+    //
+    // The row also has to be the installation that was read. A `setup` that
+    // lands between the scan and this write puts an active row in its place,
+    // which is a row to remove like any other: without the second clause the
+    // registration just made would be revoked, and the delete below would take
+    // the secret just written for it. Scoped as `markWorkspaceRevoked` in the
+    // resolver is: by `installed_at`, or by its absence on a row that has none.
+    // The parentheses are needed, because DynamoDB evaluates AND before OR.
     try {
       await ddb.send(new UpdateCommand({
         TableName: registryTable,
         Key: { linear_workspace_id: linearWorkspaceId },
         UpdateExpression: 'SET #status = :revoked, revoked_reason = :reason, revoked_at = :now, revoked_by_platform_user_id = :uid, updated_at = :now',
-        ConditionExpression: REMOVABLE_ROW,
+        ConditionExpression: `(${REMOVABLE_ROW}) AND ${installedAt === undefined ? 'attribute_not_exists(installed_at)' : 'installed_at = :installed'}`,
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':revoked': 'revoked',
@@ -321,23 +332,30 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
           ':active': 'active',
           ':now': now,
           ':uid': userId,
+          ...(installedAt !== undefined && { ':installed': installedAt }),
         },
       }));
     } catch (err) {
       if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
-      // A concurrent DELETE removed the row between our scan and this write.
-      // (The resolver latching it revoked in that window does not end here:
-      // the condition accepts such a row, and its secret is deleted below.)
-      // This request changed nothing, so 404 (the same answer a caller gets
-      // for an already-removed slug) is the truthful one. The secret ARN is
+      // The row is no longer the one the scan read: a concurrent DELETE removed
+      // it, or a `setup` registered the workspace anew. (The resolver latching
+      // it revoked in that window does not end here: the condition accepts such
+      // a row, and its secret is deleted below.) This request changed nothing,
+      // so it answers 404 as for an already-removed slug, but does not call the
+      // workspace absent: after a setup it is registered. The secret ARN is
       // logged at WARN so that whatever the winner left behind is findable.
-      logger.warn('Linear remove-workspace lost a race: the registry row was already removed at write time', {
+      logger.warn('Linear remove-workspace lost a race: the registry row was removed or set up again between the read and the write', {
         request_id: requestId,
         workspace_slug: slug,
         linear_workspace_id: linearWorkspaceId,
         oauth_secret_arn: oauthSecretArn,
       });
-      return errorResponse(404, ErrorCode.WORKSPACE_NOT_FOUND, `Workspace '${slug}' is not an active registration.`, requestId);
+      return errorResponse(
+        404,
+        ErrorCode.WORKSPACE_NOT_FOUND,
+        `Workspace '${slug}' was removed or set up again while this request was running, so it removed nothing.`,
+        requestId,
+      );
     }
 
     // ─── Secrets Manager: delete the per-workspace OAuth secret ───────

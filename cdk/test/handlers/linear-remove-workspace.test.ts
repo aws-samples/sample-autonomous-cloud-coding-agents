@@ -50,6 +50,20 @@ const ADMIN = 'cognito-admin-sub';
  */
 const REMOVABLE_ROW = '#status = :active OR (#status = :revoked AND (attribute_not_exists(revoked_reason) OR revoked_reason <> :reason))';
 
+/**
+ * The condition of the revoke: a row to remove that is still the installation the
+ * scan read. `setup` and `add-workspace` write `installed_at` anew each time; a row
+ * read without one has to be without one still. The parentheses carry the meaning:
+ * DynamoDB evaluates AND before OR, so without them the clause would belong to the
+ * revoked half of `REMOVABLE_ROW`, and an active row would pass whatever its
+ * installation.
+ */
+const SAME_INSTALLATION = `(${REMOVABLE_ROW}) AND installed_at = :installed`;
+const NO_INSTALLATION_RECORDED = `(${REMOVABLE_ROW}) AND attribute_not_exists(installed_at)`;
+
+/** `installed_at` of the fixture row: the time `setup` recorded for its installation. */
+const INSTALLED = '2026-11-01T09:00:00.000Z';
+
 function makeEvent(opts: {
   slug?: string;
   userId?: string;
@@ -79,6 +93,7 @@ function activeRow(overrides: Record<string, unknown> = {}) {
     workspace_slug: 'acme',
     oauth_secret_arn: 'arn:aws:secretsmanager:us-east-1:123:secret:bgagent-linear-oauth-acme-AbCd',
     installed_by_platform_user_id: ADMIN,
+    installed_at: INSTALLED,
     status: 'active',
     ...overrides,
   };
@@ -135,6 +150,40 @@ function routeDdb(opts: {
     }
     return Promise.resolve({});
   });
+}
+
+/**
+ * `routeDdb` for a registry of one row that another command rewrites between this
+ * handler's read and its revoke: `written` takes the place of `read` once the scan
+ * has answered. The revoke is then answered as DynamoDB answers it, on the row as
+ * it is by then: it needs a removable row, and under `SAME_INSTALLATION` the
+ * `installed_at` that the revoke binds. Returns the registry, to read what became
+ * of the row.
+ */
+function routeDdbWithAWriteAfterTheScan(read: Record<string, unknown>, written: Record<string, unknown>) {
+  const registry = [read];
+  routeDdb({ registryRows: registry });
+  const baseImpl = ddbSend.getMockImplementation()!;
+  ddbSend.mockImplementation((cmd: { _type: string; input: Record<string, unknown> }) => {
+    const answer = baseImpl(cmd);
+    if (cmd._type === 'Scan') registry[0] = written;
+    const values = (cmd.input.ExpressionAttributeValues ?? {}) as Record<string, unknown>;
+    if (cmd._type !== 'Update' || values[':revoked'] !== 'revoked') return answer;
+
+    const [row] = registry;
+    const removable = row.status === values[':active']
+      || (row.status === values[':revoked'] && row.revoked_reason !== values[':reason']);
+    const sameInstallation = cmd.input.ConditionExpression !== SAME_INSTALLATION
+      || row.installed_at === values[':installed'];
+    if (!removable || !sameInstallation) {
+      return Promise.reject(
+        Object.assign(new Error('The conditional request failed'), { name: 'ConditionalCheckFailedException' }),
+      );
+    }
+    registry[0] = { ...row, status: values[':revoked'], revoked_reason: values[':reason'] };
+    return answer;
+  });
+  return registry;
 }
 
 /**
@@ -212,11 +261,13 @@ describe('linear-remove-workspace handler', () => {
       // one revoked reason the OAuth resolver re-probes instead of refusing.
       ':reason': 'admin_removed',
       ':uid': ADMIN,
+      ':installed': INSTALLED,
     });
     // The revoke is conditional on the row still being one this endpoint has
     // not removed, so two concurrent DELETEs can't both believe they won (a
-    // filtered Scan is a TOCTOU on its own; only the condition settles it).
-    expect(updateCall![0].input.ConditionExpression).toBe(REMOVABLE_ROW);
+    // filtered Scan is a TOCTOU on its own; only the condition settles it),
+    // and on its still being the installation that the scan read.
+    expect(updateCall![0].input.ConditionExpression).toBe(SAME_INSTALLATION);
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
 
     // Secret deleted — and asserted on *what* was deleted and *how*. A bare
@@ -619,6 +670,43 @@ describe('linear-remove-workspace handler', () => {
     // Nothing destructive may follow a lost race.
     expect(smSend).not.toHaveBeenCalled();
     expect(ddbSend.mock.calls.filter(([c]) => c._type === 'Delete')).toHaveLength(0);
+  });
+
+  test.each([
+    ['revoked for a dead grant', { status: 'revoked', revoked_reason: 'refresh_token_rejected' }],
+    ['active', {}],
+  ])('a workspace read as %s and set up again before the revoke keeps its new registration and its secret', async (_as, read) => {
+    // `bgagent linear setup` stores the new token in the workspace's secret and
+    // then puts the whole row anew: active, with the time of this installation. A
+    // revoke that asks only for a removable row finds one in it, and the delete
+    // that follows takes the secret with the token just stored.
+    const setUpAgain = activeRow({ installed_at: '2026-11-18T10:00:05.000Z' });
+    const registry = routeDdbWithAWriteAfterTheScan(activeRow(read), setUpAgain);
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+
+    expect(registry).toEqual([setUpAgain]);
+    expect(smSend).not.toHaveBeenCalled();
+    // Nothing was removed, and the answer says so instead of calling the
+    // workspace absent: it is registered, by the setup that has just finished.
+    expect(result.statusCode).toBe(404);
+    expect(JSON.parse(result.body).error).toMatchObject({
+      code: 'WORKSPACE_NOT_FOUND',
+      message: expect.stringContaining('set up again'),
+    });
+  });
+
+  test('a row that carries no installed_at is revoked on condition that it still carries none', async () => {
+    // The CLI has recorded `installed_at` in every row it has written, so such a
+    // row was written by hand. A setup adds the attribute, which takes the row out
+    // of the condition. No `:installed` is bound here: DynamoDB requires a bound
+    // value to be used by the expressions of the request.
+    routeDdb({ registryRow: activeRow({ installed_at: undefined }) });
+
+    const result = await handler(makeEvent({ slug: 'acme', userId: ADMIN }));
+    expect(result.statusCode).toBe(200);
+    expect(findRevoke()![0].input.ConditionExpression).toBe(NO_INSTALLATION_RECORDED);
+    expect(findRevoke()![0].input.ExpressionAttributeValues).not.toHaveProperty(':installed');
   });
 
   test('a non-conditional Update failure surfaces as a 500 and never reaches the secret delete', async () => {
