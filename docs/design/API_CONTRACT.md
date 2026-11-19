@@ -396,7 +396,15 @@ GET /v1/pending
 
 Returns the caller's pending Cedar HITL approval requests across all their tasks.
 
+- A request whose approval window has passed is not listed. The window ends at `created_at` plus `timeout_s`, which each entry also carries as `expires_at`. The stored record of such a request can stay pending for days, when the agent was gone at the end of the window and could not close it.
+- At most 100 requests are returned, and the endpoint has no pagination.
+- One call reads the caller's pending records in at most 20 pages of 100 (2,000 records). When it stops there with fewer than 100 requests to list and records are left unread, the requests among them are not listed, and a warning is written to the function's log.
+- The response has no field that says the list is incomplete, for either limit.
+- Rate limit: 60 requests per user per minute, counted by clock minute. A request above it is answered `429 RATE_LIMIT_EXCEEDED`.
+
 **Response: `200 OK`** — `{ "data": { "pending": [ ... ] } }`.
+
+**Errors:** `401 UNAUTHORIZED`, `429 RATE_LIMIT_EXCEEDED`.
 
 ### Get repo policies
 
