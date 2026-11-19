@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ApiClient } from '../../src/api-client';
@@ -106,6 +106,28 @@ describe('replay command', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('--force leaves an existing --output file owner-only', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'replay-test-'));
+    const file = join(dir, 'bundle.json');
+    try {
+      // A file that is already there keeps its mode when it is only written to.
+      writeFileSync(file, 'old');
+      chmodSync(file, 0o644);
+      await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', file, '--force']);
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(BUNDLE);
+      expect(statSync(file).mode % 0o1000).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('--force writes to a device such as /dev/null and leaves its mode alone', async () => {
+    const mode = statSync('/dev/null').mode;
+    await makeReplayCommand().parseAsync(['node', 'test', 'abc', '--output', '/dev/null', '--force']);
+    expect(errSpy).toHaveBeenCalledWith('Wrote replay bundle to /dev/null');
+    expect(statSync('/dev/null').mode).toBe(mode);
   });
 
   test('refuses to overwrite an existing --output file without --force', async () => {

@@ -21,6 +21,7 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import type { APIGatewayRequestAuthorizerEvent, APIGatewayAuthorizerResult } from 'aws-lambda';
 import { hashApiKeySecret, parseApiKey, timingSafeHashEqual } from './shared/api-key';
+import { getHeader } from './shared/gateway';
 import { logger } from './shared/logger';
 import type { ApiKeyRecord } from './shared/types';
 import { makeDocClient } from './shared/ua';
@@ -64,11 +65,6 @@ function generatePolicy(
   };
 }
 
-function header(event: APIGatewayRequestAuthorizerEvent, name: string): string | undefined {
-  const headers = event.headers ?? {};
-  return headers[name] ?? headers[name.toLowerCase()];
-}
-
 /**
  * Lambda REQUEST authorizer accepting EITHER a platform API key (`X-API-Key`)
  * OR a Cognito id token (`Authorization`). Returns `principalId = user_id` and
@@ -77,8 +73,8 @@ function header(event: APIGatewayRequestAuthorizerEvent, name: string): string |
  */
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
   const methodArn = event.methodArn;
-  const apiKeyHeader = header(event, 'X-API-Key');
-  const authHeader = header(event, 'Authorization');
+  const apiKeyHeader = getHeader(event.headers, 'X-API-Key');
+  const authHeader = getHeader(event.headers, 'Authorization');
 
   try {
     if (apiKeyHeader) {
@@ -137,6 +133,10 @@ async function authorizeApiKey(
     });
     return generatePolicy(record.user_id, 'Deny', methodArn);
   }
+
+  // The record of what a key was used for (the method ARN names verb and
+  // route): after a key leaks, this is how an operator sees what it did.
+  logger.info('API key authorized', { key_id: record.key_id, user_id: record.user_id, method_arn: methodArn });
 
   return generatePolicy(record.user_id, 'Allow', methodArn, {
     userId: record.user_id,

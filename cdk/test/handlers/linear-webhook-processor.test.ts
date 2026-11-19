@@ -92,6 +92,7 @@ process.env.GUARDRAIL_VERSION = '1';
 
 import { handler } from '../../src/handlers/linear-webhook-processor';
 import { LinearAttachmentError } from '../../src/handlers/shared/linear-attachments';
+import { renderIssueContextHint } from '../../src/handlers/shared/linear-issue-context-probe';
 import { logger } from '../../src/handlers/shared/logger';
 
 function eventWith(payload: Record<string, unknown>): { raw_body: string } {
@@ -593,6 +594,28 @@ describe('linear-webhook-processor handler', () => {
       expect(message).toContain('re-apply the trigger label');
     });
 
+    test('an idempotent replay (createTaskCore 200) is not reported as a failure', async () => {
+      // A second run of the same delivery (Lambda retrying the async invoke after a
+      // timeout or a crash) reaches createTaskCore with the same idempotency key and
+      // gets the first run's task back with 200. That task is working on the issue,
+      // so a "couldn't create this task (status 200)" comment and a ❌ would be wrong.
+      // What this run uploaded is keyed on a task id that never became a task.
+      ddbSend
+        .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
+        .mockResolvedValueOnce({ Item: { platform_user_id: 'cognito-user-1', status: 'active' } });
+      const uploaded = { attachment_id: 'a1', s3_key: 'attachments/u/t/a1/paste.png' };
+      downloadLinearAttachmentsMock.mockResolvedValueOnce([uploaded]);
+      createTaskCoreMock.mockResolvedValueOnce({ statusCode: 200, body: JSON.stringify({ data: { task_id: 'T1' } }) });
+      const payload = issue();
+      (payload.data as Record<string, unknown>).description = '![paste](https://uploads.linear.app/15d12f61/090e5ce6/938f90d7)';
+
+      await handler(eventWith(payload));
+
+      expect(createTaskCoreMock).toHaveBeenCalledTimes(1);
+      expect(reportIssueFailureMock).not.toHaveBeenCalled();
+      expect(cleanupPreScreenedAttachmentsMock).toHaveBeenCalledWith(expect.anything(), 'attachments-bucket', [uploaded]);
+    });
+
     test('does NOT post feedback on the happy 201 path', async () => {
       ddbSend
         .mockResolvedValueOnce({ Item: { repo: 'org/repo', status: 'active' } })
@@ -1006,6 +1029,48 @@ describe('linear-webhook-processor handler', () => {
       expect(reqBody.task_description).toContain('ABC-42: Fix the login bug');
     });
 
+    // The hint is advisory, like the document and comment sections: ABCA adds it,
+    // so it must never be what takes a description that fits over the limit. It
+    // was: an issue of 9,900 characters with one Figma paperclip was rejected with
+    // "task_description exceeds maximum length of 10000 characters", and making
+    // the issue a hundred characters shorter did not help.
+    describe('the hint and the size limit of the description', () => {
+      const probe = {
+        attachmentTitles: ['Checkout mockup'],
+        // A paperclip that is not a Linear upload: named in the hint, never fetched.
+        attachments: [{ title: 'Checkout mockup', url: 'https://www.figma.com/file/abc/checkout' }],
+        projectName: 'Onboarding',
+        projectHasDocuments: false,
+        projectDocuments: [],
+        ok: true,
+        projectDocumentCount: 0,
+      };
+      const title = 'ABC-42: Fix the login bug';
+      // Title, hint and description are set apart by blank lines: four line breaks.
+      const descriptionRoom = 10_000 - title.length - renderIssueContextHint(probe).length - 4;
+
+      async function taskDescriptionFor(description: string): Promise<string> {
+        probeLinearIssueContextMock.mockResolvedValueOnce(probe);
+        const payload = issue();
+        (payload.data as Record<string, unknown>).description = description;
+        await handler(eventWith(payload));
+        return String(createTaskCoreMock.mock.calls[0][0].task_description);
+      }
+
+      test('a hint that fits is kept, up to the last character of the limit', async () => {
+        const sent = await taskDescriptionFor('x'.repeat(descriptionRoom));
+        expect(sent).toContain('references additional context');
+        expect(sent).toHaveLength(10_000);
+      });
+
+      test('a hint that does not fit is left out, and the issue text is sent whole', async () => {
+        const description = 'x'.repeat(descriptionRoom + 1);
+        const sent = await taskDescriptionFor(description);
+        expect(sent.length).toBeLessThanOrEqual(10_000);
+        expect(sent).toBe(`${title}\n\n${description}`);
+      });
+    });
+
     // ─── ADR-016 pre-hydration: recent comments folded into the description ────
 
     test('folds recent human comments into the task description under a heading', async () => {
@@ -1163,7 +1228,9 @@ describe('probeLinearIssueContext', () => {
     expect(body.query).toContain('content'); // ADR-016 — doc bodies pre-hydrated
     expect(body.query).toContain('documentsForCount'); // true-total count connection
     expect(result).toEqual({
-      attachmentTitles: ['spec.pdf'],
+      // The paperclip is an upload: the processor fetches and attaches it, so
+      // the hint does not list it.
+      attachmentTitles: [],
       attachments: [{ title: 'spec.pdf', url: 'https://uploads.linear.app/u/a/spec' }],
       projectName: 'P1',
       projectHasDocuments: true,

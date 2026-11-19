@@ -398,7 +398,7 @@ class _ProgressWriter:
     # Circuit-breaker proxies (finding #8): keep the historical
     # ``writer._disabled`` / ``writer._failure_count`` surface working as
     # read-only attributes.  Callers in ``hooks.py`` and tests inspect
-    # these directly — see ``_emit_nudge_milestone`` which reads
+    # these directly — see ``hooks._try_progress`` which reads
     # ``getattr(progress, "_disabled", False)``.  We back them with the
     # shared state so external readers see the consolidated view.
     # ------------------------------------------------------------------
@@ -929,7 +929,9 @@ class _ProgressWriter:
           ``matching_rule_ids``. Used by the publisher Lambda to emit
           ``TimedOutEffectiveTimeout`` with a ``rule_id`` dimension
           (normalized against an allowlist so unknown rules collapse
-          to ``other`` — cardinality cap, H4 adversarial finding).
+          to ``other`` — cardinality cap, H4 adversarial finding). The
+          publisher emits the value a second time without dimensions:
+          that is the metric the dashboard's percentiles read.
 
         ``timeout_s`` is retained for backward-compat — pre-Chunk-8a
         events and consumers that only want the raw timer value see
@@ -1059,6 +1061,7 @@ class _ProgressWriter:
         cached_decision: str,
         cached_reason: str,
         original_decision_ts: str,
+        matched_rule_id: str | None = None,
     ) -> None:
         """Emit ``policy_decision`` for a recent-decision-cache hit (IMPL-23).
 
@@ -1068,6 +1071,10 @@ class _ProgressWriter:
         ``decision_source`` field distinguishes cache-driven denies from
         fresh policy evaluations so operators can correlate retry patterns
         with container restarts (§12.8, §13.6).
+
+        ``matched_rule_id`` is the rule a rule-level hit was denied for (a
+        retry that matches a rule the user has just denied). A hit on the
+        exact input has none, and the field is omitted from the metadata.
 
         Reuses ``_put_approval_milestone`` for the ``agent_milestone``
         event shape; the ``milestone`` key is ``policy_decision`` here
@@ -1080,6 +1087,7 @@ class _ProgressWriter:
                 "decision_source": "recent_decision_cache",
                 "tool_name": tool_name,
                 "tool_input_sha256": tool_input_sha256,
+                **({} if matched_rule_id is None else {"matched_rule_id": matched_rule_id}),
                 "cached_decision": cached_decision,
                 "cached_reason": self._preview(cached_reason),
                 "original_decision_ts": original_decision_ts,

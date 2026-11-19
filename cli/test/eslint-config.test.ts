@@ -41,6 +41,16 @@ const CASES: Array<[file: string, code: string, rules: string[]]> = [
   ['src/a.ts', '/* v8 ignore next */', ['no-warning-comments']],
   ['src/a.ts', '/* c8 ignore start */', ['no-warning-comments']],
   ['src/a.ts', '/* node:coverage disable */', ['no-warning-comments']],
+  // An explicit any.
+  ['src/a.ts', 'export const value: any = 1;', ['@typescript-eslint/no-explicit-any']],
+  // The two core formatting rules that stay on beside their @stylistic forks: what the
+  // forks leave out.
+  ['src/a.ts', 'try { run(); } catch(err) { report(err); }', ['keyword-spacing']],
+  ['src/a.ts', 'export const [,second] = pair;', ['comma-spacing']],
+  // A control character in a regular expression.
+  ['src/a.ts', 'export const pattern = /\\x01/;', ['no-control-regex']],
+  // Two spaces inside an import attribute, which @stylistic/no-multi-spaces lets pass by default.
+  ['src/a.ts', "import cfg from './cfg.json' with { type: /* c */  'json' };", ['@stylistic/no-multi-spaces']],
 ];
 
 /**
@@ -73,4 +83,46 @@ test('eslint.config.mjs reports each snippet with exactly the rules listed', () 
   });
   const reported = JSON.parse(stdout) as string[][];
   expect(CASES.map(([file, code], index) => [file, code, reported[index]])).toEqual(CASES);
+}, 60_000);
+
+/**
+ * A function that was above the complexity ceiling when the ceiling landed carries a
+ * directive, and the first number in its parenthesis is the record: the value the function
+ * had then, lowered whenever a change made the function smaller. The directive switches
+ * the rule off for that function, so nothing else compares the two numbers: this lints
+ * src with the directives ignored and holds each function above the ceiling to the record
+ * on the line above it.
+ */
+const LINT_COMPLEXITY = `
+  import { readFileSync } from 'node:fs';
+  import { relative } from 'node:path';
+  import { ESLint } from 'eslint';
+  const eslint = new ESLint({
+    overrideConfigFile: 'eslint.config.mjs',
+    allowInlineConfig: false,
+    ruleFilter: ({ ruleId }) => ruleId === 'complexity',
+    overrideConfig: [{ files: ['**/*.ts'], languageOptions: { parserOptions: { project: null } } }],
+  });
+  const grown = [];
+  for (const result of await eslint.lintFiles(['src'])) {
+    const lines = readFileSync(result.filePath, 'utf-8').split('\\n');
+    for (const { line, message } of result.messages) {
+      const [, now] = /has a complexity of (\\d+)/.exec(message) ?? [];
+      const [, recorded] = /complexity -- .*?\\((\\d+)/.exec(lines[line - 2]) ?? [];
+      // A message or a directive without a number fails the comparison as well.
+      if (!(Number(now) <= Number(recorded))) {
+        grown.push(relative('.', result.filePath) + ':' + line + ' ' + message + ' Recorded: ' + (recorded ?? 'nothing') + '.');
+      }
+    }
+  }
+  console.log(JSON.stringify(grown));
+`;
+
+test('no function above the complexity ceiling has grown past the value its directive records', () => {
+  const stdout = execFileSync(process.execPath, ['--input-type=module', '--eval', LINT_COMPLEXITY], {
+    cwd: path.resolve(__dirname, '..'),
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  expect(JSON.parse(stdout)).toEqual([]);
 }, 60_000);

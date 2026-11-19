@@ -81,6 +81,8 @@ orchestrator log ──task_id──▶ TaskRecord ──otel_trace_id──▶ 
 - **Agent plane** (MicroVM): OTel spans, baggage, and agent-emitted `TaskEvents` carry `{task_id, user_id, repo, trace_id}`, so the event stream is joinable to the X-Ray trace directly.
 - **TaskRecord**: holds `otel_trace_id` and `session_id` (persisted at terminal write, #515), the durable link between the two planes and the basis of the [task replay bundle](#task-replay-bundle).
 
+Where the agent runs under `opentelemetry-instrument`, the auto-instrumentation copies the trace context and the baggage into the headers of requests sent with an instrumented HTTP client. The agent image keeps that for boto3 and the tool gateway client and switches it off for `requests` and `urllib3` (`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` in `agent/Dockerfile`), so the agent's requests to Linear and Atlassian, which it sends with `requests`, carry neither.
+
 **Coverage notes:**
 
 - The `task_created` event is written at task creation, *before* the correlation envelope exists on the orchestration path; it joins by `task_id` alone. Every event from `hydration_started` onward carries the envelope. Rare safety-net writers (e.g. the stranded-task reconciler) likewise join by `task_id`.

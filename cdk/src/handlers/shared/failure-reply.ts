@@ -41,8 +41,8 @@
  * iteration on the same PR. Pure and deterministic; no I/O.
  */
 
-import { classifyError, classifyMicrovmTerminalFailure, retryGuidance } from './error-classifier';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, classifyMicrovmTerminalFailure, retryGuidance } from './error-classifier';
 
 /** Max chars of the raw agent error surfaced inline (the rest is in CloudWatch). */
 const EXCERPT_MAX = 200;

@@ -184,7 +184,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (123; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -522,6 +522,16 @@ export class AgentStack extends Stack {
         return ecsClusterArnHolder;
       },
     });
+
+    // Per-user concurrency cap. Declared once, here, for every function that reads
+    // MAX_CONCURRENT_TASKS_PER_USER: those of the task API, the orchestrator
+    // (admission control), the admission-queue pickup, the Linear and Jira
+    // integrations and the orchestration reconcilers (their release throttle).
+    // They must never drift: each has to count against the SAME ceiling admission
+    // enforces. A construct that is not passed the cap falls back to a default of
+    // its own.
+    const maxConcurrentTasksPerUser = 10;
+
     // --- Task API (REST API + Cognito + Lambda handlers) ---
     const taskApi = this.taskApi = new TaskApi(this, 'TaskApi', {
       taskTable: taskTable.table,
@@ -540,6 +550,7 @@ export class AgentStack extends Stack {
       traceArtifactsBucket: traceArtifactsBucket.bucket,
       attachmentsBucket: attachmentsBucket.bucket,
       userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
       budgetTable: budgetTable.table,
       // ADR-021: gives the cancel Lambda `lambda:TerminateMicrovm`, scoped to the
       // platform MicroVM image, so cancelling a MicroVM-backed task stops compute
@@ -677,7 +688,6 @@ export class AgentStack extends Stack {
         // Persistent mount (no flock):
         CLAUDE_CONFIG_DIR: '/mnt/workspace/.claude-config',
         npm_config_cache: '/mnt/workspace/.npm-cache',
-        // ENABLE_CLI_TELEMETRY: '1',
         // Outbound SDK solution attribution (#319): botocore reads
         // AWS_SDK_UA_APP_ID natively → `app/uksb-wt64nei4u6#{stack}`. The
         // Lambda-only Aspect can't reach this runtime, so set it explicitly.
@@ -1152,6 +1162,10 @@ export class AgentStack extends Stack {
         taskTable: taskTable.table,
         taskEventsTable: taskEventsTable.table,
         userConcurrencyTable: userConcurrencyTable.table,
+        // ECS parity: NUDGES_TABLE_NAME in the container env, without which the
+        // agent's nudge reader is off. No task-role grant: the agent reads the
+        // table through the SessionRole, which lists it above.
+        taskNudgesTable: taskNudgesTable.table,
         githubTokenSecret,
         memoryId: agentMemory.memory.memoryId,
         // ECS parity: pass the Memory construct (not just its id) so the task
@@ -1316,11 +1330,6 @@ export class AgentStack extends Stack {
     }
 
     // --- Task Orchestrator (durable Lambda function) ---
-    // Per-user concurrency cap, shared by the orchestrator (admission control)
-    // and the orchestration reconcilers (their release throttle), so the two
-    // never drift — the reconciler must throttle to the SAME ceiling admission
-    // enforces.
-    const maxConcurrentTasksPerUser = 10;
     const orchestrator = new TaskOrchestrator(this, 'TaskOrchestrator', {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
@@ -1448,6 +1457,7 @@ export class AgentStack extends Stack {
       taskTable: taskTable.table,
       taskEventsTable: taskEventsTable.table,
       userConcurrencyTable: userConcurrencyTable.table,
+      maxConcurrentTasksPerUser,
       orchestratorFunctionArn: orchestrator.alias.functionArn,
     });
 
@@ -1782,11 +1792,11 @@ export class AgentStack extends Stack {
     }
 
     // Phase 2.0b-O2: pipe the workspace registry table + per-workspace
-    // OAuth-secret-prefix grant into the orchestrator so the concurrency-cap
-    // rejection path can post a Linear comment + ❌. The orchestrator only
-    // resolves a token when `task.channel_source === 'linear'`, but the
-    // IAM grant is unconditional (per-workspace secrets are created lazily
-    // by `bgagent linear setup`).
+    // OAuth-secret-prefix grant into the orchestrator so that it can post the
+    // queued notice as a Linear comment when a task is queued at the
+    // concurrency cap. The orchestrator only resolves a token when
+    // `task.channel_source === 'linear'`, but the IAM grant is unconditional
+    // (per-workspace secrets are created lazily by `bgagent linear setup`).
     if (linearIntegration) {
       linearIntegration.workspaceRegistryTable.grantReadData(orchestrator.fn);
       orchestrator.fn.addEnvironment(
@@ -1905,7 +1915,7 @@ export class AgentStack extends Stack {
       }
 
       // Pipe the workspace registry table + per-tenant OAuth-secret-prefix
-      // grant into the orchestrator so the concurrency-cap rejection path
+      // grant into the orchestrator so the concurrency-cap queueing path
       // (`notifyJiraOnConcurrencyCap` in orchestrate-task.ts) can post a Jira
       // comment. The orchestrator only resolves a token when
       // `task.channel_source === 'jira'`, but the IAM grant is unconditional
@@ -2236,13 +2246,6 @@ export class AgentStack extends Stack {
       {
         id: 'AwsSolutions-IAM5',
         reason: 'Bedrock model invocation logging configuration APIs are account-level and do not support resource-level permissions',
-      },
-    ], true);
-
-    NagSuppressions.addResourceSuppressions(bedrockLoggingRole, [
-      {
-        id: 'AwsSolutions-IAM5',
-        reason: 'CloudWatch Logs grantWrite generates wildcards for log stream creation — required by Bedrock logging service',
       },
     ], true);
 

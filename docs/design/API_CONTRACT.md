@@ -113,7 +113,7 @@ in place of `task_type`.
 | `type` | String | Yes | `image`, `file`, or `url` |
 | `content_type` | String | Conditional | MIME type. Required for presigned uploads and URL attachments; auto-detected from magic bytes for inline data. |
 | `data` | String | No | Base64-encoded content (max 500 KB decoded per attachment; max 3 MB total inline per request). Mutually exclusive with `url`. |
-| `url` | String | No | HTTPS URL to fetch during hydration (max 10 MB, 10s timeout). Required when `type` is `url`. |
+| `url` | String | No | HTTPS URL to fetch during hydration (max 10 MB, 10s timeout per request, 30s for all URL attachments of a task). Required when `type` is `url`, and refused for the other types. |
 | `filename` | String | No | Original filename. Auto-generated if absent. Must not contain path separators or start with `.`. |
 | `expected_size_bytes` | Number | Conditional | Declared file size in bytes. Required for presigned uploads (no `data`, no `url`). Used for early budget validation. |
 
@@ -135,6 +135,7 @@ in place of `task_type`.
 | Max total size per task | 50 MB |
 | URL scheme | HTTPS only |
 | URL fetch timeout | 10 seconds |
+| URL attachments, total time per task | 30 seconds (no request for a URL attachment starts or runs after this time; name lookups and screening are counted but not cut off) |
 
 **Upload paths:**
 
@@ -181,7 +182,7 @@ For PR tasks, `branch_name` is initially `pending:pr_resolution` and resolved to
 }
 ```
 
-**Idempotency:** Clients may send `Idempotency-Key` (see [Conventions](#conventions)). The first successful create returns **`201 Created`** (or `202` for presigned tasks). A subsequent request with the same key and the **same authenticated user** returns **`200 OK`** with the full `TaskDetail` reflecting **current** task state, plus response header `Idempotent-Replay: true`. No duplicate task is created and the orchestrator is not invoked again for that replay. If the key is already bound to a task owned by **another** user, the API returns **`409 DUPLICATE_TASK`** without exposing that task (extremely unlikely for high-entropy keys).
+**Idempotency:** Clients may send `Idempotency-Key` (see [Conventions](#conventions)). The first successful create returns **`201 Created`** (or `202` for presigned tasks). A subsequent request with the same key and the **same authenticated user** returns **`200 OK`** with the full `TaskDetail` reflecting **current** task state, plus response header `Idempotent-Replay: true`. While that task is still in `PENDING_UPLOADS`, the replay also carries new `upload_instructions` for the uploads that are not yet confirmed and the task's `task_expires_at`, so a client whose upload or confirmation failed can upload again and call `confirm-uploads`. No duplicate task is created and the orchestrator is not invoked again for that replay. If the key is already bound to a task owned by **another** user, the API returns **`409 DUPLICATE_TASK`** without exposing that task (extremely unlikely for high-entropy keys).
 
 **Errors:** `400 VALIDATION_ERROR` (invalid body/parameters, or task description blocked by content screening), `400 ATTACHMENT_INVALID_CONTENT` (content does not match declared MIME type or could not be sanitized), `400 ATTACHMENT_BLOCKED` (inline attachment failed content screening), `400 ATTACHMENT_INLINE_TOO_LARGE` (single inline attachment > 500 KB; total inline > 3 MB surfaces as `VALIDATION_ERROR`), `400 ATTACHMENTS_TOTAL_TOO_LARGE` (aggregate declared size > 50 MB), `401 UNAUTHORIZED`, `409 DUPLICATE_TASK` (idempotency key collision across users only), `422 REPO_NOT_ONBOARDED`, `429 BUDGET_EXCEEDED` (a user or Cognito-team monthly hard-stop budget is exhausted), `503 SERVICE_UNAVAILABLE`, `503 ATTACHMENT_SCREENING_UNAVAILABLE`.
 
@@ -214,7 +215,7 @@ Triggers security screening for presigned-upload attachments and transitions the
 
 If the orchestrator dispatch fails after the task is submitted, the response body additionally carries a `warning` field; the task is still picked up by the background reconciler.
 
-**Errors:** `400 VALIDATION_ERROR` (no attachments to confirm), `400 ATTACHMENT_UPLOAD_MISSING` (a declared upload is not present in S3), `400 ATTACHMENT_BLOCKED` (an attachment failed content screening — the task transitions to `FAILED`), `404 TASK_NOT_FOUND`, `409 UPLOADS_NOT_PENDING` (task is in a state that cannot accept upload confirmations), `429 RATE_LIMIT_EXCEEDED` (user concurrency limit reached), `503 ATTACHMENT_SCREENING_UNAVAILABLE`, `503 SCREENING_DEADLINE_EXCEEDED` (screening did not finish within the time limit; retry — already-screened attachments are skipped).
+**Errors:** `400 VALIDATION_ERROR` (no attachments to confirm; or the uploads together exceed the 50 MB task limit, and the task transitions to `FAILED`), `400 ATTACHMENT_UPLOAD_MISSING` (a declared upload is not present in S3), `400 ATTACHMENT_BLOCKED` (an attachment failed content screening or does not match its declared type, and the task transitions to `FAILED`; or its upload is no longer in storage because the task has failed or expired in the meantime), `404 TASK_NOT_FOUND`, `409 UPLOADS_NOT_PENDING` (task is in a state that cannot accept upload confirmations), `429 RATE_LIMIT_EXCEEDED` (user concurrency limit reached), `503 ATTACHMENT_SCREENING_UNAVAILABLE`, `503 SCREENING_DEADLINE_EXCEEDED` (screening did not finish within the time limit; retry — already-screened attachments are skipped).
 
 ### Get task
 
@@ -369,7 +370,7 @@ POST /v1/tasks/{task_id}/approve
 POST /v1/tasks/{task_id}/deny
 ```
 
-When a task pauses in `AWAITING_APPROVAL` (Cedar soft-deny gate), the owner approves or denies the pending request to resume the agent. Both endpoints accept a request body with the pending `request_id`. `approve` may include an optional `scope` (defaults to `this_call`); `deny` may include an optional `reason` (redacted and truncated to 2,000 chars).
+When a task pauses in `AWAITING_APPROVAL` (Cedar soft-deny gate), the owner approves or denies the pending request to resume the agent. Both endpoints accept a request body with the pending `request_id`. `approve` may include an optional `scope` (defaults to `this_call`); `deny` may include an optional `reason` (redacted and truncated to 2,000 chars; the redaction reads the first 20,000 characters of the reason).
 
 **Response: `202 Accepted`**
 
@@ -395,7 +396,15 @@ GET /v1/pending
 
 Returns the caller's pending Cedar HITL approval requests across all their tasks.
 
+- A request whose approval window has passed is not listed. The window ends at `created_at` plus `timeout_s`, which each entry also carries as `expires_at`. The stored record of such a request can stay pending for days, when the agent was gone at the end of the window and could not close it.
+- At most 100 requests are returned, and the endpoint has no pagination.
+- One call reads the caller's pending records in at most 20 pages of 100 (2,000 records). When it stops there with fewer than 100 requests to list and records are left unread, the requests among them are not listed, and a warning is written to the function's log.
+- The response has no field that says the list is incomplete, for either limit.
+- Rate limit: 60 requests per user per minute, counted by clock minute. A request above it is answered `429 RATE_LIMIT_EXCEEDED`.
+
 **Response: `200 OK`** — `{ "data": { "pending": [ ... ] } }`.
+
+**Errors:** `401 UNAUTHORIZED`, `429 RATE_LIMIT_EXCEEDED`.
 
 ### Get repo policies
 
@@ -594,6 +603,7 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `REPO_NOT_ONBOARDED` | 422 | Repository not registered (onboard via CDK, not runtime API) |
 | `REPO_NOT_FOUND_OR_NO_ACCESS` | 422 | Repo onboarded but credentials cannot reach it |
 | `PR_NOT_FOUND_OR_CLOSED` | 422 | PR does not exist, is closed, or is inaccessible |
+| `PR_FROM_FORK` | 422 | PR comes from a fork: its branch is not in the onboarded repository |
 | `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` | 422 | GitHub token lacks required permissions for the task type |
 | `ATTACHMENT_BLOCKED` | 400 | Attachment content blocked by security screening |
 | `ATTACHMENT_TOO_LARGE` | 400 | Individual attachment exceeds 10 MB size limit |
@@ -616,12 +626,14 @@ There is no per-user request-rate or "tasks-per-hour" limiter on task creation. 
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (retry with backoff) |
 
+`REPO_NOT_FOUND_OR_NO_ACCESS`, `PR_NOT_FOUND_OR_CLOSED`, `PR_FROM_FORK`, `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` and `GITHUB_UNREACHABLE` are reasons of the pre-flight step, which runs after the task is created. No request is answered with them: the task goes to `FAILED`, the code is the `reason` of its `preflight_failed` event, and its `error_message` starts with `Pre-flight check failed: <code>`. The step has two more reasons, which this table does not list: `GITHUB_TOKEN_SECRET_MISSING` and `GITHUB_TOKEN_SECRET_UNREADABLE`, for a GitHub token secret that is missing or cannot be read.
+
 ## Pagination
 
 List endpoints use token-based pagination (consistent with DynamoDB's `ExclusiveStartKey`).
 
 - `pagination.next_token` (opaque string) and `pagination.has_more` (boolean) in responses
-- Pass `next_token` as query parameter for the next page
+- Pass `next_token` as query parameter for the next page; a token that cannot be decoded is refused with `400 VALIDATION_ERROR`
 - Tokens are short-lived and should not be stored
 - Results ordered by `created_at` descending (newest first)
 - A page can hold fewer items than `limit`, or none, while `has_more` is `true`: a list that filters (tasks by `status` or `repo`, webhooks and API keys without the revoked ones) reads a bounded number of rows per request. Follow `next_token` until `has_more` is `false`

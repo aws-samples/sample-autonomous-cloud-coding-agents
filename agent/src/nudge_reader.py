@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from typing import Any, TypedDict
 
 from shell import log
+from task_state import _extract_error_code
 
 
 class PendingNudge(TypedDict):
@@ -176,15 +177,6 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
 
     now_iso = datetime.now(UTC).isoformat()
 
-    # Lazy import so tests without boto3 installed still load the module.
-    ClientError: type[Exception] | None
-    try:
-        from botocore.exceptions import ClientError as _CE
-
-        ClientError = _CE
-    except Exception:  # pragma: no cover — boto3/botocore always present at runtime
-        ClientError = None
-
     try:
         tbl.update_item(
             Key={"task_id": task_id, "nudge_id": nudge_id},
@@ -200,36 +192,10 @@ def mark_consumed(task_id: str, nudge_id: str, table: Any | None = None) -> bool
         )
         return True
     except Exception as exc:
-        # Structured ClientError path: boto3 wraps the DDB error code in
-        # ``exc.response["Error"]["Code"]``.
-        if ClientError is not None and isinstance(exc, ClientError):
-            code = exc.response.get("Error", {}).get("Code")
-            if code == "ConditionalCheckFailedException":
-                log("DEBUG", f"Nudge {nudge_id} already consumed (conditional check)")
-                return False
-            log(
-                "WARN",
-                f"Nudge mark_consumed ClientError for {nudge_id}: {code}: {exc}",
-            )
-            return False
-        # Fallback: some tests/mocks raise a bare exception subclass named
-        # ``ConditionalCheckFailedException`` rather than a real ClientError.
-        exc_name = type(exc).__name__
-        if exc_name == "ConditionalCheckFailedException":
+        if _extract_error_code(exc) == "ConditionalCheckFailedException":
             log("DEBUG", f"Nudge {nudge_id} already consumed (conditional check)")
-            return False
-        # Also handle fake ClientError duck-types carrying response["Error"]["Code"].
-        response = getattr(exc, "response", None)
-        if isinstance(response, dict):
-            code = (
-                response.get("Error", {}).get("Code")
-                if isinstance(response.get("Error"), dict)
-                else None
-            )
-            if code == "ConditionalCheckFailedException":
-                log("DEBUG", f"Nudge {nudge_id} already consumed (conditional check)")
-                return False
-        log("WARN", f"Nudge mark_consumed failed for {nudge_id}: {exc_name}: {exc}")
+        else:
+            log("WARN", f"Nudge mark_consumed failed for {nudge_id}: {type(exc).__name__}: {exc}")
         return False
 
 

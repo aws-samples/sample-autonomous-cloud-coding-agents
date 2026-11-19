@@ -151,6 +151,8 @@ Run `/bgagent link` in Slack, then `bgagent slack link <code>` in your terminal.
 
 The repo must be registered with a Blueprint before submitting tasks. See the [User guide](./USER_GUIDE.md).
 
+In a channel that has a default repo (`bgagent slack onboard-channel`) you get this answer only for a repo that is written with an issue number (`org/repo#42`) or that has the same owner as the repo the task would otherwise run on: the channel's default, or an onboarded repo named in the same message. Any other `word/word`, a repo of another owner included, is read as part of the description. A pasted GitHub link is not read as its repo either, also when it points to an onboarded repo or to one of the default's owner: its parts are slash words like any other (`github.com/acme` and `api/pull` in a link to `acme/api`), so the task normally starts on the channel's default. A part that has the default's owner gets the answer above: a link to `acme/acme` holds the word `acme/pull`. The "Task submitted" message names the repo the task runs on; if that is not what you meant, click **Cancel Task** on the "Agent started working" message.
+
 ### OAuth install fails (bad_client_secret)
 
 The credentials stored don't match your app. Delete the app and re-run `bgagent slack setup`, making sure to paste the correct values.

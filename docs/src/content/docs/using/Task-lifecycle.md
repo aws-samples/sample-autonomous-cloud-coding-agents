@@ -45,7 +45,7 @@ Task records in terminal states are automatically deleted after 90 days (configu
 
 ### Concurrency limits
 
-Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with a file attachment over 500 KB is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
+Each user can run up to 10 tasks concurrently. If you exceed the limit, the task is queued (`QUEUED`) instead of failing: it starts automatically, oldest first, as your active tasks finish or are cancelled, and fails only if it is still queued 24 hours after submission. A task with an uploaded file attachment (a file over 500 KB, or a smaller one once 3 MB are sent inline) is checked when you confirm its uploads: if your slots are all in use at that moment, the confirmation is refused with `429 RATE_LIMIT_EXCEEDED`. Through the API, confirm again once a slot is free, within 30 minutes of submitting; after that the unconfirmed task is cancelled. `bgagent submit` does not retry the confirmation: submit the task again.
 
 There is no system-wide cap - the theoretical maximum is `number_of_users * per_user_limit`. The hard ceiling is the AgentCore concurrent sessions quota for your AWS account (check the [AWS Service Quotas console](https://console.aws.amazon.com/servicequotas/) for Bedrock AgentCore in your region).
 
@@ -84,14 +84,13 @@ If a task fails with a `preflight_failed` event, the platform rejected the run b
 - `REPO_NOT_FOUND_OR_NO_ACCESS` - The GitHub PAT does not have access to the target repository, or the repo does not exist.
 - `INSUFFICIENT_GITHUB_REPO_PERMISSIONS` - The PAT lacks the required permissions for the workflow. For `coding/new-task-v1` and `coding/pr-iteration-v1`, you need Contents (read/write) and Pull requests (read/write). For `coding/pr-review-v1`, Triage or higher is enough.
 - `PR_NOT_FOUND_OR_CLOSED` - The specified PR does not exist or is already closed.
+- `PR_FROM_FORK` - The specified PR comes from a fork. The agent works on branches of the onboarded repository, and the branch of this PR is in the fork. Push the branch to the repository itself, open the PR from there, and submit the task for that PR.
 
 To fix permission issues, update the GitHub PAT in AWS Secrets Manager and submit a new task. See [Developer guide - Repository preparation](/sample-autonomous-cloud-coding-agents/developer-guide/repository-preparation) for the full permissions table.
 
 ### Viewing logs
 
-Each task record includes a `logs_url` field with a direct link to filtered CloudWatch logs. You can get this URL from the task status output or from the `GET /tasks/{task_id}` API response.
-
-Alternatively, the application logs are in the CloudWatch log group:
+The application logs are in the CloudWatch log group:
 
 ```
 /aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/jean_cloude

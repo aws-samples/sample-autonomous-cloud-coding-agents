@@ -93,8 +93,8 @@ import { handler as receiverHandler } from '../../src/handlers/github-webhook';
 import { handler as processorHandler } from '../../src/handlers/github-webhook-processor';
 
 const sha = 'a'.repeat(40);
-const pr41 = { number: 41, state: 'open', title: 'other PR', head: { sha, ref: 'other' } };
-const pr42 = { number: 42, state: 'open', title: 'preview PR', head: { sha, ref: 'preview' } };
+const pr41 = { number: 41, state: 'open', title: 'other PR', head: { sha, ref: 'other' }, base: { repo: { full_name: 'owner/repo' } } };
+const pr42 = { number: 42, state: 'open', title: 'preview PR', head: { sha, ref: 'preview' }, base: { repo: { full_name: 'owner/repo' } } };
 
 const originalTargetEnvironment = process.env.SCREENSHOT_TARGET_ENVIRONMENT;
 afterEach(() => {

@@ -78,14 +78,22 @@ function makeEvent(body: string, headers: Record<string, string> = {}): APIGatew
   };
 }
 
-function signedEvent(body: string, retryNum?: string): APIGatewayProxyEvent {
+function signedEvent(body: string, retryNum?: string, retryReason?: string): APIGatewayProxyEvent {
   const ts = currentTs();
   const headers: Record<string, string> = {
     'X-Slack-Signature': sign(body, ts),
     'X-Slack-Request-Timestamp': ts,
   };
   if (retryNum) headers['X-Slack-Retry-Num'] = retryNum;
+  if (retryReason) headers['X-Slack-Retry-Reason'] = retryReason;
   return makeEvent(body, headers);
+}
+
+/** JSON bodies of the calls made to one Slack Web API method, in call order. */
+function slackCalls(method: string): Array<Record<string, unknown>> {
+  return fetchMock.mock.calls
+    .filter(([url]) => String(url) === `https://slack.com/api/${method}`)
+    .map(([, opts]) => JSON.parse((opts as { body: string }).body));
 }
 
 describe('slack-events handler', () => {
@@ -144,6 +152,22 @@ describe('slack-events handler', () => {
     expect(result.statusCode).toBe(500);
   });
 
+  test('refuses an unsigned url_verification when the signing secret is scheduled for deletion', async () => {
+    // Not "not populated yet": the secret exists and cannot be read, so the
+    // request cannot be verified and must not be answered.
+    smSend.mockImplementation(() => Promise.reject(Object.assign(
+      new Error("You can't perform this operation on the secret because it was marked for deletion."),
+      { name: 'InvalidRequestException' },
+    )));
+    invalidateSlackSecretCache(process.env.SLACK_SIGNING_SECRET_ARN!);
+    const body = JSON.stringify({ type: 'url_verification', challenge: 'abc123' });
+
+    const result = await handler(makeEvent(body, {}));
+
+    expect(result.statusCode).toBe(500);
+    expect(result.body).not.toContain('abc123');
+  });
+
   test('drops non-critical retries without reprocessing', async () => {
     const body = JSON.stringify({
       type: 'event_callback',
@@ -153,6 +177,50 @@ describe('slack-events handler', () => {
     const result = await handler(signedEvent(body, '1'));
     expect(result.statusCode).toBe(200);
     // No lambda invocation because the retry is short-circuited
+    expect(lambdaSend).not.toHaveBeenCalled();
+  });
+
+  test('processes the first retry of a mention whose first delivery got an HTTP error', async () => {
+    // The first delivery was answered 5xx or 429 (Secrets Manager throttled the
+    // signing-secret read, API Gateway throttled the request). This handler
+    // answers a mention with a non-2xx status only when it did not invoke the
+    // processor, so nothing was submitted: the retry is the user's request.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+        return Promise.resolve({ SecretString: SIGNING_SECRET });
+      }
+      return Promise.resolve({ SecretString: 'xoxb-bot' });
+    });
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> hi', ts: '1.0' },
+    });
+    const result = await handler(signedEvent(body, '1', 'http_error'));
+    expect(result.statusCode).toBe(200);
+    expect(lambdaSend).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    // The first delivery may have been processed, only too slowly for Slack.
+    ['1', 'http_timeout'],
+    ['1', 'unknown_error'],
+    // The reason describes the attempt before this one, not the first delivery:
+    // that one may have been processed and then timed out.
+    ['2', 'http_error'],
+  ])('drops retry %s of a mention with reason %s without reprocessing', async (retryNum, retryReason) => {
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> hi', ts: '1.0' },
+    });
+    const result = await handler(signedEvent(body, retryNum, retryReason));
+    expect(result.statusCode).toBe(200);
     expect(lambdaSend).not.toHaveBeenCalled();
   });
 
@@ -264,6 +332,100 @@ describe('slack-events handler', () => {
       ([url, opts]) => String(url).includes('chat.postMessage') && String((opts as { body: string }).body).includes('Please include a repo'),
     );
     expect(postedReply).toBeFalsy();
+  });
+
+  test.each([
+    // A slash word need not be a repo, and the first one need not be the
+    // repo: the processor decides, it can ask what is onboarded.
+    ['<@BOT> fix the CI/CD pipeline', 'submit fix the CI/CD pipeline'],
+    ['<@BOT> make the client/server handshake retry in acme/api#7', 'submit make the client/server handshake retry in acme/api#7'],
+    // Line breaks and indentation are part of what the user wrote.
+    ['<@BOT> fix this in org/repo:\n  line two', 'submit fix this in org/repo:\n  line two'],
+  ])('forwards the text of a mention as written: %j', async (text, forwarded) => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text, ts: '1.0' },
+    });
+
+    await handler(signedEvent(body));
+
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    expect(JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload)).text).toBe(forwarded);
+  });
+
+  describe('a mention written as a reply inside a thread', () => {
+    // ts is the mention itself, thread_ts the first message of the thread,
+    // which somebody else may have written.
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> fix A in acme/api', ts: '200.0002', thread_ts: '100.0001' },
+    });
+
+    beforeEach(() => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      });
+      smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+        if (cmd._type === 'GetSecretValue' && cmd.input?.SecretId === process.env.SLACK_SIGNING_SECRET_ARN) {
+          return Promise.resolve({ SecretString: SIGNING_SECRET });
+        }
+        return Promise.resolve({ SecretString: 'xoxb-bot' });
+      });
+    });
+
+    test('gets the :eyes: reaction itself and is forwarded with both timestamps', async () => {
+      lambdaSend.mockResolvedValueOnce({});
+
+      const result = await handler(signedEvent(body));
+
+      expect(result.statusCode).toBe(200);
+      expect(slackCalls('reactions.add')).toEqual([{ channel: 'C1', timestamp: '200.0002', name: 'eyes' }]);
+      const [invokeCmd] = lambdaSend.mock.calls[0];
+      const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+      expect(payload.mention_thread_ts).toBe('100.0001');
+      expect(payload.mention_message_ts).toBe('200.0002');
+    });
+
+    test('is marked :x: itself when forwarding fails, with the reply in its thread', async () => {
+      lambdaSend.mockRejectedValueOnce(new Error('lambda outage'));
+
+      await handler(signedEvent(body));
+
+      expect(slackCalls('reactions.remove')).toEqual([{ channel: 'C1', timestamp: '200.0002', name: 'eyes' }]);
+      expect(slackCalls('reactions.add')).toEqual([
+        { channel: 'C1', timestamp: '200.0002', name: 'eyes' },
+        { channel: 'C1', timestamp: '200.0002', name: 'x' },
+      ]);
+      expect(slackCalls('chat.postMessage')).toEqual([expect.objectContaining({ channel: 'C1', thread_ts: '100.0001' })]);
+    });
+  });
+
+  test('a top-level mention is forwarded with its own ts as thread and as message', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: true }),
+    });
+    lambdaSend.mockResolvedValueOnce({});
+    const body = JSON.stringify({
+      type: 'event_callback',
+      team_id: 'T1',
+      event: { type: 'app_mention', user: 'U1', channel: 'C1', text: '<@BOT> fix A in acme/api', ts: '200.0002' },
+    });
+
+    await handler(signedEvent(body));
+
+    const [invokeCmd] = lambdaSend.mock.calls[0];
+    const payload = JSON.parse(new TextDecoder().decode(invokeCmd.input.Payload));
+    expect(payload.mention_thread_ts).toBe('200.0002');
+    expect(payload.mention_message_ts).toBe('200.0002');
   });
 
   test('app_mention with Lambda invoke failure swaps :eyes: to :x:', async () => {

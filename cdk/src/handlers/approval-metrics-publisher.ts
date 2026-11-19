@@ -443,18 +443,19 @@ export const handler = async (
       emittedMetrics += result.emitted;
       skippedBranches += result.skipped;
     } catch (err) {
-      // Poison-pill isolation. Lambda retries this specific record via
-      // the reportBatchItemFailures cursor; after retryAttempts it
-      // lands in the DLQ (see ApprovalMetricsPublisherConsumer).
-      const eventID = record.eventID;
+      // Poison-pill isolation. Lambda checkpoints at this record's stream
+      // sequence number (the reportBatchItemFailures cursor) and retries
+      // from it; after retryAttempts it lands in the DLQ (see
+      // ApprovalMetricsPublisherConsumer).
+      const sequenceNumber = record.dynamodb?.SequenceNumber;
       logger.warn('approval_metrics record threw — flagging for partial-batch retry', {
         event: 'approval_metrics.record.failed',
-        event_id: eventID,
+        event_id: record.eventID,
         error: err instanceof Error ? err.message : String(err),
         error_name: err instanceof Error ? err.name : undefined,
       });
-      if (eventID !== undefined) {
-        batchItemFailures.push({ itemIdentifier: eventID });
+      if (sequenceNumber !== undefined) {
+        batchItemFailures.push({ itemIdentifier: sequenceNumber });
       }
     }
   }

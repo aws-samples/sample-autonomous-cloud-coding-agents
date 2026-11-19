@@ -34,7 +34,7 @@ Follow these steps in order:
    predecessor's update. Resolve conflicts by integrating both intents.
 
 3. **Test your changes (MANDATORY)**
-   - Run the project build: `mise run build`
+   - Run the project build: `{build_command}`
    - Run linters/type-checkers if available.
    - Run tests if the project has them (`npm test`, `pytest`, `make test`).
    - The combined result must build — a re-stack that doesn't build is worse

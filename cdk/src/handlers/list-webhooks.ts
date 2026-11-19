@@ -57,6 +57,9 @@ export async function handler(event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const limit = parseLimit(event.queryStringParameters?.limit, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT);
     let startKey = decodePaginationToken(event.queryStringParameters?.next_token);
+    if (startKey === null) {
+      return errorResponse(400, ErrorCode.VALIDATION_ERROR, 'Invalid next_token.', requestId);
+    }
     const includeRevoked = event.queryStringParameters?.include_revoked === 'true';
 
     let filterExpression: string | undefined;

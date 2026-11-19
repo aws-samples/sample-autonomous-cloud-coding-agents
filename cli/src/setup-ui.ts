@@ -23,6 +23,7 @@
  * goes to a log file; the operator sees components, counts and causes.
  */
 
+// eslint-disable-next-line no-control-regex -- ANSI escape codes start with the escape character
 const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const SPINNER_INTERVAL_MS = 100;

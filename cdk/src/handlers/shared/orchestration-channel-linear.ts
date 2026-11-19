@@ -19,14 +19,13 @@
 
 /**
  * Linear implementation of the surface-agnostic {@link Channel}. A thin adapter:
- * it maps the channel-neutral operations onto the existing Linear feedback +
- * sub-issue-graph helpers, so the orchestration engine gets exactly today's
+ * it maps the channel-neutral operations onto the existing Linear feedback
+ * helpers, so the orchestration engine gets exactly today's
  * Linear behavior through the abstraction — no behavior change, just an indirection
  * the engine can also satisfy for other surfaces.
  *
  * Surface-specific choices made here (kept OUT of the engine): the reaction-emoji
- * mapping, the markdown comment format (Linear-native), and reading the sub-issue
- * DAG from Linear's `blocks` relations.
+ * mapping and the markdown comment format (Linear-native).
  */
 
 import {
@@ -41,18 +40,13 @@ import {
   revertIssueToNotStarted,
   swapCommentReaction,
   swapIssueReaction,
-  sweepTransientNotes,
   transitionIssueState,
   upsertStatusComment,
   upsertThreadedReply as upsertLinearThreadedReply,
   type LinearFeedbackContext,
 } from './linear-feedback';
-import { resolveLinearOauthToken } from './linear-oauth-resolver';
-import { fetchSubIssueGraph } from './linear-subissue-fetch';
-import { logger } from './logger';
 import {
   type Channel,
-  type ChannelSubIssueNode,
   type IssueRef,
   type Reaction,
   type StateIntent,
@@ -162,29 +156,6 @@ export function makeLinearChannel(registryTableName: string): Channel {
         },
       );
       return id ? { commentId: id } : null;
-    },
-
-    async sweepNotes(issue, keep) {
-      return sweepTransientNotes(ctxFor(issue), issue.issueId, keep?.commentId);
-    },
-
-    async fetchChildGraph(parent): Promise<readonly ChannelSubIssueNode[]> {
-      const resolved = await resolveLinearOauthToken(parent.credentialsRef, registryTableName);
-      if (!resolved?.accessToken) {
-        logger.warn('Linear channel: no token to fetch sub-issue graph', {
-          issue_id: parent.issueId,
-        });
-        return [];
-      }
-      const graph = await fetchSubIssueGraph(resolved.accessToken, parent.issueId);
-      if (graph.kind !== 'ok') return [];
-      // Map Linear's SubIssueNode (blocks-derived depends_on) to the neutral shape.
-      return graph.children.map((n) => ({
-        issueId: n.id,
-        ...(n.identifier !== undefined && { displayId: n.identifier }),
-        ...(n.title !== undefined && { title: n.title }),
-        dependsOn: n.depends_on,
-      }));
     },
   };
 }

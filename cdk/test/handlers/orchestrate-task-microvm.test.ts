@@ -90,9 +90,9 @@ jest.mock('@aws-sdk/client-s3', () => ({
 }));
 
 // Real orchestrator helpers would talk to DynamoDB; stub them and assert on the
-// calls. `buildComputeMetadata` is kept REAL (re-exported from the actual module)
-// so the persisted metadata shape is genuinely exercised, not mirrored.
-const realOrchestrator = jest.requireActual('../../src/handlers/shared/orchestrator');
+// calls. `buildComputeMetadata` is kept REAL (re-exported from the actual module,
+// `realOrchestrator` below) so the persisted metadata shape is genuinely
+// exercised, not mirrored.
 const mockTransitionTask = jest.fn();
 const mockEmitTaskEvent = jest.fn();
 const mockFinalizeTask = jest.fn();
@@ -157,6 +157,10 @@ process.env.TASK_RETENTION_DAYS = '90';
 process.env.GITHUB_TOKEN_SECRET_ARN =
   'arn:aws:secretsmanager:us-east-1:123456789012:secret:abca/github-token-AbCdEf';
 process.env.AGENT_SESSION_ROLE_ARN = 'arn:aws:iam::123456789012:role/AbcaAgentSessionRole';
+
+// Loaded after the env block: the orchestrator module imports the MicroVM
+// supervisor, and through it the strategy module.
+const realOrchestrator = jest.requireActual('../../src/handlers/shared/orchestrator');
 
 import type { DurableExecutionHandler } from '@aws/durable-execution-sdk-js';
 import { TaskStatus } from '../../src/constructs/task-status';
@@ -556,6 +560,40 @@ describe('orchestrate-task for a lambda-microvm task', () => {
     expect(mockFinalizeTask).toHaveBeenCalledWith('TASK001', { attempts: 0 }, 'user-1');
     expect(steps).toContain('finalize-before-session');
     expect(mockPollTaskStatus).not.toHaveBeenCalled();
+  });
+
+  test('a replayed start for a task that is already cancelled terminates the saved MicroVM', async () => {
+    // An interrupted run of start-session launched the MicroVM and saved its
+    // handle on the start receipt. The task was cancelled while RunMicrovm was
+    // in flight, so the cancel had no session to stop. When Durable Execution
+    // runs the step again, the start claim answers "closed" with that handle.
+    let inStartSession = false;
+    mockClaimStart.mockResolvedValue({
+      clientToken: 'TASK001',
+      closed: true,
+      handle: { strategyType: 'lambda-microvm', sessionId: MICROVM_ID, microvmId: MICROVM_ID, endpoint: ENDPOINT },
+    });
+    // Unlike the double of this suite, every read of the step answers the
+    // committed status, strongly consistent or not.
+    mockLoadTask.mockImplementation(async (_id, consistentRead) => ({
+      task_id: 'TASK001',
+      user_id: 'user-1',
+      repo: 'org/repo',
+      status: inStartSession ? TaskStatus.CANCELLED : consistentRead ? TaskStatus.HYDRATING : TaskStatus.SUBMITTED,
+    }));
+    mockMicrovmSend.mockResolvedValue({});
+    const { ctx, steps } = fakeContext();
+    await handler({ task_id: 'TASK001' }, {
+      ...ctx,
+      step: async (name: string, fn: () => Promise<unknown>, config?: unknown) => {
+        if (name === 'start-session') inStartSession = true;
+        return ctx.step(name, fn, config);
+      },
+    } as never);
+    expect(commandsOfType('RunMicrovm')).toHaveLength(0);
+    expect(commandsOfType('TerminateMicrovm').map(c => c.input)).toEqual([{ microvmIdentifier: MICROVM_ID }]);
+    expect(steps).toContain('finalize-before-session');
+    expect(mockFinalizeTask).toHaveBeenCalledWith('TASK001', { attempts: 0 }, 'user-1');
   });
 
   test('a session_started audit-event failure does not destroy a registered session', async () => {

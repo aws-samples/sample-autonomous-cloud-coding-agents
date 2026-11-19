@@ -12,3 +12,11 @@
 # the binary: gh keeps only the tokenizer (`govulncheck -mode binary` and `go tool nm`).
 # Remove this with the GH_VERSION bump in agent/Dockerfile that brings x/net 0.62.0.
 CVE-2026-78661 exp:2026-12-16
+
+# setuptools 70.3.0, path traversal in PackageIndex (CVE-2025-47273), reported for the
+# copy that pip vendors (pip/_vendor/vendor.txt). pip ships only pkg_resources from it:
+# the module the advisory names, setuptools/package_index.py, is not in the image
+# (`find / -name 'package_index*'` prints nothing). On 2026-11-17 pip 26.3, the newest
+# release, still vendors 70.3.0. Remove this when the image's pip vendors setuptools
+# 78.1.1 or later, or no longer vendors it.
+CVE-2025-47273 exp:2026-12-16

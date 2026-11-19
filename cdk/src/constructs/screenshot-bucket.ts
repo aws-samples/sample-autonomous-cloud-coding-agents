@@ -137,10 +137,6 @@ export class ScreenshotBucket extends Construct {
         id: 'AwsSolutions-CFR4',
         reason: 'Distribution uses the default *.cloudfront.net certificate (TLSv1+ enforced by AWS). No custom domain, so no minimum-TLS-version override needed.',
       },
-      {
-        id: 'AwsSolutions-CFR7',
-        reason: 'OAC is in use (the construct calls `S3BucketOrigin.withOriginAccessControl`). cdk-nag misclassifies the L2 helper as an OAI deployment.',
-      },
     ], true);
   }
 }

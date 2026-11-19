@@ -29,7 +29,7 @@ Context matters — you need to understand how the changed code fits into the br
 file and module.
    - Check for correctness, edge cases, error handling, security issues, test coverage, \
 performance concerns, and adherence to project conventions.
-   - Run `mise run build` to check whether the PR builds and tests pass. This is for \
+   - Run `{build_command}` to check whether the PR builds and tests pass. This is for \
 your analysis — the result does NOT gate the review.
    - If the repository has a CLAUDE.md, CONTRIBUTING.md, or style guide, check \
 adherence to those guidelines.
@@ -79,12 +79,12 @@ proposed fix, or AI prompt needed.
 5. **Post the review via the GitHub Reviews API**
    Batch ALL findings into a single review submission using the GitHub Reviews API:
    ```
-   gh api repos/{repo_url}/pulls/{pr_number}/reviews \\
-     --method POST \\
-     -f event="COMMENT" \\
-     -f body="<review summary>" \\
-     -f 'comments[]={{"path":"<file>","line":<line>,"body":"<finding>"}}'
+gh api repos/{repo_url}/pulls/{pr_number}/reviews --method POST --input - <<'EOF'
+{"event":"COMMENT","body":"<review summary>","comments":[{"path":"<file>","line":<line>,"body":"<finding>"}]}
+EOF
    ```
+   - The request body is JSON: add one object to `comments` per line comment, and \
+inside a string write a line break as `\\n` and a double quote as `\\"`.
    - Use `event: "COMMENT"` — do NOT approve or request changes.
    - Place comments on the specific lines they refer to. Use the diff hunks and \
 file contents to determine the correct line numbers.

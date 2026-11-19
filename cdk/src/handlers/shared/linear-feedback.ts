@@ -80,29 +80,10 @@ mutation UpdateComment($id: String!, $body: String!) {
 }
 `.trim();
 
-/** Delete a comment — used to clear a transient note once the thing it was about
- *  is settled, and to reposition the epic panel by delete-and-repost. */
+/** Delete a comment — used to reposition the epic panel by delete-and-repost. */
 const COMMENT_DELETE_MUTATION = `
 mutation DeleteComment($id: String!) {
   commentDelete(id: $id) { success }
-}
-`.trim();
-
-/**
- * List an issue's TOP-LEVEL comments (id + body). Used to tidy a thread once the
- * thing its notes were about is settled: we can't track every fire-and-forget
- * note id, so we fetch the thread once and delete the bot's own ``🗂️``/``👋``
- * notes by prefix, keeping any comment the caller names plus the
- * (differently-prefixed) live panel. ``first: 100`` comfortably covers the note
- * volume one issue accumulates; pagination is unnecessary for it.
- */
-const ISSUE_COMMENTS_QUERY = `
-query IssueComments($issueId: String!) {
-  issue(id: $issueId) {
-    comments(first: 100) {
-      nodes { id body }
-    }
-  }
 }
 `.trim();
 
@@ -116,7 +97,7 @@ query IssueComments($issueId: String!) {
  * for those app/integration comments — so @bgagent's own progress and ack
  * comments carry a ``botActor`` and no ``user``. ``createdAt`` orders the thread.
  *
- * We fetch the first 100 (matching {@link ISSUE_COMMENTS_QUERY}) and sort +
+ * We fetch the first 100 and sort +
  * slice to the most recent human comments CLIENT-SIDE, so the result is
  * independent of Linear's connection sort direction. 100 covers every realistic
  * issue thread; the rare over-100 issue simply may miss the oldest turns, which
@@ -212,8 +193,8 @@ query CommentBody($commentId: String!) {
 /**
  * The bgagent status-marker emojis we manage on the PARENT epic. Mirrors
  * ``_BGAGENT_EMOJIS`` in ``agent/src/linear_reactions.py``. Only these are
- * ever deleted by {@link swapIssueReaction} — a human's reaction is never
- * touched.
+ * ever deleted by {@link swapReaction}. They are matched by emoji alone, not
+ * by who reacted: a person's own reaction with one of them counts as a marker.
  */
 const BGAGENT_EMOJIS: ReadonlySet<string> = new Set([
   EMOJI_STARTED, EMOJI_SUCCESS, EMOJI_FAILURE, EMOJI_NEEDS_INPUT,
@@ -439,11 +420,9 @@ export async function upsertStatusComment(
 }
 
 /**
- * Delete a comment — used for the transient "🗂️ On it — updating…" ack once the
- * revised plan it announced has been posted. Best-effort: returns true on
- * success, false on any failure (a lingering ack is a cosmetic nit, never a
- * breakage). Note Linear may already have fired a notification for the ack that
- * deletion can't un-send — acceptable.
+ * Delete a comment — used to remove the old epic panel when a retry posts it
+ * again below the retry note. Best-effort: returns true on success, false on any
+ * failure (a second panel left behind is a cosmetic nit, never a breakage).
  */
 export async function deleteComment(
   ctx: LinearFeedbackContext,
@@ -452,59 +431,6 @@ export async function deleteComment(
   const token = await resolveToken(ctx);
   if (!token) return false;
   return (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id: commentId })).ok;
-}
-
-/**
- * Bot-comment prefixes that mark a TRANSIENT note — an interim ack, an error note,
- * a nudge, a wrong-handle correction. These are the ``🗂️``/``👋`` comments a
- * thread cleanup sweeps once the thing they were about is settled.
- *
- * Deliberately does NOT include the live epic panel (``🔄``/``⚠️``/``✅``) or the
- * agent's own progress (``🤖``) — those aren't ours to delete here, and the panel
- * is the thing we're KEEPING. Mirrors the self-trigger guard's
- * ``BOT_COMMENT_PREFIXES`` but scoped to transient notes.
- */
-const TRANSIENT_NOTE_PREFIXES: readonly string[] = ['🗂️', '👋'];
-
-/**
- * Sweep the bot's transient notes off an issue once the thing they were about is
- * settled, leaving any frozen reference + the live epic panel. Fetches the thread
- * once, then deletes every top-level comment that (a) starts with a transient-note
- * prefix and (b) is NOT ``keepCommentId`` (a reference to keep). Best-effort and
- * total: a failed list returns 0 (nothing swept — a lingering note is a
- * cosmetic nit, never a breakage), and each delete is independent so one
- * failure doesn't abort the rest. Returns the count deleted (for logging/tests).
- *
- * Prefix-scoping is the robustness win: interim notes are posted fire-and-forget
- * from sites whose ids we don't track, and future note types are covered
- * automatically — while the panel (different prefix) and human comments (no bot
- * prefix) are provably untouched.
- */
-export async function sweepTransientNotes(
-  ctx: LinearFeedbackContext,
-  issueId: string,
-  keepCommentId?: string,
-): Promise<number> {
-  const token = await resolveToken(ctx);
-  if (!token) return 0;
-  const data = lookupValueOr(await graphqlData(token, ISSUE_COMMENTS_QUERY, { issueId }), null);
-  const issue = data?.issue as { comments?: { nodes?: Array<{ id?: string; body?: string }> } } | undefined;
-  const nodes = issue?.comments?.nodes ?? [];
-  let deleted = 0;
-  for (const node of nodes) {
-    const id = node?.id;
-    const body = (node?.body ?? '').trimStart();
-    if (!id || id === keepCommentId) continue;
-    if (!TRANSIENT_NOTE_PREFIXES.some((p) => body.startsWith(p))) continue;
-    const ok = (await graphqlRequest(token, COMMENT_DELETE_MUTATION, { id })).ok;
-    if (ok) deleted += 1;
-  }
-  if (deleted > 0) {
-    logger.info('Swept transient notes off the issue thread', {
-      issue_id: issueId, deleted, kept_reference: keepCommentId ?? null,
-    });
-  }
-  return deleted;
 }
 
 /** A rendered issue comment folded into the task context (mirrors the Jira
@@ -817,26 +743,29 @@ async function deleteOwnMarker(accessToken: string, reactionId: string): Promise
 }
 
 /**
- * Swap the PARENT epic's bgagent status marker so only ONE is shown at a
- * time (👀 → ✅/❌), mirroring the children's reaction behaviour. The
- * children capture the reaction id in-process and delete it; the parent's
- * markers are added across SEPARATE lambda invocations (👀 at seed, ✅/❌ at
- * completion), so we instead query the issue's reactions, delete every
- * bgagent marker EXCEPT the target, then add the target if absent. Only
- * bgagent emojis (👀/✅/❌) are ever removed — a human's reaction is left
- * untouched. Best-effort; returns true if the target marker is present
- * afterwards.
+ * Leave ONE bgagent status marker on an issue or on a comment (👀 → ✅/❌/❓).
+ * The markers are added across SEPARATE lambda invocations (👀 at seed or at
+ * receipt, the outcome at completion), so no reaction id is at hand: query the
+ * target's reactions, delete every marker emoji EXCEPT the wanted one, then add
+ * the wanted one if absent. A reaction with any other emoji is never touched.
+ * Idempotent (a redelivery re-converges to the same single marker). Best-effort;
+ * returns true only when the wanted marker is present AND no stale marker was
+ * left behind — two markers at once is the state this prevents.
  */
-export async function swapIssueReaction(
+async function swapReaction(
   ctx: LinearFeedbackContext,
-  issueId: string,
+  target: 'issue' | 'comment',
+  id: string,
   emoji: string,
 ): Promise<boolean> {
   const token = await resolveToken(ctx);
   if (!token) return false;
 
-  const data = lookupValueOr(await graphqlData(token, ISSUE_REACTIONS_QUERY, { issueId }), null);
-  const reactions = ((data?.issue as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
+  const onIssue = target === 'issue';
+  const idVariable = { [`${target}Id`]: id };
+  const data = lookupValueOr(
+    await graphqlData(token, onIssue ? ISSUE_REACTIONS_QUERY : COMMENT_REACTIONS_QUERY, idVariable), null);
+  const reactions = ((data?.[target] as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
 
   // Delete our stale markers (any bgagent emoji that isn't the target).
   let targetPresent = false;
@@ -848,66 +777,40 @@ export async function swapIssueReaction(
     }
   }
 
-  // A marker we could not remove means the issue still shows two of our own
-  // reactions at once, which is the contradictory state this swap exists to
-  // prevent — so don't report the promised single marker.
+  // A marker we could not remove means the issue or comment still shows two of
+  // our own reactions at once ("saw it" beside "done"), which is the
+  // contradictory state this swap exists to prevent — so don't report the
+  // promised single marker.
   if (staleLeft > 0) {
-    logger.warn('Could not remove a stale status marker from the issue', {
-      event: 'linear_feedback.issue_reaction_swap_incomplete',
-      issue_id: issueId,
+    logger.warn(`Could not remove a stale status marker from the ${target}`, {
+      event: `linear_feedback.${target}_reaction_swap_incomplete`,
+      [`${target}_id`]: id,
       stale_count: staleLeft,
     });
   }
   if (targetPresent) return staleLeft === 0; // already present; the deletes decide
-  const added = (await graphqlRequest(token, REACTION_CREATE_MUTATION, { issueId, emoji })).ok;
+  const added = (await graphqlRequest(
+    token, onIssue ? REACTION_CREATE_MUTATION : REACTION_CREATE_ON_COMMENT_MUTATION, { ...idVariable, emoji })).ok;
   return added && staleLeft === 0;
 }
 
 /**
- * Swap the bgagent status marker on a COMMENT (👀 → ✅/❌), so the trigger
- * comment shows ONE marker reflecting the outcome — mirrors
- * {@link swapIssueReaction} but on a comment. The 👀 lands at
- * receipt ({@link reactToComment}); when the iteration settles we swap it for
- * ✅ (success) / ❌ (failure) so the comment itself reads done at a glance, not
- * just the threaded reply. Queries the comment's reactions, deletes every
- * bgagent marker except the target, adds the target if absent. Only bgagent
- * emojis (👀/✅/❌) are removed — a human's reaction is never touched.
- * Idempotent (a reconciler redelivery re-converges to the same single marker).
- * Best-effort; returns true only when the target is present AND no stale marker
- * of ours was left behind — two markers at once is the state this prevents.
+ * Swap the PARENT epic's status marker — see {@link swapReaction}. The children
+ * capture their reaction id in-process and delete it; the parent's 👀 is added
+ * at seed and its ✅/❌ at completion.
  */
-export async function swapCommentReaction(
-  ctx: LinearFeedbackContext,
-  commentId: string,
-  emoji: string,
-): Promise<boolean> {
-  const token = await resolveToken(ctx);
-  if (!token) return false;
+export function swapIssueReaction(ctx: LinearFeedbackContext, issueId: string, emoji: string): Promise<boolean> {
+  return swapReaction(ctx, 'issue', issueId, emoji);
+}
 
-  const data = lookupValueOr(await graphqlData(token, COMMENT_REACTIONS_QUERY, { commentId }), null);
-  const reactions = ((data?.comment as { reactions?: Array<{ id: string; emoji: string }> } | undefined)?.reactions) ?? [];
-
-  let targetPresent = false;
-  let staleLeft = 0;
-  for (const r of reactions) {
-    if (r.emoji === emoji) { targetPresent = true; continue; }
-    if (BGAGENT_EMOJIS.has(r.emoji)) {
-      if (!(await deleteOwnMarker(token, r.id))) staleLeft += 1;
-    }
-  }
-
-  // Same all-or-nothing result as the issue swap: a leftover marker leaves the
-  // comment showing "saw it" beside "done", so it is not a success.
-  if (staleLeft > 0) {
-    logger.warn('Could not remove a stale status marker from the comment', {
-      event: 'linear_feedback.comment_reaction_swap_incomplete',
-      comment_id: commentId,
-      stale_count: staleLeft,
-    });
-  }
-  if (targetPresent) return staleLeft === 0;
-  const added = (await graphqlRequest(token, REACTION_CREATE_ON_COMMENT_MUTATION, { commentId, emoji })).ok;
-  return added && staleLeft === 0;
+/**
+ * Swap the status marker on a COMMENT — see {@link swapReaction}. The 👀 lands
+ * at receipt ({@link reactToComment}); when the iteration settles it becomes
+ * ✅/❌, so the trigger comment itself reads done at a glance, not just the
+ * threaded reply.
+ */
+export function swapCommentReaction(ctx: LinearFeedbackContext, commentId: string, emoji: string): Promise<boolean> {
+  return swapReaction(ctx, 'comment', commentId, emoji);
 }
 
 /**

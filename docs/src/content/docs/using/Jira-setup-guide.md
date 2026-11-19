@@ -88,12 +88,17 @@ For an ordinary task, the **start** comment is posted by the agent and the
 `@bgagent` iteration, the processor immediately posts one status comment; the
 heartbeat and terminal owner edit that same comment in place. Terminal feedback
 therefore includes cost / turns / duration even when the agent crashes before
-completing (max-turns, OOM). The final state frames three outcomes:
+completing (max-turns, OOM). The final state frames four outcomes:
 
-- ✅ **Task completed** — with the PR link when one was opened.
+- ✅ **Task completed** — with the PR link when one was opened and, for an
+  `@bgagent` question that needed no change, the agent's answer.
 - ⚠️ **Shipped a PR but stopped early** — the PR link plus the reason it
   stopped (e.g. "Hit max-turns cap"), so you can review and decide.
 - ❌ **Task failed / cancelled / timed out** — with a short classifier reason.
+- 🤖 **ABCA has a question before it starts** — a task started by the trigger
+  label stopped to ask instead of changing anything and opened no PR. The
+  comment carries the question. Add the details to the issue, then re-apply
+  the trigger label to run it again.
 
 Comments are advisory and best-effort: network/auth failures are logged and swallowed (the agent path has an auth circuit-breaker; the platform path classifies transient failures as retryable and retries the record), never gating the task itself. Ordinary terminal comments use a per-task post-once marker. Iteration terminal writers use a per-task claim before updating the stored comment ID, and the heartbeat checks that claim before writing, so retries do not duplicate the comment or regress a terminal outcome back to running.
 
@@ -275,7 +280,7 @@ bgagent jira map <cloud-id> <PROJECT-KEY> \
 - `--status-on-start <name>` — Jira status to move the issue to when a task starts (overrides the heuristic; see [Board transitions](#board-transitions))
 - `--status-on-pr <name>` — Jira status to move the issue to when a PR is opened (overrides the `In Review` default)
 
-This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it writes DynamoDB directly).
+This writes an `active` row keyed `<cloudId>#<projectKey>` into the project-mapping table. Requires admin IAM (it reads and writes DynamoDB directly).
 
 ### 6. Link your Jira identity
 
@@ -369,9 +374,9 @@ All executable subtasks must belong to active Jira project mappings that resolve
 
 The parent receives orchestration progress and the terminal rollup. Parallel leaves converge through an internal integration task so the orchestration produces one combined pull request; that internal task does not address a nonexistent Jira issue. An `@bgagent` comment on a real child updates that child's pull request and restacks dependent pull requests through the shared orchestration reconciler.
 
-To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`.
+To extend an existing orchestration, add Jira subtasks and re-apply the trigger label. ABCA appends only genuinely new issue keys: existing tasks, branches, statuses, and dependencies are preserved. A new child starts immediately when all of its declared predecessors have already succeeded; otherwise it remains blocked for the reconciler. A new child with no explicit blocker stacks on the existing epic tip rather than bare `main`. A subtask that failed or was skipped is not part of that tip, and neither is work that still waits behind it: after a failure the new child builds on what is left, or starts from the repository's default branch when nothing is left to build on.
 
-Re-applying the label without adding a child is an idempotent no-op. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
+Re-applying the label without adding a child starts nothing and changes no status, branch or dependency. It does read again the summary and description of the subtasks that are not running and have not succeeded. So does an `@bgagent retry` comment by a linked user on the parent, which then retries the subtasks that failed or were skipped: a reworded subtask starts with its new text. Changes only to blocker links between existing children are also ignored; dependency edits do not rewrite work that may already be running or complete. Extending a terminal orchestration reopens the parent progress panel and settles it again when the added work finishes.
 
 ## Issue context: attachments and comments
 
@@ -389,7 +394,7 @@ Jira-hosted `media` attachments are downloaded through the Jira REST API, run th
 
 ### Recent comments
 
-The most recent **human** comments (up to 10, oldest-first) are folded into the task description under a **Recent comments** heading, each attributed to its author. ABCA's own progress/final-status comments and other app/bot comments are excluded (filtered by Atlassian `accountType`). Comment enrichment is **best-effort / fail-open**: if the fetch fails, the task proceeds without comments (a warning is logged) — comments are advisory context, never a gate. Long comment histories are not fetched in full; only the recent window is included.
+The most recent **human** comments (up to 10, oldest-first) are folded into the task description under a **Recent comments** heading, each attributed to its author. ABCA's own progress/final-status comments and other app/bot comments are excluded (filtered by Atlassian `accountType` and by the marker ABCA's own comments start with; a human comment that starts with one of those emoji is left out as well). Comment enrichment is **best-effort / fail-open**: if the fetch fails, the task proceeds without comments (a warning is logged) — comments are advisory context, never a gate. Long comment histories are not fetched in full; only the 100 newest comments are read.
 
 ## Board transitions
 
@@ -398,13 +403,14 @@ As a Jira-triggered task progresses, the agent moves the originating issue acros
 - **Task start** → the issue moves to an **In Progress** status.
 - **PR opened** → the issue moves to a **review** status (default **In Review**, falling back to In Progress so a stock board isn't skipped).
 - **Task failed or no PR opened** → the status is **left unchanged**; the ❌ final-status comment is the signal, and bouncing a card back and forth is noisier than leaving it where a human sees the failure.
-- **Already at or past the target** → the transition is **skipped**, so a re-triggered task never drags a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration.
+- **Already at or past the target** → the transition is **skipped**, so a re-triggered task does not drag a card backward (e.g. from In Review back to In Progress). This mirrors the Linear integration. A per-project override changes this: see step 1 below.
+- **Already on one of the names of step 2 below** → the issue only moves to a name listed before it, and the category fallback (step 3) is not used for it. A card that is In Progress on a board that has none of the review names of step 2 therefore stays In Progress when the PR opens; if the board calls its review status something else, set `--status-on-pr`.
 
 Humans still move the card to **Done** after merging the PR — ABCA never closes issues.
 
 **How a target status is resolved** (evaluated per lifecycle point, first match wins — modeled on the Linear integration):
 
-1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback).
+1. **Per-project override** — the `--status-on-start` / `--status-on-pr` names configured on the project mapping. Matched case-insensitively against the destination status name. An override is a deliberate instruction: it's honored regardless of the current status, and if it isn't reachable, ABCA skips (no heuristic fallback). One exception: when an `@bgagent` iteration starts, an issue that is already In Progress or later stays where it is, so a comment does not pull a card that the earlier task left In Review back to the `--status-on-start` status.
 2. **Name match** (no config needed for standard workflows):
    - On start, a transition whose destination is named **In Progress**.
    - On PR opened, a transition named **In Review**, then common synonyms (`Code Review`, `Review`, `Peer Review`, `Reviewing`), then **In Progress** as a last resort.

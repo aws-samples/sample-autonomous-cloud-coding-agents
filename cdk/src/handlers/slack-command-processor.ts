@@ -21,10 +21,12 @@ import * as crypto from 'crypto';
 import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { createTaskCore } from './shared/create-task-core';
 import { logger } from './shared/logger';
+import { lookupRepo } from './shared/repo-config';
 import { slackFetch } from './shared/slack-api';
 import { getSlackSecret, SLACK_SECRET_PREFIX } from './shared/slack-verify';
 import type { Attachment } from './shared/types';
 import { makeDocClient } from './shared/ua';
+import { MAX_INLINE_ATTACHMENT_SIZE_BYTES, MAX_TOTAL_INLINE_SIZE_BYTES } from './shared/validation';
 import { CODING_WORKFLOW_ID } from './shared/workflows';
 import type { SlackCommandPayload } from './slack-commands';
 
@@ -56,7 +58,10 @@ export interface SlackFileRef {
 /** @mention invocation — no response_url; reply via chat.postMessage in-thread. */
 export interface MentionEvent extends BasePayload {
   readonly source: 'mention';
+  /** The thread to reply in: the mention itself, or the thread it was written in. */
   readonly mention_thread_ts?: string;
+  /** The mention itself, which carries the progress reactions. */
+  readonly mention_message_ts?: string;
   readonly files?: readonly SlackFileRef[];
 }
 
@@ -115,7 +120,8 @@ export async function handler(raw: RawEvent): Promise<void> {
       case 'submit':
         // Submit is only used via @mentions — slash commands show usage guidance.
         if (event.source === 'mention') {
-          await handleSubmit(event, parts.slice(1), reply);
+          // The message as written, line breaks included: it becomes the task description.
+          await handleSubmit(event, text.slice(subcommand.length).trim(), reply);
         } else {
           await reply('Use `@Shoof` to submit tasks — e.g. `@Shoof fix the bug in org/repo#42`\nFor private submissions, DM Shoof directly.');
         }
@@ -146,6 +152,19 @@ export async function handler(raw: RawEvent): Promise<void> {
       user_id: event.user_id,
     });
     await reply(':warning: Something went wrong. Please try again.');
+    if (event.source === 'mention') {
+      // As on every other failure, :eyes: must not stay on a request that
+      // created nothing. Best-effort: an error that escapes this handler makes
+      // Lambda retry the invocation and run the submission again.
+      try {
+        await swapReaction(event, 'eyes', 'x');
+      } catch (swapErr) {
+        logger.warn('Failed to mark the mention as failed', {
+          error: swapErr instanceof Error ? swapErr.message : String(swapErr),
+          team_id: event.team_id,
+        });
+      }
+    }
   }
 }
 
@@ -180,8 +199,31 @@ function buildMentionReply(event: MentionEvent): ReplyFn {
 
 // ─── Submit ───────────────────────────────────────────────────────────────────
 
-async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn): Promise<void> {
-  if (args.length === 0) {
+/** `owner/repo` or `owner/repo#42` as a word of a message: group 1 is the repo, group 2 the issue number. */
+const REPO_REFERENCE = /\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)(?:#(\d+))?\b/g;
+
+/** The owner part of `owner/repo`, lower-cased: owners compare without case. */
+function ownerOf(repo: string): string {
+  return repo.split('/')[0].toLowerCase();
+}
+
+/**
+ * The first of these references that certainly means a repo: it carries an
+ * issue number, or it names an onboarded repo (one RepoTable read per distinct name).
+ */
+async function findRepoReference(references: RegExpExecArray[]): Promise<RegExpExecArray | undefined> {
+  const notOnboarded = new Set<string>();
+  for (const reference of references) {
+    if (reference[2] || (!notOnboarded.has(reference[1]) && (await lookupRepo(reference[1])).onboarded)) {
+      return reference;
+    }
+    notOnboarded.add(reference[1]);
+  }
+  return undefined;
+}
+
+async function handleSubmit(event: MentionEvent, message: string, reply: ReplyFn): Promise<void> {
+  if (!message) {
     await reply('Usage: `/bgagent submit org/repo#42 description`');
     return;
   }
@@ -190,36 +232,37 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   const platformUserId = await lookupPlatformUser(event.team_id, event.user_id);
   if (!platformUserId) {
     await reply(':link: Your Slack account is not linked. Run `/bgagent link` first.');
-    if (event.mention_thread_ts) {
-      await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
-    }
+    await swapReaction(event, 'eyes', 'x');
     return;
   }
 
-  // Resolve the target repo. Two ways:
-  //   1. The user typed it: "org/repo#42 <description>" — first arg is the repo,
-  //      the rest is the description.
-  //   2. The user omitted it and the channel has an onboarded default repo
-  //      (`bgagent slack onboard-channel`) — the WHOLE message is the description.
-  const repoArg = args[0];
-  let { repo, issueNumber } = parseRepoArg(repoArg);
-  let description: string | undefined;
-  if (repo) {
-    description = args.slice(1).join(' ') || undefined;
-  } else {
-    const defaultRepo = await lookupChannelDefaultRepo(event.team_id, event.channel_id);
-    if (defaultRepo) {
-      repo = defaultRepo;
-      issueNumber = undefined;
-      // No repo token was consumed, so the entire message is the description.
-      description = args.join(' ') || undefined;
-    }
-  }
+  // Resolve the target repo. A slash-joined word is not necessarily a repo
+  // ("CI/CD", "and/or", "src/handlers/foo.ts"), so the first one does not decide.
+  // A repo is known when a word certainly means one (findRepoReference) or,
+  // failing that, when the channel has an onboarded default repo (`bgagent
+  // slack onboard-channel`).
+  //   1. The repo is the first word under the owner of the known repo, wherever
+  //      it stands in "fix the bug in org/repo#42": that repo itself or, before
+  //      it, a sibling or a misspelling. The rest of the message is the
+  //      description, and createTaskCore reports a repo that is not onboarded.
+  //   2. With no such word, the channel default gets the WHOLE message.
+  //   3. With no repo known at all, the first slash-joined word is taken, as before.
+  const references = [...message.matchAll(REPO_REFERENCE)];
+  const certain = await findRepoReference(references);
+  const defaultRepo = certain ? null : await lookupChannelDefaultRepo(event.team_id, event.channel_id);
+  const known = certain?.[1] ?? defaultRepo;
+  const reference = known
+    ? references.find(candidate => ownerOf(candidate[1]) === ownerOf(known))
+    : references[0];
+  const repo = reference?.[1] ?? defaultRepo;
+  const issueNumber = reference?.[2] ? parseInt(reference[2], 10) : undefined;
+  // The message without the word that named the repo and the blanks in front of it.
+  const description = reference
+    ? (message.slice(0, reference.index).replace(/[ \t]+$/, '') + message.slice(reference.index + reference[0].length)).trim()
+    : message;
   if (!repo) {
     await reply('Please include a repo — e.g. `@Shoof fix the bug in org/repo#42`. Or ask an admin to set a default with `bgagent slack onboard-channel`.');
-    if (event.mention_thread_ts) {
-      await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
-    }
+    await swapReaction(event, 'eyes', 'x');
     return;
   }
 
@@ -227,11 +270,13 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   const channelCheck = await checkChannelAccess(event.team_id, event.channel_id);
   if (!channelCheck.ok) {
     await reply(channelCheck.error!);
+    await swapReaction(event, 'eyes', 'x');
     return;
   }
 
   // handleSubmit is only invoked for the mention path, so there's no response_url.
-  // Notifications thread under the user's @mention message using mention_thread_ts.
+  // Notifications thread under the user's @mention message using mention_thread_ts;
+  // the reactions of the task go on the mention itself, mention_message_ts.
   const channelMetadata: Record<string, string> = {
     slack_team_id: event.team_id,
     slack_channel_id: event.channel_id,
@@ -240,15 +285,16 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   if (event.mention_thread_ts) {
     channelMetadata.slack_thread_ts = event.mention_thread_ts;
   }
+  if (event.mention_message_ts) {
+    channelMetadata.slack_message_ts = event.mention_message_ts;
+  }
 
   // Extract file attachments from the Slack event (if present).
   // Files are downloaded from Slack CDN and passed as inline base64 attachments.
   const attachments = await extractSlackFileAttachments(event, reply);
   if (attachments === null) {
     // extractSlackFileAttachments already replied with the error
-    if (event.mention_thread_ts) {
-      await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
-    }
+    await swapReaction(event, 'eyes', 'x');
     return;
   }
 
@@ -257,7 +303,7 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
     {
       repo,
       issue_number: issueNumber,
-      task_description: description,
+      task_description: description || undefined,
       // Explicit coding workflow: a Slack-submitted task targets a repo, so it
       // must not fall through the resolution ladder to the repo-less
       // default/agent-v1 (which never commits or opens a PR). Mirrors the Jira
@@ -284,19 +330,7 @@ async function handleSubmit(event: MentionEvent, args: string[], reply: ReplyFn)
   const errMsg = body.error?.message ?? 'Unknown error';
   await reply(`:x: Failed to create task: ${errMsg}`);
   // Swap reaction to :x: on the mention message.
-  if (event.mention_thread_ts) {
-    await swapReaction(event.team_id, event.channel_id, event.mention_thread_ts, 'eyes', 'x');
-  }
-}
-
-function parseRepoArg(arg: string): { repo: string | null; issueNumber?: number } {
-  // Match "org/repo#42" or "org/repo"
-  const match = arg.match(/^([a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+)(?:#(\d+))?$/);
-  if (!match) return { repo: null };
-  return {
-    repo: match[1],
-    issueNumber: match[2] ? parseInt(match[2], 10) : undefined,
-  };
+  await swapReaction(event, 'eyes', 'x');
 }
 
 // ─── Link ─────────────────────────────────────────────────────────────────────
@@ -396,8 +430,6 @@ async function checkChannelAccess(teamId: string, channelId: string): Promise<{ 
 
 // ─── Slack File Extraction ───────────────────────────────────────────────────
 
-/** Max size for a Slack file attachment (10 MB per the design doc). */
-const SLACK_FILE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 /** Max number of file attachments per Slack message. */
 const SLACK_FILE_MAX_COUNT = 10;
 
@@ -437,11 +469,25 @@ async function extractSlackFileAttachments(
     return null;
   }
 
+  // The bytes accepted so far, and why a file of `bytes` more is refused, if it is.
+  // The files reach createTaskCore as inline attachments, so the limits are those
+  // of validateAttachments for inline data: 500 KB per file and 3 MB per task.
+  let totalBytes = 0;
+  const sizeError = (bytes: number): string | undefined => {
+    if (bytes > MAX_INLINE_ATTACHMENT_SIZE_BYTES) {
+      return `too large, ${Math.ceil(bytes / 1024)} KB > ${MAX_INLINE_ATTACHMENT_SIZE_BYTES / 1024} KB limit`;
+    }
+    if (totalBytes + bytes > MAX_TOTAL_INLINE_SIZE_BYTES) {
+      return `more than ${MAX_TOTAL_INLINE_SIZE_BYTES / (1024 * 1024)} MB of attachments in total`;
+    }
+    return undefined;
+  };
+
   for (const file of files) {
-    // Validate size
-    if (file.size > SLACK_FILE_MAX_SIZE_BYTES) {
-      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      errors.push(`\`${file.name}\` (too large, ${sizeMb} MB > 10 MB limit)`);
+    // Validate the size Slack declares, before anything is downloaded.
+    const declaredSizeError = sizeError(file.size);
+    if (declaredSizeError) {
+      errors.push(`\`${file.name}\` (${declaredSizeError})`);
       continue;
     }
 
@@ -476,11 +522,12 @@ async function extractSlackFileAttachments(
 
       // Post-download size validation: Slack's declared file.size may differ
       // from the actual download (e.g., server-side processing, bug, or manipulation).
-      if (buffer.length > SLACK_FILE_MAX_SIZE_BYTES) {
-        const sizeMb = (buffer.length / (1024 * 1024)).toFixed(1);
-        errors.push(`\`${file.name}\` (downloaded size ${sizeMb} MB exceeds 10 MB limit)`);
+      const downloadedSizeError = sizeError(buffer.length);
+      if (downloadedSizeError) {
+        errors.push(`\`${file.name}\` (${downloadedSizeError})`);
         continue;
       }
+      totalBytes += buffer.length;
 
       attachments.push({
         type: isImage ? 'image' : 'file',
@@ -595,9 +642,15 @@ async function postToSlack(responseUrl: string, text: string): Promise<void> {
   }
 }
 
-async function swapReaction(teamId: string, channelId: string, messageTs: string, remove: string, add: string): Promise<void> {
-  const botToken = await getBotToken(teamId);
+/**
+ * Swap one reaction for another on the mention. A payload from an events
+ * handler that predates mention_message_ts names only the thread.
+ */
+async function swapReaction(event: MentionEvent, remove: string, add: string): Promise<void> {
+  const messageTs = event.mention_message_ts ?? event.mention_thread_ts;
+  if (!messageTs) return;
+  const botToken = await getBotToken(event.team_id);
   if (!botToken) return;
-  await slackFetch(botToken, 'reactions.remove', { channel: channelId, timestamp: messageTs, name: remove });
-  await slackFetch(botToken, 'reactions.add', { channel: channelId, timestamp: messageTs, name: add });
+  await slackFetch(botToken, 'reactions.remove', { channel: event.channel_id, timestamp: messageTs, name: remove });
+  await slackFetch(botToken, 'reactions.add', { channel: event.channel_id, timestamp: messageTs, name: add });
 }

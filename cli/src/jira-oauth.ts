@@ -19,6 +19,7 @@
 
 import * as crypto from 'crypto';
 import { CliError } from './errors';
+import { describeTokenShape } from './linear-oauth';
 
 /**
  * Atlassian OAuth (3LO) endpoint URLs. Fixed across all tenants.
@@ -324,7 +325,7 @@ async function parseTokenResponse(
   if (!isJiraTokenResponse(body)) {
     throw new CliError(
       `Atlassian /oauth/token returned an unexpected shape for ${contextLabel}: `
-      + `${JSON.stringify(body).slice(0, 200)}`,
+      + describeTokenShape(body),
     );
   }
   return body;

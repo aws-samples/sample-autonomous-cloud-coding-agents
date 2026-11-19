@@ -108,6 +108,7 @@ describe('resolveJiraOauthToken', () => {
   beforeEach(() => {
     _resetCachesForTesting();
   });
+  afterEach(() => jest.restoreAllMocks());
 
   test('happy path: returns access token + site url + secret arn', async () => {
     const stored = makeStoredToken({ access_token: 'jira_oauth_happy' });
@@ -574,6 +575,32 @@ describe('resolveJiraOauthToken', () => {
       (c) => c[0].constructor.name === 'GetSecretValueCommand',
     );
     expect(getSecretCalls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('gives up on a refresh that Atlassian takes and never answers', async () => {
+    const clients = makeFakeClients({
+      registryItem: {
+        site_url: 'https://acme.atlassian.net',
+        oauth_secret_arn: 'arn:secret:acme',
+        status: 'active',
+      },
+      storedToken: makeStoredToken({ expires_at: new Date(Date.now() - 1000).toISOString() }),
+    });
+    // The request's time limit, already run out: `AbortSignal.timeout` runs on a
+    // timer that jest's fake timers do not drive.
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(AbortSignal.abort(new Error('timed out')));
+    const fetchImpl = jest.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      // No answer ever comes: only the signal of the request ends the wait.
+      if (init?.signal?.aborted) reject(init.signal.reason as Error);
+    }));
+
+    const result = await resolveJiraOauthToken('cloud-uuid-1', REGISTRY_TABLE, {
+      ...clients,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toBeNull();
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
   });
 });
 

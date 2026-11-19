@@ -103,4 +103,105 @@ describe('buildClarifyResumeDescription', () => {
     expect(md).not.toContain('You asked:');
     expect(md).toContain('The reviewer answered: yes, all of it');
   });
+
+  test('cuts an original that fills the description limit, never the exchange', () => {
+    // The label path fills the description to exactly 10,000 characters when
+    // project documents or comments overflow. createTaskCore refuses anything
+    // longer, so the original gives way from its end and the answer survives.
+    const md = buildClarifyResumeDescription('x'.repeat(10_000), 'Which environment?', 'staging');
+    expect(md.length).toBeLessThanOrEqual(10_000);
+    expect(md.startsWith('xxx')).toBe(true);
+    expect(md).toContain('You asked: Which environment?');
+    expect(md).toContain('The reviewer answered: staging');
+    expect(md).toMatch(/Proceed with the original request using this answer\.$/);
+  });
+
+  test('keeps the answer of an earlier round when a second question is answered', () => {
+    // The description of a resumed task ends with the first exchange. Cutting
+    // it from its end would drop that answer to make room for the second one.
+    const first = buildClarifyResumeDescription('x'.repeat(10_000), 'Which environment?', 'staging');
+    const md = buildClarifyResumeDescription(first, 'Which region?', 'eu-west-1');
+    expect(md.length).toBeLessThanOrEqual(10_000);
+    expect(md.startsWith('xxx')).toBe(true);
+    expect(md).toContain('The reviewer answered: staging');
+    expect(md.indexOf('The reviewer answered: staging')).toBeLessThan(md.indexOf('You asked: Which region?'));
+    expect(md).toContain('The reviewer answered: eu-west-1');
+  });
+
+  // What buildFollowUpDescription (linear-webhook-processor.ts) appends when a
+  // reviewer comments on an issue whose last run ended without a pull request.
+  const FOLLOW_UP = [
+    '---',
+    'An earlier run on this issue ended without a pull request.',
+    'The reviewer now asks: retry, but only the SAML part: skip OIDC',
+  ].join('\n');
+  const EXCHANGE = [
+    '---',
+    'This continues an earlier run that paused to ask a clarifying question.',
+    'You asked: Which IdP?',
+    'The reviewer answered: Okta',
+    'Proceed with the original request using this answer.',
+  ].join('\n');
+
+  test.each([10_000, 9_831])(
+    'keeps the request of a follow-up comment whole (a description of %d characters)',
+    (length) => {
+      // The description of a task that a follow-up comment started ends with
+      // that request. It is the reviewer's word, like an answer: without it the
+      // resumed run does the whole issue again. The issue text gives way.
+      const description = `${'x'.repeat(length - FOLLOW_UP.length - 2)}\n\n${FOLLOW_UP}`;
+      const md = buildClarifyResumeDescription(description, 'Which IdP?', 'Okta');
+      expect(md.slice(md.indexOf('\n\n---\n'))).toBe(`\n\n${FOLLOW_UP}\n\n${EXCHANGE}`);
+      expect(md.startsWith('xxx')).toBe(true);
+      expect(md.length).toBe(10_000);
+    },
+  );
+
+  test('keeps a follow-up request and every answer through further rounds', () => {
+    const followUp = `${'x'.repeat(10_000 - FOLLOW_UP.length - 2)}\n\n${FOLLOW_UP}`;
+    const first = buildClarifyResumeDescription(followUp, 'Which IdP?', 'Okta');
+    const md = buildClarifyResumeDescription(first, 'Which tenant?', 'the EU one');
+    expect(md.slice(md.indexOf('\n\n---\n'))).toBe([
+      '',
+      '',
+      FOLLOW_UP,
+      '',
+      EXCHANGE,
+      '',
+      '---',
+      'This continues an earlier run that paused to ask a clarifying question.',
+      'You asked: Which tenant?',
+      'The reviewer answered: the EU one',
+      'Proceed with the original request using this answer.',
+    ].join('\n'));
+    expect(md.length).toBe(10_000);
+  });
+
+  test('changes nothing in a description that fits, also in front of a follow-up request', () => {
+    const description = `ABC-42: Fix the login bug \n\n${FOLLOW_UP}`;
+    expect(buildClarifyResumeDescription(description, 'Which IdP?', 'Okta'))
+      .toBe(`${description}\n\n${EXCHANGE}`);
+  });
+
+  test('leaves exchanges that exceed the limit on their own whole, for createTaskCore to refuse', () => {
+    // A row without a stored description: the first resume is the exchange
+    // alone, and there is no issue text to give way. A shortened answer would
+    // go unnoticed; a description over the limit is refused, and the processor
+    // tells the commenter why.
+    const first = buildClarifyResumeDescription(undefined, 'q'.repeat(2_000), 'a'.repeat(3_000));
+    const md = buildClarifyResumeDescription(first, 'r'.repeat(2_000), 'b'.repeat(3_000));
+    expect(md.startsWith(`${first}\n\n---\n`)).toBe(true);
+    expect(md.length).toBeGreaterThan(10_000);
+  });
+
+  test.each([
+    ['in the middle of an emoji', '', 9_999],
+    ['between two emoji', 'x', 10_000],
+  ])('never keeps half of a character when the cut falls %s', (_where, pad, length) => {
+    // An emoji is two UTF-16 code units, and the limit counts units. Half of
+    // one is not a character: it is stored as U+FFFD.
+    const md = buildClarifyResumeDescription(`${pad}${'😀'.repeat(5_000)}`, 'Which environment?', 'staging');
+    expect(Buffer.from(md, 'utf8').toString('utf8') === md).toBe(true);
+    expect(md.length).toBe(length);
+  });
 });

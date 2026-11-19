@@ -22,7 +22,7 @@ ABCA propagates *who* as data but not as an enforceable credential. Issue [#245]
 2. **Outbound auth is N hand-rolled resolvers.** Each integration re-implements credential fetch, refresh, and refresh-race handling against Secrets Manager.
 
    - `resolve_github_token()` (`agent/src/config.py`): one shared PAT for all repos and users. No per-user or per-repo scoping.
-   - `resolve_linear_api_token()` (`agent/src/config.py`) + `cdk/src/handlers/shared/linear-oauth-resolver.ts`: per-workspace OAuth token. Manual refresh inside 60s of expiry, one-shot rotation-race handling.
+   - `resolve_linear_api_token()` (`agent/src/config.py`) + `cdk/src/handlers/shared/linear-oauth-resolver.ts`: per-workspace OAuth token. The Lambda resolver refreshes it manually inside 60s of expiry, with one-shot rotation-race handling, and writes the new tokens back to the secret. The agent resolver does not refresh, because the agent's role holds `GetSecretValue` only and could not store the refresh token that Linear rotates on every use: it reads the stored token and returns no token when the stored one is inside 60s of expiry.
    - the Jira resolver added in PR [#302](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/pull/302) and extended by issue [#642](https://github.com/aws-samples/sample-autonomous-cloud-coding-agents/issues/642): one per-tenant Secrets Manager bundle holds 3LO for reads/human lookup plus the signed Forge app-actor proxy for writes.
 
    A second provider arriving through the same `resolve_<integration>_token()` shape is live evidence the seam already exists; it just is not named or unified.

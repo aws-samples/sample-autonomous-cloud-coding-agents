@@ -22,7 +22,7 @@ import { TaskStatus, TERMINAL_STATUSES } from '../constructs/task-status';
 import { resolveComputeStrategy, type SessionHandle } from './shared/compute-strategy';
 import { MicrovmStartUncertainError } from './shared/error-classifier';
 import { reportIssueFailure as reportJiraIssueFailure } from './shared/jira-feedback';
-import { reportIssueFailure } from './shared/linear-feedback';
+import { postIssueComment } from './shared/linear-feedback';
 import { logger } from './shared/logger';
 import { stopMicrovmWithDiagnostics } from './shared/microvm/supervisor';
 import { pollMicrovmTask } from './shared/microvm/task-poll';
@@ -75,7 +75,6 @@ function isMicrovmStartFailure(result: StartSessionResult): result is MicrovmSta
 }
 
 const MAX_POLL_ATTEMPTS = 1020; // ~8.5h at 30s intervals
-const MAX_NON_RUNNING_POLLS = 10; // ~5min grace period for session to start
 const MAX_CONSECUTIVE_ECS_POLL_FAILURES = 3;
 const MAX_CONSECUTIVE_ECS_COMPLETED_POLLS = 5;
 /** Poll cadence when the blueprint doesn't override ``poll_interval_ms`` (seconds). */
@@ -121,12 +120,14 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // pickup-cycle re-queue must preserve the CURRENT queued_at /
       // admission_attempts, which the pickup Lambda may have advanced.
       // queueTask emits the `admission_queued` event itself.
-      await queueTask(current);
+      const queued = await queueTask(current);
       // Channel feedback only on the FIRST queue entry — a pickup-cycle
       // re-queue (lost admission race) would otherwise spam the issue with
       // one comment per cycle. Non-fatal: a throw here would re-run
       // queueTask on the durable-execution retry, producing duplicate events.
-      if (current.queued_at === undefined) {
+      // And only when the task WAS queued: queueTask answers false when a
+      // concurrent transition (a user cancel) won, and that task never starts.
+      if (queued && current.queued_at === undefined) {
         try {
           await notifyLinearOnConcurrencyCap(task);
         } catch (err) {
@@ -206,6 +207,20 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     let strategy: ReturnType<typeof resolveComputeStrategy> | undefined;
     let startedHandle: Awaited<ReturnType<typeof startSessionWithRetry>>['handle'] | undefined;
     try {
+      // Re-read status with a strongly consistent read, as the admission and
+      // pre-flight steps do. It detects a cancel that landed during hydration,
+      // and a failure this step recorded itself: the catch below fails the task
+      // and rethrows, and Durable Execution then runs the step again. A session
+      // started now would run for a task that is already over. Not for a
+      // MicroVM: its strategy makes this check when it claims the start
+      // (`claimMicrovmStart`) and then also stops a computer that an interrupted
+      // run of this step saved, which a throw from here would skip.
+      if (blueprintConfig.compute_type !== 'lambda-microvm') {
+        const beforeStart = await loadTask(taskId, true);
+        if (TERMINAL_STATUSES.includes(beforeStart.status)) {
+          throw new Error(`Task is ${beforeStart.status}, no session started`);
+        }
+      }
       strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {
         taskId,
@@ -260,10 +275,20 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // mark the task RUNNING before this point, and the event must not depend
       // on which writer got there first.
       if (handle.strategyType !== 'lambda-microvm') {
-        await emitTaskEvent(taskId, 'session_started', {
-          session_id: handle.sessionId,
-          strategy_type: handle.strategyType,
-        }, correlation);
+        // The transition above is the commit point: the session runs and the
+        // task row names it. A failed event write must not throw from here:
+        // Durable Execution would run the step again, the re-read above would
+        // see a RUNNING task, and every run would start another session.
+        try {
+          await emitTaskEvent(taskId, 'session_started', {
+            session_id: handle.sessionId,
+            strategy_type: handle.strategyType,
+          }, correlation);
+        } catch (emitErr) {
+          log.warn('session_started event failed after the session was registered', {
+            session_id: handle.sessionId, error: String(emitErr),
+          });
+        }
       }
 
       log.info('Session started', {
@@ -425,12 +450,19 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
     ? resolveComputeStrategy(blueprintConfig)
     : undefined;
 
+  // The poll window is a time, MAX_POLL_ATTEMPTS polls at the default interval
+  // (~8.5h), so the number of polls it allows depends on the blueprint's interval.
+  const pollSeconds = blueprintConfig.poll_interval_ms
+    ? Math.ceil(blueprintConfig.poll_interval_ms / 1000)
+    : DEFAULT_POLL_INTERVAL_SECONDS;
+  const maxPollAttempts = Math.ceil(MAX_POLL_ATTEMPTS * DEFAULT_POLL_INTERVAL_SECONDS / pollSeconds);
+
   // Step 5: Wait for agent to finish
   // Polls DynamoDB on each interval. The agent writes terminal status when done.
   // While RUNNING, the runtime updates `agent_heartbeat_at`; if that timestamp
   // goes stale, `pollTaskStatus` sets `sessionUnhealthy` so we fail fast instead
   // of waiting the full MAX_POLL_ATTEMPTS window (~8.5h) after a silent crash.
-  // ECS/AgentCore retain their poll-count startup/total bounds. MicroVM uses
+  // ECS/AgentCore retain their poll-count bound. MicroVM uses
   // persisted wall-clock deadlines so faster transition polls cannot shorten a session.
 
   const finalPollState = await context.waitForCondition<PollState>(
@@ -517,18 +549,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
             delay: { seconds: Math.max(1, Math.ceil(state.microvmSupervisor.nextPollInMs / 1000)) },
           };
         }
-        if (state.attempts >= MAX_POLL_ATTEMPTS) {
+        if (state.attempts >= maxPollAttempts) {
           return { shouldContinue: false };
         }
-        // If the task is still HYDRATING after a grace period, the session never
-        // started (e.g. container crash). Stop polling early so finalizeTask can
-        // transition to FAILED instead of waiting 8.5h.
-        if (state.attempts >= MAX_NON_RUNNING_POLLS && state.lastStatus === TaskStatus.HYDRATING) {
-          return { shouldContinue: false };
-        }
-        const pollSeconds = blueprintConfig.poll_interval_ms
-          ? Math.ceil(blueprintConfig.poll_interval_ms / 1000)
-          : DEFAULT_POLL_INTERVAL_SECONDS;
         return { shouldContinue: true, delay: { seconds: pollSeconds } };
       },
     },
@@ -578,9 +601,12 @@ export const handler = withDurableExecution(durableHandler);
  * reaction the agent never gets to add — looks like the integration silently
  * dropped the request.
  *
- * Best-effort: errors inside `reportIssueFailure` are swallowed at the helper
+ * A comment only, not `reportIssueFailure`: that helper also adds the ❌
+ * reaction, the marker of a failed task, and this task is queued.
+ *
+ * Best-effort: errors inside `postIssueComment` are swallowed at the helper
  * layer; we don't surface them here because Linear feedback must never block
- * the rejection path.
+ * the admission step.
  *
  * Exported for unit testing — the durable handler invokes it inline.
  */
@@ -597,13 +623,13 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
     return;
   }
   // Wrap in try/catch matching the `safeReportIssueFailure` pattern in
-  // the webhook processor. `reportIssueFailure` itself is best-effort
+  // the webhook processor. `postIssueComment` itself is best-effort
   // internally, but a synchronous throw bubbling up here would crash the
   // durable-execution step on a transient DDB throttle during the
-  // workspace registry lookup. Suppress + log so the rejection path is
+  // workspace registry lookup. Suppress + log so the admission step is
   // never blocked by Linear-feedback failures.
   try {
-    await reportIssueFailure(
+    await postIssueComment(
       { linearWorkspaceId, registryTableName },
       issueId,
       '⏸️ ABCA hit your concurrency limit — this task has been queued and will start automatically when a slot frees up. No action needed.',
@@ -631,7 +657,7 @@ export async function notifyLinearOnConcurrencyCap(task: TaskRecord): Promise<vo
  *
  * Best-effort: `reportIssueFailure` swallows its own errors; we wrap in
  * try/catch anyway because a transient throw during the registry lookup must
- * never block the rejection path. Exported for unit testing.
+ * never block the admission step. Exported for unit testing.
  */
 export async function notifyJiraOnConcurrencyCap(task: TaskRecord): Promise<void> {
   if (task.channel_source !== 'jira') return;

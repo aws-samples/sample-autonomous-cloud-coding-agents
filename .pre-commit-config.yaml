@@ -25,16 +25,22 @@ repos:
 
   - repo: local
     hooks:
+      # Every entry below that runs a mise task exports MISE_ACTIVATE_AGGRESSIVE=1 first.
+      # On macOS the login shell of an entry puts /usr/local/bin and /opt/homebrew/bin back
+      # in front of the directories mise had added to PATH, and mise leaves them there: the
+      # hook then ran the machine's own node, gitleaks and semgrep, not the versions that
+      # mise.toml pins. With the variable mise puts its tools first again. A hook added
+      # here needs it too (cdk/test/scripts/git-hooks.test.ts).
       - id: gitleaks
         name: gitleaks (staged)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run security:secrets:staged'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run security:secrets:staged'
         language: system
         pass_filenames: false
         stages: [pre-commit]
 
       - id: cdk-eslint
         name: eslint (cdk)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //cdk:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cdk:eslint'
         language: system
         pass_filenames: false
         files: ^cdk/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
@@ -43,7 +49,7 @@ repos:
 
       - id: cli-eslint
         name: eslint (cli)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //cli:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //cli:eslint'
         language: system
         pass_filenames: false
         files: ^cli/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
@@ -51,7 +57,7 @@ repos:
 
       - id: web-eslint
         name: eslint (web)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //web:eslint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //web:eslint'
         language: system
         pass_filenames: false
         files: ^web/.*\.(ts|tsx|mts|cts|cjs|mjs|js)$
@@ -59,7 +65,7 @@ repos:
 
       - id: agent-quality
         name: quality (agent)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/agent" && mise run quality'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/agent" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run quality'
         language: system
         pass_filenames: false
         files: ^agent/.*\.py$
@@ -67,7 +73,7 @@ repos:
 
       - id: docs-sync
         name: sync docs → Starlight mirrors
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)/docs" && node scripts/sync-starlight.mjs && git add src/content/docs/'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:sync && git add docs/src/content/docs/'
         language: system
         pass_filenames: false
         files: ^(docs/(design|guides)/.*\.md$|CONTRIBUTING\.md$)
@@ -88,7 +94,7 @@ repos:
 
       - id: docs-markdown-lint
         name: markdown structure lint (all tracked Markdown)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:markdown-lint'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:markdown-lint'
         language: system
         pass_filenames: false
         files: \.(md|mdx)$
@@ -96,7 +102,7 @@ repos:
 
       - id: docs-script-tests
         name: docs script tests (generator, markdown lint)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && mise //docs:test'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_EXPERIMENTAL=1 && export MISE_ACTIVATE_AGGRESSIVE=1 && mise //docs:test'
         language: system
         pass_filenames: false
         files: ^docs/scripts/
@@ -104,7 +110,7 @@ repos:
 
       - id: types-sync-cdk-cli
         name: type sync drift (CDK ↔ CLI ↔ web)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:types-sync'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:types-sync'
         language: system
         pass_filenames: false
         # The script compiles the CDK types file with every module it imports (ten
@@ -115,7 +121,7 @@ repos:
 
       - id: constants-sync
         name: cross-language constants drift (contracts/constants.json)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:constants-sync'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:constants-sync'
         language: system
         pass_filenames: false
         # The script scans every Python file under agent/src, one CDK consumer and
@@ -125,7 +131,7 @@ repos:
 
       - id: coverage-thresholds-sync
         name: coverage threshold drift (contracts/coverage-thresholds.json)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run check:coverage-thresholds-sync'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run check:coverage-thresholds-sync'
         language: system
         pass_filenames: false
         # Every commit, not a `files` pattern: the script reads the contract, five
@@ -138,14 +144,14 @@ repos:
 
       - id: monorepo-security-pre-push
         name: security scans (pre-push)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && mise run hooks:pre-push:security'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run hooks:pre-push:security'
         language: system
         pass_filenames: false
         stages: [pre-push]
 
       - id: monorepo-tests-pre-push
         name: package tests (pre-push)
-        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export TMPDIR="${HOME}/.cache/cdk-tmp" && mkdir -p "$TMPDIR" && mise run hooks:pre-push:tests'
+        entry: bash -lc 'cd "$(git rev-parse --show-toplevel)" && export TMPDIR="${HOME}/.cache/cdk-tmp" && mkdir -p "$TMPDIR" && export MISE_ACTIVATE_AGGRESSIVE=1 && mise run hooks:pre-push:tests'
         language: system
         pass_filenames: false
         stages: [pre-push]

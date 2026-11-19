@@ -99,6 +99,13 @@ function makeContext(remainingMs: number): Context {
   };
 }
 
+/** DynamoDB for a whole call: `task` for the task read, a free slot for the concurrency pre-check, success for every write. */
+function mockDdb(task: unknown): void {
+  ddbSend.mockImplementation((cmd: any) => Promise.resolve(
+    cmd._type !== 'Get' ? {} : { Item: cmd.input.TableName === 'Tasks' ? task : { active_count: 0 } },
+  ));
+}
+
 const PENDING_TASK = {
   task_id: 'task-1',
   user_id: 'user-1',
@@ -162,6 +169,18 @@ describe('confirm-uploads handler', () => {
     expect(result.statusCode).toBe(200);
   });
 
+  // Admission can queue a confirmed task, an approval gate can pause it, and it
+  // finalizes: a repeated confirmation is answered with the task in each of them.
+  test.each(['QUEUED', 'AWAITING_APPROVAL', 'FINALIZING'])(
+    'returns 200 idempotently when the confirmed task has moved on to %s',
+    async (status) => {
+      ddbSend.mockResolvedValueOnce({ Item: { ...PENDING_TASK, status } });
+      const result = await handler(makeEvent('task-1'), makeContext(180_000));
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body).data.status).toBe(status);
+    },
+  );
+
   test('returns 409 when task is in a terminal status', async () => {
     ddbSend.mockResolvedValueOnce({ Item: { ...PENDING_TASK, status: 'CANCELLED' } });
     const result = await handler(makeEvent('task-1'), makeContext(180_000));
@@ -197,13 +216,55 @@ describe('confirm-uploads handler', () => {
     expect(body.error.code).toBe('ATTACHMENT_UPLOAD_MISSING');
   });
 
+  test('confirms the uploads of a task that also has a URL attachment, which stays pending for hydration', async () => {
+    const { screenImage } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    screenImage.mockResolvedValue({
+      content: pngContent,
+      contentType: 'image/png',
+      checksum: 'abc123',
+      screening: { status: 'passed' },
+    });
+
+    // create-task stores the URL record first; nothing is in S3 for it until hydration fetches the URL.
+    const urlAttachment = {
+      attachment_id: 'att-url',
+      type: 'url',
+      content_type: 'application/octet-stream',
+      filename: 'spec.md',
+      source_url: 'https://raw.githubusercontent.com/acme/specs/main/spec.md',
+      screening: { status: 'pending' },
+    };
+    mockDdb({ ...PENDING_TASK, attachments: [urlAttachment, PENDING_TASK.attachments[0]] });
+    s3Send.mockImplementation((cmd: any) => {
+      if (cmd.input.Key.includes('att-url')) {
+        return Promise.reject(Object.assign(new Error('NotFound'), { $metadata: { httpStatusCode: 404 } }));
+      }
+      if (cmd._type === 'S3Head') return Promise.resolve({ VersionId: 'v1', ContentLength: 1024 });
+      return Promise.resolve({ Body: { transformToByteArray: () => pngContent } });
+    });
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ data: { status: 'SUBMITTED' } });
+    expect(result.statusCode).toBe(200);
+    expect(s3Send.mock.calls.filter((call: any[]) => call[0].input.Key.includes('att-url'))).toHaveLength(0);
+    const submitted = ddbSend.mock.calls.find((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':submitted']);
+    expect(submitted?.[0].input.ExpressionAttributeValues[':atts']).toEqual([
+      urlAttachment,
+      expect.objectContaining({ attachment_id: 'att-1', screening: expect.objectContaining({ status: 'passed' }) }),
+    ]);
+  });
+
   test('happy path: HeadObject → screen → transition to SUBMITTED → invoke orchestrator', async () => {
     const { screenImage, screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
 
     const pngContent = Buffer.alloc(1024);
     pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG magic
-    const textContent = Buffer.alloc(512);
-    textContent.write('hello world');
+    const textContent = Buffer.alloc(512, 'a');
 
     // Screening passes
     screenImage.mockResolvedValue({
@@ -295,6 +356,7 @@ describe('confirm-uploads handler', () => {
 
     // GetObject for first attachment
     const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     s3Send.mockResolvedValueOnce({ Body: { transformToByteArray: () => pngContent } });
 
     // Screening blocks the image
@@ -312,6 +374,205 @@ describe('confirm-uploads handler', () => {
     // The task is failed as a complete terminal row.
     const failing = ddbSend.mock.calls.find((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed']);
     expect(failing?.[0].input.UpdateExpression).toContain('completed_at = :now');
+    // The bucket is versioned: a delete by key alone only adds a delete marker. The
+    // version HeadObject reported is named as well, so the uploaded bytes are gone now.
+    const cleanup = s3Send.mock.calls.find((call: any[]) => call[0]?._type === 'S3Delete');
+    expect(cleanup?.[0].input.Delete.Objects).toEqual([
+      { Key: 'attachments/user-1/task-1/att-1/screenshot.png' },
+      { Key: 'attachments/user-1/task-1/att-2/notes.txt' },
+      { Key: 'attachments/user-1/task-1/att-1/screenshot.png', VersionId: 'v1' },
+      { Key: 'attachments/user-1/task-1/att-2/notes.txt', VersionId: 'v2' },
+    ]);
+  });
+
+  test('fails the task when an upload is not what its content type declares', async () => {
+    const { screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    // An executable ("MZ" header, NUL bytes) uploaded as notes.txt, text/plain.
+    const executable = Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]);
+    // The guardrail would find nothing in it.
+    screenTextFile.mockResolvedValue({
+      content: executable,
+      contentType: 'text/plain',
+      checksum: 'def456',
+      screening: { status: 'passed' },
+    });
+    mockDdb({ ...PENDING_TASK, attachments: [PENDING_TASK.attachments[1]] });
+    s3Send.mockImplementation((cmd: any) => Promise.resolve(
+      cmd._type === 'S3Head'
+        ? { VersionId: 'v2', ContentLength: executable.length }
+        : { Body: { transformToByteArray: () => executable } },
+    ));
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code: 'ATTACHMENT_BLOCKED' } });
+    expect(result.statusCode).toBe(400);
+    expect(screenTextFile).not.toHaveBeenCalled();
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed'])).toBe(true);
+  });
+
+  test.each([
+    ['with time to spare', 180_000],
+    ['when the time is up after its batch', 10_000],
+  ])('stops screening and fails the task as soon as the guardrail blocks an attachment, %s', async (_when, remainingMsAfterFirstBatch) => {
+    const { screenImage } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    // Four uploads are two batches of screening; the guardrail blocks the second upload.
+    const uploads = ['att-1', 'att-2', 'att-3', 'att-4'].map(id => ({
+      ...PENDING_TASK.attachments[0],
+      attachment_id: id,
+      filename: `${id}.png`,
+    }));
+    screenImage.mockImplementation((content: Buffer, contentType: string, filename: string) => Promise.resolve({
+      content,
+      contentType,
+      checksum: 'abc123',
+      screening: filename === 'att-2.png'
+        ? { status: 'blocked', categories: ['content_policy_violation'] }
+        : { status: 'passed' },
+    }));
+    mockDdb({ ...PENDING_TASK, attachments: uploads });
+    s3Send.mockImplementation((cmd: any) => Promise.resolve(
+      cmd._type === 'S3Head'
+        ? { VersionId: 'v1', ContentLength: 1024 }
+        : { Body: { transformToByteArray: () => pngContent } },
+    ));
+
+    const context = makeContext(remainingMsAfterFirstBatch);
+    (context.getRemainingTimeInMillis as jest.Mock).mockReturnValueOnce(180_000);
+
+    const result = await handler(makeEvent('task-1'), context);
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code: 'ATTACHMENT_BLOCKED' } });
+    expect(result.statusCode).toBe(400);
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed'])).toBe(true);
+    // The blocked record is not saved for a retry to step over.
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':atts'])).toBe(false);
+    // The fourth upload is in the second batch, which is not screened for a task that is already lost.
+    expect(screenImage).toHaveBeenCalledTimes(3);
+  });
+
+  // The handler used to save a blocked record with the partial screening state of a call
+  // that ran out of time. A task that still holds one must fail, not be submitted.
+  const BLOCKED_ATTACHMENT = {
+    ...PENDING_TASK.attachments[0],
+    s3_version_id: 'v1',
+    checksum_sha256: 'abc123',
+    screening: { status: 'blocked', screened_at: '2025-03-15T10:31:00Z', categories: ['content_policy_violation'] },
+  };
+
+  test('fails a task that holds an attachment stored as blocked, even when the rest passes', async () => {
+    const { screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    const textContent = Buffer.alloc(512, 'a');
+    screenTextFile.mockResolvedValue({
+      content: textContent,
+      contentType: 'text/plain',
+      checksum: 'def456',
+      screening: { status: 'passed' },
+    });
+    mockDdb({ ...PENDING_TASK, attachments: [BLOCKED_ATTACHMENT, PENDING_TASK.attachments[1]] });
+    s3Send.mockImplementation((cmd: any) => Promise.resolve(
+      cmd._type === 'S3Head'
+        ? { VersionId: 'v2', ContentLength: 512 }
+        : { Body: { transformToByteArray: () => textContent } },
+    ));
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code: 'ATTACHMENT_BLOCKED' } });
+    expect(result.statusCode).toBe(400);
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed'])).toBe(true);
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':submitted'])).toBe(false);
+  });
+
+  test('fails a task that holds an attachment stored as blocked when nothing is left to screen', async () => {
+    const passedAttachment = {
+      ...PENDING_TASK.attachments[1],
+      s3_version_id: 'v2',
+      checksum_sha256: 'def456',
+      screening: { status: 'passed', screened_at: '2025-03-15T10:31:00Z' },
+    };
+    mockDdb({ ...PENDING_TASK, attachments: [BLOCKED_ATTACHMENT, passedAttachment] });
+    s3Send.mockResolvedValue({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code: 'ATTACHMENT_BLOCKED' } });
+    expect(result.statusCode).toBe(400);
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed'])).toBe(true);
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':submitted'])).toBe(false);
+  });
+
+  test('submits a task whose uploads are all screened already, without screening them again', async () => {
+    const screened = PENDING_TASK.attachments.map(attachment => ({
+      ...attachment,
+      s3_version_id: 'v1',
+      checksum_sha256: 'abc123',
+      screening: { status: 'passed', screened_at: '2025-03-15T10:31:00Z' },
+    }));
+    mockDdb({ ...PENDING_TASK, attachments: screened });
+    lambdaSend.mockResolvedValueOnce({});
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ data: { status: 'SUBMITTED' } });
+    expect(result.statusCode).toBe(200);
+    expect(s3Send).not.toHaveBeenCalled();
+    const submitted = ddbSend.mock.calls.find((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':submitted']);
+    expect(submitted?.[0].input.ExpressionAttributeValues[':atts']).toEqual(screened);
+  });
+
+  test.each([
+    ['fails the task with that reason and deletes the uploads', false],
+    ['leaves the uploads alone when another call has moved the task in the meantime', true],
+  ])('uploads that are over the task size limit together: %s', async (_outcome, taskMovedOn) => {
+    const { screenImage } = jest.requireMock('../../src/handlers/shared/attachment-screening');
+
+    // Each upload is under the 10 MB the presigned POST allows per file; the six are 54 MB.
+    const nineMb = Buffer.alloc(9 * 1024 * 1024);
+    nineMb.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const uploads = ['att-1', 'att-2', 'att-3', 'att-4', 'att-5', 'att-6'].map(id => ({
+      ...PENDING_TASK.attachments[0],
+      attachment_id: id,
+      filename: `${id}.png`,
+    }));
+    screenImage.mockImplementation((content: Buffer, contentType: string) => Promise.resolve({
+      content,
+      contentType,
+      checksum: 'abc123',
+      screening: { status: 'passed' },
+    }));
+    mockDdb({ ...PENDING_TASK, attachments: uploads });
+    if (taskMovedOn) {
+      // The conditional write to FAILED finds the task no longer in PENDING_UPLOADS.
+      const condErr = new Error('The conditional request failed');
+      condErr.name = 'ConditionalCheckFailedException';
+      const answer = ddbSend.getMockImplementation()!;
+      ddbSend.mockImplementation((cmd: any) => (
+        cmd.input.ExpressionAttributeValues?.[':failed'] ? Promise.reject(condErr) : answer(cmd)
+      ));
+    }
+    s3Send.mockImplementation((cmd: any) => Promise.resolve(
+      cmd._type === 'S3Head'
+        ? { VersionId: 'v1', ContentLength: nineMb.length }
+        : { Body: { transformToByteArray: () => nineMb } },
+    ));
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code: 'VALIDATION_ERROR' } });
+    expect(result.statusCode).toBe(400);
+    // Without its uploads the task could never be confirmed, so it is failed with the reason
+    // first; the uploads are deleted only when that write went through.
+    const failing = ddbSend.mock.calls.find((call: any[]) => call[0]?.input?.ExpressionAttributeValues?.[':failed']);
+    expect(failing?.[0].input.ExpressionAttributeValues[':err']).toBe('Combined attachment size exceeds the 52428800-byte task limit.');
+    expect(s3Send.mock.calls.some((call: any[]) => call[0]?._type === 'S3Delete')).toBe(!taskMovedOn);
+    // No single attachment is at fault, so no attachment_blocked event is written.
+    expect(ddbSend.mock.calls.some((call: any[]) => call[0]?._type === 'Put')).toBe(false);
   });
 
   test('skips S3 cleanup when failTaskOnScreening loses the race (ConditionalCheckFailedException)', async () => {
@@ -327,6 +588,7 @@ describe('confirm-uploads handler', () => {
 
     // GetObject for first attachment
     const pngContent = Buffer.alloc(1024);
+    pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     s3Send.mockResolvedValueOnce({ Body: { transformToByteArray: () => pngContent } });
 
     // Screening blocks the image
@@ -347,13 +609,38 @@ describe('confirm-uploads handler', () => {
     expect(s3DeleteCalls).toHaveLength(0);
   });
 
+  // A second call for the same task can fail it and delete its uploads while this call is screening.
+  test.each([
+    ['says that the upload is gone when it has been deleted in the meantime', 'NoSuchVersion', 404, 400, 'ATTACHMENT_BLOCKED', 'no longer in storage'],
+    ['reports the screening as unavailable for any other storage error', 'InternalError', 500, 503, 'ATTACHMENT_SCREENING_UNAVAILABLE', 'temporarily unavailable'],
+  ])('when an upload cannot be read for screening, %s', async (_answer, errorName, storageStatus, status, code, message) => {
+    mockDdb({ ...PENDING_TASK, attachments: [PENDING_TASK.attachments[0]] });
+    // The task has left PENDING_UPLOADS: the other call has failed it.
+    const condErr = new Error('The conditional request failed');
+    condErr.name = 'ConditionalCheckFailedException';
+    const answer = ddbSend.getMockImplementation()!;
+    ddbSend.mockImplementation((cmd: any) => (
+      cmd.input.ExpressionAttributeValues?.[':failed'] ? Promise.reject(condErr) : answer(cmd)
+    ));
+    s3Send.mockImplementation((cmd: any) => (
+      cmd._type === 'S3Head'
+        ? Promise.resolve({ VersionId: 'v1', ContentLength: 1024 })
+        : Promise.reject(Object.assign(new Error(errorName), { name: errorName, $metadata: { httpStatusCode: storageStatus } }))
+    ));
+
+    const result = await handler(makeEvent('task-1'), makeContext(180_000));
+
+    expect(JSON.parse(result.body)).toMatchObject({ error: { code, message: expect.stringContaining(message) } });
+    expect(result.statusCode).toBe(status);
+    expect(s3Send.mock.calls.some((call: any[]) => call[0]?._type === 'S3Delete')).toBe(false);
+  });
+
   test('does not re-upload content to S3 after screening passes (no redundant PUT)', async () => {
     const { screenImage, screenTextFile } = jest.requireMock('../../src/handlers/shared/attachment-screening');
 
     const pngContent = Buffer.alloc(1024);
     pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const textContent = Buffer.alloc(512);
-    textContent.write('hello world');
+    const textContent = Buffer.alloc(512, 'a');
 
     screenImage.mockResolvedValue({
       content: pngContent,
@@ -418,8 +705,7 @@ describe('confirm-uploads handler', () => {
 
     const pngContent = Buffer.alloc(1024);
     pngContent.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const textContent = Buffer.alloc(512);
-    textContent.write('hello world');
+    const textContent = Buffer.alloc(512, 'a');
 
     screenImage.mockResolvedValue({
       content: pngContent,

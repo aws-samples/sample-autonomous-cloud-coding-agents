@@ -21,12 +21,12 @@
 
 import { GetMicrovmCommand, LambdaMicrovmsClient, ResumeMicrovmCommand } from '@aws-sdk/client-lambda-microvms';
 import type { Context } from 'aws-lambda';
+import { TaskStatus } from '../../../constructs/task-status';
 import type { SessionControlOptions } from '../compute-strategy';
 import { logger } from '../logger';
+import { makeClient } from '../ua';
 import { microvmErrorIdentity, microvmRequestIdentity } from './control';
 import { readMicrovmLifecycleSnapshot, saveMicrovmLifecycleIntent, type MicrovmLifecycleSnapshot } from './lifecycle';
-import { TaskStatus } from '../../../constructs/task-status';
-import { makeClient } from '../ua';
 
 const API_TIMEOUT_MS = 15_000;
 const RESPONSE_RESERVE_MS = 1_000;

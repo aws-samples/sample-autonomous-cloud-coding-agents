@@ -336,7 +336,10 @@ export class EcsComputeStrategy implements ComputeStrategy {
 
     const ecsTask = result.tasks?.[0];
     if (!ecsTask) {
-      return { status: 'failed', error: `ECS task ${taskArn} not found` };
+      // Thrown, not reported as `failed`: the ECS API is eventually consistent, so
+      // a read right after RunTask can miss a task that is starting normally. The
+      // caller counts a throw as one failed poll and fails the task after several.
+      throw new Error(`ECS task ${taskArn} not found`);
     }
 
     const lastStatus = ecsTask.lastStatus;

@@ -7,7 +7,53 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+
 import observability
+
+
+@pytest.fixture
+def finished_spans(monkeypatch):
+    """Give ``task_span`` a tracer of the real SDK; return the exporter its spans end in."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(observability, "_tracer", provider.get_tracer("test"))
+    yield exporter
+    provider.shutdown()
+
+
+class TestTaskSpan:
+    """A phase that raises ends its span with status ERROR and the exception on it once.
+    The tracer's own context manager does both; an ``exception`` event that ``task_span``
+    adds itself is a second one, and every count of failures in the trace doubles."""
+
+    def test_exception_is_recorded_once_on_each_span_it_leaves(self, finished_spans):
+        with (
+            pytest.raises(RuntimeError, match="clone failed"),
+            observability.task_span("task.pipeline"),
+            observability.task_span("task.repo_setup"),
+        ):
+            raise RuntimeError("clone failed")
+
+        spans = {span.name: span for span in finished_spans.get_finished_spans()}
+        assert set(spans) == {"task.pipeline", "task.repo_setup"}
+        for span in spans.values():
+            assert span.status.status_code is StatusCode.ERROR
+            assert [event.name for event in span.events] == ["exception"]
+
+    def test_phase_that_succeeds_carries_its_attributes_and_no_error(self, finished_spans):
+        with observability.task_span("task.repo_setup", {"repo.url": "owner/repo"}) as span:
+            span.set_attribute("build.before", True)
+
+        (finished,) = finished_spans.get_finished_spans()
+        assert finished.attributes == {"repo.url": "owner/repo", "build.before": True}
+        assert finished.status.status_code is StatusCode.UNSET
+        assert finished.events == ()
 
 
 class TestCurrentOtelTraceId:

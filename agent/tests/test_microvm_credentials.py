@@ -151,7 +151,12 @@ class TestRetainedCredentials:
             config = make_client.call_args.kwargs["config"]
             assert config.connect_timeout == (2 if microvm else 60)
             assert config.read_timeout == (2 if microvm else 60)
-            assert config.retries == ({"total_max_attempts": 1} if microvm else None)
+            # Every client carries the retry mode the module names; the MicroVM
+            # budget adds its single attempt to it.
+            expected = {"mode": aws_session.RETRY_MODE}
+            if microvm:
+                expected["total_max_attempts"] = 1
+            assert config.retries == expected
         finally:
             if context is not None:
                 microvm_lifecycle.unregister_task(context)
