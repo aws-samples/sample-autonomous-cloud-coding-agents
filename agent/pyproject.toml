@@ -158,10 +158,11 @@ ignore = [
     "S607",  # partial executable path — agent relies on PATH for git, gh, mise
 ]
 
-# A function with more than 15 independent paths fails the lint. The ten functions
+# A function with more than 15 independent paths fails the lint. Nine functions
 # that were above it when the ceiling was set carry `# noqa: C901` with the value
-# they had: that value must not grow, and the comment goes when the function is
-# split. Do not raise the number to make a new function fit.
+# they had (after a newer value, where the comment gives one): the first value
+# must not grow, and the comment goes when the function is split. Do not raise the
+# number to make a new function fit.
 [tool.ruff.lint.mccabe]
 max-complexity = 15
 

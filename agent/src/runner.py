@@ -475,7 +475,7 @@ def _register_gateway_server(mcp_servers: dict[str, Any]) -> None:
         log("AGENT", "AgentCore Gateway tool bridge registered (mcp__abca_gateway__*)")
 
 
-async def run_agent(  # noqa: C901 -- 37 when the ceiling of 15 was set; must not grow
+async def run_agent(  # noqa: C901 -- 40 since #904 (37 when the ceiling of 15 was set); must not grow
     prompt: str,
     system_prompt: str,
     config: TaskConfig,
