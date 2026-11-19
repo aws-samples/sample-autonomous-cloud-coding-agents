@@ -244,6 +244,26 @@ class TestFailureIsSwallowed:
             react_task_started("linear", {"linear_issue_id": "issue-1"})
             post.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "body",
+        [b"<html><body>Sign in</body></html>", b"null", b"[]", b"42", b'"scalar"'],
+        ids=["html", "null", "list", "number", "string"],
+    )
+    def test_200_without_a_json_object_does_not_raise(self, monkeypatch, body):
+        """A 200 whose body is a proxy's HTML page, or JSON that is not an object,
+        is one more failure: raised out of the hook, it would turn a finished task
+        into FAILED. A real ``requests.Response``, so it fails the way requests does."""
+        import requests as rq
+
+        monkeypatch.setenv("LINEAR_API_TOKEN", "lin_api_test")
+        resp = rq.Response()
+        resp.status_code = 200
+        resp._content = body
+        with patch("linear_reactions.requests.post", return_value=resp):
+            # must not raise
+            react_task_finished("linear", {"linear_issue_id": "issue-1"}, success=True)
+            assert linear_reactions._graphql("query Q { x }", {}) is None
+
 
 class TestSweepStaleReactions:
     """react_task_started sweeps prior bgagent-owned 👀/✅/❌ before posting

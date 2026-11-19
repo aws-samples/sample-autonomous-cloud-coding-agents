@@ -36,7 +36,7 @@ describe('coerceNumericOrNull', () => {
     expect(warnCalls).toHaveLength(0);
   });
 
-  test('parses numeric strings (DDB Document-client shape)', () => {
+  test('parses numeric strings (the shape the agent stores)', () => {
     // The actual shape observed in Scenario 7-extended deploy
     // validation: ``duration_s: "96.0"`` and
     // ``cost_usd: "0.20939010000000002"``.

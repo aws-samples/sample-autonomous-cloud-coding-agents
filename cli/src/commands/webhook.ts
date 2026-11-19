@@ -21,7 +21,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../api-client';
 import { tryLoadConfig } from '../config';
 import { CliError } from '../errors';
-import { formatJson, formatWebhookCreated, formatWebhookDetail, formatWebhookList } from '../format';
+import { followPages, formatJson, formatWebhookCreated, formatWebhookDetail, formatWebhookList } from '../format';
 import { DEFAULT_STACK_NAME, resolveOperatorContext } from '../operator-context';
 import { loadActiveRepoConfig, listRepoConfigs } from '../repo-lookup';
 import { getStackOutput } from '../stack-outputs';
@@ -58,10 +58,11 @@ export function makeWebhookCommand(): Command {
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const client = new ApiClient({ apiKey: opts.apiKey });
-        const result = await client.listWebhooks({
-          includeRevoked: opts.includeRevoked,
-          limit: opts.limit,
-        });
+        const result = await followPages(
+          await client.listWebhooks({ includeRevoked: opts.includeRevoked, limit: opts.limit }),
+          opts.limit,
+          (limit, nextToken) => client.listWebhooks({ includeRevoked: opts.includeRevoked, limit, nextToken }),
+        );
 
         if (opts.output === 'json') {
           console.log(formatJson(result));

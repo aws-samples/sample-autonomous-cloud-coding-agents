@@ -56,6 +56,16 @@ const SECRET_CACHE_TTL_MS = 60_000;
 /** Refresh threshold: refresh tokens with <60s remaining. */
 const REFRESH_THRESHOLD_SECONDS = 60;
 
+/**
+ * Time limit of one refresh request; without it an Atlassian that does not
+ * answer holds the calling Lambda until its own timeout. A renewal that
+ * Atlassian completed but answered too late is lost with the request: the
+ * refresh token it used is disabled, and exchanging it again is tolerated only
+ * within the reuse interval, 10 minutes by default
+ * (https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/).
+ */
+const REFRESH_TIMEOUT_MS = 10_000;
+
 /** Registry row status values. Anything else is treated as `revoked` (fail-closed). */
 type RegistryRowStatus = 'active' | 'revoked';
 
@@ -567,6 +577,7 @@ async function tryRefreshOnce(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body,
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
   } catch (err) {
     logger.error('Jira token refresh fetch failed', {

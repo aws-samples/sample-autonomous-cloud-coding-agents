@@ -519,7 +519,7 @@ describe('computeLambdaMicrovmPolicy', () => {
     const resolvedDoc = stack.resolve(doc);
     const statements = resolvedDoc.Statement as Array<{ Sid: string }>;
 
-    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms', 'MicrovmPassRoles']);
+    expect(statements.map((s) => s.Sid)).toEqual(['LambdaMicrovms', 'MicrovmPassRoles', 'MicrovmSuspendConfiguration']);
   });
 
   it('covers the expected service prefixes', () => {
@@ -530,8 +530,16 @@ describe('computeLambdaMicrovmPolicy', () => {
     );
     const prefixes = new Set(allActions.map((a) => a.split(':')[0]));
 
-    // `iam` joins `lambda` as of the MicrovmPassRoles statement (ADR-021 P2r2-F9).
-    expect(prefixes).toEqual(new Set(['lambda', 'iam']));
+    expect(prefixes).toEqual(new Set(['lambda', 'iam', 'ssm']));
+  });
+
+  it('limits parameter lifecycle and tagging to the ABCA MicroVM suspension switch', () => {
+    const statement = stack.resolve(doc).Statement.find((s: { Sid: string }) => s.Sid === 'MicrovmSuspendConfiguration');
+    expect(statement.Resource).toBe('arn:aws:ssm:*:*:parameter/backgroundagent-*/microvm-approval-suspend-enabled');
+    expect(statement.Action).toEqual([
+      'ssm:GetParameters', 'ssm:PutParameter', 'ssm:DeleteParameter',
+      'ssm:AddTagsToResource', 'ssm:RemoveTagsFromResource', 'ssm:ListTagsForResource',
+    ]);
   });
 
   describe('MicrovmPassRoles (ADR-021 P2r2-F9)', () => {
@@ -567,6 +575,10 @@ describe('computeLambdaMicrovmPolicy', () => {
       expect(resources).toEqual([
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeBuild*',
         'arn:aws:iam::*:role/backgroundagent-dev-LambdaMicrovmComputeConnector*',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmBuildRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-MicrovmConnectorRole',
+        'arn:aws:iam::*:role/backgroundagent-dev-*-MicrovmConnectorRole',
       ]);
       // NOT the stack-wide role prefix the conditioned statement uses: an
       // unconditioned pass on `backgroundagent-dev-*` would drop the
@@ -610,6 +622,27 @@ describe('computeLambdaMicrovmPolicy', () => {
           return re.test(arn);
         });
         expect(matched).toBe(true);
+      }
+    });
+
+    it('limits nested PassRole to the build and operator names of the default or a suffixed stack', () => {
+      const resources = passRoleStatement().Resource as string[];
+      const matches = (name: string) => resources.some(pattern =>
+        new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`)
+          .test(`arn:aws:iam::123456789012:role/${name}`));
+      expect(matches('backgroundagent-dev-MicrovmBuildRole')).toBe(true);
+      expect(matches('backgroundagent-dev-MicrovmConnectorRole')).toBe(true);
+      // A supported stack name such as `backgroundagent-dev-team-b` (#904 review).
+      expect(matches('backgroundagent-dev-team-b-MicrovmBuildRole')).toBe(true);
+      expect(matches('backgroundagent-dev-team-b-MicrovmConnectorRole')).toBe(true);
+      for (const name of [
+        'backgroundagent-dev-MicrovmExecutionRole',
+        'backgroundagent-dev-team-b-MicrovmExecutionRole',
+        'other-stack-MicrovmBuildRole',
+        'backgroundagent-dev-MicrovmBuildRoleOther',
+        'backgroundagent-dev-OtherBuildRole',
+      ]) {
+        expect(matches(name)).toBe(false);
       }
     });
   });

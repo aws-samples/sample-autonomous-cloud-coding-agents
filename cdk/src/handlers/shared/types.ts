@@ -17,15 +17,15 @@
  *  SOFTWARE.
  */
 
-import { classifyError, type ErrorClassification } from './error-classifier';
-import { logger } from './logger';
-import { coerceNumericOrNull } from './numeric';
-import type { ComputeType } from './repo-config';
 // Cross-language constants — see ``contracts/constants.md``. Imported at
 // TypeScript compile time (resolveJsonModule); esbuild inlines the values
 // into the bundled Lambda artifact, so no runtime FS read is needed.
 import sharedConstants from '../../../../contracts/constants.json';
 import type { TaskStatusType } from '../../constructs/task-status';
+import { classifyError, type ErrorClassification } from './error-classifier';
+import { logger } from './logger';
+import { coerceNumericOrNull } from './numeric';
+import type { ComputeType } from './repo-config';
 
 /**
  * Re-export of {@link TaskStatusType} so the CDK↔CLI type-sync drift
@@ -227,8 +227,10 @@ export interface TaskRecord {
   readonly updated_at: string;
   readonly started_at?: string;
   readonly completed_at?: string;
-  readonly cost_usd?: number;
-  readonly duration_s?: number;
+  /** The agent stores these two and the turn counters below as DynamoDB
+   *  Strings; read them through ``coerceNumericOrNull``. */
+  readonly cost_usd?: number | string;
+  readonly duration_s?: number | string;
   readonly build_passed?: boolean;
   /**
    * A6/#299: whether a PR-iteration advanced the branch HEAD (a real commit) vs.
@@ -278,13 +280,15 @@ export interface TaskRecord {
   readonly artifact_uri?: string;
   /** Rev-5 DATA-1: authoritative SDK counter including the attempt that
    *  tripped any cap. Equals the legacy `turns` value. */
-  readonly turns_attempted?: number;
+  readonly turns_attempted?: number | string;
   /** Rev-5 DATA-1: turns that actually completed (clamped to
    *  `max_turns` when `agent_status='error_max_turns'`). */
-  readonly turns_completed?: number;
+  readonly turns_completed?: number | string;
   readonly prompt_version?: string;
   readonly memory_written?: boolean;
   readonly compute_type?: ComputeType;
+  /** Approval-wait seconds before MicroVM sleep; 0 keeps it awake. Captured at submission. */
+  readonly microvm_sleep_after_s?: number;
   readonly compute_metadata?: Record<string, string>;
   readonly ttl?: number;
   /**
@@ -446,6 +450,8 @@ export interface TaskNotificationsConfig {
  * Strips internal fields not exposed in the API.
  */
 export interface TaskDetail {
+  /** Configured MicroVM approval-wait delay; 0 disables sleep. Absent on legacy records. */
+  readonly microvm_sleep_after_s?: number;
   readonly task_id: string;
   readonly status: TaskStatusType;
   /** ``null`` for a repo-less workflow (#248 Phase 3). */
@@ -720,6 +726,8 @@ export interface ReplayBundle {
  * Keep in sync with ``cli/src/types.ts``.
  */
 export interface CreateTaskRequest {
+  /** MicroVM approval-wait seconds before sleep (0 = off, omitted = the contract default). Does not extend approval deadlines. */
+  readonly microvm_sleep_after_s?: number;
   /** Target repository (``owner/repo``). Optional since #248 Phase 3: a
    *  repo-less workflow (``requires_repo: false``) is submitted without it.
    *  Required-ness is enforced conditionally in ``createTaskCore`` based on
@@ -930,12 +938,12 @@ export interface AgentAttachmentPayload {
 /**
  * Map a DynamoDB task record to the API detail response shape.
  *
- * All numeric fields sourced from the DDB record are routed through
- * ``coerceNumericOrNull`` — the Document-client deserializes DynamoDB
- * ``Number`` attributes as JavaScript ``string``s in some code paths
- * (see ``shared/numeric.ts`` for rationale), and any downstream caller
- * doing arithmetic (``.toFixed``, comparison, math) on a string-typed
- * "number" crashes at runtime. Coercing uniformly here means no caller
+ * The numeric fields that may be stored as strings are routed through
+ * ``coerceNumericOrNull`` — the agent stores some of them as DynamoDB
+ * String attributes, which arrive as JavaScript ``string``s
+ * (see ``shared/numeric.ts`` for rationale), and a downstream caller
+ * that calls ``.toFixed`` on a string-typed "number" crashes at
+ * runtime, while ``+`` concatenates. Coercing uniformly here means no caller
  * has to guess which TaskDetail numeric fields are safe — do not bypass
  * the helper when adding new numeric fields.
  *
@@ -951,6 +959,9 @@ export function toTaskDetail(
 ): TaskDetail {
   const ctx = { task_id: record.task_id };
   return {
+    ...(typeof record.microvm_sleep_after_s === 'number' && Number.isInteger(record.microvm_sleep_after_s)
+      && record.microvm_sleep_after_s >= MICROVM_SLEEP_AFTER_S_MIN && record.microvm_sleep_after_s <= MICROVM_SLEEP_AFTER_S_MAX
+      && { microvm_sleep_after_s: record.microvm_sleep_after_s }),
     task_id: record.task_id,
     status: record.status,
     repo: record.repo ?? null,
@@ -1281,6 +1292,18 @@ export type ApprovalScope =
   | `rule:${string}`;
 
 /**
+ * Approval row status values. PENDING is the only non-terminal state —
+ * every other transition is final, which matches the
+ * `ConditionExpression: status = :pending` guard on every mutator.
+ */
+export type ApprovalStatus =
+  | 'PENDING'
+  | 'APPROVED'
+  | 'DENIED'
+  | 'TIMED_OUT'
+  | 'STRANDED';
+
+/**
  * Cedar HITL severity, surfaced in the CLI approval prompt and used
  * for severity-gated channel routing (§11.2: high-severity rules
  * skip Slack-button auto-approval). Shared alias so the same literal
@@ -1442,6 +1465,11 @@ export const APPROVAL_TIMEOUT_S_MIN = sharedConstants.approval_timeout_s.min;
  *  `maxLifetime - 300` clip is applied (§7.3).
  *  Sourced from ``contracts/constants.json`` (S9). */
 export const APPROVAL_TIMEOUT_S_MAX = sharedConstants.approval_timeout_s.max;
+
+/** Per-task MicroVM sleep delay bounds; zero disables automatic sleep. */
+export const MICROVM_SLEEP_AFTER_S_MIN = sharedConstants.microvm_sleep_after_s.min;
+export const MICROVM_SLEEP_AFTER_S_MAX = sharedConstants.microvm_sleep_after_s.max;
+export const MICROVM_SLEEP_AFTER_S_DEFAULT = sharedConstants.microvm_sleep_after_s.default;
 
 /**
  * Cedar HITL: bounds + platform default for the per-task approval-gate cap

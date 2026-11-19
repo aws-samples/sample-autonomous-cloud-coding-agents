@@ -48,7 +48,7 @@ export interface RegistryClient {
     version: string,
   ): Promise<RegistryRecord | null>;
 
-  /** List records (optionally filtered by kind/namespace). */
+  /** List records (optionally filtered by kind/namespace/name). */
   listRecords(filter?: ListFilter): Promise<readonly RegistryRecord[]>;
 
   /**

@@ -7,6 +7,7 @@ import tempfile
 import threading
 import traceback
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import botocore.httpsession
 import pytest
@@ -139,9 +140,34 @@ os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
 #    when the code under test swallows the error. The error is a RuntimeError
 #    because botocore retries its own connection errors, with backoff.
 _blocked_aws_requests: list[str] = []
+_real_send = botocore.httpsession.URLLib3Session.send
+
+
+def _loopback_origin(endpoint: str) -> str | None:
+    """``http://127.0.0.1:<port>`` when ``endpoint`` is exactly that, else None."""
+    parts = urlsplit(endpoint)
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "http" or parts.hostname != "127.0.0.1" or port is None:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment or parts.username:
+        return None
+    return f"http://127.0.0.1:{port}"
+
+
+# The one exemption: DynamoDB Local, a loopback process CI starts for the MicroVM
+# checkpoint transaction tests and names in ABCA_DDB_LOCAL_ENDPOINT. Only that
+# exact origin passes; any other address, port or scheme is refused as before.
+_DYNAMODB_LOCAL_ORIGIN = _loopback_origin(os.environ.get("ABCA_DDB_LOCAL_ENDPOINT", ""))
 
 
 def _refuse_aws_request(self, request):
+    if _DYNAMODB_LOCAL_ORIGIN is not None:
+        parts = urlsplit(request.url)
+        if f"{parts.scheme}://{parts.netloc}" == _DYNAMODB_LOCAL_ORIGIN:
+            return _real_send(self, request)
     frames = [f for f in traceback.extract_stack()[:-1] if "site-packages" not in f.filename]
     # The path as the frame has it, not made relative: that asks for the working
     # directory, and where a test has deleted it the attempt would go unrecorded.
@@ -323,7 +349,6 @@ _AGENT_ENV_VARS = [
     "DRY_RUN",
     "LOG_GROUP_NAME",
     "MEMORY_ID",
-    "ENABLE_CLI_TELEMETRY",
     # Per-session IAM scoping (PR #209) — the scoped-session S3-hang guard.
     # See the ``_clean_env`` docstring below for the full rationale (why the
     # env strip AND the cache reset are both required).
@@ -355,3 +380,17 @@ def _clean_env(monkeypatch):
     from aws_session import reset_session_cache
 
     reset_session_cache()
+
+    # The #251 blocker latch is a module-level scalar too: a clone-failure test
+    # in test_repo.py leaves it set for whichever test runs next.
+    from hooks import reset_blocker_reason
+
+    reset_blocker_reason()
+
+    # The OpenTelemetry context is per thread. The server tests run the body of the
+    # task thread on the main thread, where its correlation baggage stays attached,
+    # and mcp 2.x copies the current context into `_meta` of every request it sends:
+    # a later test that compares a whole request found `baggage` in it.
+    from opentelemetry import context
+
+    context.attach(context.Context())

@@ -17,7 +17,7 @@
  *  SOFTWARE.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { BlueprintDefinition } from '../../src/blueprints/definitions';
@@ -44,6 +44,8 @@ interface Deployment {
   readonly directory: string;
   readonly census: AssemblyCensus;
   readonly application: TemplateJson;
+  /** Nested application templates (for example the MicroVM stack), which can import network exports directly. */
+  readonly nested: readonly TemplateJson[];
   readonly network?: TemplateJson;
 }
 
@@ -56,7 +58,21 @@ function isNetworkResource(id: string): boolean {
   return id.startsWith('AgentVpc') || id.startsWith('DnsFirewall');
 }
 
-function importedExports(template: TemplateJson): Set<string> {
+/**
+ * Inline, the parent passes network references into nested stacks as parameters;
+ * split, the nested template imports the network exports itself. Drop those
+ * parameters so both topologies compare equal apart from where networking lives.
+ */
+function withoutNetworkParameters(resource: TemplateJson): TemplateJson {
+  if (resource?.Type !== 'AWS::CloudFormation::Stack') return resource;
+  const parameters = Object.fromEntries(Object.entries((resource.Properties.Parameters ?? {}) as Record<string, TemplateJson>)
+    .filter(([, value]) => !(typeof value?.Ref === 'string' && isNetworkResource(value.Ref))));
+  // The nested template differs accordingly, so its content-addressed URL does too.
+  const { Parameters: _parameters, TemplateURL: _url, ...properties } = resource.Properties;
+  return { ...resource, Properties: Object.keys(parameters).length ? { ...properties, Parameters: parameters } : properties };
+}
+
+function importedExports(template: TemplateJson | readonly TemplateJson[]): Set<string> {
   const imports = new Set<string>();
   function visit(value: any): void {
     if (!value || typeof value !== 'object') return;
@@ -120,6 +136,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
           'networkTopology': topology,
           'networkReservedAzs': reservedAzs,
           'compute_types': compute,
+          'microvm_nested_stack': true,
           'bedrockGeoRegion': 'global',
           'enableToolGateway': true,
           'enableAgentRegistry': true,
@@ -139,6 +156,8 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
       directory,
       census: inspectAssembly(directory),
       application: assembly.getStackByName(APP_NAME).template,
+      nested: readdirSync(directory).filter(file => file.endsWith('.nested.template.json'))
+        .map(file => JSON.parse(readFileSync(path.join(directory, file), 'utf8'))),
       ...(topology === 'split' ? { network: assembly.getStackByName(NETWORK_NAME).template } : {}),
     };
   }
@@ -168,7 +187,7 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     expect(inline.census.errors).toEqual([]);
     expect(split.census.errors).toEqual([]);
     expect(JSON.stringify(network)).not.toContain('Fn::ImportValue');
-    expect(JSON.stringify(split.application)).toContain('Fn::ImportValue');
+    expect(JSON.stringify([split.application, ...split.nested])).toContain('Fn::ImportValue');
     expect(Object.keys(split.application.Resources).length).toBeLessThan(Object.keys(inline.application.Resources).length - 45);
   });
 
@@ -198,11 +217,11 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
       .map(output => [output.Export.Name, output.Value]));
     const removed = [...oldExports.keys()].filter(name => !newExports.has(name));
     expect(removed).toHaveLength(1);
-    expect(importedExports(threeZones.application).has(removed[0])).toBe(true);
+    expect(importedExports([threeZones.application, ...threeZones.nested]).has(removed[0])).toBe(true);
 
     // Stage one: every import in the target application still resolves in the
     // deployed three-zone network. --exclusively keeps that network unchanged.
-    const targetImports = importedExports(reducedZones.application);
+    const targetImports = importedExports([reducedZones.application, ...reducedZones.nested]);
     expect(targetImports.has(removed[0])).toBe(false);
     for (const name of targetImports) expect(oldExports.get(name)).toEqual(newExports.get(name));
 
@@ -304,7 +323,13 @@ describe.each(['agentcore', 'ecs', 'lambda-microvm'] as const)('%s network extra
     for (const [id, resource] of Object.entries(split.application.Resources as Record<string, TemplateJson>)
       .filter(([, value]) => value.Type !== 'AWS::CDK::Metadata')) {
       const key = originalId(id);
-      expect({ [key]: normalize(resource) }).toEqual({ [key]: normalize(inline.application.Resources[key]) });
+      expect({ [key]: normalize(withoutNetworkParameters(resource)) })
+        .toEqual({ [key]: normalize(withoutNetworkParameters(inline.application.Resources[key])) });
+    }
+    // Nested application stacks (MicroVM) import their network references directly.
+    for (const name of importedExports(split.nested)) {
+      expect(exports.has(JSON.stringify(name))).toBe(true);
+      imports.add(JSON.stringify(name));
     }
     expect(imports.size).toBeGreaterThan(0);
     expect(imports.size).toBeLessThanOrEqual(exports.size);

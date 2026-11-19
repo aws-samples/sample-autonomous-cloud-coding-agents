@@ -2,6 +2,7 @@
 
 **Status:** proposed
 **Date:** 2026-05-19
+**Last-updated:** 2026-11-15
 
 ## Context
 
@@ -24,7 +25,7 @@ For a human, this is annoying. For an autonomous agent, this is catastrophic:
 - **Cascade failures** — in a stacked PR chain (ADR-001), a CI failure on PR 1 blocks PRs 2–N, multiplying the wait
 - **Cost amplification** — each round-trip costs inference tokens for the agent to re-read the failure, re-analyze, and re-attempt
 
-The root cause: there is no **Tier 2** — a local, fast, high-fidelity validation layer that catches integration-level issues *before* pushing to remote.
+The root cause: there is no **Tier 2** — a local, fast, high-fidelity validation layer that catches integration-level issues *before* pushing to remote. (Phase 2a of it now exists; see the table below.)
 
 ### What exists today
 
@@ -33,7 +34,7 @@ The root cause: there is no **Tier 2** — a local, fast, high-fidelity validati
 | Pre-commit (Tier 0) | No fixed budget: by what is staged (measured times under Tier 0 below) | Formatting, secrets, lint and drift checks of the staged files | None — works well |
 | mise build (Tier 1) | 30–90s | Compile, unit tests, CDK synth, docs sync, linting | Wired as a pre-push gate (prek `pre-push` hooks run tests + security); the `mise run build` superset is available on demand |
 | Remote CI (Tier 3) | 5–20 min | Full matrix, security, E2E, deploy | Authoritative but slow |
-| **Local integration (Tier 2)** | — | **Does not exist** | Integration-level validation without remote round-trip |
+| **Local integration (Tier 2)** | About half a minute for phase 2a, on a laptop | Phase 2a only: how real handler, CLI and agent code behaves against emulated DynamoDB, S3, Secrets Manager, Cognito, STS and CloudWatch Logs | Phase 2a is an advisory check, not a required one; phases 2b–2d do not exist |
 
 ### Agentic-first motivation
 
@@ -100,23 +101,23 @@ Status: **Implemented as a pre-push gate.** `.pre-commit-config.yaml` sets `defa
 
 **Tier 2 — Local sandbox (1–5 min, on-demand before PR)**
 
-This tier does not exist today. It should provide:
+Phase 2a exists; the rest of this tier does not. It should provide:
 
-- Container-based integration tests against mocked AWS services (LocalStack or moto)
-- CDK deploy to a local/ephemeral sandbox (validate IAM, resource creation without real cloud)
+- Container-based integration tests against emulated AWS services (phase 2a uses the AWS Emulator; LocalStack and moto were the candidates when this ADR was written)
+- CDK deploy to an ephemeral sandbox (validate IAM and resource creation). This part needs a real AWS account: the emulator does not evaluate IAM the way AWS does, and a missing `Allow` never fails a deployment there
 - Agent runtime smoke test (run the agent pipeline against a test repo in a local container)
 - Cross-package integration (API → handler → agent contract verification)
 - Policy validation (Cedar policy evaluation against test fixtures)
 
-Status: **Gap — does not exist.** This is the primary investment needed.
+Status: **Phase 2a implemented as an advisory check; phases 2b–2d are a gap.** `mise run test:integration` starts a pinned AWS Emulator in a container and runs ABCA's real handler, CLI and agent code against it, with no AWS account. The `emulator` workflow runs it on every pull request and is not a required check. ABCA's own agents cannot run it inside their container yet: the agent image has no Docker. What a green run shows and does not show, and the rules for tests in this tier, are in `scripts/aws-emulator/README.md`.
 
 Progressive build-out:
 
 | Phase | Capability | Mechanism | Catches |
 |-------|-----------|-----------|---------|
-| 2a | Container integration tests | `mise run test:integration` → Docker Compose + LocalStack | AWS API call failures, DynamoDB schema issues, SQS message format |
+| 2a | Container integration tests | `mise run test:integration` → the AWS Emulator in a container, version pinned in `scripts/aws-emulator/Dockerfile` | DynamoDB conditions, update expressions, transactions, index keys and `Limit` applied before a filter; S3 object and presigned GET behavior; Secrets Manager, Cognito sign-in, STS `AssumeRole` and CloudWatch Logs behavior; state shared between the Python agent and the TypeScript handlers. Not permissions, deployment or the AgentCore runtime |
 | 2b | Agent pipeline smoke | `mise run test:agent-smoke` → build agent container, run against fixture repo | Agent crashes, tool failures, prompt regressions |
-| 2c | Ephemeral stack deploy | `mise run deploy:ephemeral` → CDK deploy to a disposable environment with auto-destroy | IAM permission gaps (ADR-002 preflight), resource wiring, real API behavior |
+| 2c | Ephemeral stack deploy | `mise run deploy:ephemeral` → CDK deploy to a disposable environment in a real AWS account, with auto-destroy (not the emulator, which cannot show a missing permission) | IAM permission gaps (ADR-002 preflight), resource wiring, real API behavior |
 | 2d | Full local sandbox | `mise run sandbox` → MicroVM matching prod topology | End-to-end flow in production-equivalent isolation |
 
 **Tier 3 — Remote CI (5–20 min, authoritative, gates merge)**
@@ -158,7 +159,7 @@ Residual risk after these mitigations (a malicious fork PR that passes maintaine
 
 ### Agent interaction model
 
-Agents interact with validation tiers through skills (depends on ADR-012 for the skill model). The `validate-locally` skill and the two `mise` tasks it runs in the flow below are proposed here and do not exist yet:
+Agents interact with validation tiers through skills (depends on ADR-012 for the skill model). The `validate-locally` skill and `mise run check:full` in the flow below are proposed here and do not exist yet; `mise run test:integration` exists (phase 2a):
 
 ```
 Agent completes implementation
@@ -180,16 +181,16 @@ The gap analysis dictates priority:
 | Priority | Investment | Impact |
 |----------|-----------|--------|
 | P0 | ~~Enforce Tier 1 as pre-push gate~~ **(largely done)** — test + security push gate is wired (prek `pre-push` hooks); remaining work is folding synth/docs-sync/drift into the gate | Eliminates "pushed without building" class of CI failures |
-| P1 | `mise run test:integration` (Tier 2a — LocalStack) | Eliminates 60%+ of CI-only failures (AWS API contract mismatches) |
+| P1 | ~~`mise run test:integration` (Tier 2a)~~ **(done as an advisory check)** — built on the AWS Emulator; remaining work is graduation to a required check (criteria under Design constraints) | Catches data-plane defects and defects in state shared between the agent and the handlers without a deployment: about one in twelve (10 of 120) of the recorded defects that passed unit tests and were found on a deployed stack. More than half of those 120 need real AWS and still do. It does not reduce CI-only failures: `build.yml` makes no AWS call |
 | P2 | Agent smoke test (Tier 2b) | Catches agent runtime regressions before PR |
 | P3 | Ephemeral stack deploy (Tier 2c) | Catches IAM/wiring issues that only surface in real deployment |
 | P4 | Full local sandbox (Tier 2d) | Production-equivalent local validation (long-term target) |
 
 ### Design constraints
 
-- **Tier 2 must not require cloud credentials for basic operation** — agents running in isolation (MicroVM, CI runner) need to validate without AWS access. LocalStack/moto fills this.
-- **Tier 2 must be optional until stable** — a failing Tier 2 should warn, not block, during build-out. Once stable, it becomes a gate.
-- **Tier 2 must be cacheable** — container images, LocalStack state, and fixture repos should be cached between runs. An agent shouldn't rebuild the world every time.
+- **Tier 2 must not require cloud credentials for basic operation** — agents running in isolation (MicroVM, CI runner) need to validate without AWS access. For phase 2a the AWS Emulator fills this: it needs Docker and no AWS account. Phase 2c is the exception and needs a real account.
+- **Tier 2 must be optional until stable** — a failing Tier 2 should warn, not block, during build-out. Once stable, it becomes a gate. For phase 2a, stable means, measured over 30 days: every red run triaged; none of the last 100 pull-request and merge-queue runs red because of the emulator or the runner; p95 job duration under 5 minutes; at least one test per service in scope; the emulator pin never more than 14 days behind upstream. Then the job is added to the required checks of the `main` ruleset.
+- **Tier 2 must be cacheable** — container images and fixture repos should be cached between runs (emulated state is in memory and is discarded on purpose). An agent shouldn't rebuild the world every time.
 - **No tier should duplicate work from a lower tier** — if Tier 0 checks formatting, Tier 1 does not re-check it. If Tier 1 runs unit tests, Tier 3 does not re-run them (it may run *additional* tests but not the same ones).
 
 ### Escape hatches
@@ -217,14 +218,21 @@ Escape hatches must be explicit (noted in PR description, not silent).
 - (-) Pre-push gate adds 30–90s to every push (proposed mitigation: `mise run check:fast` alone for safe paths)
 - (!) LocalStack fidelity gaps must be documented — when Tier 2 passes but Tier 3 fails, document the divergence and add it to Tier 2's scope
 - (!) Tier 2 "optional until stable" phase must have a defined graduation criteria, or it stays optional forever
+- (!) Phase 2a was built on the AWS Emulator, not LocalStack: the three LocalStack consequences above apply to it as written. Its known differences from AWS are kept in `scripts/aws-emulator/README.md`, and the graduation criteria asked for above are under Design constraints
 
 ## References
 
 - Issue #149 — implementation tracking for this ADR
-- ADR-002 — bootstrap policies (Tier 2c validates IAM preflight locally)
+- ADR-002 — bootstrap policies (Tier 2c validates the IAM preflight before a pull request, in a real AWS account)
 - ADR-008 — definition of done (tier requirements per DoD level)
 - ADR-012 (prerequisite) — operational knowledge stack; this ADR depends on 012's skill model for agent interaction with validation tiers
 - Current hooks: `.pre-commit-config.yaml` — the config file keeps the `pre-commit` name, but the runner is **prek** (pinned in `mise.toml` `[tools]`; `prek install --prepare-hooks` wires both `pre-commit` and `pre-push` stages). Implements Tier 0 (`pre-commit` stage) and the Tier 1 push gate (`pre-push` stage).
 - Current build: `mise.toml` root + package-level configs (Tier 1 implementation)
-- LocalStack: https://localstack.cloud (candidate for Tier 2a)
+- AWS Emulator: https://github.com/aws/aws-emulator (adopted for Tier 2a; the version is pinned in `scripts/aws-emulator/Dockerfile`)
+- LocalStack: https://localstack.cloud (the candidate for Tier 2a when this ADR was written; not adopted, and not evaluated in depth)
+- `docs/research/aws-emulator-local-tests.md` — the investigation behind phase 2a: what was built and measured, and what was not verified
 - Firecracker MicroVMs: https://firecracker-microvm.github.io (candidate for Tier 2d)
+
+## Changelog
+
+- 2026-11-15 — Phase 2a is implemented, on the AWS Emulator instead of LocalStack, as an advisory check (`mise run test:integration` and the `emulator` workflow). Replaced the estimate that it would eliminate "60%+ of CI-only failures" with what was measured, added the graduation criteria this ADR asks for, and stated that phase 2c needs a real AWS account because the emulator cannot show a missing permission (decision otherwise unchanged).

@@ -198,7 +198,7 @@ describe('compute roles read only deployed trackers\' OAuth secrets', () => {
   let linearOnly: string;
   beforeAll(() => {
     const synth = (id: string, features: typeof MINIMAL_DEPLOYMENT_FEATURES) => JSON.stringify(Template.fromStack(new AgentStack(
-      new App({ context: { compute_types: 'agentcore,ecs,lambda-microvm' } }), id,
+      new App({ context: { compute_types: 'agentcore,ecs,lambda-microvm', microvm_nested_stack: true } }), id,
       { env: { account: '123456789012', region: 'us-east-1' }, features },
     )).toJSON());
     minimal = synth('MinimalAllBackends', MINIMAL_DEPLOYMENT_FEATURES);

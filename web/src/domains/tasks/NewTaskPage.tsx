@@ -149,7 +149,7 @@ export function NewTaskPage() {
     if (mode === 'linear' && chosenLinear) {
       // Same path as adding the label in Linear: the agent comments there, and the task
       // appears on the repository page once Linear's webhook arrives.
-      startLinear.mutate({ issueId: chosenLinear.issueId, projectId: chosenLinear.projectId }, { onSuccess: () => navigate(repoHref(repo.trim())) });
+      startLinear.mutate({ issueId: chosenLinear.issueId, projectId: chosenLinear.projectId }, { onSuccess: () => void navigate(repoHref(repo.trim())) });
       return;
     }
     create.mutate(
@@ -162,7 +162,7 @@ export function NewTaskPage() {
         ...limitFields(maxTurns, maxBudget),
         ...(fullDetails && { trace: true }),
       },
-      { onSuccess: (task) => navigate(taskHref(task.task_id)) },
+      { onSuccess: (task) => void navigate(taskHref(task.task_id)) },
     );
   };
 
@@ -172,7 +172,7 @@ export function NewTaskPage() {
         <Form
           actions={
             <SpaceBetween direction="horizontal" size="xs">
-              <Button variant="link" formAction="none" onClick={() => navigate(-1)}>Cancel</Button>
+              <Button variant="link" formAction="none" onClick={() => void navigate(-1)}>Cancel</Button>
               <Button variant="primary" loading={create.isPending || startLinear.isPending}>Start task</Button>
             </SpaceBetween>
           }

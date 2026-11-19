@@ -9,13 +9,15 @@ silent issue for 22 minutes.
 
 This module gives the agent a cheap, precise loop-breaker:
 
-  1. ``record_tool_result`` is called from the PostToolUse hook for every tool
-     call. It computes a coarse SIGNATURE — ``(tool_name, normalized command)``
-     — and tracks how many times that exact signature has just FAILED in a row
-     WITH THE SAME OUTPUT. A success, a different signature, or a different
-     failure output resets the streak.
+  1. ``record_tool_result`` is called for every tool result: from the
+     PostToolUse hook for a call that completed and from the PostToolUseFailure
+     hook for one that failed (a failing command fires only the latter). It
+     computes a coarse SIGNATURE — ``(tool_name, normalized command)`` — and
+     tracks how many times that exact signature has just FAILED in a row WITH
+     THE SAME OUTPUT. A success, a different signature, or a different failure
+     output resets the streak.
 
-  2. ``evaluate`` is called from a between-turns (Stop) hook. When a signature
+  2. ``evaluate`` is called right after each recorded result. When a signature
      has failed ``STEER_THRESHOLD`` times in a row with identical output it
      returns a STEER action: inject a ONE-TIME advisory message telling the
      agent to stop retrying and either work around the failure or finish with
@@ -36,7 +38,9 @@ Design choices (deliberately conservative):
     DIFFERENTLY each time) never trips this — only a true spin does.
   - "Failure" is detected from the tool RESPONSE via small, well-known signals
     (non-zero exit, command-not-found, OOM markers). Unknown output counts as
-    success — we never punish a healthy turn.
+    success — we never punish a healthy turn. Where the hook knows how the call
+    ended it says so instead: a call of any tool but Bash that completed is no
+    failure, whatever the text it returned says (a file that holds "exit 1").
   - Steer at most ONCE per signature (process-lifetime dedup), mirroring the
     nudge hook's ``_INJECTED_NUDGES`` guard.
 
@@ -46,6 +50,7 @@ hook wiring in ``hooks.py`` owns all I/O.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
@@ -98,15 +103,19 @@ _EXIT_CODE_RE = re.compile(r"\bexit(?:\s+code)?\s+(\d+)\b", re.IGNORECASE)
 def _signature(tool_name: str, tool_input: object) -> str:
     """Coarse, stable signature for a tool call: ``tool_name|normalized-cmd``.
 
-    For Bash, the command drives the signature (whitespace-collapsed); other
-    tools fall back to their name + a normalized repr of the input so that
-    e.g. editing the same file repeatedly is also detectable. The signature is
-    intentionally coarse: we want "the agent keeps doing the same thing", not
-    byte-exact identity.
+    For Bash, the command drives the signature (whitespace-collapsed); a tool
+    that takes a ``file_path`` keys on it, so that e.g. editing the same file
+    repeatedly is also detectable; any other tool keys on its whole input. The
+    signature is intentionally coarse: we want "the agent keeps doing the same
+    thing", not byte-exact identity.
     """
     cmd = ""
     if isinstance(tool_input, dict):
-        cmd = str(tool_input.get("command") or tool_input.get("file_path") or "")
+        cmd = str(
+            tool_input.get("command")
+            or tool_input.get("file_path")
+            or json.dumps(tool_input, sort_keys=True, default=str)
+        )
     elif isinstance(tool_input, str):
         cmd = tool_input
     normalized = re.sub(r"\s+", " ", cmd).strip().lower()
@@ -172,7 +181,7 @@ class _SigState:
 
 @dataclass
 class StuckAction:
-    """What the between-turns hook should do this turn."""
+    """What the hook that asked should do now."""
 
     kind: str  # 'none' | 'steer'  (advisory only — never kills the task)
     signature: str = ""
@@ -197,12 +206,21 @@ class StuckGuard:
     _window: list[tuple[bool, str, str]] = field(default_factory=list)
     _window_steered: bool = False
 
-    def record_tool_result(self, tool_name: str, tool_input: object, tool_response: str) -> None:
-        """Called from PostToolUse for every tool call. Updates failure streaks."""
+    def record_tool_result(
+        self, tool_name: str, tool_input: object, tool_response: str, failed: bool | None = None
+    ) -> None:
+        """Called for every tool result, completed or failed. Updates failure streaks.
+
+        *failed* is given where the caller knows the outcome; otherwise the
+        response is read for the signs of a failure. The guard quotes the input
+        and the response of a failing call, cut to a preview, in its advisory
+        and in its summary: the caller screens both for secrets first.
+        """
         # Trailing-window bookkeeping (ABCA-662): record every outcome, newest
         # last, capped at WINDOW — signature-agnostic, so a loop of *different*
         # commands all failing is visible even though no single streak grows.
-        failed = _looks_failed(tool_response)
+        if failed is None:
+            failed = _looks_failed(tool_response)
         self._window.append(
             (
                 failed,
@@ -215,7 +233,7 @@ class StuckGuard:
 
         sig = _signature(tool_name, tool_input)
         state = self._sigs.setdefault(sig, _SigState())
-        if _looks_failed(tool_response):
+        if failed:
             # Only grow the streak when the SAME command fails the SAME way. A
             # different failure fingerprint means the agent made progress (fixed
             # one error, hit the next) — that's healthy iteration, so reset to a
@@ -240,7 +258,7 @@ class StuckGuard:
                 self._last_failing_sig = None
 
     def evaluate(self) -> StuckAction:
-        """Called from a between-turns hook. Decide steer / none (advisory only).
+        """Called after each recorded result. Decide steer / none (advisory only).
 
         STEER fires at most once per signature. There is no bail — the guard
         never kills a task (see module docstring).

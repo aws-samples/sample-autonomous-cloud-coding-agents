@@ -152,6 +152,9 @@ describe('admin invite-user credentials file', () => {
     const body = fs.readFileSync(invitePath, 'utf-8');
     const lines = body.split('\n');
 
+    // The file holds a password: owner-only.
+    expect(fs.statSync(invitePath).mode % 0o1000).toBe(0o600);
+
     // The label is "temp password:" (not "password:") for invites.
     const emailLine = lines.find((l) => l.startsWith('email:'))!;
     const pwdLine = lines.find((l) => l.startsWith('temp password:'))!;

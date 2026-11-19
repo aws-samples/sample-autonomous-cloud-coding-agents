@@ -499,7 +499,7 @@ describe('github-comment: renderCommentBody numeric self-defense (finding #9)', 
       latestEventType: 'task_completed',
       latestEventAt: '2026-05-05T00:00:00Z',
       prUrl: null,
-      // DynamoDB Document-client deserialization: Number → string.
+      // As the agent stores them: DynamoDB strings (see shared/numeric.ts).
       durationS: '96.0' as unknown as number,
       costUsd: '0.20939010000000002' as unknown as number,
     });

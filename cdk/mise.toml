@@ -18,16 +18,20 @@ run = "cd .. && yarn install --check-files"
 description = "TypeScript compile"
 run = "yarn compile"
 
+# Both eslint tasks name their configuration (--config): ESLint then applies
+# cdk/eslint.config.mjs to every file. Left to look for one from each file's directory,
+# it would let an eslint.config.* added below cdk/ (a copied directory can bring one
+# along) replace the rules for that directory, with the gate still green.
 [tasks.eslint]
 description = "ESLint"
-run = "../node_modules/.bin/eslint --max-warnings 0 --fix src test scripts"
+run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 --fix src test scripts"
 
 # The same command without --fix, for checks that must not rewrite files (the root
 # `lint` task). Keep the targets of the two tasks identical. --max-warnings 0 in both:
 # a warning fails the task like an error.
 [tasks."eslint:check"]
 description = "ESLint without --fix: reports findings and rewrites nothing"
-run = "../node_modules/.bin/eslint --max-warnings 0 src test scripts"
+run = "../node_modules/.bin/eslint --config eslint.config.mjs --max-warnings 0 src test scripts"
 
 [tasks.test]
 description = "Jest tests"

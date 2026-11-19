@@ -17,6 +17,8 @@
  *  SOFTWARE.
  */
 
+import { execFile } from 'child_process';
+import { randomBytes } from 'crypto';
 import * as http from 'http';
 import { URL } from 'url';
 import { CliError } from './errors';
@@ -226,4 +228,39 @@ export async function awaitOauthCallback(
 
     server.listen(CALLBACK_PORT, CALLBACK_HOST);
   });
+}
+
+/**
+ * Open `url` in the user's default browser. Returns true on best-effort
+ * success, false if no opener is available (e.g. headless SSH session) so
+ * callers can fall back to printing the URL.
+ *
+ * Uses `child_process.execFile` directly rather than a dependency like
+ * `open` — no need for a 200-line module to spawn one shell command.
+ */
+export function openBrowser(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let opener: { cmd: string; args: string[] };
+    if (process.platform === 'darwin') {
+      opener = { cmd: 'open', args: [url] };
+    } else if (process.platform === 'win32') {
+      // `start` is a cmd.exe builtin; URLs need empty title arg + escaping.
+      opener = { cmd: 'cmd', args: ['/c', 'start', '""', url] };
+    } else {
+      opener = { cmd: 'xdg-open', args: [url] };
+    }
+    execFile(opener.cmd, opener.args, (err) => {
+      resolve(!err);
+    });
+  });
+}
+
+/**
+ * Generate an opaque, URL-safe `state` value for OAuth CSRF protection.
+ * 32 bytes of crypto-randomness — enough that collisions and guesses
+ * are not realistic concerns.
+ */
+export function randomState(): string {
+  const STATE_BYTES = 32;
+  return randomBytes(STATE_BYTES).toString('base64url');
 }

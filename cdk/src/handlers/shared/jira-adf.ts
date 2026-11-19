@@ -31,7 +31,8 @@
  * surface. The agent gets a coherent text rendering; richer rendering (tables,
  * text marks) can land in a follow-up.
  *
- * Tests: cdk/test/handlers/jira-webhook-processor.test.ts (via the processor)
+ * Tests: cdk/test/handlers/shared/jira-adf.test.ts (lists),
+ * cdk/test/handlers/jira-webhook-processor.test.ts (via the processor)
  * and cdk/test/handlers/shared/jira-attachments.test.ts (comment rendering).
  */
 
@@ -99,11 +100,15 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
           .flatMap((sub) => collectInlineLines(sub))
           .join(' ')
           .trim();
-        if (!itemText) return;
         const bullet = node.type === 'orderedList' ? `${idx + 1}.` : '-';
-        out.push(`${' '.repeat(depth * 2)}${bullet} ${itemText}`);
+        if (itemText) out.push(`${' '.repeat(depth * 2)}${bullet} ${itemText}`);
+        // What an item holds besides its own text (a nested list, a code
+        // block, an image), one level deeper.
+        (item.content ?? [])
+          .filter((sub) => sub.type !== 'paragraph' && sub.type !== 'text')
+          .forEach((sub) => walkAdf(sub, out, depth + 1));
       });
-      out.push('');
+      if (depth === 0) out.push('');
       return;
     }
     case 'codeBlock': {
@@ -148,6 +153,8 @@ function walkAdf(node: AdfNode | undefined, out: string[], depth: number): void 
 function textOf(node: AdfNode): string {
   if (node.type === 'text' && node.text) return node.text;
   if (node.type === 'mention' && node.attrs?.text) return node.attrs.text;
+  // A pasted link: Jira stores it as a card that has its URL and no text.
+  if (node.type === 'inlineCard' && node.attrs?.url) return node.attrs.url;
   if (node.type === 'hardBreak') return '\n';
   if (node.content) return node.content.map(textOf).join('');
   return '';

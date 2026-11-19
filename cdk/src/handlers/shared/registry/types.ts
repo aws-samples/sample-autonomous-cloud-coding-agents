@@ -64,7 +64,9 @@ export interface McpRuntimePayload {
   readonly command?: string;
   readonly args?: readonly string[];
   readonly headers?: Readonly<Record<string, string>>;
-  /** Tools surface under this prefix (e.g. `mcp__example__`). */
+  /** Not applied. Publish accepts it and resolve echoes it, nothing else reads it:
+   *  the agent writes the server under the key `<namespace>__<name>`, so the tools
+   *  of `acme/pdf-tools` surface as `mcp__acme__pdf-tools__*` whatever this says. */
   readonly tool_prefix?: string;
 }
 
@@ -226,4 +228,6 @@ export interface PublishInput {
 export interface ListFilter {
   readonly kind?: string;
   readonly namespace?: string;
+  /** Asset name: with it, only the records of that asset are fetched. */
+  readonly name?: string;
 }

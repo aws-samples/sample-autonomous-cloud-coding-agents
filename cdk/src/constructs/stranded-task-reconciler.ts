@@ -33,7 +33,7 @@ const DEFAULT_STRANDED_TIMEOUT_SECONDS = 1200;
 /** Default approval-stranded timeout (seconds; 2 hours). */
 const DEFAULT_APPROVAL_STRANDED_TIMEOUT_SECONDS = 7200;
 
-/** Default task-record retention used for event TTL (days). */
+/** Default retention (days): the ttl of a task row the sweep fails and of the events it writes. */
 const DEFAULT_TASK_RETENTION_DAYS = 90;
 
 /** Reconciler Lambda timeout (minutes). */
@@ -87,7 +87,7 @@ export interface StrandedTaskReconcilerProps {
    */
   readonly approvalStrandedTimeoutSeconds?: number;
 
-  /** Forwarded to the handler for event TTL. @default 90 */
+  /** Forwarded to the handler for the ttl of the task rows it fails and of its events. @default 90 */
   readonly taskRetentionDays?: number;
 }
 

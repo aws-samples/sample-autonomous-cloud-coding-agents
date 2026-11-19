@@ -118,6 +118,35 @@ describe('slack-oauth-callback handler', () => {
     expect(result.body).toContain('invalid_code');
   });
 
+  test('uses credentials stored since the previous callback', async () => {
+    // The operator pasted a wrong client secret, saw the install fail, stored
+    // the right values and opened the install link again. The same warm
+    // container answers: it must read the secrets again, not reuse the ones
+    // it cached a moment ago.
+    const stored = { clientId: 'old-id', clientSecret: 'old-secret' };
+    smSend.mockImplementation((cmd: { _type: string; input?: { SecretId?: string } }) => {
+      if (cmd._type !== 'GetSecretValue') return Promise.resolve({});
+      return Promise.resolve({
+        SecretString: cmd.input?.SecretId === process.env.SLACK_CLIENT_ID_SECRET_ARN ? stored.clientId : stored.clientSecret,
+      });
+    });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ ok: false, error: 'bad_client_secret' }),
+    });
+
+    const first = await handler(makeEvent('code-1'));
+    expect(first.body).toContain('bad_client_secret');
+
+    stored.clientId = 'new-id';
+    stored.clientSecret = 'new-secret';
+    await handler(makeEvent('code-2'));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondExchange = new URLSearchParams((fetchMock.mock.calls[1][1] as { body: string }).body);
+    expect(Object.fromEntries(secondExchange)).toMatchObject({ client_id: 'new-id', client_secret: 'new-secret' });
+  });
+
   test('successful install creates secret + records installation', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,

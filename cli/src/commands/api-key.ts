@@ -19,7 +19,7 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { formatApiKeyCreated, formatApiKeyDetail, formatApiKeyList, formatJson } from '../format';
+import { followPages, formatApiKeyCreated, formatApiKeyDetail, formatApiKeyList, formatJson } from '../format';
 import { API_KEY_SCOPES, ApiKeyScope } from '../types';
 
 /**
@@ -71,10 +71,11 @@ export function makeApiKeyCommand(): Command {
       .option('--output <format>', 'Output format (text or json)', 'text')
       .action(async (opts) => {
         const client = new ApiClient();
-        const result = await client.listApiKeys({
-          includeRevoked: opts.includeRevoked,
-          limit: opts.limit,
-        });
+        const result = await followPages(
+          await client.listApiKeys({ includeRevoked: opts.includeRevoked, limit: opts.limit }),
+          opts.limit,
+          (limit, nextToken) => client.listApiKeys({ includeRevoked: opts.includeRevoked, limit, nextToken }),
+        );
 
         if (opts.output === 'json') {
           console.log(formatJson(result));

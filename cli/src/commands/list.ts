@@ -19,7 +19,13 @@
 
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { formatJson, formatTaskList } from '../format';
+import { followPages, formatJson, formatTaskList } from '../format';
+
+/**
+ * Requests one `list` sends at most. `list --status RUNNING` rarely fills a page, so over a long history every call
+ * sends them all: 5 keeps a call every two seconds under the 1,000 requests in five minutes the API allows one address.
+ */
+const MAX_LIST_REQUESTS = 5;
 
 export function makeListCommand(): Command {
   return new Command('list')
@@ -30,11 +36,12 @@ export function makeListCommand(): Command {
     .option('--output <format>', 'Output format (text or json)', 'text')
     .action(async (opts) => {
       const client = new ApiClient();
-      const result = await client.listTasks({
-        status: opts.status,
-        repo: opts.repo,
-        limit: opts.limit,
-      });
+      const result = await followPages(
+        await client.listTasks({ status: opts.status, repo: opts.repo, limit: opts.limit }),
+        opts.limit,
+        (limit, nextToken) => client.listTasks({ status: opts.status, repo: opts.repo, limit, nextToken }),
+        MAX_LIST_REQUESTS,
+      );
 
       if (opts.output === 'json') {
         console.log(formatJson(result));

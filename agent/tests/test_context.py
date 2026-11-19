@@ -7,6 +7,9 @@ untrusted-content delimiters.
 """
 
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 import context
 from context import _UNTRUSTED_BEGIN, _UNTRUSTED_END, assemble_prompt, fetch_github_issue
@@ -122,6 +125,48 @@ class TestFetchGitHubIssueSanitization:
         assert issue.comments[0].author == "(deleted user)"
         assert issue.comments[0].body == "comment from a deleted account"
         assert issue.comments[1].author == "alice"
+
+
+def _github_with_comments(total: int):
+    """Build a fake ``requests`` module that lists issue comments the way GitHub does.
+
+    The comments have the ids 1 to ``total``, oldest first, 30 to a page unless
+    ``per_page`` asks for more (100 at most).
+    """
+
+    def get(url, headers=None, timeout=None):
+        parts = urlsplit(url)
+        if not parts.path.endswith("/comments"):
+            return _FakeResponse({"title": "T", "body": "B", "number": 42, "comments": total})
+        query = parse_qs(parts.query)
+        per_page = min(int(query.get("per_page", ["30"])[0]), 100)
+        start = (int(query.get("page", ["1"])[0]) - 1) * per_page
+        ids = range(1, total + 1)[start : start + per_page]
+        return _FakeResponse(
+            [{"id": i, "user": {"login": "alice"}, "body": f"comment {i}"} for i in ids]
+        )
+
+    return SimpleNamespace(get=get)
+
+
+class TestFetchGitHubIssueCommentPages:
+    """GitHub returns the 30 oldest comments unless asked; the newest are the ones to keep."""
+
+    @pytest.mark.parametrize(
+        ("total", "oldest"),
+        [
+            (45, 1),
+            (150, 1),
+            # Above three pages the oldest pages are left out: 101 to 345 are pages 2 to 4.
+            (345, 101),
+        ],
+    )
+    def test_hydrates_the_newest_comments(self, monkeypatch, total, oldest):
+        monkeypatch.setattr(context, "requests", _github_with_comments(total))
+
+        issue = fetch_github_issue("owner/repo", "42", "tok")
+
+        assert [c.id for c in issue.comments] == list(range(oldest, total + 1))
 
 
 def _fetched_issue(monkeypatch, *, title, body, number, comments=None):

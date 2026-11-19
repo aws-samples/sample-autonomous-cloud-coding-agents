@@ -21,8 +21,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Command } from 'commander';
 import { ApiClient } from '../api-client';
-import { CliError } from '../errors';
+import { ApiError, CliError } from '../errors';
 import { formatJson, formatTaskDetail } from '../format';
+import { abortableSleep, isTransientError } from '../retry';
 import {
   APPROVAL_TIMEOUT_S_MAX,
   APPROVAL_TIMEOUT_S_MIN,
@@ -31,16 +32,24 @@ import {
   AttachmentType,
   AttachmentUploadInstruction,
   CreateTaskRequest,
+  CreateTaskResponse,
   DEFAULT_CODING_WORKFLOW_ID,
   INITIAL_APPROVALS_MAX_ENTRIES,
   INITIAL_APPROVALS_MAX_ENTRY_LENGTH,
   MAX_BUDGET_USD_MAX,
   MAX_BUDGET_USD_MIN,
+  MICROVM_SLEEP_AFTER_S_DEFAULT,
+  MICROVM_SLEEP_AFTER_S_MAX,
+  MICROVM_SLEEP_AFTER_S_MIN,
+  TaskDetail,
+  TERMINAL_STATUSES,
 } from '../types';
 import { exitCodeForStatus, waitForTask } from '../wait';
 
 /** Scope prefixes the server accepts (see ``parseApprovalScope`` on the
- *  CDK side). Special short forms without ``:`` are also valid. */
+ *  CDK side). ``all_session`` is the one form without ``:`` that can be
+ *  granted before a task starts: ``this_call``, ``tool_type_session`` and
+ *  ``tool_group_session`` stand for a call that is waiting for approval. */
 const SCOPE_PREFIXES = [
   'tool_type:',
   'tool_group:',
@@ -48,12 +57,6 @@ const SCOPE_PREFIXES = [
   'write_path:',
   'rule:',
 ] as const;
-const SCOPE_SHORT_FORMS = new Set([
-  'this_call',
-  'tool_type_session',
-  'tool_group_session',
-  'all_session',
-]);
 
 function collect<T>(value: T, previous: readonly T[]): readonly T[] {
   return [...previous, value];
@@ -72,13 +75,13 @@ export function makeSubmitCommand(): Command {
     .option(
       '--workflow <id>',
       'Workflow to run, as <id>[@<constraint>] (e.g. coding/new-task-v1). '
-        + 'Overrides the workflow implied by --pr/--review-pr; omit to let the server resolve a default.',
+        + 'Overrides the workflow implied by --pr/--review-pr; without any of the three, coding/new-task-v1 is sent.',
     )
     .option('--idempotency-key <key>', 'Idempotency key for deduplication')
     .option('--trace', 'Capture 4 KB debug previews (design §10.1). Opt-in per task; not routine observability.')
     .option(
       '--attachment <path-or-url>',
-      'Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline; URLs are fetched by the agent.',
+      'Attach a local file or URL (repeatable). Local files ≤ 500 KB are sent inline, up to 3 MB in total; URLs are fetched by the platform before the agent starts.',
       collect<string>,
       [] as readonly string[],
     )
@@ -89,16 +92,21 @@ export function makeSubmitCommand(): Command {
       parseInt,
     )
     .option(
+      '--microvm-sleep-after <seconds|off>',
+      `Sleep while waiting for approval after this many seconds (default ${MICROVM_SLEEP_AFTER_S_DEFAULT}; `
+        + 'off keeps the worker awake). MicroVM only; requires platform sleep support and does not extend approval deadlines.',
+    )
+    .option(
       '--pre-approve <scope>',
       'Cedar HITL pre-approval scope to seed at task start (repeatable). '
-        + 'Valid forms: this_call, tool_type_session, tool_group_session, all_session, '
+        + 'Valid forms: all_session, '
         + 'tool_type:<name>, tool_group:<name>, bash_pattern:<glob>, write_path:<glob>, rule:<id>.',
       collect<string>,
       [] as readonly string[],
     )
     .option('--wait', 'Wait for task to complete')
     .option('--output <format>', 'Output format (text or json)', 'text')
-    // eslint-disable-next-line complexity -- predates the ceiling (70 when it landed); must not grow
+    // eslint-disable-next-line complexity -- predates the ceiling (68, down from 70 when it landed); must not grow
     .action(async (opts) => {
       if (opts.pr !== undefined && isNaN(opts.pr)) {
         throw new CliError('--pr must be a valid number.');
@@ -151,6 +159,7 @@ export function makeSubmitCommand(): Command {
           );
         }
       }
+      const microvmSleepAfter = microvmSleepAfterField(opts.microvmSleepAfter as string | undefined);
       const preApproveRaw = (opts.preApprove ?? []) as readonly string[];
       let initialApprovals: readonly ApprovalScope[] | undefined;
       if (preApproveRaw.length > 0) {
@@ -166,12 +175,11 @@ export function makeSubmitCommand(): Command {
             );
           }
           if (
-            !SCOPE_SHORT_FORMS.has(scope)
+            scope !== 'all_session'
             && !SCOPE_PREFIXES.some((p) => scope.startsWith(p) && scope.length > p.length)
           ) {
             throw new CliError(
-              `--pre-approve "${scope}" has an invalid scope. Use one of: `
-                + 'this_call, tool_type_session, tool_group_session, all_session, '
+              `--pre-approve "${scope}" has an invalid scope. Use all_session `
                 + 'or a prefix: tool_type:, tool_group:, bash_pattern:, write_path:, rule:.',
             );
           }
@@ -186,8 +194,12 @@ export function makeSubmitCommand(): Command {
         if (attachmentArgs.length > 10) {
           throw new CliError('Maximum 10 attachments per task.');
         }
+        let inlineBytes = 0;
         for (const arg of attachmentArgs) {
-          attachments.push(resolveAttachmentArg(arg));
+          const attachment = resolveAttachmentArg(arg, inlineBytes);
+          // The decoded size, as the API counts it; a URL or a file to upload adds nothing.
+          inlineBytes += Buffer.byteLength(attachment.data ?? '', 'base64');
+          attachments.push(attachment);
         }
       }
 
@@ -227,6 +239,7 @@ export function makeSubmitCommand(): Command {
         ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
         ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
+        ...microvmSleepAfter,
         ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
         ...(attachments.length > 0 && { attachments }),
       };
@@ -237,24 +250,16 @@ export function makeSubmitCommand(): Command {
       let task = createResponse;
       if (createResponse.upload_instructions && createResponse.upload_instructions.length > 0) {
         process.stderr.write(`Uploading ${createResponse.upload_instructions.length} attachment(s)...\n`);
+        // The files declared for upload, in the order of the request.
+        const toUpload = attachmentArgs.filter((_, i) => attachments[i].expected_size_bytes !== undefined);
         for (const instruction of createResponse.upload_instructions) {
-          const localAtt = attachments.find(a => a.filename === instruction.filename);
-          if (!localAtt || !localAtt.filename) {
-            throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
-          }
-          const filePath = attachmentArgs.find(arg =>
-            !isUrlArg(arg) && path.basename(safeResolvePath(arg)) === instruction.filename,
-          );
-          if (!filePath) {
-            throw new CliError(`Cannot locate local file for presigned upload: ${instruction.filename}`);
-          }
-          await uploadViaPresignedPost(safeResolvePath(filePath), instruction);
+          await uploadViaPresignedPost(fileToUpload(instruction, createResponse, toUpload), instruction);
           process.stderr.write(`  Uploaded: ${instruction.filename}\n`);
         }
 
         // Confirm uploads to trigger screening and transition to SUBMITTED
         process.stderr.write('Confirming uploads...\n');
-        task = await client.confirmUploads(createResponse.task_id);
+        task = await confirmUploadsWithRetry(client, createResponse.task_id);
       }
 
       if (opts.wait) {
@@ -267,6 +272,20 @@ export function makeSubmitCommand(): Command {
         console.log(opts.output === 'json' ? formatJson(task) : formatTaskDetail(task));
       }
     });
+}
+
+/**
+ * The request field of `--microvm-sleep-after`, or nothing when the option is not given.
+ * A function of its own so that the action above, whose complexity is recorded, does not grow.
+ */
+function microvmSleepAfterField(raw: string | undefined): { microvm_sleep_after_s?: number } {
+  if (raw === undefined) return {};
+  const seconds = raw === 'off' ? 0 : /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(seconds) || seconds < MICROVM_SLEEP_AFTER_S_MIN || seconds > MICROVM_SLEEP_AFTER_S_MAX) {
+    throw new CliError('--microvm-sleep-after must be off or an integer between '
+      + `${MICROVM_SLEEP_AFTER_S_MIN} and ${MICROVM_SLEEP_AFTER_S_MAX} seconds.`);
+  }
+  return { microvm_sleep_after_s: seconds };
 }
 
 // ---------------------------------------------------------------------------
@@ -286,15 +305,42 @@ function safeResolvePath(userPath: string): string {
   return resolved;
 }
 
+/**
+ * The local file an upload instruction is for. Its name alone does not say: two files can
+ * have the same one (before/shot.png, after/shot.png), and a retried submission is asked
+ * only for the uploads that are still missing. The task lists its attachments of that name
+ * with the uploads last, in the order of the request, so the place of the instruction's
+ * attachment among those is the place of its file among the files of that name. The
+ * pairing is by place alone: a retry has to name the files of one name in the order of
+ * the first run.
+ *
+ * @param declared - the files declared for upload, in the order of the request.
+ */
+function fileToUpload(
+  instruction: AttachmentUploadInstruction,
+  task: CreateTaskResponse,
+  declared: readonly string[],
+): string {
+  const files = declared.filter(file => path.basename(safeResolvePath(file)) === instruction.filename);
+  const uploads = (task.attachments ?? []).filter(a => a.filename === instruction.filename).slice(-files.length);
+  const file = files[uploads.findIndex(a => a.attachment_id === instruction.attachment_id)];
+  if (file === undefined) {
+    throw new CliError(`No local file found for upload instruction: ${instruction.filename}`);
+  }
+  return safeResolvePath(file);
+}
+
 const MAX_INLINE_SIZE_BYTES = 500 * 1024; // 500 KB
 
-/** MIME type lookup by file extension. */
+/** Inline data the API accepts in one request, all files together (MiB). */
+const MAX_TOTAL_INLINE_SIZE_MB = 3;
+const MAX_TOTAL_INLINE_SIZE_BYTES = MAX_TOTAL_INLINE_SIZE_MB * 1024 * 1024;
+
+/** MIME type lookup by file extension: the types the API accepts. */
 const MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
   '.txt': 'text/plain',
   '.log': 'text/x-log',
   '.csv': 'text/csv',
@@ -303,23 +349,15 @@ const MIME_BY_EXT: Record<string, string> = {
   '.pdf': 'application/pdf',
 };
 
-const IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
-
-/** True when the attachment argument is a URL (http:// or https://) rather
- *  than a local file path. Mirrors the scheme detection in
- *  ``resolveAttachmentArg`` so URL vs. local-file classification stays
- *  consistent across the upload-confirmation path. A bare ``http://`` is
- *  still a URL here (it's rejected as non-HTTPS earlier in resolution); the
- *  point is that it must never be treated as a local file path. */
-function isUrlArg(arg: string): boolean {
-  return arg.startsWith('https://') || arg.startsWith('http://');
-}
+const IMAGE_MIMES = new Set(['image/png', 'image/jpeg']);
 
 /**
  * Resolve a CLI --attachment argument to an Attachment object.
  * Handles URLs (https://...) and local file paths.
+ *
+ * @param inlineBytes - size of the files this request already carries inline.
  */
-function resolveAttachmentArg(arg: string): Attachment {
+function resolveAttachmentArg(arg: string, inlineBytes: number): Attachment {
   // URL detection: starts with https://
   // Omit content_type for URLs — the server-side resolver determines the
   // actual content type from the HTTP response's Content-Type header.
@@ -353,8 +391,8 @@ function resolveAttachmentArg(arg: string): Attachment {
 
   const type: AttachmentType = IMAGE_MIMES.has(contentType) ? 'image' : 'file';
 
-  if (stat.size > MAX_INLINE_SIZE_BYTES) {
-    // Large file: use presigned upload path (metadata only, no data)
+  if (stat.size > MAX_INLINE_SIZE_BYTES || inlineBytes + stat.size > MAX_TOTAL_INLINE_SIZE_BYTES) {
+    // Large file, or no room left in the request: use presigned upload path (metadata only, no data)
     return {
       type,
       content_type: contentType,
@@ -409,15 +447,16 @@ async function uploadViaPresignedPost(
       body: form,
       signal: controller.signal,
     });
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
+  } catch (err) {
+    const { name, message } = err as { name?: string; message?: string };
+    if (name === 'AbortError') {
       throw new CliError(
         `Upload timed out for ${instruction.filename} after ${UPLOAD_TIMEOUT_MS / 1000}s. ` +
         'Check your network connection and try again.',
       );
     }
     throw new CliError(
-      `Upload failed for ${instruction.filename}: ${err.message ?? String(err)}`,
+      `Upload failed for ${instruction.filename}: ${message ?? String(err)}`,
     );
   } finally {
     clearTimeout(timeout);
@@ -430,5 +469,59 @@ async function uploadViaPresignedPost(
     throw new CliError(
       `Presigned upload failed for ${instruction.filename}: HTTP ${res.status}${text ? ` — ${text.slice(0, 200)}` : ''}`,
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Upload confirmation
+// ---------------------------------------------------------------------------
+
+/** Confirmations sent for one submission before a gateway timeout is reported as the error. */
+const CONFIRM_MAX_ATTEMPTS = 3;
+
+/** How often the task is read while its confirmation runs on behind a gateway timeout. */
+const CONFIRM_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * 165 s of reading the task. A confirmation runs for at most 180 s (its Lambda timeout)
+ * and the gateway gave up after 29 s of them; the rest is room for a cold start.
+ */
+const CONFIRM_MAX_POLLS = 33;
+
+/**
+ * Confirm the uploads, and do not take a gateway timeout for a failure.
+ *
+ * API Gateway ends a request after 29 s, but the confirmation runs on behind it and
+ * then submits or fails the task. So after a 504, read the task until it has left
+ * PENDING_UPLOADS: it is then the answer, and one that has ended without completing is
+ * reported with its reason (a second confirmation is refused for it, without the reason).
+ * Confirm again only when the task is still pending once the confirmation cannot be
+ * running any more: that call goes on from the progress a confirmation that ran out of
+ * time has saved. It is not sent while the first one may still be running, because a
+ * second confirmation beside it screens every upload again.
+ */
+async function confirmUploadsWithRetry(client: ApiClient, taskId: string): Promise<TaskDetail> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await client.confirmUploads(taskId);
+    } catch (err) {
+      const gatewayTimeout = err instanceof ApiError && err.statusCode === 504;
+      if (!gatewayTimeout || attempt === CONFIRM_MAX_ATTEMPTS) throw err;
+      process.stderr.write(`  Screening of task ${taskId} is still running; waiting for it to finish...\n`);
+      for (let poll = 0; poll < CONFIRM_MAX_POLLS; poll++) {
+        await abortableSleep(CONFIRM_POLL_INTERVAL_MS);
+        let task: TaskDetail;
+        try {
+          task = await client.getTask(taskId);
+        } catch (readErr) {
+          // A read that fails for a moment (5xx, network) is no answer: read again.
+          if (!isTransientError(readErr)) throw readErr;
+          continue;
+        }
+        if (task.status === 'PENDING_UPLOADS') continue;
+        if (task.status === 'COMPLETED' || !TERMINAL_STATUSES.includes(task.status)) return task;
+        throw new CliError(`Task ${taskId} is ${task.status}${task.error_message ? `: ${task.error_message}` : '.'}`);
+      }
+    }
   }
 }
