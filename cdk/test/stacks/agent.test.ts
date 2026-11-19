@@ -1006,7 +1006,12 @@ describe('AgentStack', () => {
     // back to a default of its own, and that shows only on the day the stack's value
     // changes: the orchestrator then admits against one number while the admission-queue
     // pickup and the task API count against another.
-    const caps = Object.entries(template.findResources('AWS::Lambda::Function'))
+    // The scheduled jobs, the pickup among them, are in a nested stack with a template of its own.
+    const functions = {
+      ...template.findResources('AWS::Lambda::Function'),
+      ...concurrencyMaintenance.findResources('AWS::Lambda::Function'),
+    };
+    const caps = Object.entries(functions)
       .map(([id, fn]) => [id, fn.Properties.Environment?.Variables?.MAX_CONCURRENT_TASKS_PER_USER] as const)
       .filter(([, cap]) => cap !== undefined);
     const admissionCap = caps.find(([id]) => id.startsWith('TaskOrchestratorOrchestratorFn'))?.[1];
@@ -1014,8 +1019,8 @@ describe('AgentStack', () => {
     expect(admissionCap).toBeDefined();
     expect(caps.filter(([, cap]) => cap !== admissionCap)).toEqual([]);
     // The functions this is here for. One that stops carrying the variable, or that
-    // moves into a nested stack (whose template then has to be read here as well),
-    // would otherwise drop out of the comparison above without being noticed.
+    // moves into another nested stack (whose template then has to be read here as
+    // well), would otherwise drop out of the comparison above without being noticed.
     expect(caps.map(([id]) => id)).toEqual(expect.arrayContaining([
       expect.stringMatching(/^TaskApiGetTaskFn/),
       expect.stringMatching(/^TaskApiConfirmUploadsFn/),

@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import Request
@@ -63,8 +63,8 @@ def callbacks(monkeypatch):
 
 @pytest.fixture
 async def client():
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=server.app), base_url="http://test"
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=server.app), base_url="http://test"
     ) as client:
         yield client
 

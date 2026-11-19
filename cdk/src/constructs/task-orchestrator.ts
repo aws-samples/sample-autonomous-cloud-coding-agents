@@ -394,7 +394,7 @@ export class TaskOrchestrator extends Construct {
    */
   public readonly errorAlarm: cloudwatch.Alarm;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (45 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (50; 45 when it landed); must not grow
   constructor(scope: Construct, id: string, props: TaskOrchestratorProps) {
     super(scope, id);
 

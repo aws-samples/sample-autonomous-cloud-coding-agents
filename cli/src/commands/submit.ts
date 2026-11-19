@@ -157,16 +157,7 @@ export function makeSubmitCommand(): Command {
           );
         }
       }
-      let microvmSleepAfterS: number | undefined;
-      if (opts.microvmSleepAfter !== undefined) {
-        const raw = opts.microvmSleepAfter as string;
-        microvmSleepAfterS = raw === 'off' ? 0 : /^\d+$/.test(raw) ? Number(raw) : NaN;
-        if (!Number.isSafeInteger(microvmSleepAfterS)
-          || microvmSleepAfterS < MICROVM_SLEEP_AFTER_S_MIN || microvmSleepAfterS > MICROVM_SLEEP_AFTER_S_MAX) {
-          throw new CliError('--microvm-sleep-after must be off or an integer between '
-            + `${MICROVM_SLEEP_AFTER_S_MIN} and ${MICROVM_SLEEP_AFTER_S_MAX} seconds.`);
-        }
-      }
+      const microvmSleepAfter = microvmSleepAfterField(opts.microvmSleepAfter as string | undefined);
       const preApproveRaw = (opts.preApprove ?? []) as readonly string[];
       let initialApprovals: readonly ApprovalScope[] | undefined;
       if (preApproveRaw.length > 0) {
@@ -246,7 +237,7 @@ export function makeSubmitCommand(): Command {
         ...(prNumber !== undefined && { pr_number: prNumber }),
         ...(opts.trace && { trace: true }),
         ...(opts.approvalTimeout !== undefined && { approval_timeout_s: opts.approvalTimeout }),
-        ...(microvmSleepAfterS !== undefined && { microvm_sleep_after_s: microvmSleepAfterS }),
+        ...microvmSleepAfter,
         ...(initialApprovals !== undefined && { initial_approvals: initialApprovals }),
         ...(attachments.length > 0 && { attachments }),
       };
@@ -284,6 +275,20 @@ export function makeSubmitCommand(): Command {
         console.log(opts.output === 'json' ? formatJson(task) : formatTaskDetail(task));
       }
     });
+}
+
+/**
+ * The request field of `--microvm-sleep-after`, or nothing when the option is not given.
+ * A function of its own so that the action above, whose complexity is recorded, does not grow.
+ */
+function microvmSleepAfterField(raw: string | undefined): { microvm_sleep_after_s?: number } {
+  if (raw === undefined) return {};
+  const seconds = raw === 'off' ? 0 : /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(seconds) || seconds < MICROVM_SLEEP_AFTER_S_MIN || seconds > MICROVM_SLEEP_AFTER_S_MAX) {
+    throw new CliError('--microvm-sleep-after must be off or an integer between '
+      + `${MICROVM_SLEEP_AFTER_S_MIN} and ${MICROVM_SLEEP_AFTER_S_MAX} seconds.`);
+  }
+  return { microvm_sleep_after_s: seconds };
 }
 
 // ---------------------------------------------------------------------------

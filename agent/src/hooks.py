@@ -37,7 +37,13 @@ import task_state
 from microvm_lifecycle import ApprovalRecord, get_context
 from nudge_reader import _xml_escape
 from output_scanner import _PATTERNS, scan_tool_output
-from policy import APPROVAL_RATE_LIMIT, FLOOR_TIMEOUT_S, Outcome, _sha256_tool_input, approval_deadline_epoch
+from policy import (
+    APPROVAL_RATE_LIMIT,
+    FLOOR_TIMEOUT_S,
+    Outcome,
+    _sha256_tool_input,
+    approval_deadline_epoch,
+)
 from progress_writer import _generate_ulid
 from shared_constants import SHARED_CONSTANTS
 from shell import log, log_error_cw, redact_secrets
@@ -2166,13 +2172,6 @@ def build_hook_matchers(
                 _lifecycle_tool_finished(lifecycle, hook_input, tool_use_id)
 
     async def _post_failure(
-        _hook_input: HookInput, tool_use_id: str | None, _ctx: HookContext
-    ) -> HookJSONOutput:
-        if lifecycle:
-            lifecycle.tool_finished(tool_use_id)
-        return SyncHookJSONOutput()
-
-    async def _post_failure(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
     ) -> HookJSONOutput:
         try:
@@ -2187,6 +2186,10 @@ def build_hook_matchers(
         except Exception as exc:
             log("ERROR", f"PostToolUseFailure wrapper crashed: {type(exc).__name__}: {exc}")
             return SyncHookJSONOutput()
+        finally:
+            # A failed tool has left the MicroVM lifecycle barrier too.
+            if lifecycle:
+                lifecycle.tool_finished(tool_use_id)
 
     async def _stop(
         hook_input: HookInput, tool_use_id: str | None, ctx: HookContext
@@ -2216,7 +2219,7 @@ def build_hook_matchers(
     # contract's approval ceiling) plus cleanup. A frozen MicroVM's CLI timer
     # does not advance while suspended, so suspension cannot shorten it.
     callback_window_s = SHARED_CONSTANTS["approval_timeout_s"]["max"]
-    matchers = {
+    return {
         "PreToolUse": [
             HookMatcher(
                 matcher=None,
@@ -2228,6 +2231,3 @@ def build_hook_matchers(
         "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[_post_failure])],
         "Stop": [HookMatcher(matcher=None, hooks=[_stop])],
     }
-    if lifecycle:
-        matchers["PostToolUseFailure"] = [HookMatcher(matcher=None, hooks=[_post_failure])]
-    return matchers

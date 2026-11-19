@@ -18,8 +18,8 @@
  */
 
 import { formatMicrovmTerminalFailure } from '../error-classifier';
-import { MICROVM_SUPERVISOR_CYCLE_MS, superviseMicrovm, type MicrovmSupervisorInput } from './supervisor';
 import type { PollState } from '../orchestrator';
+import { MICROVM_SUPERVISOR_CYCLE_MS, superviseMicrovm, type MicrovmSupervisorInput } from './supervisor';
 
 /** One bounded supervisor cycle mapped onto the orchestrator's poll state. */
 export async function pollMicrovmTask(input: Omit<MicrovmSupervisorInput, 'previous'>, state: PollState): Promise<PollState> {

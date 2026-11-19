@@ -213,9 +213,9 @@ const durableHandler: DurableExecutionHandler<OrchestrateTaskEvent, void> = asyn
       // itself: the catch below fails the task and rethrows, and Durable
       // Execution then runs the step again. A session started now would run
       // for a task that is already over.
-      const current = await loadTask(taskId);
-      if (TERMINAL_STATUSES.includes(current.status)) {
-        throw new Error(`Task is ${current.status}, no session started`);
+      const beforeStart = await loadTask(taskId);
+      if (TERMINAL_STATUSES.includes(beforeStart.status)) {
+        throw new Error(`Task is ${beforeStart.status}, no session started`);
       }
       strategy = resolveComputeStrategy(blueprintConfig);
       const startInput = {

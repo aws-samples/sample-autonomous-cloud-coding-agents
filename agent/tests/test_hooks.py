@@ -3324,7 +3324,9 @@ class TestTimeoutCapping:
         )
 
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert hooks.time.monotonic() == 80
+        # The window runs from the second the request is stamped with, so the
+        # wait ends within the last second before 80 s, never after it.
+        assert 79 < hooks.time.monotonic() <= 80
 
     def test_ceiling_shrinking_emits_once(
         self, fake_task_state, progress, engine_with_soft_gate, monkeypatch

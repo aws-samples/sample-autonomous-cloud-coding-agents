@@ -9,6 +9,7 @@ and return a small JSON acceptance immediately. Task progress is tracked in
 DynamoDB via ``task_state`` + ``ProgressWriter``.
 """
 
+import asyncio
 import contextlib as _ctx_for_debug
 import json
 import logging

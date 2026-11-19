@@ -184,7 +184,7 @@ export class AgentStack extends Stack {
   /** Set when deployed with the Linear identity vault; the console then mints tokens through it. */
   public readonly linearIdentityVault?: LinearIdentityVault;
 
-  // eslint-disable-next-line complexity -- predates the ceiling (108 when it landed); must not grow
+  // eslint-disable-next-line complexity -- predates the ceiling (123; 108 when it landed); must not grow
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 

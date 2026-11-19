@@ -20,8 +20,8 @@
 import { GetParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import type { SessionControlOptions } from '../compute-strategy';
 import { logger } from '../logger';
-import { microvmErrorIdentity } from './control';
 import { makeClient } from '../ua';
+import { microvmErrorIdentity } from './control';
 
 const MICROVM_SUSPEND_CONFIG_TIMEOUT_MS = 3_000;
 let client: SSMClient | undefined;

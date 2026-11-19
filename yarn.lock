@@ -584,6 +584,20 @@
     "@smithy/types" "^4.20.0"
     tslib "^2.6.2"
 
+"@aws-sdk/client-ssm@^3.1166.0":
+  version "3.1166.0"
+  resolved "https://registry.yarnpkg.com/@aws-sdk/client-ssm/-/client-ssm-3.1166.0.tgz#3fdc9279b62c7f5f16033bfa8e114ebc850cf40f"
+  integrity sha512-UB2FTuA+fPAjFmsKJNtfxGzpHGFxgnSeHjKGDT2u8lyVLpuElUL7IlHTxMQuS8nX9BtOdHd5iga1ZupvAHs5DA==
+  dependencies:
+    "@aws-sdk/core" "^3.981.0"
+    "@aws-sdk/credential-provider-node" "^3.972.96"
+    "@aws-sdk/types" "^3.975.1"
+    "@smithy/core" "^3.40.0"
+    "@smithy/fetch-http-handler" "^5.8.1"
+    "@smithy/node-http-handler" "^4.14.2"
+    "@smithy/types" "^4.20.0"
+    tslib "^2.6.2"
+
 "@aws-sdk/client-sts@^3.1166.0":
   version "3.1166.0"
   resolved "https://registry.yarnpkg.com/@aws-sdk/client-sts/-/client-sts-3.1166.0.tgz#951f3acda37db47bbe971c4e1ad8ab8ac17b1b76"

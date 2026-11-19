@@ -23,7 +23,6 @@ import {
   DEPLOYMENT_FEATURES, DEPLOYMENT_PROFILE_CONTEXT, DeploymentFeature, FEATURE_CONTEXT_KEYS,
 } from '../deployment/features';
 import { DEFAULT_BEDROCK_MODEL_IDS } from '../handlers/shared/bedrock-model-constants';
-import { DEFAULT_BUDGETS } from './budgets';
 
 /** Enough additional model grants to exercise the SessionRole's lazy policy split. */
 const EXTRA_MODEL_COUNT = 8;

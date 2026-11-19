@@ -765,6 +765,9 @@ def _run_agent(
             for message in messages:
                 yield message
 
+        async def disconnect(self):
+            pass
+
     progress = MagicMock()
     monkeypatch.setattr(sdk, "ClaudeSDKClient", Client)
     monkeypatch.setattr(runner, "_setup_agent_env", lambda _config: None)

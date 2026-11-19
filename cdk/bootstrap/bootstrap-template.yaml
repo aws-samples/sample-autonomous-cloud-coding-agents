@@ -797,8 +797,7 @@ Resources:
                 Effect: Allow
                 Action: iam:PassRole
                 Resource:
-                  Fn::Sub: >-
-                    arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
+                  Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${Qualifier}-cfn-exec-role-${AWS::AccountId}-${AWS::Region}
                 Condition:
                   StringEquals:
                     iam:PassedToService: cloudformation.amazonaws.com
