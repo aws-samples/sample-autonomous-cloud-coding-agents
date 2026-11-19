@@ -30,6 +30,12 @@ function readJson(file: string): { version?: unknown; commit?: unknown } | Error
   }
 }
 
+/** What the compile recorded (`lib/build-info.json`) and the package manifest, beside `lib/`. */
+const CLI_FILES = {
+  buildInfo: path.join(__dirname, 'build-info.json'),
+  packageJson: path.join(__dirname, '..', 'package.json'),
+};
+
 /**
  * What `bgagent --version` prints: the version and commit the compile recorded in
  * `lib/build-info.json` (`cli/scripts/write-build-info.mjs`), so a bug report names
@@ -39,11 +45,11 @@ function readJson(file: string): { version?: unknown; commit?: unknown } | Error
  * It never throws: it runs at start-up, before any command, so an unreadable file is
  * reported in the version string instead of stopping the CLI.
  *
- * @param libDir the compiled `lib/` directory; `package.json` is its sibling.
+ * @param files the two files to read; the compiled CLI's own unless a test passes others.
  */
-export function cliVersion(libDir: string = __dirname): string {
-  const info = readJson(path.join(libDir, 'build-info.json'));
-  const pkg = readJson(path.join(libDir, '..', 'package.json'));
+export function cliVersion(files: { buildInfo: string; packageJson: string } = CLI_FILES): string {
+  const info = readJson(files.buildInfo);
+  const pkg = readJson(files.packageJson);
   const fromInfo = info instanceof Error ? undefined : info?.version;
   const fromPkg = pkg instanceof Error ? undefined : pkg?.version;
   const version = typeof fromInfo === 'string' ? fromInfo : typeof fromPkg === 'string' ? fromPkg : 'unknown';
